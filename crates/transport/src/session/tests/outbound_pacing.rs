@@ -122,6 +122,81 @@ async fn outbound_pacing_full_writer_services_snapshot_and_shutdown() {
     actor.await.unwrap();
 }
 
+/// Terminal shutdown with the session as last owner of a large unsent
+/// inventory: the session task exits without waiting for the release, the
+/// session it drops owns none of it, and the remainder is freed one slice per
+/// step off the session turn.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_exit_hands_inventory_to_paced_release() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let (mut session, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    session.writer_join.take().unwrap().abort();
+    // A full one-slot writer queue keeps every route unsent.
+    let (bulk, _held) = mpsc::channel(1);
+    bulk.try_send(Bytes::from_static(b"held")).unwrap();
+    session.writer_bulk_tx = Some(bulk);
+    let held = make_route(100).attributes;
+    let base = Arc::strong_count(&held);
+    let live = || Arc::strong_count(&held) - base;
+    let total = 5 * SLICE;
+    let routes = (0..u32::try_from(total).unwrap())
+        .map(|index| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32)),
+            attributes: Arc::clone(&held),
+            ..make_route(100)
+        })
+        .collect();
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    assert_eq!(live(), total, "nothing was sent");
+
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    // Poll the session task by hand, so each recorded release is one
+    // synchronous step: a single poll of the session, or one clock advance
+    // (paused time) in which any other task (the paced release) runs once.
+    let mut released = Vec::new();
+    let started = tokio::time::Instant::now();
+    {
+        let mut run = std::pin::pin!(session.run());
+        loop {
+            let before = live();
+            let polled =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+            released.push(before - live());
+            if let std::task::Poll::Ready(result) = polled {
+                result.unwrap();
+                break;
+            }
+            let before = live();
+            tokio::time::advance(std::time::Duration::from_millis(1)).await;
+            released.push(before - live());
+        }
+    }
+    assert!(
+        started.elapsed() <= 2 * super::writer::CLOSE_FLUSH_BUDGET,
+        "the session task exits on its close budget, not after the release"
+    );
+    assert!(live() > 0, "the exit does not wait for the release");
+    let before = live();
+    drop(session);
+    released.push(before - live());
+    for _ in 0..2 * total / SLICE {
+        let before = live();
+        tokio::task::yield_now().await;
+        released.push(before - live());
+    }
+    assert_eq!(live(), 0, "every route is released: {released:?}");
+    assert!(
+        released.iter().all(|&batch| batch <= SLICE),
+        "one step released more than a slice: {released:?}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_resource_deadline_is_finite_with_send_hold_disabled() {
     let (mut session, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);

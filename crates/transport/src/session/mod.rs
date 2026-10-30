@@ -2788,11 +2788,19 @@ impl PeerSession {
     }
 
     /// Main event loop. Runs until Shutdown command or fatal error.
+    pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
+        let result = self.run_loop().await;
+        // The owning task drops the session next; nothing may free a whole
+        // outbound inventory in that one turn.
+        self.hand_off_retirement();
+        result
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the run loop keeps every select! arm and its state wiring in one place"
     )]
-    pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
+    async fn run_loop(&mut self) -> Result<(), TransportError> {
         loop {
             self.run_due_link_check().await;
             if let Some(command) = self.deferred_command.take()
