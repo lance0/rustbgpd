@@ -29,7 +29,11 @@
 #   local absence  <= t_w + S + 5 s and >= t_w + 2 s   (stall; below that the
 #                                           stall did not engage: INVALID)
 #   FRR absence    <= local absence + 5 s
-#   FRR session Established at the end
+#   FRR session Established throughout: FRR's connectionsEstablished and
+#     connectionsDropped for the rustbgpd peer are unchanged from setup to the
+#     end (a change is a flap: session_established FAIL). A flap or an
+#     unreadable counter during absence polling makes FRR absence INVALID,
+#     since a dropped session also empties FRR's table.
 #   control: the legacy rule is still at FRR 5 s after its original deadline
 #   INVALID also when the late guarded renewal or the lease listing fails, or
 #   when reads fail up to a deadline: a failed read never counts as absence.
@@ -39,6 +43,7 @@
 #   frr-hang    stops FRR's bgpd and watchfrr instead, so every FRR read blocks
 #               until its time bound ends it
 #   late-renew  sends the late guarded renewal with a stale generation
+#   session-reset  runs "clear bgp *" in FRR as absence polling starts
 #
 # Times are wall-clock seconds on this host. A window's expiry is bounded
 # from below by the issue request's send time plus its lifetime. Local
@@ -238,6 +243,16 @@ print("present" if sys.argv[1] in json.dumps(table) else "absent")
 local_has() { [ "$(local_state "$1")" = present ]; }
 frr_has() { [ "$(frr_state "$1")" = present ]; }
 
+# FRR's "connectionsEstablished connectionsDropped" for the rustbgpd peer.
+# Fails, rather than printing a default, when they cannot be read.
+frr_session_counters() {
+    frr_vtysh "show bgp neighbors 10.0.0.1 json" 10 2>/dev/null | python3 -c '
+import json, sys
+text = sys.stdin.read()
+peer = json.loads(text[text.index("{"):])["10.0.0.1"]
+print(peer["connectionsEstablished"], peer["connectionsDropped"])'
+}
+
 frr_established() {
     frr_vtysh "show bgp neighbors 10.0.0.1 json" 10 2>/dev/null \
         | grep -q '"bgpState":"Established"'
@@ -304,7 +319,7 @@ main() {
     else
         start_rustbgpd "$DAEMON_LOG_ENV /usr/local/bin/start-rustbgpd.sh >/var/log/rustbgpd.log 2>&1"
     fi
-    wait_frr_established "$FRR" 10.0.0.1 "FRR" || { verdict session INVALID "FRR never established"; return; }
+    wait_frr_established "$FRR" 10.0.0.1 "FRR" || { verdict session_established INVALID "FRR never established"; return; }
     if [ "$PHASE" = stall ]; then
         # Let the startup End-of-RIB batches, each stalled, drain first.
         sleep $(( 3 * STALL_MS / 1000 ))
@@ -321,6 +336,10 @@ main() {
             || { verdict setup INVALID "FRR never held both rules"; return; }
         sleep 0.5
     done
+    local session_before
+    session_before=$(frr_session_counters) \
+        || { verdict session_established INVALID "FRR's session counters could not be read at setup"; return; }
+    event "session_counters setup $session_before"
     sleep 12
     kill "$CONTROLLER_PID" "$LEGACY_PID"
     wait "$CONTROLLER_PID" "$LEGACY_PID" 2>/dev/null
@@ -381,7 +400,7 @@ main() {
             || event "stall_trigger_failed"
     fi
 
-    local local_gone local_polled frr_gone="" limit lag frr_poller
+    local local_gone local_polled frr_gone="" limit lag frr_poller session_polled=""
     limit=$(calc "$t_w + $STALL_MS / 1000 + 20")
     # FRR is polled on its own, so a local read held behind a stalled RIB
     # turn cannot delay the FRR observation.
@@ -395,6 +414,11 @@ main() {
             # Seeded fault: every FRR read blocks until it is timed out.
             event "fault frr-hang: stopping watchfrr and bgpd"
             frr_signal STOP
+            ;;
+        session-reset)
+            # Seeded fault: the session drops, which also empties FRR's table.
+            event "fault session-reset: clear bgp *"
+            frr_vtysh "clear bgp *" 10 >/dev/null 2>&1
             ;;
     esac
     (wait_absent frr_state "$RULE" "$limit" >"$STATE_DIR/frr_absent"; echo $? >"$STATE_DIR/frr_status") &
@@ -410,6 +434,8 @@ main() {
         wait "$frr_poller"
         fault_end
         frr_gone=$(cat "$STATE_DIR/frr_absent")
+        session_polled=$(frr_session_counters) || session_polled=unreadable
+        event "session_counters after_polling $session_polled"
         # A read can wait behind a later stalled turn, so the first absent
         # poll only bounds the withdrawal from above; the daemon's record of
         # its withdrawal turn dates it.
@@ -434,7 +460,9 @@ main() {
         wait "$frr_poller"
         return
     fi
-    if [ "$(cat "$STATE_DIR/frr_status")" = 2 ]; then
+    if [ "$session_polled" != "$session_before" ]; then
+        verdict frr_absence INVALID "the session counters changed during polling ($session_before -> $session_polled): absence may come from a flap"
+    elif [ "$(cat "$STATE_DIR/frr_status")" = 2 ]; then
         verdict frr_absence INVALID "FRR reads failed up to t_w + S + 20 s; absence was never read"
     elif [ -n "$frr_gone" ]; then
         if python3 -c "import sys; sys.exit(not ($frr_gone <= $local_gone + 5))"; then
@@ -453,10 +481,15 @@ main() {
     else
         verdict legacy_control INVALID "the late legacy renewal did not extend the legacy rule (renewed=$legacy_renewed, FRR read $legacy_state)"
     fi
-    if frr_established; then
-        verdict session PASS "FRR session Established throughout"
+    local session_after
+    if ! session_after=$(frr_session_counters); then
+        verdict session_established INVALID "FRR's session counters could not be read at the end"
+    elif [ "$session_after" != "$session_before" ]; then
+        verdict session_established FAIL "the session flapped: established/dropped $session_before -> $session_after"
+    elif frr_established; then
+        verdict session_established PASS "Established throughout; established/dropped unchanged at $session_after"
     else
-        verdict session FAIL "FRR session not Established"
+        verdict session_established FAIL "FRR session not Established at the end"
     fi
     {
         printf '{"phase": "%s", "stall_ms": %s, "t_w": %s, "stopped": %s, ' "$PHASE" \

@@ -1,0 +1,5 @@
+lease_deadline PASS deadline - t_w = 0.05 s after a late 60 s renewal
+local_absence PASS absent 0.045 s after t_w (bar 2 s)
+frr_absence PASS absent 0.286 s after local absence (bar 5 s)
+legacy_control PASS the legacy rule is still at FRR 8.5 s past its deadline after a late renewal
+session_established PASS Established throughout; established/dropped unchanged at 1 0
