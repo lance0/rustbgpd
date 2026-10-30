@@ -1544,6 +1544,7 @@ mod selection_deferral_backpressure;
 mod selection_deferral_conditional_timer;
 mod selection_deferral_dirty_rtbh;
 mod selection_deferral_mutations;
+mod selection_deferral_oracle;
 mod selection_deferral_orf_edges;
 mod selection_deferral_recording;
 mod selection_deferral_rtc_join;

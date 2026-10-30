@@ -6,7 +6,7 @@ const SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 81);
 const OBSERVER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 82);
 const WAITER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 83);
 
-fn connect(
+pub(super) fn connect(
     manager: &mut RibManager,
     address: Ipv4Addr,
     capacity: usize,
@@ -371,7 +371,7 @@ fn target_with_policy(
     rx
 }
 
-fn manager_with_dormant_waiter() -> RibManager {
+pub(super) fn manager_with_dormant_waiter() -> RibManager {
     let (_tx, rx) = mpsc::channel(16);
     RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new()).with_selection_deferral(
         SelectionDeferralConfig {
@@ -720,7 +720,7 @@ fn final_encoder_refusal_keeps_frozen_ordinary_capacity_and_recovery_owned() {
     );
 }
 
-fn private_policy(strip_blackhole: Option<u32>) -> rustbgpd_policy::PolicyChain {
+pub(super) fn private_policy(strip_blackhole: Option<u32>) -> rustbgpd_policy::PolicyChain {
     let mut policy = deny_prefixes_chain(&[Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))]);
     let mut private = policy.policies[0].policy.entries[0].clone();
     private.prefix = None;

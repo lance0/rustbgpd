@@ -458,6 +458,13 @@ impl AdmittedRecovery {
         self.fail_next_allocation = true;
     }
 
+    /// Disarm an injected failure no allocation consumed, so it cannot
+    /// land on another peer later.
+    #[cfg(test)]
+    pub(in crate::manager) fn disarm_allocation_failure_for_test(&mut self) {
+        self.fail_next_allocation = false;
+    }
+
     #[cfg(test)]
     pub(in crate::manager) fn optional_share_attempts_for_test(&self) -> usize {
         self.optional_share_attempts
