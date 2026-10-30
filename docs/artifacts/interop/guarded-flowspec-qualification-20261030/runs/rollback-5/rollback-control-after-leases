@@ -1,0 +1,13 @@
+{
+  "leases": [
+    {
+      "owner": "qual",
+      "generation": {
+        "incarnation": "9214791318622146070",
+        "sequence": "1"
+      },
+      "leaseSeconds": 30,
+      "leaseRemainingMs": 29959
+    }
+  ]
+}

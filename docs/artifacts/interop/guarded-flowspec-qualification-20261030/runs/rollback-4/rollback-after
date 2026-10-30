@@ -1,0 +1,28 @@
+{}
+{
+  "receivedRoutes": [
+    {
+      "route": {
+        "components": [
+          {
+            "type": 1,
+            "prefix": "203.0.113.20/32"
+          }
+        ],
+        "actions": [
+          {
+            "trafficRate": {}
+          }
+        ],
+        "peerAddress": "0.0.0.0",
+        "afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
+        "extendedCommunities": [
+          "9225060886715039744"
+        ]
+      },
+      "selected": true,
+      "validation": "FLOW_SPEC_VALIDATION_STATUS_DISABLED"
+    }
+  ],
+  "receivedView": true
+}

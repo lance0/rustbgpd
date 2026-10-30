@@ -1,0 +1,1 @@
+{"phase": "loss", "stall_ms": 0, "t_w": 1793375147.578038, "stopped": 1793375130.104603303, "lease_deadline_hi": 1793375147.6314433, "local_absent": 1793375147.623181, "local_absent_polled": 1793375147.764128597, "frr_absent": 1793375147.919742519, "legacy_deadline": 1793375139.687435}

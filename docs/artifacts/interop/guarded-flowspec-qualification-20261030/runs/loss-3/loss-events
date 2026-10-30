@@ -1,0 +1,9 @@
+1793369173.538914123 guarded_added {"incarnation": "533252865694643821", "sequence": "2"}
+1793369192.784899323 late_legacy_renew ok
+1793369197.694535202 late_guarded_renew {
+  "generation": {
+    "incarnation": "533252865694643821",
+    "sequence": "2"
+  },
+  "leaseRemainingMs": 5990
+}

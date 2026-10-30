@@ -1,0 +1,46 @@
+{
+  "leases": [
+    {
+      "owner": "qual",
+      "generation": {
+        "incarnation": "830066690941234748",
+        "sequence": "1"
+      },
+      "leaseSeconds": 30,
+      "leaseRemainingMs": 29950
+    }
+  ]
+}
+{
+  "receivedRoutes": [
+    {
+      "route": {
+        "components": [
+          {
+            "type": 1,
+            "prefix": "203.0.113.9/32"
+          }
+        ],
+        "actions": [
+          {
+            "trafficRate": {}
+          }
+        ],
+        "peerAddress": "0.0.0.0",
+        "afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
+        "extendedCommunities": [
+          "9225060886715039744"
+        ],
+        "injectionOwner": "qual",
+        "leaseGeneration": {
+          "incarnation": "830066690941234748",
+          "sequence": "1"
+        },
+        "leaseRemainingMs": 29902
+      },
+      "selected": true,
+      "validation": "FLOW_SPEC_VALIDATION_STATUS_DISABLED"
+    }
+  ],
+  "receivedView": true
+}

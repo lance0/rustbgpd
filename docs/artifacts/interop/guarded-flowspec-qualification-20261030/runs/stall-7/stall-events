@@ -1,0 +1,13 @@
+1793377258.373708606 guarded_added {"incarnation": "4863454757974573768", "sequence": "2"}
+1793377259.068947771 session_counters setup 1 0
+1793377277.624833903 late_legacy_renew ok
+1793377282.552423080 late_guarded_renew {
+  "generation": {
+    "incarnation": "4863454757974573768",
+    "sequence": "2"
+  },
+  "leaseRemainingMs": 5989
+}
+1793377287.491651179 stall_trigger
+1793377303.627067337 session_counters after_polling 1 0
+1793377303.672100321 local_absent_polled 1793377303.570157762 local_absent_logged 1793377295.548843

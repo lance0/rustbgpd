@@ -1,0 +1,13 @@
+1793377164.170641524 guarded_added {"incarnation": "3559136593605503536", "sequence": "2"}
+1793377164.853088366 session_counters setup 1 0
+1793377183.415623805 late_legacy_renew ok
+1793377188.347469259 late_guarded_renew {
+  "generation": {
+    "incarnation": "3559136593605503536",
+    "sequence": "2"
+  },
+  "leaseRemainingMs": 5990
+}
+1793377188.438690388 fault session-reset: clear bgp *
+1793377194.534931356 session_counters after_polling 2 1
+1793377194.583255030 local_absent_polled 1793377194.474160074 local_absent_logged 1793377194.319687

@@ -1,0 +1,1 @@
+superseded: the session was checked only at the end, so a flap during polling went unseen
