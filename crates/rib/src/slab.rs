@@ -236,6 +236,17 @@ impl<T> RouteSlab<T> {
             .flatten()
             .filter_map(Option::as_mut)
     }
+
+    /// Every allocated slot in handle order, vacancies included, so a
+    /// checkpointed walk can yield between holes of a sparse table.
+    pub(crate) fn iter_slots(&self) -> impl Iterator<Item = Option<&T>> {
+        self.segments.iter().flatten().map(Option::as_ref)
+    }
+
+    /// Mutable [`Self::iter_slots`].
+    pub(crate) fn iter_slots_mut(&mut self) -> impl Iterator<Item = Option<&mut T>> {
+        self.segments.iter_mut().flatten().map(Option::as_mut)
+    }
 }
 
 #[cfg(test)]

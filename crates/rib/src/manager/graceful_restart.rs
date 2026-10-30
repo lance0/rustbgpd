@@ -604,7 +604,7 @@ impl RibManager {
             };
             if !llgr_only.is_empty() {
                 info!(%peer, families = ?llgr_only, "families absent from the GR capability enter the LLGR stale phase");
-                self.enter_llgr_phase(peer, &llgr_only, &llgr_config);
+                self.enter_llgr_phase(peer, &llgr_only, &llgr_config, None);
             }
             self.llgr_peer_config.insert(peer, llgr_config);
         }
@@ -780,6 +780,10 @@ impl RibManager {
     pub(super) fn sweep_gr_stale(&mut self, peer: PeerId) {
         // Timer arms call this outside `handle_update`; invalidate Received,
         // Best, and Advertised continuations before stale promotion/purge.
+        // The cached page topology leaves the readable slot first, so the
+        // LLGR owner can retire it with checkpoints instead of the version
+        // advance dropping it whole.
+        let page_topology = self.orr_page_topology.take();
         self.advance_all_route_pages();
         let gr_families: Vec<(Afi, Safi)> = self
             .gr_peers
@@ -807,12 +811,13 @@ impl RibManager {
         if let Some(llgr_config) = llgr_config {
             info!(%peer, "GR timer expired — promoting to LLGR stale phase");
 
-            self.enter_llgr_phase(peer, &gr_families, &llgr_config);
+            self.enter_llgr_phase(peer, &gr_families, &llgr_config, page_topology);
             // GR remains "active" for metrics until LLGR completes. The
             // promotion purged non-LLGR families and NO_LLGR routes.
             self.publish_gr_stale_routes(peer);
             return;
         }
+        drop(page_topology);
 
         // No LLGR — purge stale routes. Drop any LLGR config entry that
         // failed the promotion gate above (insertion is gated identically,
@@ -940,13 +945,28 @@ impl RibManager {
     /// the GR-stale routes of every family in the peer's LLGR capability to
     /// LLGR-stale, purge the stale routes of the others, and stamp each
     /// promoted family's Long-Lived Stale Time deadline.
+    /// `page_topology` is a version-fenced paged-read topology the caller
+    /// took out before advancing page versions; it is retired under the
+    /// owner.
     fn enter_llgr_phase(
         &mut self,
         peer: PeerId,
         families: &[(Afi, Safi)],
         llgr_config: &LlgrPeerConfig,
+        page_topology: Option<Box<(super::RoutePageVersion, crate::orr::OrrTopology)>>,
     ) {
         self.with_selection_readiness(|manager| {
+            if let Some(page) = page_topology {
+                let readiness = manager.replacement_readiness.clone();
+                let (_, topology) = *page;
+                topology.retire_with(&mut || {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "llgr_orr_page_retire",
+                        false,
+                    );
+                });
+            }
             manager.enter_llgr_phase_with_readiness(peer, families, llgr_config);
         });
     }

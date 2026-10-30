@@ -6128,10 +6128,14 @@ impl RibManager {
             inputs = inputs.saturating_add(rib.bgpls_len());
         }
         crate::orr::OrrTopology::build_with_checkpoint(
+            // A leading `None` per RIB yields a checkpoint even for a peer
+            // with no BGP-LS routes, so empty tables cannot accumulate inside
+            // one `next()`.
             self.ribs
                 .values()
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls)
+                .flat_map(|rib| std::iter::once(None).chain(rib.iter_bgpls().map(Some)))
                 .inspect(|_| scan())
+                .flatten()
                 .filter(|route| !self.selection_deferred(route.family.to_afi_safi())),
             inputs,
             build,

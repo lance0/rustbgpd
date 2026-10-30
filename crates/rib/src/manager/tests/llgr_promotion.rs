@@ -534,14 +534,12 @@ fn chain_topology(peer: Ipv4Addr, nodes: u8) -> Vec<crate::route::BgpLsRibRoute>
 fn run_orr_llgr_case(
     nodes: u8,
     promote: bool,
+    empty_peers: usize,
 ) -> (
     BTreeMap<&'static str, usize>,
     crate::orr::rebuild_growth::Growth,
 ) {
-    let (_tx, rx) = mpsc::channel(1);
-    let (readiness_tx, readiness_rx) = mpsc::channel(1);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_readiness_queries(readiness_rx);
+    let (mut manager, readiness_tx) = readiness_manager();
     let restarting = Ipv4Addr::new(10, 9, 9, 1);
     let steady = Ipv4Addr::new(10, 9, 9, 2);
     manager
@@ -571,6 +569,46 @@ fn run_orr_llgr_case(
         3600,
     ));
 
+    for index in 0..empty_peers {
+        let empty = peer_v4(Ipv4Addr::new(
+            10,
+            8,
+            u8::try_from(index / 256).unwrap(),
+            u8::try_from(index % 256).unwrap(),
+        ));
+        manager.ribs.insert(empty, AdjRibIn::new(empty));
+    }
+
+    crate::orr::rebuild_growth::take();
+    let answered = sweep_gr_stale_with_readiness_probe(&mut manager, readiness_tx, peer);
+    let growth = crate::orr::rebuild_growth::take();
+
+    let retained: Vec<_> = manager.ribs[&peer]
+        .iter_bgpls()
+        .map(|route| (route.is_stale, route.is_llgr_stale))
+        .collect();
+    if promote {
+        assert_eq!(retained, vec![(false, true); routes]);
+    } else {
+        assert!(retained.is_empty(), "non-LLGR BGP-LS must purge");
+    }
+    assert_eq!(manager.orr.resolved.get(&orr_vantage()), Some(&true));
+    assert_eq!(manager.orr.topology.node_count(), usize::from(nodes));
+    assert_eq!(
+        manager.orr.topology.link_count(),
+        2 * usize::from(nodes - 1)
+    );
+    (answered, growth)
+}
+
+/// Run the actual GR-timer caller while every readiness checkpoint queues a
+/// query that the next checkpoint must find already answered. Returns how
+/// many queries each stage answered.
+fn sweep_gr_stale_with_readiness_probe(
+    manager: &mut RibManager,
+    readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
+    peer: PeerId,
+) -> BTreeMap<&'static str, usize> {
     let pending = Arc::new(Mutex::new(
         None::<(
             &'static str,
@@ -602,28 +640,148 @@ fn run_orr_llgr_case(
             *pending.lock().unwrap() = Some((stage, response));
         }
     }));
-    crate::orr::rebuild_growth::take();
     manager.sweep_gr_stale(peer);
     manager.replacement_readiness_test_hook = None;
-    let growth = crate::orr::rebuild_growth::take();
+    answered.lock().unwrap().clone()
+}
 
+fn readiness_manager() -> (RibManager, mpsc::Sender<crate::RibReadinessQuery>) {
+    let (_tx, rx) = mpsc::channel(1);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx);
+    (manager, readiness_tx)
+}
+
+/// LLGR promotion and non-LLGR purge of a mostly withdrawn unicast slab:
+/// the walk services readiness between vacant slots, so the walked stage
+/// gains at least one answered query per vacancy (two promotion passes,
+/// one purge pass) over a dense table holding the same routes.
+fn run_sparse_unicast_case(total: u16, kept: u16, promote: bool) -> usize {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = peer_v4(addr);
+    let mut rib = AdjRibIn::new(peer);
+    let prefix = |index: u16| {
+        let [high, low] = index.to_be_bytes();
+        Ipv4Prefix::new(Ipv4Addr::new(203, high, low, 0), 24)
+    };
+    for index in 0..total {
+        rib.insert(make_route(prefix(index), addr));
+    }
+    for index in 0..total - kept {
+        assert!(rib.withdraw(&Prefix::V4(prefix(index)), 0));
+    }
+    assert_eq!(rib.len(), usize::from(kept));
+    manager.ribs.insert(peer, rib);
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    let flowspec = (Afi::Ipv4, Safi::FlowSpec);
+    let llgr = if promote { unicast } else { flowspec };
+    manager.handle_update(gr_with_llgr(
+        peer,
+        120,
+        vec![unicast, flowspec],
+        vec![llgr],
+        3600,
+    ));
+    let answered = sweep_gr_stale_with_readiness_probe(&mut manager, readiness_tx, peer);
     let retained: Vec<_> = manager.ribs[&peer]
-        .iter_bgpls()
+        .iter()
         .map(|route| (route.is_stale, route.is_llgr_stale))
         .collect();
     if promote {
-        assert_eq!(retained, vec![(false, true); routes]);
+        assert_eq!(retained, vec![(false, true); usize::from(kept)]);
     } else {
-        assert!(retained.is_empty(), "non-LLGR BGP-LS must purge");
+        assert!(retained.is_empty(), "non-LLGR unicast must purge");
     }
-    assert_eq!(manager.orr.resolved.get(&orr_vantage()), Some(&true));
-    assert_eq!(manager.orr.topology.node_count(), usize::from(nodes));
     assert_eq!(
-        manager.orr.topology.link_count(),
-        2 * usize::from(nodes - 1)
+        manager.ribs[&peer].maintained_stale_route_counts(),
+        manager.ribs[&peer].scanned_stale_route_counts()
     );
-    let answered = answered.lock().unwrap().clone();
-    (answered, growth)
+    let walked = if promote {
+        "llgr_promotion"
+    } else {
+        "llgr_purge"
+    };
+    answered.get(walked).copied().unwrap_or(0)
+}
+
+#[test]
+fn llgr_sparse_unicast_slab_services_readiness_between_vacant_slots() {
+    // (promote, passes, dense, sparse) for the promotion and purge walks.
+    let walks: Vec<_> = [(true, 2), (false, 1)]
+        .into_iter()
+        .map(|(promote, passes)| {
+            (
+                promote,
+                passes,
+                run_sparse_unicast_case(8, 8, promote),
+                run_sparse_unicast_case(2048, 8, promote),
+            )
+        })
+        .collect();
+    assert!(
+        walks
+            .iter()
+            .all(|&(_, passes, dense, sparse)| sparse >= dense + passes * 2040),
+        "each pass over 2040 vacant slots must answer once per slot: {walks:?}"
+    );
+}
+
+/// A topology page read without vantages caches a graph; the GR timer's
+/// LLGR entry must retire it under the readiness owner, not drop it whole
+/// while advancing page versions before the owner opens.
+#[test]
+fn llgr_timer_retires_cached_orr_page_topology_under_readiness() {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let feed = Ipv4Addr::new(10, 9, 9, 1);
+    let peer = peer_v4(feed);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer,
+        announced: chain_topology(feed, 32),
+        withdrawn: Vec::new(),
+    });
+    drain_route_chunks(&mut manager);
+    manager.handle_update(gr_with_llgr(peer, 120, vec![BGPLS], vec![BGPLS], 3600));
+    // An operator walks the retained topology while the peer is restarting.
+    let (reply, mut page) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryOrrTopologyLinksPage {
+        after: None,
+        expected_version: None,
+        page_size: 1000,
+        reply,
+    });
+    let links = page.try_recv().unwrap().unwrap().total;
+    assert_eq!(links, 62);
+    assert!(
+        manager.orr_page_topology.is_some(),
+        "the read cached a graph"
+    );
+
+    let answered = sweep_gr_stale_with_readiness_probe(&mut manager, readiness_tx, peer);
+    assert!(manager.orr_page_topology.is_none());
+    let retired = answered.get("llgr_orr_page_retire").copied().unwrap_or(0);
+    assert!(
+        u64::try_from(retired).unwrap() >= 2 * links,
+        "cached graph of {links} links retired with {retired} answered queries: {answered:?}"
+    );
+}
+
+/// The ORR scan yields once per Adj-RIB-In, including peers that hold no
+/// BGP-LS routes: each empty table adds a sizing and a traversal boundary.
+#[test]
+fn llgr_orr_scan_services_readiness_across_empty_bgpls_peers() {
+    let (without, _) = run_orr_llgr_case(8, true, 0);
+    let (with, _) = run_orr_llgr_case(8, true, 512);
+    let scans = |answered: &BTreeMap<&str, usize>| answered.get("orr_scan").copied().unwrap_or(0);
+    assert!(
+        scans(&with) >= scans(&without) + 2 * 512,
+        "512 empty peers answered {} vs {} orr_scan queries",
+        scans(&with),
+        scans(&without)
+    );
 }
 
 /// BGP-LS LLGR promotion and purge reached from the GR timer rebuild ORR
@@ -632,7 +790,7 @@ fn run_orr_llgr_case(
 #[test]
 fn llgr_bgpls_orr_rebuild_answers_readiness_inside_every_unit() {
     for promote in [true, false] {
-        let (answered, _) = run_orr_llgr_case(8, promote);
+        let (answered, _) = run_orr_llgr_case(8, promote, 0);
         for stage in ORR_STAGES {
             assert!(
                 answered.get(stage).copied().unwrap_or(0) >= 2,
@@ -649,8 +807,8 @@ fn llgr_bgpls_orr_rebuild_answers_readiness_inside_every_unit() {
 #[test]
 fn llgr_bgpls_orr_rebuild_work_between_checkpoints_stays_bounded() {
     for promote in [true, false] {
-        let (small, small_growth) = run_orr_llgr_case(16, promote);
-        let (large, large_growth) = run_orr_llgr_case(64, promote);
+        let (small, small_growth) = run_orr_llgr_case(16, promote, 0);
+        let (large, large_growth) = run_orr_llgr_case(64, promote, 0);
         for stage in ORR_STAGES {
             let small = small.get(stage).copied().unwrap_or(0);
             let large = large.get(stage).copied().unwrap_or(0);

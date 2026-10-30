@@ -1057,8 +1057,9 @@ impl AdjRibIn {
         checkpoint();
         stale.extend(
             self.routes
-                .iter()
+                .iter_slots()
                 .inspect(|_| checkpoint())
+                .flatten()
                 .filter(|r| r.is_stale && route_matches_family(r, family))
                 .map(|r| (r.prefix, r.path_id)),
         );
@@ -1132,8 +1133,11 @@ impl AdjRibIn {
         let capacity = self.gr_stale_family_len(family);
         let mut no_llgr_keys: Vec<(Prefix, u32)> = Vec::new();
         checkpoint();
-        for route in self.routes.iter() {
+        for route in self.routes.iter_slots() {
             checkpoint();
+            let Some(route) = route else {
+                continue;
+            };
             if route.is_stale
                 && route_matches_family(route, family)
                 && route.communities().contains(&COMMUNITY_NO_LLGR)
@@ -1154,26 +1158,28 @@ impl AdjRibIn {
             self.remove_route_entry(&key.0, key.1);
             checkpoint();
         }
-        for_each_counted(
-            self.routes.iter_mut().map(|route| ((), route)),
-            &mut self.unicast_stale,
-            |(), route| {
+        // Walk slots, not routes, so vacancies of a sparse slab yield too.
+        for route in self.routes.iter_slots_mut() {
+            checkpoint();
+            let Some(route) = route else {
+                continue;
+            };
+            if route.is_stale && route_matches_family(route, family) {
+                let before = route.retention();
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                self.unicast_stale.shift(before, route.retention());
                 checkpoint();
-                if route.is_stale && route_matches_family(route, family) {
-                    route.is_stale = false;
-                    route.is_llgr_stale = true;
-                    checkpoint();
-                    if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
-                        self.llgr_stale_local_tags
-                            .insert((route.prefix, route.path_id), ());
-                    }
-                    checkpoint();
-                    attr_intern.intern(&mut route.attributes);
-                    checkpoint();
-                    affected.push(route.prefix);
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
+                    self.llgr_stale_local_tags
+                        .insert((route.prefix, route.path_id), ());
                 }
-            },
-        );
+                checkpoint();
+                attr_intern.intern(&mut route.attributes);
+                checkpoint();
+                affected.push(route.prefix);
+            }
+        }
         retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
@@ -3407,10 +3413,13 @@ mod tests {
             // Allocation edges, both scans, two removal edges, mutation
             // and interning edges for two promoted rows, plus owned-key drops.
             let promotion_edges = if index == 1 { 2 } else { 3 };
+            // The unicast slab's second scan also visits the slot vacated
+            // by the removed NO_LLGR row.
+            let vacated = usize::from(index == 0);
             observed.push((index, visits));
             expected.push((
                 index,
-                6 + 5 + 2 + 4 + 2 * promotion_edges + usize::from(owned),
+                6 + 5 + 2 + 4 + 2 * promotion_edges + usize::from(owned) + vacated,
             ));
             assert_eq!(
                 llgr_tag_shape(&rib)[index].0,
