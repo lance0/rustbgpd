@@ -1876,7 +1876,7 @@ impl RibManager {
         // intern table as they were.
         let generation = if let Some((owner, lease_seconds)) = lease {
             Some(
-                self.admit_injected_lease(&key, present, owner, lease_seconds)?
+                self.admit_injected_lease(&key, present, owner, lease_seconds, None)?
                     .generation,
             )
         } else {
@@ -3274,16 +3274,24 @@ impl RibManager {
     }
 }
 
-/// Map an ADR-0141 lease table rejection to its command error.
+/// Map an ADR-0141 or ADR-0144 lease table rejection to its command error.
 pub(in crate::manager) fn lease_rejection(
     rejection: crate::injection_lease::LeaseRejection,
 ) -> RibCommandError {
+    use crate::injection_lease::{LeaseConflict, LeaseRejection};
     match rejection {
-        crate::injection_lease::LeaseRejection::OwnerCap => {
-            RibCommandError::ResourceExhausted(format!(
-                "at most {} owners can hold a live injection lease",
-                crate::injection_lease::MAX_LIVE_OWNERS
-            ))
-        }
+        LeaseRejection::OwnerCap => RibCommandError::ResourceExhausted(format!(
+            "at most {} owners can hold a live injection lease",
+            crate::injection_lease::MAX_LIVE_OWNERS
+        )),
+        LeaseRejection::WindowCap => RibCommandError::ResourceExhausted(format!(
+            "at most {} live mutation windows per owner, {} in total",
+            crate::injection_lease::MAX_LIVE_WINDOWS_PER_OWNER,
+            crate::injection_lease::MAX_LIVE_WINDOWS
+        )),
+        LeaseRejection::WindowNotLive => RibCommandError::FailedPrecondition(
+            LeaseConflict::WindowNotLive,
+            "the mutation window is not live for this owner".to_string(),
+        ),
     }
 }

@@ -1,12 +1,18 @@
 //! ADR-0141 owner-scoped leases through a running RIB manager, on a paused
 //! clock.
 
+use std::num::NonZeroU64;
+
+use rustbgpd_wire::{FlowSpecComponent, FlowSpecPrefix};
+
 use super::*;
 use crate::PeerId;
 use crate::injection_lease::{
-    ExpiryExit, InjectedKey, InjectionLeases, LeaseConflict, LeaseGeneration, LeasedKeysPage,
-    LeasedKeysResume, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiryExit, GuardedFence, InjectedKey, InjectionLeases, LeaseConflict, LeaseGeneration,
+    LeasedKeysPage, LeasedKeysResume, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS, MutationWindowId,
+    guarded_owner,
 };
+use crate::route::FlowSpecKey;
 use crate::test_support::peer_v4;
 use crate::update::{InjectOutcome, RibCommandError, RoutePage};
 
@@ -1252,6 +1258,9 @@ fn lease_variants_do_not_grow_rib_update() {
     assert!(size_of::<RibUpdate>() <= 248, "{}", size_of::<RibUpdate>());
     assert!(size_of::<(Route, String, u32, Reply)>() < size_of::<RibUpdate>());
     assert!(size_of::<(FlowSpecRoute, String, u32, Reply)>() < size_of::<RibUpdate>());
+    assert!(
+        size_of::<(FlowSpecRoute, String, u32, GuardedFence, Reply)>() < size_of::<RibUpdate>()
+    );
 }
 
 async fn route_page(tx: &mpsc::Sender<RibUpdate>, scope: RouteQueryScope) -> RoutePage {
@@ -1806,4 +1815,443 @@ async fn a_multi_owner_expiry_batch_keeps_answering_readiness() {
         [super::super::ReadinessOwnerKind::PeerTeardown],
         "the batch ran under the source teardown owner"
     );
+}
+
+// ADR-0144 guarded FlowSpec mutations: windows, revisions and the guarded
+// owner namespace, through a running RIB manager on a paused clock.
+
+/// A local rule for `203.0.113.<octet>/32` whose payload is set by
+/// `community`.
+fn guarded_rule(octet: u8, community: u32) -> FlowSpecRoute {
+    let mut route = local_rule();
+    route.rule.components = vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32),
+    ))];
+    route
+        .attributes
+        .push(PathAttribute::Communities(vec![community]));
+    route
+}
+
+fn rule_key(octet: u8) -> FlowSpecKey {
+    guarded_rule(octet, 0).selection_key()
+}
+
+type AddReply = oneshot::Receiver<Result<(InjectOutcome, LeaseGeneration), RibCommandError>>;
+type DeleteReply = oneshot::Receiver<Result<crate::update::InjectedRemoval, RibCommandError>>;
+
+/// Queue a guarded add with a 60 s lease without waiting for its reply.
+async fn queue_guarded_add(
+    tx: &mpsc::Sender<RibUpdate>,
+    route: FlowSpecRoute,
+    owner: &str,
+    window: MutationWindowId,
+    revision: u64,
+) -> AddReply {
+    let (reply, rx) = oneshot::channel();
+    tx.send(RibUpdate::InjectGuardedFlowSpec {
+        route,
+        owner: owner.to_string(),
+        lease_seconds: 60,
+        fence: GuardedFence {
+            window,
+            revision: NonZeroU64::new(revision).unwrap(),
+        },
+        reply,
+    })
+    .await
+    .unwrap();
+    rx
+}
+
+async fn guarded_add(
+    tx: &mpsc::Sender<RibUpdate>,
+    route: FlowSpecRoute,
+    owner: &str,
+    window: MutationWindowId,
+    revision: u64,
+) -> Result<(InjectOutcome, LeaseGeneration), RibCommandError> {
+    queue_guarded_add(tx, route, owner, window, revision)
+        .await
+        .await
+        .unwrap()
+}
+
+/// Queue a guarded delete without waiting for its reply.
+async fn queue_guarded_delete(
+    tx: &mpsc::Sender<RibUpdate>,
+    octet: u8,
+    owner: &str,
+    revision: u64,
+) -> DeleteReply {
+    let (reply, rx) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawGuardedFlowSpec {
+        key: rule_key(octet),
+        owner: owner.to_string(),
+        revision: NonZeroU64::new(revision).unwrap(),
+        reply,
+    })
+    .await
+    .unwrap();
+    rx
+}
+
+async fn guarded_delete(
+    tx: &mpsc::Sender<RibUpdate>,
+    octet: u8,
+    owner: &str,
+    revision: u64,
+) -> Result<crate::update::InjectedRemoval, RibCommandError> {
+    queue_guarded_delete(tx, octet, owner, revision)
+        .await
+        .await
+        .unwrap()
+}
+
+/// A legacy owner-scoped `FlowSpec` delete.
+async fn legacy_delete_rule(
+    tx: &mpsc::Sender<RibUpdate>,
+    octet: u8,
+    owner: &str,
+    override_owner: bool,
+) -> Result<crate::update::InjectedRemoval, RibCommandError> {
+    let (reply, rx) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawFlowSpec {
+        key: rule_key(octet),
+        allow_missing: false,
+        owner: owner.to_string(),
+        override_owner,
+        reply,
+    })
+    .await
+    .unwrap();
+    rx.await.unwrap()
+}
+
+#[track_caller]
+fn assert_conflict<T: std::fmt::Debug>(
+    result: Result<T, RibCommandError>,
+    expected: LeaseConflict,
+) {
+    match result {
+        Err(RibCommandError::FailedPrecondition(conflict, _)) => assert_eq!(conflict, expected),
+        other => panic!("expected {expected:?}, got {other:?}"),
+    }
+}
+
+/// The local rules' destination octets with their payloads, sorted.
+async fn local_rules(tx: &mpsc::Sender<RibUpdate>) -> Vec<(u8, Vec<PathAttribute>)> {
+    let mut rules: Vec<(u8, Vec<PathAttribute>)> = query_flowspec_routes(tx)
+        .await
+        .into_iter()
+        .filter(|route| route.peer == LOCAL_PEER)
+        .map(|route| {
+            let octet = (1..=u8::MAX)
+                .find(|octet| route.selection_key() == rule_key(*octet))
+                .expect("a guarded test rule");
+            (octet, route.attributes.clone())
+        })
+        .collect();
+    rules.sort_by_key(|(octet, _)| *octet);
+    rules
+}
+
+fn guarded_lease(h: &Harness, owner: &str) -> Vec<crate::injection_lease::LeaseRow> {
+    h.leases.list(Some(&guarded_owner(owner)))
+}
+
+fn flowspec_changes(updates: &[OutboundRouteUpdate]) -> usize {
+    updates
+        .iter()
+        .map(|update| update.flowspec_announce.len() + update.flowspec_withdraw.len())
+        .sum()
+}
+
+/// A guarded add queued behind a stalled RIB inside its window, and applied
+/// after the window expired, is refused at commit: it starts no lease for a
+/// new owner, leaves a live sibling and its lease untouched, and reaches
+/// neither the RIB nor the wire.
+///
+/// Break-to-red: without the window check in the lease table's admission,
+/// both adds commit and the new owner starts a lease.
+#[tokio::test(start_paused = true)]
+async fn a_guarded_add_stalled_past_its_window_starts_no_lease() {
+    let mut h = Harness::start_with_ingest_stall(Some(Duration::from_secs(20))).await;
+    let (long, _) = h.leases.issue_window("ctl", 120).unwrap();
+    guarded_add(&h.tx, guarded_rule(1, 1), "ctl", long, 1)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+    let sibling_lease = guarded_lease(&h, "ctl");
+
+    let (short_ctl, _) = h.leases.issue_window("ctl", 5).unwrap();
+    let (short_solo, _) = h.leases.issue_window("solo", 5).unwrap();
+    h.stall_rib().await;
+    let sibling = queue_guarded_add(&h.tx, guarded_rule(2, 1), "ctl", short_ctl, 1).await;
+    let fresh = queue_guarded_add(&h.tx, guarded_rule(3, 1), "solo", short_solo, 1).await;
+    tokio::time::advance(Duration::from_secs(20)).await;
+
+    assert_conflict(sibling.await.unwrap(), LeaseConflict::WindowNotLive);
+    assert_conflict(fresh.await.unwrap(), LeaseConflict::WindowNotLive);
+    h.settle().await;
+    assert_eq!(flowspec_changes(&h.drain()), 0, "nothing reached the wire");
+    assert_eq!(guarded_lease(&h, "solo"), Vec::new(), "no lease started");
+    let lease = guarded_lease(&h, "ctl");
+    assert_eq!(lease[0].generation, sibling_lease[0].generation);
+    assert_eq!(
+        lease[0].remaining,
+        sibling_lease[0]
+            .remaining
+            .checked_sub(Duration::from_secs(20))
+            .unwrap(),
+        "the refusal did not move the sibling's deadline"
+    );
+    let rules = local_rules(&h.tx).await;
+    assert_eq!(
+        rules.iter().map(|(octet, _)| *octet).collect::<Vec<_>>(),
+        [1]
+    );
+    h.stop().await;
+}
+
+/// The window caps the deadline on an unchanged re-add, even below a later
+/// deadline a renewal set, and on a renewal.
+///
+/// Break-to-red: without the cap, the re-add keeps the renewed deadline.
+#[tokio::test(start_paused = true)]
+async fn the_window_caps_an_unchanged_readd_and_a_renewal() {
+    let h = Harness::start().await;
+    let (short, _) = h.leases.issue_window("ctl", 30).unwrap();
+    let (outcome, g) = guarded_add(&h.tx, guarded_rule(1, 1), "ctl", short, 1)
+        .await
+        .unwrap();
+    assert_eq!(outcome, InjectOutcome::Created);
+    assert_eq!(
+        guarded_lease(&h, "ctl")[0].remaining,
+        Duration::from_secs(30)
+    );
+    let (long, _) = h.leases.issue_window("ctl", 120).unwrap();
+    assert_eq!(
+        h.leases.renew_guarded("ctl", g, 60, long),
+        Ok(Duration::from_secs(60))
+    );
+    tokio::time::advance(Duration::from_secs(10)).await;
+
+    let (outcome, again) = guarded_add(&h.tx, guarded_rule(1, 1), "ctl", short, 1)
+        .await
+        .unwrap();
+    assert_eq!((outcome, again), (InjectOutcome::Unchanged, g));
+    assert_eq!(
+        guarded_lease(&h, "ctl")[0].remaining,
+        Duration::from_secs(20)
+    );
+    assert_eq!(
+        h.leases.renew_guarded("ctl", g, 60, short),
+        Ok(Duration::from_secs(20))
+    );
+    assert_eq!(
+        guarded_lease(&h, "ctl")[0].remaining,
+        Duration::from_secs(20)
+    );
+    h.stop().await;
+}
+
+/// A delete of an older revision delayed behind a delete and a newer add of
+/// the same key is refused, and the newer admission stays in the RIB and on
+/// the wire. Its own revision reads back through the removal tag, and a
+/// repeat delete reports the key absent.
+///
+/// Break-to-red: without the revision check on the withdraw path, the late
+/// delete removes the newer admission.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_delete_spares_a_newer_admission() {
+    let mut h = Harness::start_with_ingest_stall(Some(Duration::from_secs(20))).await;
+    let (window, _) = h.leases.issue_window("ctl", 120).unwrap();
+    guarded_add(&h.tx, guarded_rule(1, 1), "ctl", window, 1)
+        .await
+        .unwrap();
+    guarded_add(&h.tx, guarded_rule(2, 1), "ctl", window, 1)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+
+    h.stall_rib().await;
+    let first = queue_guarded_delete(&h.tx, 1, "ctl", 1).await;
+    let newer = queue_guarded_add(&h.tx, guarded_rule(1, 2), "ctl", window, 2).await;
+    let late = queue_guarded_delete(&h.tx, 1, "ctl", 1).await;
+    tokio::time::advance(Duration::from_secs(20)).await;
+
+    let removal = first.await.unwrap().unwrap();
+    assert!(removal.removed);
+    assert_eq!(removal.tag.unwrap().revision, NonZeroU64::new(1));
+    assert_eq!(newer.await.unwrap().unwrap().0, InjectOutcome::Created);
+    assert_conflict(late.await.unwrap(), LeaseConflict::RevisionMismatch);
+    h.settle().await;
+    let updates = h.drain();
+    let last = updates
+        .iter()
+        .rev()
+        .find(|update| flowspec_changes(std::slice::from_ref(update)) > 0)
+        .unwrap();
+    assert_eq!(
+        last.flowspec_announce.len(),
+        1,
+        "the newer admission is announced last"
+    );
+    assert_eq!(
+        local_rules(&h.tx).await,
+        vec![
+            (1, guarded_rule(1, 2).attributes),
+            (2, guarded_rule(2, 1).attributes)
+        ]
+    );
+
+    let (reply, rx) = oneshot::channel();
+    h.tx.send(RibUpdate::QueryLeasedKeys {
+        owner: guarded_owner("ctl"),
+        resume: None,
+        page_size: 10,
+        reply,
+    })
+    .await
+    .unwrap();
+    let revisions: Vec<_> = rx
+        .await
+        .unwrap()
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|row| (row.key, row.revision))
+        .collect();
+    assert_eq!(
+        revisions,
+        [
+            (InjectedKey::FlowSpec(rule_key(1)), NonZeroU64::new(2)),
+            (InjectedKey::FlowSpec(rule_key(2)), NonZeroU64::new(1)),
+        ],
+        "read-back reports each key's admission revision"
+    );
+
+    assert_conflict(
+        guarded_delete(&h.tx, 2, "other", 1).await,
+        LeaseConflict::OwnerMismatch,
+    );
+    let removal = guarded_delete(&h.tx, 1, "ctl", 2).await.unwrap();
+    assert!(removal.removed);
+    assert_eq!(removal.tag.unwrap().revision, NonZeroU64::new(2));
+    let absent = guarded_delete(&h.tx, 1, "ctl", 2).await.unwrap();
+    assert!(!absent.removed, "an absent key is NOT_PRESENT");
+    assert_eq!(local_rules(&h.tx).await.len(), 1);
+    h.stop().await;
+}
+
+/// A present key refuses another revision, and its own revision with a
+/// different payload, changing nothing: the payload, the sibling key, the
+/// lease deadline and the wire stay as they were. Its own revision with the
+/// same payload is an idempotent retry.
+///
+/// Break-to-red: without the revision checks on the add path, the second
+/// payload replaces the first.
+#[tokio::test(start_paused = true)]
+async fn a_present_key_refuses_another_revision_or_payload() {
+    let mut h = Harness::start().await;
+    let (window, _) = h.leases.issue_window("ctl", 120).unwrap();
+    let (_, g) = guarded_add(&h.tx, guarded_rule(1, 1), "ctl", window, 1)
+        .await
+        .unwrap();
+    guarded_add(&h.tx, guarded_rule(2, 1), "ctl", window, 1)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+    let before = guarded_lease(&h, "ctl");
+    let rules = local_rules(&h.tx).await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+
+    for (community, revision) in [(2, 1), (1, 2), (2, 2)] {
+        assert_conflict(
+            guarded_add(&h.tx, guarded_rule(1, community), "ctl", window, revision).await,
+            LeaseConflict::RevisionMismatch,
+        );
+    }
+    h.settle().await;
+    assert_eq!(flowspec_changes(&h.drain()), 0);
+    assert_eq!(local_rules(&h.tx).await, rules);
+    let after = guarded_lease(&h, "ctl");
+    assert_eq!(after[0].generation, g);
+    assert_eq!(
+        after[0].remaining,
+        before[0]
+            .remaining
+            .checked_sub(Duration::from_secs(5))
+            .unwrap()
+    );
+    assert_eq!(
+        guarded_add(&h.tx, guarded_rule(1, 1), "ctl", window, 1)
+            .await
+            .unwrap(),
+        (InjectOutcome::Unchanged, g)
+    );
+    h.stop().await;
+}
+
+/// Legacy entry points cannot reach a guarded owner's key or lease: a
+/// leased add, an unowned add and an owner-scoped delete of the bare name
+/// are refused; a legacy renewal of the guarded generation fails; and a
+/// legacy add of a new key starts a separate lease that leaves the guarded
+/// deadline alone. Guarded calls cannot reach the legacy key either, and
+/// `override_owner` stays as break-glass.
+///
+/// Break-to-red: without the namespace, the legacy add joins the guarded
+/// owner's key.
+#[tokio::test(start_paused = true)]
+async fn legacy_entry_points_cannot_reach_a_guarded_owner() {
+    let h = Harness::start().await;
+    let (window, _) = h.leases.issue_window("ctl", 120).unwrap();
+    let (_, g) = guarded_add(&h.tx, guarded_rule(1, 1), "ctl", window, 1)
+        .await
+        .unwrap();
+    let before = guarded_lease(&h, "ctl");
+
+    assert_conflict(
+        leased_rule(&h.tx, guarded_rule(1, 1), "ctl", 3600).await,
+        LeaseConflict::OwnerMismatch,
+    );
+    let (reply, rx) = oneshot::channel();
+    h.tx.send(RibUpdate::InjectFlowSpec {
+        route: guarded_rule(1, 1),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_conflict(rx.await.unwrap(), LeaseConflict::OwnerMismatch);
+    for owner in ["ctl", ""] {
+        assert_conflict(
+            legacy_delete_rule(&h.tx, 1, owner, false).await,
+            LeaseConflict::OwnerMismatch,
+        );
+    }
+    assert_eq!(h.leases.renew("ctl", g, 3600), None);
+    let (_, legacy) = leased_rule(&h.tx, guarded_rule(2, 1), "ctl", 3600)
+        .await
+        .unwrap();
+    assert_ne!(legacy, g, "a separate legacy lease");
+    assert_eq!(guarded_lease(&h, "ctl"), before);
+
+    assert_conflict(
+        guarded_add(&h.tx, guarded_rule(2, 1), "ctl", window, 1).await,
+        LeaseConflict::OwnerMismatch,
+    );
+    assert_conflict(
+        guarded_delete(&h.tx, 2, "ctl", 1).await,
+        LeaseConflict::OwnerMismatch,
+    );
+    assert_eq!(local_rules(&h.tx).await.len(), 2);
+
+    let removal = legacy_delete_rule(&h.tx, 1, "", true).await.unwrap();
+    assert!(removal.removed);
+    assert_eq!(&*removal.tag.unwrap().owner, guarded_owner("ctl"));
+    h.stop().await;
 }

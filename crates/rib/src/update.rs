@@ -3861,6 +3861,37 @@ pub enum RibUpdate {
             Result<(InjectOutcome, crate::injection_lease::LeaseGeneration), RibCommandError>,
         >,
     },
+    /// Inject a locally-originated `FlowSpec` rule under a guarded owner's
+    /// lease, fenced by a mutation window and an admission revision
+    /// (ADR-0144).
+    InjectGuardedFlowSpec {
+        /// The `FlowSpec` route to inject.
+        route: FlowSpecRoute,
+        /// Guarded owner as the client names it, already validated; the RIB
+        /// stores it under the guarded namespace.
+        owner: String,
+        /// Lease duration, already validated.
+        lease_seconds: u32,
+        /// Window the add must commit within, and its admission revision.
+        fence: crate::injection_lease::GuardedFence,
+        /// Completion reply with the outcome and the owner's live generation.
+        reply: oneshot::Sender<
+            Result<(InjectOutcome, crate::injection_lease::LeaseGeneration), RibCommandError>,
+        >,
+    },
+    /// Withdraw a guarded owner's `FlowSpec` rule at one admission revision
+    /// (ADR-0144 §3). An absent rule is `removed: false` (`NOT_PRESENT`);
+    /// another owner or revision is `FailedPrecondition`.
+    WithdrawGuardedFlowSpec {
+        /// Family-complete `FlowSpec` identity to withdraw.
+        key: crate::route::FlowSpecKey,
+        /// Guarded owner as the client names it, already validated.
+        owner: String,
+        /// The admission revision the delete removes.
+        revision: std::num::NonZeroU64,
+        /// Completion reply: whether the rule was removed, and its tag.
+        reply: oneshot::Sender<Result<InjectedRemoval, RibCommandError>>,
+    },
     /// Inject a locally-originated EVPN route (RFC 7432).
     ///
     /// Entry point for controller-driven injection — an SDN controller
@@ -4256,6 +4287,8 @@ impl RibUpdate {
             | Self::InjectFlowSpec { .. }
             | Self::WithdrawFlowSpec { .. }
             | Self::InjectLeasedFlowSpec { .. }
+            | Self::InjectGuardedFlowSpec { .. }
+            | Self::WithdrawGuardedFlowSpec { .. }
             | Self::InjectEvpn { .. }
             | Self::WithdrawEvpn { .. } => RibActorTurnKind::Injection,
             Self::RpkiCacheUpdate { .. } | Self::AspaTableUpdate { .. } => {

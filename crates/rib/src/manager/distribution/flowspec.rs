@@ -6,7 +6,8 @@ use super::{
 };
 use crate::PeerId;
 use crate::attr_set::AttrSet;
-use crate::injection_lease::{InjectedKey, LeaseGeneration};
+use crate::injection_lease::{GuardedFence, InjectedKey, LeaseGeneration};
+use crate::manager::lease_expiry::GuardedAdmission;
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
 use crate::update::InjectOutcome;
 
@@ -161,49 +162,64 @@ impl RibManager {
             Result<(InjectOutcome, LeaseGeneration), RibCommandError>,
         >,
     ) {
-        let result = self
-            .inject_local_flowspec(route, Some((owner, lease_seconds)))
+        let result = self.inject_leased_flowspec(route, owner, lease_seconds, None);
+        let _ = reply.send(result);
+    }
+
+    /// A guarded add (ADR-0144): a leased add under `owner`'s guarded name,
+    /// fenced by a mutation window and an admission revision.
+    pub(in crate::manager) fn handle_inject_guarded_flowspec(
+        &mut self,
+        route: crate::route::FlowSpecRoute,
+        owner: &str,
+        lease_seconds: u32,
+        fence: GuardedFence,
+        reply: tokio::sync::oneshot::Sender<
+            Result<(InjectOutcome, LeaseGeneration), RibCommandError>,
+        >,
+    ) {
+        let owner = crate::injection_lease::guarded_owner(owner);
+        let result = self.inject_leased_flowspec(route, &owner, lease_seconds, Some(fence));
+        let _ = reply.send(result);
+    }
+
+    fn inject_leased_flowspec(
+        &mut self,
+        route: crate::route::FlowSpecRoute,
+        owner: &str,
+        lease_seconds: u32,
+        fence: Option<GuardedFence>,
+    ) -> Result<(InjectOutcome, LeaseGeneration), RibCommandError> {
+        self.inject_local_flowspec(route, Some((owner, lease_seconds, fence)))
             .map(|(outcome, generation)| {
                 (
                     outcome,
                     generation.expect("a leased add returns its generation"),
                 )
-            });
-        let _ = reply.send(result);
+            })
     }
 
-    /// Insert a local `FlowSpec` rule, unowned or under `lease`; see
-    /// `inject_local_route` for the ownership contract (ADR-0141).
+    /// Insert a local `FlowSpec` rule, unowned or under `lease`, guarded when
+    /// the lease carries a fence; see `inject_local_route` for the ownership
+    /// contract (ADR-0141) and ADR-0144 for the guarded one.
     fn inject_local_flowspec(
         &mut self,
         route: crate::route::FlowSpecRoute,
-        lease: Option<(&str, u32)>,
+        lease: Option<(&str, u32, Option<GuardedFence>)>,
     ) -> Result<(InjectOutcome, Option<LeaseGeneration>), RibCommandError> {
         let key = route.selection_key();
         let owned_key = InjectedKey::FlowSpec(key.clone());
-        let present = self
-            .ribs
-            .get(&LOCAL_PEER)
-            .is_some_and(|rib| rib.get_flowspec(&route.key()).is_some());
-        let generation = if let Some((owner, lease_seconds)) = lease {
-            Some(
-                self.admit_injected_lease(&owned_key, present, owner, lease_seconds)?
-                    .generation,
-            )
-        } else {
-            self.check_injected_owner(&owned_key, "")?;
-            None
-        };
-        let rib = self
-            .ribs
-            .entry(LOCAL_PEER)
-            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         // Decide from the local Adj-RIB-In, not Loc-RIB: a received rule
         // that out-selects the local one leaves Loc-RIB unchanged even when
         // the local payload really was replaced. `received_at` is excluded,
         // matching the Loc-RIB change test, so an identical re-add distributes
-        // nothing.
-        let outcome = match rib.get_flowspec(&route.key()) {
+        // nothing. Decided before admission, which a guarded add's revision
+        // check needs.
+        let outcome = match self
+            .ribs
+            .get(&LOCAL_PEER)
+            .and_then(|rib| rib.get_flowspec(&route.key()))
+        {
             None => InjectOutcome::Created,
             Some(old)
                 if old.attributes == route.attributes
@@ -216,6 +232,24 @@ impl RibManager {
             }
             Some(_) => InjectOutcome::Replaced,
         };
+        let present = outcome != InjectOutcome::Created;
+        let generation = if let Some((owner, lease_seconds, fence)) = lease {
+            let guarded = fence.map(|fence| GuardedAdmission {
+                fence,
+                same_payload: outcome == InjectOutcome::Unchanged,
+            });
+            Some(
+                self.admit_injected_lease(&owned_key, present, owner, lease_seconds, guarded)?
+                    .generation,
+            )
+        } else {
+            self.check_injected_owner(&owned_key, "")?;
+            None
+        };
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         rib.insert_flowspec(route);
         crate::manager::helpers::set_rib_prefixes(
             &self.metrics,
@@ -236,6 +270,7 @@ impl RibManager {
         allow_missing: bool,
         owner: &str,
         override_owner: bool,
+        revision: Option<std::num::NonZeroU64>,
         reply: tokio::sync::oneshot::Sender<
             Result<crate::update::InjectedRemoval, RibCommandError>,
         >,
@@ -250,9 +285,16 @@ impl RibManager {
             .ribs
             .get(&LOCAL_PEER)
             .is_some_and(|rib| rib.get_flowspec(&route_key).is_some());
+        // A guarded delete (`revision` set) also needs the key's admission
+        // revision to match, so a late delete cannot remove a newer admission
+        // of the same key (ADR-0144 §3).
         if !override_owner
             && present
-            && let Err(rejection) = self.check_injected_owner(&owned_key, owner)
+            && let Err(rejection) = self.check_injected_owner(&owned_key, owner).and_then(|()| {
+                revision.map_or(Ok(()), |revision| {
+                    self.check_injected_revision(&owned_key, revision)
+                })
+            })
         {
             let _ = reply.send(Err(rejection));
             return;

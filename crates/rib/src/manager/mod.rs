@@ -5152,6 +5152,13 @@ impl RibManager {
                 lease_seconds,
                 reply,
             } => self.handle_inject_leased_flowspec(route, &owner, lease_seconds, reply),
+            RibUpdate::InjectGuardedFlowSpec {
+                route,
+                owner,
+                lease_seconds,
+                fence,
+                reply,
+            } => self.handle_inject_guarded_flowspec(route, &owner, lease_seconds, fence, reply),
             RibUpdate::WithdrawFlowSpec {
                 key,
                 allow_missing,
@@ -5160,7 +5167,25 @@ impl RibManager {
                 reply,
             } => {
                 let retired = ExactExportKey::FlowSpec(key.clone());
-                self.handle_withdraw_flowspec(key, allow_missing, &owner, override_owner, reply);
+                self.handle_withdraw_flowspec(
+                    key,
+                    allow_missing,
+                    &owner,
+                    override_owner,
+                    None,
+                    reply,
+                );
+                self.retire_exact_export_rejections([retired]);
+            }
+            RibUpdate::WithdrawGuardedFlowSpec {
+                key,
+                owner,
+                revision,
+                reply,
+            } => {
+                let retired = ExactExportKey::FlowSpec(key.clone());
+                let owner = crate::injection_lease::guarded_owner(&owner);
+                self.handle_withdraw_flowspec(key, true, &owner, false, Some(revision), reply);
                 self.retire_exact_export_rejections([retired]);
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
