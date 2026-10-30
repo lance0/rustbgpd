@@ -8014,6 +8014,38 @@ impl RibManager {
         );
     }
 
+    /// Whether a clean member has rejection-inventory work in `scope`:
+    /// retained history or a group denial there, or an export policy that
+    /// per-peer staging can deny under. Clean members without it stay
+    /// unowned, so an ordinary pass creates no readiness owner.
+    fn clean_member_rejection_work(
+        &self,
+        peer: PeerId,
+        member_of: Option<usize>,
+        scope: &HashSet<Prefix>,
+    ) -> bool {
+        let history = self
+            .policy_filtered_routes
+            .get(&peer)
+            .is_some_and(|history| {
+                if scope.len() <= history.len() {
+                    scope.iter().any(|prefix| history.contains_key(prefix))
+                } else {
+                    history.keys().any(|prefix| scope.contains(prefix))
+                }
+            });
+        history
+            || match member_of {
+                Some(gid) => self
+                    .group_ribs
+                    .get(&gid)
+                    .is_some_and(|group| group.has_policy_filtered_in(scope)),
+                // Any ungrouped export policy counts: knowing whether it
+                // denies in scope would take the staging evaluation itself.
+                None => self.export_policy_for(peer).is_some(),
+            }
+    }
+
     fn clone_distribution_metrics(
         metrics: &BgpMetrics,
         #[cfg(any(test, feature = "bench-internals"))] stats: &mut super::AdjRibOutCommitStats,
@@ -8036,23 +8068,59 @@ impl RibManager {
         evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
     ) {
-        // Selection has completed before export. Keep executor opportunities
-        // across staging, independent member transactions and shared cleanup.
-        super::with_executor_handoff(|| {
-            self.distribute_changes_with_readiness(
+        let pass = |manager: &mut Self, owned: bool| {
+            manager.distribute_changes_with_readiness(
                 best_changed,
                 all_affected,
                 service_ingest_readiness,
                 advertised_generation_already_advanced,
                 evpn_feeds,
                 targets,
+                owned,
             );
-        });
+        };
+        // A replay pass, or one whose shared staging refreshes a group's
+        // rejection inventory, owns its shared preparation and retirement;
+        // keep executor opportunities across the whole pass. Clean
+        // incremental fanout keeps its synchronous fast path.
+        if self.dirty_peers.is_empty()
+            && self.force_outbound_peers.is_empty()
+            && !self.shared_rejection_work(best_changed, all_affected, targets)
+        {
+            pass(self, false);
+        } else {
+            super::with_executor_handoff(|| pass(self, true));
+        }
+    }
+
+    /// Whether shared staging refreshes a per-client-best group's denial
+    /// inventory: such a group walks every candidate of each staged prefix
+    /// through its export chain and records each denied identity.
+    fn shared_rejection_work(
+        &self,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+        targets: Option<&HashSet<PeerId>>,
+    ) -> bool {
+        (!best_changed.is_empty() || !all_affected.is_empty())
+            && self.group_ribs.values().any(|group| {
+                group.per_client_best
+                    && targets.is_none_or(|targets| {
+                        group.members.iter().any(|member| targets.contains(member))
+                    })
+                    && (group.export_chain.is_some()
+                        || group.has_policy_filtered_in(best_changed)
+                        || group.has_policy_filtered_in(all_affected))
+            })
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "distribution loop coordinates dirty peers, forced resync, and all families"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the owned flag records the executor handoff decided by the caller"
     )]
     fn distribute_changes_with_readiness(
         &mut self,
@@ -8062,8 +8130,12 @@ impl RibManager {
         advertised_generation_already_advanced: bool,
         mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
+        owned: bool,
     ) {
-        let prep_installed = self.begin_replacement_readiness();
+        // Clean incremental fanout owns no readiness episode: its work is
+        // bounded by the pass. Owned shared preparation and cleanup take one
+        // each, so their ages never bleed into a member's.
+        let prep_installed = owned && self.begin_replacement_readiness();
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -8183,15 +8255,29 @@ impl RibManager {
             #[cfg(any(test, feature = "bench-internals"))]
             &mut self.adj_rib_out_commit_stats,
         );
+        // Staging can mark members dirty. Check here, before any peer work;
+        // sends below only dirty their own current member, never a later one.
+        // Clean incremental fanout retains its existing synchronous fast path.
+        let replay_handoff = !self.dirty_peers.is_empty() || !self.force_outbound_peers.is_empty();
+        // A clean member with rejection-inventory work owns a readiness
+        // episode below; the pass scope bounds each member's scope, so this
+        // finds every such member before the fanout starts.
+        let fanout_handoff = replay_handoff
+            || peers.iter().any(|&peer| {
+                let member_of = self.grouped_member_of(peer);
+                self.clean_member_rejection_work(peer, member_of, &best_changed)
+                    || self.clean_member_rejection_work(peer, member_of, &all_affected)
+            });
         // Shared preparation cannot donate its age to later independent
         // member transactions. A genuine outer owner remains unchanged.
         drop(readiness);
         self.finish_readiness_owner(prep_installed);
         let distribute_peers = || {
             for peer in peers {
-                // Clean and replay members own independent readiness episodes;
-                // an existing outer owner's identity and age are retained.
-                let installed = self.begin_replacement_readiness();
+                // Replay members and members with rejection-inventory work own
+                // independent readiness episodes; an existing outer owner's
+                // identity and age are retained.
+                let mut installed = false;
                 'member: {
                     let readiness = self.replacement_readiness.clone();
                     let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -8274,6 +8360,9 @@ impl RibManager {
                         break 'member;
                     }
                     let resync = is_dirty || is_force;
+                    installed = resync && self.begin_replacement_readiness();
+                    let readiness = self.replacement_readiness.clone();
+                    let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
                     let private_evpn_recovery = (resync && !evpn_group_owned)
                         .then(|| self.evpn_recovery_handle(peer))
                         .flatten();
@@ -8332,6 +8421,10 @@ impl RibManager {
                             .get(&peer)
                             .map_or(0, |extra| extra.unicast.len());
                         capacity += self.peer_otc_blocked.get(&peer).map_or(0, HashMap::len);
+                        capacity += self
+                            .policy_filtered_routes
+                            .get(&peer)
+                            .map_or(0, std::collections::BTreeMap::len);
                         self.replacement_checkpoint(true);
                         let mut all = HashSet::with_capacity(capacity);
                         self.replacement_checkpoint(true);
@@ -8417,6 +8510,13 @@ impl RibManager {
                         }
                         if let Some(blocked) = self.peer_otc_blocked.get(&peer) {
                             all.extend(blocked.keys().inspect(|_| checkpoint()).copied());
+                        }
+                        // Retained denials whose route left while the peer was
+                        // dirty are in none of the sources above; the resync
+                        // must revisit them to retire the stale history, as
+                        // initial export does.
+                        if let Some(history) = self.policy_filtered_routes.get(&peer) {
+                            all.extend(history.keys().inspect(|_| checkpoint()).copied());
                         }
                         Cow::Owned(all)
                     } else if let Some(gid) = member_of {
@@ -8826,6 +8926,13 @@ impl RibManager {
                         );
                     }
 
+                    if !installed
+                        && self.clean_member_rejection_work(peer, member_of, &effective_prefixes)
+                    {
+                        installed = self.begin_replacement_readiness();
+                    }
+                    let readiness = self.replacement_readiness.clone();
+                    let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
                     if let Cow::Owned(prefixes) = &effective_prefixes {
                         self.replacement_capacity(
                             "effective_prefixes",
@@ -10093,38 +10200,61 @@ impl RibManager {
                 self.finish_readiness_owner(installed);
             }
         };
-        distribute_peers();
-        let retirement_installed = self.begin_replacement_readiness();
-        let readiness = self.replacement_readiness.clone();
-        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
-        // One line per pass that mixes unicast withdrawals and announcements
-        // in a group (a failover), so a daemon-level benchmark can count the
-        // members on each path without per-pass churn noise.
-        #[cfg(feature = "bench-internals")]
-        if group_stage
-            .values()
-            .any(|stage| !stage.shared_withdraw.is_empty() && !stage.shared_announce.is_empty())
-        {
-            info!(
-                shared_members = bench_grouped_paths.0,
-                per_member_walks = bench_grouped_paths.1,
-                "bench: grouped mixed pass fanout paths"
-            );
+        if fanout_handoff {
+            super::with_executor_handoff(distribute_peers);
+        } else {
+            distribute_peers();
         }
-        shared_unicast_probe_cache
-            .retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
-        for (_, mut stage) in group_stage.drain() {
-            stage.retire_with(&mut |force| self.replacement_checkpoint_at("retirement", force));
+        // Shared cleanup is owned when it releases inventory: an owned pass,
+        // more memoized source attribute sets than staged prefixes (several
+        // candidates per prefix, as Add-Path or per-client-best export
+        // memoizes), captured admitted keys, or a peer made dirty during the
+        // pass (conditional advertisement or a failed send). One memo entry
+        // per changed prefix is ordinary pass-sized work.
+        let retirement_owned = owned
+            || replay_handoff
+            || export_memo.len() > best_changed.len().saturating_add(all_affected.len())
+            || !speculative_group_admitted.is_empty()
+            || !self.dirty_peers.is_empty()
+            || !self.force_outbound_peers.is_empty();
+        let mut retire = || {
+            let retirement_installed = retirement_owned && self.begin_replacement_readiness();
+            let readiness = self.replacement_readiness.clone();
+            let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+            // One line per pass that mixes unicast withdrawals and announcements
+            // in a group (a failover), so a daemon-level benchmark can count the
+            // members on each path without per-pass churn noise.
+            #[cfg(feature = "bench-internals")]
+            if group_stage
+                .values()
+                .any(|stage| !stage.shared_withdraw.is_empty() && !stage.shared_announce.is_empty())
+            {
+                info!(
+                    shared_members = bench_grouped_paths.0,
+                    per_member_walks = bench_grouped_paths.1,
+                    "bench: grouped mixed pass fanout paths"
+                );
+            }
+            shared_unicast_probe_cache
+                .retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
+            for (_, mut stage) in group_stage.drain() {
+                stage.retire_with(&mut |force| self.replacement_checkpoint_at("retirement", force));
+            }
+            crate::adj_rib_out::release_hash_map(&mut group_stage, &mut || checkpoint());
+            #[cfg(feature = "bench-internals")]
+            export_memo.record_replacement_capacities(self);
+            export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
+            crate::adj_rib_out::release_hash_map(&mut shared_group_encodes, &mut || checkpoint());
+            crate::adj_rib_out::release_hash_map(&mut rs_tagged_pass, &mut || checkpoint());
+            self.release_speculative_group_admitted_keys(&speculative_group_admitted);
+            self.replacement_checkpoint(true);
+            drop(readiness);
+            self.finish_readiness_owner(retirement_installed);
+        };
+        if retirement_owned {
+            super::with_executor_handoff(retire);
+        } else {
+            retire();
         }
-        crate::adj_rib_out::release_hash_map(&mut group_stage, &mut || checkpoint());
-        #[cfg(feature = "bench-internals")]
-        export_memo.record_replacement_capacities(self);
-        export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
-        crate::adj_rib_out::release_hash_map(&mut shared_group_encodes, &mut || checkpoint());
-        crate::adj_rib_out::release_hash_map(&mut rs_tagged_pass, &mut || checkpoint());
-        self.release_speculative_group_admitted_keys(&speculative_group_admitted);
-        self.replacement_checkpoint(true);
-        drop(readiness);
-        self.finish_readiness_owner(retirement_installed);
     }
 }

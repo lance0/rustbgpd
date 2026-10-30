@@ -68,6 +68,10 @@ impl ExportMemo {
         }
     }
 
+    pub(in crate::manager) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
         for (_, entry) in self.entries.iter_mut() {
             checkpoint();

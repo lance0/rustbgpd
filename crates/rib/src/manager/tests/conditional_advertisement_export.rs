@@ -1232,3 +1232,42 @@ async fn same_address_neighbors_keep_their_own_conditional_attachments() {
     assert!(advertises(eth0) && !advertises(eth1));
     assert!(eth0.release() && eth1.release());
 }
+
+/// A zero-settle condition that applies during a clean pass's preparation
+/// dirties its attached peer there; that pass's resync and shared cleanup
+/// run under owners inside an executor handoff.
+#[tokio::test(start_paused = true)]
+async fn peer_dirtied_by_condition_during_preparation_owns_cleanup() {
+    let mut zero_settle = definition(prefix_predicate(), ConditionalAdvertiseIf::Present);
+    zero_settle.settle_time = Duration::ZERO;
+    let mut manager = manager_with(install_set(zero_settle, &[TARGET]));
+    announce(
+        &mut manager,
+        SOURCE,
+        vec![
+            route(controlled(), SOURCE, 100, false),
+            route(other(), SOURCE, 100, false),
+        ],
+    );
+    let mut rx = peer_up(&mut manager, TARGET, Shape::default());
+    drain(&mut rx);
+    assert!(!has(&manager, TARGET, controlled()));
+    assert!(manager.dirty_peers.is_empty());
+    manager.replacement_readiness_receipts.clear();
+    let observed = owned_checkpoints(&mut manager, |manager| {
+        announce(
+            manager,
+            SOURCE,
+            vec![route(condition(), SOURCE, 100, false)],
+        );
+    });
+    assert_owned_inside_handoff("condition-dirtied pass", &observed, "terminal_cleanup");
+    // The dirty member's resync and the shared cleanup.
+    assert_eq!(
+        manager.replacement_readiness_receipts.len(),
+        2,
+        "{observed:?}"
+    );
+    assert!(has(&manager, TARGET, controlled()));
+    assert!(manager.dirty_peers.is_empty());
+}
