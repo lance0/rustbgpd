@@ -2721,8 +2721,8 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
     assert_eq!(terminals, 0);
     assert_eq!(wire.len(), 2);
     assert!(wire.keys().any(|key| key.0 == Prefix::V6(ordinary)));
-    // Rank migration withdraws H's last OLD path. ADR-0113 allows H and B
-    // to compete in batch order for that freed slot, without a preference.
+    // ADR-0113 allows H and B to compete in batch order for the remaining
+    // slot, without a preference.
     assert_ne!(
         wire.keys().any(|key| key.0 == Prefix::V6(host)),
         wire.keys().any(|key| key.0 == Prefix::V6(blocked)),
@@ -2786,8 +2786,8 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
 /// Refused proof while a deleted RTBH path's key is re-announced for its
 /// surviving sibling. A private Add-Path receiver's table still matches its
 /// admitted counts after the refused retry, so it is the wire: the delete
-/// withdraws only the deleted path's key, the sibling keeps its own, and the
-/// prefix stays blackholed throughout. With one
+/// withdraws only the deleted path's key, the sibling keeps its own before
+/// and after release, and the prefix stays blackholed throughout. With one
 /// path per prefix (a grouped receiver) the refused admission keeps the
 /// deleted path: the replacement has no other key, and the prefix must never
 /// lose its blackhole. `held_counts` also checks the advertised count inside
@@ -2956,12 +2956,14 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
         manager.distribute_changes(&HashSet::new(), &HashSet::new());
         apply_wire(&mut rx, &mut wire);
     }
-    assert_eq!(wire[&(prefix, first)].local_pref(), 100);
+    // An Add-Path survivor keeps its own key 2 through the release.
+    let survivor = 2 * first;
+    assert_eq!(wire[&(prefix, survivor)].local_pref(), 100);
     assert!(
         wire.values().all(|route| route.local_pref() != 200),
         "the deleted path never returns"
     );
-    let expected = HashSet::from([(prefix, first), (pending, first), (ordinary, first)]);
+    let expected = HashSet::from([(prefix, survivor), (pending, first), (ordinary, first)]);
     assert_eq!(wire.keys().copied().collect::<HashSet<_>>(), expected);
     assert_eq!(
         manager.actual_unicast_advertised_count(observer),

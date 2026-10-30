@@ -1338,11 +1338,11 @@ impl RibManager {
 
             let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string)
                 || ConditionalGate::requires_as_path_string(conditional);
-            // Live staging keeps Add-Path keys during a hold; mirror it.
-            let mut hold_keys = (local_only && add_path_send_max > 0 && frozen_path_id.is_none())
+            // Live staging plans stable Add-Path keys; mirror it.
+            let mut add_path_keys = (add_path_send_max > 0 && frozen_path_id.is_none())
                 .then_some(rib_out)
                 .flatten()
-                .map(|out| HoldAddPathKeys::new(ribs, out, &prefix, &ranked, &mut || {}));
+                .map(|out| AddPathKeys::new(out, &prefix, local_only, ribs, &mut || {}));
             let mut rank = 1_u32;
             let mut rank_memo = super::ExportMemo::default();
             let mut selected_rank = None;
@@ -1393,7 +1393,7 @@ impl RibManager {
                 if super::no_advertise_export_suppressed(candidate_modified.communities()) {
                     continue;
                 }
-                if hold_keys.is_some() {
+                if add_path_keys.is_some() {
                     permitted.push(candidate);
                     continue;
                 }
@@ -1403,7 +1403,7 @@ impl RibManager {
                 }
                 rank += 1;
             }
-            if let Some(keys) = hold_keys.as_mut() {
+            if let Some(keys) = add_path_keys.as_mut() {
                 // Live staging plans keys over the staged set.
                 let limit = add_path_send_max as usize;
                 let staged = permitted.len().min(limit);
@@ -2058,6 +2058,11 @@ impl RibManager {
     /// split-horizon/iBGP/family/policy, sorts by best-path, takes top N,
     /// and diffs against `AdjRibOut` to produce announces and withdrawals.
     ///
+    /// `wire` is the peer's own Adj-RIB-Out, which Add-Path keys come from.
+    /// It is `rib_out` itself except when an initial dump or ROUTE-REFRESH
+    /// re-emits against an empty view: the re-sent rows must keep the keys
+    /// the peer already holds.
+    ///
     /// `stage_path_id_zero` is the RFC 7947 §2.3.2 per-client best-path
     /// mode (`send_max = 1`): the one permitted candidate is staged at
     /// `path_id 0` instead of rank 1, so Adj-RIB-Out, BMP RIB-Out, and
@@ -2074,6 +2079,7 @@ impl RibManager {
         ribs: &HashMap<PeerId, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
+        wire: &AdjRibOut,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
         local_only: bool,
@@ -2176,15 +2182,14 @@ impl RibManager {
             }),
         }
 
-        // Walk candidates, evaluate export policy, assign path_ids 1..N.
-        // During a selection hold, positional ranks would move the exempt
-        // rows already on this peer's wire and overwrite its frozen rows:
-        // keys stay put instead (see `HoldAddPathKeys`).
+        // Walk candidates and evaluate export policy; rank only picks the N
+        // paths to send. Add-Path keys are planned once that set is known,
+        // so paths keep their keys (see `AddPathKeys`).
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string)
             || ConditionalGate::requires_as_path_string(conditional);
-        let mut hold_keys = (local_only && !stage_path_id_zero)
-            .then(|| HoldAddPathKeys::new(ribs, rib_out, prefix, &candidates, checkpoint));
-        let mut hold_staged = Vec::new();
+        let mut keys = (!stage_path_id_zero)
+            .then(|| AddPathKeys::new(wire, prefix, local_only, ribs, checkpoint));
+        let mut staged: smallvec::SmallVec<[_; 4]> = smallvec::SmallVec::new();
         let mut next_rank: u32 = 1;
         let limit = if send_max == u32::MAX {
             usize::MAX
@@ -2277,11 +2282,10 @@ impl RibManager {
                 );
                 super::rs_control::apply_rs_control_egress(&mut modified, rs_asn, prepend);
             }
-            if hold_keys.is_some() {
-                // Keys are planned once the staged set is known.
-                hold_staged.push((*candidate, modified, nh_action));
+            if keys.is_some() {
+                staged.push((*candidate, modified, nh_action));
             } else {
-                modified.path_id = if stage_path_id_zero { 0 } else { next_rank };
+                modified.path_id = 0;
                 stage_multipath_row(
                     rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
                 );
@@ -2289,14 +2293,11 @@ impl RibManager {
 
             next_rank += 1;
         }
-        if let Some(keys) = hold_keys.as_mut() {
-            let routes: Vec<_> = hold_staged
-                .iter()
-                .map(|(candidate, _, _)| *candidate)
-                .collect();
+        if let Some(keys) = keys.as_mut() {
+            let routes: smallvec::SmallVec<[_; 8]> =
+                staged.iter().map(|(candidate, _, _)| *candidate).collect();
             let assigned = keys.assign_all(&routes, limit, checkpoint);
-            for ((candidate, mut modified, nh_action), key) in hold_staged.into_iter().zip(assigned)
-            {
+            for ((candidate, mut modified, nh_action), key) in staged.into_iter().zip(assigned) {
                 modified.path_id = key;
                 stage_multipath_row(
                     rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
@@ -2317,20 +2318,12 @@ impl RibManager {
                     out.withdraw.push((*prefix, path_id));
                 }
             }
-        } else if let Some(keys) = hold_keys {
-            // Withdraw only keys the hold no longer explains: a frozen row
-            // stays, as does every key this pass assigned.
+        } else if let Some(keys) = keys {
+            // Withdraw only keys the plan no longer uses: every key this pass
+            // assigned stays, as does a frozen row during a hold.
             for path_id in rib_out.path_ids_for_prefix(prefix) {
                 checkpoint();
                 if keys.withdrawable(path_id) {
-                    out.withdraw.push((*prefix, path_id));
-                }
-            }
-        } else {
-            // Withdraw any previously advertised path_ids beyond the new set
-            for path_id in rib_out.path_ids_for_prefix(prefix) {
-                checkpoint();
-                if path_id >= next_rank {
                     out.withdraw.push((*prefix, path_id));
                 }
             }
@@ -3362,104 +3355,178 @@ pub(in crate::manager) fn lease_rejection(
     }
 }
 
-/// Outbound Add-Path keys for one prefix while selection is deferred.
+/// Outbound Add-Path keys for one prefix.
 ///
-/// The hold's candidate set holds only exempt local paths, but the peer's
-/// wire still carries the rows admitted before the hold, and the transport
-/// sends an envelope's withdraw-phase UPDATE before its announce-phase
-/// UPDATE. Positional ranks would move an exempt row to another key (a
-/// withdrawal before its re-announcement) and overwrite frozen rows. The
-/// plan instead keeps every key that can stay and lands each change as an
+/// RFC 7911 path identifiers only distinguish paths; the peer chooses among
+/// them by attributes. Rank therefore only decides which N paths are sent,
+/// never their keys. The transport sends an envelope's withdraw-phase UPDATE
+/// first and then one UPDATE per attribute set, so renumbering by rank could
+/// leave the peer without a prefix's last blackhole between UPDATEs: moving
+/// an RTBH path is a withdrawal before its re-announcement, and an ordinary
+/// path announced over the RTBH path's key lands before the RTBH path's new
+/// key. The plan keeps every key that can stay and lands each change as an
 /// in-place replacement where it can:
 ///
-/// - an exempt row already on the wire keeps its key;
-/// - a newly exempt source first takes over a departing exempt row's key,
-///   so the old blackhole stays until the new one replaces it; then its
-///   own ordinary row's key; then a key a departed ordinary row frees; then
-///   the lowest unused key while the wire stays within the send limit;
-///   and at the limit it replaces a frozen row in place;
-/// - a frozen row (received, or an ordinary injection still present) keeps
-///   its key otherwise, including a promoted source's own ordinary row when
-///   the source moved to another key: the freeze backstop keeps that row on
-///   the wire, so it counts against the send limit.
+/// - a path already on the wire keeps its key: a local injection by its
+///   source path ID, a received path by its source peer (several paths of
+///   one peer take that peer's keys lowest first, in rank order);
+/// - a newly exempt local path first takes over a departing exempt row's
+///   key, so one blackhole replaces another in place; then its own ordinary
+///   row's key; then a key a departing row frees, lowest first; then the
+///   lowest unused key;
+/// - a path that stops being exempt keeps its key unless a newly exempt
+///   path took it over first;
+/// - a new key is allocated only while every row that stays (assigned,
+///   frozen, or a later path's own row) fits the send limit;
+/// - any other new path takes a freed key, lowest first, then the lowest
+///   unused key.
 ///
-/// Only rows that carry no blackhole, or whose blackhole intent left, are
-/// ever withdrawn. A new key is allocated only while every row that stays
-/// (assigned, frozen, or a later candidate's own row) fits the send limit.
-///
-/// Why frozen rows keep their keys: the hold preserves what each session
-/// already admitted, and an RTBH path on its own key is already effective,
-/// because RFC 7911 path identifiers only distinguish paths and the peer
-/// selects by attributes. Renumbering would only churn the peer and drop a
-/// valid path it is waiting on. The one exception is the send budget: when
-/// a new RTBH path finds no other key within the limit, it replaces a frozen
-/// row in place, since a blackhole outranks a frozen path.
-pub(in crate::manager) struct HoldAddPathKeys {
-    /// Exempt rows on the wire whose source is still a candidate.
-    held_exempt: HashMap<u32, u32>,
-    /// Ordinary rows on the wire whose source became an exempt candidate.
-    held_ordinary: HashMap<u32, u32>,
-    /// Exempt rows whose source left (deleted, demoted or not staged).
-    departing_exempt: std::collections::BTreeSet<u32>,
-    /// Keys of rows that carry no blackhole and are leaving.
-    free: std::collections::BTreeSet<u32>,
-    frozen: std::collections::BTreeSet<u32>,
-    occupied: HashSet<u32>,
-    assigned: HashSet<u32>,
+/// During a selection hold the candidate set holds only exempt local paths,
+/// and a frozen row (received, or an ordinary injection still present) keeps
+/// its key: the hold preserves what each session already admitted, and an
+/// RTBH path on its own key is already effective, so renumbering would only
+/// churn the peer and drop a valid path it is waiting on. The one exception
+/// is the send budget: when a new RTBH path finds no other key within the
+/// limit, it replaces a frozen row in place, since a blackhole outranks a
+/// frozen path.
+pub(in crate::manager) struct AddPathKeys {
+    /// Local rows, sorted by source path ID.
+    local_held: smallvec::SmallVec<[HeldLocalKey; 4]>,
+    /// Received rows outside a hold, sorted by (peer, key): (peer, key,
+    /// taken).
+    peer_held: smallvec::SmallVec<[(PeerId, u32, bool); 4]>,
+    /// Keys whose row is leaving, each pool sorted ascending and consumed
+    /// from `*_next`: exempt rows whose intent left, then other rows.
+    departing_exempt: smallvec::SmallVec<[u32; 4]>,
+    departing_exempt_next: usize,
+    free: smallvec::SmallVec<[u32; 4]>,
+    free_next: usize,
+    /// Ordinary keys a promoted path left behind for an RTBH key.
+    late_free: smallvec::SmallVec<[u32; 4]>,
+    /// Frozen keys, only ever set during a hold, sorted ascending;
+    /// displaced from the top.
+    frozen: smallvec::SmallVec<[u32; 4]>,
+    /// Every key on the wire, sorted ascending, and the fresh-key cursor.
+    occupied: smallvec::SmallVec<[u32; 8]>,
+    occupied_next: usize,
     next: u32,
+    /// Keys this plan assigned, sorted once planning ends.
+    assigned: smallvec::SmallVec<[u32; 8]>,
+    hold: bool,
 }
 
-impl HoldAddPathKeys {
+/// A local row on the wire, by the injection it carries.
+#[derive(Clone, Copy)]
+struct HeldLocalKey {
+    source: u32,
+    key: u32,
+    exempt: bool,
+    /// An ordinary injection still present during a hold: its row stays
+    /// frozen unless this pass stages the injection.
+    frozen: bool,
+    taken: bool,
+}
+
+impl AddPathKeys {
+    /// The wire's keys for `prefix`, classified only by the row each
+    /// carries, so the plan costs the wire's size, not the candidates'.
     pub(in crate::manager) fn new(
-        ribs: &HashMap<PeerId, AdjRibIn>,
         rib_out: &AdjRibOut,
         prefix: &Prefix,
-        candidates: &[&crate::route::Route],
+        hold: bool,
+        ribs: &HashMap<PeerId, AdjRibIn>,
         checkpoint: &mut impl FnMut(),
     ) -> Self {
-        let claimed: HashSet<u32> = candidates
-            .iter()
-            .filter(|route| route.peer == LOCAL_PEER)
-            .map(|route| route.path_id)
-            .collect();
-        let local = ribs.get(&LOCAL_PEER);
         let mut keys = Self {
-            held_exempt: HashMap::new(),
-            held_ordinary: HashMap::new(),
-            departing_exempt: std::collections::BTreeSet::new(),
-            free: std::collections::BTreeSet::new(),
-            frozen: std::collections::BTreeSet::new(),
-            occupied: HashSet::new(),
-            assigned: HashSet::new(),
+            local_held: smallvec::SmallVec::new(),
+            peer_held: smallvec::SmallVec::new(),
+            departing_exempt: smallvec::SmallVec::new(),
+            departing_exempt_next: 0,
+            free: smallvec::SmallVec::new(),
+            free_next: 0,
+            late_free: smallvec::SmallVec::new(),
+            frozen: smallvec::SmallVec::new(),
+            occupied: smallvec::SmallVec::new(),
+            occupied_next: 0,
             next: 1,
+            assigned: smallvec::SmallVec::new(),
+            hold,
         };
-        for path_id in rib_out.path_ids_for_prefix(prefix) {
+        let local = ribs.get(&LOCAL_PEER);
+        // One prefix-index probe; a stored row's path ID is its key, and
+        // only a local row needs its provenance looked up.
+        for route in rib_out.iter_prefix(prefix) {
             checkpoint();
-            keys.occupied.insert(path_id);
-            match rib_out.local_export_source(prefix, path_id) {
-                Some(source) if claimed.contains(&source.path_id) => {
-                    if source.deferral_exempt {
-                        keys.held_exempt.insert(source.path_id, path_id);
-                    } else {
-                        keys.held_ordinary.insert(source.path_id, path_id);
-                    }
-                }
-                Some(source) if source.deferral_exempt => {
-                    keys.departing_exempt.insert(path_id);
-                }
-                Some(source) => {
-                    if local.is_some_and(|rib| rib.get(prefix, source.path_id).is_some()) {
-                        keys.frozen.insert(path_id);
-                    } else {
-                        keys.free.insert(path_id);
-                    }
-                }
-                None => {
-                    keys.frozen.insert(path_id);
-                }
+            let path_id = route.path_id;
+            keys.occupied.push(path_id);
+            let source = if route.peer == LOCAL_PEER {
+                rib_out.local_export_source(prefix, path_id)
+            } else {
+                None
+            };
+            if let Some(source) = source {
+                let exempt = source.deferral_exempt;
+                keys.local_held.push(HeldLocalKey {
+                    source: source.path_id,
+                    key: path_id,
+                    exempt,
+                    frozen: hold
+                        && !exempt
+                        && local.is_some_and(|rib| rib.get(prefix, source.path_id).is_some()),
+                    taken: false,
+                });
+            } else if hold {
+                keys.frozen.push(path_id);
+            } else if route.peer != LOCAL_PEER {
+                keys.peer_held.push((route.peer, path_id, false));
+            } else {
+                keys.free.push(path_id);
             }
         }
+        keys.local_held.sort_unstable_by_key(|held| held.source);
+        keys.peer_held
+            .sort_unstable_by_key(|&(peer, key, _)| (peer, key));
         keys
+    }
+
+    fn take_lowest(pool: &[u32], next: &mut usize) -> Option<u32> {
+        let key = pool.get(*next).copied()?;
+        *next += 1;
+        Some(key)
+    }
+
+    /// Whether a path may keep its own key: not when a new RTBH path already
+    /// took it over from the departing pool.
+    fn claim(&mut self, own: u32) -> bool {
+        let next = self.departing_exempt_next;
+        match self.departing_exempt[next..].binary_search(&own) {
+            Ok(at) => {
+                self.departing_exempt.remove(next + at);
+                true
+            }
+            Err(_) => !self.departing_exempt[..next].contains(&own),
+        }
+    }
+
+    /// The lowest key neither on the wire nor assigned by this plan.
+    fn fresh(&mut self, checkpoint: &mut impl FnMut()) -> u32 {
+        loop {
+            checkpoint();
+            while self
+                .occupied
+                .get(self.occupied_next)
+                .is_some_and(|&key| key < self.next)
+            {
+                self.occupied_next += 1;
+            }
+            if self.occupied.get(self.occupied_next) == Some(&self.next) {
+                self.next += 1;
+                continue;
+            }
+            let key = self.next;
+            self.next += 1;
+            return key;
+        }
     }
 
     /// Keys for the staged candidates, in rank order; see the type's plan.
@@ -3468,78 +3535,181 @@ impl HoldAddPathKeys {
         staged: &[&crate::route::Route],
         limit: usize,
         checkpoint: &mut impl FnMut(),
-    ) -> Vec<u32> {
-        let mut keys = vec![0; staged.len()];
-        let mut changing = Vec::new();
+    ) -> smallvec::SmallVec<[u32; 8]> {
+        // Planned keys start at 1, so 0 marks a path not yet keyed.
+        let mut keys: smallvec::SmallVec<[u32; 8]> = smallvec::smallvec![0; staged.len()];
+        // Each changing candidate, with its own ordinary row's key if any.
+        let mut changing: smallvec::SmallVec<[(usize, Option<u32>); 8]> = smallvec::SmallVec::new();
+        // Local paths keep their keys by source path ID.
         for (index, route) in staged.iter().enumerate() {
             checkpoint();
-            let held = (route.peer == LOCAL_PEER)
-                .then(|| self.held_exempt.remove(&route.path_id))
-                .flatten();
-            match held {
-                Some(key) => {
-                    self.assigned.insert(key);
-                    keys[index] = key;
+            if route.peer != LOCAL_PEER {
+                continue;
+            }
+            let exempt_now = unicast_deferral_exempt(route);
+            match self.held_local(route.path_id, exempt_now) {
+                Some(at) => {
+                    let HeldLocalKey { key, exempt, .. } = self.local_held[at];
+                    self.local_held[at].taken = true;
+                    if exempt == exempt_now {
+                        keys[index] = key;
+                        self.assigned.push(key);
+                    } else {
+                        // A path changing class may swap keys: a newly
+                        // exempt one may take over a departing RTBH key,
+                        // and a demoted one's RTBH key goes to a new RTBH
+                        // path first.
+                        if exempt {
+                            self.departing_exempt.push(key);
+                        }
+                        changing.push((index, Some(key)));
+                    }
                 }
-                None => changing.push(index),
+                None => changing.push((index, None)),
             }
         }
-        // An exempt row whose source is not staged this pass is leaving too.
-        self.departing_exempt
-            .extend(self.held_exempt.drain().map(|(_, key)| key));
-        // An ordinary row stays frozen unless its source is a changing
-        // candidate, which may still claim it; until then it is reserved.
-        let claimable: HashSet<u32> = changing
+        // Received paths keep their peer's keys, lowest first in rank order:
+        // a merge of the staged paths sorted by peer with the held keys.
+        let mut received: smallvec::SmallVec<[(PeerId, usize); 8]> = staged
             .iter()
-            .map(|&index| staged[index])
-            .filter(|route| route.peer == LOCAL_PEER)
-            .map(|route| route.path_id)
+            .enumerate()
+            .filter(|(_, route)| route.peer != LOCAL_PEER)
+            .map(|(index, route)| (route.peer, index))
             .collect();
-        let frozen = &mut self.frozen;
-        self.held_ordinary.retain(|source, key| {
-            claimable.contains(source) || {
-                frozen.insert(*key);
-                false
-            }
-        });
-        let mut reserved = self.held_ordinary.len();
-        for index in changing {
+        received.sort_by_key(|&(peer, _)| peer);
+        let mut held = 0;
+        for (peer, index) in received {
             checkpoint();
-            let route = staged[index];
-            let own = (route.peer == LOCAL_PEER)
-                .then(|| self.held_ordinary.remove(&route.path_id))
-                .flatten();
-            reserved -= usize::from(own.is_some());
-            let key = if let Some(key) = self.departing_exempt.pop_first() {
-                // The source's own ordinary row stays frozen: the hold keeps
-                // it on the wire until a blackhole replaces it in place.
-                self.frozen.extend(own);
-                key
-            } else if let Some(key) = own {
-                key
-            } else if let Some(key) = self.free.pop_first() {
-                key
-            } else if self.assigned.len() + self.frozen.len() + reserved >= limit
-                && let Some(key) = self.frozen.pop_last()
+            while self
+                .peer_held
+                .get(held)
+                .is_some_and(|&(held_peer, ..)| held_peer < peer)
             {
-                key
-            } else {
-                while self.occupied.contains(&self.next) {
-                    checkpoint();
-                    self.next += 1;
+                held += 1;
+            }
+            match self.peer_held.get_mut(held) {
+                Some(entry) if entry.0 == peer => {
+                    entry.2 = true;
+                    keys[index] = entry.1;
+                    self.assigned.push(entry.1);
+                    held += 1;
                 }
-                self.next
-            };
-            self.occupied.insert(key);
-            self.assigned.insert(key);
-            keys[index] = key;
+                _ => changing.push((index, None)),
+            }
         }
+        // Rows whose source is not staged this pass are leaving, unless
+        // frozen.
+        for held in &self.local_held {
+            if held.taken {
+                continue;
+            }
+            if held.exempt {
+                self.departing_exempt.push(held.key);
+            } else if held.frozen {
+                self.frozen.push(held.key);
+            } else {
+                self.free.push(held.key);
+            }
+        }
+        self.free.extend(
+            self.peer_held
+                .iter()
+                .filter(|&&(_, _, taken)| !taken)
+                .map(|&(_, key, _)| key),
+        );
+        self.departing_exempt.sort_unstable();
+        self.free.sort_unstable();
+        self.frozen.sort_unstable();
+        // Exempt candidates first, so a departing RTBH key goes to a new
+        // RTBH path before any ordinary path could take it; rank order
+        // within each class.
+        changing.sort_by_key(|&(index, _)| (!unicast_deferral_exempt(staged[index]), index));
+        // A changing path's own row stays until it is planned, so it is
+        // reserved against the send limit.
+        let mut reserved = changing.iter().filter(|(_, own)| own.is_some()).count();
+        for (index, own) in changing {
+            checkpoint();
+            reserved -= usize::from(own.is_some());
+            let key = self.changed_key(
+                unicast_deferral_exempt(staged[index]),
+                own,
+                limit,
+                reserved,
+                checkpoint,
+            );
+            keys[index] = key;
+            self.assigned.push(key);
+        }
+        debug_assert!(keys.iter().all(|&key| key != 0));
+        self.assigned.sort_unstable();
         keys
+    }
+
+    /// The local row `source` holds. During a hold one source may hold two
+    /// rows, its RTBH row and the frozen ordinary row it left: prefer the
+    /// row of its current class.
+    fn held_local(&self, source: u32, exempt: bool) -> Option<usize> {
+        let first = self.local_held.partition_point(|held| held.source < source);
+        let rows = self.local_held[first..]
+            .iter()
+            .take_while(|held| held.source == source)
+            .count();
+        (rows > 0).then(|| {
+            (first..first + rows)
+                .find(|&at| self.local_held[at].exempt == exempt)
+                .unwrap_or(first)
+        })
+    }
+
+    /// The key for a path without one it keeps; `own` is its row's key
+    /// when it changed class, and `reserved` counts later paths' own rows.
+    fn changed_key(
+        &mut self,
+        exempt: bool,
+        own: Option<u32>,
+        limit: usize,
+        reserved: usize,
+        checkpoint: &mut impl FnMut(),
+    ) -> u32 {
+        if let Some(key) = exempt
+            .then(|| Self::take_lowest(&self.departing_exempt, &mut self.departing_exempt_next))
+            .flatten()
+        {
+            // The path's own ordinary row, if any, leaves instead; during a
+            // hold the freeze backstop keeps it, so it stays frozen.
+            if let Some(own) = own {
+                if self.hold {
+                    if let Err(at) = self.frozen.binary_search(&own) {
+                        self.frozen.insert(at, own);
+                    }
+                } else {
+                    self.late_free.push(own);
+                }
+            }
+            key
+        } else if let Some(key) = own.filter(|&own| self.claim(own)) {
+            key
+        } else if let Some(key) = Self::take_lowest(&self.free, &mut self.free_next) {
+            key
+        } else if let Some(key) = self.late_free.pop() {
+            key
+        } else if let Some(key) =
+            Self::take_lowest(&self.departing_exempt, &mut self.departing_exempt_next)
+        {
+            key
+        } else if self.assigned.len() + self.frozen.len() + reserved >= limit
+            && let Some(key) = self.frozen.pop()
+        {
+            key
+        } else {
+            self.fresh(checkpoint)
+        }
     }
 
     /// Whether the residue pass withdraws this wire key.
     pub(in crate::manager) fn withdrawable(&self, path_id: u32) -> bool {
-        !self.assigned.contains(&path_id) && !self.frozen.contains(&path_id)
+        self.assigned.binary_search(&path_id).is_err()
+            && self.frozen.binary_search(&path_id).is_err()
     }
 }
 

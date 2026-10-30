@@ -435,20 +435,19 @@ async fn add_path_withdraws_per_path_id() {
         Some(&ip(SOURCE2))
     );
     elapse(&mut manager, SETTLE).await;
+    // The tagged path now ranks first but takes a new path ID; the
+    // untagged one keeps path ID 1.
     let both = advertised(&manager, TARGET);
-    assert_eq!(both.get(&(v4(controlled()), 1)), Some(&ip(SOURCE)));
-    assert_eq!(both.get(&(v4(controlled()), 2)), Some(&ip(SOURCE2)));
+    assert_eq!(both.get(&(v4(controlled()), 1)), Some(&ip(SOURCE2)));
+    assert_eq!(both.get(&(v4(controlled()), 2)), Some(&ip(SOURCE)));
     let _ = drain(&mut rx);
 
     withdraw(&mut manager, SOURCE2, condition());
     let _ = drain(&mut rx);
     elapse(&mut manager, SETTLE).await;
-    // The tagged path left; the untagged one now holds path ID 1 and the
-    // second ID is withdrawn.
-    assert_eq!(
-        drain(&mut rx),
-        wire(&[(controlled(), 1)], &[(controlled(), 2)])
-    );
+    // The tagged path left: only its path ID is withdrawn, and nothing is
+    // re-announced.
+    assert_eq!(drain(&mut rx), wire(&[], &[(controlled(), 2)]));
     let after = advertised(&manager, TARGET);
     assert_eq!(after.get(&(v4(controlled()), 1)), Some(&ip(SOURCE2)));
     assert!(!after.contains_key(&(v4(controlled()), 2)));

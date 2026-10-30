@@ -1634,7 +1634,10 @@ carries inactive (absent), unlimited (zero), or finite.
 
 - Capability code 69. Per-family Send/Receive/Both modes.
 - Adj-RIB-In/Out keyed by `(Prefix, u32)` for multi-path storage.
-- Multi-path send: rank-based path IDs (best=1, second=2, ...).
+- Multi-path send: rank picks the `send_max` paths. A unicast path keeps its
+  path ID while it is sent and a new path takes the lowest free ID, so a
+  rank change re-announces nothing and an RTBH path is never renumbered.
+  VPN and labeled-unicast send still number paths by rank (best=1, ...).
 - `send_max` caps paths per prefix per peer.
 - Both IPv4 body NLRI and IPv6 MP_REACH/MP_UNREACH supported.
 - A received path identifier carries no preference (§2). Unicast, VPN, and

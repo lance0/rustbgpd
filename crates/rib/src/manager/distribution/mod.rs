@@ -56,7 +56,7 @@ mod unicast;
 mod vpn;
 
 pub(in crate::manager) use export_memo::ExportMemo;
-pub(in crate::manager) use unicast::{HoldAddPathKeys, lease_rejection};
+pub(in crate::manager) use unicast::{AddPathKeys, lease_rejection};
 
 /// Bounds on one cross-message distribution window. Each bound caps a
 /// different cost: queued input messages and ingested routes cap the ingest
@@ -9469,6 +9469,7 @@ impl RibManager {
                                 &self.ribs,
                                 &self.unicast_prefix_peers,
                                 rib_out,
+                                rib_out,
                                 &self.peer_is_rr_client,
                                 prefix,
                                 self.selection_deferral.as_ref().is_some_and(|deferral| {
@@ -9522,6 +9523,7 @@ impl RibManager {
                             Self::distribute_multipath_prefix_with_checkpoint(
                                 &self.ribs,
                                 &self.unicast_prefix_peers,
+                                rib_out,
                                 rib_out,
                                 &self.peer_is_rr_client,
                                 prefix,

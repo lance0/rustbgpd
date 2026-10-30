@@ -10,12 +10,14 @@
 //! community, so a wire row names the exact injection it came from.
 //!
 //! Invariants:
-//! - I1, never unblackhole: after every UPDATE in the hold, a prefix whose
-//!   fresh export carries an exempt path and that had an exempt row on the
-//!   wire keeps one; after a drain with a free writer, admitted proof and no
-//!   ORF gate, every such prefix carries a live exempt row.
+//! - I1, never unblackhole: after every UPDATE, in the hold or outside it, a
+//!   prefix whose fresh export carries an exempt path and that had an exempt
+//!   row on the wire keeps one; after a drain in the hold with a free writer,
+//!   admitted proof and no ORF gate, every such prefix carries a live exempt
+//!   row.
 //! - I2, exact convergence: after release and drain, the wire equals a fresh
-//!   session's full dump, computed from the final intent alone.
+//!   session's full dump, computed from the final intent alone. Add-Path
+//!   path IDs are opaque, so each prefix's paths are compared, not its keys.
 //! - I3: `actual_unicast_advertised_count` equals the wire key count.
 //! - I4, no resurrection: a deleted or replaced exempt path is never
 //!   announced again.
@@ -251,6 +253,9 @@ struct Harness {
     gr_families: bool,
     /// The receiver has an established session.
     registered: bool,
+    /// I1 per UPDATE; the checker's own tests clear it for a control that
+    /// checks only after the channel.
+    per_update_i1: bool,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -292,6 +297,7 @@ impl Harness {
             helper: true,
             gr_families: true,
             registered: false,
+            per_update_i1: true,
         };
         if !config.late {
             harness.establish();
@@ -719,10 +725,10 @@ impl Harness {
     }
 
     /// I4 for every announcement; I1 after the withdrawals and after each
-    /// announcement while the hold lasts.
+    /// announcement.
     fn apply_announcements(&mut self, update: &OutboundRouteUpdate) -> Checked {
         self.check_send_limit()?;
-        if self.held {
+        if self.per_update_i1 {
             self.check_blackholed()?;
         }
         for route in update.announce.iter() {
@@ -737,7 +743,7 @@ impl Harness {
             self.wire.insert(key, injection);
             self.stale.remove(&key);
             self.check_send_limit()?;
-            if self.held {
+            if self.per_update_i1 {
                 self.check_blackholed()?;
             }
         }
@@ -841,8 +847,8 @@ impl Harness {
             .collect()
     }
 
-    /// I1's safety half, after every UPDATE in the hold: a prefix that
-    /// should be blackholed keeps an exempt row once it had one.
+    /// I1's safety half, after every UPDATE: a prefix that should be
+    /// blackholed keeps an exempt row once it had one.
     fn check_blackholed(&mut self) -> Checked {
         let wanted = self.wanted_blackholes();
         let blackholed = self.exempt_rows();
@@ -858,8 +864,13 @@ impl Harness {
             prop_assert!(
                 blackholed.contains_key(&index)
                     || self.known_unblackhole(index, fallback).is_some(),
-                "I1: {} lost its exempt row during the hold; wire {}",
+                "I1: {} lost its exempt row {}; wire {}",
                 prefix(index),
+                if self.held {
+                    "during the hold"
+                } else {
+                    "outside the hold"
+                },
                 show(&self.wire)
             );
         }
@@ -963,13 +974,48 @@ impl Harness {
         Ok(())
     }
 
+    /// `rows` with each prefix's Add-Path keys renumbered 1.. in a fixed
+    /// path order, repeated paths last. RFC 7911 path IDs are opaque and the
+    /// daemon keeps a path's key for as long as it is sent, so a long-lived
+    /// session's keys need not match a fresh dump's.
+    fn renumbered(
+        &self,
+        rows: impl IntoIterator<Item = ((Prefix, u32), usize)>,
+    ) -> BTreeMap<(Prefix, u32), usize> {
+        if !self.config.add_path {
+            return rows.into_iter().collect();
+        }
+        let mut paths = BTreeMap::<Prefix, Vec<usize>>::new();
+        for ((prefix, _), injection) in rows {
+            paths.entry(prefix).or_default().push(injection);
+        }
+        let mut renumbered = BTreeMap::new();
+        for (prefix, mut injections) in paths {
+            injections.sort_unstable();
+            let mut repeated = Vec::new();
+            injections.dedup_by(|next, kept| {
+                let same = next == kept;
+                if same {
+                    repeated.push(*next);
+                }
+                same
+            });
+            injections.sort_by_key(|&injection| {
+                (
+                    std::cmp::Reverse(self.injections[injection].preference),
+                    injection,
+                )
+            });
+            for (key, injection) in (1..).zip(injections.into_iter().chain(repeated)) {
+                renumbered.insert((prefix, key), injection);
+            }
+        }
+        renumbered
+    }
+
     fn check_converged(&mut self) -> Checked {
-        let expected = self.expected();
-        let wire: BTreeMap<_, _> = self
-            .wire
-            .iter()
-            .map(|(&key, &value)| (key, value))
-            .collect();
+        let expected = self.renumbered(self.expected());
+        let wire = self.renumbered(self.wire.iter().map(|(&key, &value)| (key, value)));
         prop_assert!(
             wire == expected,
             "I2: released wire {} differs from a fresh dump {}",
@@ -1154,7 +1200,7 @@ fn i1_catches_a_transient_unblackhole_between_updates() {
         limit: false,
         late: false,
     };
-    let transient = |held: bool| {
+    let transient = |per_update: bool| {
         let mut harness = Harness::new(config);
         harness.apply(&Op::Inject {
             prefix: 0,
@@ -1184,7 +1230,8 @@ fn i1_catches_a_transient_unblackhole_between_updates() {
                 ..OutboundRouteUpdate::default()
             })
             .unwrap();
-        harness.held = held;
+        harness.held = true;
+        harness.per_update_i1 = per_update;
         let observed = harness.observe().map(|_| ());
         if observed.is_ok() {
             assert_eq!(
@@ -1220,7 +1267,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
         limit: false,
         late: false,
     };
-    let replaced = |held: bool, between_phases: bool| {
+    let replaced = |between_phases: bool| {
         let mut harness = Harness::new(config);
         harness.apply(&Op::Inject {
             prefix: 0,
@@ -1252,19 +1299,19 @@ fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
                 ..OutboundRouteUpdate::default()
             })
             .unwrap();
-        harness.held = held && between_phases;
+        harness.held = true;
+        harness.per_update_i1 = between_phases;
         let observed = harness.observe().map(|_| ());
-        harness.held = held;
         observed.and_then(|()| harness.check_blackholed())
     };
-    let error = replaced(true, true).expect_err("the phase gap unblackholes the peer");
+    let error = replaced(true).expect_err("the phase gap unblackholes the peer");
     assert!(
         error
             .to_string()
             .contains("I1: 198.51.100.1/32 lost its exempt row")
     );
     assert!(
-        replaced(true, false).is_ok(),
+        replaced(false).is_ok(),
         "a check after the whole envelope cannot see it"
     );
 }
@@ -1314,9 +1361,9 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
                 ..OutboundRouteUpdate::default()
             })
             .unwrap();
-        harness.held = per_announcement;
-        let observed = harness.observe().map(|_| ());
         harness.held = true;
+        harness.per_update_i1 = per_announcement;
+        let observed = harness.observe().map(|_| ());
         observed.and_then(|()| harness.check_blackholed())
     };
     let error = swapped(true).expect_err("the gap between announcements unblackholes the peer");
@@ -1655,4 +1702,117 @@ fn hold_keeps_add_path_rows_within_send_max() {
         })
         .collect();
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Outside a hold, an ordinary path that outranks an announced RTBH path
+/// takes a new key: the RTBH row keeps its key, so no UPDATE leaves the
+/// prefix without its blackhole. Rank-ordered keys re-announced `#1` with
+/// the ordinary path before the RTBH path reached `#2`.
+#[test]
+fn add_path_rtbh_keeps_its_key_when_an_ordinary_path_outranks_it() {
+    for per_client_best in [false, true] {
+        let config = Config {
+            grouped: false,
+            add_path: true,
+            per_client_best,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        let setup = [
+            Op::Inject {
+                prefix: 2,
+                path: 0,
+                preference: 0,
+                blackhole: true,
+            },
+            Op::Inject {
+                prefix: 2,
+                path: 1,
+                preference: 2,
+                blackhole: false,
+            },
+        ];
+        if let Some(reason) = failure(config, &setup, &[]) {
+            panic!("{config:?}: {reason}");
+        }
+    }
+}
+
+/// Outside a hold, deleting the ordinary path ranked above an RTBH path
+/// withdraws only the deleted path's key. Rank-ordered keys withdrew the
+/// RTBH path's `#2` before re-announcing it at `#1`.
+#[test]
+fn add_path_rtbh_keeps_its_key_when_the_path_above_it_is_deleted() {
+    for per_client_best in [false, true] {
+        let config = Config {
+            grouped: false,
+            add_path: true,
+            per_client_best,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        let setup = [
+            Op::Inject {
+                prefix: 2,
+                path: 0,
+                preference: 2,
+                blackhole: false,
+            },
+            Op::Inject {
+                prefix: 2,
+                path: 1,
+                preference: 0,
+                blackhole: true,
+            },
+            Op::Delete { prefix: 2, path: 0 },
+        ];
+        if let Some(reason) = failure(config, &setup, &[]) {
+            panic!("{config:?}: {reason}");
+        }
+    }
+}
+
+/// One pass that demotes an RTBH source to an ordinary path and adds a new
+/// RTBH path (here a hold's backpressured release) hands the demoted path's
+/// key to the new RTBH path in place; the demoted path takes another key.
+/// Keeping the demoted path on its key replaced the last blackhole with an
+/// ordinary row before the new RTBH path reached its own key.
+#[test]
+fn add_path_new_rtbh_takes_over_a_demoted_rtbh_key() {
+    for per_client_best in [false, true] {
+        let config = Config {
+            grouped: false,
+            add_path: true,
+            per_client_best,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        let setup = [Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: true,
+        }];
+        let hold = [
+            Op::Backpressure(true),
+            Op::Inject {
+                prefix: 2,
+                path: 1,
+                preference: 0,
+                blackhole: false,
+            },
+            Op::Inject {
+                prefix: 2,
+                path: 0,
+                preference: 0,
+                blackhole: true,
+            },
+        ];
+        if let Some(reason) = failure(config, &setup, &hold) {
+            panic!("{config:?}: {reason}");
+        }
+    }
 }

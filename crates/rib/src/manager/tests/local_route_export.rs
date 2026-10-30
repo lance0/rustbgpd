@@ -2692,8 +2692,9 @@ fn arming_selection_promotes_rtbh_over_a_preselected_ordinary_local_path() {
                 71,
                 "{mode:?}: a newly armed hold must reclassify existing local paths"
             );
-            // Add-Path keeps the ordinary row frozen at its admitted key
-            // beside the RTBH path; single-best replaces it with the RTBH.
+            // Add-Path keeps the ordinary row frozen at its admitted key 2
+            // beside the RTBH path, which kept key 1 from its own
+            // announcement; single-best replaces it with the RTBH.
             let ordinary = row(
                 &query(&mut manager, prefix, 23, None, 10).unwrap(),
                 observer,
@@ -2702,7 +2703,7 @@ fn arming_selection_promotes_rtbh_over_a_preselected_ordinary_local_path() {
             if matches!(mode, DeferredUnicastMode::AddPath) {
                 assert_eq!(
                     (ordinary.disposition, ordinary.advertised_path_id),
-                    (RouteExportDisposition::Committed, 1),
+                    (RouteExportDisposition::Committed, 2),
                     "{mode:?}"
                 );
             } else {

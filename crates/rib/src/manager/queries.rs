@@ -3798,21 +3798,20 @@ impl RibManager {
                     }
                     permitted.push(cand);
                 }
-                // Rank picks the paths. During a hold, live staging keeps
-                // the keys already on the wire; mirror it.
-                let keys = match self.adj_ribs_out.get(&peer_addr) {
-                    Some(rib_out) if self.selection_deferred(family) => {
-                        distribution::HoldAddPathKeys::new(
-                            &self.ribs,
+                // Rank picks the paths; their keys follow live staging.
+                let keys = self.adj_ribs_out.get(&peer_addr).map_or_else(
+                    || (1..=u32::try_from(permitted.len()).unwrap_or(u32::MAX)).collect(),
+                    |rib_out| {
+                        distribution::AddPathKeys::new(
                             rib_out,
                             &prefix,
-                            &filtered,
+                            self.selection_deferred(family),
+                            &self.ribs,
                             &mut || {},
                         )
                         .assign_all(&permitted, limit, &mut || {})
-                    }
-                    _ => (1..=u32::try_from(permitted.len()).unwrap_or(u32::MAX)).collect(),
-                };
+                    },
+                );
                 for (cand, key) in permitted.into_iter().zip(keys) {
                     if self
                         .peer_unexportable

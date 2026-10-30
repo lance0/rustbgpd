@@ -2547,9 +2547,10 @@ to the presence-aware field.
 
 **Multi-path send (route server mode):** When `send = true`, the RIB
 distributes multiple candidate paths per prefix to this peer, sorted by
-best-path preference. Paths are assigned rank-based path IDs (best=1,
-second=2, etc.). Split horizon, iBGP suppression, and per-candidate export
-policy are evaluated for each path.
+best-path preference. Rank picks which `send_max` paths are sent; a path
+keeps its path ID while it is sent, and a new path takes the lowest free ID,
+so path ID 1 is not necessarily the best path. Split horizon, iBGP
+suppression, and per-candidate export policy are evaluated for each path.
 
 Both IPv4 and IPv6 unicast are supported. See [ADR-0033](../adr/0033-add-path.md).
 

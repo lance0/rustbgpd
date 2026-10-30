@@ -272,15 +272,15 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
 }
 
 /// `NO_ADVERTISE` removes one Add-Path candidate before ranking and
-/// export policy. The remaining sibling compacts to rank/path-id 1;
-/// the old rank 2 is withdrawn even when policy would remove the
-/// well-known community and permit the scoped route.
+/// export policy. Its path ID 1 is withdrawn even when policy would remove
+/// the well-known community and permit the scoped route; the remaining
+/// sibling keeps path ID 2.
 #[expect(
     clippy::too_many_lines,
     reason = "one scenario proves live and explain rank parity before and after policy"
 )]
 #[tokio::test]
-async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
+async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_key() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
@@ -363,20 +363,15 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
 
     let update = out_rx
         .try_recv()
-        .expect("rank compaction emitted after query synchronization");
-    assert_eq!(update.announce.len(), 1);
-    assert_eq!(update.announce[0].peer, peer_v4(source_b));
-    assert_eq!(update.announce[0].path_id, 1);
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 2)]);
-    assert!(
-        out_rx.try_recv().is_err(),
-        "one compact delta is sufficient"
-    );
+        .expect("withdrawal emitted after query synchronization");
+    assert!(update.announce.is_empty(), "the sibling keeps its path ID");
+    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 1)]);
+    assert!(out_rx.try_recv().is_err(), "one delta is sufficient");
 
     let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
     assert_eq!(advertised[0].peer, peer_v4(source_b));
-    assert_eq!(advertised[0].path_id, 1);
+    assert_eq!(advertised[0].path_id, 2);
 
     let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
         .await
@@ -387,8 +382,8 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
         .find(|candidate| candidate.route.peer == peer_v4(source_b))
         .expect("runner-up is present in best-path explain");
     assert_eq!(
-        sibling.advertised_path_id, 1,
-        "ExplainBestPath applies pre-policy NO_ADVERTISE before rank assignment"
+        sibling.advertised_path_id, 2,
+        "ExplainBestPath applies pre-policy NO_ADVERTISE before key assignment"
     );
 
     let (reply, response) = oneshot::channel();
@@ -406,7 +401,7 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
         .try_recv()
         .expect("policy-added NO_ADVERTISE withdraws the remaining rank");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 1)]);
+    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 2)]);
     let response = collect_advertised_routes(&tx, target).await;
     assert!(response.is_empty());
 
@@ -420,7 +415,7 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
         .expect("runner-up is present in best-path explain");
     assert_eq!(
         sibling.advertised_path_id, 0,
-        "ExplainBestPath skips post-policy NO_ADVERTISE before rank assignment"
+        "ExplainBestPath skips post-policy NO_ADVERTISE before key assignment"
     );
 
     // Post-policy NO_ADVERTISE suppression must surface through live

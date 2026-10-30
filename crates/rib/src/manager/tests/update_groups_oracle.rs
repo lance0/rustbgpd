@@ -2597,6 +2597,31 @@ enum SwapPath {
     Full,
 }
 
+/// Each receiver's paths per prefix with their path IDs, or, when
+/// `drop_path_ids`, as a sorted list of the paths alone.
+fn paths_by_prefix(
+    state: &FoldedState,
+    drop_path_ids: bool,
+) -> BTreeMap<PeerId, BTreeMap<Prefix, Vec<String>>> {
+    state
+        .iter()
+        .map(|(peer, table)| {
+            let mut prefixes = BTreeMap::<Prefix, Vec<String>>::new();
+            for ((prefix, path_id), entry) in table {
+                let path_id = if drop_path_ids { None } else { Some(path_id) };
+                prefixes
+                    .entry(*prefix)
+                    .or_default()
+                    .push(format!("{path_id:?} {entry:?}"));
+            }
+            for paths in prefixes.values_mut() {
+                paths.sort();
+            }
+            (*peer, prefixes)
+        })
+        .collect()
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the swap case table reads best as one list"
@@ -2720,8 +2745,11 @@ async fn check_swap_cases(mode: SwapMode) {
             full, member,
             "{name} {mode:?}: group-level full pass differs from per-member resync"
         );
+        // Add-Path path IDs are opaque and kept while a path is sent, so a
+        // fresh run may number the same paths differently.
         assert_eq!(
-            member, reference,
+            paths_by_prefix(&member, mode.add_path),
+            paths_by_prefix(&reference, mode.add_path),
             "{name} {mode:?}: full re-evaluation is not exact"
         );
         if mode.rs_control {
