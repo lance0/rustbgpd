@@ -1292,24 +1292,20 @@ async fn policy_rollback_rib_wait_has_one_cross_partition_deadline() {
 
         let (readiness_reply, readiness_response) = oneshot::channel();
         readiness_tx
-            .send(PeerManagerReadinessQuery::ListPeers {
+            .send(PeerManagerReadinessQuery::Ping {
                 reply: readiness_reply,
             })
             .await
             .unwrap();
         // LOAD-BEARING: awaiting the registered aggregate without the
         // read-only readiness lane makes this deadline expire.
-        assert_eq!(
-            tokio::time::timeout(
-                rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
-                readiness_response,
-            )
-            .await
-            .expect("readiness must remain live during rollback RIB congestion")
-            .unwrap()
-            .len(),
-            peers.len()
-        );
+        tokio::time::timeout(
+            rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+            readiness_response,
+        )
+        .await
+        .expect("readiness must remain live during rollback RIB congestion")
+        .unwrap();
 
         tokio::time::advance(RIB_BATCH_REPLY_TIMEOUT + Duration::from_millis(1)).await;
         tokio::task::yield_now().await;

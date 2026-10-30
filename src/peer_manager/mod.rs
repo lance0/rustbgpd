@@ -1189,10 +1189,7 @@ impl PeerManager {
     /// queue of ready commands can defer for Tokio's whole cooperative budget.
     ///
     /// `ActivePeers` (the `GetHealth` count) reads each session's published
-    /// state and never waits on a session. A `ListPeers` is detached when
-    /// possible: its session fan-out can take its whole `PEER_QUERY_TIMEOUT`
-    /// while sessions drain a reload's exports, and answered in place it held
-    /// this lane, so a `/readyz` ping queued behind it missed its deadline.
+    /// state and never waits on a session, so no readiness query fans out.
     async fn handle_readiness_query(&mut self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::Ping { reply } => {
@@ -1200,11 +1197,6 @@ impl PeerManager {
             }
             PeerManagerReadinessQuery::ActivePeers { reply } => {
                 let _ = reply.send(self.active_peer_count());
-            }
-            PeerManagerReadinessQuery::ListPeers { reply } => {
-                if let Err(reply) = self.detach_list_peers(reply) {
-                    self.answer_list_peers(reply).await;
-                }
             }
         }
         tokio::task::yield_now().await;
@@ -1214,9 +1206,9 @@ impl PeerManager {
     /// query at a time and, when `admission` is [`OperatorReadAdmission::Served`],
     /// the bounded operator-read lane as well. The step future is biased
     /// first, so a probe flood cannot delay a completed apply/rollback step.
-    /// An admitted `ListPeers` is detached (its session replies are joined by
-    /// a separate task, with every query enqueued before this wait resumes);
-    /// every other admitted read completes before this wait resumes. The
+    /// An admitted operator `ListPeers` is detached (its session replies are
+    /// joined by a separate task, with every query enqueued before this wait
+    /// resumes); every other admitted read completes before this wait resumes. The
     /// ordinary command receiver is never polled here, so mutations remain
     /// strictly behind the owner.
     ///
@@ -2974,16 +2966,6 @@ impl PeerManager {
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
-                        Some(PeerManagerReadinessQuery::ListPeers { reply }) => {
-                            // Detached as in `handle_readiness_query`; in place
-                            // only when the detached-read limit is reached or a
-                            // session channel is full.
-                            if let Err(reply) = self.detach_list_peers(reply) {
-                                self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply }).await;
-                            }
-                            // Same LIFO-slot hand-off as `handle_readiness_query`.
-                            tokio::task::yield_now().await;
-                        }
                         Some(query) => self.handle_readiness_query(query).await,
                         None => self.readiness_rx = None,
                     }
