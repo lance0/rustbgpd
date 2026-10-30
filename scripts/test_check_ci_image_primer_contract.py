@@ -749,6 +749,35 @@ class PrimerContractTests(unittest.TestCase):
                 (KERNEL, "    if: ${{ always() }}\n    needs: [classify_changes", "    if: success()\n    needs: [classify_changes"),
             )
 
+    # 6. Classifier checkout.
+
+    def test_classifier_checkout_stays_shallow_inside_its_cap(self):
+        checkout = "      - uses: actions/checkout@v7\n      - name: Classify complete pull-request diff\n"
+        run = "        run: python3 scripts/classify_heavy_ci_paths.py\n"
+        for workflow in (INTEROP, KERNEL):
+            name = Path(workflow).name
+            for seam, depth in (
+                ("unconditional full history", "0"),
+                ("full history for pull requests", "${{ github.event_name == 'pull_request' && 0 || 1 }}"),
+            ):
+                with self.subTest(workflow=name, seam=seam):
+                    self.assert_red(
+                        f"{name}:classify_changes overrides the shallow checkout depth",
+                        (workflow, checkout, checkout.replace(
+                            "@v7\n", f"@v7\n        with:\n          fetch-depth: {depth}\n"
+                        )),
+                    )
+            with self.subTest(workflow=name, seam="shallow diff without merge-base coverage"):
+                self.assert_red(
+                    f"{name}:classify_changes does not run the merge-base classifier",
+                    (workflow, run, '        run: git diff --name-only "$BASE_SHA...$HEAD_SHA"\n'),
+                )
+            with self.subTest(workflow=name, seam="cap raised"):
+                self.assert_red(
+                    f"{name}:classify_changes must keep timeout-minutes: 1",
+                    (workflow, "    timeout-minutes: 1\n", "    timeout-minutes: 2\n"),
+                )
+
     def run_aggregate(self, workflow, run_labs, results):
         text = (ROOT / ".github" / "workflows" / workflow).read_text()
         jobs = _jobs(text)
@@ -1022,6 +1051,51 @@ class HeavyLabPathClassifierTests(unittest.TestCase):
             unrelated = self.commit_file(repo, "fuzz/only", "unrelated")
             with self.assertRaises(heavy.ClassificationError):
                 heavy.changed_paths(repo, base, unrelated)
+
+    def shallow_pull_request(self, temporary: Path) -> tuple[Path, Path, str, str]:
+        """A one-commit clone of main whose PR head reaches an old main commit
+        in two steps but its true merge base only through a long topic chain."""
+        upstream = temporary / "upstream"
+        upstream.mkdir()
+        self.git(upstream, "init", "-q", "-b", "main")
+        # GitHub serves any reachable commit by ID, as the classifier needs.
+        self.git(upstream, "config", "uploadpack.allowAnySHA1InWant", "true")
+        old = self.commit_file(upstream, "README", "root")
+        merge_base = self.commit_file(upstream, "src/main_only.rs", "main")
+        self.git(upstream, "checkout", "-qb", "short", old)
+        self.commit_file(upstream, "crates/wire/fuzz/seeds/short", "short")
+        self.git(upstream, "checkout", "-qb", "long", merge_base)
+        for number in range(20):
+            self.commit_file(upstream, f"crates/wire/fuzz/seeds/long{number}", "long")
+        self.git(upstream, "merge", "-q", "--no-ff", "-m", "merge short", "short")
+        head = self.git(upstream, "rev-parse", "HEAD")
+        self.git(upstream, "checkout", "-q", "main")
+        for number in range(2):
+            base = self.commit_file(upstream, f"src/later{number}.rs", "later")
+        self.git(temporary, "clone", "-q", "--depth=1", upstream.as_uri(), "clone")
+        return upstream, temporary / "clone", base, head
+
+    def test_shallow_pull_request_fetches_its_complete_merge_base(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            upstream, clone, base, head = self.shallow_pull_request(Path(temporary))
+            expected = heavy.changed_paths(upstream, base, head)
+            self.assertNotIn("src/main_only.rs", expected)
+            self.assertEqual(len(expected), 21)
+            self.assertEqual(heavy.changed_paths(clone, base, head), expected)
+            self.assertFalse(heavy.classify_paths(expected)[0])
+
+    def test_shallow_pull_request_without_complete_merge_base_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, clone, base, head = self.shallow_pull_request(Path(temporary))
+            # At depth 5 both sides reach the old root commit, but the true
+            # merge base is still cut off behind the long chain: an older
+            # merge base would wrongly add src/main_only.rs to the diff.
+            with mock.patch.object(heavy, "FETCH_DEPTHS", (1, 5)):
+                with self.assertRaisesRegex(heavy.ClassificationError, "no complete merge base"):
+                    heavy.changed_paths(clone, base, head)
+            self.git(clone, "remote", "remove", "origin")
+            with self.assertRaises(heavy.ClassificationError):
+                heavy.changed_paths(clone, base, head)
 
     def test_allowed_fuzz_roots_are_standalone_workspaces(self):
         main = json.loads(

@@ -19,6 +19,10 @@ goes red when the rule is removed or weakened.
    call's topology and script belong to its label and to the job's name.
 5. Aggregate result. Each lab workflow's `check` job runs always() and needs,
    and expects at run time, every other job in the workflow.
+6. Classifier checkout. Each lab workflow's `classify_changes` job keeps its
+   one-minute cap, checks out shallow (no `fetch-depth` override, which could
+   restore full history), and runs the classifier that fetches a pull
+   request's complete merge base itself.
 
 Rosters are derived from the workflows, so a lab job that follows the existing
 pattern needs no edit here.
@@ -417,6 +421,14 @@ def check(root: Path) -> list[str]:
                 errors.append(
                     f"{name}:check {source} drifted: missing {missing}; extra {extra}"
                 )
+        # 6. Classifier checkout.
+        classify = jobs.get("classify_changes", "")
+        if not re.search(r"(?m)^    timeout-minutes: 1$", classify):
+            errors.append(f"{name}:classify_changes must keep timeout-minutes: 1")
+        if "fetch-depth:" in classify:
+            errors.append(f"{name}:classify_changes overrides the shallow checkout depth")
+        if not re.search(r"(?m)^        run: python3 scripts/classify_heavy_ci_paths\.py$", classify):
+            errors.append(f"{name}:classify_changes does not run the merge-base classifier")
     return errors
 
 
