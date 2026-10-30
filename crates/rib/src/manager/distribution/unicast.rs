@@ -1526,10 +1526,13 @@ impl RibManager {
                     Stop,
                     message.clone(),
                 );
-                explain.reasons.push(ExplainReason {
-                    code: "selection_deferred",
-                    message,
-                });
+                explain.reasons.insert(
+                    0,
+                    ExplainReason {
+                        code: "selection_deferred",
+                        message,
+                    },
+                );
             } else if existing.is_some() {
                 gate(
                     &mut explain.gates,
