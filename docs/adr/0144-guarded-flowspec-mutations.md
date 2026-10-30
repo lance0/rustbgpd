@@ -1,7 +1,7 @@
 # ADR-0144: Guarded FlowSpec mutation contract
 
-**Status:** Accepted; the RIB enforcement, the RPCs and the qualification land
-as separate changes.
+**Status:** Accepted; promoted into the v1 inventory by the 2026-10-30
+amendment.
 **Date:** 2026-10-30
 
 ## Context
@@ -255,3 +255,25 @@ controller surface.
   refused guarded mutation is never retried through a legacy method.
 - The lease table gains one bounded window map; the RIB's ownership index
   gains one revision per key.
+
+## Amendment: promotion into the v1 inventory (2026-10-30)
+
+Section 7's promotion is taken. The four guarded methods, the
+`admission_revision` read-back on `FlowSpecRouteEntry` and `LeasedKey`, and
+the `guarded:<owner>` name in lease listings move from the outside-v1 lists
+into the stable `InjectionService` and `RibService` sets of the
+[v1 inventory](../reference/v1-stable-surface.json), with the semantics and
+pinning tests listed in the
+[v1 contract](../reference/v1-stable-contract.md#guarded-flowspec-mutations).
+The digests change only by those additions.
+
+As with [ADR-0139](0139-flowspec-controller-contract.md), this pins the API
+shape only. The
+[qualification receipt](../artifacts/interop/guarded-flowspec-qualification-20261030/README.md)
+records rollback refusal against the 0.80.1 release, the delay and timeout
+orderings, controller loss with an ingest-stall control, and the refusal and
+cap cases, each beside its legacy control. That receipt is functional
+evidence on one host. It does not qualify forwarding, which still needs a
+router and scrubber receipt, nor GR/LLGR retention after a daemon crash. Which
+release carries the contract for a controller to pin is a release decision,
+not part of this amendment.

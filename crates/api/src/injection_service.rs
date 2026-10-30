@@ -7383,6 +7383,84 @@ mod tests {
         rig.stop().await;
     }
 
+    /// `admission_revision` is part of the lease read-back: it is set, with
+    /// `injection_owner`, `lease_generation` and `lease_remaining_ms`, on a
+    /// guarded rule in the local-intent view, and nowhere else. A legacy
+    /// leased rule reports its owner without a revision, and the selected
+    /// view reports neither.
+    #[tokio::test]
+    async fn admission_revision_reads_back_only_on_guarded_local_intent() {
+        use proto::rib_service_server::RibService as _;
+
+        let rig = GuardedRig::start();
+        let window = rig.window("ctl").await;
+        rig.add("=80", 0.0, "ctl", Some(window), 9).await.unwrap();
+        rig.svc
+            .add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                rule: Some(guarded_rule("=443", 0.0)),
+                lease: Some(proto::InjectionLease {
+                    owner: "legacy".into(),
+                    lease_seconds: 30,
+                }),
+            }))
+            .await
+            .unwrap();
+        let view = |received: &str| proto::ListFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            received_peer_address: received.into(),
+            ..Default::default()
+        };
+        let local = rig
+            .rib
+            .list_flow_spec_routes(Request::new(view("0.0.0.0")))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut local: Vec<_> = local
+            .received_routes
+            .into_iter()
+            .filter_map(|row| row.route)
+            .map(|route| {
+                (
+                    route.components[1].value.clone(),
+                    route.injection_owner,
+                    route.lease_generation.is_some(),
+                    route.lease_remaining_ms.is_some(),
+                    route.admission_revision,
+                )
+            })
+            .collect();
+        local.sort();
+        assert_eq!(
+            local,
+            [
+                ("==443".to_string(), "legacy".to_string(), true, true, None),
+                (
+                    "==80".to_string(),
+                    "guarded:ctl".to_string(),
+                    true,
+                    true,
+                    Some(9)
+                ),
+            ]
+        );
+        let selected = rig
+            .rib
+            .list_flow_spec_routes(Request::new(view("")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(selected.routes.len(), 2);
+        for route in &selected.routes {
+            assert_eq!(
+                (route.injection_owner.as_str(), route.admission_revision),
+                ("", None),
+                "the selected view carries no lease read-back"
+            );
+        }
+        rig.stop().await;
+    }
+
     /// The legacy leased add, `RenewLease` and owner-scoped `DeleteFlowSpec`
     /// cannot reach a guarded owner's rule or lease: each is refused, and the
     /// rule keeps its owner and revision.
