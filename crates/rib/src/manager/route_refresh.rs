@@ -300,13 +300,18 @@ impl RibManager {
                         u64::try_from(stale_resolution_started.elapsed().as_nanos())
                             .unwrap_or(u64::MAX);
                 }
-                rib.sweep_stale_flowspec_family_with_checkpoint(family, false, &mut sweep);
-                rib.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut sweep);
+                for llgr in [false, true] {
+                    let mut swept =
+                        rib.sweep_stale_flowspec_family_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut swept, &mut sweep);
+                }
                 rib.clear_stale_flowspec_with_checkpoint(family, &mut sweep);
             } else {
                 unicast_changed = rib.sweep_stale_family_with_checkpoint(family, true, &mut sweep);
                 unicast_changed.extend(rib.clear_stale_with_checkpoint(family, true, &mut sweep));
-                rib.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut sweep);
+                let mut swept =
+                    rib.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut sweep);
+                super::retire_vec(&mut swept, &mut sweep);
                 rib.clear_llgr_stale_flowspec_with_checkpoint(family, &mut sweep);
             }
             crate::manager::helpers::set_rib_prefixes(
@@ -318,13 +323,24 @@ impl RibManager {
             for llgr in [false, true] {
                 // From the LLGR phase only the LLGR-stale sweep applies.
                 if llgr || gr {
-                    rib.sweep_stale_family_evpn_with_checkpoint(family, llgr, &mut sweep);
-                    rib.sweep_stale_family_vpn_with_checkpoint(family, llgr, &mut sweep);
-                    rib.sweep_stale_family_labeled_with_checkpoint(family, llgr, &mut sweep);
-                    rib.sweep_stale_family_bgpls_with_checkpoint(family, llgr, &mut sweep);
-                    rtc_swept |= !rib
-                        .sweep_stale_family_rtc_with_checkpoint(family, llgr, &mut sweep)
-                        .is_empty();
+                    // The swept keys only feed the recomputes through the
+                    // sets collected above; release them between checkpoints.
+                    let mut evpn =
+                        rib.sweep_stale_family_evpn_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut evpn, &mut sweep);
+                    let mut vpn =
+                        rib.sweep_stale_family_vpn_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut vpn, &mut sweep);
+                    let mut labeled =
+                        rib.sweep_stale_family_labeled_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut labeled, &mut sweep);
+                    let mut bgpls =
+                        rib.sweep_stale_family_bgpls_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut bgpls, &mut sweep);
+                    let mut rtc =
+                        rib.sweep_stale_family_rtc_with_checkpoint(family, llgr, &mut sweep);
+                    rtc_swept |= !rtc.is_empty();
+                    super::retire_vec(&mut rtc, &mut sweep);
                 }
             }
             let llgr_only = !gr;

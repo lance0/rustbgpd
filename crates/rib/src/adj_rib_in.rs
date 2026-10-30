@@ -1004,6 +1004,10 @@ impl AdjRibIn {
         family: (Afi, Safi),
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Prefix> {
+        // Only unicast routes live in the slab (`route_matches_family`).
+        if family.1 != Safi::Unicast {
+            return Vec::new();
+        }
         let mut already_stale: Vec<(Prefix, u32)> =
             Vec::with_capacity(self.gr_stale_family_len(family));
         checkpoint();
@@ -1055,6 +1059,10 @@ impl AdjRibIn {
         llgr_only: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Prefix> {
+        // Only unicast routes live in the slab (`route_matches_family`).
+        if family.1 != Safi::Unicast {
+            return Vec::new();
+        }
         let tags = self.llgr_stale_local_tags.len();
         let mut changed = Vec::with_capacity(
             self.retained_family_len(family, false) + self.retained_family_len(family, true) + tags,
@@ -1212,6 +1220,10 @@ impl AdjRibIn {
         family: (Afi, Safi),
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Prefix> {
+        // Only unicast routes live in the slab (`route_matches_family`).
+        if family.1 != Safi::Unicast {
+            return Vec::new();
+        }
         let tags = self.llgr_stale_local_tags.len();
         let mut stale = Vec::with_capacity(
             self.retained_family_len(family, false) + self.retained_family_len(family, true),

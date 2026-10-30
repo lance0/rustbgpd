@@ -1886,3 +1886,62 @@ fn eor_add_path_removal_scans_answer_readiness() {
         "eor_sweep answered {spread} for 64 prefixes and {one} for one prefix with 64 paths"
     );
 }
+
+/// Announce `flowspec` IPv4 `FlowSpec` rules and `unicast` IPv4 routes, enter
+/// GR for both families, then resolve the `FlowSpec` family's End-of-RIB
+/// with nothing re-advertised. Returns the `eor_sweep` answers.
+fn run_flowspec_eor_case(flowspec: u8, unicast: u8) -> usize {
+    let families = [(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv4, Safi::Unicast)];
+    let (mut manager, readiness_tx) = readiness_manager();
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    for (family, count) in families.into_iter().zip([flowspec, unicast]) {
+        for index in 5..5 + count {
+            announce_case(&mut manager, family, index, false);
+        }
+    }
+    manager.handle_update(gr_with_llgr(peer, 120, families.to_vec(), Vec::new(), 0));
+    let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
+        manager.handle_update(RibUpdate::EndOfRib {
+            session_id: 0,
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::FlowSpec,
+        });
+    });
+    assert_eq!(
+        manager.ribs[&peer].flowspec_len(),
+        0,
+        "unrefreshed rules are swept"
+    );
+    assert_eq!(
+        manager.ribs[&peer].len(),
+        usize::from(unicast),
+        "unicast is untouched"
+    );
+    answered.get("eor_sweep").copied().unwrap_or(0)
+}
+
+/// End-of-RIB sweeps a large stale `FlowSpec` set: every swept rule is
+/// visited, removed between two checkpoints, its route key released and the
+/// returned rule released between checkpoints too, so the sweep answers at
+/// least five queries per swept rule.
+#[test]
+fn eor_flowspec_sweep_releases_swept_rules_under_readiness() {
+    let (small, large) = (run_flowspec_eor_case(8, 0), run_flowspec_eor_case(72, 0));
+    assert!(
+        large >= small + 5 * 64,
+        "eor_sweep answered {small} for 8 swept rules and {large} for 72"
+    );
+}
+
+/// A `FlowSpec` End-of-RIB never walks the unicast slab: its sweep answers
+/// the same number of queries however many unicast routes the peer holds.
+#[test]
+fn eor_flowspec_sweep_skips_the_unicast_slab() {
+    let (small, large) = (run_flowspec_eor_case(8, 8), run_flowspec_eor_case(8, 200));
+    assert_eq!(
+        small, large,
+        "eor_sweep answered {small} with 8 unicast routes and {large} with 200"
+    );
+}
