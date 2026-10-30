@@ -2786,8 +2786,8 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
 /// Refused proof while a deleted RTBH path's key is re-announced for its
 /// surviving sibling. A private Add-Path receiver's table still matches its
 /// admitted counts after the refused retry, so it is the wire: the delete
-/// re-ranks as outside the hold, moving the sibling to rank 1 and
-/// withdrawing rank 2, and the prefix stays blackholed throughout. With one
+/// withdraws only the deleted path's key, the sibling keeps its own, and the
+/// prefix stays blackholed throughout. With one
 /// path per prefix (a grouped receiver) the refused admission keeps the
 /// deleted path: the replacement has no other key, and the prefix must never
 /// lose its blackhole. `held_counts` also checks the advertised count inside
@@ -2916,16 +2916,15 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
         .copied()
         .collect();
     if add_path {
-        // Each UPDATE withdraws before it announces: rank 1 keeps the
-        // deleted path until path 23 replaces it, so no gap unblackholes
-        // the prefix.
-        assert_eq!(withdrawn, [(prefix, 2)], "rank 2 empties");
+        // The hold keeps Add-Path keys: only the deleted path's key leaves,
+        // and path 23 stays blackholing at its own key.
+        assert_eq!(withdrawn, [(prefix, 1)], "the deleted path's key leaves");
         assert_eq!(
-            wire.get(&(prefix, 1)).map(Route::local_pref),
+            wire.get(&(prefix, 2)).map(Route::local_pref),
             Some(100),
-            "the surviving RTBH path moves to rank 1"
+            "the surviving RTBH path keeps its key"
         );
-        assert!(!wire.contains_key(&(prefix, 2)));
+        assert!(!wire.contains_key(&(prefix, 1)));
         if held_counts {
             assert_eq!(
                 manager.actual_unicast_advertised_count(observer),
