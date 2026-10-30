@@ -1561,6 +1561,7 @@ impl RibManager {
                         &self.unicast_prefix_peers,
                         &refresh_view,
                         self.adj_ribs_out.get(&peer).unwrap_or(&refresh_view),
+                        self.peer_local_roles.get(&peer).copied().flatten(),
                         &self.peer_is_rr_client,
                         prefix,
                         self.selection_deferral.as_ref().is_some_and(|deferral| {
@@ -1608,6 +1609,7 @@ impl RibManager {
                         &self.unicast_prefix_peers,
                         &refresh_view,
                         self.adj_ribs_out.get(&peer).unwrap_or(&refresh_view),
+                        self.peer_local_roles.get(&peer).copied().flatten(),
                         &self.peer_is_rr_client,
                         prefix,
                         self.selection_deferral.as_ref().is_some_and(|deferral| {

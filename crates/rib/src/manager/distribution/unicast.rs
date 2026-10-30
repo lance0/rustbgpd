@@ -1402,7 +1402,10 @@ impl RibManager {
                     continue;
                 }
                 if add_path_keys.is_some() {
-                    permitted.push((candidate, blackholing(candidate, &candidate_modified)));
+                    permitted.push((
+                        candidate,
+                        blackholing(candidate, &candidate_modified, target_local_role),
+                    ));
                     continue;
                 }
                 if candidate.peer == source.peer && candidate.path_id == source.path_id {
@@ -2065,6 +2068,9 @@ impl RibManager {
     /// split-horizon/iBGP/family/policy, sorts by best-path, takes top N,
     /// and diffs against `AdjRibOut` to produce announces and withdrawals.
     ///
+    /// `local_role` is the peer's RFC 9234 role: a row the OTC egress gate
+    /// will block is not sent, so it never counts as blackholing.
+    ///
     /// `wire` is the peer's own Adj-RIB-Out, which Add-Path keys come from.
     /// It is `rib_out` itself except when an initial dump or ROUTE-REFRESH
     /// re-emits against an empty view: the re-sent rows must keep the keys
@@ -2087,6 +2093,7 @@ impl RibManager {
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
         wire: &AdjRibOut,
+        local_role: Option<rustbgpd_wire::BgpRole>,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
         local_only: bool,
@@ -2303,7 +2310,9 @@ impl RibManager {
         if let Some(keys) = keys.as_mut() {
             let routes: smallvec::SmallVec<[_; 8]> = staged
                 .iter()
-                .map(|(candidate, modified, _)| (*candidate, blackholing(candidate, modified)))
+                .map(|(candidate, modified, _)| {
+                    (*candidate, blackholing(candidate, modified, local_role))
+                })
                 .collect();
             let assigned = keys.assign_all(&routes, limit, checkpoint);
             for ((candidate, mut modified, nh_action), key) in staged.into_iter().zip(assigned) {
@@ -3814,15 +3823,20 @@ impl AddPathKeys {
 }
 
 /// Whether a staged path blackholes its prefix: deferral-exempt, or
-/// carrying BLACKHOLE after export policy.
+/// carrying BLACKHOLE after export policy, and not blocked by the RFC 9234
+/// OTC egress gate, which drops it after planning. A blocked row taking a
+/// departing blackhole key would have that key withdrawn ahead of the
+/// sendable blackholing row's announcement.
 pub(in crate::manager) fn blackholing(
     candidate: &crate::route::Route,
     modified: &crate::route::Route,
+    local_role: Option<rustbgpd_wire::BgpRole>,
 ) -> bool {
-    unicast_deferral_exempt(candidate)
+    (unicast_deferral_exempt(candidate)
         || modified
             .communities()
-            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE))
+        && !super::otc_egress_blocked(modified, local_role)
 }
 
 /// Stage one Add-Path or per-client-best row when it differs from what the

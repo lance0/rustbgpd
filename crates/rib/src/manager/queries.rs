@@ -3796,7 +3796,14 @@ impl RibManager {
                     if distribution::no_advertise_export_suppressed(modified.communities()) {
                         continue;
                     }
-                    permitted.push((*cand, distribution::blackholing(cand, &modified)));
+                    permitted.push((
+                        *cand,
+                        distribution::blackholing(
+                            cand,
+                            &modified,
+                            self.peer_local_roles.get(&peer_addr).copied().flatten(),
+                        ),
+                    ));
                 }
                 // Rank picks the paths; their keys follow live staging, on
                 // an empty wire before the peer's first commit.

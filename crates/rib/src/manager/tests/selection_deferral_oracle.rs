@@ -340,9 +340,8 @@ struct Injection {
     prefix: usize,
     preference: u32,
     exempt: bool,
-    /// Exempt, or a received path carrying BLACKHOLE: its row blackholes
-    /// the prefix.
-    blackholing: bool,
+    /// Injected or received carrying BLACKHOLE, before export policy.
+    community: bool,
     live: bool,
     /// The operator deleted it (a replacement only retires it).
     deleted: bool,
@@ -684,13 +683,13 @@ impl Harness {
         prefix: usize,
         preference: u32,
         exempt: bool,
-        blackholing: bool,
+        community: bool,
     ) -> usize {
         self.injections.push(Injection {
             prefix,
             preference,
             exempt,
-            blackholing,
+            community,
             live: true,
             deleted: false,
         });
@@ -719,7 +718,7 @@ impl Harness {
                 // with each other or with a received path.
                 let preference = 100 + 2 * (u32::try_from(path).unwrap() + 3 * preference);
                 let exempt = index < 2 || blackhole;
-                let injection = self.new_injection(index, preference, exempt, exempt);
+                let injection = self.new_injection(index, preference, exempt, blackhole);
                 let Prefix::V4(v4) = prefix(index) else {
                     unreachable!()
                 };
@@ -1185,7 +1184,7 @@ impl Harness {
             .map(|&injection| &self.injections[injection])
             .filter(|injection| {
                 injection.exempt
-                    || injection.blackholing
+                    || injection.community
                     || self
                         .tags
                         .contains(&(injection.prefix, injection.preference))
@@ -1369,6 +1368,21 @@ impl Harness {
             show(&wire),
             show(&expected)
         );
+        // The paths match; each must also carry BLACKHOLE exactly as its
+        // current export intends, so a policy retag that announced nothing
+        // cannot pass on the old rows.
+        for (key, &injection) in &self.wire {
+            let row = &self.injections[injection];
+            let intended = row.community || self.tags.contains(&(row.prefix, row.preference));
+            let sent = self.wire_tag.get(key).copied().unwrap_or(false);
+            prop_assert!(
+                sent == intended,
+                "I2: {}#{} carries BLACKHOLE {sent}, but its export intends {intended}; wire {}",
+                key.0,
+                key.1,
+                show(&self.wire)
+            );
+        }
         let actual = self
             .manager
             .actual_unicast_advertised_count(peer_v4(OBSERVER));
@@ -1865,12 +1879,12 @@ fn i5_flags_obsolete_rtbh_rows_beyond_the_last() {
         late: false,
     });
     for path in [1, 2] {
-        let obsolete = harness.new_injection(0, 0, true, true);
+        let obsolete = harness.new_injection(0, 0, true, false);
         harness.injections[obsolete].live = false;
         harness.injections[obsolete].deleted = true;
         harness.wire.insert((prefix(0), path), obsolete);
     }
-    let pending = harness.new_injection(0, 1, true, true);
+    let pending = harness.new_injection(0, 1, true, false);
     harness.local.insert((0, 2), pending);
     assert!(harness.check_deleted_blackholes().is_err());
     harness.wire.remove(&(prefix(0), 2));
@@ -2543,4 +2557,163 @@ fn received_blackhole_moves_between_peers_in_one_window() {
         }
     }
     assert_eq!(wire, HashMap::from([(1, true)]));
+}
+
+/// One pass replaces an ordinary path at `#1` and an RTBH path at `#2` with
+/// two new BLACKHOLE paths, the higher-ranked one carrying OTC toward an
+/// RFC 9234 peer. The OTC gate drops that one after planning, so it must not
+/// take over the departing RTBH key: the sendable RTBH path replaces `#2` in
+/// place, and the withdraw phase only removes `#1`.
+#[test]
+fn otc_blocked_path_never_takes_the_departing_rtbh_key() {
+    let mut manager = manager_with_dormant_waiter();
+    let observer = peer_v4(OBSERVER);
+    manager.handle_update(RibUpdate::SetPeerExportContext {
+        peer: observer,
+        session_id: OBSERVER_SESSION,
+        local_role: Some(rustbgpd_wire::BgpRole::Peer),
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut up = super::lifecycle::test_peer_up(observer, OBSERVER_SESSION, tx);
+    if let RibUpdate::PeerUp {
+        export_policy,
+        add_path_send_families,
+        add_path_send_max,
+        sendable_families,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![FAMILY];
+        *export_policy = Some(private_policy(None));
+        *add_path_send_families = vec![FAMILY];
+        *add_path_send_max = u32::try_from(ADD_PATH_MAX).unwrap();
+    }
+    manager.handle_update(up);
+    let Prefix::V4(v4) = prefix(2) else {
+        unreachable!()
+    };
+    let local = |path_id: u32, preference: u32, blackhole: bool, otc: bool| {
+        let mut route = make_route_with_lp(v4, SOURCE, preference);
+        set_peer(&mut route, crate::PeerId::LOCAL);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        route.path_id = path_id;
+        AttrSet::edit(&mut route.attributes, |attributes| {
+            if blackhole {
+                attributes.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_BLACKHOLE,
+                ]));
+            }
+            if otc {
+                attributes.push(PathAttribute::OnlyToCustomer(65_001));
+            }
+        });
+        route
+    };
+    let inject = |manager: &mut RibManager, route| {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route, reply });
+        result.try_recv().unwrap().unwrap();
+    };
+    let delete = |manager: &mut RibManager, path_id| {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix: prefix(2),
+            path_id,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(result.try_recv().unwrap().unwrap().removed);
+    };
+    let blackhole = |route: &Route| {
+        route
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+    };
+    let mut wire = HashMap::new();
+    inject(&mut manager, local(17, 300, false, false));
+    inject(&mut manager, local(23, 100, true, false));
+    while let Ok(update) = rx.try_recv() {
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, blackhole(route));
+        }
+    }
+    assert_eq!(wire, HashMap::from([(1, false), (2, true)]));
+    // A full writer holds every change for one dirty resync.
+    let writer = manager.outbound_peers[&observer].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    delete(&mut manager, 17);
+    delete(&mut manager, 23);
+    inject(&mut manager, local(29, 500, true, true));
+    inject(&mut manager, local(31, 400, true, false));
+    drop(occupied);
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    let mut announced = 0;
+    while let Ok(update) = rx.try_recv() {
+        for key in &update.withdraw {
+            wire.remove(&key.1);
+        }
+        assert!(
+            wire.values().any(|&blackholed| blackholed),
+            "the withdraw phase left the prefix without a blackhole: {wire:?}"
+        );
+        for route in update.announce.iter() {
+            assert_eq!(route.path_id, 2, "only the sendable RTBH path is announced");
+            announced += 1;
+            wire.insert(route.path_id, blackhole(route));
+        }
+    }
+    assert_eq!(announced, 1);
+    assert_eq!(wire, HashMap::from([(2, true)]));
+}
+
+/// I2 compares the exported BLACKHOLE state, not only path identities: a
+/// row still carrying a tag its export no longer intends (a policy retag
+/// that announced nothing) fails, and the converged wire passes.
+#[test]
+fn i2_catches_a_stale_blackhole_tag() {
+    let tagged = |stale: bool| {
+        let mut harness = Harness::new(add_path_config());
+        harness.apply(&Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: false,
+        });
+        harness.apply(&Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: false,
+        });
+        harness.drain().unwrap();
+        harness.apply(&Op::Tag {
+            prefix: 2,
+            path: 0,
+            received: false,
+            exclusive: false,
+        });
+        harness.drain().unwrap();
+        harness.apply(&Op::Tag {
+            prefix: 2,
+            path: 1,
+            received: false,
+            exclusive: true,
+        });
+        harness.drain().unwrap();
+        if stale {
+            // Seed the old placement: the first path still tagged on the
+            // wire, the second not.
+            for (key, &injection) in &harness.wire {
+                let first = harness.injections[injection].preference
+                    == harness.injections[harness.local[&(2, 0)]].preference;
+                harness.wire_tag.insert(*key, first);
+            }
+        }
+        harness.check_converged()
+    };
+    assert!(tagged(false).is_ok(), "the retag converges");
+    let error = tagged(true).expect_err("a stale tag placement fails I2");
+    assert!(error.to_string().contains("I2:"), "{error}");
 }
