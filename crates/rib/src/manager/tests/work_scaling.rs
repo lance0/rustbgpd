@@ -2125,3 +2125,150 @@ fn add_path_rtbh_demotion_work_is_linear() {
         add_path_rtbh_demotion,
     );
 }
+
+/// A held dirty resync promotes `count` ordinary local paths to RTBH while
+/// `count` RTBH paths leave and `count` received rows with higher keys stay
+/// frozen. Each promoted path takes a departing RTBH key in place and its
+/// own ordinary row joins the frozen keys below the received ones. That
+/// join must not shift the frozen keys above it: in a sorted vector it
+/// moved every received key, an unchecked shift that the red proof counted
+/// as one checkpoint per moved key.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one held transcript pins the wire before and after the measured pass"
+)]
+fn held_bulk_promotion(size: usize) -> Work {
+    let count = size * ROUTES;
+    let (_tx, manager) = manager();
+    let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_mins(2),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: waiter,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+        }],
+    });
+    let target = member(3);
+    let (outbound_tx, mut receiver) = mpsc::channel(16);
+    let mut up = test_peer_up(target, 1, outbound_tx);
+    if let RibUpdate::PeerUp {
+        add_path_send_families,
+        add_path_send_max,
+        ..
+    } = &mut up
+    {
+        *add_path_send_families = vec![(Afi::Ipv4, Safi::Unicast)];
+        *add_path_send_max = u32::MAX;
+    }
+    manager.handle_update(up);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24);
+    let local = |path_id: usize, local_pref: usize, blackhole: bool| {
+        let mut route = deferred_local_unicast(prefix);
+        route.path_id = u32::try_from(path_id).unwrap();
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+            if blackhole {
+                attrs.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_BLACKHOLE,
+                ]));
+            }
+            attrs.push(PathAttribute::LocalPref(u32::try_from(local_pref).unwrap()));
+        });
+        route
+    };
+    let apply = |receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
+                 wire: &mut BTreeMap<u32, bool>| {
+        let mut withdrawn = 0;
+        while let Ok(update) = receiver.try_recv() {
+            withdrawn += update.withdraw.len();
+            for key in &update.withdraw {
+                wire.remove(&key.1);
+            }
+            for route in update.announce.iter() {
+                wire.insert(
+                    route.path_id,
+                    route
+                        .communities()
+                        .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE),
+                );
+            }
+        }
+        withdrawn
+    };
+    let mut wire = BTreeMap::new();
+    // Keys 1..=count: ordinary local paths; then RTBH local paths; then
+    // received paths.
+    for index in 0..count {
+        inject_deferred_unicast(&mut manager, local(index, 10_000 - index, false));
+        apply(&mut receiver, &mut wire);
+    }
+    for index in 0..count {
+        inject_deferred_unicast(&mut manager, local(count + index, 5_000 - index, true));
+        apply(&mut receiver, &mut wire);
+    }
+    for index in 0..count {
+        let mut route = make_route(prefix, Ipv4Addr::new(198, 51, 100, 1));
+        route.path_id = u32::try_from(index).unwrap();
+        manager.handle_update(test_routes_received(external(), vec![route]));
+        drain_route_chunks(&mut manager);
+        apply(&mut receiver, &mut wire);
+    }
+    let all: Vec<u32> = (1..=u32::try_from(3 * count).unwrap()).collect();
+    assert_eq!(wire.keys().copied().collect::<Vec<_>>(), all);
+    arm_selection_waiter(&mut manager, waiter, &[(Afi::Ipv4, Safi::Unicast)]);
+    assert!(manager.selection_deferred((Afi::Ipv4, Safi::Unicast)));
+    apply(&mut receiver, &mut wire);
+    assert_eq!(
+        wire.keys().copied().collect::<Vec<_>>(),
+        all,
+        "the hold keeps every key"
+    );
+    // A full writer holds every change for one dirty resync.
+    let writer = manager.outbound_peers[&target].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    for index in 0..count {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix: Prefix::V4(prefix),
+            path_id: u32::try_from(count + index).unwrap(),
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(result.try_recv().unwrap().unwrap().removed);
+        inject_deferred_unicast(&mut manager, local(index, 10_000 - index, true));
+    }
+    drop(occupied);
+    let work = checkpoints_in(|| {
+        manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([target]));
+    });
+    let withdrawn = apply(&mut receiver, &mut wire);
+    assert_eq!(
+        withdrawn, 0,
+        "each promoted path replaces a departing RTBH key"
+    );
+    assert_eq!(wire.keys().copied().collect::<Vec<_>>(), all);
+    let blackholed: Vec<u32> = wire
+        .iter()
+        .filter(|&(_, &blackhole)| blackhole)
+        .map(|(&key, _)| key)
+        .collect();
+    let departing: Vec<u32> =
+        (u32::try_from(count).unwrap() + 1..=u32::try_from(2 * count).unwrap()).collect();
+    assert_eq!(
+        blackholed, departing,
+        "promoted paths hold the departing keys"
+    );
+    eprintln!("held bulk promotion size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn held_bulk_promotion_work_is_linear() {
+    assert_linear(
+        "held Add-Path promotion freezing own rows below received ones",
+        &[ALL],
+        held_bulk_promotion,
+    );
+}

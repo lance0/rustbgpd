@@ -3416,9 +3416,10 @@ pub(in crate::manager) struct AddPathKeys {
     free_next: usize,
     /// Ordinary keys a promoted path left behind for an RTBH key.
     late_free: smallvec::SmallVec<[u32; 4]>,
-    /// Frozen keys, only ever set during a hold, sorted ascending;
-    /// displaced from the top.
-    frozen: smallvec::SmallVec<[u32; 4]>,
+    /// Frozen keys, only ever set during a hold; displaced from the top.
+    /// A set, so a promoted path's own row joins in logarithmic time
+    /// however many frozen keys sit above it.
+    frozen: std::collections::BTreeSet<u32>,
     /// Every key on the wire, sorted ascending, and the fresh-key cursor.
     occupied: smallvec::SmallVec<[u32; 8]>,
     occupied_next: usize,
@@ -3474,7 +3475,7 @@ impl AddPathKeys {
             free: smallvec::SmallVec::new(),
             free_next: 0,
             late_free: smallvec::SmallVec::new(),
-            frozen: smallvec::SmallVec::new(),
+            frozen: std::collections::BTreeSet::new(),
             occupied: smallvec::SmallVec::new(),
             occupied_next: 0,
             next: 1,
@@ -3515,7 +3516,7 @@ impl AddPathKeys {
                     taken: false,
                 });
             } else if hold {
-                keys.frozen.push(path_id);
+                keys.frozen.insert(path_id);
             } else if route.peer != LOCAL_PEER {
                 keys.peer_held.push(HeldPeerKey {
                     peer: route.peer,
@@ -3665,7 +3666,7 @@ impl AddPathKeys {
                 continue;
             }
             if held.frozen {
-                self.frozen.push(held.key);
+                self.frozen.insert(held.key);
             } else if held.blackholing {
                 self.departing_exempt.push(held.key);
             } else {
@@ -3682,7 +3683,6 @@ impl AddPathKeys {
         self.departing_exempt.sort_unstable();
         self.departing_taken = smallvec::smallvec![false; self.departing_exempt.len()];
         self.free.sort_unstable();
-        self.frozen.sort_unstable();
         // Blackholing candidates first, so a departing blackhole key goes to
         // a new blackholing path before any ordinary path could take it; a
         // demoted path then reclaims its own blackhole key before any new
@@ -3719,8 +3719,7 @@ impl AddPathKeys {
             self.blackhole_keys.is_empty()
                 || !staged.iter().any(|&(_, blackholing)| blackholing)
                 || self.blackhole_keys.iter().any(|key| {
-                    self.assigned.binary_search(key).is_ok()
-                        || self.frozen.binary_search(key).is_ok()
+                    self.assigned.binary_search(key).is_ok() || self.frozen.contains(key)
                 }),
             "the plan withdraws every blackholing key {:?} while it keeps a blackholing row",
             self.blackhole_keys
@@ -3785,9 +3784,7 @@ impl AddPathKeys {
             // hold the freeze backstop keeps it, so it stays frozen.
             if let Some(own) = own {
                 if self.hold {
-                    if let Err(at) = self.frozen.binary_search(&own) {
-                        self.frozen.insert(at, own);
-                    }
+                    self.frozen.insert(own);
                 } else {
                     self.late_free.push(own);
                 }
@@ -3802,7 +3799,7 @@ impl AddPathKeys {
         } else if let Some(key) = self.take_departing(checkpoint) {
             key
         } else if self.assigned.len() + self.frozen.len() + reserved >= limit
-            && let Some(key) = self.frozen.pop()
+            && let Some(key) = self.frozen.pop_last()
         {
             key
         } else {
@@ -3812,8 +3809,7 @@ impl AddPathKeys {
 
     /// Whether the residue pass withdraws this wire key.
     pub(in crate::manager) fn withdrawable(&self, path_id: u32) -> bool {
-        self.assigned.binary_search(&path_id).is_err()
-            && self.frozen.binary_search(&path_id).is_err()
+        self.assigned.binary_search(&path_id).is_err() && !self.frozen.contains(&path_id)
     }
 }
 
