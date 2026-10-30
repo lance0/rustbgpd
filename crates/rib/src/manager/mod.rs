@@ -531,11 +531,22 @@ impl RtcMembership {
     /// two-part encoding, so it needs explicit recognition here; like
     /// ordinary RTs, it matches on the RT bits under the prefix alone.
     fn matches_any(&self, rts: &[rustbgpd_wire::ExtendedCommunity]) -> bool {
+        self.matches_any_with_checkpoint(rts, &mut || {})
+    }
+
+    /// [`Self::matches_any`] with a checkpoint per membership entry compared,
+    /// for restages that walk a large membership under a readiness owner.
+    fn matches_any_with_checkpoint(
+        &self,
+        rts: &[rustbgpd_wire::ExtendedCommunity],
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
         if self.has_default {
             return true;
         }
         rts.iter().any(|&rt| {
             self.entries.iter().any(|nlri| {
+                checkpoint();
                 nlri.matches(rt)
                     || (rt.as_es_import_rt().is_some()
                         && (rt.as_u64() ^ nlri.route_target_bits)

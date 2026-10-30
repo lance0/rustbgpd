@@ -234,17 +234,40 @@ impl RibManager {
             self.advance_table_pages();
         }
         self.record_deferred_bgpls(affected);
-        let mut affected: HashSet<_> = affected
-            .iter()
-            .inspect(|_| checkpoint())
-            .filter(|key| !self.selection_deferred(key.family.to_afi_safi()))
-            .cloned()
-            .collect();
+        // A filtered subset of `affected`, reserved under an owner.
+        let input = affected;
+        let mut affected: HashSet<crate::route::BgpLsRouteKey> =
+            HashSet::with_capacity(if readiness.is_some() { input.len() } else { 0 });
+        #[cfg(test)]
+        let reserved_input = affected.capacity();
+        affected.extend(
+            input
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|key| !self.selection_deferred(key.family.to_afi_safi()))
+                .cloned(),
+        );
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_owned_set(
+            "selected_bgpls",
+            readiness.is_some(),
+            reserved_input,
+            &affected,
+        );
         if affected.is_empty() {
             return;
         }
 
-        let mut changed_keys: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
+        // Changed keys are a subset of the selected inputs: an owner
+        // reserves them so inserts never rehash between checkpoints.
+        let mut changed_keys: HashSet<crate::route::BgpLsRouteKey> =
+            HashSet::with_capacity(if readiness.is_some() {
+                affected.len()
+            } else {
+                0
+            });
+        #[cfg(test)]
+        let reserved = changed_keys.capacity();
         for key in &affected {
             checkpoint();
             let candidates = self
@@ -257,6 +280,13 @@ impl RibManager {
             }
         }
 
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_owned_set(
+            "changed_keys_bgpls",
+            readiness.is_some(),
+            reserved,
+            &changed_keys,
+        );
         if changed_keys.is_empty() {
             super::super::retire_hash_set(&mut affected, &mut checkpoint);
             return;

@@ -523,12 +523,24 @@ pub(crate) mod rebuild_growth {
         reserved: usize,
         changed: &std::collections::HashSet<T>,
     ) {
+        record_owned_set("recompute_best_changed", owned, reserved, changed);
+    }
+
+    /// A selection set filled from a bounded input: record its growth under
+    /// a readiness owner; without one, an empty set must not have reserved
+    /// anything.
+    pub(crate) fn record_owned_set<T>(
+        destination: &'static str,
+        owned: bool,
+        reserved: usize,
+        set: &std::collections::HashSet<T>,
+    ) {
         if owned {
-            record("recompute_best_changed", reserved, changed.capacity());
+            record(destination, reserved, set.capacity());
         } else {
             assert!(
-                !changed.is_empty() || changed.capacity() == 0,
-                "an unowned pass with no changed prefix must not pre-reserve"
+                !set.is_empty() || set.capacity() == 0,
+                "{destination}: an unowned pass that kept nothing must not pre-reserve"
             );
         }
     }

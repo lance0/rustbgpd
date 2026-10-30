@@ -260,7 +260,16 @@ impl RibManager {
             return;
         }
 
-        let mut changed_keys: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
+        // Changed keys are a subset of the selected inputs: an owner
+        // reserves them so inserts never rehash between checkpoints.
+        let mut changed_keys: HashSet<crate::route::RtcRibRouteKey> =
+            HashSet::with_capacity(if readiness.is_some() {
+                affected.len()
+            } else {
+                0
+            });
+        #[cfg(test)]
+        let reserved = changed_keys.capacity();
         for key in affected {
             checkpoint();
             let candidates = self
@@ -273,6 +282,13 @@ impl RibManager {
             }
         }
 
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_owned_set(
+            "changed_keys_rtc",
+            readiness.is_some(),
+            reserved,
+            &changed_keys,
+        );
         if changed_keys.is_empty() {
             return;
         }
