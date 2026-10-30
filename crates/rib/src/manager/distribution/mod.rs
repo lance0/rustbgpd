@@ -7746,7 +7746,13 @@ impl RibManager {
             super::replacement_readiness_checkpoint_at(&readiness, "selection_candidates", false);
         };
         self.record_deferred_unicast(affected);
-        let mut changed = HashSet::new();
+        // `changed` is a subset of `affected`: an owner reserves it so inserts
+        // never rehash between checkpoints; unowned passes grow it lazily.
+        let owned = readiness.is_some();
+        let mut changed = HashSet::with_capacity(if owned { affected.len() } else { 0 });
+        checkpoint();
+        #[cfg(test)]
+        let reserved = changed.capacity();
         for prefix in affected {
             let previous_best = self.loc_rib.get(prefix).map(BestSource::of);
             // Inner scope: `candidates` borrows the Adj-RIB-Ins and must be
@@ -7852,6 +7858,8 @@ impl RibManager {
             }
             self.selection_readiness_checkpoint();
         }
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_selection(owned, reserved, &changed);
         crate::manager::helpers::set_loc_rib_prefixes(
             &self.metrics,
             crate::manager::helpers::UNICAST_FAMILIES,

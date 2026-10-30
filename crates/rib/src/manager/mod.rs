@@ -6079,8 +6079,10 @@ impl RibManager {
         // Capture BEFORE the write (design §2.3): under the invariant
         // adv(m) = Φ-filtered group table, `old` is the true prior
         // advertised state.
-        let old = self.peer_rt_membership.get(&peer).cloned();
-        if old == membership {
+        // Compare and publish with checkpoints: a large membership is
+        // compared, cloned once and swapped, never cloned whole for the
+        // prior state.
+        if self.same_rtc_membership(self.peer_rt_membership.get(&peer), membership.as_ref()) {
             return;
         }
         // Grouped VPN pages read the current membership even when emission defers.
@@ -6091,7 +6093,8 @@ impl RibManager {
         };
         let captured_prior =
             self.vpn_grouped_member_of(peer).is_some() && self.capture_group_admitted_keys(peer);
-        self.peer_rt_membership.insert(peer, new.clone());
+        let published = self.clone_rtc_membership(&new);
+        let old = self.peer_rt_membership.insert(peer, published);
         if !self.outbound_peers.contains_key(&peer) {
             return;
         }
@@ -6147,10 +6150,16 @@ impl RibManager {
     /// advertisements through the restart window). Shared by the rebuild
     /// seam above and the GR re-establish path in
     /// `register_active_session`.
+    ///
+    /// Collection is reserved from the RTC table size, and the sort and
+    /// dedup checkpoint per comparison.
     fn rtc_membership_from_rib(&self, peer: PeerId) -> RtcMembership {
         let mut has_default = false;
-        let mut entries: Vec<rustbgpd_wire::RtcNlri> = Vec::new();
-        if let Some(rib) = self.ribs.get(&peer) {
+        let rib = self.ribs.get(&peer);
+        let mut entries: Vec<rustbgpd_wire::RtcNlri> =
+            Vec::with_capacity(rib.map_or(0, AdjRibIn::rtc_len));
+        self.replacement_checkpoint_at("selection_rtc_membership", false);
+        if let Some(rib) = rib {
             for route in rib.iter_rtc() {
                 self.replacement_checkpoint_at("selection_rtc_membership", false);
                 if route.nlri.is_default() {
@@ -6160,11 +6169,53 @@ impl RibManager {
                 }
             }
         }
-        entries.sort_unstable();
-        entries.dedup();
+        entries.sort_unstable_by(|left, right| {
+            self.replacement_checkpoint_at("rtc_membership_sort", false);
+            left.cmp(right)
+        });
+        entries.dedup_by(|left, right| {
+            self.replacement_checkpoint_at("rtc_membership_sort", false);
+            left == right
+        });
         RtcMembership {
             has_default,
             entries,
+        }
+    }
+
+    /// Clone a membership with a publication checkpoint per entry.
+    fn clone_rtc_membership(&self, membership: &RtcMembership) -> RtcMembership {
+        let mut entries = Vec::with_capacity(membership.entries.len());
+        self.replacement_checkpoint_at("rtc_membership_publish", false);
+        for &entry in &membership.entries {
+            self.replacement_checkpoint_at("rtc_membership_publish", false);
+            entries.push(entry);
+        }
+        RtcMembership {
+            has_default: membership.has_default,
+            entries,
+        }
+    }
+
+    /// Membership equality with a publication checkpoint per compared entry.
+    fn same_rtc_membership(
+        &self,
+        left: Option<&RtcMembership>,
+        right: Option<&RtcMembership>,
+    ) -> bool {
+        match (left, right) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                let mut checkpoint =
+                    || self.replacement_checkpoint_at("rtc_membership_publish", false);
+                left.has_default == right.has_default
+                    && crate::orr::eq_with_checkpoint(
+                        &left.entries,
+                        &right.entries,
+                        &mut checkpoint,
+                    )
+            }
+            _ => false,
         }
     }
 

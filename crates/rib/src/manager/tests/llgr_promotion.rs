@@ -609,26 +609,62 @@ fn sweep_gr_stale_with_readiness_probe(
     readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
     peer: PeerId,
 ) -> BTreeMap<&'static str, usize> {
+    run_with_readiness_probe(manager, readiness_tx, |manager| {
+        manager.sweep_gr_stale(peer);
+    })
+}
+
+/// Stage key recording whether a query queued before `work` was answered
+/// by the time `work` returned.
+const PRE_QUEUED: &str = "pre_queued_answered_inside";
+
+/// Run actual-caller `work` while every readiness checkpoint queues a query
+/// that the next checkpoint must find already answered. A query is also
+/// queued before `work`; `PRE_QUEUED` counts it when `work` answered it.
+/// Returns how many queries each stage answered.
+fn run_with_readiness_probe(
+    manager: &mut RibManager,
+    readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
+    work: impl FnOnce(&mut RibManager),
+) -> BTreeMap<&'static str, usize> {
+    run_with_readiness_observations(manager, readiness_tx, work).0
+}
+
+/// [`run_with_readiness_probe`] that also returns every answered query's
+/// `(stage, Loc-RIB count)` in order, including the query answered by the
+/// owner's final checkpoint.
+fn run_with_readiness_observations(
+    manager: &mut RibManager,
+    readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
+    work: impl FnOnce(&mut RibManager),
+) -> (BTreeMap<&'static str, usize>, Vec<(&'static str, usize)>) {
+    let (reply, mut pre_queued) = oneshot::channel();
+    readiness_tx
+        .try_send(crate::RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: Instant::now(),
+        })
+        .unwrap();
     let pending = Arc::new(Mutex::new(
         None::<(
             &'static str,
             oneshot::Receiver<Result<usize, crate::RibReadinessError>>,
         )>,
     ));
-    let answered = Arc::new(Mutex::new(BTreeMap::<&'static str, usize>::new()));
+    let observations = Arc::new(Mutex::new(Vec::<(&'static str, usize)>::new()));
     manager.flush_poll_budget = Duration::ZERO;
     manager.replacement_readiness_test_hook = Some(Arc::new({
         let pending = Arc::clone(&pending);
-        let answered = Arc::clone(&answered);
+        let observations = Arc::clone(&observations);
         move |stage| {
             if let Some((previous, mut reply)) = pending.lock().unwrap().take() {
-                reply
+                let count = reply
                     .try_recv()
                     .unwrap_or_else(|error| {
                         panic!("{previous}: queued readiness query not answered inside: {error}")
                     })
                     .unwrap();
-                *answered.lock().unwrap().entry(previous).or_default() += 1;
+                observations.lock().unwrap().push((previous, count));
             }
             let (reply, response) = oneshot::channel();
             readiness_tx
@@ -640,14 +676,28 @@ fn sweep_gr_stale_with_readiness_probe(
             *pending.lock().unwrap() = Some((stage, response));
         }
     }));
-    manager.sweep_gr_stale(peer);
+    work(manager);
     manager.replacement_readiness_test_hook = None;
-    answered.lock().unwrap().clone()
+    let mut observations = observations.lock().unwrap().clone();
+    if let Some((stage, mut reply)) = pending.lock().unwrap().take()
+        && let Ok(count) = reply.try_recv()
+    {
+        observations.push((stage, count.unwrap()));
+    }
+    let mut answered = BTreeMap::new();
+    for (stage, _) in &observations {
+        *answered.entry(*stage).or_default() += 1;
+    }
+    if pre_queued.try_recv().is_ok() {
+        answered.insert(PRE_QUEUED, 1);
+    }
+    (answered, observations)
 }
 
 fn readiness_manager() -> (RibManager, mpsc::Sender<crate::RibReadinessQuery>) {
     let (_tx, rx) = mpsc::channel(1);
-    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    // One query queued before the work plus one outstanding per checkpoint.
+    let (readiness_tx, readiness_rx) = mpsc::channel(2);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_readiness_queries(readiness_rx);
     (manager, readiness_tx)
@@ -861,4 +911,395 @@ fn llgr_bgpls_orr_rebuild_work_between_checkpoints_stays_bounded() {
             );
         }
     }
+}
+
+const EXPIRY_UNITS: [&str; 3] = [
+    "llgr_expiry_purge",
+    "llgr_expiry_inventory",
+    "llgr_intern_cleanup",
+];
+
+/// Make the peer's LLGR deadline for `family` due now, and keep a later
+/// deadline on another tuple so expiry stays non-terminal: departed-peer
+/// teardown has its own owner and must not stand in for this one.
+fn make_llgr_expiry_due(manager: &mut RibManager, peer: PeerId, family: (Afi, Safi)) {
+    let now = tokio::time::Instant::now();
+    manager
+        .llgr_stale_deadlines
+        .insert((peer, family.0, family.1), now);
+    manager.llgr_stale_deadlines.insert(
+        (peer, Afi::Ipv6, Safi::Unicast),
+        now + Duration::from_secs(3600),
+    );
+}
+
+/// Retain `routes` LLGR-stale routes of `family` through the actual GR
+/// timer promotion, after announcing `vacated` more unicast routes and
+/// withdrawing them so the slab keeps vacant slots, then run the actual
+/// LLGR timer arm under the readiness probe.
+fn run_llgr_expiry_case(
+    family: (Afi, Safi),
+    routes: u8,
+    vacated: u8,
+) -> BTreeMap<&'static str, usize> {
+    run_llgr_expiry_case_with_fresh(family, routes, vacated, 0)
+}
+
+/// Announce one route that is neither GR- nor LLGR-stale and never expires
+/// with `family`: an IPv6 `FlowSpec` rule beside expiring IPv4 `FlowSpec`, or a
+/// fresh RT-Constrain route beside expiring RTC routes.
+fn announce_fresh(manager: &mut RibManager, family: (Afi, Safi), index: u8) {
+    let addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = peer_v4(addr);
+    let update = match family.1 {
+        Safi::FlowSpec => {
+            let mut route = make_flowspec_route(addr);
+            route.afi = Afi::Ipv6;
+            route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                rustbgpd_wire::FlowSpecPrefix::V6(rustbgpd_wire::Ipv6PrefixOffset {
+                    prefix: Ipv6Prefix::new(
+                        Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, u16::from(index), 0),
+                        112,
+                    ),
+                    offset: 0,
+                }),
+            )];
+            RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer,
+                announced: Vec::new(),
+                withdrawn: Vec::new(),
+                flowspec_announced: vec![route],
+                flowspec_withdrawn: Vec::new(),
+                evpn_announced: Vec::new(),
+                evpn_withdrawn: Vec::new(),
+                validated_with: None,
+            }
+        }
+        Safi::RtConstrain => RibUpdate::RtcRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: vec![make_rtc_rib_route(addr, 1000 + u16::from(index), 100)],
+            withdrawn: Vec::new(),
+        },
+        _ => unreachable!("fresh fixture families"),
+    };
+    manager.handle_update(update);
+    drain_route_chunks(manager);
+}
+
+/// [`run_llgr_expiry_case`] with `fresh` non-expiring routes announced
+/// after promotion, before the LLGR deadline fires.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual-caller fixture pins retention, survivors and every readiness count together"
+)]
+fn run_llgr_expiry_case_with_fresh(
+    family: (Afi, Safi),
+    routes: u8,
+    vacated: u8,
+    fresh: u8,
+) -> BTreeMap<&'static str, usize> {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = peer_v4(addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    for index in 5..5 + vacated + routes {
+        announce_case(&mut manager, family, index, false);
+    }
+    if vacated > 0 {
+        assert_eq!(
+            family,
+            (Afi::Ipv4, Safi::Unicast),
+            "slab vacancies are unicast"
+        );
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced: Vec::new(),
+            withdrawn: (5..5 + vacated)
+                .map(|index| {
+                    (
+                        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, index, 0), 24)),
+                        0,
+                    )
+                })
+                .collect(),
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    }
+    manager.handle_update(gr_with_llgr(peer, 120, vec![family], vec![family], 3600));
+    manager.sweep_gr_stale(peer);
+    let retained = |manager: &RibManager| {
+        manager.ribs[&peer]
+            .stale_route_counts()
+            .find(|(seen, _)| *seen == family)
+            .map_or(0, |(_, counts)| counts.llgr_stale)
+    };
+    assert_eq!(retained(&manager), u64::from(routes), "{family:?}");
+    for index in 0..fresh {
+        announce_fresh(&mut manager, family, index);
+    }
+    make_llgr_expiry_due(&mut manager, peer, family);
+    let initial_count = manager.loc_rib.len();
+
+    // Growth recorded during setup is not the expiry's.
+    crate::orr::rebuild_growth::take();
+    let (answered, observations) = run_with_readiness_observations(
+        &mut manager,
+        readiness_tx,
+        RibManager::sweep_expired_llgr_stale,
+    );
+    assert_eq!(
+        retained(&manager),
+        0,
+        "{family:?}: expiry purges the family"
+    );
+    // Readiness serves the Loc-RIB count as each completed withdrawal
+    // publishes it: every unicast selection step drops exactly one prefix,
+    // other families leave the count alone, and the owner's final answer is
+    // the settled count.
+    let final_count = if family.1 == Safi::Unicast {
+        initial_count - usize::from(routes)
+    } else {
+        initial_count
+    };
+    let selections: Vec<_> = observations
+        .iter()
+        .filter_map(|&(stage, count)| (stage == "selection_recompute").then_some(count))
+        .collect();
+    let expected_selections: Vec<_> = if family.1 == Safi::Unicast {
+        (1..=usize::from(routes))
+            .map(|removed| initial_count - removed)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        selections, expected_selections,
+        "{family:?}: every completed withdrawal publishes its exact count"
+    );
+    assert!(
+        observations
+            .iter()
+            .all(|&(_, count)| (final_count..=initial_count).contains(&count)),
+        "{family:?}: counts outside [{final_count}, {initial_count}]: {observations:?}"
+    );
+    assert_eq!(
+        observations.last().map(|&(_, count)| count),
+        Some(final_count),
+        "{family:?}: the final answer is the settled count"
+    );
+    let survivors = match family.1 {
+        Safi::FlowSpec => manager.ribs[&peer].flowspec_lens()[1],
+        Safi::RtConstrain => manager.ribs[&peer].rtc_len(),
+        _ => 0,
+    };
+    assert_eq!(
+        survivors,
+        usize::from(fresh),
+        "{family:?}: fresh routes survive"
+    );
+    assert!(
+        !manager
+            .llgr_stale_deadlines
+            .contains_key(&(peer, family.0, family.1))
+    );
+    let expected = if family.1 == Safi::Unicast {
+        initial_count - usize::from(routes)
+    } else {
+        initial_count
+    };
+    assert_eq!(manager.loc_rib.len(), expected, "{family:?}");
+    assert_eq!(
+        manager.ribs[&peer].maintained_stale_route_counts(),
+        manager.ribs[&peer].scanned_stale_route_counts()
+    );
+    answered
+}
+
+/// The LLGR timer arm sweeps every family under the readiness owner: a
+/// query queued before the sweep and one queued at each checkpoint of the
+/// purge, affected-inventory and intern-cleanup units are answered inside
+/// the sweep.
+#[test]
+fn llgr_expiry_timer_answers_readiness_inside_every_family_sweep() {
+    let mut failures = Vec::new();
+    for family in FAMILIES {
+        let answered = run_llgr_expiry_case(family, 32, 0);
+        for stage in std::iter::once(PRE_QUEUED).chain(EXPIRY_UNITS) {
+            let count = answered.get(stage).copied().unwrap_or(0);
+            if count < usize::from(stage != PRE_QUEUED) + 1 {
+                failures.push((family, stage, count));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "(family, stage, answered) without interior readiness service: {failures:?}"
+    );
+}
+
+/// Per-unit work-count control: as the retained inventory grows from 8 to
+/// 40 routes, the purge unit answers at least twice per added route (walk
+/// and removal) and the inventory unit at least once per added key, for
+/// every family. A unicast slab with 240 vacant slots adds a purge answer
+/// per vacancy.
+#[test]
+fn llgr_expiry_work_counts_grow_per_unit() {
+    let count = |answered: &BTreeMap<&str, usize>, stage| answered.get(stage).copied().unwrap_or(0);
+    let mut failures = Vec::new();
+    for family in FAMILIES {
+        let small = run_llgr_expiry_case(family, 8, 0);
+        let large = run_llgr_expiry_case(family, 40, 0);
+        for (stage, per_route) in [("llgr_expiry_purge", 2), ("llgr_expiry_inventory", 1)] {
+            let (small, large) = (count(&small, stage), count(&large, stage));
+            if large < small + per_route * 32 {
+                failures.push((family, stage, small, large));
+            }
+        }
+    }
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    let dense = count(&run_llgr_expiry_case(unicast, 8, 0), "llgr_expiry_purge");
+    let sparse = count(&run_llgr_expiry_case(unicast, 8, 240), "llgr_expiry_purge");
+    if sparse < dense + 240 {
+        failures.push((unicast, "llgr_expiry_purge vacant slots", dense, sparse));
+    }
+    assert!(
+        failures.is_empty(),
+        "(family, unit, small, large) answered counts do not grow with the work: {failures:?}"
+    );
+}
+
+/// LLGR expiry of a BGP-LS feeder with ORR configured rebuilds ORR inside
+/// the readiness owner, and retires a topology page cache inside it too.
+#[test]
+fn llgr_expiry_rebuilds_orr_and_retires_page_cache_under_readiness() {
+    for vantage in [true, false] {
+        let (mut manager, readiness_tx) = readiness_manager();
+        let restarting = Ipv4Addr::new(10, 9, 9, 1);
+        let steady = Ipv4Addr::new(10, 9, 9, 2);
+        if vantage {
+            manager
+                .peer_orr_vantage
+                .insert(peer_v4(Ipv4Addr::new(10, 0, 0, 2)), orr_vantage());
+        }
+        for feed in [restarting, steady] {
+            let peer = peer_v4(feed);
+            manager.ribs.insert(peer, AdjRibIn::new(peer));
+            manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+                session_id: 0,
+                peer,
+                announced: chain_topology(feed, 16),
+                withdrawn: Vec::new(),
+            });
+            drain_route_chunks(&mut manager);
+        }
+        let peer = peer_v4(restarting);
+        manager.handle_update(gr_with_llgr(peer, 120, vec![BGPLS], vec![BGPLS], 3600));
+        manager.sweep_gr_stale(peer);
+        make_llgr_expiry_due(&mut manager, peer, BGPLS);
+        let mut links = 0;
+        if !vantage {
+            // An operator walks the retained topology during LLGR.
+            let (reply, mut page) = oneshot::channel();
+            manager.handle_update(RibUpdate::QueryOrrTopologyLinksPage {
+                after: None,
+                expected_version: None,
+                page_size: 1000,
+                reply,
+            });
+            links = page.try_recv().unwrap().unwrap().total;
+            assert_eq!(links, 30);
+            assert!(manager.orr_page_topology.is_some());
+        }
+
+        let answered = run_with_readiness_probe(
+            &mut manager,
+            readiness_tx,
+            RibManager::sweep_expired_llgr_stale,
+        );
+        assert_eq!(manager.ribs[&peer].bgpls_len(), 0);
+        if vantage {
+            assert_eq!(manager.orr.resolved.get(&orr_vantage()), Some(&true));
+            for stage in ORR_STAGES {
+                assert!(
+                    answered.get(stage).copied().unwrap_or(0) >= 2,
+                    "no interior {stage} service during LLGR expiry: {answered:?}"
+                );
+            }
+        } else {
+            assert!(manager.orr_page_topology.is_none());
+            let retired = answered.get("llgr_orr_page_retire").copied().unwrap_or(0);
+            assert!(
+                u64::try_from(retired).unwrap() >= 2 * links,
+                "cached graph of {links} links retired with {retired} answered queries: \
+                 {answered:?}"
+            );
+        }
+    }
+}
+
+/// Expiring IPv4 `FlowSpec` beside a large non-expiring IPv6 inventory: the
+/// per-AFI recount for the prefix gauge answers readiness per route.
+#[test]
+fn llgr_expiry_flowspec_recount_services_readiness_per_route() {
+    let flowspec = (Afi::Ipv4, Safi::FlowSpec);
+    let count = |answered: &BTreeMap<&str, usize>| {
+        answered.get("llgr_expiry_metrics").copied().unwrap_or(0)
+    };
+    let small = count(&run_llgr_expiry_case_with_fresh(flowspec, 8, 0, 0));
+    let large = count(&run_llgr_expiry_case_with_fresh(flowspec, 8, 0, 128));
+    assert!(
+        large >= small + 128,
+        "FlowSpec recount answered {small} with no IPv6 rules and {large} with 128"
+    );
+}
+
+/// Expiring RT-Constrain routes beside fresh ones: rebuilding the surviving
+/// membership answers readiness per collected entry, per sort/dedup
+/// comparison and per published entry, each counted separately.
+#[test]
+fn llgr_expiry_rtc_membership_rebuild_services_readiness_per_unit() {
+    let rtc = (Afi::Ipv4, Safi::RtConstrain);
+    let small = run_llgr_expiry_case_with_fresh(rtc, 8, 0, 8);
+    let large = run_llgr_expiry_case_with_fresh(rtc, 8, 0, 136);
+    let failures: Vec<_> = [
+        "selection_rtc_membership",
+        "rtc_membership_sort",
+        "rtc_membership_publish",
+    ]
+    .into_iter()
+    .map(|stage| {
+        (
+            stage,
+            small.get(stage).copied().unwrap_or(0),
+            large.get(stage).copied().unwrap_or(0),
+        )
+    })
+    .filter(|&(_, small, large)| large < small + 128)
+    .collect();
+    assert!(
+        failures.is_empty(),
+        "(unit, answered with 8 fresh, with 136 fresh) must grow per fresh route: {failures:?}"
+    );
+}
+
+/// A large unicast expiry selects into a `changed` set reserved up front,
+/// so no insert rehashes between selection checkpoints.
+#[test]
+fn llgr_expiry_unicast_selection_changed_set_never_grows() {
+    let answered = run_llgr_expiry_case((Afi::Ipv4, Safi::Unicast), 200, 0);
+    let growth = crate::orr::rebuild_growth::take();
+    assert!(answered.get("selection_recompute").copied().unwrap_or(0) >= 200);
+    assert_eq!(
+        growth.get("recompute_best_changed"),
+        Some(&(1, 0)),
+        "one selection pass, no capacity growth inside it: {growth:?}"
+    );
 }
