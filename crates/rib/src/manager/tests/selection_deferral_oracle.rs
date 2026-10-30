@@ -882,12 +882,6 @@ impl Harness {
     /// A known open defect that explains a deleted exempt row still on the
     /// wire after a drain in the hold, or `None`.
     fn known_stale_blackhole(&self, key: (Prefix, u32)) -> Option<&'static str> {
-        // LAN-2703: a GR helper keeps a row from the session that ended as
-        // stale until our End-of-RIB, which the hold defers to release; a
-        // row deleted before the new session re-sent it is never withdrawn.
-        if self.stale.contains(&key) {
-            return allowed("LAN-2703");
-        }
         // LAN-2701: under refused proof, a private receiver keeps a deleted
         // RTBH until release when the refused retry itself announced its
         // current row: a new RTBH, or a path the retry moved onto the
@@ -1514,4 +1508,70 @@ fn i5_flags_obsolete_rtbh_rows_beyond_the_last() {
     assert!(harness.check_deleted_blackholes().is_err());
     harness.wire.remove(&(prefix(0), 2));
     assert!(harness.check_deleted_blackholes().is_ok());
+}
+
+/// I5 across a clean flap toward a GR helper: the peer keeps the ended
+/// session's rows stale until our End-of-RIB, which the hold defers, so an
+/// RTBH deleted before the new session re-sends it must be withdrawn on the
+/// new session inside the hold. The two minimized flap orders, for host and
+/// BLACKHOLE-aggregate RTBHs, private and grouped. Red proof: without the
+/// carried stale exempt keys every case keeps the deleted RTBH.
+#[test]
+fn stale_rtbh_at_a_gr_helper_leaves_the_wire_inside_the_hold() {
+    let flap = |writer_full| Op::Reconnect {
+        notification: false,
+        helper: true,
+        gr_families: true,
+        writer_full,
+    };
+    let mut failed = Vec::new();
+    for grouped in [false, true] {
+        let config = Config {
+            grouped,
+            add_path: false,
+            per_client_best: false,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        for (prefix, blackhole) in [(1, false), (2, true)] {
+            let inject = Op::Inject {
+                prefix,
+                path: 1,
+                preference: 0,
+                blackhole,
+            };
+            let delete = Op::Delete { prefix, path: 1 };
+            let orders = [
+                (
+                    "delete behind the new writer",
+                    vec![
+                        inject.clone(),
+                        flap(true),
+                        delete.clone(),
+                        Op::Backpressure(false),
+                        Op::Drain,
+                    ],
+                ),
+                (
+                    "delete stuck before the flap",
+                    vec![
+                        inject.clone(),
+                        Op::Backpressure(true),
+                        delete.clone(),
+                        flap(false),
+                        Op::Drain,
+                    ],
+                ),
+            ];
+            for (order, hold) in orders {
+                if let Some(reason) = failure(config, &[], &hold) {
+                    failed.push(format!(
+                        "grouped={grouped} prefix {prefix} {order}: {reason}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
 }
