@@ -10,8 +10,8 @@
 #     that the guarded delete names, are byte-identical before and after the
 #     four calls;
 #   - control: AddLeasedFlowSpec on the same server returns OK and changes
-#     both listings (otherwise the run is INVALID: the server was not
-#     serving or not mutable).
+#     the lease listing and the rule listing, each compared on its own
+#     (otherwise the run is INVALID: the server was not shown to be mutable).
 # A failed or malformed listing, before or after, makes the run INVALID
 # before anything is compared. QUAL_FAULT=after-read stops the daemon before
 # the after-snapshot, for the red proof of that path.
@@ -102,7 +102,9 @@ snapshot() {
         verdict snapshot INVALID "ListFlowSpecRoutes failed for $(basename "$out"); see that file"
         exit 2
     fi
-    printf '%s\n%s\n' "$leases" "$rules" >"$out"
+    printf '%s\n' "$leases" >"$out-leases"
+    printf '%s\n' "$rules" >"$out-rules"
+    cat "$out-leases" "$out-rules" >"$out"
 }
 
 RULE='{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "components": [{"type": 1, "prefix": "203.0.113.9/32"}], "actions": [{"trafficRate": {"rate": 0}}]}'
@@ -147,10 +149,11 @@ fi
 if call "{\"rule\": $RULE, \"lease\": {\"owner\": \"qual\", \"leaseSeconds\": 30}}" \
     InjectionService/AddLeasedFlowSpec >"$OUT_DIR/rollback-control" 2>&1 \
     && snapshot "$OUT_DIR/rollback-control-after" \
-    && ! cmp -s "$OUT_DIR/rollback-after" "$OUT_DIR/rollback-control-after"; then
-    verdict legacy_control PASS "AddLeasedFlowSpec committed and changed the inventory"
+    && ! cmp -s "$OUT_DIR/rollback-after-leases" "$OUT_DIR/rollback-control-after-leases" \
+    && ! cmp -s "$OUT_DIR/rollback-after-rules" "$OUT_DIR/rollback-control-after-rules"; then
+    verdict legacy_control PASS "AddLeasedFlowSpec committed and changed both the leases and the rules"
 else
-    verdict legacy_control INVALID "the legacy control did not commit; see rollback-control"
+    verdict legacy_control INVALID "the legacy control did not change both listings; see rollback-control"
 fi
 grep -q ' FAIL \| INVALID ' "$VERDICTS" && exit 1
 exit 0

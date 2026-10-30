@@ -36,6 +36,8 @@
 #
 # QUAL_FAULT seeds a fault for the red proofs of the INVALID paths:
 #   frr-read    pauses FRR while its absence is polled, so every FRR read fails
+#   frr-hang    stops FRR's bgpd and watchfrr instead, so every FRR read blocks
+#               until its time bound ends it
 #   late-renew  sends the late guarded renewal with a stale generation
 #
 # Times are wall-clock seconds on this host. A window's expiry is bounded
@@ -99,7 +101,7 @@ on_exit() {
     trap - EXIT INT TERM HUP
     [ -n "$CONTROLLER_PID" ] && kill "$CONTROLLER_PID" 2>/dev/null
     [ -n "$LEGACY_PID" ] && kill "$LEGACY_PID" 2>/dev/null
-    [ "${QUAL_FAULT:-}" = frr-read ] && docker unpause "$FRR" >/dev/null 2>&1
+    fault_end
     docker exec "$RUSTBGPD" cat /var/log/rustbgpd.log >"$OUT_DIR/$PHASE-daemon.log" 2>&1
     [ -f "$STATE_DIR/events" ] && cp "$STATE_DIR/events" "$OUT_DIR/$PHASE-events"
     containerlab destroy -t "$TOPO_FILE" --cleanup >/dev/null 2>&1
@@ -107,6 +109,19 @@ on_exit() {
     exit "$code"
 }
 trap on_exit EXIT INT TERM HUP
+
+# Send signal $1 to FRR's watchfrr and bgpd (the frr-hang fault).
+frr_signal() {
+    docker exec "$FRR" sh -c "kill -$1 \$(ps -o pid,comm | awk '\$2 == \"watchfrr\" || \$2 == \"bgpd\" {print \$1}')"
+}
+
+# Undo a seeded fault; harmless when none is active.
+fault_end() {
+    case "${QUAL_FAULT:-}" in
+        frr-read) docker unpause "$FRR" >/dev/null 2>&1 ;;
+        frr-hang) frr_signal CONT >/dev/null 2>&1 ;;
+    esac
+}
 
 now() { date +%s.%N; }
 calc() { python3 -c "print($*)"; }
@@ -158,13 +173,31 @@ legacy_controller() {
 }
 
 # Each probe prints "present", "absent" or "error". A failed read, or a reply
-# without the expected shape, is an error and never counts as absence.
+# without the expected shape, is an error and never counts as absence. Each
+# read is bounded by probe_budget; a read that runs out of time is an error.
+
+# Seconds one read may take: what is left before PROBE_DEADLINE (wait_absent
+# sets it), at least 0.5 s, else 30 s.
+probe_budget() {
+    if [ -n "${PROBE_DEADLINE:-}" ]; then
+        calc "max(0.5, round($PROBE_DEADLINE - $(now), 2))"
+    else
+        echo 30
+    fi
+}
+
+# Run vtysh command $1 in FRR within $2 seconds. The inner timeout ends the
+# vtysh process if the outer one has already given up on docker exec.
+frr_vtysh() {
+    timeout --kill-after=1 "$2" docker exec "$FRR" timeout "$2" vtysh -c "$1"
+}
 
 # Whether $1 is among the local rules (0.0.0.0 view). The reply must be the
 # acknowledged local-intent view.
 local_state() {
     local reply
-    reply=$(grpcurl_call -d '{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "receivedPeerAddress": "0.0.0.0"}' \
+    reply=$(grpcurl_call -max-time "$(probe_budget)" \
+        -d '{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "receivedPeerAddress": "0.0.0.0"}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListFlowSpecRoutes 2>/dev/null) || { echo error; return; }
     printf '%s' "$reply" | python3 -c '
 import json, sys
@@ -187,7 +220,7 @@ print("present" if sys.argv[1] in prefixes else "absent")
 # must be FRR's JSON table.
 frr_state() {
     local reply
-    reply=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json" 2>/dev/null) || { echo error; return; }
+    reply=$(frr_vtysh "show bgp ipv4 flowspec json" "$(probe_budget)" 2>/dev/null) || { echo error; return; }
     printf '%s' "$reply" | python3 -c '
 import json, sys
 text = sys.stdin.read()
@@ -206,7 +239,7 @@ local_has() { [ "$(local_state "$1")" = present ]; }
 frr_has() { [ "$(frr_state "$1")" = present ]; }
 
 frr_established() {
-    docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
+    frr_vtysh "show bgp neighbors 10.0.0.1 json" 10 2>/dev/null \
         | grep -q '"bgpState":"Established"'
 }
 
@@ -216,6 +249,7 @@ frr_established() {
 # when the last read before the deadline failed: absence was never read.
 wait_absent() {
     local probe=$1 prefix=$2 limit=$3 state="" errors=0
+    local PROBE_DEADLINE=$limit
     while python3 -c "import sys,time; sys.exit(time.time() >= $limit)"; do
         state=$("$probe" "$prefix")
         case "$state" in
@@ -351,11 +385,18 @@ main() {
     limit=$(calc "$t_w + $STALL_MS / 1000 + 20")
     # FRR is polled on its own, so a local read held behind a stalled RIB
     # turn cannot delay the FRR observation.
-    if [ "${QUAL_FAULT:-}" = frr-read ]; then
-        # Seeded fault: every FRR read fails until the deadline.
-        event "fault frr-read: pausing FRR"
-        docker pause "$FRR" >/dev/null
-    fi
+    case "${QUAL_FAULT:-}" in
+        frr-read)
+            # Seeded fault: every FRR read fails until the deadline.
+            event "fault frr-read: pausing FRR"
+            docker pause "$FRR" >/dev/null
+            ;;
+        frr-hang)
+            # Seeded fault: every FRR read blocks until it is timed out.
+            event "fault frr-hang: stopping watchfrr and bgpd"
+            frr_signal STOP
+            ;;
+    esac
     (wait_absent frr_state "$RULE" "$limit" >"$STATE_DIR/frr_absent"; echo $? >"$STATE_DIR/frr_status") &
     frr_poller=$!
     local local_status=0
@@ -367,7 +408,7 @@ main() {
     fi
     if [ "$local_status" -eq 0 ]; then
         wait "$frr_poller"
-        [ "${QUAL_FAULT:-}" = frr-read ] && docker unpause "$FRR" >/dev/null
+        fault_end
         frr_gone=$(cat "$STATE_DIR/frr_absent")
         # A read can wait behind a later stalled turn, so the first absent
         # poll only bounds the withdrawal from above; the daemon's record of

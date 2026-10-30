@@ -1,0 +1,12 @@
+1793375164.858394127 guarded_added {"incarnation": "4350876163399789572", "sequence": "2"}
+1793375184.098080444 late_legacy_renew ok
+1793375189.028053936 late_guarded_renew {
+  "generation": {
+    "incarnation": "4350876163399789572",
+    "sequence": "2"
+  },
+  "leaseRemainingMs": 5991
+}
+1793375189.122278609 fault frr-hang: stopping watchfrr and bgpd
+1793375223.184496139 frr_state read_errors 1 last error
+1793375223.277565242 local_absent_polled 1793375195.166340032 local_absent_logged 1793375195.003258
