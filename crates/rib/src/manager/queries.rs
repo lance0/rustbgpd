@@ -2337,7 +2337,27 @@ impl RibManager {
         if let Some((reason, detail)) = self.unexported_family(peer, family) {
             return row(Withheld, &reason, "family_not_sendable", detail);
         }
+        let resyncing = (self.dirty_peers.contains(&peer)
+            && !self.selection_partial_caught_up(peer))
+            || self.outbound_channel_gone(peer);
+        let source = crate::update::RouteSourceIdentity {
+            peer: LOCAL_PEER,
+            path_id: route.path_id,
+        };
         if self.selection_deferred(family) && !unicast_deferral_exempt(route) {
+            // A row admitted before the hold stays in the Adj-RIB-Out; the
+            // source-scoped explain finds it at its frozen outbound path ID.
+            let explanation =
+                (!resyncing).then(|| self.explain_unicast_export(peer, prefix, Some(source)));
+            if let Some(explanation) = explanation.filter(|explanation| {
+                explanation.decision == crate::update::ExplainDecision::Advertise
+                    && explanation.already_advertised
+            }) {
+                return PeerRouteExport {
+                    advertised_path_id: explanation.path_id,
+                    ..row(Committed, "", "", "in the peer's Adj-RIB-Out".to_string())
+                };
+            }
             return row(
                 Pending,
                 "selection_deferred",
@@ -2345,9 +2365,7 @@ impl RibManager {
                 "route awaits graceful-restart selection deferral".to_string(),
             );
         }
-        if (self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer))
-            || self.outbound_channel_gone(peer)
-        {
+        if resyncing {
             return row(
                 Pending,
                 "outbound_resync",
@@ -2355,10 +2373,6 @@ impl RibManager {
                 "outbound delivery to this peer is resynchronizing".to_string(),
             );
         }
-        let source = crate::update::RouteSourceIdentity {
-            peer: LOCAL_PEER,
-            path_id: route.path_id,
-        };
         // An Add-Path send peer explains this exact source at its outbound
         // rank; any other peer explains its own selected route.
         let add_path = self.add_path_send_max_for_prefix(peer, &prefix) > 0;
@@ -2991,6 +3005,33 @@ impl RibManager {
         }
         Some(view)
     }
+    /// During a hold the deferred candidate set omits a non-RTBH local row
+    /// that a peer still holds from before the hold. The source of that
+    /// frozen row: the Loc-RIB best for Add-Path, otherwise the advertised row.
+    fn frozen_local_explain_source(
+        &self,
+        prefix: Prefix,
+        add_path: bool,
+        view: Option<&AdjRibOut>,
+    ) -> Option<crate::update::RouteSourceIdentity> {
+        let view = view?;
+        let path_id = if add_path {
+            let best = self.loc_rib.get(&prefix)?;
+            (best.peer == LOCAL_PEER
+                && view
+                    .local_source_outbound_path_id(&prefix, best.path_id)
+                    .is_some())
+            .then_some(best.path_id)?
+        } else {
+            view.local_export_source(&prefix, 0)?.path_id
+        };
+        let route = self.ribs.get(&LOCAL_PEER)?.get(&prefix, path_id)?;
+        (!unicast_deferral_exempt(route)).then_some(crate::update::RouteSourceIdentity {
+            peer: LOCAL_PEER,
+            path_id,
+        })
+    }
+
     /// Explain the unicast export ladder for `(prefix, peer)`.
     ///
     /// Truthfulness mechanism: for the single-best shapes — per-peer
@@ -3067,8 +3108,26 @@ impl RibManager {
             .get(&peer)
             .map(|encoder| encoder.snapshot());
         let grouped_rib_out = self.grouped_unicast_explain_view(peer, &prefix);
+        let frozen_source = if source.is_none() && self.selection_deferred(family) {
+            self.frozen_local_explain_source(
+                prefix,
+                add_path_send_max > 0,
+                grouped_rib_out
+                    .as_ref()
+                    .or_else(|| self.adj_ribs_out.get(&peer)),
+            )
+        } else {
+            None
+        };
 
-        if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best {
+        // The RPC accepts a source only for Add-Path send; export readback
+        // and a frozen row also scope the explain to one local source.
+        if orr_ctx.is_some()
+            || add_path_send_max > 0
+            || per_client_best
+            || source.is_some()
+            || frozen_source.is_some()
+        {
             let mut explanation = Self::explain_single_best_prefix(
                 &self.loc_rib,
                 &self.ribs,
@@ -3096,11 +3155,14 @@ impl RibManager {
                 self.export_policy_for(peer),
                 orr_ctx,
                 per_client_best,
-                source,
+                source.or(frozen_source),
                 snapshot.as_deref(),
             );
+            explanation.source = source;
             explanation.update_group_id = member_of.map(|gid| gid as u64);
-            return self.apply_unicast_export_overlays_to_explain(peer, explanation);
+            let mut explanation = self.apply_unicast_export_overlays_to_explain(peer, explanation);
+            defer_frozen_export_change(&mut explanation);
+            return explanation;
         }
 
         // Dry run of the live single-best staging body against the
@@ -4494,6 +4556,41 @@ fn not_established_export(peer: PeerId, peer_interface: Option<Arc<str>>) -> Pee
         advertised_path_id: 0,
         deny_validation: Vec::new(),
     }
+}
+
+/// A frozen source that would no longer export as admitted (changed body,
+/// policy deny, `NO_ADVERTISE`, ...) still leaves its admitted row on the
+/// peer's wire: the change itself is what selection deferral holds.
+fn defer_frozen_export_change(explanation: &mut crate::update::ExplainAdvertisedRoute) {
+    use crate::update::ExplainDecision::{Advertise, NoBestRoute};
+    let frozen = explanation
+        .gates
+        .iter()
+        .any(|step| step.code == "selection_deferred_frozen");
+    if !frozen
+        || (explanation.decision == Advertise && explanation.already_advertised)
+        || explanation
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "selection_deferred")
+    {
+        return;
+    }
+    explanation.decision = NoBestRoute;
+    explanation.already_advertised = false;
+    let message = "this source no longer exports as admitted; the peer keeps the admitted row \
+                   until graceful-restart selection deferral ends"
+        .to_string();
+    explanation.gates.push(crate::update::ExportGateStep {
+        gate: "adj_rib_out",
+        code: "selection_deferred",
+        verdict: crate::update::ExportGateVerdict::Stop,
+        detail: message.clone(),
+    });
+    explanation.reasons.push(crate::update::ExplainReason {
+        code: "selection_deferred",
+        message,
+    });
 }
 
 #[cfg(test)]
