@@ -3103,15 +3103,24 @@ async fn shared_encode_cell_refuses_a_mismatched_payload() {
     }
 }
 
-/// The member that holds the last reference to a completed shared inventory
-/// releases it one bounded batch per advance after its final frame, not in
-/// the one turn that admits that frame. Unicast and VPN alike.
-#[tokio::test]
-async fn shared_group_last_owner_retires_inventory_in_bounded_steps() {
-    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
-    let total = 4 * SLICE + 1;
-    let source = Ipv4Addr::new(10, 46, 0, 1);
-    for vpn in [false, true] {
+/// Two update-group members sharing one inventory of `total` routes, each
+/// with an unsent envelope and a writer queue of `capacity` frames. Unicast
+/// routes share one attribute set and VPN routes another; `held` counts
+/// live routes through it.
+struct RetirementFixture {
+    held: Arc<AttrSet>,
+    base: usize,
+    members: Vec<(
+        PeerSession,
+        mpsc::Receiver<RibUpdate>,
+        mpsc::Receiver<Bytes>,
+    )>,
+    updates: Vec<OutboundRouteUpdate>,
+}
+
+impl RetirementFixture {
+    fn new(vpn: bool, total: usize, capacity: usize) -> Self {
+        let source = Ipv4Addr::new(10, 46, 0, 1);
         let unicast_template = make_sourced_route(
             source,
             Ipv4Prefix::new(Ipv4Addr::new(20, 0, 0, 0), 24),
@@ -3123,15 +3132,11 @@ async fn shared_group_last_owner_retires_inventory_in_bounded_steps() {
         } else {
             &unicast_template.attributes
         });
-        let base = Arc::strong_count(&held);
-        let live = || Arc::strong_count(&held) - base;
-        let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
-        let mut members = Vec::new();
-        let mut updates = Vec::new();
+        let count = u32::try_from(total).unwrap();
         let unicast: Arc<Vec<Route>> = Arc::new(if vpn {
             Vec::new()
         } else {
-            (0..u32::try_from(total).unwrap())
+            (0..count)
                 .map(|i| Route {
                     prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1400_0000 | (i << 8)), 24)),
                     ..unicast_template.clone()
@@ -3139,7 +3144,7 @@ async fn shared_group_last_owner_retires_inventory_in_bounded_steps() {
                 .collect()
         });
         let vpn_routes: Arc<Vec<_>> = Arc::new(if vpn {
-            (0..u32::try_from(total).unwrap())
+            (0..count)
                 .map(|i| {
                     let mut route = vpn_template.clone();
                     route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0a00_0000 | i), 32).unwrap();
@@ -3149,6 +3154,11 @@ async fn shared_group_last_owner_retires_inventory_in_bounded_steps() {
         } else {
             Vec::new()
         });
+        drop((unicast_template, vpn_template));
+        let base = Arc::strong_count(&held) - total;
+        let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+        let mut members = Vec::new();
+        let mut updates = Vec::new();
         for _ in 0..2 {
             let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
             let mut negotiated = negotiated_session(65002, false);
@@ -3157,7 +3167,7 @@ async fn shared_group_last_owner_retires_inventory_in_bounded_steps() {
             }
             session.negotiated = Some(Arc::new(negotiated));
             session.config.route_server_client = true;
-            let (bulk, frames) = mpsc::channel(100_000);
+            let (bulk, frames) = mpsc::channel(capacity);
             session.writer_bulk_tx = Some(bulk);
             let update = if vpn {
                 OutboundRouteUpdate {
@@ -3172,33 +3182,171 @@ async fn shared_group_last_owner_retires_inventory_in_bounded_steps() {
             updates.push(update);
             members.push((session, rib_rx, frames));
         }
-        drop((unicast, vpn_routes));
-        assert_eq!(live(), total);
+        Self {
+            held,
+            base,
+            members,
+            updates,
+        }
+    }
+
+    fn live(&self) -> usize {
+        Arc::strong_count(&self.held) - self.base
+    }
+
+    /// Advance member `index` until its envelope is gone, recording what
+    /// each advance released.
+    async fn drain(&mut self, index: usize, released: &mut Vec<usize>) {
+        loop {
+            let (member, _, frames) = &mut self.members[index];
+            let Some(pending) = member.pending_outbound.as_ref() else {
+                return;
+            };
+            pending.ready(member.writer_bulk_tx.as_ref()).await;
+            let before = Arc::strong_count(&self.held);
+            member.advance_pending_outbound();
+            while frames.try_recv().is_ok() {}
+            released.push(before - Arc::strong_count(&self.held));
+        }
+    }
+}
+
+const RETIRE_SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+const RETIRE_TOTAL: usize = 4 * RETIRE_SLICE + 1;
+
+/// The member that holds the last reference to a completed shared inventory
+/// releases it one bounded batch per advance after its final frame, not in
+/// the one turn that admits that frame. Unicast and VPN alike.
+#[tokio::test]
+async fn shared_group_last_owner_retires_inventory_in_bounded_steps() {
+    for vpn in [false, true] {
+        let mut fixture = RetirementFixture::new(vpn, RETIRE_TOTAL, 100_000);
+        assert_eq!(fixture.live(), RETIRE_TOTAL);
 
         // The first member completes while the second still holds the inventory.
-        let (first, _, _) = &mut members[0];
-        first.test_drain_outbound(updates.remove(0)).await;
+        let update = fixture.updates.remove(0);
+        fixture.members[0].0.test_drain_outbound(update).await;
         assert_eq!(
-            live(),
-            total,
+            fixture.live(),
+            RETIRE_TOTAL,
             "vpn={vpn}: a non-last member releases nothing"
         );
 
-        let (last, _, frames) = &mut members[1];
-        let mut before = live();
-        last.handle_outbound_route_update(updates.remove(0)).await;
-        let mut released = vec![before - live()];
-        while let Some(pending) = last.pending_outbound.as_ref() {
-            pending.ready(last.writer_bulk_tx.as_ref()).await;
-            before = live();
-            last.advance_pending_outbound();
-            released.push(before - live());
+        let before = fixture.live();
+        let update = fixture.updates.remove(0);
+        fixture.members[1]
+            .0
+            .handle_outbound_route_update(update)
+            .await;
+        let mut released = vec![before - fixture.live()];
+        fixture.drain(1, &mut released).await;
+        assert_eq!(
+            fixture.live(),
+            0,
+            "vpn={vpn}: the last owner releases every route"
+        );
+        assert!(
+            released.iter().all(|&batch| batch <= RETIRE_SLICE),
+            "vpn={vpn}: one advance released more than a slice: {released:?}"
+        );
+    }
+}
+
+/// Members completing at the same moment each consume their reference, so
+/// exactly one of them owns the inventory and paces its release. Neither
+/// may leave a whole inventory to whichever envelope happens to drop last.
+#[tokio::test]
+async fn shared_group_concurrent_completions_still_retire_in_bounded_steps() {
+    for vpn in [false, true] {
+        // A one-frame writer queue keeps both envelopes open.
+        let mut fixture = RetirementFixture::new(vpn, RETIRE_TOTAL, 1);
+        let mut pendings = Vec::new();
+        for (member, update) in fixture
+            .members
+            .iter_mut()
+            .zip(std::mem::take(&mut fixture.updates))
+        {
+            member.0.handle_outbound_route_update(update).await;
+            pendings.push(
+                member
+                    .0
+                    .pending_outbound
+                    .take()
+                    .expect("envelope stays open"),
+            );
+        }
+        assert_eq!(fixture.live(), RETIRE_TOTAL);
+
+        // Both complete before either envelope is dropped.
+        let retiring: Vec<bool> = pendings
+            .iter_mut()
+            .map(super::outbound::PendingOutbound::begin_retirement)
+            .collect();
+        assert_eq!(
+            retiring.iter().filter(|&&r| r).count(),
+            1,
+            "vpn={vpn}: exactly one completion owns the inventory"
+        );
+        let mut released = Vec::new();
+        for ((member, _, _), (pending, retiring)) in fixture
+            .members
+            .iter_mut()
+            .zip(pendings.into_iter().zip(retiring))
+        {
+            let before = Arc::strong_count(&fixture.held);
+            if retiring {
+                member.pending_outbound = Some(pending);
+            } else {
+                drop(pending);
+            }
+            released.push(before - Arc::strong_count(&fixture.held));
+        }
+        for index in 0..2 {
+            fixture.drain(index, &mut released).await;
+        }
+        assert_eq!(fixture.live(), 0, "vpn={vpn}: every route released");
+        assert!(
+            released.iter().all(|&batch| batch <= RETIRE_SLICE),
+            "vpn={vpn}: one step released more than a slice: {released:?}"
+        );
+    }
+}
+
+/// A disconnect while the last owner is still releasing its inventory keeps
+/// the bounded release going instead of dropping the remainder at once.
+#[tokio::test]
+async fn shared_group_disconnect_during_retirement_keeps_release_bounded() {
+    for vpn in [false, true] {
+        let mut fixture = RetirementFixture::new(vpn, RETIRE_TOTAL, 100_000);
+        let update = fixture.updates.remove(0);
+        fixture.members[0].0.test_drain_outbound(update).await;
+        let update = fixture.updates.remove(0);
+        fixture.members[1]
+            .0
+            .handle_outbound_route_update(update)
+            .await;
+        let mut released = Vec::new();
+        // Advance until the envelope has completed and retirement has begun.
+        while fixture.live() == RETIRE_TOTAL {
+            let (member, _, frames) = &mut fixture.members[1];
+            let pending = member.pending_outbound.as_ref().expect("still open");
+            pending.ready(member.writer_bulk_tx.as_ref()).await;
+            member.advance_pending_outbound();
             while frames.try_recv().is_ok() {}
         }
-        assert_eq!(live(), 0, "vpn={vpn}: the last owner releases every route");
         assert!(
-            released.iter().all(|&batch| batch <= SLICE),
-            "vpn={vpn}: one advance released more than a slice: {released:?}"
+            fixture.live() > RETIRE_SLICE,
+            "vpn={vpn}: retirement is still under way"
+        );
+
+        let before = fixture.live();
+        fixture.members[1].0.handle_tcp_disconnect();
+        released.push(before - fixture.live());
+        fixture.drain(1, &mut released).await;
+        assert_eq!(fixture.live(), 0, "vpn={vpn}: every route released");
+        assert!(
+            released.iter().all(|&batch| batch <= RETIRE_SLICE),
+            "vpn={vpn}: the disconnect released more than a slice: {released:?}"
         );
     }
 }

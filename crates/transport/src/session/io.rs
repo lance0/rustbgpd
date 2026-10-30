@@ -603,7 +603,7 @@ impl PeerSession {
     /// own select observes it via the writer-exit arm.
     pub(super) fn close_tcp(&mut self) {
         self.cancel_outbound_replay();
-        self.pending_outbound = None;
+        self.retire_pending_outbound();
         self.outbound_admission_timer = None;
         self.writer_completed = None;
         if let Some(task) = self.connect_task.take() {
@@ -661,7 +661,7 @@ impl PeerSession {
     /// drop pattern as `close_tcp`.
     pub(super) fn handle_tcp_disconnect(&mut self) {
         self.cancel_outbound_replay();
-        self.pending_outbound = None;
+        self.retire_pending_outbound();
         self.outbound_admission_timer = None;
         self.writer_completed = None;
         debug!(peer = %self.peer_label, "TCP disconnected");

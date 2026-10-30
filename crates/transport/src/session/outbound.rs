@@ -43,7 +43,7 @@ pub(super) struct PendingOutbound {
     evpn_announce: std::vec::IntoIter<EvpnRibRoute>,
     vpn_announce: std::vec::IntoIter<VpnRibRoute>,
     labeled_announce: std::vec::IntoIter<LabeledRibRoute>,
-    /// Unicast announcements, filled only once the envelope completes (see
+    /// Unicast announcements, filled only once the envelope retires (see
     /// [`Self::begin_retirement`]); until then they stay in `update`.
     announce: std::vec::IntoIter<Route>,
     /// Spans every announce slice, so the envelope reports dropped IPv6
@@ -130,17 +130,38 @@ fn take_private_announcements<T>(
     }
 }
 
+/// Consume one envelope's reference to `shared`. `Arc::into_inner`, unlike
+/// `Arc::try_unwrap`, hands the inventory to exactly one of several members
+/// completing at once, so it is never left to whichever drops last. A moved
+/// private remainder already in `owned` is kept.
+fn own_if_last<T>(owned: &mut std::vec::IntoIter<T>, shared: &mut Arc<Vec<T>>) {
+    if let Some(routes) = Arc::into_inner(std::mem::take(shared))
+        && !routes.is_empty()
+    {
+        debug_assert_eq!(owned.len(), 0, "a shared inventory has no moved remainder");
+        *owned = routes.into_iter();
+    }
+}
+
 impl PendingOutbound {
-    /// Once every frame is admitted, no fallback can read the announcements
-    /// again. Where this session holds the last reference to a shared (or
-    /// private unicast) inventory it takes ownership, so the inventory is
-    /// released a bounded batch per advance, like moved private payloads,
-    /// instead of in one synchronous drop. Returns whether any remains after
-    /// the first batch.
-    fn begin_retirement(&mut self) -> bool {
-        self.announce = take_private_announcements(&mut self.update.announce, false);
-        self.vpn_announce = take_private_announcements(&mut self.update.vpn_announce, false);
-        self.evpn_announce = take_private_announcements(&mut self.update.evpn_announce, false);
+    /// Keep a completed or abandoned envelope only while its inventory is
+    /// released in bounded steps; nothing more is sent from it. A replay
+    /// envelope carries no announcement inventory and is dropped as before.
+    pub(super) fn into_retiring(mut self) -> Option<Self> {
+        (self.update.replay.is_none() && self.begin_retirement()).then_some(self)
+    }
+
+    /// Once the envelope completes or is abandoned, no fallback can read the
+    /// announcements again. Each envelope consumes its own reference to a
+    /// shared (or private unicast) inventory; the one that held the last
+    /// reference takes ownership, so the inventory is released a bounded batch
+    /// per advance, like moved private payloads, instead of in one synchronous
+    /// drop. Returns whether any remains after the first batch.
+    pub(super) fn begin_retirement(&mut self) -> bool {
+        own_if_last(&mut self.announce, &mut self.update.announce);
+        own_if_last(&mut self.vpn_announce, &mut self.update.vpn_announce);
+        own_if_last(&mut self.evpn_announce, &mut self.update.evpn_announce);
+        self.shared = None;
         self.capacity_blocked = false;
         self.phase = OUTBOUND_PHASES.len();
         self.retire_step()
@@ -153,7 +174,8 @@ impl PendingOutbound {
         let budget = self.slice_routes;
         let released = self.announce.by_ref().take(budget).count()
             + self.vpn_announce.by_ref().take(budget).count()
-            + self.evpn_announce.by_ref().take(budget).count();
+            + self.evpn_announce.by_ref().take(budget).count()
+            + self.labeled_announce.by_ref().take(budget).count();
         let cost = started.elapsed();
         #[cfg(test)]
         let cost = self.test_slice_cost.unwrap_or(cost);
@@ -163,11 +185,15 @@ impl PendingOutbound {
         self.retiring()
     }
 
-    /// Only a completed envelope retires: before that, the moved private
-    /// iterators still hold routes to send.
-    fn retiring(&self) -> bool {
+    /// Only a completed or abandoned envelope retires: before that, the
+    /// moved private iterators still hold routes to send.
+    pub(super) fn retiring(&self) -> bool {
         self.phase == OUTBOUND_PHASES.len()
-            && self.announce.len() + self.vpn_announce.len() + self.evpn_announce.len() > 0
+            && self.announce.len()
+                + self.vpn_announce.len()
+                + self.evpn_announce.len()
+                + self.labeled_announce.len()
+                > 0
     }
 
     fn shared_announce_phase(&self) -> usize {
@@ -507,6 +533,15 @@ impl PeerSession {
         }
     }
 
+    /// Teardown abandons the envelope but still releases its inventory in
+    /// bounded steps (see [`PendingOutbound::into_retiring`]).
+    pub(super) fn retire_pending_outbound(&mut self) {
+        self.pending_outbound = self
+            .pending_outbound
+            .take()
+            .and_then(PendingOutbound::into_retiring);
+    }
+
     pub(super) fn expire_outbound_admission(&mut self) {
         self.outbound_admission_timer = None;
         if self
@@ -516,7 +551,7 @@ impl PeerSession {
         {
             // Writer closure and resource expiry can be ready in the same
             // select turn. The writer-exit arm must retain its actual cause.
-            self.pending_outbound = None;
+            self.retire_pending_outbound();
             return;
         }
         warn!(peer = %self.peer_label, "outbound writer capacity admission deadline expired — sending Cease/Out-of-Resources and tearing down");
@@ -542,12 +577,14 @@ impl PeerSession {
         }
         let Some(writer) = &self.writer_bulk_tx else {
             self.outbound_admission_timer = None;
+            self.pending_outbound = pending.into_retiring();
             return;
         };
         if writer.is_closed() {
             // The writer-exit arm owns its actual failure cause. A stale
             // admission deadline must not relabel it as resource saturation.
             self.outbound_admission_timer = None;
+            self.pending_outbound = pending.into_retiring();
             return;
         }
         // Every valid payload entry contributes at most one UPDATE frame;
@@ -574,6 +611,7 @@ impl PeerSession {
                     }
                     if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
                         self.outbound_admission_timer = None;
+                        self.pending_outbound = pending.into_retiring();
                         return;
                     }
                     available -= 1;
@@ -608,6 +646,7 @@ impl PeerSession {
                     .is_err()
                 {
                     self.outbound_admission_timer = None;
+                    self.pending_outbound = pending.into_retiring();
                     return;
                 }
                 self.metrics
@@ -679,10 +718,9 @@ impl PeerSession {
                 )));
             }
         } else {
+            // Finished, or the writer closed: either way only release remains.
             self.outbound_admission_timer = None;
-            if finished && pending.update.replay.is_none() && pending.begin_retirement() {
-                self.pending_outbound = Some(pending);
-            }
+            self.pending_outbound = pending.into_retiring();
         }
         self.sample_outbound_queue_depth();
     }

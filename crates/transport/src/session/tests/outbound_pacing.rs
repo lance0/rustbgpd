@@ -103,7 +103,13 @@ async fn outbound_pacing_full_writer_services_snapshot_and_shutdown() {
     assert!(session.pending_outbound.is_some());
     let actor = tokio::spawn(async move {
         session.run().await.unwrap();
-        assert!(session.pending_outbound.is_none());
+        // Shutdown abandons the envelope: at most its inventory release remains.
+        assert!(
+            session
+                .pending_outbound
+                .as_ref()
+                .is_none_or(super::outbound::PendingOutbound::retiring)
+        );
         assert!(session.outbound_admission_timer.is_none());
     });
     let (reply, response) = oneshot::channel();
