@@ -2784,11 +2784,14 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
 }
 
 /// Refused proof while a deleted RTBH path's key is re-announced for its
-/// surviving sibling. With Add-Path (a private receiver) the sibling only
-/// moves rank: withdraw the deleted path's key and keep the sibling's old
-/// key. With one path per prefix (a grouped receiver) the replacement has no
-/// other key, so the deleted path stays: the prefix must never lose its
-/// blackhole. `held_counts` also checks the advertised count inside the hold.
+/// surviving sibling. A private Add-Path receiver's table still matches its
+/// admitted counts after the refused retry, so it is the wire: the delete
+/// re-ranks as outside the hold, moving the sibling to rank 1 and
+/// withdrawing rank 2, and the prefix stays blackholed throughout. With one
+/// path per prefix (a grouped receiver) the refused admission keeps the
+/// deleted path: the replacement has no other key, and the prefix must never
+/// lose its blackhole. `held_counts` also checks the advertised count inside
+/// the hold.
 #[expect(
     clippy::too_many_lines,
     reason = "one transcript covers pre-hold admission, refused proof, the replacement and release"
@@ -2907,22 +2910,22 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     assert!(result.try_recv().unwrap().unwrap().removed);
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(manager.selection_deferred(FAMILY));
-    assert!(
-        updates.iter().all(|update| update.announce.is_empty()),
-        "re-announcing path 23 needs the refused admission"
-    );
     let withdrawn: Vec<_> = updates
         .iter()
         .flat_map(|update| &update.withdraw)
         .copied()
         .collect();
     if add_path {
-        assert_eq!(withdrawn, [(prefix, 1)], "the deleted rank-1 path leaves");
+        // Each UPDATE withdraws before it announces: rank 1 keeps the
+        // deleted path until path 23 replaces it, so no gap unblackholes
+        // the prefix.
+        assert_eq!(withdrawn, [(prefix, 2)], "rank 2 empties");
         assert_eq!(
-            wire.get(&(prefix, 2)).map(Route::local_pref),
+            wire.get(&(prefix, 1)).map(Route::local_pref),
             Some(100),
-            "the surviving RTBH path keeps its old rank"
+            "the surviving RTBH path moves to rank 1"
         );
+        assert!(!wire.contains_key(&(prefix, 2)));
         if held_counts {
             assert_eq!(
                 manager.actual_unicast_advertised_count(observer),
@@ -2930,6 +2933,10 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
             );
         }
     } else {
+        assert!(
+            updates.iter().all(|update| update.announce.is_empty()),
+            "re-announcing path 23 needs the refused admission"
+        );
         assert_eq!(withdrawn, [], "the replacement has no other key");
         assert_eq!(
             wire.get(&(prefix, 0)).map(Route::local_pref),
@@ -2970,7 +2977,6 @@ fn refused_proof_withdraws_a_deleted_add_path_rtbh_and_keeps_its_moved_sibling()
 }
 
 #[test]
-#[ignore = "LAN-2702: the held count omits the RTBH admitted under refused proof"]
 fn refused_proof_add_path_rtbh_admission_keeps_held_advertised_count() {
     assert_refused_proof_rtbh_replacement(true, true);
 }
@@ -2982,7 +2988,10 @@ fn refused_proof_keeps_a_single_best_prefix_blackholed_across_rtbh_replacement()
 
 /// The refused-proof replacement salvage is linear in the batch: deleting
 /// rank 1 of `siblings` Add-Path RTBH paths re-ranks every other path, and
-/// each re-announcement must not rescan the prefix's siblings.
+/// each re-announcement must not rescan the prefix's siblings. A private
+/// table that still matches its counts after the refused retry is the wire,
+/// so this receiver now re-ranks without the salvage; stable Add-Path keys
+/// (LAN-2700) rework this test.
 fn refused_replacement_salvage_visits(siblings: u32) -> usize {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
@@ -3076,7 +3085,11 @@ fn refused_replacement_salvage_visits(siblings: u32) -> usize {
         .iter()
         .flat_map(|update| update.withdraw.clone())
         .collect();
-    assert_eq!(withdrawn, [(prefix, 1)], "the deleted rank-1 path leaves");
+    assert_eq!(
+        withdrawn,
+        [(prefix, siblings)],
+        "the siblings move up and the last rank empties"
+    );
     manager.refused_replacement_salvage_visits
 }
 
@@ -3086,7 +3099,7 @@ fn refused_replacement_salvage_work_is_linear_in_add_path_siblings() {
         let visits = refused_replacement_salvage_visits(siblings);
         let bound = 3 * siblings as usize + 8;
         assert!(
-            visits > siblings as usize && visits <= bound,
+            visits <= bound,
             "{siblings} siblings cost {visits} salvage visits; bound {bound}"
         );
     }
