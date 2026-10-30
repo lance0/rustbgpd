@@ -29,7 +29,7 @@
 //!
 //! Known open defects are allowed only by their exact signature, each
 //! naming its ticket (`allowed`). `ORACLE_STRICT=1` disables every
-//! allowance and `ORACLE_STRICT=LAN-2680,...` only the listed ones, which
+//! allowance and `ORACLE_STRICT=LAN-2690,...` only the listed ones, which
 //! reproduces them. `PROPTEST_CASES` scales the case count for a deep run;
 //! `ORACLE_TRACE` prints each operation and wire update. A failure prints a
 //! sequence minimized by one-op deletion.
@@ -651,11 +651,6 @@ impl Harness {
     /// A known open defect that explains `index` losing its exempt rows
     /// during the hold, or `None`.
     fn known_unblackhole(&self, index: usize, fallback: bool) -> Option<&'static str> {
-        // LAN-2689: with admitted proof, a dirty resync behind a
-        // replay-re-armed ORF gate withdraws the gated family's admitted keys.
-        if self.orf_gated && !fallback {
-            return allowed("LAN-2689");
-        }
         // LAN-2692: under refused proof, an Add-Path
         // receiver withdraws a removed exempt path while its exempt
         // replacement still waits for admission.
@@ -768,28 +763,7 @@ impl Harness {
     /// A known open defect that explains this stale extra row, or `None`.
     /// Each allowance matches one ticket's exact signature; the invariant
     /// itself is never weakened.
-    fn known_stale(
-        &self,
-        key: (Prefix, u32),
-        injection: usize,
-        expected: &BTreeMap<(Prefix, u32), usize>,
-    ) -> Option<&'static str> {
-        // LAN-2680: after a same-channel replay and refused proof (in
-        // either order) leave keys-only provenance, release leaves a
-        // surviving Add-Path path's old rank key, a duplicate of a live row
-        // the fresh dump also carries.
-        let duplicate = expected
-            .iter()
-            .any(|(&(prefix, _), &live)| prefix == key.0 && live == injection);
-        if self.config.add_path
-            && self.replayed
-            && self.refused
-            && key.1 > 1
-            && self.injections[injection].live
-            && duplicate
-        {
-            return allowed("LAN-2680");
-        }
+    fn known_stale(&self, key: (Prefix, u32), injection: usize) -> Option<&'static str> {
         // LAN-2690: a grouped receiver replayed during the hold never
         // withdraws a row removed in that hold.
         if self.grouped_replayed && !self.injections[injection].live {
@@ -797,9 +771,16 @@ impl Harness {
         }
         // LAN-2691: once a same-channel replay and a refused
         // proof (or refused capture) meet in one hold, release never
-        // withdraws a row removed or ORF-denied during that hold.
+        // withdraws a received row, or a grouped receiver's row, removed or
+        // ORF-denied during that hold. A private receiver's local rows keep
+        // their bodies through the replay and converge.
         let denied = self.config.orf && self.deny & (1 << prefix_index(key.0)) != 0;
-        if self.replayed && self.refused && (!self.injections[injection].live || denied) {
+        let received = self.injections[injection].prefix >= LOCAL_PREFIXES;
+        if self.replayed
+            && self.refused
+            && (!self.injections[injection].live || denied)
+            && (received || self.config.grouped)
+        {
             return allowed("LAN-2691");
         }
         None
@@ -823,7 +804,7 @@ impl Harness {
             && !extra.is_empty()
             && extra
                 .iter()
-                .all(|&(&key, &injection)| self.known_stale(key, injection, &expected).is_some());
+                .all(|&(&key, &injection)| self.known_stale(key, injection).is_some());
         prop_assert!(
             known || wire == expected,
             "I2: released wire {} differs from a fresh dump {}",
@@ -838,8 +819,7 @@ impl Harness {
             .iter()
             .filter(|&&(&key, &injection)| {
                 known
-                    && !(self.config.limit
-                        && self.known_stale(key, injection, &expected) == Some("LAN-2690"))
+                    && !(self.config.limit && self.known_stale(key, injection) == Some("LAN-2690"))
             })
             .count();
         let actual = self
@@ -1189,4 +1169,94 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
         swapped(false).is_ok(),
         "a check after all announcements cannot see it"
     );
+}
+
+/// Minimized cases a keys-only replay used to break, checked with every
+/// allowance off: local rows keep their bodies and index through the
+/// replay, so release and recovery converge exactly.
+#[test]
+fn keys_only_replay_keeps_local_rows_exact() {
+    use Op::{Backpressure, Delete, Drain, Inject, Receive, RefuseProof, Replay};
+    let config = |add_path, orf| Config {
+        grouped: false,
+        add_path,
+        per_client_best: false,
+        orf,
+        limit: false,
+    };
+    let inject = |prefix, path, preference, blackhole| Inject {
+        prefix,
+        path,
+        preference,
+        blackhole,
+    };
+    let replay = Replay {
+        refuse_capture: false,
+    };
+    let cases = [
+        (
+            // A surviving Add-Path RTBH path's old rank key is withdrawn
+            // at release, not left as a duplicate.
+            "add-path rank after release",
+            config(true, false),
+            vec![],
+            vec![
+                Backpressure(true),
+                inject(2, 0, 0, true),
+                inject(2, 2, 0, true),
+                RefuseProof,
+                Delete { prefix: 2, path: 2 },
+                replay.clone(),
+            ],
+        ),
+        (
+            // The last local route deleted behind a full writer after the
+            // replay is still withdrawn.
+            "last local route deleted after replay",
+            config(false, false),
+            vec![Receive { prefix: 3 }, inject(0, 0, 0, true)],
+            vec![
+                replay.clone(),
+                Backpressure(true),
+                Delete { prefix: 0, path: 0 },
+            ],
+        ),
+        (
+            // A deleted RTBH host route is withdrawn after replay and
+            // refused proof.
+            "deleted rtbh after replay and refused proof",
+            config(false, false),
+            vec![inject(1, 0, 2, true)],
+            vec![
+                Backpressure(true),
+                inject(0, 2, 0, true),
+                RefuseProof,
+                replay.clone(),
+                Delete { prefix: 0, path: 2 },
+            ],
+        ),
+        (
+            // A replay that re-arms the ORF gate keeps the RTBH advertised
+            // until the refresh, with admitted or refused proof.
+            "orf-gated rtbh with admitted proof",
+            config(false, true),
+            vec![inject(0, 0, 0, false)],
+            vec![replay.clone(), Drain],
+        ),
+        (
+            "orf-gated rtbh with refused proof",
+            config(false, true),
+            vec![Receive { prefix: 3 }, inject(0, 0, 0, false)],
+            vec![Backpressure(true), replay.clone(), RefuseProof, Drain],
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, config, setup, hold)| {
+            run(config, &setup, &hold)
+                .err()
+                .map(|error| format!("{name}: {error}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

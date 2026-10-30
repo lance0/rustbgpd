@@ -3458,8 +3458,8 @@ impl RibManager {
                 // rank-1 RTBH path is re-ranked by its sibling. Withdraw that
                 // key only while the replacing exempt source provably keeps
                 // its own admitted key, so the prefix never loses its
-                // blackhole. Provenance, not the prefix index, proves it: a
-                // keys-only replay retires bodies but keeps provenance.
+                // blackhole. Local rows keep their bodies and prefix index
+                // through a keys-only replay, so the index proves it.
                 #[cfg(test)]
                 let mut visits = 0;
                 if let Some(rib) = self.adj_ribs_out.get(&peer) {
@@ -3489,14 +3489,19 @@ impl RibManager {
                         let mut prefixes: HashSet<_> =
                             departures.iter().map(|&(prefix, _, _)| prefix).collect();
                         let mut held = HashSet::new();
-                        for (&(prefix, _), source) in rib.local_export_sources() {
-                            checkpoint();
-                            #[cfg(test)]
-                            {
-                                visits += 1;
-                            }
-                            if source.deferral_exempt && prefixes.contains(&prefix) {
-                                held.insert((prefix, source.path_id));
+                        for &prefix in &prefixes {
+                            for path_id in rib.path_ids_for_prefix(&prefix) {
+                                checkpoint();
+                                #[cfg(test)]
+                                {
+                                    visits += 1;
+                                }
+                                if let Some(source) = rib
+                                    .local_export_source(&prefix, path_id)
+                                    .filter(|source| source.deferral_exempt)
+                                {
+                                    held.insert((prefix, source.path_id));
+                                }
                             }
                         }
                         for &(prefix, path_id, replacement) in &departures {

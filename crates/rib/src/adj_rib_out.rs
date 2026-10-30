@@ -443,25 +443,24 @@ impl AdjRibOut {
         retained
     }
 
-    pub(crate) fn take_local_export_sources(
-        &mut self,
-    ) -> ShardedMap<(Prefix, u32), LocalExportSource> {
-        std::mem::take(&mut self.local_export_sources)
-    }
-
-    pub(crate) fn adopt_local_export_sources(
-        &mut self,
-        sources: ShardedMap<(Prefix, u32), LocalExportSource>,
-    ) {
-        self.local_export_sources = sources;
-    }
-
-    /// Every admitted key's original local provenance. It survives a
-    /// keys-only replay that retires the route bodies and prefix index.
-    pub(crate) fn local_export_sources(
-        &self,
-    ) -> impl Iterator<Item = (&(Prefix, u32), &LocalExportSource)> {
-        self.local_export_sources.iter()
+    /// Move only locally sourced rows, with their bodies, next-hop actions,
+    /// prefix index and provenance, into a new table; every received row
+    /// stays behind for retirement. Local injections are an operator-sized
+    /// set, so a keys-only replay keeps them exactly and later diffs need no
+    /// reconstruction from provenance alone.
+    pub(crate) fn take_local_rows(&mut self, checkpoint: &mut impl FnMut()) -> Self {
+        let mut retained = Self::new(self.peer);
+        let mut sources = std::mem::take(&mut self.local_export_sources);
+        for (&(prefix, path_id), &source) in sources.iter() {
+            checkpoint();
+            let action = self.next_hop_override(&prefix, path_id).cloned();
+            if let Some(route) = self.take_with(&prefix, path_id, checkpoint) {
+                retained.insert_with_next_hop(route, action, checkpoint);
+            }
+            retained.set_local_export_source((prefix, path_id), Some(source));
+        }
+        retire_sharded_map(&mut sources, checkpoint);
+        retained
     }
 
     pub(crate) fn local_export_source(
@@ -557,16 +556,28 @@ impl AdjRibOut {
         path_id: u32,
         checkpoint: &mut impl FnMut(),
     ) -> bool {
+        let retired = self.take_with(prefix, path_id, checkpoint);
+        let removed = retired.is_some();
+        drop(retired);
+        checkpoint();
+        removed
+    }
+
+    /// Remove a route and every per-key record, returning its body.
+    fn take_with(
+        &mut self,
+        prefix: &Prefix,
+        path_id: u32,
+        checkpoint: &mut impl FnMut(),
+    ) -> Option<Route> {
         let (handle, remove_prefix) = {
-            let Some(ids) = self.prefix_path_ids.get_mut(prefix) else {
-                return false;
-            };
-            let Ok(pos) = ids.binary_search_by(|(id, _)| {
-                checkpoint();
-                id.cmp(&path_id)
-            }) else {
-                return false;
-            };
+            let ids = self.prefix_path_ids.get_mut(prefix)?;
+            let pos = ids
+                .binary_search_by(|(id, _)| {
+                    checkpoint();
+                    id.cmp(&path_id)
+                })
+                .ok()?;
             let handle = ids[pos].1;
             for index in pos..ids.len() - 1 {
                 checkpoint();
@@ -589,16 +600,13 @@ impl AdjRibOut {
         self.local_export_sources.remove(&(*prefix, path_id));
         self.set_self_next_hop(handle, false);
         let retired = self.routes.remove(handle);
-        let removed = retired.is_some();
         track(
             &mut self.second_family.unicast,
             matches!(prefix, Prefix::V6(_)),
             false,
-            removed,
+            retired.is_some(),
         );
-        drop(retired);
-        checkpoint();
-        removed
+        retired
     }
 
     /// Look up a route by prefix and path ID.
@@ -1655,6 +1663,60 @@ mod tests {
         assert_eq!(retained.path_ids_for_prefix(&v6).as_slice(), [9]);
         assert!(retained.remove_vpn(&vpn6_key));
         assert_eq!(retained.family_lens().vpn, [1, 0]);
+    }
+
+    /// A keys-only replay keeps local rows exactly and drops received rows:
+    /// the local body, next-hop action, prefix index and provenance move to
+    /// the retained table, and no received body comes along.
+    #[test]
+    fn take_local_rows_moves_local_rows_and_leaves_received_rows() {
+        let v6 = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            "2001:db8::".parse().unwrap(),
+            32,
+        ));
+        let mut rib = AdjRibOut::new(PeerId::from_addr("192.0.2.1".parse().unwrap()));
+        let specific = NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
+        rib.insert_with_next_hop(
+            make_route(prefix_a(), 1),
+            Some(specific.clone()),
+            &mut || {},
+        );
+        rib.set_local_export_source(
+            (prefix_a(), 1),
+            Some(LocalExportSource {
+                path_id: 17,
+                deferral_exempt: true,
+            }),
+        );
+        rib.insert(make_route(prefix_a(), 2));
+        rib.insert(make_route(v6, 0));
+        let mut checkpoints = 0;
+        let retained = rib.take_local_rows(&mut || checkpoints += 1);
+        assert!(checkpoints > 0);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained.path_ids_for_prefix(&prefix_a()).as_slice(), [1]);
+        assert!(retained.get(&prefix_a(), 1).is_some());
+        assert_eq!(retained.next_hop_override(&prefix_a(), 1), Some(&specific));
+        assert_eq!(
+            retained.local_export_source(&prefix_a(), 1),
+            Some(LocalExportSource {
+                path_id: 17,
+                deferral_exempt: true
+            })
+        );
+        assert!(
+            retained.get(&prefix_a(), 2).is_none(),
+            "received row left behind"
+        );
+        assert!(retained.get(&v6, 0).is_none(), "received row left behind");
+        assert_eq!(rib.len(), 2, "only received rows remain to retire");
+        assert!(
+            rib.get(&prefix_a(), 1).is_none(),
+            "local body moved, not copied"
+        );
+        assert_eq!(rib.path_ids_for_prefix(&prefix_a()).as_slice(), [2]);
+        assert!(rib.local_export_source(&prefix_a(), 1).is_none());
+        assert_eq!(rib.family_lens().unicast, [1, 1]);
     }
 
     /// A batch whose keys all land in one nearly full shard must reserve

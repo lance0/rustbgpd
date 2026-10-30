@@ -889,8 +889,8 @@ impl RibManager {
         // Any family's removed committed rows end an advertised-view walk.
         if let Some(mut rib) = self.adj_ribs_out.remove(&peer) {
             let retained_common = retain_private_body.then(|| rib.take_common_routes());
-            let local_sources = (same_connection_replay && retained_common.is_none())
-                .then(|| rib.take_local_export_sources());
+            let local_rows = (same_connection_replay && retained_common.is_none())
+                .then(|| rib.take_local_rows(&mut || self.replacement_checkpoint(false)));
             if !rib.is_empty_all_families() {
                 self.advance_advertised_pages();
             }
@@ -934,9 +934,7 @@ impl RibManager {
             });
             if let Some(retained) = retained_common {
                 self.adj_ribs_out.insert(peer, retained);
-            } else if let Some(sources) = local_sources {
-                let mut retained = AdjRibOut::new(peer);
-                retained.adopt_local_export_sources(sources);
+            } else if let Some(retained) = local_rows {
                 self.adj_ribs_out.insert(peer, retained);
             }
         }
