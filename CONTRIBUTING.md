@@ -18,6 +18,12 @@ cargo build --workspace          # builds rustbgpd + rbgp
 cargo test --workspace
 ```
 
+Dev and test builds keep only line tables for workspace crates and no
+debuginfo for dependencies, so backtraces show file and line but a debugger
+cannot inspect local variables. Set `CARGO_PROFILE_DEV_DEBUG=true` for full
+debuginfo in workspace crates, and also pass
+`--config 'profile.dev.package."*".debug=true'` to cover dependencies.
+
 ## Code Style
 
 ```bash

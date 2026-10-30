@@ -257,6 +257,16 @@ name = "policy_set_store_dhat"
 path = "tests/policy_set_store_dhat.rs"
 required-features = ["bench-internals", "dhat-heap"]
 
+# Dev and test builds keep line tables for workspace crates (backtraces still
+# show file:line) and drop dependency debuginfo, which cuts target size and
+# link time. `release-prof` and `scale` keep their own debuginfo. Set
+# `CARGO_PROFILE_DEV_DEBUG=true` locally when a debugger needs locals.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = true
 codegen-units = 1
