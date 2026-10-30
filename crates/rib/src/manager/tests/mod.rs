@@ -1516,6 +1516,7 @@ mod join_cohort;
 mod labeled;
 mod lifecycle;
 mod llgr_families;
+mod llgr_promotion;
 mod local_route_export;
 mod multipath_fib;
 mod no_export;

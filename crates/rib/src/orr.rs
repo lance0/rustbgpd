@@ -483,7 +483,71 @@ pub struct OrrTopology {
     /// (TLV 1155, 0 when absent).
     prefix_v4: PrefixMap<Ipv4Net, Vec<(NodeIx, u32)>>,
     prefix_v6: PrefixMap<Ipv6Net, Vec<(NodeIx, u32)>>,
+    /// Advertiser rows across both prefix maps (sizes the lookup signature).
+    prefix_entries: usize,
     input_diagnostics: OrrInputDiagnostics,
+}
+
+/// Test-only capacity growth of each ORR rebuild destination. Every
+/// destination is reserved before it fills, so any growth is rehash or
+/// reallocation work inside one checkpoint slice.
+#[cfg(test)]
+pub(crate) mod rebuild_growth {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    /// Destination -> `(fills, largest capacity growth of one fill)`.
+    pub(crate) type Growth = BTreeMap<&'static str, (usize, usize)>;
+
+    thread_local! {
+        static GROWTH: RefCell<Growth> = RefCell::default();
+    }
+
+    pub(crate) fn record(destination: &'static str, reserved: usize, filled: usize) {
+        GROWTH.with_borrow_mut(|growth| {
+            let entry = growth.entry(destination).or_default();
+            entry.0 += 1;
+            entry.1 = entry.1.max(filled.saturating_sub(reserved));
+        });
+    }
+
+    pub(crate) fn take() -> Growth {
+        GROWTH.take()
+    }
+}
+
+/// Element-wise slice equality with a checkpoint per compared element.
+pub(crate) fn eq_with_checkpoint<T: PartialEq>(
+    left: &[T],
+    right: &[T],
+    checkpoint: &mut impl FnMut(),
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            checkpoint();
+            left == right
+        })
+}
+
+/// Remove every prefix one at a time, then release the emptied trie.
+fn retire_prefix_map<P: prefix_trie::Prefix + Copy, T>(
+    mut map: PrefixMap<P, T>,
+    checkpoint: &mut impl FnMut(),
+) {
+    let mut prefixes = Vec::with_capacity(map.len());
+    checkpoint();
+    for (prefix, _) in &map {
+        checkpoint();
+        prefixes.push(prefix);
+    }
+    for prefix in &prefixes {
+        checkpoint();
+        drop(map.remove(prefix));
+    }
+    checkpoint();
+    drop(prefixes);
+    drop(map);
+    checkpoint();
 }
 
 impl Default for OrrTopology {
@@ -517,12 +581,33 @@ impl OrrTopology {
     /// naturally. Nodes materialize from Link NLRI endpoints; Node NLRIs
     /// contribute keys too but are not required.
     pub fn build<'a>(routes: impl Iterator<Item = &'a BgpLsRibRoute>) -> Self {
+        Self::build_with_checkpoint(routes, 0, &mut || {})
+    }
+
+    /// [`Self::build`] for a readiness-owned rebuild. `inputs` bounds the
+    /// routes `routes` yields; every collection is reserved from it or from
+    /// exact counts taken before filling, and `checkpoint` runs between
+    /// per-input and per-element steps.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dedup, sizing, interning and adjacency passes share one reservation plan"
+    )]
+    pub(crate) fn build_with_checkpoint<'a>(
+        routes: impl Iterator<Item = &'a BgpLsRibRoute>,
+        inputs: usize,
+        checkpoint: &mut impl FnMut(),
+    ) -> Self {
         // Pass 1: dedup by NLRI across peers, folding metrics to the min,
         // preserving first-seen order for deterministic node indexes.
-        let mut order: Vec<(&'a BgpLsNlri, Element)> = Vec::new();
-        let mut seen: HashMap<&'a BgpLsNlri, usize> = HashMap::new();
+        let mut order: Vec<(&'a BgpLsNlri, Element)> = Vec::with_capacity(inputs);
+        checkpoint();
+        let mut seen: HashMap<&'a BgpLsNlri, usize> = HashMap::with_capacity(inputs);
+        checkpoint();
+        #[cfg(test)]
+        let reserved = (order.capacity(), seen.capacity());
         let mut input_diagnostics = OrrInputDiagnostics::default();
         for route in routes {
+            checkpoint();
             // Unknown NLRI are opaque to ORR, including their attributes. Do
             // not parse Attribute 29 merely to discard the classification.
             let attribute_tlvs = if matches!(route.nlri.nlri_type, BgpLsNlriType::Unknown(_)) {
@@ -587,18 +672,55 @@ impl OrrTopology {
             }
         }
 
-        // Pass 2: intern nodes, index addresses, and emit edges.
+        #[cfg(test)]
+        {
+            rebuild_growth::record("orr_build_order", reserved.0, order.capacity());
+            rebuild_growth::record("orr_build_seen", reserved.1, seen.capacity());
+        }
+        checkpoint();
+        drop(seen);
+        checkpoint();
+
+        // Size pass 2 from upper bounds: each element interns at most its
+        // endpoints, and each link indexes at most its present addresses.
+        let (mut nodes, mut links, mut addresses) = (0_usize, 0_usize, 0_usize);
+        for (nlri, element) in &order {
+            checkpoint();
+            match element {
+                Element::Node | Element::IpPrefix { .. } => nodes += 1,
+                Element::Link { metric } => {
+                    nodes += 2;
+                    links += usize::from(metric.is_some());
+                    addresses += usize::from(nlri.link_ipv4_interface_address().is_some())
+                        + usize::from(nlri.link_ipv6_interface_address().is_some())
+                        + usize::from(nlri.link_ipv4_neighbor_address().is_some())
+                        + usize::from(nlri.link_ipv6_neighbor_address().is_some());
+                }
+            }
+        }
+
+        // Pass 2: intern nodes, index addresses, and record usable links.
         let mut topo = Self {
-            node_keys: Vec::new(),
-            node_ix: HashMap::new(),
+            node_keys: Vec::with_capacity(nodes),
+            node_ix: HashMap::with_capacity(nodes),
             adj: Vec::new(),
-            links: Vec::new(),
-            addr_index: HashMap::new(),
+            links: Vec::with_capacity(links),
+            addr_index: HashMap::with_capacity(addresses),
             prefix_v4: PrefixMap::new(),
             prefix_v6: PrefixMap::new(),
+            prefix_entries: 0,
             input_diagnostics,
         };
+        checkpoint();
+        #[cfg(test)]
+        let reserved = (
+            topo.node_keys.capacity(),
+            topo.node_ix.capacity(),
+            topo.links.capacity(),
+            topo.addr_index.capacity(),
+        );
         for (nlri, element) in order {
+            checkpoint();
             match element {
                 Element::Node => {
                     if let Some(key) = nlri.local_node_key() {
@@ -609,6 +731,53 @@ impl OrrTopology {
                 Element::IpPrefix { metric } => topo.add_prefix(nlri, metric),
             }
         }
+        checkpoint();
+
+        // Size each adjacency list from its exact out-degree, then fill in
+        // link order (the order per-link pushes used to produce).
+        let mut degree: Vec<usize> = Vec::with_capacity(topo.node_keys.len());
+        checkpoint();
+        #[expect(
+            clippy::same_item_push,
+            reason = "a filled allocation would initialize every node in one checkpoint slice"
+        )]
+        for _ in &topo.node_keys {
+            checkpoint();
+            degree.push(0);
+        }
+        for link in &topo.links {
+            checkpoint();
+            degree[link.local.index()] += 1;
+        }
+        topo.adj = Vec::with_capacity(degree.len());
+        checkpoint();
+        for &out in &degree {
+            checkpoint();
+            topo.adj.push(Vec::with_capacity(out));
+        }
+        checkpoint();
+        drop(degree);
+        for link in &topo.links {
+            checkpoint();
+            topo.adj[link.local.index()].push((link.remote, link.cost));
+        }
+        checkpoint();
+        #[cfg(test)]
+        {
+            rebuild_growth::record("orr_build_node_keys", reserved.0, topo.node_keys.capacity());
+            rebuild_growth::record("orr_build_node_ix", reserved.1, topo.node_ix.capacity());
+            rebuild_growth::record("orr_build_links", reserved.2, topo.links.capacity());
+            rebuild_growth::record(
+                "orr_build_addr_index",
+                reserved.3,
+                topo.addr_index.capacity(),
+            );
+            rebuild_growth::record(
+                "orr_build_adjacency",
+                topo.links.len(),
+                topo.adj.iter().map(Vec::capacity).sum(),
+            );
+        }
         topo
     }
 
@@ -618,7 +787,6 @@ impl OrrTopology {
         }
         let ix = NodeIx(u32::try_from(self.node_keys.len()).expect("more than u32::MAX nodes"));
         self.node_keys.push(key.clone());
-        self.adj.push(Vec::new());
         self.node_ix.insert(key, ix);
         ix
     }
@@ -648,7 +816,6 @@ impl OrrTopology {
         }
 
         if let Some(cost) = metric {
-            self.adj[local.index()].push((remote, cost));
             self.links.push(OrrLink {
                 local,
                 remote,
@@ -664,6 +831,10 @@ impl OrrTopology {
             return;
         };
         let node = self.intern(node_key);
+        self.prefix_entries += 1;
+        // The tries expose no reservation, so their node tables and each
+        // prefix's advertiser list still grow by amortized reallocation
+        // (a copy, never a rehash).
         match prefix {
             Prefix::V4(p) => {
                 let net = Ipv4Net::new(p.addr, p.len).expect("ip_reachability validates length");
@@ -782,11 +953,21 @@ impl OrrTopology {
     /// order (which derives from hasher-dependent Adj-RIB-In iteration).
     #[must_use]
     pub fn resolve_node(&self, ip: IpAddr) -> Option<NodeIx> {
+        self.resolve_node_with_checkpoint(ip, &mut || {})
+    }
+
+    /// [`Self::resolve_node`] with a checkpoint per covering advertiser.
+    pub(crate) fn resolve_node_with_checkpoint(
+        &self,
+        ip: IpAddr,
+        checkpoint: &mut impl FnMut(),
+    ) -> Option<NodeIx> {
         if let Some(&ix) = self.addr_index.get(&ip) {
             return Some(ix);
         }
         self.prefix_lpm(ip)?
             .iter()
+            .inspect(|_| checkpoint())
             .min_by(|(a_ix, a_metric), (b_ix, b_metric)| {
                 a_metric.cmp(b_metric).then_with(|| {
                     self.node_keys[a_ix.index()]
@@ -815,17 +996,39 @@ impl OrrTopology {
     /// from the result.
     #[must_use]
     pub fn spf(&self, source: NodeIx) -> SpfResult {
-        let mut dist: Vec<Option<u64>> = vec![None; self.node_keys.len()];
-        let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
+        self.spf_with_checkpoint(source, &mut || {})
+    }
+
+    /// [`Self::spf`] with a checkpoint per node initialized, heap pop and
+    /// edge relaxed. The heap is reserved for its bound: one push for the
+    /// source plus at most one per usable link.
+    pub(crate) fn spf_with_checkpoint(
+        &self,
+        source: NodeIx,
+        checkpoint: &mut impl FnMut(),
+    ) -> SpfResult {
+        let mut dist: Vec<Option<u64>> = Vec::with_capacity(self.node_keys.len());
+        checkpoint();
+        for _ in &self.node_keys {
+            checkpoint();
+            dist.push(None);
+        }
+        let mut heap: BinaryHeap<Reverse<(u64, u32)>> =
+            BinaryHeap::with_capacity(self.links.len() + 1);
+        checkpoint();
+        #[cfg(test)]
+        let reserved = (dist.capacity(), heap.capacity());
         if let Some(entry) = dist.get_mut(source.index()) {
             *entry = Some(0);
             heap.push(Reverse((0, source.0)));
         }
         while let Some(Reverse((d, ix))) = heap.pop() {
+            checkpoint();
             if dist[ix as usize] != Some(d) {
                 continue; // stale heap entry
             }
             for &(next, cost) in &self.adj[ix as usize] {
+                checkpoint();
                 let nd = d.saturating_add(u64::from(cost));
                 if dist[next.index()].is_none_or(|current| nd < current) {
                     dist[next.index()] = Some(nd);
@@ -833,6 +1036,14 @@ impl OrrTopology {
                 }
             }
         }
+        #[cfg(test)]
+        {
+            rebuild_growth::record("orr_spf_dist", reserved.0, dist.capacity());
+            rebuild_growth::record("orr_spf_heap", reserved.1, heap.capacity());
+        }
+        checkpoint();
+        drop(heap);
+        checkpoint();
         SpfResult {
             dist,
             nh_cache: Mutex::new(LruCache::new(
@@ -848,52 +1059,118 @@ impl OrrTopology {
     /// key-addressed distances, never raw `dist` vectors.
     #[must_use]
     pub fn spf_signature(&self, spf: &SpfResult) -> Vec<(Vec<u8>, u64)> {
-        let mut signature: Vec<(Vec<u8>, u64)> = self
-            .node_keys
-            .iter()
-            .enumerate()
-            .filter_map(|(i, key)| {
-                spf.dist
-                    .get(i)
-                    .copied()
-                    .flatten()
-                    .map(|dist| (key.as_bytes().to_vec(), dist))
-            })
-            .collect();
-        signature.sort();
+        self.spf_signature_with_checkpoint(spf, &mut || {})
+    }
+
+    /// [`Self::spf_signature`] with a checkpoint per node and per sort
+    /// comparison, reserved for every node so collection never regrows.
+    pub(crate) fn spf_signature_with_checkpoint(
+        &self,
+        spf: &SpfResult,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<(Vec<u8>, u64)> {
+        let mut signature: Vec<(Vec<u8>, u64)> = Vec::with_capacity(self.node_keys.len());
+        checkpoint();
+        #[cfg(test)]
+        let reserved = signature.capacity();
+        for (i, key) in self.node_keys.iter().enumerate() {
+            checkpoint();
+            if let Some(dist) = spf.dist.get(i).copied().flatten() {
+                signature.push((key.as_bytes().to_vec(), dist));
+            }
+        }
+        #[cfg(test)]
+        rebuild_growth::record("orr_spf_signature", reserved, signature.capacity());
+        // Keys are unique, so the unstable sort matches the stable order
+        // without the stable sort's scratch allocation.
+        signature.sort_unstable_by(|left, right| {
+            checkpoint();
+            left.cmp(right)
+        });
         signature
     }
 
     /// Compare next-hop lookup inputs independently of node interning order.
     /// Node distances alone miss address ownership and prefix reachability
     /// changes, including Prefix Metric replacements.
-    pub(crate) fn same_next_hop_lookup(&self, other: &Self) -> bool {
-        self.addr_index.len() == other.addr_index.len()
-            && self.addr_index.iter().all(|(address, node)| {
+    pub(crate) fn same_next_hop_lookup_with_checkpoint(
+        &self,
+        other: &Self,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
+        if self.addr_index.len() != other.addr_index.len()
+            || !self.addr_index.iter().all(|(address, node)| {
+                checkpoint();
                 other.addr_index.get(address).is_some_and(|other_node| {
                     self.node_keys[node.index()] == other.node_keys[other_node.index()]
                 })
             })
-            && self.prefix_signature() == other.prefix_signature()
+        {
+            return false;
+        }
+        let mine = self.prefix_signature(checkpoint);
+        let theirs = other.prefix_signature(checkpoint);
+        let same = eq_with_checkpoint(&mine, &theirs, checkpoint);
+        // Borrowed rows own nothing; releasing either buffer is one free.
+        drop((mine, theirs));
+        checkpoint();
+        same
     }
 
-    fn prefix_signature(&self) -> Vec<(Prefix, &[u8], u32)> {
-        let mut prefixes = Vec::new();
+    fn prefix_signature(&self, checkpoint: &mut impl FnMut()) -> Vec<(Prefix, &[u8], u32)> {
+        let mut prefixes = Vec::with_capacity(self.prefix_entries);
+        checkpoint();
+        #[cfg(test)]
+        let reserved = prefixes.capacity();
         for (net, advertisers) in &self.prefix_v4 {
             let prefix = Prefix::V4(Ipv4Prefix::new(net.addr(), net.prefix_len()));
             for &(node, metric) in advertisers {
+                checkpoint();
                 prefixes.push((prefix, self.node_keys[node.index()].as_bytes(), metric));
             }
         }
         for (net, advertisers) in &self.prefix_v6 {
             let prefix = Prefix::V6(Ipv6Prefix::new(net.addr(), net.prefix_len()));
             for &(node, metric) in advertisers {
+                checkpoint();
                 prefixes.push((prefix, self.node_keys[node.index()].as_bytes(), metric));
             }
         }
-        prefixes.sort_unstable();
-        prefixes.dedup();
+        #[cfg(test)]
+        rebuild_growth::record("orr_prefix_signature", reserved, prefixes.capacity());
+        prefixes.sort_unstable_by(|left, right| {
+            checkpoint();
+            left.cmp(right)
+        });
+        prefixes.dedup_by(|left, right| {
+            checkpoint();
+            left == right
+        });
         prefixes
+    }
+
+    /// Release every owned element between checkpoints.
+    pub(crate) fn retire_with(self, checkpoint: &mut impl FnMut()) {
+        let Self {
+            mut node_keys,
+            mut node_ix,
+            mut adj,
+            mut links,
+            mut addr_index,
+            prefix_v4,
+            prefix_v6,
+            prefix_entries: _,
+            input_diagnostics: _,
+        } = self;
+        crate::adj_rib_out::retire_hash_map(&mut node_ix, checkpoint);
+        drop(node_ix);
+        crate::adj_rib_out::retire_hash_map(&mut addr_index, checkpoint);
+        drop(addr_index);
+        crate::manager::retire_vec(&mut node_keys, checkpoint);
+        crate::manager::retire_vec(&mut adj, checkpoint);
+        crate::manager::retire_vec(&mut links, checkpoint);
+        retire_prefix_map(prefix_v4, checkpoint);
+        retire_prefix_map(prefix_v6, checkpoint);
     }
 
     /// Serializable snapshot for the read-only topology API.
@@ -1081,6 +1358,26 @@ impl OrrState {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.resolved.is_empty() && self.spf.is_empty()
+    }
+
+    /// Release the topology, SPF results and signatures between checkpoints.
+    pub(crate) fn retire_with(self, checkpoint: &mut impl FnMut()) {
+        let Self {
+            topology,
+            mut spf,
+            mut resolved,
+            mut signatures,
+        } = self;
+        topology.retire_with(checkpoint);
+        crate::adj_rib_out::retire_hash_map(&mut spf, checkpoint);
+        drop(spf);
+        crate::adj_rib_out::retire_hash_map(&mut resolved, checkpoint);
+        drop(resolved);
+        for (_, mut signature) in signatures.drain() {
+            crate::manager::retire_vec(&mut signature, checkpoint);
+        }
+        drop(signatures);
+        checkpoint();
     }
 }
 
@@ -2129,12 +2426,12 @@ mod tests {
         let before = OrrTopology::build(routes.iter());
         routes.reverse();
         let reversed = OrrTopology::build(routes.iter());
-        assert!(before.same_next_hop_lookup(&reversed));
+        assert!(before.same_next_hop_lookup_with_checkpoint(&reversed, &mut || {}));
         assert_ne!(before.node_ix(&node_key(A)), reversed.node_ix(&node_key(A)));
 
         routes.push(link_route(PEER1, A, X, Some(0), &[mt_id_tlv(&[2])]));
         let excluded = OrrTopology::build(routes.iter());
-        assert!(before.same_next_hop_lookup(&excluded));
+        assert!(before.same_next_hop_lookup_with_checkpoint(&excluded, &mut || {}));
         assert_eq!(excluded.input_diagnostics().excluded_nondefault, 1);
     }
 
@@ -2181,11 +2478,16 @@ mod tests {
                 before.spf_signature(&before_spf),
                 after.spf_signature(&after_spf)
             );
-            assert!(!before.same_next_hop_lookup(&after));
+            assert!(!before.same_next_hop_lookup_with_checkpoint(&after, &mut || {}));
             assert_eq!(after_spf.cost_to(&after, next_hop), expected_cost);
         }
         routes.reverse();
-        assert!(before.same_next_hop_lookup(&OrrTopology::build(routes.iter())));
+        assert!(
+            before.same_next_hop_lookup_with_checkpoint(
+                &OrrTopology::build(routes.iter()),
+                &mut || {}
+            )
+        );
     }
 
     #[test]

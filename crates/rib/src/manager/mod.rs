@@ -114,7 +114,7 @@ fn add_export_tally(
 }
 
 /// Release owned temporary elements while the actor still owns readiness.
-fn retire_vec<T>(values: &mut Vec<T>, checkpoint: &mut impl FnMut()) {
+pub(crate) fn retire_vec<T>(values: &mut Vec<T>, checkpoint: &mut impl FnMut()) {
     checkpoint();
     if std::mem::needs_drop::<T>() {
         while let Some(value) = values.pop() {
@@ -6236,6 +6236,42 @@ impl RibManager {
         self.distribute_changes(&HashSet::new(), &HashSet::new());
     }
 
+    /// The ORR topology input: every peer's BGP-LS Adj-RIB-In, excluding
+    /// families whose selection is still deferred. The vantage cache and
+    /// every on-demand read share this one definition, so a read cannot
+    /// change source when the vantage set empties or fills.
+    pub(super) fn build_orr_topology(&self) -> crate::orr::OrrTopology {
+        self.build_orr_topology_with_checkpoint(&mut || {}, &mut || {})
+    }
+
+    /// [`Self::build_orr_topology`] with `scan` called for every visited
+    /// input, deferred-family exclusions included, and `build` inside the
+    /// topology construction.
+    fn build_orr_topology_with_checkpoint(
+        &self,
+        scan: &mut impl FnMut(),
+        build: &mut impl FnMut(),
+    ) -> crate::orr::OrrTopology {
+        let mut inputs = 0_usize;
+        for rib in self.ribs.values() {
+            scan();
+            inputs = inputs.saturating_add(rib.bgpls_len());
+        }
+        crate::orr::OrrTopology::build_with_checkpoint(
+            // A leading `None` per RIB yields a checkpoint even for a peer
+            // with no BGP-LS routes, so empty tables cannot accumulate inside
+            // one `next()`.
+            self.ribs
+                .values()
+                .flat_map(|rib| std::iter::once(None).chain(rib.iter_bgpls().map(Some)))
+                .inspect(|_| scan())
+                .flatten()
+                .filter(|route| !self.selection_deferred(route.family.to_afi_safi())),
+            inputs,
+            build,
+        )
+    }
+
     /// Rebuild the cached RFC 9107 ORR state: one topology from the
     /// BGP-LS Adj-RIB-In union, one SPF per DISTINCT configured vantage
     /// IP. Returns the vantages whose next-hop cost surface changed
@@ -6243,27 +6279,33 @@ impl RibManager {
     /// bound peers). Early-outs with no
     /// topology build and no SPF while `peer_orr_vantage` is empty, so
     /// non-ORR deployments pay nothing on BGP-LS churn.
-    /// The ORR topology input: every peer's BGP-LS Adj-RIB-In, excluding
-    /// families whose selection is still deferred. The vantage cache and
-    /// every on-demand read share this one definition, so a read cannot
-    /// change source when the vantage set empties or fills.
-    pub(super) fn build_orr_topology(&self) -> crate::orr::OrrTopology {
-        crate::orr::OrrTopology::build(
-            self.ribs
-                .values()
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls)
-                .filter(|route| !self.selection_deferred(route.family.to_afi_safi())),
-        )
-    }
-
+    ///
+    /// Under a readiness owner, every unit checkpoints: the inventory scan,
+    /// topology construction, lookup comparison, vantage collection and
+    /// resolution, SPF, signature sorting and comparison, and retirement of
+    /// the replaced state. Each collection is reserved before it fills.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one readiness-owned rebuild keeps every ORR unit's checkpoint in view"
+    )]
     pub(super) fn recompute_orr(&mut self) -> HashSet<IpAddr> {
+        let readiness = self.replacement_readiness.clone();
+        let mut scan = || replacement_readiness_checkpoint_at(&readiness, "orr_scan", false);
+        let mut build = || replacement_readiness_checkpoint_at(&readiness, "orr_build", false);
+        let mut compare = || replacement_readiness_checkpoint_at(&readiness, "orr_compare", false);
+        let mut vantage_step =
+            || replacement_readiness_checkpoint_at(&readiness, "orr_vantages", false);
+        let mut spf_step = || replacement_readiness_checkpoint_at(&readiness, "orr_spf", false);
+        let mut signature_step =
+            || replacement_readiness_checkpoint_at(&readiness, "orr_signature", false);
+        let mut retire = || replacement_readiness_checkpoint_at(&readiness, "orr_retire", false);
         if self.peer_orr_vantage.is_empty() {
             if !self.orr.is_empty() {
                 log_orr_input_transition(
                     self.orr.topology.input_diagnostics(),
                     crate::orr::OrrInputDiagnostics::default(),
                 );
-                self.orr = crate::orr::OrrState::default();
+                std::mem::take(&mut self.orr).retire_with(&mut retire);
             }
             self.metrics.set_orr_topology_nodes(0);
             self.metrics.set_orr_topology_links(0);
@@ -6273,21 +6315,46 @@ impl RibManager {
             return HashSet::new();
         }
         // The vantage cache below now serves paged topology reads.
-        self.orr_page_topology = None;
+        if let Some(page) = self.orr_page_topology.take() {
+            let (_, topology) = *page;
+            topology.retire_with(&mut retire);
+        }
 
-        let topology = self.build_orr_topology();
+        let topology = self.build_orr_topology_with_checkpoint(&mut scan, &mut build);
         let input_diagnostics = topology.input_diagnostics();
         log_orr_input_transition(self.orr.topology.input_diagnostics(), input_diagnostics);
         // Next-hop costs also depend on exact address ownership and covering
         // prefix advertisers/metrics, which can move without any node distance.
-        let lookup_changed = !topology.same_next_hop_lookup(&self.orr.topology);
-        let vantages: HashSet<IpAddr> = self.peer_orr_vantage.values().copied().collect();
-        let mut changed = HashSet::new();
-        let mut spf = HashMap::new();
-        let mut resolved = HashMap::new();
-        let mut signatures = HashMap::new();
+        let lookup_changed =
+            !topology.same_next_hop_lookup_with_checkpoint(&self.orr.topology, &mut compare);
+        let mut vantages = HashSet::with_capacity(self.peer_orr_vantage.len());
+        vantage_step();
+        #[cfg(test)]
+        let reserved = vantages.capacity();
+        for &vantage in self.peer_orr_vantage.values() {
+            vantage_step();
+            vantages.insert(vantage);
+        }
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record("orr_vantages", reserved, vantages.capacity());
+        let mut changed = HashSet::with_capacity(vantages.len());
+        vantage_step();
+        let mut spf = HashMap::with_capacity(vantages.len());
+        vantage_step();
+        let mut resolved = HashMap::with_capacity(vantages.len());
+        vantage_step();
+        let mut signatures = HashMap::with_capacity(vantages.len());
+        vantage_step();
+        #[cfg(test)]
+        let reserved = (
+            changed.capacity(),
+            spf.capacity(),
+            resolved.capacity(),
+            signatures.capacity(),
+        );
         for vantage in vantages {
-            let node = topology.resolve_node(vantage);
+            vantage_step();
+            let node = topology.resolve_node_with_checkpoint(vantage, &mut vantage_step);
             let was_resolved = self.orr.resolved.get(&vantage).copied();
             // Log once per transition (a fresh vantage counts as one).
             match (was_resolved, node.is_some()) {
@@ -6303,10 +6370,15 @@ impl RibManager {
             }
             resolved.insert(vantage, node.is_some());
             if let Some(node) = node {
-                let result = topology.spf(node);
+                let result = topology.spf_with_checkpoint(node, &mut spf_step);
                 self.metrics.record_orr_spf_run();
-                let signature = topology.spf_signature(&result);
-                if lookup_changed || self.orr.signatures.get(&vantage) != Some(&signature) {
+                let signature =
+                    topology.spf_signature_with_checkpoint(&result, &mut signature_step);
+                if lookup_changed
+                    || self.orr.signatures.get(&vantage).is_none_or(|previous| {
+                        !crate::orr::eq_with_checkpoint(previous, &signature, &mut signature_step)
+                    })
+                {
                     changed.insert(vantage);
                 }
                 spf.insert(vantage, result);
@@ -6318,7 +6390,11 @@ impl RibManager {
             }
         }
 
-        let unresolved = resolved.values().filter(|resolved| !**resolved).count();
+        let unresolved = resolved
+            .values()
+            .inspect(|_| vantage_step())
+            .filter(|resolved| !**resolved)
+            .count();
         self.metrics
             .set_orr_topology_nodes(i64::try_from(topology.node_count()).unwrap_or(i64::MAX));
         self.metrics
@@ -6327,12 +6403,23 @@ impl RibManager {
             .set_orr_unresolved_vantages(i64::try_from(unresolved).unwrap_or(i64::MAX));
         self.metrics
             .set_orr_input_diagnostics(input_diagnostics.values());
-        self.orr = crate::orr::OrrState {
-            topology,
-            spf,
-            resolved,
-            signatures,
-        };
+        #[cfg(test)]
+        {
+            crate::orr::rebuild_growth::record("orr_changed", reserved.0, changed.capacity());
+            crate::orr::rebuild_growth::record("orr_spf_results", reserved.1, spf.capacity());
+            crate::orr::rebuild_growth::record("orr_resolved", reserved.2, resolved.capacity());
+            crate::orr::rebuild_growth::record("orr_signatures", reserved.3, signatures.capacity());
+        }
+        std::mem::replace(
+            &mut self.orr,
+            crate::orr::OrrState {
+                topology,
+                spf,
+                resolved,
+                signatures,
+            },
+        )
+        .retire_with(&mut retire);
         changed
     }
 

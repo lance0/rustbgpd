@@ -32,7 +32,7 @@ use rustbgpd_wire::{
 use smallvec::SmallVec;
 
 use crate::attr_set::AttrSet;
-use crate::fast_hash::{FastSet as HashSet, ShardedMap};
+use crate::fast_hash::ShardedMap;
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -314,7 +314,7 @@ pub struct AdjRibIn {
     /// transparently. Mirrors `AdjRibOut::prefix_path_ids`.
     prefix_index: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
     /// Route keys where `LLGR_STALE` was injected locally by this daemon.
-    llgr_stale_local_tags: HashSet<(Prefix, u32)>,
+    llgr_stale_local_tags: ShardedMap<(Prefix, u32), ()>,
     /// Exact `(prefix, path_id)` counts by RPKI state for IPv4 unicast.
     rpki_counts_v4: RpkiValidationCounts,
     /// Exact `(prefix, path_id)` counts by RPKI state for IPv6 unicast.
@@ -322,7 +322,7 @@ pub struct AdjRibIn {
     /// `FlowSpec` routes keyed by AFI, rule, and Add-Path ID.
     flowspec_routes: StaleTracked<FlowSpecRouteKey, FlowSpecRoute>,
     /// `FlowSpec` route keys where `LLGR_STALE` was injected locally.
-    flowspec_llgr_stale_local_tags: HashSet<FlowSpecRouteKey>,
+    flowspec_llgr_stale_local_tags: ShardedMap<FlowSpecRouteKey, ()>,
     /// EVPN routes keyed by RFC 7432 route identity.
     evpn_routes: StaleTracked<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS routes keyed by opaque RFC 9552 route identity.
@@ -345,19 +345,19 @@ pub struct AdjRibIn {
     /// during promotion from GR-stale → LLGR-stale. Used to distinguish
     /// locally-injected communities (which we strip on clear) from
     /// peer-originated ones (which must be preserved).
-    evpn_llgr_stale_local_tags: HashSet<EvpnRouteKey>,
+    evpn_llgr_stale_local_tags: ShardedMap<EvpnRouteKey, ()>,
     /// BGP-LS route keys where `LLGR_STALE` was injected locally (see
     /// `evpn_llgr_stale_local_tags`).
-    bgpls_llgr_stale_local_tags: HashSet<BgpLsRouteKey>,
+    bgpls_llgr_stale_local_tags: ShardedMap<BgpLsRouteKey, ()>,
     /// VPN route keys where `LLGR_STALE` was injected locally (see
     /// `evpn_llgr_stale_local_tags`).
-    vpn_llgr_stale_local_tags: HashSet<VpnRibRouteKey>,
+    vpn_llgr_stale_local_tags: ShardedMap<VpnRibRouteKey, ()>,
     /// Labeled-unicast route keys where `LLGR_STALE` was injected locally
     /// (see `evpn_llgr_stale_local_tags`).
-    labeled_llgr_stale_local_tags: HashSet<LabeledRibRouteKey>,
+    labeled_llgr_stale_local_tags: ShardedMap<LabeledRibRouteKey, ()>,
     /// RTC route keys where `LLGR_STALE` was injected locally (see
     /// `evpn_llgr_stale_local_tags`).
-    rtc_llgr_stale_local_tags: HashSet<RtcRibRouteKey>,
+    rtc_llgr_stale_local_tags: ShardedMap<RtcRibRouteKey, ()>,
 }
 
 impl AdjRibIn {
@@ -373,13 +373,19 @@ impl AdjRibIn {
         crate::adj_rib_out::release_sharded_map(&mut self.labeled_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.labeled_key_index, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.rtc_routes.map, checkpoint);
-        retire_local_tags(&mut self.llgr_stale_local_tags, checkpoint);
-        retire_local_tags(&mut self.flowspec_llgr_stale_local_tags, checkpoint);
-        retire_local_tags(&mut self.evpn_llgr_stale_local_tags, checkpoint);
-        retire_local_tags(&mut self.bgpls_llgr_stale_local_tags, checkpoint);
-        retire_local_tags(&mut self.vpn_llgr_stale_local_tags, checkpoint);
-        retire_local_tags(&mut self.labeled_llgr_stale_local_tags, checkpoint);
-        retire_local_tags(&mut self.rtc_llgr_stale_local_tags, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.llgr_stale_local_tags, checkpoint);
+        crate::adj_rib_out::release_sharded_map(
+            &mut self.flowspec_llgr_stale_local_tags,
+            checkpoint,
+        );
+        crate::adj_rib_out::release_sharded_map(&mut self.evpn_llgr_stale_local_tags, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.bgpls_llgr_stale_local_tags, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.vpn_llgr_stale_local_tags, checkpoint);
+        crate::adj_rib_out::release_sharded_map(
+            &mut self.labeled_llgr_stale_local_tags,
+            checkpoint,
+        );
+        crate::adj_rib_out::release_sharded_map(&mut self.rtc_llgr_stale_local_tags, checkpoint);
         checkpoint.checkpoint(RetirementProgress::Boundary);
         drop(self);
         checkpoint.checkpoint(RetirementProgress::Boundary);
@@ -401,11 +407,11 @@ impl AdjRibIn {
             routes: RouteSlab::with_capacity(route_capacity),
             unicast_stale: StaleCounters::default(),
             prefix_index: FamilyPrefixMap::default(),
-            llgr_stale_local_tags: HashSet::default(),
+            llgr_stale_local_tags: ShardedMap::default(),
             rpki_counts_v4: RpkiValidationCounts::default(),
             rpki_counts_v6: RpkiValidationCounts::default(),
             flowspec_routes: StaleTracked::with_capacity(flowspec_capacity),
-            flowspec_llgr_stale_local_tags: HashSet::default(),
+            flowspec_llgr_stale_local_tags: ShardedMap::default(),
             evpn_routes: StaleTracked::default(),
             bgpls_routes: StaleTracked::default(),
             vpn_routes: StaleTracked::default(),
@@ -413,11 +419,11 @@ impl AdjRibIn {
             labeled_routes: StaleTracked::default(),
             labeled_key_index: ShardedMap::default(),
             rtc_routes: StaleTracked::default(),
-            evpn_llgr_stale_local_tags: HashSet::default(),
-            bgpls_llgr_stale_local_tags: HashSet::default(),
-            vpn_llgr_stale_local_tags: HashSet::default(),
-            labeled_llgr_stale_local_tags: HashSet::default(),
-            rtc_llgr_stale_local_tags: HashSet::default(),
+            evpn_llgr_stale_local_tags: ShardedMap::default(),
+            bgpls_llgr_stale_local_tags: ShardedMap::default(),
+            vpn_llgr_stale_local_tags: ShardedMap::default(),
+            labeled_llgr_stale_local_tags: ShardedMap::default(),
+            rtc_llgr_stale_local_tags: ShardedMap::default(),
         }
     }
 
@@ -479,6 +485,15 @@ impl AdjRibIn {
         let mut counts: Vec<_> = self.stale_route_counts().collect();
         counts.sort_by_key(|((afi, safi), _)| (*afi as u16, *safi as u8));
         counts
+    }
+
+    /// GR-stale identities in one family bound promotion and purge outputs.
+    pub(crate) fn gr_stale_family_len(&self, family: (Afi, Safi)) -> usize {
+        let count = self
+            .stale_route_counts()
+            .find_map(|(found, counts)| (found == family).then_some(counts.stale))
+            .unwrap_or(0);
+        usize::try_from(count).expect("maintained route count fits addressable storage")
     }
 
     /// Insert or replace a route. Clears any stale tag on the key.
@@ -971,7 +986,7 @@ impl AdjRibIn {
             |(), route| {
                 if route_matches_family(route, family) {
                     let key = (route.prefix, route.path_id);
-                    let tagged = self.llgr_stale_local_tags.contains(&key);
+                    let tagged = self.llgr_stale_local_tags.contains_key(&key);
                     if route.is_stale || route.is_llgr_stale || tagged {
                         changed.push(route.prefix);
                     }
@@ -1026,18 +1041,38 @@ impl AdjRibIn {
     /// Remove stale routes for a specific family, returning their prefixes.
     /// Used when a family was in GR but not in the peer's LLGR capability.
     pub fn sweep_stale_family(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
-        let stale: Vec<(Prefix, u32)> = self
-            .routes
-            .iter()
-            .filter(|r| r.is_stale && route_matches_family(r, family))
-            .map(|r| (r.prefix, r.path_id))
-            .collect();
-        let mut prefixes = Vec::new();
+        self.sweep_stale_family_with_checkpoint(family, &mut || {})
+    }
+
+    pub(crate) fn sweep_stale_family_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<Prefix> {
+        if family.1 != Safi::Unicast {
+            return Vec::new();
+        }
+        checkpoint();
+        let mut stale: Vec<(Prefix, u32)> = Vec::with_capacity(self.gr_stale_family_len(family));
+        checkpoint();
+        stale.extend(
+            self.routes
+                .iter_slots()
+                .inspect(|_| checkpoint())
+                .flatten()
+                .filter(|r| r.is_stale && route_matches_family(r, family))
+                .map(|r| (r.prefix, r.path_id)),
+        );
+        let mut prefixes = Vec::with_capacity(stale.len());
+        checkpoint();
         for key in &stale {
+            checkpoint();
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
             self.remove_route_entry(&key.0, key.1);
+            checkpoint();
         }
+        retire_llgr_keys(stale, checkpoint);
         prefixes
     }
 
@@ -1052,7 +1087,7 @@ impl AdjRibIn {
                 let key = (route.prefix, route.path_id);
                 if route.is_stale || route.is_llgr_stale {
                     stale.push(key);
-                } else if self.llgr_stale_local_tags.contains(&key) {
+                } else if self.llgr_stale_local_tags.contains_key(&key) {
                     clear_local_llgr.push(key);
                 }
             }
@@ -1080,44 +1115,72 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<Prefix> {
+        self.promote_to_llgr_stale_with_checkpoint(family, attr_intern, &mut || {})
+    }
+
+    pub(crate) fn promote_to_llgr_stale_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<Prefix> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
-        // First pass: remove routes with NO_LLGR community
-        let no_llgr_keys: Vec<(Prefix, u32)> = self
-            .routes
-            .iter()
-            .filter(|r| {
-                r.is_stale
-                    && route_matches_family(r, family)
-                    && r.communities().contains(&COMMUNITY_NO_LLGR)
-            })
-            .map(|r| (r.prefix, r.path_id))
-            .collect();
-        let mut affected: Vec<Prefix> = no_llgr_keys.iter().map(|(p, _)| *p).collect();
+        if family.1 != Safi::Unicast {
+            return Vec::new();
+        }
+        checkpoint();
+        let capacity = self.gr_stale_family_len(family);
+        let mut no_llgr_keys: Vec<(Prefix, u32)> = Vec::new();
+        checkpoint();
+        for route in self.routes.iter_slots() {
+            checkpoint();
+            let Some(route) = route else {
+                continue;
+            };
+            if route.is_stale
+                && route_matches_family(route, family)
+                && route.communities().contains(&COMMUNITY_NO_LLGR)
+            {
+                if no_llgr_keys.is_empty() {
+                    no_llgr_keys.reserve_exact(capacity);
+                    checkpoint();
+                }
+                no_llgr_keys.push((route.prefix, route.path_id));
+            }
+        }
+        let mut affected = Vec::with_capacity(capacity);
+        checkpoint();
         for key in &no_llgr_keys {
+            checkpoint();
+            affected.push(key.0);
             self.llgr_stale_local_tags.remove(key);
             self.remove_route_entry(&key.0, key.1);
+            checkpoint();
         }
-
-        // Second pass: promote remaining stale routes to LLGR-stale
-        for_each_counted(
-            self.routes.iter_mut().map(|route| ((), route)),
-            &mut self.unicast_stale,
-            |(), route| {
-                if route.is_stale && route_matches_family(route, family) {
-                    route.is_stale = false;
-                    route.is_llgr_stale = true;
-                    // Add LLGR_STALE community
-                    if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
-                        self.llgr_stale_local_tags
-                            .insert((route.prefix, route.path_id));
-                    }
-                    attr_intern.intern(&mut route.attributes);
-                    affected.push(route.prefix);
+        // Walk slots, not routes, so vacancies of a sparse slab yield too.
+        for route in self.routes.iter_slots_mut() {
+            checkpoint();
+            let Some(route) = route else {
+                continue;
+            };
+            if route.is_stale && route_matches_family(route, family) {
+                let before = route.retention();
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                self.unicast_stale.shift(before, route.retention());
+                checkpoint();
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
+                    self.llgr_stale_local_tags
+                        .insert((route.prefix, route.path_id), ());
                 }
-            },
-        );
-
+                checkpoint();
+                attr_intern.intern(&mut route.attributes);
+                checkpoint();
+                affected.push(route.prefix);
+            }
+        }
+        retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
 
@@ -1170,7 +1233,7 @@ impl AdjRibIn {
             |(), route| {
                 if route_matches_family(route, family) {
                     let key = (route.prefix, route.path_id);
-                    let tagged = self.llgr_stale_local_tags.contains(&key);
+                    let tagged = self.llgr_stale_local_tags.contains_key(&key);
                     if route.is_llgr_stale || tagged {
                         changed.push(route.prefix);
                     }
@@ -1321,7 +1384,7 @@ impl AdjRibIn {
         self.evpn_routes.for_each_mut(|key, route| {
             route.is_stale = false;
             route.is_llgr_stale = false;
-            if self.evpn_llgr_stale_local_tags.contains(key) {
+            if self.evpn_llgr_stale_local_tags.contains_key(key) {
                 clear_local_llgr.push(*key);
             }
         });
@@ -1330,26 +1393,41 @@ impl AdjRibIn {
 
     /// Remove all stale EVPN routes, returning their keys.
     pub fn sweep_stale_evpn(&mut self) -> Vec<EvpnRouteKey> {
-        let stale: Vec<EvpnRouteKey> = self
-            .evpn_routes
-            .iter()
-            .filter(|(_, r)| r.is_stale)
-            .map(|(k, _)| *k)
-            .collect();
-        for key in &stale {
-            self.evpn_llgr_stale_local_tags.remove(key);
-            self.evpn_routes.remove(key);
-        }
-        stale
+        self.sweep_stale_family_evpn_with_checkpoint((Afi::L2Vpn, Safi::Evpn), &mut || {})
     }
 
     /// Remove stale EVPN routes if `family == (L2Vpn, Evpn)`. Used when a
     /// family was in GR but not in the peer's LLGR capability.
     pub fn sweep_stale_family_evpn(&mut self, family: (Afi, Safi)) -> Vec<EvpnRouteKey> {
+        self.sweep_stale_family_evpn_with_checkpoint(family, &mut || {})
+    }
+
+    pub(crate) fn sweep_stale_family_evpn_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<EvpnRouteKey> {
         if family != (Afi::L2Vpn, Safi::Evpn) {
             return Vec::new();
         }
-        self.sweep_stale_evpn()
+        checkpoint();
+        let mut stale: Vec<EvpnRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        checkpoint();
+        stale.extend(
+            self.evpn_routes
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|(_, r)| r.is_stale)
+                .map(|(k, _)| *k),
+        );
+        for key in &stale {
+            checkpoint();
+            self.evpn_llgr_stale_local_tags.remove(key);
+            self.evpn_routes.remove(key);
+            checkpoint();
+        }
+        checkpoint();
+        stale
     }
 
     /// Promote GR-stale EVPN routes to LLGR-stale (RFC 9494).
@@ -1364,38 +1442,59 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<EvpnRouteKey> {
+        self.promote_to_llgr_stale_evpn_with_checkpoint(family, attr_intern, &mut || {})
+    }
+
+    pub(crate) fn promote_to_llgr_stale_evpn_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<EvpnRouteKey> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family != (Afi::L2Vpn, Safi::Evpn) {
             return Vec::new();
         }
-
-        // First pass: remove routes carrying NO_LLGR
-        let no_llgr_keys: Vec<EvpnRouteKey> = self
-            .evpn_routes
-            .iter()
-            .filter(|(_, r)| r.is_stale && r.communities().contains(&COMMUNITY_NO_LLGR))
-            .map(|(k, _)| *k)
-            .collect();
-        let mut affected: Vec<EvpnRouteKey> = no_llgr_keys.clone();
+        checkpoint();
+        let capacity = self.gr_stale_family_len(family);
+        let mut no_llgr_keys: Vec<EvpnRouteKey> = Vec::new();
+        checkpoint();
+        for (_, route) in self.evpn_routes.iter() {
+            checkpoint();
+            if route.is_stale && route.communities().contains(&COMMUNITY_NO_LLGR) {
+                if no_llgr_keys.is_empty() {
+                    no_llgr_keys.reserve_exact(capacity);
+                    checkpoint();
+                }
+                no_llgr_keys.push(route.key());
+            }
+        }
+        let mut affected = Vec::with_capacity(capacity);
+        checkpoint();
         for key in &no_llgr_keys {
+            checkpoint();
+            affected.push(*key);
             self.evpn_llgr_stale_local_tags.remove(key);
             self.evpn_routes.remove(key);
+            checkpoint();
         }
-
-        // Second pass: promote remaining stale routes to LLGR-stale
         self.evpn_routes.for_each_mut(|_, route| {
+            checkpoint();
             if route.is_stale {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
+                checkpoint();
                 if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
-                    self.evpn_llgr_stale_local_tags.insert(route.key());
+                    self.evpn_llgr_stale_local_tags.insert(route.key(), ());
                 }
+                checkpoint();
                 attr_intern.intern(&mut route.attributes);
+                checkpoint();
                 affected.push(route.key());
             }
         });
-
+        retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
 
@@ -1433,7 +1532,7 @@ impl AdjRibIn {
         let mut clear_local_llgr = Vec::new();
         self.evpn_routes.for_each_mut(|key, route| {
             route.is_llgr_stale = false;
-            if self.evpn_llgr_stale_local_tags.contains(key) {
+            if self.evpn_llgr_stale_local_tags.contains_key(key) {
                 clear_local_llgr.push(*key);
             }
         });
@@ -1561,7 +1660,7 @@ impl AdjRibIn {
             if route.family == fam {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
-                if self.bgpls_llgr_stale_local_tags.contains(key) {
+                if self.bgpls_llgr_stale_local_tags.contains_key(key) {
                     clear_local_llgr.push(key.clone());
                 }
             }
@@ -1590,19 +1689,34 @@ impl AdjRibIn {
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
     pub fn sweep_stale_family_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
+        self.sweep_stale_family_bgpls_with_checkpoint(family, &mut || {})
+    }
+
+    pub(crate) fn sweep_stale_family_bgpls_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<BgpLsRouteKey> {
         let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
             return Vec::new();
         };
-        let stale: Vec<BgpLsRouteKey> = self
-            .bgpls_routes
-            .iter()
-            .filter(|(_, r)| r.is_stale && r.family == fam)
-            .map(|(k, _)| k.clone())
-            .collect();
+        checkpoint();
+        let mut stale: Vec<BgpLsRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        checkpoint();
+        stale.extend(
+            self.bgpls_routes
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|(_, r)| r.is_stale && r.family == fam)
+                .map(|(k, _)| k.clone()),
+        );
         for key in &stale {
+            checkpoint();
             self.bgpls_llgr_stale_local_tags.remove(key);
             self.bgpls_routes.remove(key);
+            checkpoint();
         }
+        checkpoint();
         stale
     }
 
@@ -1619,40 +1733,62 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<BgpLsRouteKey> {
+        self.promote_to_llgr_stale_bgpls_with_checkpoint(family, attr_intern, &mut || {})
+    }
+
+    pub(crate) fn promote_to_llgr_stale_bgpls_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<BgpLsRouteKey> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
             return Vec::new();
         };
-
-        // First pass: remove routes carrying NO_LLGR
-        let no_llgr_keys: Vec<BgpLsRouteKey> = self
-            .bgpls_routes
-            .iter()
-            .filter(|(_, r)| {
-                r.is_stale && r.family == fam && r.communities().contains(&COMMUNITY_NO_LLGR)
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-        let mut affected: Vec<BgpLsRouteKey> = no_llgr_keys.clone();
+        checkpoint();
+        let capacity = self.gr_stale_family_len(family);
+        let mut no_llgr_keys: Vec<BgpLsRouteKey> = Vec::new();
+        checkpoint();
+        for (_, route) in self.bgpls_routes.iter() {
+            checkpoint();
+            if route.is_stale
+                && route.family == fam
+                && route.communities().contains(&COMMUNITY_NO_LLGR)
+            {
+                if no_llgr_keys.is_empty() {
+                    no_llgr_keys.reserve_exact(capacity);
+                    checkpoint();
+                }
+                no_llgr_keys.push(route.key());
+            }
+        }
+        let mut affected = Vec::with_capacity(capacity);
+        checkpoint();
         for key in &no_llgr_keys {
+            checkpoint();
+            affected.push(key.clone());
             self.bgpls_llgr_stale_local_tags.remove(key);
             self.bgpls_routes.remove(key);
+            checkpoint();
         }
-
-        // Second pass: promote remaining stale routes to LLGR-stale
         self.bgpls_routes.for_each_mut(|_, route| {
+            checkpoint();
             if route.is_stale && route.family == fam {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
+                checkpoint();
                 if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
-                    self.bgpls_llgr_stale_local_tags.insert(route.key());
+                    self.bgpls_llgr_stale_local_tags.insert(route.key(), ());
                 }
+                checkpoint();
                 attr_intern.intern(&mut route.attributes);
+                checkpoint();
                 affected.push(route.key());
             }
         });
-
+        retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
 
@@ -1703,7 +1839,7 @@ impl AdjRibIn {
         self.bgpls_routes.for_each_mut(|key, route| {
             if route.family == fam {
                 route.is_llgr_stale = false;
-                if self.bgpls_llgr_stale_local_tags.contains(key) {
+                if self.bgpls_llgr_stale_local_tags.contains_key(key) {
                     clear_local_llgr.push(key.clone());
                 }
             }
@@ -1884,7 +2020,7 @@ impl AdjRibIn {
             if route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
-                if self.vpn_llgr_stale_local_tags.contains(key) {
+                if self.vpn_llgr_stale_local_tags.contains_key(key) {
                     clear_local_llgr.push(key.clone());
                 }
             }
@@ -1912,18 +2048,33 @@ impl AdjRibIn {
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
     pub fn sweep_stale_family_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
+        self.sweep_stale_family_vpn_with_checkpoint(family, &mut || {})
+    }
+
+    pub(crate) fn sweep_stale_family_vpn_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<VpnRibRouteKey> {
         if family.1 != Safi::MplsVpn {
             return Vec::new();
         }
-        let stale: Vec<VpnRibRouteKey> = self
-            .vpn_routes
-            .iter()
-            .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
-            .map(|(k, _)| k.clone())
-            .collect();
+        checkpoint();
+        let mut stale: Vec<VpnRibRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        checkpoint();
+        stale.extend(
+            self.vpn_routes
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
+                .map(|(k, _)| k.clone()),
+        );
         for key in &stale {
+            checkpoint();
             self.remove_vpn_entry(key);
+            checkpoint();
         }
+        checkpoint();
         stale
     }
 
@@ -1940,39 +2091,62 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<VpnRibRouteKey> {
+        self.promote_to_llgr_stale_vpn_with_checkpoint(family, attr_intern, &mut || {})
+    }
+
+    pub(crate) fn promote_to_llgr_stale_vpn_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<VpnRibRouteKey> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family.1 != Safi::MplsVpn {
             return Vec::new();
         }
-
-        // First pass: remove routes carrying NO_LLGR
-        let no_llgr_keys: Vec<VpnRibRouteKey> = self
-            .vpn_routes
-            .iter()
-            .filter(|(_, r)| {
-                r.is_stale && r.afi_safi() == family && r.communities().contains(&COMMUNITY_NO_LLGR)
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-        let mut affected: Vec<VpnRibRouteKey> = no_llgr_keys.clone();
-        for key in &no_llgr_keys {
-            self.remove_vpn_entry(key);
+        checkpoint();
+        let capacity = self.gr_stale_family_len(family);
+        let mut no_llgr_keys: Vec<VpnRibRouteKey> = Vec::new();
+        checkpoint();
+        for (_, route) in self.vpn_routes.iter() {
+            checkpoint();
+            if route.is_stale
+                && route.afi_safi() == family
+                && route.communities().contains(&COMMUNITY_NO_LLGR)
+            {
+                if no_llgr_keys.is_empty() {
+                    no_llgr_keys.reserve_exact(capacity);
+                    checkpoint();
+                }
+                no_llgr_keys.push(route.key());
+            }
         }
-
-        // Second pass: promote remaining stale routes to LLGR-stale
+        let mut affected = Vec::with_capacity(capacity);
+        checkpoint();
+        for key in &no_llgr_keys {
+            checkpoint();
+            affected.push(key.clone());
+            self.vpn_llgr_stale_local_tags.remove(key);
+            self.remove_vpn_entry(key);
+            checkpoint();
+        }
         self.vpn_routes.for_each_mut(|_, route| {
+            checkpoint();
             if route.is_stale && route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
+                checkpoint();
                 if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
-                    self.vpn_llgr_stale_local_tags.insert(route.key());
+                    self.vpn_llgr_stale_local_tags.insert(route.key(), ());
                 }
+                checkpoint();
                 attr_intern.intern(&mut route.attributes);
+                checkpoint();
                 affected.push(route.key());
             }
         });
-
+        retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
 
@@ -2021,7 +2195,7 @@ impl AdjRibIn {
         self.vpn_routes.for_each_mut(|key, route| {
             if route.afi_safi() == family {
                 route.is_llgr_stale = false;
-                if self.vpn_llgr_stale_local_tags.contains(key) {
+                if self.vpn_llgr_stale_local_tags.contains_key(key) {
                     clear_local_llgr.push(key.clone());
                 }
             }
@@ -2177,7 +2351,7 @@ impl AdjRibIn {
             if route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
-                if self.labeled_llgr_stale_local_tags.contains(key) {
+                if self.labeled_llgr_stale_local_tags.contains_key(key) {
                     clear_local_llgr.push(*key);
                 }
             }
@@ -2205,18 +2379,34 @@ impl AdjRibIn {
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
     pub fn sweep_stale_family_labeled(&mut self, family: (Afi, Safi)) -> Vec<LabeledRibRouteKey> {
+        self.sweep_stale_family_labeled_with_checkpoint(family, &mut || {})
+    }
+
+    pub(crate) fn sweep_stale_family_labeled_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<LabeledRibRouteKey> {
         if family.1 != Safi::LabeledUnicast {
             return Vec::new();
         }
-        let stale: Vec<LabeledRibRouteKey> = self
-            .labeled_routes
-            .iter()
-            .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
-            .map(|(k, _)| *k)
-            .collect();
+        checkpoint();
+        let mut stale: Vec<LabeledRibRouteKey> =
+            Vec::with_capacity(self.gr_stale_family_len(family));
+        checkpoint();
+        stale.extend(
+            self.labeled_routes
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
+                .map(|(k, _)| *k),
+        );
         for key in &stale {
+            checkpoint();
             self.remove_labeled_entry(key);
+            checkpoint();
         }
+        checkpoint();
         stale
     }
 
@@ -2233,39 +2423,62 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<LabeledRibRouteKey> {
+        self.promote_to_llgr_stale_labeled_with_checkpoint(family, attr_intern, &mut || {})
+    }
+
+    pub(crate) fn promote_to_llgr_stale_labeled_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<LabeledRibRouteKey> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family.1 != Safi::LabeledUnicast {
             return Vec::new();
         }
-
-        // First pass: remove routes carrying NO_LLGR
-        let no_llgr_keys: Vec<LabeledRibRouteKey> = self
-            .labeled_routes
-            .iter()
-            .filter(|(_, r)| {
-                r.is_stale && r.afi_safi() == family && r.communities().contains(&COMMUNITY_NO_LLGR)
-            })
-            .map(|(k, _)| *k)
-            .collect();
-        let mut affected: Vec<LabeledRibRouteKey> = no_llgr_keys.clone();
-        for key in &no_llgr_keys {
-            self.remove_labeled_entry(key);
+        checkpoint();
+        let capacity = self.gr_stale_family_len(family);
+        let mut no_llgr_keys: Vec<LabeledRibRouteKey> = Vec::new();
+        checkpoint();
+        for (_, route) in self.labeled_routes.iter() {
+            checkpoint();
+            if route.is_stale
+                && route.afi_safi() == family
+                && route.communities().contains(&COMMUNITY_NO_LLGR)
+            {
+                if no_llgr_keys.is_empty() {
+                    no_llgr_keys.reserve_exact(capacity);
+                    checkpoint();
+                }
+                no_llgr_keys.push(route.key());
+            }
         }
-
-        // Second pass: promote remaining stale routes to LLGR-stale
+        let mut affected = Vec::with_capacity(capacity);
+        checkpoint();
+        for key in &no_llgr_keys {
+            checkpoint();
+            affected.push(*key);
+            self.labeled_llgr_stale_local_tags.remove(key);
+            self.remove_labeled_entry(key);
+            checkpoint();
+        }
         self.labeled_routes.for_each_mut(|_, route| {
+            checkpoint();
             if route.is_stale && route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
+                checkpoint();
                 if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
-                    self.labeled_llgr_stale_local_tags.insert(route.key());
+                    self.labeled_llgr_stale_local_tags.insert(route.key(), ());
                 }
+                checkpoint();
                 attr_intern.intern(&mut route.attributes);
+                checkpoint();
                 affected.push(route.key());
             }
         });
-
+        retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
 
@@ -2317,7 +2530,7 @@ impl AdjRibIn {
         self.labeled_routes.for_each_mut(|key, route| {
             if route.afi_safi() == family {
                 route.is_llgr_stale = false;
-                if self.labeled_llgr_stale_local_tags.contains(key) {
+                if self.labeled_llgr_stale_local_tags.contains_key(key) {
                     clear_local_llgr.push(*key);
                 }
             }
@@ -2443,7 +2656,7 @@ impl AdjRibIn {
         self.rtc_routes.for_each_mut(|key, route| {
             route.is_stale = false;
             route.is_llgr_stale = false;
-            if self.rtc_llgr_stale_local_tags.contains(key) {
+            if self.rtc_llgr_stale_local_tags.contains_key(key) {
                 clear_local_llgr.push(key.clone());
             }
         });
@@ -2454,26 +2667,41 @@ impl AdjRibIn {
     /// (RFC 4724 §4.1: stale routes deleted when the restart timer expires or
     /// `EoR` sweeps).
     pub fn sweep_stale_rtc(&mut self) -> Vec<RtcRibRouteKey> {
-        let stale: Vec<RtcRibRouteKey> = self
-            .rtc_routes
-            .iter()
-            .filter(|(_, r)| r.is_stale)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in &stale {
-            self.rtc_llgr_stale_local_tags.remove(key);
-            self.rtc_routes.remove(key);
-        }
-        stale
+        self.sweep_stale_family_rtc_with_checkpoint(RtcRibRouteKey::afi_safi(), &mut || {})
     }
 
     /// Remove stale RTC routes if `family == (Ipv4, RtConstrain)`. Used when
     /// a family was in GR but not in the peer's LLGR capability.
     pub fn sweep_stale_family_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
+        self.sweep_stale_family_rtc_with_checkpoint(family, &mut || {})
+    }
+
+    pub(crate) fn sweep_stale_family_rtc_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<RtcRibRouteKey> {
         if family != RtcRibRouteKey::afi_safi() {
             return Vec::new();
         }
-        self.sweep_stale_rtc()
+        checkpoint();
+        let mut stale: Vec<RtcRibRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        checkpoint();
+        stale.extend(
+            self.rtc_routes
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|(_, r)| r.is_stale)
+                .map(|(k, _)| k.clone()),
+        );
+        for key in &stale {
+            checkpoint();
+            self.rtc_llgr_stale_local_tags.remove(key);
+            self.rtc_routes.remove(key);
+            checkpoint();
+        }
+        checkpoint();
+        stale
     }
 
     /// Promote GR-stale RTC routes to LLGR-stale (RFC 9494 §4.2/§4.3).
@@ -2488,38 +2716,59 @@ impl AdjRibIn {
         family: (Afi, Safi),
         attr_intern: &mut crate::attr_intern::AttrInternTable,
     ) -> Vec<RtcRibRouteKey> {
+        self.promote_to_llgr_stale_rtc_with_checkpoint(family, attr_intern, &mut || {})
+    }
+
+    pub(crate) fn promote_to_llgr_stale_rtc_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        attr_intern: &mut crate::attr_intern::AttrInternTable,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<RtcRibRouteKey> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family != RtcRibRouteKey::afi_safi() {
             return Vec::new();
         }
-
-        // First pass: remove routes carrying NO_LLGR
-        let no_llgr_keys: Vec<RtcRibRouteKey> = self
-            .rtc_routes
-            .iter()
-            .filter(|(_, r)| r.is_stale && r.communities().contains(&COMMUNITY_NO_LLGR))
-            .map(|(k, _)| k.clone())
-            .collect();
-        let mut affected: Vec<RtcRibRouteKey> = no_llgr_keys.clone();
+        checkpoint();
+        let capacity = self.gr_stale_family_len(family);
+        let mut no_llgr_keys: Vec<RtcRibRouteKey> = Vec::new();
+        checkpoint();
+        for (_, route) in self.rtc_routes.iter() {
+            checkpoint();
+            if route.is_stale && route.communities().contains(&COMMUNITY_NO_LLGR) {
+                if no_llgr_keys.is_empty() {
+                    no_llgr_keys.reserve_exact(capacity);
+                    checkpoint();
+                }
+                no_llgr_keys.push(route.key());
+            }
+        }
+        let mut affected = Vec::with_capacity(capacity);
+        checkpoint();
         for key in &no_llgr_keys {
+            checkpoint();
+            affected.push(key.clone());
             self.rtc_llgr_stale_local_tags.remove(key);
             self.rtc_routes.remove(key);
+            checkpoint();
         }
-
-        // Second pass: promote remaining stale routes to LLGR-stale
         self.rtc_routes.for_each_mut(|_, route| {
+            checkpoint();
             if route.is_stale {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
+                checkpoint();
                 if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
-                    self.rtc_llgr_stale_local_tags.insert(route.key());
+                    self.rtc_llgr_stale_local_tags.insert(route.key(), ());
                 }
+                checkpoint();
                 attr_intern.intern(&mut route.attributes);
+                checkpoint();
                 affected.push(route.key());
             }
         });
-
+        retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
 
@@ -2559,7 +2808,7 @@ impl AdjRibIn {
         let mut clear_local_llgr = Vec::new();
         self.rtc_routes.for_each_mut(|key, route| {
             route.is_llgr_stale = false;
-            if self.rtc_llgr_stale_local_tags.contains(key) {
+            if self.rtc_llgr_stale_local_tags.contains_key(key) {
                 clear_local_llgr.push(key.clone());
             }
         });
@@ -2672,24 +2921,40 @@ impl AdjRibIn {
 
     /// Remove stale `FlowSpec` routes for a specific family, returning their rules.
     pub fn sweep_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
+        self.sweep_stale_flowspec_family_with_checkpoint(family, &mut || {})
+    }
+
+    pub(crate) fn sweep_stale_flowspec_family_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<FlowSpecKey> {
         if family.1 != Safi::FlowSpec {
             return Vec::new();
         }
-        let stale: Vec<FlowSpecRouteKey> = self
-            .flowspec_routes
-            .iter()
-            .filter(|(_, r)| r.is_stale && r.afi == family.0)
-            .map(|(k, _)| k.clone())
-            .collect();
-        let mut rules = Vec::new();
+        checkpoint();
+        let mut stale: Vec<FlowSpecRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        checkpoint();
+        stale.extend(
+            self.flowspec_routes
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|(_, r)| r.is_stale && r.afi == family.0)
+                .map(|(k, _)| k.clone()),
+        );
+        let mut rules = Vec::with_capacity(stale.len());
+        checkpoint();
         for key in &stale {
+            checkpoint();
             rules.push(FlowSpecKey {
                 afi: key.afi,
                 rule: key.rule.clone(),
             });
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
+            checkpoint();
         }
+        retire_llgr_keys(stale, checkpoint);
         rules
     }
 
@@ -2700,49 +2965,65 @@ impl AdjRibIn {
     ///
     /// Returns rules affected (for best-path recalc).
     pub fn promote_to_llgr_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
+        self.promote_to_llgr_stale_flowspec_with_checkpoint(family, &mut || {})
+    }
+
+    pub(crate) fn promote_to_llgr_stale_flowspec_with_checkpoint(
+        &mut self,
+        family: (Afi, Safi),
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<FlowSpecKey> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
         if family.1 != Safi::FlowSpec {
             return Vec::new();
         }
-
-        // First pass: remove routes with NO_LLGR community
-        let no_llgr_keys: Vec<FlowSpecRouteKey> = self
-            .flowspec_routes
-            .iter()
-            .filter(|(_, r)| {
-                r.is_stale
-                    && r.afi == family.0
-                    && r.attributes.iter().any(|a| {
-                        a.communities()
-                            .is_some_and(|values| values.contains(&COMMUNITY_NO_LLGR))
-                    })
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-        let mut affected: Vec<FlowSpecKey> = no_llgr_keys
-            .iter()
-            .map(|key| FlowSpecKey {
+        checkpoint();
+        let capacity = self.gr_stale_family_len(family);
+        let mut no_llgr_keys: Vec<FlowSpecRouteKey> = Vec::new();
+        checkpoint();
+        for (_, route) in self.flowspec_routes.iter() {
+            checkpoint();
+            if route.is_stale
+                && route.afi == family.0
+                && route.attributes.iter().any(|attr| {
+                    attr.communities()
+                        .is_some_and(|values| values.contains(&COMMUNITY_NO_LLGR))
+                })
+            {
+                if no_llgr_keys.is_empty() {
+                    no_llgr_keys.reserve_exact(capacity);
+                    checkpoint();
+                }
+                no_llgr_keys.push(route.key());
+            }
+        }
+        let mut affected = Vec::with_capacity(capacity);
+        checkpoint();
+        for key in &no_llgr_keys {
+            checkpoint();
+            affected.push(FlowSpecKey {
                 afi: key.afi,
                 rule: key.rule.clone(),
-            })
-            .collect();
-        for key in &no_llgr_keys {
+            });
+            self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
+            checkpoint();
         }
-
-        // Second pass: promote remaining stale routes to LLGR-stale
         self.flowspec_routes.for_each_mut(|_, route| {
+            checkpoint();
             if route.is_stale && route.afi == family.0 {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
+                checkpoint();
                 if add_llgr_stale_community(&mut route.attributes) {
-                    self.flowspec_llgr_stale_local_tags.insert(route.key());
+                    self.flowspec_llgr_stale_local_tags.insert(route.key(), ());
                 }
+                checkpoint();
                 affected.push(route.selection_key());
             }
         });
-
+        retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
 
@@ -2801,7 +3082,7 @@ impl AdjRibIn {
             if route.afi == family.0 {
                 route.is_llgr_stale = false;
                 let key = route.key();
-                if self.flowspec_llgr_stale_local_tags.contains(&key) {
+                if self.flowspec_llgr_stale_local_tags.contains_key(&key) {
                     clear_local_llgr.push(key);
                 }
             }
@@ -2875,16 +3156,16 @@ impl AdjRibIn {
     }
 }
 
-fn retire_local_tags<T>(tags: &mut HashSet<T>, checkpoint: &mut impl RetirementCheckpoint) {
-    checkpoint.checkpoint(RetirementProgress::Boundary);
+fn retire_llgr_keys<T>(mut keys: Vec<T>, checkpoint: &mut impl FnMut()) {
+    checkpoint();
     if std::mem::needs_drop::<T>() {
-        for tag in tags.drain() {
-            drop(tag);
-            checkpoint.checkpoint(RetirementProgress::Progress);
+        while let Some(key) = keys.pop() {
+            drop(key);
+            checkpoint();
         }
     }
-    drop(std::mem::take(tags));
-    checkpoint.checkpoint(RetirementProgress::Boundary);
+    drop(keys);
+    checkpoint();
 }
 
 /// Add `LLGR_STALE`, mutating an existing canonical or Partial COMMUNITIES
@@ -2947,6 +3228,256 @@ mod tests {
 
     use crate::route::BgpLsFamily;
     use crate::test_support::{make_flowspec_route, make_route, make_v6_route};
+
+    fn insert_llgr_bound_routes(
+        rib: &mut AdjRibIn,
+        index: u32,
+        stale: bool,
+        llgr: bool,
+        attributes: Vec<PathAttribute>,
+    ) {
+        let peer = Ipv4Addr::new(10, 0, 0, 1);
+        let addr = Ipv4Addr::from(0x0a00_0000 + index);
+        let attrs = AttrSet::new(attributes.clone());
+        let mut route = make_route(Ipv4Prefix::new(addr, 32), peer);
+        route.attributes = Arc::clone(&attrs);
+        route.is_stale = stale;
+        route.is_llgr_stale = llgr;
+        rib.insert(route);
+
+        let mut route = make_flowspec_route(peer);
+        route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+            rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(addr, 32)),
+        )];
+        route.attributes = attributes.clone();
+        route.is_stale = stale;
+        route.is_llgr_stale = llgr;
+        rib.insert_flowspec(route);
+
+        let key = insert_evpn_imet(rib, peer, index, attributes);
+        rib.evpn_routes.update(&key, |route| {
+            route.is_stale = stale;
+            route.is_llgr_stale = llgr;
+        });
+
+        let mut nlri = bgpls_nlri(0);
+        nlri.payload = index.to_be_bytes().to_vec().into();
+        let mut route = make_bgpls_route(BgpLsFamily::LinkState, nlri, 1);
+        route.attributes = Arc::clone(&attrs);
+        route.is_stale = stale;
+        route.is_llgr_stale = llgr;
+        rib.insert_bgpls(route);
+
+        let mut route = make_vpn_route(vpn_nlri(addr.octets(), 32, 100), 1);
+        route.attributes = Arc::clone(&attrs);
+        route.is_stale = stale;
+        route.is_llgr_stale = llgr;
+        rib.insert_vpn(route);
+
+        let mut route = make_labeled_route(labeled_nlri(addr.octets(), 32, 100), 1);
+        route.attributes = Arc::clone(&attrs);
+        route.is_stale = stale;
+        route.is_llgr_stale = llgr;
+        rib.insert_labeled(route);
+
+        let mut route = make_rtc_route(rtc_nlri(index), 1);
+        route.attributes = attrs;
+        route.is_stale = stale;
+        route.is_llgr_stale = llgr;
+        rib.insert_rtc(route);
+    }
+
+    fn llgr_tag_shape(rib: &AdjRibIn) -> [(usize, usize); 7] {
+        [
+            (
+                rib.llgr_stale_local_tags.len(),
+                rib.llgr_stale_local_tags.capacity(),
+            ),
+            (
+                rib.flowspec_llgr_stale_local_tags.len(),
+                rib.flowspec_llgr_stale_local_tags.capacity(),
+            ),
+            (
+                rib.evpn_llgr_stale_local_tags.len(),
+                rib.evpn_llgr_stale_local_tags.capacity(),
+            ),
+            (
+                rib.bgpls_llgr_stale_local_tags.len(),
+                rib.bgpls_llgr_stale_local_tags.capacity(),
+            ),
+            (
+                rib.vpn_llgr_stale_local_tags.len(),
+                rib.vpn_llgr_stale_local_tags.capacity(),
+            ),
+            (
+                rib.labeled_llgr_stale_local_tags.len(),
+                rib.labeled_llgr_stale_local_tags.capacity(),
+            ),
+            (
+                rib.rtc_llgr_stale_local_tags.len(),
+                rib.rtc_llgr_stale_local_tags.capacity(),
+            ),
+        ]
+    }
+
+    fn promote_llgr_bound_family(
+        rib: &mut AdjRibIn,
+        index: usize,
+        intern: &mut crate::attr_intern::AttrInternTable,
+        checkpoint: &mut impl FnMut(),
+    ) -> usize {
+        match index {
+            0 => rib
+                .promote_to_llgr_stale_with_checkpoint(
+                    (Afi::Ipv4, Safi::Unicast),
+                    intern,
+                    checkpoint,
+                )
+                .len(),
+            1 => rib
+                .promote_to_llgr_stale_flowspec_with_checkpoint(
+                    (Afi::Ipv4, Safi::FlowSpec),
+                    checkpoint,
+                )
+                .len(),
+            2 => rib
+                .promote_to_llgr_stale_evpn_with_checkpoint(
+                    (Afi::L2Vpn, Safi::Evpn),
+                    intern,
+                    checkpoint,
+                )
+                .len(),
+            3 => rib
+                .promote_to_llgr_stale_bgpls_with_checkpoint(
+                    (Afi::BgpLs, Safi::BgpLs),
+                    intern,
+                    checkpoint,
+                )
+                .len(),
+            4 => rib
+                .promote_to_llgr_stale_vpn_with_checkpoint(
+                    (Afi::Ipv4, Safi::MplsVpn),
+                    intern,
+                    checkpoint,
+                )
+                .len(),
+            5 => rib
+                .promote_to_llgr_stale_labeled_with_checkpoint(
+                    (Afi::Ipv4, Safi::LabeledUnicast),
+                    intern,
+                    checkpoint,
+                )
+                .len(),
+            6 => rib
+                .promote_to_llgr_stale_rtc_with_checkpoint(
+                    (Afi::Ipv4, Safi::RtConstrain),
+                    intern,
+                    checkpoint,
+                )
+                .len(),
+            _ => unreachable!("fixture has seven tables"),
+        }
+    }
+
+    #[test]
+    fn llgr_promoters_checkpoint_excluded_routes_removal_intern_and_retirement() {
+        let mut rib = AdjRibIn::new(PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 1).into()));
+        for index in 0..5 {
+            let attributes = match index {
+                1 | 4 => vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
+                2 => vec![PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_NO_LLGR,
+                ])],
+                _ => vec![],
+            };
+            insert_llgr_bound_routes(&mut rib, index, index < 3, index == 4, attributes);
+        }
+        let mut intern = crate::attr_intern::AttrInternTable::new();
+        let owned_scratch = [
+            std::mem::needs_drop::<(Prefix, u32)>(),
+            std::mem::needs_drop::<FlowSpecRouteKey>(),
+            std::mem::needs_drop::<EvpnRouteKey>(),
+            std::mem::needs_drop::<BgpLsRouteKey>(),
+            std::mem::needs_drop::<VpnRibRouteKey>(),
+            std::mem::needs_drop::<LabeledRibRouteKey>(),
+            std::mem::needs_drop::<RtcRibRouteKey>(),
+        ];
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for (index, owned) in owned_scratch.into_iter().enumerate() {
+            let mut visits = 0;
+            assert_eq!(
+                promote_llgr_bound_family(&mut rib, index, &mut intern, &mut || visits += 1),
+                3
+            );
+            // Allocation edges, both scans, two removal edges, mutation
+            // and interning edges for two promoted rows, plus owned-key drops.
+            let promotion_edges = if index == 1 { 2 } else { 3 };
+            // The unicast slab's second scan also visits the slot vacated
+            // by the removed NO_LLGR row.
+            let vacated = usize::from(index == 0);
+            observed.push((index, visits));
+            expected.push((
+                index,
+                6 + 5 + 2 + 4 + 2 * promotion_edges + usize::from(owned) + vacated,
+            ));
+            assert_eq!(
+                llgr_tag_shape(&rib)[index].0,
+                1,
+                "only the locally added community is tagged"
+            );
+        }
+        assert_eq!(
+            observed, expected,
+            "every family must checkpoint both scans, mutation and cleanup"
+        );
+        assert_eq!(rib.retained_stale_count(), 21);
+        assert_eq!(
+            rib.maintained_stale_route_counts(),
+            rib.scanned_stale_route_counts()
+        );
+        assert_eq!(
+            intern.len(),
+            1,
+            "promoted attribute sets remain interned across families"
+        );
+    }
+
+    #[test]
+    fn llgr_production_promoters_bound_all_local_tag_growth() {
+        let mut rib = AdjRibIn::new(PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 1).into()));
+        let mut intern = crate::attr_intern::AttrInternTable::new();
+        let mut inserted = 0;
+        let mut growth = Vec::new();
+        let mut previous = [(0_usize, 0_usize); 7];
+        for count in [0, 14_336, 14_337, 28_672, 28_673, 32_768] {
+            for index in inserted..count {
+                insert_llgr_bound_routes(&mut rib, index, true, false, vec![]);
+            }
+            for family in 0..7 {
+                assert_eq!(
+                    promote_llgr_bound_family(&mut rib, family, &mut intern, &mut || {}),
+                    usize::try_from(count - inserted).unwrap()
+                );
+            }
+            let shape = llgr_tag_shape(&rib);
+            for (index, (len, capacity)) in shape.into_iter().enumerate() {
+                assert_eq!(len, usize::try_from(count).unwrap());
+                if matches!(count, 14_337 | 28_673)
+                    && capacity.saturating_sub(previous[index].1) > crate::fast_hash::SHARD_SPLIT_AT
+                {
+                    growth.push((index, previous[index].1, capacity));
+                }
+            }
+            assert_eq!(rib.retained_stale_count(), u64::from(count) * 7);
+            previous = shape;
+            inserted = count;
+        }
+        assert!(
+            growth.is_empty(),
+            "one local tag rehashed beyond one shard in these tables: {growth:?}"
+        );
+    }
 
     /// `unicast_lens` reads the RPKI buckets; this pins that every stored
     /// path identity is counted once in its own AFI.
@@ -3815,7 +4346,7 @@ mod tests {
                         // Path 31 exercises retained local-tag cleanup without a
                         // stale flag; path 41 carries an upstream community.
                         if matches!(path_id, 7 | 11 | 31) {
-                            rib.llgr_stale_local_tags.insert((prefix, path_id));
+                            rib.llgr_stale_local_tags.insert((prefix, path_id), ());
                         }
                     }
                 }
@@ -3841,7 +4372,16 @@ mod tests {
                 actual.rpki_validation_counts(),
                 expected.rpki_validation_counts()
             );
-            assert_eq!(actual.llgr_stale_local_tags, expected.llgr_stale_local_tags);
+            assert_eq!(
+                actual
+                    .llgr_stale_local_tags
+                    .keys()
+                    .collect::<std::collections::HashSet<_>>(),
+                expected
+                    .llgr_stale_local_tags
+                    .keys()
+                    .collect::<std::collections::HashSet<_>>()
+            );
             for prefix in [v4, v6] {
                 assert_eq!(
                     actual.iter_prefix(&prefix).count(),
@@ -3979,14 +4519,18 @@ mod tests {
         other.validation_state = RpkiValidation::Invalid;
         rib.insert(selected);
         rib.insert(other);
-        rib.llgr_stale_local_tags.insert((Prefix::V4(prefix), 1));
+        rib.llgr_stale_local_tags
+            .insert((Prefix::V4(prefix), 1), ());
 
         let taken = rib.take_route(&Prefix::V4(prefix), 1).unwrap();
         assert_eq!(taken.path_id, 1);
         assert!(Arc::ptr_eq(&taken.attributes, &attributes));
         assert_eq!(rib.rpki_counts_v4.valid, 0);
         assert_eq!(rib.rpki_counts_v4.invalid, 1);
-        assert!(!rib.llgr_stale_local_tags.contains(&(Prefix::V4(prefix), 1)));
+        assert!(
+            !rib.llgr_stale_local_tags
+                .contains_key(&(Prefix::V4(prefix), 1))
+        );
         assert_eq!(rib.iter_prefix(&Prefix::V4(prefix)).count(), 1);
         assert!(rib.take_route(&Prefix::V4(prefix), 1).is_none());
         assert!(rib.take_route(&Prefix::V4(prefix), 2).is_some());
@@ -4521,7 +5065,7 @@ mod tests {
             &mut crate::attr_intern::AttrInternTable::new(),
         );
         assert!(
-            rib.evpn_llgr_stale_local_tags.contains(&key),
+            rib.evpn_llgr_stale_local_tags.contains_key(&key),
             "promotion should record the local LLGR_STALE injection"
         );
 
@@ -4534,7 +5078,7 @@ mod tests {
         );
         assert_eq!(readvertised, key);
         assert!(
-            !rib.evpn_llgr_stale_local_tags.contains(&key),
+            !rib.evpn_llgr_stale_local_tags.contains_key(&key),
             "re-advertise must clear the stale local tag"
         );
 
@@ -4560,11 +5104,11 @@ mod tests {
             (Afi::L2Vpn, Safi::Evpn),
             &mut crate::attr_intern::AttrInternTable::new(),
         );
-        assert!(rib.evpn_llgr_stale_local_tags.contains(&key));
+        assert!(rib.evpn_llgr_stale_local_tags.contains_key(&key));
 
         assert!(rib.withdraw_evpn(&key));
         assert!(
-            !rib.evpn_llgr_stale_local_tags.contains(&key),
+            !rib.evpn_llgr_stale_local_tags.contains_key(&key),
             "withdraw must clear the stale local tag"
         );
     }
@@ -4780,7 +5324,7 @@ mod tests {
         let promoted = &rib.vpn_routes[&key];
         assert!(promoted.is_llgr_stale);
         assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
-        assert!(rib.vpn_llgr_stale_local_tags.contains(&key));
+        assert!(rib.vpn_llgr_stale_local_tags.contains_key(&key));
 
         rib.clear_stale_vpn(VPN_V4);
         let route = &rib.vpn_routes[&key];
@@ -4851,7 +5395,7 @@ mod tests {
                 .communities()
                 .contains(&COMMUNITY_LLGR_STALE)
         );
-        assert!(rib.vpn_llgr_stale_local_tags.contains(&keep_key));
+        assert!(rib.vpn_llgr_stale_local_tags.contains_key(&keep_key));
         assert!(affected.contains(&keep_key));
         assert!(affected.contains(&no_llgr_key));
         // v6 tuple untouched: still GR-stale, not promoted
@@ -4877,7 +5421,7 @@ mod tests {
 
         rib.mark_stale_vpn(VPN_V4);
         rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
-        assert!(rib.vpn_llgr_stale_local_tags.contains(&key));
+        assert!(rib.vpn_llgr_stale_local_tags.contains_key(&key));
 
         // Peer re-advertises the same key, itself carrying LLGR_STALE.
         let readvertised = insert_vpn_with(
@@ -4886,7 +5430,7 @@ mod tests {
             vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
         );
         assert_eq!(readvertised, key);
-        assert!(!rib.vpn_llgr_stale_local_tags.contains(&key));
+        assert!(!rib.vpn_llgr_stale_local_tags.contains_key(&key));
 
         // EoR: the peer-originated LLGR_STALE must survive.
         rib.clear_llgr_stale_vpn(VPN_V4);
@@ -4904,10 +5448,10 @@ mod tests {
         let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         rib.mark_stale_vpn(VPN_V4);
         rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
-        assert!(rib.vpn_llgr_stale_local_tags.contains(&key));
+        assert!(rib.vpn_llgr_stale_local_tags.contains_key(&key));
 
         assert!(rib.withdraw_vpn(&key));
-        assert!(!rib.vpn_llgr_stale_local_tags.contains(&key));
+        assert!(!rib.vpn_llgr_stale_local_tags.contains_key(&key));
     }
 
     fn labeled_nlri(addr: [u8; 4], len: u8, label: u32) -> LabeledNlri {
@@ -5189,7 +5733,7 @@ mod tests {
         let promoted = &rib.labeled_routes[&key];
         assert!(promoted.is_llgr_stale);
         assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
-        assert!(rib.labeled_llgr_stale_local_tags.contains(&key));
+        assert!(rib.labeled_llgr_stale_local_tags.contains_key(&key));
 
         rib.clear_stale_labeled(LU_V4);
         let route = &rib.labeled_routes[&key];
@@ -5264,7 +5808,7 @@ mod tests {
                 .communities()
                 .contains(&COMMUNITY_LLGR_STALE)
         );
-        assert!(rib.labeled_llgr_stale_local_tags.contains(&keep_key));
+        assert!(rib.labeled_llgr_stale_local_tags.contains_key(&keep_key));
         assert!(affected.contains(&keep_key));
         assert!(affected.contains(&no_llgr_key));
         // v6 tuple untouched: still GR-stale, not promoted
@@ -5311,7 +5855,7 @@ mod tests {
 
         rib.mark_stale_labeled(LU_V4);
         rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
-        assert!(rib.labeled_llgr_stale_local_tags.contains(&key));
+        assert!(rib.labeled_llgr_stale_local_tags.contains_key(&key));
 
         // Peer re-advertises the same key, itself carrying LLGR_STALE.
         let readvertised = insert_labeled_with(
@@ -5320,7 +5864,7 @@ mod tests {
             vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
         );
         assert_eq!(readvertised, key);
-        assert!(!rib.labeled_llgr_stale_local_tags.contains(&key));
+        assert!(!rib.labeled_llgr_stale_local_tags.contains_key(&key));
 
         // EoR: the peer-originated LLGR_STALE must survive.
         rib.clear_llgr_stale_labeled(LU_V4);
@@ -5338,10 +5882,10 @@ mod tests {
         let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         rib.mark_stale_labeled(LU_V4);
         rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
-        assert!(rib.labeled_llgr_stale_local_tags.contains(&key));
+        assert!(rib.labeled_llgr_stale_local_tags.contains_key(&key));
 
         assert!(rib.withdraw_labeled(&key));
-        assert!(!rib.labeled_llgr_stale_local_tags.contains(&key));
+        assert!(!rib.labeled_llgr_stale_local_tags.contains_key(&key));
     }
 
     #[test]
@@ -5410,7 +5954,7 @@ mod tests {
                 .communities()
                 .contains(&COMMUNITY_LLGR_STALE)
         );
-        assert!(rib.bgpls_llgr_stale_local_tags.contains(&key));
+        assert!(rib.bgpls_llgr_stale_local_tags.contains_key(&key));
 
         rib.clear_stale_bgpls(LS_BASE);
         let route = &rib.bgpls_routes[&key];
@@ -5493,7 +6037,7 @@ mod tests {
                 .communities()
                 .contains(&COMMUNITY_LLGR_STALE)
         );
-        assert!(rib.bgpls_llgr_stale_local_tags.contains(&keep_key));
+        assert!(rib.bgpls_llgr_stale_local_tags.contains_key(&keep_key));
         assert!(affected.contains(&keep_key));
         assert!(affected.contains(&no_llgr_key));
         // SAFI 72 tuple untouched: still GR-stale, not promoted
@@ -5515,7 +6059,7 @@ mod tests {
 
         rib.mark_stale_bgpls(LS_BASE);
         rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
-        assert!(rib.bgpls_llgr_stale_local_tags.contains(&key));
+        assert!(rib.bgpls_llgr_stale_local_tags.contains_key(&key));
 
         let readvertised = insert_bgpls_with(
             &mut rib,
@@ -5524,7 +6068,7 @@ mod tests {
             vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
         );
         assert_eq!(readvertised, key);
-        assert!(!rib.bgpls_llgr_stale_local_tags.contains(&key));
+        assert!(!rib.bgpls_llgr_stale_local_tags.contains_key(&key));
 
         rib.clear_llgr_stale_bgpls(LS_BASE);
         assert!(
@@ -5541,10 +6085,10 @@ mod tests {
         let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         rib.mark_stale_bgpls(LS_BASE);
         rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
-        assert!(rib.bgpls_llgr_stale_local_tags.contains(&key));
+        assert!(rib.bgpls_llgr_stale_local_tags.contains_key(&key));
 
         assert!(rib.withdraw_bgpls(&key));
-        assert!(!rib.bgpls_llgr_stale_local_tags.contains(&key));
+        assert!(!rib.bgpls_llgr_stale_local_tags.contains_key(&key));
     }
 
     #[test]
@@ -5602,7 +6146,7 @@ mod tests {
                 .communities()
                 .contains(&COMMUNITY_LLGR_STALE)
         );
-        assert!(rib.rtc_llgr_stale_local_tags.contains(&key));
+        assert!(rib.rtc_llgr_stale_local_tags.contains_key(&key));
 
         rib.clear_stale_rtc(RTC_FAM);
         let route = &rib.rtc_routes[&key];
@@ -5666,7 +6210,7 @@ mod tests {
                 .communities()
                 .contains(&COMMUNITY_LLGR_STALE)
         );
-        assert!(rib.rtc_llgr_stale_local_tags.contains(&keep_key));
+        assert!(rib.rtc_llgr_stale_local_tags.contains_key(&keep_key));
         assert!(affected.contains(&keep_key));
         assert!(affected.contains(&no_llgr_key));
 
@@ -5684,7 +6228,7 @@ mod tests {
 
         rib.mark_stale_rtc(RTC_FAM);
         rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
-        assert!(rib.rtc_llgr_stale_local_tags.contains(&key));
+        assert!(rib.rtc_llgr_stale_local_tags.contains_key(&key));
 
         let readvertised = insert_rtc_with(
             &mut rib,
@@ -5692,7 +6236,7 @@ mod tests {
             vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])],
         );
         assert_eq!(readvertised, key);
-        assert!(!rib.rtc_llgr_stale_local_tags.contains(&key));
+        assert!(!rib.rtc_llgr_stale_local_tags.contains_key(&key));
 
         rib.clear_llgr_stale_rtc(RTC_FAM);
         assert!(
@@ -5709,10 +6253,10 @@ mod tests {
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
         rib.mark_stale_rtc(RTC_FAM);
         rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
-        assert!(rib.rtc_llgr_stale_local_tags.contains(&key));
+        assert!(rib.rtc_llgr_stale_local_tags.contains_key(&key));
 
         assert!(rib.withdraw_rtc(&key));
-        assert!(!rib.rtc_llgr_stale_local_tags.contains(&key));
+        assert!(!rib.rtc_llgr_stale_local_tags.contains_key(&key));
     }
 
     #[test]
