@@ -611,8 +611,22 @@ impl AdjRibIn {
     /// slot. Every unicast removal path routes through here so the index and
     /// slab can never disagree.
     fn remove_route_entry(&mut self, prefix: &Prefix, path_id: u32) -> Option<Route> {
+        self.remove_route_entry_with_checkpoint(prefix, path_id, &mut || {})
+    }
+
+    /// [`Self::remove_route_entry`] with a checkpoint per Add-Path entry the
+    /// prefix's path-list scan visits.
+    fn remove_route_entry_with_checkpoint(
+        &mut self,
+        prefix: &Prefix,
+        path_id: u32,
+        checkpoint: &mut impl FnMut(),
+    ) -> Option<Route> {
         let ids = self.prefix_index.get_mut(prefix)?;
-        let pos = ids.iter().position(|(id, _)| *id == path_id)?;
+        let pos = ids
+            .iter()
+            .inspect(|_| checkpoint())
+            .position(|(id, _)| *id == path_id)?;
         let (_, handle) = ids.swap_remove(pos);
         if ids.is_empty() {
             self.prefix_index.remove(prefix);
@@ -1175,7 +1189,7 @@ impl AdjRibIn {
             checkpoint();
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.remove_route_entry(&key.0, key.1);
+            self.remove_route_entry_with_checkpoint(&key.0, key.1, checkpoint);
             checkpoint();
         }
         retire_llgr_keys(stale, checkpoint);
@@ -1286,7 +1300,7 @@ impl AdjRibIn {
             checkpoint();
             affected.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.remove_route_entry(&key.0, key.1);
+            self.remove_route_entry_with_checkpoint(&key.0, key.1, checkpoint);
             checkpoint();
         }
         // Walk slots, not routes, so vacancies of a sparse slab yield too.
@@ -2024,13 +2038,26 @@ impl AdjRibIn {
     /// the GR/LLGR stale sweeps) must route through here so the secondary
     /// index never dangles.
     fn remove_vpn_entry(&mut self, key: &VpnRibRouteKey) -> bool {
+        self.remove_vpn_entry_with_checkpoint(key, &mut || {})
+    }
+
+    /// [`Self::remove_vpn_entry`] with a checkpoint per Add-Path id the
+    /// index scan visits.
+    fn remove_vpn_entry_with_checkpoint(
+        &mut self,
+        key: &VpnRibRouteKey,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
         // A removed key can no longer carry a locally-injected LLGR_STALE tag.
         if !self.vpn_llgr_stale_local_tags.is_empty() {
             self.vpn_llgr_stale_local_tags.remove(key);
         }
         let removed = self.vpn_routes.remove(key).is_some();
         if removed && let Some(ids) = self.vpn_key_index.get_mut(&key.nlri_key) {
-            ids.retain(|id| *id != key.path_id);
+            ids.retain(|id| {
+                checkpoint();
+                *id != key.path_id
+            });
             if ids.is_empty() {
                 self.vpn_key_index.remove(&key.nlri_key);
             }
@@ -2237,7 +2264,7 @@ impl AdjRibIn {
         );
         for key in &stale {
             checkpoint();
-            self.remove_vpn_entry(key);
+            self.remove_vpn_entry_with_checkpoint(key, checkpoint);
             checkpoint();
         }
         checkpoint();
@@ -2294,7 +2321,7 @@ impl AdjRibIn {
             checkpoint();
             affected.push(key.clone());
             self.vpn_llgr_stale_local_tags.remove(key);
-            self.remove_vpn_entry(key);
+            self.remove_vpn_entry_with_checkpoint(key, checkpoint);
             checkpoint();
         }
         self.vpn_routes.for_each_mut(|_, route| {
@@ -2379,13 +2406,26 @@ impl AdjRibIn {
     /// (withdraw and the GR/LLGR stale sweeps) must route through here so
     /// the secondary index never dangles.
     fn remove_labeled_entry(&mut self, key: &LabeledRibRouteKey) -> bool {
+        self.remove_labeled_entry_with_checkpoint(key, &mut || {})
+    }
+
+    /// [`Self::remove_labeled_entry`] with a checkpoint per Add-Path id the
+    /// index scan visits.
+    fn remove_labeled_entry_with_checkpoint(
+        &mut self,
+        key: &LabeledRibRouteKey,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
         // A removed key can no longer carry a locally-injected LLGR_STALE tag.
         if !self.labeled_llgr_stale_local_tags.is_empty() {
             self.labeled_llgr_stale_local_tags.remove(key);
         }
         let removed = self.labeled_routes.remove(key).is_some();
         if removed && let Some(ids) = self.labeled_key_index.get_mut(&key.prefix) {
-            ids.retain(|id| *id != key.path_id);
+            ids.retain(|id| {
+                checkpoint();
+                *id != key.path_id
+            });
             if ids.is_empty() {
                 self.labeled_key_index.remove(&key.prefix);
             }
@@ -2582,7 +2622,7 @@ impl AdjRibIn {
         );
         for key in &stale {
             checkpoint();
-            self.remove_labeled_entry(key);
+            self.remove_labeled_entry_with_checkpoint(key, checkpoint);
             checkpoint();
         }
         checkpoint();
@@ -2639,7 +2679,7 @@ impl AdjRibIn {
             checkpoint();
             affected.push(*key);
             self.labeled_llgr_stale_local_tags.remove(key);
-            self.remove_labeled_entry(key);
+            self.remove_labeled_entry_with_checkpoint(key, checkpoint);
             checkpoint();
         }
         self.labeled_routes.for_each_mut(|_, route| {
@@ -3662,10 +3702,13 @@ mod tests {
             // The unicast slab's second scan also visits the slot vacated
             // by the removed NO_LLGR row.
             let vacated = usize::from(index == 0);
+            // Unicast, VPN and labeled removals also visit the one Add-Path
+            // index entry of the removed NO_LLGR row.
+            let indexed = usize::from(matches!(index, 0 | 4 | 5));
             observed.push((index, visits));
             expected.push((
                 index,
-                6 + 5 + 2 + 4 + 2 * promotion_edges + usize::from(owned) + vacated,
+                6 + 5 + 2 + 4 + 2 * promotion_edges + usize::from(owned) + vacated + indexed,
             ));
             assert_eq!(
                 llgr_tag_shape(&rib)[index].0,

@@ -12,10 +12,16 @@
 //! after taking the lock, so a renewal that waited for the lock past the
 //! deadline is judged at the time it is applied, and none holds the lock
 //! across an `.await`.
+//!
+//! Guarded `FlowSpec` owners (ADR-0144) also hold mutation windows here, at
+//! most [`MAX_LIVE_WINDOWS`](crate::injection_lease::MAX_LIVE_WINDOWS) live.
+//! A guarded add or renewal checks its window, and caps the deadline at the
+//! window's expiry, under the same lock and clock read as the admission.
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -39,6 +45,45 @@ pub const MAX_LIVE_OWNERS: usize = 64;
 pub const MAX_KEYS_PER_OWNER: usize = 16_384;
 /// Longest accepted owner name, in bytes.
 pub const MAX_OWNER_LEN: usize = 64;
+
+/// Longest mutation window, in seconds (ADR-0144 §2).
+pub const MAX_WINDOW_SECONDS: u32 = 120;
+/// Most live mutation windows one guarded owner may hold.
+pub const MAX_LIVE_WINDOWS_PER_OWNER: usize = 64;
+/// Most live mutation windows in the table, so window state stays bounded
+/// however many owner names are used.
+pub const MAX_LIVE_WINDOWS: usize = MAX_LIVE_OWNERS * MAX_LIVE_WINDOWS_PER_OWNER;
+
+/// Prefix of a guarded owner's stored name (ADR-0144 §4). `:` is outside the
+/// owner alphabet [`validate_owner`] accepts, so no legacy add, renewal or
+/// owner-scoped delete can name a guarded owner.
+const GUARDED_OWNER_PREFIX: &str = "guarded:";
+
+/// The name under which guarded owner `owner` is stored, tagged and labelled.
+#[must_use]
+pub fn guarded_owner(owner: &str) -> String {
+    format!("{GUARDED_OWNER_PREFIX}{owner}")
+}
+
+/// A server-issued mutation window (ADR-0144 §2). It must match both fields;
+/// a window from a previous process never matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MutationWindowId {
+    /// The issuing process's incarnation.
+    pub incarnation: u64,
+    /// Daemon-wide window counter, only increasing.
+    pub sequence: u64,
+}
+
+/// What fences a guarded `FlowSpec` add: the window it must commit within and
+/// its client-chosen admission revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardedFence {
+    /// Window checked, and capping the lease deadline, at commit.
+    pub window: MutationWindowId,
+    /// Admission revision stored with the key's tag.
+    pub revision: NonZeroU64,
+}
 
 /// One owner's lease generation. A renewal must match both fields; the
 /// incarnation is drawn once per process, so a generation from a previous
@@ -103,6 +148,8 @@ pub struct LeasedKeyRow {
     pub cursor: InjectedKeyCursor,
     /// Generation the key is tagged with.
     pub generation: LeaseGeneration,
+    /// Admission revision of a guarded key; `None` for a legacy one.
+    pub revision: Option<NonZeroU64>,
     /// Time to that generation's deadline; zero once it expired.
     pub remaining: Duration,
 }
@@ -173,6 +220,34 @@ pub struct InjectionTag {
     pub owner: Arc<str>,
     /// Generation the key is tagged with.
     pub generation: LeaseGeneration,
+    /// Admission revision of a guarded add (ADR-0144 §3); `None` for a
+    /// legacy leased add.
+    pub revision: Option<NonZeroU64>,
+}
+
+/// A lease table admission (ADR-0141 §4, ADR-0144 §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Admission {
+    /// The owner and generation joined or started.
+    pub(crate) tag: InjectionTag,
+    /// Live owners, read under the admission's lock, so the caller need not
+    /// take it again before the RIB insert.
+    pub(crate) live_owners: usize,
+    /// Whether the admission started a new generation. The caller logs it
+    /// with [`log_generation_started`] after the commit, so a slow log write
+    /// never sits between the window check and the RIB insert.
+    pub(crate) started: bool,
+}
+
+/// Log that `tag`'s generation started under a lease of `lease_seconds`.
+pub(crate) fn log_generation_started(tag: &InjectionTag, lease_seconds: u32) {
+    tracing::info!(
+        owner = &*tag.owner,
+        incarnation = tag.generation.incarnation,
+        sequence = tag.generation.sequence,
+        lease_seconds,
+        "injection lease generation started"
+    );
 }
 
 /// Why a lease table admission was refused. The table, the RIB and the wire
@@ -181,6 +256,12 @@ pub struct InjectionTag {
 pub enum LeaseRejection {
     /// A new owner would exceed [`MAX_LIVE_OWNERS`].
     OwnerCap,
+    /// A new window would exceed [`MAX_LIVE_WINDOWS_PER_OWNER`] or
+    /// [`MAX_LIVE_WINDOWS`].
+    WindowCap,
+    /// A guarded add's window is unknown, expired, another owner's or another
+    /// process's.
+    WindowNotLive,
 }
 
 /// Which ADR-0141 ownership or generation check refused a command. The API
@@ -199,6 +280,13 @@ pub enum LeaseConflict {
     /// A replay-complete signal named another daemon incarnation than this
     /// process's: the controller replayed into a previous process.
     IncarnationMismatch,
+    /// A guarded add or renewal named a mutation window that is unknown,
+    /// expired, another owner's or another process's (ADR-0144 §2).
+    WindowNotLive,
+    /// A guarded add or delete named another admission revision than the
+    /// key's, or a guarded add repeated the key's revision with a different
+    /// payload (ADR-0144 §3).
+    RevisionMismatch,
 }
 
 impl LeaseConflict {
@@ -210,6 +298,8 @@ impl LeaseConflict {
             Self::KeyUnowned => "KEY_UNOWNED",
             Self::GenerationNotLive => "GENERATION_NOT_LIVE",
             Self::IncarnationMismatch => "INCARNATION_MISMATCH",
+            Self::WindowNotLive => "WINDOW_NOT_LIVE",
+            Self::RevisionMismatch => "REVISION_MISMATCH",
         }
     }
 }
@@ -225,6 +315,21 @@ pub fn validate_lease(owner: &str, lease_seconds: u32) -> Result<(), String> {
     if !(MIN_LEASE_SECONDS..=MAX_LEASE_SECONDS).contains(&lease_seconds) {
         return Err(format!(
             "lease_seconds must be {MIN_LEASE_SECONDS}..={MAX_LEASE_SECONDS}; got {lease_seconds}"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a mutation window request's owner and lifetime.
+///
+/// # Errors
+///
+/// Returns a description of the first invalid field.
+pub fn validate_window(owner: &str, window_seconds: u32) -> Result<(), String> {
+    validate_owner(owner)?;
+    if !(1..=MAX_WINDOW_SECONDS).contains(&window_seconds) {
+        return Err(format!(
+            "window_seconds must be 1..={MAX_WINDOW_SECONDS}; got {window_seconds}"
         ));
     }
     Ok(())
@@ -258,9 +363,19 @@ struct LiveLease {
     lease_seconds: u32,
 }
 
+#[derive(Debug)]
+struct Window {
+    owner: Arc<str>,
+    expiry: Instant,
+}
+
 #[derive(Debug, Default)]
 struct State {
     next_sequence: u64,
+    next_window: u64,
+    /// Issued mutation windows by sequence. Expired entries stay until the
+    /// next successful issue prunes them, so a refusal moves nothing.
+    windows: HashMap<u64, Window>,
     /// Current lease per owner. A lease is live iff `now < deadline`; an
     /// entry past its deadline stays here until the tick, or a successful
     /// leased add for the same owner, moves it to `pending`.
@@ -284,6 +399,23 @@ impl State {
             .values()
             .filter(|lease| now < lease.deadline)
             .count()
+    }
+
+    /// The expiry of `window` if it is live now and issued to `owner`.
+    fn window_expiry(
+        &self,
+        incarnation: u64,
+        owner: &str,
+        window: MutationWindowId,
+        now: Instant,
+    ) -> Option<Instant> {
+        if window.incarnation != incarnation {
+            return None;
+        }
+        self.windows
+            .get(&window.sequence)
+            .filter(|entry| &*entry.owner == owner && now < entry.expiry)
+            .map(|entry| entry.expiry)
     }
 }
 
@@ -327,6 +459,7 @@ impl InjectionLeases {
             incarnation,
             state: Mutex::new(State {
                 next_sequence: 1,
+                next_window: 1,
                 ..State::default()
             }),
             changed: Notify::new(),
@@ -359,17 +492,51 @@ impl InjectionLeases {
     /// [`LeaseRejection::OwnerCap`] when a new owner would exceed
     /// [`MAX_LIVE_OWNERS`] live leases; nothing changes.
     pub fn admit(&self, owner: &str, lease_seconds: u32) -> Result<InjectionTag, LeaseRejection> {
-        self.admit_at(owner, lease_seconds, Instant::now)
+        let admission = self.admit_at(owner, lease_seconds, None, Instant::now)?;
+        if admission.started {
+            log_generation_started(&admission.tag, lease_seconds);
+        }
+        Ok(admission.tag)
+    }
+
+    /// [`admit`](Self::admit), and with `window` a guarded admission
+    /// (ADR-0144 §2): `owner` is the stored guarded name, the window must be
+    /// live and issued to it at this instant, and the deadline becomes
+    /// `max(current, min(now + lease_seconds, window expiry))`: never
+    /// shortened, and never extended past the window. Logs nothing: the
+    /// caller logs a started generation after its commit.
+    ///
+    /// # Errors
+    ///
+    /// [`LeaseRejection::WindowNotLive`] or [`LeaseRejection::OwnerCap`];
+    /// nothing changes.
+    pub(crate) fn admit_with(
+        &self,
+        owner: &str,
+        lease_seconds: u32,
+        window: Option<MutationWindowId>,
+    ) -> Result<Admission, LeaseRejection> {
+        self.admit_at(owner, lease_seconds, window, Instant::now)
     }
 
     fn admit_at(
         &self,
         owner: &str,
         lease_seconds: u32,
+        window: Option<MutationWindowId>,
         clock: impl FnOnce() -> Instant,
-    ) -> Result<InjectionTag, LeaseRejection> {
+    ) -> Result<Admission, LeaseRejection> {
         let mut state = self.lock();
         let now = clock();
+        let cap = match window {
+            Some(window) => Some(
+                state
+                    .window_expiry(self.incarnation, owner, window, now)
+                    .ok_or(LeaseRejection::WindowNotLive)?,
+            ),
+            None => None,
+        };
+        let capped = |deadline: Instant| cap.map_or(deadline, |expiry| deadline.min(expiry));
         let lease_for = Duration::from_secs(u64::from(lease_seconds));
         if let Some((name, lease)) = state.owners.get_key_value(owner)
             && now < lease.deadline
@@ -377,16 +544,24 @@ impl InjectionLeases {
             let tag = InjectionTag {
                 owner: Arc::clone(name),
                 generation: lease.generation,
+                revision: None,
             };
             let lease = state.owners.get_mut(owner).expect("present above");
-            let extended = now + lease_for;
+            // An add never shortens the shared deadline, so a delayed add
+            // with an older window cannot expire live sibling keys early.
+            let extended = capped(now + lease_for);
             if extended > lease.deadline {
                 lease.deadline = extended;
                 lease.lease_seconds = lease_seconds;
             }
+            let live_owners = state.live_count(now);
             drop(state);
             self.changed.notify_one();
-            return Ok(tag);
+            return Ok(Admission {
+                tag,
+                live_owners,
+                started: false,
+            });
         }
         // Capacity counts live leases by deadline: unreaped expired records
         // do not hold a slot, and a rejection moves nothing.
@@ -404,22 +579,21 @@ impl InjectionLeases {
             Arc::clone(&name),
             LiveLease {
                 generation,
-                deadline: now + lease_for,
+                deadline: capped(now + lease_for),
                 lease_seconds,
             },
         );
+        let live_owners = state.live_count(now);
         drop(state);
         self.changed.notify_one();
-        tracing::info!(
-            owner,
-            incarnation = generation.incarnation,
-            sequence = generation.sequence,
-            lease_seconds,
-            "injection lease generation started"
-        );
-        Ok(InjectionTag {
-            owner: name,
-            generation,
+        Ok(Admission {
+            tag: InjectionTag {
+                owner: name,
+                generation,
+                revision: None,
+            },
+            live_owners,
+            started: true,
         })
     }
 
@@ -435,7 +609,34 @@ impl InjectionLeases {
         generation: LeaseGeneration,
         lease_seconds: u32,
     ) -> Option<Duration> {
-        self.renew_at(owner, generation, lease_seconds, Instant::now)
+        self.renew_at(owner, generation, lease_seconds, None, Instant::now)
+            .ok()
+    }
+
+    /// Renew guarded owner `owner`'s lease within `window` (ADR-0144 §2):
+    /// as [`renew`](Self::renew), but the window must be live and issued to
+    /// `owner` at this instant, and the deadline becomes
+    /// `min(now + lease_seconds, window expiry)`. Returns the time to the new
+    /// deadline.
+    ///
+    /// # Errors
+    ///
+    /// [`LeaseConflict::WindowNotLive`] or
+    /// [`LeaseConflict::GenerationNotLive`]; nothing changes.
+    pub fn renew_guarded(
+        &self,
+        owner: &str,
+        generation: LeaseGeneration,
+        lease_seconds: u32,
+        window: MutationWindowId,
+    ) -> Result<Duration, LeaseConflict> {
+        self.renew_at(
+            &guarded_owner(owner),
+            generation,
+            lease_seconds,
+            Some(window),
+            Instant::now,
+        )
     }
 
     fn renew_at(
@@ -443,20 +644,87 @@ impl InjectionLeases {
         owner: &str,
         generation: LeaseGeneration,
         lease_seconds: u32,
+        window: Option<MutationWindowId>,
         clock: impl FnOnce() -> Instant,
-    ) -> Option<Duration> {
+    ) -> Result<Duration, LeaseConflict> {
         let mut state = self.lock();
         let now = clock();
-        let lease = state.owners.get_mut(owner)?;
-        if lease.generation != generation || now >= lease.deadline {
-            return None;
-        }
-        let lease_for = Duration::from_secs(u64::from(lease_seconds));
-        lease.deadline = now + lease_for;
+        let cap = match window {
+            Some(window) => Some(
+                state
+                    .window_expiry(self.incarnation, owner, window, now)
+                    .ok_or(LeaseConflict::WindowNotLive)?,
+            ),
+            None => None,
+        };
+        let lease = state
+            .owners
+            .get_mut(owner)
+            .filter(|lease| lease.generation == generation && now < lease.deadline)
+            .ok_or(LeaseConflict::GenerationNotLive)?;
+        let extended = now + Duration::from_secs(u64::from(lease_seconds));
+        let deadline = cap.map_or(extended, |expiry| extended.min(expiry));
+        lease.deadline = deadline;
         lease.lease_seconds = lease_seconds;
         drop(state);
         self.changed.notify_one();
-        Some(lease_for)
+        Ok(deadline.saturating_duration_since(now))
+    }
+
+    /// Issue a mutation window to guarded owner `owner` (ADR-0144 §2),
+    /// living `window_seconds`, at most [`MAX_WINDOW_SECONDS`]. Returns the
+    /// window and its lifetime.
+    ///
+    /// # Errors
+    ///
+    /// [`LeaseRejection::WindowCap`] when `owner` already holds
+    /// [`MAX_LIVE_WINDOWS_PER_OWNER`] live windows or the table holds
+    /// [`MAX_LIVE_WINDOWS`]; nothing changes.
+    pub fn issue_window(
+        &self,
+        owner: &str,
+        window_seconds: u32,
+    ) -> Result<(MutationWindowId, Duration), LeaseRejection> {
+        self.issue_window_at(owner, window_seconds, Instant::now)
+    }
+
+    fn issue_window_at(
+        &self,
+        owner: &str,
+        window_seconds: u32,
+        clock: impl FnOnce() -> Instant,
+    ) -> Result<(MutationWindowId, Duration), LeaseRejection> {
+        let owner: Arc<str> = Arc::from(guarded_owner(owner));
+        let mut state = self.lock();
+        let now = clock();
+        let (total, held) = state
+            .windows
+            .values()
+            .filter(|window| now < window.expiry)
+            .fold((0, 0), |(total, held), window| {
+                (total + 1, held + usize::from(window.owner == owner))
+            });
+        if total >= MAX_LIVE_WINDOWS || held >= MAX_LIVE_WINDOWS_PER_OWNER {
+            return Err(LeaseRejection::WindowCap);
+        }
+        state.windows.retain(|_, window| now < window.expiry);
+        let lifetime = Duration::from_secs(u64::from(window_seconds.min(MAX_WINDOW_SECONDS)));
+        let sequence = state.next_window;
+        state.next_window += 1;
+        state.windows.insert(
+            sequence,
+            Window {
+                owner,
+                expiry: now + lifetime,
+            },
+        );
+        Ok((
+            MutationWindowId {
+                incarnation: self.incarnation,
+                sequence,
+            },
+            lifetime,
+        ))
     }
 
     /// Time left on `tag`'s generation; zero once it has expired or been
@@ -640,9 +908,12 @@ mod tests {
         let g = table.admit("ctl", 5).unwrap().generation;
         let deadline = start + Duration::from_secs(5);
         let just_before = deadline - Duration::from_nanos(1);
-        assert!(table.renew_at("ctl", g, 5, || just_before).is_some());
+        assert!(table.renew_at("ctl", g, 5, None, || just_before).is_ok());
         let deadline = just_before + Duration::from_secs(5);
-        assert_eq!(table.renew_at("ctl", g, 5, || deadline), None);
+        assert_eq!(
+            table.renew_at("ctl", g, 5, None, || deadline),
+            Err(LeaseConflict::GenerationNotLive)
+        );
         tokio::time::advance(Duration::from_secs(10)).await;
         let (expired, _) = table.take_expired();
         assert_eq!(expired.len(), 1);
@@ -696,7 +967,11 @@ mod tests {
             let base = Instant::now();
             let offset_ms = Arc::new(AtomicU64::new(0));
             let reads = Arc::new(AtomicUsize::new(0));
-            let g = table.admit_at("ctl", 5, || base).unwrap().generation;
+            let g = table
+                .admit_at("ctl", 5, None, || base)
+                .unwrap()
+                .tag
+                .generation;
 
             let guard = table.lock();
             let contender = {
@@ -715,11 +990,11 @@ mod tests {
                     };
                     if leased_add {
                         table
-                            .admit_at("ctl", 5, clock)
-                            .map(|tag| tag.generation)
+                            .admit_at("ctl", 5, None, clock)
+                            .map(|admission| admission.tag.generation)
                             .ok()
                     } else {
-                        table.renew_at("ctl", g, 5, clock).map(|_| g)
+                        table.renew_at("ctl", g, 5, None, clock).ok().map(|_| g)
                     }
                 })
             };
@@ -739,5 +1014,150 @@ mod tests {
                 assert_eq!(result, None, "renewed an expired generation");
             }
         }
+    }
+
+    fn guarded_tag(
+        table: &InjectionLeases,
+        owner: &str,
+        lease_seconds: u32,
+        window: MutationWindowId,
+    ) -> Result<InjectionTag, LeaseRejection> {
+        table
+            .admit_with(&guarded_owner(owner), lease_seconds, Some(window))
+            .map(|admission| admission.tag)
+    }
+
+    fn remaining(table: &InjectionLeases, owner: &str) -> Duration {
+        table.list(Some(&guarded_owner(owner)))[0].remaining
+    }
+
+    /// The window cap refuses a 65th live window for one owner and a
+    /// 4,097th in the table. A refusal changes nothing, so an issued window
+    /// still admits, and expired windows free their slots.
+    ///
+    /// Break-to-red: dropping either cap issues the extra window.
+    #[tokio::test(start_paused = true)]
+    async fn window_caps_refuse_and_change_nothing() {
+        let table = InjectionLeases::new();
+        let (oldest, lifetime) = table.issue_window("ctl", 30).unwrap();
+        assert_eq!(lifetime, Duration::from_secs(30));
+        for _ in 1..MAX_LIVE_WINDOWS_PER_OWNER {
+            table.issue_window("ctl", 30).unwrap();
+        }
+        assert_eq!(
+            table.issue_window("ctl", 30),
+            Err(LeaseRejection::WindowCap)
+        );
+        assert_eq!(table.lock().windows.len(), MAX_LIVE_WINDOWS_PER_OWNER);
+        guarded_tag(&table, "ctl", 60, oldest).unwrap();
+        // Other owners have their own allowance until the table is full.
+        for owner in 1..MAX_LIVE_OWNERS {
+            for _ in 0..MAX_LIVE_WINDOWS_PER_OWNER {
+                table.issue_window(&format!("o{owner}"), 30).unwrap();
+            }
+        }
+        assert_eq!(
+            table.issue_window("late", 30),
+            Err(LeaseRejection::WindowCap)
+        );
+        assert_eq!(table.lock().windows.len(), MAX_LIVE_WINDOWS);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        table.issue_window("late", 30).unwrap();
+        table.issue_window("ctl", 30).unwrap();
+        assert_eq!(table.lock().windows.len(), 2, "expired windows pruned");
+    }
+
+    /// A guarded admission or renewal is refused, changing nothing, for a
+    /// window that is expired, another owner's, another process's, unknown,
+    /// or presented under the bare owner name.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_live_window_of_the_same_owner_admits() {
+        let table = InjectionLeases::new();
+        let other = InjectionLeases::new();
+        let (window, lifetime) = table.issue_window("ctl", 500).unwrap();
+        assert_eq!(lifetime, Duration::from_secs(u64::from(MAX_WINDOW_SECONDS)));
+        let (foreign, _) = table.issue_window("b", 30).unwrap();
+        let (elsewhere, _) = other.issue_window("ctl", 30).unwrap();
+        let unknown = MutationWindowId {
+            sequence: 99,
+            ..window
+        };
+        for refused in [foreign, elsewhere, unknown] {
+            assert_eq!(
+                guarded_tag(&table, "ctl", 60, refused),
+                Err(LeaseRejection::WindowNotLive)
+            );
+        }
+        assert_eq!(
+            table
+                .admit_with("ctl", 60, Some(window))
+                .map(|admission| admission.tag),
+            Err(LeaseRejection::WindowNotLive),
+            "the window belongs to the guarded name"
+        );
+        assert_eq!(table.list(None), Vec::new());
+        let g = guarded_tag(&table, "ctl", 60, window).unwrap().generation;
+        assert_eq!(
+            table.renew_guarded("ctl", g, 60, foreign),
+            Err(LeaseConflict::WindowNotLive)
+        );
+        tokio::time::advance(Duration::from_secs(u64::from(MAX_WINDOW_SECONDS))).await;
+        let before = table.list(None);
+        assert_eq!(
+            guarded_tag(&table, "ctl", 60, window),
+            Err(LeaseRejection::WindowNotLive)
+        );
+        assert_eq!(
+            table.renew_guarded("ctl", g, 60, window),
+            Err(LeaseConflict::WindowNotLive)
+        );
+        assert_eq!(table.list(None), before);
+    }
+
+    /// The deadline never passes the window's expiry: on a new generation,
+    /// on a renewal (which sets it exactly and may shorten it), and on a
+    /// join, which never shortens it either.
+    #[tokio::test(start_paused = true)]
+    async fn the_window_caps_the_deadline() {
+        let table = InjectionLeases::new();
+        let (short, _) = table.issue_window("ctl", 30).unwrap();
+        let g = guarded_tag(&table, "ctl", 60, short).unwrap().generation;
+        assert_eq!(remaining(&table, "ctl"), Duration::from_secs(30));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            table.renew_guarded("ctl", g, 5, short),
+            Ok(Duration::from_secs(5))
+        );
+        // A join extends to its own window's expiry, not past it.
+        assert_eq!(guarded_tag(&table, "ctl", 60, short).unwrap().generation, g);
+        assert_eq!(remaining(&table, "ctl"), Duration::from_secs(20));
+        let (long, _) = table.issue_window("ctl", 120).unwrap();
+        assert_eq!(
+            table.renew_guarded("ctl", g, 60, long),
+            Ok(Duration::from_secs(60))
+        );
+        // A join through the older, shorter window keeps the later deadline.
+        assert_eq!(guarded_tag(&table, "ctl", 60, short).unwrap().generation, g);
+        assert_eq!(remaining(&table, "ctl"), Duration::from_secs(60));
+    }
+
+    /// Guarded names are outside the owner alphabet, so a legacy request can
+    /// never name one, and a legacy renewal or add of the bare name cannot
+    /// reach a guarded lease.
+    #[tokio::test(start_paused = true)]
+    async fn guarded_names_are_unreachable_by_legacy_names() {
+        let table = InjectionLeases::new();
+        assert!(validate_owner(&guarded_owner("ctl")).is_err());
+        assert!(validate_window("ctl", 1).is_ok());
+        assert!(validate_window("ctl", MAX_WINDOW_SECONDS).is_ok());
+        assert!(validate_window("ctl", 0).is_err());
+        assert!(validate_window("ctl", MAX_WINDOW_SECONDS + 1).is_err());
+        assert!(validate_window("ctl:x", 30).is_err());
+        let (window, _) = table.issue_window("ctl", 30).unwrap();
+        let g = guarded_tag(&table, "ctl", 30, window).unwrap().generation;
+        assert_eq!(table.renew("ctl", g, 3600), None);
+        let legacy = table.admit("ctl", 3600).unwrap();
+        assert_ne!(legacy.generation, g);
+        assert_eq!(remaining(&table, "ctl"), Duration::from_secs(30));
     }
 }

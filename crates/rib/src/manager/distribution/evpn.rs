@@ -713,7 +713,16 @@ impl RibManager {
             return;
         }
 
-        let mut changed_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+        // Changed keys are a subset of the selected inputs: an owner
+        // reserves them so inserts never rehash between checkpoints.
+        let mut changed_keys: HashSet<rustbgpd_wire::EvpnRouteKey> =
+            HashSet::with_capacity(if readiness.is_some() {
+                affected.len()
+            } else {
+                0
+            });
+        #[cfg(test)]
+        let reserved = changed_keys.capacity();
         for key in affected {
             checkpoint();
             let candidates: Vec<&EvpnRibRoute> = self
@@ -787,6 +796,13 @@ impl RibManager {
             }
         }
 
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_owned_set(
+            "changed_keys_evpn",
+            readiness.is_some(),
+            reserved,
+            &changed_keys,
+        );
         // This token covers exactly the projection input consumed by the
         // daemon dataplane.  Type 4 changes remain visible through the
         // public EVPN query and event stream, but cannot change that

@@ -741,14 +741,38 @@ impl RibManager {
             self.advance_table_pages();
         }
         self.record_deferred_labeled(affected);
-        let mut affected_nlri: HashSet<Prefix> = affected
-            .iter()
-            .inspect(|_| checkpoint())
-            .filter(|key| !self.selection_deferred(key.afi_safi()))
-            .map(|key| key.prefix)
-            .collect();
+        // A filtered subset of `affected`, reserved under an owner.
+        let mut affected_nlri: HashSet<Prefix> = HashSet::with_capacity(if readiness.is_some() {
+            affected.len()
+        } else {
+            0
+        });
+        #[cfg(test)]
+        let reserved_input = affected_nlri.capacity();
+        affected_nlri.extend(
+            affected
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|key| !self.selection_deferred(key.afi_safi()))
+                .map(|key| key.prefix),
+        );
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_owned_set(
+            "selected_labeled",
+            readiness.is_some(),
+            reserved_input,
+            &affected_nlri,
+        );
 
-        let mut changed_keys: HashSet<Prefix> = HashSet::new();
+        // Changed keys are a subset of the selected inputs: an owner
+        // reserves them so inserts never rehash between checkpoints.
+        let mut changed_keys: HashSet<Prefix> = HashSet::with_capacity(if readiness.is_some() {
+            affected_nlri.len()
+        } else {
+            0
+        });
+        #[cfg(test)]
+        let reserved = changed_keys.capacity();
         for key in &affected_nlri {
             checkpoint();
             let candidates: Vec<&LabeledRibRoute> = self
@@ -763,6 +787,13 @@ impl RibManager {
             }
         }
 
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_owned_set(
+            "changed_keys_labeled",
+            readiness.is_some(),
+            reserved,
+            &changed_keys,
+        );
         // An RFC 9107 ORR peer selects from the per-target candidate set,
         // not the Loc-RIB best — a candidate change that leaves the
         // Loc-RIB best untouched can still flip a vantage best, so

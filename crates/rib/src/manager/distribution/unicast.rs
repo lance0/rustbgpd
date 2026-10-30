@@ -571,7 +571,7 @@ impl RibManager {
                 });
             if held && source.peer == PeerId::LOCAL {
                 frozen_path_id = rib_out
-                    .and_then(|out| out.local_source_outbound_path_id(&prefix, source.path_id));
+                    .and_then(|out| out.frozen_local_outbound_path_id(&prefix, source.path_id));
             }
             if held && frozen_path_id.is_none() {
                 let message = "source awaits graceful-restart selection deferral".to_string();
@@ -1888,14 +1888,22 @@ impl RibManager {
         // Ownership and capacity are decided before anything changes, so a
         // refused add leaves the RIB, the lease table and the attribute
         // intern table as they were.
-        let generation = if let Some((owner, lease_seconds)) = lease {
-            Some(
-                self.admit_injected_lease(&key, present, owner, lease_seconds)?
-                    .generation,
+        let (generation, started) = if let Some((owner, lease_seconds)) = lease {
+            let (tag, started) =
+                self.admit_injected_lease(&key, present, owner, lease_seconds, None)?;
+            (
+                Some(tag.generation),
+                started.then_some((tag, lease_seconds)),
             )
         } else {
             self.check_injected_owner(&key, "")?;
-            None
+            (None, None)
+        };
+        // Logged once the add has committed and distributed.
+        let log_started = || {
+            if let Some((tag, lease_seconds)) = &started {
+                crate::injection_lease::log_generation_started(tag, *lease_seconds);
+            }
         };
         self.attr_intern.intern(&mut route.attributes);
         let rib = self
@@ -1921,6 +1929,7 @@ impl RibManager {
         };
         if outcome == InjectOutcome::Unchanged {
             debug!(%prefix, ?outcome, "injected local route");
+            log_started();
             return Ok((outcome, generation));
         }
         let replaced = rib.insert(route);
@@ -1940,6 +1949,7 @@ impl RibManager {
         self.distribute_changes(&changed, &affected);
         self.defer_unicast_attr_gc(usize::from(replaced));
         self.sync_attr_intern_gauge();
+        log_started();
         Ok((outcome, generation))
     }
 
@@ -3288,16 +3298,24 @@ impl RibManager {
     }
 }
 
-/// Map an ADR-0141 lease table rejection to its command error.
+/// Map an ADR-0141 or ADR-0144 lease table rejection to its command error.
 pub(in crate::manager) fn lease_rejection(
     rejection: crate::injection_lease::LeaseRejection,
 ) -> RibCommandError {
+    use crate::injection_lease::{LeaseConflict, LeaseRejection};
     match rejection {
-        crate::injection_lease::LeaseRejection::OwnerCap => {
-            RibCommandError::ResourceExhausted(format!(
-                "at most {} owners can hold a live injection lease",
-                crate::injection_lease::MAX_LIVE_OWNERS
-            ))
-        }
+        LeaseRejection::OwnerCap => RibCommandError::ResourceExhausted(format!(
+            "at most {} owners can hold a live injection lease",
+            crate::injection_lease::MAX_LIVE_OWNERS
+        )),
+        LeaseRejection::WindowCap => RibCommandError::ResourceExhausted(format!(
+            "at most {} live mutation windows per owner, {} in total",
+            crate::injection_lease::MAX_LIVE_WINDOWS_PER_OWNER,
+            crate::injection_lease::MAX_LIVE_WINDOWS
+        )),
+        LeaseRejection::WindowNotLive => RibCommandError::FailedPrecondition(
+            LeaseConflict::WindowNotLive,
+            "the mutation window is not live for this owner".to_string(),
+        ),
     }
 }

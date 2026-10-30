@@ -1577,3 +1577,257 @@ fn gr_entry_consecutive_restart_releases_deleted_flowspec_rules() {
         "gr_mark answered {small} for 8 deleted rules and {large} for 40"
     );
 }
+
+/// Announce `paths` Add-Path routes of an indexed family (unicast, VPN or
+/// labeled) from one peer, all on one NLRI or one per NLRI, retain them
+/// LLGR-stale through the actual GR timer, expire them through the actual
+/// LLGR timer arm, and return the purge unit's answered readiness count.
+fn run_add_path_expiry_case(family: (Afi, Safi), paths: u8, one_nlri: bool) -> usize {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = peer_v4(addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    let nlri = |path: u8| if one_nlri { 1 } else { path + 1 };
+    let path_id = |path: u8| if one_nlri { u32::from(path) + 1 } else { 0 };
+    let update = match family.1 {
+        Safi::Unicast => RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced: (0..paths)
+                .map(|path| {
+                    let mut route = make_route(
+                        Ipv4Prefix::new(Ipv4Addr::new(203, 0, nlri(path), 0), 24),
+                        addr,
+                    );
+                    route.path_id = path_id(path);
+                    route
+                })
+                .collect(),
+            withdrawn: Vec::new(),
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+            validated_with: None,
+        },
+        Safi::MplsVpn => RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: (0..paths)
+                .map(|path| {
+                    let mut route = make_vpn_rib_route(addr, nlri(path), 100, 100);
+                    route.path_id = path_id(path);
+                    route
+                })
+                .collect(),
+            withdrawn: Vec::new(),
+        },
+        Safi::LabeledUnicast => RibUpdate::LabeledRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: (0..paths)
+                .map(|path| {
+                    let mut route = make_labeled_rib_route(addr, nlri(path), 100, 100);
+                    route.path_id = path_id(path);
+                    route
+                })
+                .collect(),
+            withdrawn: Vec::new(),
+        },
+        _ => unreachable!("indexed fixture families"),
+    };
+    manager.handle_update(update);
+    drain_route_chunks(&mut manager);
+    manager.handle_update(gr_with_llgr(peer, 120, vec![family], vec![family], 3600));
+    manager.sweep_gr_stale(peer);
+    let retained = |manager: &RibManager| manager.ribs[&peer].retained_stale_count();
+    assert_eq!(retained(&manager), u64::from(paths), "{family:?}");
+    make_llgr_expiry_due(&mut manager, peer, family);
+    let answered = run_with_readiness_probe(
+        &mut manager,
+        readiness_tx,
+        RibManager::sweep_expired_llgr_stale,
+    );
+    assert_eq!(
+        retained(&manager),
+        0,
+        "{family:?}: expiry purges every path"
+    );
+    answered.get("llgr_expiry_purge").copied().unwrap_or(0)
+}
+
+/// Many Add-Path paths on one NLRI: each removal scans the NLRI's path
+/// list, so the purge must answer readiness inside those scans. One NLRI
+/// with 64 paths answers at least `64 * 63 / 8` more queries than 64 NLRIs
+/// with one path each, for unicast, VPN and labeled.
+#[test]
+fn llgr_expiry_add_path_removal_scans_answer_readiness() {
+    let failures: Vec<_> = [
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+    ]
+    .into_iter()
+    .map(|family| {
+        (
+            family,
+            run_add_path_expiry_case(family, 64, false),
+            run_add_path_expiry_case(family, 64, true),
+        )
+    })
+    .filter(|&(_, spread, one)| one < spread + 64 * 63 / 8)
+    .collect();
+    assert!(
+        failures.is_empty(),
+        "(family, 64 NLRIs, one NLRI with 64 paths) purge answers must cover the \
+         path-list scans: {failures:?}"
+    );
+}
+
+/// A large typed-family expiry selects into sets reserved from their
+/// bounded inputs, so no insert rehashes between selection checkpoints.
+#[test]
+fn llgr_expiry_typed_selection_sets_never_grow() {
+    let mut failures = Vec::new();
+    for (family, sets) in [
+        ((Afi::Ipv4, Safi::FlowSpec), &["changed_keys_flowspec"][..]),
+        ((Afi::L2Vpn, Safi::Evpn), &["changed_keys_evpn"][..]),
+        (
+            (Afi::BgpLs, Safi::BgpLs),
+            &["selected_bgpls", "changed_keys_bgpls"][..],
+        ),
+        (
+            (Afi::Ipv4, Safi::MplsVpn),
+            &["selected_vpn", "changed_keys_vpn"][..],
+        ),
+        (
+            (Afi::Ipv4, Safi::LabeledUnicast),
+            &["selected_labeled", "changed_keys_labeled"][..],
+        ),
+        ((Afi::Ipv4, Safi::RtConstrain), &["changed_keys_rtc"][..]),
+    ] {
+        run_llgr_expiry_case(family, 200, 0);
+        let growth = crate::orr::rebuild_growth::take();
+        for &set in sets {
+            let (fills, largest) = growth.get(set).copied().unwrap_or_default();
+            if fills == 0 || largest != 0 {
+                failures.push((family, set, fills, largest));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "(family, set, fills, growth inside one checkpoint slice) must fill without growth: \
+         {failures:?}"
+    );
+}
+
+/// An RT-Constrain client re-established during its RTC LLGR window holds
+/// `fresh` re-advertised RTs that match none of `vpn` VPN routes from
+/// another peer, plus one unrefreshed RT. The actual LLGR timer arm sweeps
+/// that RT, rebuilds the client's membership and restages its VPN view;
+/// returns the answered readiness counts of that expiry.
+fn run_rtc_restage_expiry_case(fresh: u16, vpn: u8) -> BTreeMap<&'static str, usize> {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let source = Ipv4Addr::new(10, 0, 0, 9);
+    let client = Ipv4Addr::new(10, 0, 0, 1);
+    let rtc = (Afi::Ipv4, Safi::RtConstrain);
+    for addr in [source, client] {
+        manager
+            .ribs
+            .insert(peer_v4(addr), AdjRibIn::new(peer_v4(addr)));
+    }
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: peer_v4(source),
+        announced: (0..vpn)
+            .map(|octet| make_vpn_rib_route_with_rts(source, octet, vec![rt(9)]))
+            .collect(),
+        withdrawn: Vec::new(),
+    });
+    let peer_up = |manager: &mut RibManager| {
+        let (outbound_tx, outbound_rx) = mpsc::channel(4096);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: peer_v4(client),
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vpn_rtc_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        outbound_rx
+    };
+    let announce = |manager: &mut RibManager, admins: &mut dyn Iterator<Item = u16>| {
+        manager.handle_update(RibUpdate::RtcRoutesReceived {
+            session_id: 0,
+            peer: peer_v4(client),
+            announced: admins
+                .map(|admin| make_rtc_rib_route(client, admin, 100))
+                .collect(),
+            withdrawn: Vec::new(),
+        });
+    };
+    let _first = peer_up(&mut manager);
+    announce(&mut manager, &mut (1000..1000 + fresh).chain([7]));
+    manager.handle_update(gr_with_llgr(
+        peer_v4(client),
+        120,
+        vec![rtc],
+        vec![rtc],
+        3600,
+    ));
+    manager.sweep_gr_stale(peer_v4(client));
+    let _second = peer_up(&mut manager);
+    announce(&mut manager, &mut (1000..1000 + fresh));
+    make_llgr_expiry_due(&mut manager, peer_v4(client), rtc);
+    let answered = run_with_readiness_probe(
+        &mut manager,
+        readiness_tx,
+        RibManager::sweep_expired_llgr_stale,
+    );
+    assert_eq!(manager.ribs[&peer_v4(client)].rtc_len(), usize::from(fresh));
+    answered
+}
+
+/// The re-established client is a VPN group member, so publishing its
+/// rebuilt membership walks the group's staged VPN routes and compares each
+/// against the old and the new membership. Every staged route and every
+/// membership entry compared answers readiness inside the expiry: growing
+/// the membership by 128 non-matching RTs adds at least one answer per
+/// staged route per added entry.
+#[test]
+fn llgr_expiry_rtc_restage_matching_answers_readiness() {
+    let small = run_rtc_restage_expiry_case(8, 64);
+    let large = run_rtc_restage_expiry_case(136, 64);
+    let count = |answered: &BTreeMap<&str, usize>, stage| answered.get(stage).copied().unwrap_or(0);
+    let failures: Vec<_> = [
+        ("rtc_membership_delta", 64, 0),
+        ("rtc_membership_match", 64 * 9, 64 * 128),
+    ]
+    .into_iter()
+    .map(|(unit, floor, growth)| {
+        (
+            unit,
+            floor,
+            growth,
+            count(&small, unit),
+            count(&large, unit),
+        )
+    })
+    .filter(|&(_, floor, growth, small, large)| small < floor || large < small + growth)
+    .collect();
+    assert!(
+        failures.is_empty(),
+        "(unit, floor, growth, answered with 8 fresh RTs, with 136) must cover the restage: {failures:?}"
+    );
+}

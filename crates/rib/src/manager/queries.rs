@@ -3039,11 +3039,13 @@ impl RibManager {
             let best = self.loc_rib.get(&prefix)?;
             (best.peer == LOCAL_PEER
                 && view
-                    .local_source_outbound_path_id(&prefix, best.path_id)
+                    .frozen_local_outbound_path_id(&prefix, best.path_id)
                     .is_some())
             .then_some(best.path_id)?
         } else {
-            view.local_export_source(&prefix, 0)?.path_id
+            view.local_export_source(&prefix, 0)
+                .filter(|source| !source.deferral_exempt)?
+                .path_id
         };
         let route = self.ribs.get(&LOCAL_PEER)?.get(&prefix, path_id)?;
         (!unicast_deferral_exempt(route)).then_some(crate::update::RouteSourceIdentity {
@@ -3068,7 +3070,7 @@ impl RibManager {
                 .and_then(|rib| rib.get(&prefix, source.path_id))
                 .is_some_and(|route| !unicast_deferral_exempt(route))
             && view.is_some_and(|view| {
-                view.local_source_outbound_path_id(&prefix, source.path_id)
+                view.frozen_local_outbound_path_id(&prefix, source.path_id)
                     .is_some()
             })
     }

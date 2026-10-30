@@ -531,11 +531,22 @@ impl RtcMembership {
     /// two-part encoding, so it needs explicit recognition here; like
     /// ordinary RTs, it matches on the RT bits under the prefix alone.
     fn matches_any(&self, rts: &[rustbgpd_wire::ExtendedCommunity]) -> bool {
+        self.matches_any_with_checkpoint(rts, &mut || {})
+    }
+
+    /// [`Self::matches_any`] with a checkpoint per membership entry compared,
+    /// for restages that walk a large membership under a readiness owner.
+    fn matches_any_with_checkpoint(
+        &self,
+        rts: &[rustbgpd_wire::ExtendedCommunity],
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
         if self.has_default {
             return true;
         }
         rts.iter().any(|&rt| {
             self.entries.iter().any(|nlri| {
+                checkpoint();
                 nlri.matches(rt)
                     || (rt.as_es_import_rt().is_some()
                         && (rt.as_u64() ^ nlri.route_target_bits)
@@ -5159,6 +5170,13 @@ impl RibManager {
                 lease_seconds,
                 reply,
             } => self.handle_inject_leased_flowspec(route, &owner, lease_seconds, reply),
+            RibUpdate::InjectGuardedFlowSpec {
+                route,
+                owner,
+                lease_seconds,
+                fence,
+                reply,
+            } => self.handle_inject_guarded_flowspec(route, &owner, lease_seconds, fence, reply),
             RibUpdate::WithdrawFlowSpec {
                 key,
                 allow_missing,
@@ -5167,8 +5185,40 @@ impl RibManager {
                 reply,
             } => {
                 let retired = ExactExportKey::FlowSpec(key.clone());
-                self.handle_withdraw_flowspec(key, allow_missing, &owner, override_owner, reply);
+                self.handle_withdraw_flowspec(
+                    key,
+                    allow_missing,
+                    &owner,
+                    override_owner,
+                    None,
+                    reply,
+                );
                 self.retire_exact_export_rejections([retired]);
+            }
+            RibUpdate::WithdrawGuardedFlowSpec {
+                key,
+                owner,
+                revision,
+                reply,
+            } => {
+                // Only a removal retires the key's export rejections; a
+                // refused or absent delete changes nothing. Both run under
+                // one readiness owner, as the unicast withdrawal does, so the
+                // retirement's checkpoints keep answering readiness.
+                let retired = ExactExportKey::FlowSpec(key.clone());
+                let owner = crate::injection_lease::guarded_owner(&owner);
+                self.with_selection_readiness(|manager| {
+                    if manager.handle_withdraw_flowspec(
+                        key,
+                        true,
+                        &owner,
+                        false,
+                        Some(revision),
+                        reply,
+                    ) {
+                        manager.retire_exact_export_rejections([retired]);
+                    }
+                });
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
             RibUpdate::WithdrawEvpn { key, reply } => {

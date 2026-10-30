@@ -802,14 +802,40 @@ impl RibManager {
             self.advance_table_pages();
         }
         self.record_deferred_vpn(affected);
-        let mut affected_nlri: HashSet<VpnRouteKey> = affected
-            .iter()
-            .inspect(|_| checkpoint())
-            .filter(|key| !self.selection_deferred(key.afi_safi()))
-            .map(|key| key.nlri_key)
-            .collect();
+        // A filtered subset of `affected`, reserved under an owner.
+        let mut affected_nlri: HashSet<VpnRouteKey> =
+            HashSet::with_capacity(if readiness.is_some() {
+                affected.len()
+            } else {
+                0
+            });
+        #[cfg(test)]
+        let reserved_input = affected_nlri.capacity();
+        affected_nlri.extend(
+            affected
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|key| !self.selection_deferred(key.afi_safi()))
+                .map(|key| key.nlri_key),
+        );
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_owned_set(
+            "selected_vpn",
+            readiness.is_some(),
+            reserved_input,
+            &affected_nlri,
+        );
 
-        let mut changed_keys: HashSet<VpnRouteKey> = HashSet::new();
+        // Changed keys are a subset of the selected inputs: an owner
+        // reserves them so inserts never rehash between checkpoints.
+        let mut changed_keys: HashSet<VpnRouteKey> =
+            HashSet::with_capacity(if readiness.is_some() {
+                affected_nlri.len()
+            } else {
+                0
+            });
+        #[cfg(test)]
+        let reserved = changed_keys.capacity();
         for key in &affected_nlri {
             checkpoint();
             // RFC 9069 Loc-RIB tap: keep the previous best's NLRI so a
@@ -858,6 +884,13 @@ impl RibManager {
             }
         }
 
+        #[cfg(test)]
+        crate::orr::rebuild_growth::record_owned_set(
+            "changed_keys_vpn",
+            readiness.is_some(),
+            reserved,
+            &changed_keys,
+        );
         if !changed_keys.is_empty() {
             crate::manager::helpers::set_loc_rib_prefixes(
                 &self.metrics,
