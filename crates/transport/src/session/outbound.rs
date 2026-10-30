@@ -168,14 +168,16 @@ impl PendingOutbound {
     }
 
     /// Release one slice-sized batch of a completed envelope's inventory,
-    /// sized by the same slice-cost feedback as encode slices.
+    /// sized by the same slice-cost feedback as encode slices. The families
+    /// share that one budget, so a mixed envelope stays within a slice.
     fn retire_step(&mut self) -> bool {
         let started = Instant::now();
-        let budget = self.slice_routes;
-        let released = self.announce.by_ref().take(budget).count()
-            + self.vpn_announce.by_ref().take(budget).count()
-            + self.evpn_announce.by_ref().take(budget).count()
-            + self.labeled_announce.by_ref().take(budget).count();
+        let mut left = self.slice_routes;
+        left -= self.announce.by_ref().take(left).count();
+        left -= self.vpn_announce.by_ref().take(left).count();
+        left -= self.evpn_announce.by_ref().take(left).count();
+        left -= self.labeled_announce.by_ref().take(left).count();
+        let released = self.slice_routes - left;
         let cost = started.elapsed();
         #[cfg(test)]
         let cost = self.test_slice_cost.unwrap_or(cost);

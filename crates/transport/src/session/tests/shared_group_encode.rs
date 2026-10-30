@@ -3350,3 +3350,85 @@ async fn shared_group_disconnect_during_retirement_keeps_release_bounded() {
         );
     }
 }
+
+/// An abandoned mixed-family envelope, as the RIB's combined commit builds,
+/// releases at most one slice per step across all of its families together,
+/// not one slice per family.
+#[tokio::test]
+async fn abandoned_mixed_family_envelope_retires_one_slice_per_step() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    // A full one-slot writer queue keeps every route unsent.
+    let (bulk, _frames) = mpsc::channel(1);
+    bulk.try_send(Bytes::from_static(b"held")).unwrap();
+    session.writer_bulk_tx = Some(bulk);
+    let held = AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]);
+    let base = Arc::strong_count(&held);
+    let live = || Arc::strong_count(&held) - base;
+    let per_family = RETIRE_SLICE + 1;
+    let count = u32::try_from(per_family).unwrap();
+    let unicast_template = make_sourced_route(
+        Ipv4Addr::new(10, 47, 0, 1),
+        Ipv4Prefix::new(Ipv4Addr::new(20, 0, 0, 0), 24),
+        64_601,
+    );
+    let update = OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        announce: (0..count)
+            .map(|i| Route {
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1400_0000 | (i << 8)), 24)),
+                attributes: Arc::clone(&held),
+                ..unicast_template.clone()
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        vpn_announce: (0..count)
+            .map(|i| {
+                let mut route = make_vpn_rib_route(101);
+                route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0a00_0000 | i), 32).unwrap();
+                route.attributes = Arc::clone(&held);
+                route
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        evpn_announce: (0..count)
+            .map(|i| {
+                let mut route = shared_evpn_route(i);
+                route.attributes = Arc::clone(&held);
+                route
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        labeled_announce: (0..count)
+            .map(|i| {
+                let mut route = make_labeled_rib_route(16);
+                route.nlri.prefix =
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1e00_0000 | (i << 8)), 24));
+                route.attributes = Arc::clone(&held);
+                route
+            })
+            .collect(),
+        ..OutboundRouteUpdate::default()
+    };
+    session.handle_outbound_route_update(update).await;
+    assert!(
+        session.pending_outbound.is_some(),
+        "the envelope stays open"
+    );
+    assert_eq!(live(), 4 * per_family, "nothing was sent");
+
+    let mut released = Vec::new();
+    let before = live();
+    session.handle_tcp_disconnect();
+    released.push(before - live());
+    while session.pending_outbound.is_some() {
+        let before = live();
+        session.advance_pending_outbound();
+        released.push(before - live());
+    }
+    assert_eq!(live(), 0, "every family's routes are released");
+    assert!(
+        released.iter().all(|&batch| batch <= RETIRE_SLICE),
+        "one step released more than a slice across families: {released:?}"
+    );
+}
