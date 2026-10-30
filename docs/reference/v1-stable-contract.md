@@ -104,12 +104,6 @@ The following shared surfaces remain **outside v1**:
   opt-in and disabled by default. Local injection remains trusted origination.
 - FlowSpec CLI commands and output, GR/LLGR retention guarantees, remote
   acceptance, installation, forwarding and enforcement.
-- The guarded FlowSpec mutation methods of
-  [ADR-0144](../adr/0144-guarded-flowspec-mutations.md)
-  (`IssueMutationWindow`, `AddGuardedFlowSpec`, `DeleteGuardedFlowSpec`,
-  `RenewGuardedLease`), the `admission_revision` read-back on
-  `FlowSpecRouteEntry` and `LeasedKey`, and guarded owner names
-  (`guarded:<owner>`) in lease listings.
 
 The message-graph digest includes the shared messages as a review tripwire;
 it does not promote the excluded fields or modes. `OK` means local mutation,
@@ -226,6 +220,37 @@ hosted M22 lease-expiry leg observes FRR 10.7.1 losing both entries within
 lease + 5 s of the controller stopping, which is evidence, not a timing
 promise. The lease bounds how long a stopped controller's state outlives it,
 not how long the daemon outlives the controller.
+
+### Guarded FlowSpec mutations
+
+The guarded mutation contract of
+[ADR-0144](../adr/0144-guarded-flowspec-mutations.md) is inventoried in the
+stable `InjectionService` set: `IssueMutationWindow`, `AddGuardedFlowSpec`,
+`DeleteGuardedFlowSpec` and `RenewGuardedLease`, the `admission_revision`
+read-back on `FlowSpecRouteEntry` and `LeasedKey`, and the guarded owner name
+`guarded:<owner>` that read-back reports and `ListLeasedKeys` accepts. Like
+the [FlowSpec controller boundary](#flowspec-controller-boundary), this pins
+the API shape only. The following semantics are part of the promise:
+
+| Semantics | Pinned by |
+|---|---|
+| A guarded add or renewal commits only inside a live window issued to its owner by this process. An expired, unknown, foreign or previous-process window is `FAILED_PRECONDITION` with `ErrorInfo` reason `WINDOW_NOT_LIVE` and changes nothing, including when the call waited before its handler or in the RIB queue. | `a_guarded_add_stalled_past_its_window_starts_no_lease`, `only_a_live_window_of_the_same_owner_admits`, `a_call_queued_past_the_client_deadline_commits_only_inside_its_window`, `a_call_held_before_its_handler_past_its_window_is_refused` |
+| A guarded add sets the owner's deadline to `max(current, min(now + lease_seconds, window expiry))`: never shorter, never extended past its own window. A guarded renewal sets exactly `min(now + lease_seconds, window expiry)`. The lease never outlives the latest-expiring window its owner used. | `the_window_caps_the_deadline`, `a_guarded_add_never_shortens_and_never_passes_its_window`, `delayed_renewals_and_retries_never_outlive_the_latest_window`, `a_shortened_guarded_lease_expires_at_the_new_deadline` |
+| A present rule held at another revision, or at the same revision with another payload, refuses a guarded add with `REVISION_MISMATCH`; the same revision and payload is `UNCHANGED`. A guarded delete removes the rule only at its revision, reports `NOT_PRESENT` for an absent rule, and a late delete cannot remove a newer admission. | `a_present_key_refuses_another_revision_or_payload`, `a_delayed_delete_spares_a_newer_admission`, `a_delayed_guarded_delete_spares_a_newer_admission`, `foreign_and_stale_mutations_are_refused_while_a_sibling_lives` |
+| Guarded owners live in their own namespace. The leased and unleased methods cannot add, renew or delete a guarded owner's state, apart from `DeleteFlowSpec` with `override_owner`. | `legacy_entry_points_cannot_reach_a_guarded_owner`, `legacy_rpcs_cannot_reach_a_guarded_owner`, `guarded_names_are_unreachable_by_legacy_names` |
+| `admission_revision` is set with `injection_owner` on guarded local intent and nowhere else; `ListLeasedKeys` walks a guarded owner by its `guarded:<owner>` name. | `admission_revision_reads_back_only_on_guarded_local_intent`, `guarded_read_back_reports_owner_and_revision` |
+| Every refusal is definitive and changes nothing: `INVALID_ARGUMENT`; `FAILED_PRECONDITION` with reason `WINDOW_NOT_LIVE`, `REVISION_MISMATCH`, `OWNER_MISMATCH`, `KEY_UNOWNED` or `GENERATION_NOT_LIVE`; and `RESOURCE_EXHAUSTED` once an owner holds 64 live windows or the daemon 4,096. | `guarded_rpcs_map_every_definitive_refusal`, `window_caps_refuse_and_change_nothing`, `the_window_cap_is_resource_exhausted_and_changes_nothing` |
+| A server without the guarded methods answers `UNIMPLEMENTED` and changes nothing. | `an_older_daemon_refuses_every_guarded_method_and_changes_nothing` |
+
+Any other outcome, such as `DEADLINE_EXCEEDED`, `UNAVAILABLE` or a dropped
+connection, is unknown: the controller reads the revision back or retries
+with the same revision under a live window, never through the legacy methods.
+The [dated qualification](../artifacts/interop/guarded-flowspec-qualification-20261030/README.md)
+supplies rollback, delay, controller-loss and refusal evidence against FRR
+10.7.1 and the 0.80.1 release. It is evidence, not a timing promise. Local
+removal after a controller stops takes up to the window lifetime plus the
+expiry apply lag. Forwarding, remote acceptance, GR/LLGR retention after a
+daemon crash and behavior across a host suspend stay outside the guarantee.
 
 ### Bounded reflected-family queries
 

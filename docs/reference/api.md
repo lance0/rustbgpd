@@ -3948,7 +3948,9 @@ A leased mutation can commit long after the controller sent it: it can wait
 before its handler runs, for RIB queue admission and behind RIB work, and a
 client timeout cancels none of these. The guarded methods
 ([ADR-0144](../adr/0144-guarded-flowspec-mutations.md)) fence a FlowSpec rule
-against that. They are outside the v1 contract.
+against that. They are part of the
+[v1 contract](v1-stable-contract.md#guarded-flowspec-mutations), which pins
+their API shape only.
 
 | RPC | Behaviour |
 |---|---|

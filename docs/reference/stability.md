@@ -65,6 +65,11 @@ In particular:
   fields and the ownership and generation read-back. Remote withdrawal timing
   and dataplane enforcement after expiry stay outside the promise
   ([lease lifecycle](v1-stable-contract.md#injection-lease-lifecycle)).
+- Guarded FlowSpec mutations (ADR-0144) are inventoried: the four guarded
+  RPCs, the `admission_revision` read-back and the guarded owner name in
+  lease listings. Like the controller boundary, this pins the API shape only;
+  forwarding and timing after controller loss stay outside the promise
+  ([guarded mutations](v1-stable-contract.md#guarded-flowspec-mutations)).
 - Files under `runtime_state_dir` remain outside the inventory; the
   contract's [on-disk runtime state](v1-stable-contract.md#on-disk-runtime-state)
   section records how each reader treats older and newer versions today.
