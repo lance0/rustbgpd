@@ -93,6 +93,8 @@ struct Config {
     orf: bool,
     /// A configured prefix limit makes recovery depend on exact proof.
     limit: bool,
+    /// The receiver's first session establishes inside the hold.
+    late: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +125,17 @@ enum Op {
     /// admission-proof allocation.
     RefuseProof,
     Drain,
+    /// The receiver's session ends and re-establishes on a new channel and
+    /// session id, as the transport does: `PeerGracefulRestart` when the
+    /// peer was GR-capable (`graceful`), else `PeerDown`; then the staged
+    /// session context and `PeerUp`. `helper` peers retain our routes as
+    /// stale until our End-of-RIB; `writer_full` backpressures the new
+    /// channel before its initial table.
+    Reconnect {
+        graceful: bool,
+        helper: bool,
+        writer_full: bool,
+    },
 }
 
 fn config_strategy() -> impl Strategy<Value = Config> {
@@ -132,15 +145,19 @@ fn config_strategy() -> impl Strategy<Value = Config> {
         any::<bool>(),
         any::<bool>(),
         any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(grouped, add_path, per_client_best, orf, limit)| Config {
-            // Add-Path and ORF receivers are always private.
-            grouped: grouped && !add_path && !orf,
-            add_path,
-            per_client_best,
-            orf,
-            limit,
-        })
+        .prop_map(
+            |(grouped, add_path, per_client_best, orf, limit, late)| Config {
+                // Add-Path and ORF receivers are always private.
+                grouped: grouped && !add_path && !orf,
+                add_path,
+                per_client_best,
+                orf,
+                limit,
+                late,
+            },
+        )
 }
 
 fn intent_strategy() -> impl Strategy<Value = Op> {
@@ -167,7 +184,17 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
         2 => any::<bool>().prop_map(Op::Backpressure),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
+        2 => (any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+            |(graceful, helper, writer_full)| Op::Reconnect {
+                graceful,
+                helper,
+                writer_full,
+            }
+        ),
     ]
+    .prop_filter("investigation: production ops only", |op| {
+        std::env::var("ORACLE_NO_REPLAY").is_err() || !matches!(op, Op::Replay { .. })
+    })
 }
 
 struct Injection {
@@ -199,6 +226,15 @@ struct Harness {
     reannounced: Option<BTreeSet<usize>>,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
+    /// The receiver's current transport session.
+    session: u64,
+    /// Keys a GR helper retains as stale from a previous session until our
+    /// End-of-RIB on the current one.
+    stale: HashSet<(Prefix, u32)>,
+    /// The current session negotiated helper retention.
+    helper: bool,
+    /// The receiver has an established session.
+    registered: bool,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -237,8 +273,68 @@ impl Harness {
             hold_starting: false,
             reannounced: None,
             blackholed: BTreeMap::new(),
+            session: OBSERVER_SESSION,
+            stale: HashSet::new(),
+            helper: true,
+            registered: false,
         };
-        harness.register();
+        if !config.late {
+            harness.establish();
+        }
+        harness
+    }
+
+    /// The transport's Established sequence on the current channel and
+    /// session: staged context, `PeerUp`, `PeerAddPathLimits`, then the
+    /// configured limit and the peer's first ORF.
+    fn establish(&mut self) {
+        self.registered = true;
+        let observer = peer_v4(OBSERVER);
+        let session_id = self.session;
+        self.manager.handle_update(RibUpdate::SetPeerExportContext {
+            peer: observer,
+            session_id,
+            local_role: None,
+        });
+        self.manager.handle_update(RibUpdate::SetPeerRsControl {
+            peer: observer,
+            session_id,
+            rs_control_asn: None,
+        });
+        self.manager
+            .handle_update(RibUpdate::SetPeerExportPolicyCounters {
+                peer: observer,
+                session_id,
+                counters: crate::update::ExportPolicyCounters::default(),
+            });
+        self.manager
+            .handle_update(RibUpdate::SetPeerGracefulRestartContext {
+                peer: observer,
+                session_id,
+                peer_restart_state: false,
+                peer_gr_helper: self.helper,
+                peer_gr_families: vec![FAMILY],
+                peer_enhanced_refresh: true,
+                peer_llgr_families: vec![],
+                local_llgr_stale_time: 0,
+            });
+        self.manager.handle_update(RibUpdate::SetPeerPolicyContext {
+            peer: observer,
+            session_id,
+            peer_group: None,
+        });
+        self.register();
+        self.manager.handle_update(RibUpdate::PeerAddPathLimits {
+            peer: observer,
+            session_id,
+            limits: if self.config.add_path {
+                vec![(FAMILY, u32::try_from(ADD_PATH_MAX).unwrap())]
+            } else {
+                vec![]
+            },
+        });
+        let config = self.config;
+        let harness = self;
         if config.limit {
             super::outbound_prefix_limits::prepare(
                 &mut harness.manager,
@@ -251,12 +347,57 @@ impl Harness {
         if config.orf {
             harness.push_orf(0);
         }
-        harness
+    }
+
+    /// A production session flap: the old channel and its queued updates
+    /// die, a new channel and session id register.
+    fn reconnect(&mut self, graceful: bool, helper: bool, writer_full: bool) {
+        let observer = peer_v4(OBSERVER);
+        if graceful {
+            self.manager.handle_update(RibUpdate::PeerGracefulRestart {
+                peer: observer,
+                session_id: self.session,
+                restart_time: 120,
+                stale_routes_time: 360,
+                gr_families: vec![FAMILY],
+                peer_llgr_capable: false,
+                peer_llgr_families: vec![],
+                llgr_stale_time: 0,
+            });
+        } else {
+            self.manager.handle_update(RibUpdate::PeerDown {
+                peer: observer,
+                session_id: self.session,
+            });
+        }
+        // The transport discards the dying session's queued updates.
+        self.occupied.clear();
+        while self.rx.try_recv().is_ok() {}
+        if self.helper {
+            // A GR helper keeps our routes as stale until our End-of-RIB.
+            self.stale = self.wire.keys().copied().collect();
+        } else {
+            // A session reset drops our routes: no blackhole survives it.
+            self.wire.clear();
+            self.stale.clear();
+            self.blackholed.clear();
+        }
+        self.helper = helper;
+        let (tx, rx) = mpsc::channel(4);
+        self.tx = tx;
+        self.rx = rx;
+        self.session += 1000;
+        if writer_full {
+            let writer = self.tx.clone();
+            self.occupied =
+                std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+        }
+        self.establish();
     }
 
     fn register(&mut self) {
         let mut up =
-            super::lifecycle::test_peer_up(peer_v4(OBSERVER), OBSERVER_SESSION, self.tx.clone());
+            super::lifecycle::test_peer_up(peer_v4(OBSERVER), self.session, self.tx.clone());
         if let RibUpdate::PeerUp {
             export_policy,
             per_client_best,
@@ -319,7 +460,7 @@ impl Harness {
         let (reply, mut response) = oneshot::channel();
         self.manager.handle_update(RibUpdate::PeerOrfUpdate {
             peer: peer_v4(OBSERVER),
-            session_id: OBSERVER_SESSION,
+            session_id: self.session,
             afi: FAMILY.0,
             safi: FAMILY.1,
             when: WhenToRefresh::Immediate,
@@ -431,7 +572,8 @@ impl Harness {
                 self.retire(old);
             }
             Op::Orf { deny } => {
-                if self.config.orf {
+                // A receiver with no session yet sends no ORF.
+                if self.config.orf && self.registered {
                     self.push_orf(deny);
                 }
             }
@@ -458,6 +600,11 @@ impl Harness {
                     .disarm_allocation_failure_for_test();
             }
             Op::Drain => {}
+            Op::Reconnect {
+                graceful,
+                helper,
+                writer_full,
+            } => self.reconnect(graceful, helper, writer_full),
         }
     }
 
@@ -504,6 +651,7 @@ impl Harness {
             }
             for key in &update.withdraw {
                 self.wire.remove(key);
+                self.stale.remove(key);
             }
             // The transport sends an envelope's withdrawals as their own
             // UPDATEs before its announcements, and splits announcements with
@@ -522,6 +670,16 @@ impl Harness {
             let observed = self.apply_announcements(&update);
             self.reannounced = None;
             observed?;
+            // Our End-of-RIB ends a GR helper's retention: it purges every
+            // stale row this session did not re-announce.
+            if update.end_of_rib.contains(&FAMILY) && !self.stale.is_empty() {
+                for key in std::mem::take(&mut self.stale) {
+                    self.wire.remove(&key);
+                }
+                if self.held {
+                    self.check_blackholed()?;
+                }
+            }
         }
         Ok(updates)
     }
@@ -541,6 +699,7 @@ impl Harness {
                 (route.prefix, route.path_id)
             );
             self.wire.insert((route.prefix, route.path_id), injection);
+            self.stale.remove(&(route.prefix, route.path_id));
             if self.held {
                 self.check_blackholed()?;
             }
@@ -743,11 +902,12 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     }
     harness.drain()?;
     prop_assert!(
-        harness
-            .manager
-            .grouped_member_of(peer_v4(OBSERVER))
-            .is_some()
-            == config.grouped,
+        config.late
+            || harness
+                .manager
+                .grouped_member_of(peer_v4(OBSERVER))
+                .is_some()
+                == config.grouped,
         "the configuration names the receiver's real distribution mode"
     );
     harness.blackholed = harness.exempt_rows();
@@ -757,6 +917,11 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     harness.hold_starting = true;
     harness.observe()?;
     harness.hold_starting = false;
+    if config.late {
+        // The receiver's first session establishes inside the hold.
+        harness.establish();
+        harness.observe()?;
+    }
     for op in hold {
         if std::env::var("ORACLE_TRACE").is_ok() {
             eprintln!(
@@ -894,6 +1059,7 @@ fn i1_catches_a_transient_unblackhole_between_updates() {
         per_client_best: false,
         orf: false,
         limit: false,
+        late: false,
     };
     let transient = |held: bool| {
         let mut harness = Harness::new(config);
@@ -959,6 +1125,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
         per_client_best: false,
         orf: false,
         limit: false,
+        late: false,
     };
     let replaced = |held: bool, between_phases: bool| {
         let mut harness = Harness::new(config);
@@ -1020,6 +1187,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
         per_client_best: false,
         orf: false,
         limit: false,
+        late: false,
     };
     let swapped = |per_announcement: bool| {
         let mut harness = Harness::new(config);
