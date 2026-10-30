@@ -922,6 +922,60 @@ fn run_llgr_expiry_case(
     routes: u8,
     vacated: u8,
 ) -> BTreeMap<&'static str, usize> {
+    run_llgr_expiry_case_with_fresh(family, routes, vacated, 0)
+}
+
+/// Announce one route that is neither GR- nor LLGR-stale and never expires
+/// with `family`: an IPv6 `FlowSpec` rule beside expiring IPv4 `FlowSpec`, or a
+/// fresh RT-Constrain route beside expiring RTC routes.
+fn announce_fresh(manager: &mut RibManager, family: (Afi, Safi), index: u8) {
+    let addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = peer_v4(addr);
+    let update = match family.1 {
+        Safi::FlowSpec => {
+            let mut route = make_flowspec_route(addr);
+            route.afi = Afi::Ipv6;
+            route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                rustbgpd_wire::FlowSpecPrefix::V6(rustbgpd_wire::Ipv6PrefixOffset {
+                    prefix: Ipv6Prefix::new(
+                        Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, u16::from(index), 0),
+                        112,
+                    ),
+                    offset: 0,
+                }),
+            )];
+            RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer,
+                announced: Vec::new(),
+                withdrawn: Vec::new(),
+                flowspec_announced: vec![route],
+                flowspec_withdrawn: Vec::new(),
+                evpn_announced: Vec::new(),
+                evpn_withdrawn: Vec::new(),
+                validated_with: None,
+            }
+        }
+        Safi::RtConstrain => RibUpdate::RtcRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: vec![make_rtc_rib_route(addr, 1000 + u16::from(index), 100)],
+            withdrawn: Vec::new(),
+        },
+        _ => unreachable!("fresh fixture families"),
+    };
+    manager.handle_update(update);
+    drain_route_chunks(manager);
+}
+
+/// [`run_llgr_expiry_case`] with `fresh` non-expiring routes announced
+/// after promotion, before the LLGR deadline fires.
+fn run_llgr_expiry_case_with_fresh(
+    family: (Afi, Safi),
+    routes: u8,
+    vacated: u8,
+    fresh: u8,
+) -> BTreeMap<&'static str, usize> {
     let (mut manager, readiness_tx) = readiness_manager();
     let addr = Ipv4Addr::new(10, 0, 0, 1);
     let peer = peer_v4(addr);
@@ -964,9 +1018,14 @@ fn run_llgr_expiry_case(
             .map_or(0, |(_, counts)| counts.llgr_stale)
     };
     assert_eq!(retained(&manager), u64::from(routes), "{family:?}");
+    for index in 0..fresh {
+        announce_fresh(&mut manager, family, index);
+    }
     make_llgr_expiry_due(&mut manager, peer, family);
     let initial_count = manager.loc_rib.len();
 
+    // Growth recorded during setup is not the expiry's.
+    crate::orr::rebuild_growth::take();
     let answered = run_with_readiness_probe(
         &mut manager,
         readiness_tx,
@@ -976,6 +1035,16 @@ fn run_llgr_expiry_case(
         retained(&manager),
         0,
         "{family:?}: expiry purges the family"
+    );
+    let survivors = match family.1 {
+        Safi::FlowSpec => manager.ribs[&peer].flowspec_lens()[1],
+        Safi::RtConstrain => manager.ribs[&peer].rtc_len(),
+        _ => 0,
+    };
+    assert_eq!(
+        survivors,
+        usize::from(fresh),
+        "{family:?}: fresh routes survive"
     );
     assert!(
         !manager
@@ -1115,4 +1184,63 @@ fn llgr_expiry_rebuilds_orr_and_retires_page_cache_under_readiness() {
             );
         }
     }
+}
+
+/// Expiring IPv4 `FlowSpec` beside a large non-expiring IPv6 inventory: the
+/// per-AFI recount for the prefix gauge answers readiness per route.
+#[test]
+fn llgr_expiry_flowspec_recount_services_readiness_per_route() {
+    let flowspec = (Afi::Ipv4, Safi::FlowSpec);
+    let count = |answered: &BTreeMap<&str, usize>| {
+        answered.get("llgr_expiry_metrics").copied().unwrap_or(0)
+    };
+    let small = count(&run_llgr_expiry_case_with_fresh(flowspec, 8, 0, 0));
+    let large = count(&run_llgr_expiry_case_with_fresh(flowspec, 8, 0, 128));
+    assert!(
+        large >= small + 128,
+        "FlowSpec recount answered {small} with no IPv6 rules and {large} with 128"
+    );
+}
+
+/// Expiring RT-Constrain routes beside fresh ones: rebuilding the surviving
+/// membership answers readiness per collected entry, per sort/dedup
+/// comparison and per published entry, each counted separately.
+#[test]
+fn llgr_expiry_rtc_membership_rebuild_services_readiness_per_unit() {
+    let rtc = (Afi::Ipv4, Safi::RtConstrain);
+    let small = run_llgr_expiry_case_with_fresh(rtc, 8, 0, 8);
+    let large = run_llgr_expiry_case_with_fresh(rtc, 8, 0, 136);
+    let failures: Vec<_> = [
+        "selection_rtc_membership",
+        "rtc_membership_sort",
+        "rtc_membership_publish",
+    ]
+    .into_iter()
+    .map(|stage| {
+        (
+            stage,
+            small.get(stage).copied().unwrap_or(0),
+            large.get(stage).copied().unwrap_or(0),
+        )
+    })
+    .filter(|&(_, small, large)| large < small + 128)
+    .collect();
+    assert!(
+        failures.is_empty(),
+        "(unit, answered with 8 fresh, with 136 fresh) must grow per fresh route: {failures:?}"
+    );
+}
+
+/// A large unicast expiry selects into a `changed` set reserved up front,
+/// so no insert rehashes between selection checkpoints.
+#[test]
+fn llgr_expiry_unicast_selection_changed_set_never_grows() {
+    let answered = run_llgr_expiry_case((Afi::Ipv4, Safi::Unicast), 200, 0);
+    let growth = crate::orr::rebuild_growth::take();
+    assert!(answered.get("selection_recompute").copied().unwrap_or(0) >= 200);
+    assert_eq!(
+        growth.get("recompute_best_changed"),
+        Some(&(1, 0)),
+        "one selection pass, no capacity growth inside it: {growth:?}"
+    );
 }

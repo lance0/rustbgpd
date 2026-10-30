@@ -1416,12 +1416,23 @@ impl RibManager {
             self.attr_intern.gc_with_checkpoint(&mut cleanup);
             self.metrics
                 .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
-            crate::manager::helpers::set_rib_prefixes(
-                &self.metrics,
-                &peer_label,
-                crate::manager::helpers::FLOWSPEC_FAMILIES,
-                rib.flowspec_lens(),
-            );
+            // FlowSpec counts have no maintained per-AFI counter; recount
+            // only when this expiry removed FlowSpec routes.
+            if !fs_affected.is_empty() {
+                let mut metrics = || {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "llgr_expiry_metrics",
+                        false,
+                    );
+                };
+                crate::manager::helpers::set_rib_prefixes(
+                    &self.metrics,
+                    &peer_label,
+                    crate::manager::helpers::FLOWSPEC_FAMILIES,
+                    rib.flowspec_lens_with_checkpoint(&mut metrics),
+                );
+            }
             rib_len = rib.unicast_lens();
             evpn_len = rib.evpn_len();
         }

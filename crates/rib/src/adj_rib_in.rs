@@ -2806,9 +2806,18 @@ impl AdjRibIn {
     // small rule sets. Maintain a per-AFI counter if they grow large.
     #[must_use]
     pub fn flowspec_lens(&self) -> [usize; 2] {
+        self.flowspec_lens_with_checkpoint(&mut || {})
+    }
+
+    /// [`Self::flowspec_lens`] with a checkpoint per visited route.
+    pub(crate) fn flowspec_lens_with_checkpoint(
+        &self,
+        checkpoint: &mut impl FnMut(),
+    ) -> [usize; 2] {
         let v6 = self
             .flowspec_routes
             .values()
+            .inspect(|_| checkpoint())
             .filter(|route| route.afi == Afi::Ipv6)
             .count();
         [self.flowspec_routes.len() - v6, v6]
