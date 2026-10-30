@@ -472,9 +472,11 @@ impl AdjRibOut {
         self.local_export_sources.get(&(*prefix, path_id)).copied()
     }
 
-    /// The outbound path ID that currently carries the local injection
-    /// with `source_path_id`, if this Adj-RIB-Out holds it.
-    pub(crate) fn local_source_outbound_path_id(
+    /// The outbound path ID of a frozen admission: the local injection with
+    /// `source_path_id`, admitted as ordinary (not deferral-exempt). An
+    /// exempt admission is never frozen; selection deferral lets its
+    /// withdrawal or replacement go out.
+    pub(crate) fn frozen_local_outbound_path_id(
         &self,
         prefix: &Prefix,
         source_path_id: u32,
@@ -483,7 +485,9 @@ impl AdjRibOut {
             .into_iter()
             .find(|&path_id| {
                 self.local_export_source(prefix, path_id)
-                    .is_some_and(|source| source.path_id == source_path_id)
+                    .is_some_and(|source| {
+                        source.path_id == source_path_id && !source.deferral_exempt
+                    })
             })
     }
 

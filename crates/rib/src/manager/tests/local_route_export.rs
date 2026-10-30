@@ -4010,3 +4010,83 @@ fn grouped_rs_client_reads_back_its_post_control_row() {
         );
     }
 }
+
+/// An RTBH row admitted before the hold is not frozen: once its injection
+/// turns ordinary, the hold lets its withdrawal go out. While that
+/// withdrawal waits behind a full writer, explain must not claim the row
+/// stays until release, even when an ORF would also deny it.
+#[test]
+fn exempt_admitted_row_awaiting_withdrawal_is_not_reported_frozen() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    for mode in [
+        DeferredUnicastMode::PrivatePerClient,
+        DeferredUnicastMode::AddPath,
+    ] {
+        let mut manager = restart_unicast_manager(false);
+        let observer = PeerId::from_addr(v4(4));
+        let mut rx = deferred_unicast_peer(&mut manager, observer, mode, false);
+        let _ = deferred_unicast_drain(&mut rx);
+        inject(&mut manager, deferred_unicast_local(prefix, 71, 50));
+        assert_eq!(
+            deferred_unicast_drain(&mut rx)
+                .iter()
+                .map(|update| update.announce.len())
+                .sum::<usize>(),
+            1,
+            "{mode:?}: the RTBH row is admitted before the hold"
+        );
+        let _waiter_rx = connect_restart_waiter(&mut manager);
+        assert!(manager.selection_deferred(prefix_family(&prefix)));
+
+        // Removing BLACKHOLE from the aggregate makes the injection
+        // ordinary; its withdrawal waits behind a full writer.
+        let writer = manager.outbound_peers[&observer].clone();
+        let occupied: Vec<_> =
+            std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+        inject(&mut manager, local_route(prefix, 71));
+        manager
+            .peer_orf_filters
+            .entry(observer)
+            .or_default()
+            .entry((Afi::Ipv4, Safi::Unicast))
+            .or_default()
+            .apply(&[rustbgpd_wire::AddressPrefixOrf {
+                action: rustbgpd_wire::OrfAction::Add,
+                match_: rustbgpd_wire::OrfMatch::Deny,
+                sequence: 10,
+                min_len: 0,
+                max_len: 0,
+                prefix: Some(prefix),
+            }])
+            .unwrap();
+        let held = manager.adj_ribs_out[&observer].local_export_source(
+            &prefix,
+            u32::from(matches!(mode, DeferredUnicastMode::AddPath)),
+        );
+        assert!(
+            held.is_some_and(|source| source.deferral_exempt),
+            "{mode:?}: the exempt admission still waits on the writer"
+        );
+        let explanation = source_less_explain(&mut manager, observer, prefix);
+        assert!(
+            explanation.gates.iter().all(|step| {
+                step.code != "selection_deferred" && step.code != "selection_deferred_frozen"
+            }),
+            "{mode:?}: the withdrawal is not held: {explanation:?}"
+        );
+        assert!(!explanation.already_advertised, "{mode:?}");
+
+        drop(occupied);
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        let withdrawn: Vec<_> = deferred_unicast_drain(&mut rx)
+            .iter()
+            .flat_map(|update| update.withdraw.clone())
+            .collect();
+        assert!(manager.selection_deferred(prefix_family(&prefix)));
+        assert_eq!(
+            withdrawn.iter().filter(|key| key.0 == prefix).count(),
+            1,
+            "{mode:?}: the hold sends the withdrawal: {withdrawn:?}"
+        );
+    }
+}
