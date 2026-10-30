@@ -550,37 +550,22 @@ impl Harness {
                 self.wire.remove(key);
             }
             // The transport sends an envelope's withdrawals as their own
-            // UPDATEs before its announcements, so the peer also sees the
-            // state between the two phases.
-            if self.held {
-                self.reannounced = Some(
-                    update
-                        .announce
-                        .iter()
-                        .map(Self::identity)
-                        .filter(|&injection| self.injections[injection].exempt)
-                        .collect(),
-                );
-                let between_phases = self.check_blackholed();
-                self.reannounced = None;
-                between_phases?;
-            }
-            for route in update.announce.iter() {
-                let injection = Self::identity(route);
-                let resurrected =
-                    self.injections[injection].exempt && !self.injections[injection].live;
-                prop_assert!(
-                    !resurrected,
-                    "I4: removed exempt injection {injection} re-announced at {:?}",
-                    (route.prefix, route.path_id)
-                );
-                self.wire.insert((route.prefix, route.path_id), injection);
-            }
-            // A withdraw and re-announce in separate envelopes leaves the
-            // peer unblackholed in between, so check each one.
-            if self.held {
-                self.check_blackholed()?;
-            }
+            // UPDATEs before its announcements, and splits announcements with
+            // different attributes into separate UPDATEs. Check the peer's
+            // state after the withdrawals and after every announcement: one
+            // UPDATE per announcement is stricter than the wire, and exempt
+            // and ordinary rows never share attributes.
+            self.reannounced = self.held.then(|| {
+                update
+                    .announce
+                    .iter()
+                    .map(Self::identity)
+                    .filter(|&injection| self.injections[injection].exempt)
+                    .collect()
+            });
+            let observed = self.apply_announcements(&update);
+            self.reannounced = None;
+            observed?;
         }
         if self
             .manager
@@ -590,6 +575,28 @@ impl Harness {
             self.refused = true;
         }
         Ok(updates)
+    }
+
+    /// I4 for every announcement; I1 after the withdrawals and after each
+    /// announcement while the hold lasts.
+    fn apply_announcements(&mut self, update: &OutboundRouteUpdate) -> Checked {
+        if self.held {
+            self.check_blackholed()?;
+        }
+        for route in update.announce.iter() {
+            let injection = Self::identity(route);
+            let resurrected = self.injections[injection].exempt && !self.injections[injection].live;
+            prop_assert!(
+                !resurrected,
+                "I4: removed exempt injection {injection} re-announced at {:?}",
+                (route.prefix, route.path_id)
+            );
+            self.wire.insert((route.prefix, route.path_id), injection);
+            if self.held {
+                self.check_blackholed()?;
+            }
+        }
+        Ok(())
     }
 
     fn drain(&mut self) -> Checked {
@@ -1120,5 +1127,66 @@ fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
     assert!(
         replaced(true, false).is_ok(),
         "a check after the whole envelope cannot see it"
+    );
+}
+
+/// One envelope that announces an ordinary row over the last exempt row's
+/// Add-Path key, then a live exempt row at the next key, reaches the peer
+/// as two UPDATEs (their attributes differ): I1 must see the gap.
+#[test]
+fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
+    let config = Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+    };
+    let swapped = |per_announcement: bool| {
+        let mut harness = Harness::new(config);
+        harness.apply(&Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: true,
+        });
+        harness.drain().unwrap();
+        let aggregate = prefix(2);
+        assert_eq!(harness.wire.get(&(aggregate, 1)), Some(&0));
+        harness.blackholed = harness.exempt_rows();
+        // A live ordinary row the seeded envelope moves onto key 1.
+        let ordinary = harness.new_injection(2, 120, false);
+        let Prefix::V4(v4) = aggregate else {
+            unreachable!()
+        };
+        let row = |injection: usize, path_id| {
+            let mut route = make_route_with_lp(v4, SOURCE, 100);
+            route.path_id = path_id;
+            route.attributes = AttrSet::new(vec![PathAttribute::Communities(vec![
+                (IDENTITY_ASN << 16) | u32::try_from(injection).unwrap(),
+            ])]);
+            route
+        };
+        harness
+            .tx
+            .try_send(OutboundRouteUpdate {
+                announce: Arc::new(vec![row(ordinary, 1), row(0, 2)]),
+                ..OutboundRouteUpdate::default()
+            })
+            .unwrap();
+        harness.held = per_announcement;
+        let observed = harness.observe().map(|_| ());
+        harness.held = true;
+        observed.and_then(|()| harness.check_blackholed())
+    };
+    let error = swapped(true).expect_err("the gap between announcements unblackholes the peer");
+    assert!(
+        error
+            .to_string()
+            .contains("I1: 203.0.113.0/24 lost its exempt row")
+    );
+    assert!(
+        swapped(false).is_ok(),
+        "a check after all announcements cannot see it"
     );
 }
