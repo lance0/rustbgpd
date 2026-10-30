@@ -1,0 +1,5 @@
+lease_deadline PASS deadline - t_w = 0.051 s after a late 60 s renewal
+local_absence PASS absent 0.171 s after t_w (bar 2 s)
+frr_absence PASS absent 0.09 s after local absence (bar 5 s)
+legacy_control INVALID the late legacy renewal did not extend the legacy rule
+session PASS FRR session Established throughout

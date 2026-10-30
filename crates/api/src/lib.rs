@@ -29,6 +29,8 @@ pub mod evpn_service;
 mod global_service;
 pub mod gnmi_dialout;
 mod gnmi_service;
+#[cfg(test)]
+mod guarded_flowspec_qualification_tests;
 pub mod health_probe;
 pub mod import_roster;
 mod injection_service;

@@ -1,0 +1,10 @@
+1793369370.851543228 guarded_added {"incarnation": "8377374440838353692", "sequence": "2"}
+1793369390.098790369 late_legacy_renew ok
+1793369395.010048069 late_guarded_renew {
+  "generation": {
+    "incarnation": "8377374440838353692",
+    "sequence": "2"
+  },
+  "leaseRemainingMs": 5993
+}
+1793369399.963235341 stall_trigger
