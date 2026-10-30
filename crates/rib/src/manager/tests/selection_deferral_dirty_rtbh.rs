@@ -3428,13 +3428,6 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
         "the deleted path never returns"
     );
     let expected = HashSet::from([(prefix, first), (pending, first), (ordinary, first)]);
-    if keys_only && add_path {
-        // Release after a keys-only replay does not yet withdraw the
-        // surviving path's old rank-2 key, a duplicate of the live route
-        // tracked separately; every expected key is present.
-        assert!(expected.iter().all(|key| wire.contains_key(key)));
-        return;
-    }
     assert_eq!(wire.keys().copied().collect::<HashSet<_>>(), expected);
     assert_eq!(
         manager.actual_unicast_advertised_count(observer),
@@ -3465,8 +3458,13 @@ fn refused_proof_keeps_a_single_best_prefix_blackholed_across_rtbh_replacement()
 
 /// The refused-proof replacement salvage is linear in the batch: deleting
 /// rank 1 of `siblings` Add-Path RTBH paths re-ranks every other path, and
-/// each re-announcement must not rescan the prefix's siblings.
-fn refused_replacement_salvage_visits(siblings: u32) -> usize {
+/// each re-announcement must not rescan the prefix's siblings. `unrelated`
+/// other advertised RTBH prefixes must cost nothing.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one Add-Path transcript builds the refused-proof state and measures one salvage"
+)]
+fn refused_replacement_salvage_visits(siblings: u32, unrelated: u8) -> usize {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
@@ -3494,10 +3492,16 @@ fn refused_replacement_salvage_visits(siblings: u32) -> usize {
     super::outbound_prefix_limits::prepare(
         &mut manager,
         1,
-        super::outbound_prefix_limits::limit_config(&[(observer, Some(8), None)], &[]),
+        super::outbound_prefix_limits::limit_config(&[(observer, Some(1024), None)], &[]),
     )
     .unwrap();
     super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
+    for last in 0..unrelated {
+        inject_host(
+            &mut manager,
+            Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, last), 32),
+        );
+    }
     let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
     let prefix = Prefix::V4(host);
     for rank in 0..siblings {
@@ -3528,6 +3532,12 @@ fn refused_replacement_salvage_visits(siblings: u32) -> usize {
     assert_eq!(
         wire.keys().filter(|key| key.0 == prefix).count(),
         siblings as usize
+    );
+    assert_eq!(
+        manager.adj_ribs_out[&observer]
+            .local_export_sources()
+            .count(),
+        siblings as usize + usize::from(unrelated)
     );
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
     manager.handle_update(registration(tx));
@@ -3566,12 +3576,12 @@ fn refused_replacement_salvage_visits(siblings: u32) -> usize {
 
 #[test]
 fn refused_replacement_salvage_work_is_linear_in_add_path_siblings() {
-    for siblings in [4, 16, 64] {
-        let visits = refused_replacement_salvage_visits(siblings);
+    for (siblings, unrelated) in [(4, 0), (16, 0), (64, 0), (4, 200)] {
+        let visits = refused_replacement_salvage_visits(siblings, unrelated);
         let bound = 3 * siblings as usize + 8;
         assert!(
             visits <= bound,
-            "{siblings} siblings cost {visits} salvage visits; bound {bound}"
+            "{siblings} siblings beside {unrelated} unrelated prefixes cost {visits} salvage visits; bound {bound}"
         );
     }
 }
