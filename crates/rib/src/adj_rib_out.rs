@@ -464,6 +464,21 @@ impl AdjRibOut {
         self.local_export_sources.get(&(*prefix, path_id)).copied()
     }
 
+    /// The outbound path ID that currently carries the local injection
+    /// with `source_path_id`, if this Adj-RIB-Out holds it.
+    pub(crate) fn local_source_outbound_path_id(
+        &self,
+        prefix: &Prefix,
+        source_path_id: u32,
+    ) -> Option<u32> {
+        self.path_ids_for_prefix(prefix)
+            .into_iter()
+            .find(|&path_id| {
+                self.local_export_source(prefix, path_id)
+                    .is_some_and(|source| source.path_id == source_path_id)
+            })
+    }
+
     pub(crate) fn set_local_export_source(
         &mut self,
         key: (Prefix, u32),

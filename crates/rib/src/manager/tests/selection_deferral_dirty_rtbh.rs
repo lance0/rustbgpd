@@ -1808,6 +1808,7 @@ enum RefusedRtbhRemoval {
     Delete,
     Expire,
     Demote,
+    PolicyDeny,
 }
 
 #[expect(
@@ -1998,6 +1999,15 @@ async fn assert_removed_rtbh_after_proof_refusal(
                 crate::update::InjectOutcome::Replaced
             );
         }
+        RefusedRtbhRemoval::PolicyDeny => {
+            let (reply, mut result) = oneshot::channel();
+            manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+                peer: observer,
+                export_policy: Some(deny_prefixes_chain(&[first])),
+                reply,
+            });
+            result.try_recv().unwrap().unwrap();
+        }
     }
     if let Some(occupied) = occupied {
         assert_eq!(manager.actual_unicast_advertised_count(observer), 2);
@@ -2114,6 +2124,16 @@ async fn refused_proof_still_withdraws_demoted_ipv4_rtbh() {
 #[tokio::test(start_paused = true)]
 async fn refused_proof_still_withdraws_demoted_ipv6_rtbh() {
     assert_removed_rtbh_after_proof_refusal(true, RefusedRtbhRemoval::Demote, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_policy_denied_ipv4_rtbh() {
+    assert_removed_rtbh_after_proof_refusal(false, RefusedRtbhRemoval::PolicyDeny, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_policy_denied_ipv6_rtbh() {
+    assert_removed_rtbh_after_proof_refusal(true, RefusedRtbhRemoval::PolicyDeny, false).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -3223,4 +3243,141 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         "limited body after queued intent recovery",
     );
     assert!(!manager.dirty_peers.contains(&observer));
+}
+
+/// A withdrawal that only moves a live RTBH path to another Add-Path rank
+/// is not a removal: refused proof must not salvage it while the matching
+/// announcement waits.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one Add-Path transcript covers pre-hold admission, refused proof, the rank move and release"
+)]
+fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(64);
+    let registration = |tx| {
+        let mut up = super::lifecycle::test_peer_up(observer, 82, tx);
+        if let RibUpdate::PeerUp {
+            per_client_best,
+            add_path_send_families,
+            add_path_send_max,
+            sendable_families,
+            ..
+        } = &mut up
+        {
+            *per_client_best = true;
+            *sendable_families = vec![FAMILY];
+            *add_path_send_families = vec![FAMILY];
+            *add_path_send_max = 2;
+        }
+        up
+    };
+    manager.handle_update(registration(tx.clone()));
+    let mut wire = std::collections::HashMap::new();
+    apply_wire(&mut rx, &mut wire);
+    // A configured limit makes recovery depend on exact admission proof.
+    super::outbound_prefix_limits::prepare(
+        &mut manager,
+        1,
+        super::outbound_prefix_limits::limit_config(&[(observer, Some(3), None)], &[]),
+    )
+    .unwrap();
+    super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
+    let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
+    let prefix = Prefix::V4(host);
+    // Path 17 ranks first on local preference; path 23 second.
+    for (path_id, preference) in [(17, 200), (23, 100)] {
+        let mut route = make_route_with_lp(host, SOURCE, preference);
+        set_peer(&mut route, crate::PeerId::LOCAL);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        route.path_id = path_id;
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route, reply });
+        result.try_recv().unwrap().unwrap();
+    }
+    // A received row admitted before the hold stays frozen, which holds
+    // this receiver's recovery on exact admission proof.
+    let ordinary = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            SOURCE,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    apply_wire(&mut rx, &mut wire);
+    assert!(wire.contains_key(&(ordinary, 1)));
+    assert_eq!(wire[&(prefix, 1)].local_pref(), 200);
+    assert_eq!(wire[&(prefix, 2)].local_pref(), 100);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    manager.handle_update(registration(tx));
+    apply_wire(&mut rx, &mut wire);
+    // A new RTBH waits behind a full writer, so the retry must reserve proof.
+    let pending = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32));
+    let writer = manager.outbound_peers[&observer].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    inject_host(
+        &mut manager,
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
+    );
+    drop(occupied);
+    assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    assert!(manager.pending_group_admitted.get(&observer).is_none());
+    assert!(manager.group_recovery_fallback(observer).is_some());
+    assert!(apply_wire(&mut rx, &mut wire).is_empty());
+
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix,
+        path_id: 17,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    assert!(result.try_recv().unwrap().unwrap().removed);
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(manager.selection_deferred(FAMILY));
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.withdraw.is_empty() && update.announce.is_empty()),
+        "path 23 moving from rank 2 to rank 1 needs the refused admission"
+    );
+    assert_eq!(
+        wire.get(&(prefix, 2)).map(Route::local_pref),
+        Some(100),
+        "the still-injected RTBH path stays advertised"
+    );
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 83,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    for _ in 0..3 {
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        apply_wire(&mut rx, &mut wire);
+    }
+    assert_eq!(
+        wire.keys().copied().collect::<HashSet<_>>(),
+        HashSet::from([(prefix, 1), (pending, 1), (ordinary, 1)])
+    );
+    assert_eq!(wire[&(prefix, 1)].local_pref(), 100);
 }

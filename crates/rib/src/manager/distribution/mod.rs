@@ -3425,7 +3425,23 @@ impl RibManager {
                 self.replacement_checkpoint(true);
                 let mut seen = HashSet::with_capacity(batch.withdraw.len());
                 let mut withdraw = Vec::with_capacity(batch.withdraw.len());
+                // An exempt source this batch re-announces under another
+                // outbound path ID moved rather than left: withdrawing its
+                // old key while the announcement is refused would drop it.
+                let mut moved = HashSet::new();
+                if !batch.withdraw.is_empty() {
+                    for route in batch.unicast.announce.iter() {
+                        checkpoint();
+                        if let Some(source) =
+                            self.exported_local_source(peer, route, &batch.local_sources)
+                        {
+                            moved.insert((route.prefix, source.path_id));
+                        }
+                    }
+                }
                 self.replacement_checkpoint(true);
+                // Every other withdrawal of an exempt source (delete, expiry,
+                // demotion or an export-policy deny) leaves the peer's wire.
                 for &(prefix, path_id) in &batch.withdraw {
                     checkpoint();
                     let source = self
@@ -3433,17 +3449,13 @@ impl RibManager {
                         .get(&peer)
                         .and_then(|rib| rib.local_export_source(&prefix, path_id));
                     if source.is_some_and(|source| {
-                        source.deferral_exempt
-                            && self
-                                .ribs
-                                .get(&LOCAL_PEER)
-                                .and_then(|rib| rib.get(&prefix, source.path_id))
-                                .is_none_or(|route| !unicast_deferral_exempt(route))
+                        source.deferral_exempt && !moved.contains(&(prefix, source.path_id))
                     }) && seen.insert((prefix, path_id))
                     {
                         withdraw.push((prefix, path_id));
                     }
                 }
+                super::retire_hash_set(&mut moved, &mut || checkpoint());
                 super::retire_hash_set(&mut seen, &mut || checkpoint());
                 if withdraw.is_empty() {
                     super::retire_vec(&mut withdraw, &mut || checkpoint());

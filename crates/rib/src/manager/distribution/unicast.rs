@@ -560,13 +560,20 @@ impl RibManager {
         // `distribute_orr_best_prefix` (same collection via
         // `orr_candidates`, same comparator). A plain peer explains the
         // Loc-RIB best, unchanged.
+        // A deferred non-RTBH local source still explains the row it froze
+        // in this peer's Adj-RIB-Out before the hold, at that row's path ID.
+        let mut frozen_path_id = None;
         let best = if let Some(source) = source {
-            if local_only
+            let held = local_only
                 && !ribs.get(&source.peer).is_some_and(|rib| {
                     rib.get(&prefix, source.path_id)
                         .is_some_and(unicast_deferral_exempt)
-                })
-            {
+                });
+            if held && source.peer == PeerId::LOCAL {
+                frozen_path_id = rib_out
+                    .and_then(|out| out.local_source_outbound_path_id(&prefix, source.path_id));
+            }
+            if held && frozen_path_id.is_none() {
                 let message = "source awaits graceful-restart selection deferral".to_string();
                 gate(
                     &mut explain.gates,
@@ -606,16 +613,28 @@ impl RibManager {
                 });
                 return explain;
             }
-            gate(
-                &mut explain.gates,
-                "best_route",
-                "source_selected",
-                Pass,
-                format!(
-                    "selected Adj-RIB-In path from {} with inbound path ID {}",
-                    source.peer, source.path_id
-                ),
-            );
+            if frozen_path_id.is_some() {
+                gate(
+                    &mut explain.gates,
+                    "best_route",
+                    "selection_deferred_frozen",
+                    Pass,
+                    "graceful-restart selection deferral keeps this source's pre-hold \
+                     advertisement frozen in the Adj-RIB-Out"
+                        .to_string(),
+                );
+            } else {
+                gate(
+                    &mut explain.gates,
+                    "best_route",
+                    "source_selected",
+                    Pass,
+                    format!(
+                        "selected Adj-RIB-In path from {} with inbound path ID {}",
+                        source.peer, source.path_id
+                    ),
+                );
+            }
             selected
         } else if let Some((topology, spf, vantage)) = orr {
             explain.orr_vantage = Some(vantage);
@@ -962,10 +981,15 @@ impl RibManager {
             );
             winner
         } else {
-            let Some(best) = loc_rib
-                .get(&prefix)
-                .filter(|best| !local_only || unicast_deferral_exempt(best))
-            else {
+            let Some(best) = loc_rib.get(&prefix).filter(|best| {
+                !local_only
+                    || unicast_deferral_exempt(best)
+                    || (best.peer == PeerId::LOCAL
+                        && rib_out.is_some_and(|out| {
+                            out.local_source_outbound_path_id(&prefix, best.path_id)
+                                .is_some()
+                        }))
+            }) else {
                 gate(
                     &mut explain.gates,
                     "best_route",
@@ -1284,22 +1308,27 @@ impl RibManager {
         // OTC and exact-wire rejection occur after assignment and therefore
         // retain the attempted outbound rank.
         if let Some(source) = source {
-            let mut ranked: Vec<&crate::route::Route> = multipath_candidates(
-                ribs,
-                prefix_peers,
-                peer_is_rr_client,
-                &prefix,
-                local_only,
-                Some(target_peer),
-                target_is_ebgp,
-                interpret_rfc1997,
-                rs_control_asn.zip(target_peer_asn),
-                target_is_rr_client,
-                cluster_id,
-                family,
-                llgr,
-            )
-            .collect();
+            // A frozen row keeps the outbound path ID it was admitted with.
+            let mut ranked: Vec<&crate::route::Route> = if frozen_path_id.is_some() {
+                Vec::new()
+            } else {
+                multipath_candidates(
+                    ribs,
+                    prefix_peers,
+                    peer_is_rr_client,
+                    &prefix,
+                    local_only,
+                    Some(target_peer),
+                    target_is_ebgp,
+                    interpret_rfc1997,
+                    rs_control_asn.zip(target_peer_asn),
+                    target_is_rr_client,
+                    cluster_id,
+                    family,
+                    llgr,
+                )
+                .collect()
+            };
             match orr {
                 Some((topology, spf, _)) => ranked.sort_by(|a, b| {
                     best_path_cmp_orr(
@@ -1369,7 +1398,8 @@ impl RibManager {
                 }
                 rank += 1;
             }
-            let outbound_rank = selected_rank
+            let outbound_rank = frozen_path_id
+                .or(selected_rank)
                 .expect("selected source passed the same eligibility and policy gates");
             if outbound_rank > add_path_send_max {
                 explain.decision = ExplainDecision::Deny;
@@ -2498,10 +2528,20 @@ impl RibManager {
         let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
 
         checkpoint();
-        let Some(best) = loc_rib
-            .get(prefix)
-            .filter(|best| !local_only || unicast_deferral_exempt(best))
-        else {
+        // Live staging withdraws a frozen non-RTBH local row and the
+        // deferral recovery filter then holds that withdrawal; an explain dry
+        // run reports the net result, the row still in the Adj-RIB-Out.
+        let explaining = matches!(target, super::ExportTarget::Explain { .. });
+        let Some(best) = loc_rib.get(prefix).filter(|best| {
+            !local_only
+                || unicast_deferral_exempt(best)
+                || (explaining
+                    && best.peer == PeerId::LOCAL
+                    && rib_out
+                        .local_export_source(prefix, 0)
+                        .map(|source| source.path_id)
+                        == Some(best.path_id))
+        }) else {
             target.gate("best_route", "no_best_route", Stop, || {
                 "no best route exists for this prefix".to_string()
             });

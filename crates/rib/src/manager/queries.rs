@@ -2337,7 +2337,27 @@ impl RibManager {
         if let Some((reason, detail)) = self.unexported_family(peer, family) {
             return row(Withheld, &reason, "family_not_sendable", detail);
         }
+        let resyncing = (self.dirty_peers.contains(&peer)
+            && !self.selection_partial_caught_up(peer))
+            || self.outbound_channel_gone(peer);
+        let source = crate::update::RouteSourceIdentity {
+            peer: LOCAL_PEER,
+            path_id: route.path_id,
+        };
         if self.selection_deferred(family) && !unicast_deferral_exempt(route) {
+            // A row admitted before the hold stays in the Adj-RIB-Out; the
+            // source-scoped explain finds it at its frozen outbound path ID.
+            let explanation =
+                (!resyncing).then(|| self.explain_unicast_export(peer, prefix, Some(source)));
+            if let Some(explanation) = explanation.filter(|explanation| {
+                explanation.decision == crate::update::ExplainDecision::Advertise
+                    && explanation.already_advertised
+            }) {
+                return PeerRouteExport {
+                    advertised_path_id: explanation.path_id,
+                    ..row(Committed, "", "", "in the peer's Adj-RIB-Out".to_string())
+                };
+            }
             return row(
                 Pending,
                 "selection_deferred",
@@ -2345,9 +2365,7 @@ impl RibManager {
                 "route awaits graceful-restart selection deferral".to_string(),
             );
         }
-        if (self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer))
-            || self.outbound_channel_gone(peer)
-        {
+        if resyncing {
             return row(
                 Pending,
                 "outbound_resync",
@@ -2355,10 +2373,6 @@ impl RibManager {
                 "outbound delivery to this peer is resynchronizing".to_string(),
             );
         }
-        let source = crate::update::RouteSourceIdentity {
-            peer: LOCAL_PEER,
-            path_id: route.path_id,
-        };
         // An Add-Path send peer explains this exact source at its outbound
         // rank; any other peer explains its own selected route.
         let add_path = self.add_path_send_max_for_prefix(peer, &prefix) > 0;
@@ -3068,7 +3082,9 @@ impl RibManager {
             .map(|encoder| encoder.snapshot());
         let grouped_rib_out = self.grouped_unicast_explain_view(peer, &prefix);
 
-        if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best {
+        // The RPC accepts a source only for Add-Path send; export readback
+        // also scopes a deferred local source to find its frozen row.
+        if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best || source.is_some() {
             let mut explanation = Self::explain_single_best_prefix(
                 &self.loc_rib,
                 &self.ribs,

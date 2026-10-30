@@ -3419,7 +3419,11 @@ completion markers remain held. See the
 
 `ListPathExportDispositions` reports the actual local export outcome; local
 RTBH injection bypasses `selection_deferred`; other injected unicast reports
-that pending reason while its family is held. Another eligible local path
+that pending reason while its family is held. A row the peer's Adj-RIB-Out
+already held before the hold stays frozen there and reports `COMMITTED`
+until the injection changes; `ExplainAdvertisedRoute` shows that frozen row,
+with the `selection_deferred_frozen` step for a source-scoped Add-Path
+explain. Another eligible local path
 can still out-select an RTBH route, and policy or admission can withhold or
 delay export. The family's End-of-RIB remains held until release selection
 is sent and all existing completion gates allow it. `MarkReplayComplete` releases
@@ -3511,7 +3515,7 @@ a route for the prefix.
 | `outbound_prefix_limit` | Withheld | The peer's outbound prefix limit is reached. |
 | `exact_export_rejected:<reason>` | Withheld | The session's encoder refuses the route's exact wire form, for example `exact_export_rejected:missing_ipv6_next_hop`. A bare `exact_export_rejected` means a fresh probe no longer reproduces the refusal. |
 | `export_rule` | Withheld | Another export gate stops the route, such as split horizon, `NO_ADVERTISE`, LLGR, an ORF filter, OTC or conditional advertisement. |
-| `selection_deferred` | Pending | Graceful Restart selection deferral holds injected unicast other than local `/32`, `/128` or BLACKHOLE `65535:666` routes. |
+| `selection_deferred` | Pending | Graceful Restart selection deferral holds injected unicast other than local `/32`, `/128` or BLACKHOLE `65535:666` routes. A row already admitted before the hold, unchanged since, reports `COMMITTED`. |
 | `outbound_resync` | Pending | Outbound delivery to the peer is resynchronizing. |
 | `orf_pending` | Pending | The peer negotiated ORF and has not sent its first ROUTE-REFRESH. |
 | `not_yet_committed` | Pending | The route is staged but the Adj-RIB-Out does not hold it yet. |
