@@ -3160,7 +3160,9 @@ impl RibManager {
             );
             explanation.source = source;
             explanation.update_group_id = member_of.map(|gid| gid as u64);
-            return self.apply_unicast_export_overlays_to_explain(peer, explanation);
+            let mut explanation = self.apply_unicast_export_overlays_to_explain(peer, explanation);
+            defer_frozen_export_change(&mut explanation);
+            return explanation;
         }
 
         // Dry run of the live single-best staging body against the
@@ -4554,6 +4556,41 @@ fn not_established_export(peer: PeerId, peer_interface: Option<Arc<str>>) -> Pee
         advertised_path_id: 0,
         deny_validation: Vec::new(),
     }
+}
+
+/// A frozen source that would no longer export as admitted (changed body,
+/// policy deny, `NO_ADVERTISE`, ...) still leaves its admitted row on the
+/// peer's wire: the change itself is what selection deferral holds.
+fn defer_frozen_export_change(explanation: &mut crate::update::ExplainAdvertisedRoute) {
+    use crate::update::ExplainDecision::{Advertise, NoBestRoute};
+    let frozen = explanation
+        .gates
+        .iter()
+        .any(|step| step.code == "selection_deferred_frozen");
+    if !frozen
+        || (explanation.decision == Advertise && explanation.already_advertised)
+        || explanation
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "selection_deferred")
+    {
+        return;
+    }
+    explanation.decision = NoBestRoute;
+    explanation.already_advertised = false;
+    let message = "this source no longer exports as admitted; the peer keeps the admitted row \
+                   until graceful-restart selection deferral ends"
+        .to_string();
+    explanation.gates.push(crate::update::ExportGateStep {
+        gate: "adj_rib_out",
+        code: "selection_deferred",
+        verdict: crate::update::ExportGateVerdict::Stop,
+        detail: message.clone(),
+    });
+    explanation.reasons.push(crate::update::ExplainReason {
+        code: "selection_deferred",
+        message,
+    });
 }
 
 #[cfg(test)]

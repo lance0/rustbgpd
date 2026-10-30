@@ -3679,50 +3679,57 @@ fn frozen_ordinary_injection_reads_back_committed_during_selection_deferral() {
             "{mode:?}"
         );
 
-        // Replacing the frozen source changes what export would send; the
-        // new attributes wait for release.
-        let mut replacement = local_route(prefixes[0], 23);
-        AttrSet::edit(&mut replacement.attributes, |attrs| {
-            attrs.push(PathAttribute::Med(7));
-        });
-        let (reply, mut response) = oneshot::channel();
-        manager.handle_update(RibUpdate::InjectRoute {
-            route: replacement,
-            reply,
-        });
-        assert_eq!(
-            response.try_recv().unwrap().unwrap(),
-            crate::update::InjectOutcome::Replaced
-        );
-        let page = query(&mut manager, prefixes[0], 23, None, 10).unwrap();
-        assert_eq!(
+        // Replacing the frozen source changes what export would send, here
+        // a new MED or a NO_ADVERTISE that makes it export-ineligible. Either
+        // change waits for release while the peer keeps the admitted row.
+        for (prefix, attribute) in [
+            (prefixes[0], PathAttribute::Med(7)),
             (
-                row(&page, observer).disposition,
-                row(&page, observer).reason.as_str()
+                prefixes[1],
+                PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_NO_ADVERTISE]),
             ),
-            (RouteExportDisposition::Pending, "selection_deferred"),
-            "{mode:?}: replaced attributes are not committed"
-        );
-        let explanation = source_less_explain(&mut manager, observer, prefixes[0]);
-        assert_eq!(
-            (explanation.decision, explanation.already_advertised),
-            (crate::update::ExplainDecision::NoBestRoute, false),
-            "{mode:?}: the replacement is deferred, not staged: {explanation:?}"
-        );
-        assert!(
-            explanation
-                .reasons
-                .iter()
-                .any(|reason| reason.code == "selection_deferred"),
-            "{mode:?}: {explanation:?}"
-        );
-        assert!(
-            explanation
-                .gates
-                .iter()
-                .all(|step| step.code != "staged_announce"),
-            "{mode:?}: {explanation:?}"
-        );
+        ] {
+            let mut replacement = local_route(prefix, 23);
+            AttrSet::edit(&mut replacement.attributes, |attrs| attrs.push(attribute));
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::InjectRoute {
+                route: replacement,
+                reply,
+            });
+            assert_eq!(
+                response.try_recv().unwrap().unwrap(),
+                crate::update::InjectOutcome::Replaced
+            );
+            let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+            assert_eq!(
+                (
+                    row(&page, observer).disposition,
+                    row(&page, observer).reason.as_str()
+                ),
+                (RouteExportDisposition::Pending, "selection_deferred"),
+                "{mode:?} {prefix}: replaced attributes are not committed"
+            );
+            let explanation = source_less_explain(&mut manager, observer, prefix);
+            assert_eq!(
+                (explanation.decision, explanation.already_advertised),
+                (crate::update::ExplainDecision::NoBestRoute, false),
+                "{mode:?} {prefix}: the replacement is deferred: {explanation:?}"
+            );
+            assert!(
+                explanation
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.code == "selection_deferred"),
+                "{mode:?} {prefix}: {explanation:?}"
+            );
+            assert!(
+                explanation
+                    .gates
+                    .iter()
+                    .all(|step| step.code != "staged_announce"),
+                "{mode:?} {prefix}: {explanation:?}"
+            );
+        }
         assert!(
             deferred_unicast_drain(&mut observer_rx)
                 .iter()
