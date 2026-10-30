@@ -851,25 +851,13 @@ impl RibManager {
     /// (`peer_asn`/`peer_group`/`peer_bgp_id`) and the retained route-source
     /// classification (`peer_is_rr_client`) stay out: GR keeps them for stale
     /// routes and the returning peer; terminal `PeerDown` removes them.
-    pub(super) fn clear_outbound_peer_state(&mut self, peer: PeerId) {
-        self.clear_outbound_peer_state_inner(peer, false);
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "outbound teardown keeps per-registration cleanup and detached table retirement in their existing ownership order"
     )]
-    fn clear_outbound_peer_state_inner(&mut self, peer: PeerId, same_connection_replay: bool) {
-        let retain_admission = same_connection_replay && self.retain_initial_group_admitted(peer);
-        // A refused capture has no key ledger to replace these actual bodies.
-        // Only the exact channel with a proven-complete private table keeps it.
-        let retain_private_body = retain_admission
-            && self.pending_group_admitted.get(&peer).is_none()
-            && self.private_common_admission_complete(peer);
+    pub(super) fn clear_outbound_peer_state(&mut self, peer: PeerId) {
         self.invalidate_evpn_feed_completion(peer);
-        if !same_connection_replay {
-            self.retire_evpn_recovery(peer);
-        }
+        self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
         self.outbound_session_ids.remove(&peer);
         self.pending_inbound_refresh.remove(&peer);
@@ -888,9 +876,6 @@ impl RibManager {
         );
         // Any family's removed committed rows end an advertised-view walk.
         if let Some(mut rib) = self.adj_ribs_out.remove(&peer) {
-            let retained_common = retain_private_body.then(|| rib.take_common_routes());
-            let local_sources = (same_connection_replay && retained_common.is_none())
-                .then(|| rib.take_local_export_sources());
             if !rib.is_empty_all_families() {
                 self.advance_advertised_pages();
             }
@@ -932,13 +917,6 @@ impl RibManager {
                     manager.replacement_checkpoint(true);
                 });
             });
-            if let Some(retained) = retained_common {
-                self.adj_ribs_out.insert(peer, retained);
-            } else if let Some(sources) = local_sources {
-                let mut retained = AdjRibOut::new(peer);
-                retained.adopt_local_export_sources(sources);
-                self.adj_ribs_out.insert(peer, retained);
-            }
         }
         // The gauge reports the size of the table removed on the line
         // above, so it is zeroed here rather than at the `PeerDown` call
@@ -950,10 +928,7 @@ impl RibManager {
         // the hold window; this series carries what we would actually
         // re-advertise, which is nothing until the peer returns.
         let peer_label = peer.label();
-        for &(family, _, safi) in rustbgpd_wire::CONFIGURED_FAMILIES {
-            if retain_admission && matches!(safi, Safi::Unicast | Safi::MplsVpn) {
-                continue;
-            }
+        for &(family, _, _) in rustbgpd_wire::CONFIGURED_FAMILIES {
             self.metrics
                 .set_adj_rib_out_prefixes(&peer_label, family, 0);
         }
@@ -962,11 +937,9 @@ impl RibManager {
         // session was advertising. A reconnect starts empty and admits its
         // initial feed up to the cap, so stale accounting can neither
         // consume a new generation's capacity nor clear its episode.
-        if !retain_admission {
-            self.outbound_prefix_limits.remove(&peer);
-            self.outbound_limit_control.reap_peer(peer);
-            self.metrics.reap_outbound_prefix_capacity(&peer.label());
-        }
+        self.outbound_prefix_limits.remove(&peer);
+        self.outbound_limit_control.reap_peer(peer);
+        self.metrics.reap_outbound_prefix_capacity(&peer.label());
         self.export_chains.remove(&peer);
         if self.peer_sendable_families.remove(&peer).is_some() {
             self.outbound_roster_generation = self.outbound_roster_generation.wrapping_add(1);
@@ -1074,9 +1047,7 @@ impl RibManager {
             });
         }
         self.pending_extra_withdraws.remove(&peer);
-        if !same_connection_replay {
-            self.release_group_admitted_keys(peer);
-        }
+        self.release_group_admitted_keys(peer);
         self.remove_update_group_member(peer);
         // The extra-withdraw drop above mutates residue even for a peer
         // whose membership removal doesn't touch a group.
@@ -1146,38 +1117,17 @@ impl RibManager {
                 self.clear_policy_filtered_routes_for_peer(peer);
                 self.clear_peer_adj_rib_in(peer);
             }
-            // Legacy emitters can reannounce the same actor/channel. Their
-            // existing admission proof and accepted reset handoff still
-            // belong to that connection, even while this ordinary replay
-            // rebuilds the other outbound registration state.
-            let same_connection_replay = self.outbound_session_ids.get(&peer) == Some(&session_id)
-                && self
-                    .outbound_peers
-                    .get(&peer)
-                    .is_some_and(|previous| previous.same_channel(&outbound_tx));
-            if same_connection_replay {
-                let held = self.selection_receiver_held_families(peer);
-                if held.into_iter().any(|held| held) {
-                    // A same-channel replay keeps OLD on the wire while its
-                    // private bodies are retired. Transfer its limited prefix
-                    // ownership before that table disappears.
-                    if self.grouped_member_of(peer).is_none()
-                        && !self.private_unicast_admission_incomplete(peer)
-                    {
-                        self.carry_outbound_admitted_across_regroup(peer, true);
-                    }
-                    self.capture_group_admitted_keys_for_send(peer);
-                    if let Some(record) = self.newest_live_session_mut(peer, session_id) {
-                        for (pending, held) in record.selection_partial_pending.iter_mut().zip(held)
-                        {
-                            *pending |= held;
-                        }
-                    }
-                    self.seed_initial_group_admitted_counts(peer);
-                }
-                self.prepare_evpn_registration_replay(peer);
-            }
-            self.clear_outbound_peer_state_inner(peer, same_connection_replay);
+            // Transport recreates the outbound channel whenever a session
+            // ends, so one connection never registers twice.
+            debug_assert!(
+                self.outbound_session_ids.get(&peer) != Some(&session_id)
+                    || !self
+                        .outbound_peers
+                        .get(&peer)
+                        .is_some_and(|previous| previous.same_channel(&outbound_tx)),
+                "same-channel PeerUp replay for {peer} session {session_id}"
+            );
+            self.clear_outbound_peer_state(peer);
         }
 
         let local_role = self
@@ -1196,41 +1146,11 @@ impl RibManager {
             .remove(&(peer, session_id))
             .unwrap_or_default();
 
-        // Receipt ownership moves only across an exact actor/channel replay.
-        // A replacement never receives the prior connection's acknowledgement.
-        let (evpn_recovery_reset_receipt, evpn_recovery_reset_retry_reported) =
-            self.take_evpn_recovery_reset_receipt(peer, session_id, &outbound_tx);
-        let evpn_feed_completion = self.take_evpn_feed_completion(peer, session_id, &outbound_tx);
         let previous_session = self.live_sessions.get(&peer).and_then(|sessions| {
             sessions
                 .iter()
                 .find(|record| record.session_id == session_id)
         });
-        let (evpn_recovery_reset, group_recovery_fallback) = previous_session
-            .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
-            .map_or((None, None), |old| {
-                (old.evpn_recovery_reset, old.group_recovery_fallback)
-            });
-        let evpn_admitted_count = previous_session
-            .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
-            .map_or(0, |record| record.evpn_admitted_count);
-        let (
-            selection_initial_pending,
-            selection_partial_pending,
-            selection_initial_admitted,
-            selection_partial_caught_up,
-            selection_initial_admitted_valid,
-        ) = previous_session
-            .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
-            .map_or((false, [false; 4], [0; 6], false, false), |record| {
-                (
-                    record.selection_initial_pending,
-                    record.selection_partial_pending,
-                    record.selection_initial_admitted,
-                    record.selection_partial_caught_up,
-                    record.selection_initial_admitted_valid,
-                )
-            });
         let source_context = self
             .pending_peer_source_context
             .remove(&(peer, session_id))
@@ -1287,21 +1207,20 @@ impl RibManager {
             gr_context: self.pending_peer_gr_context.remove(&(peer, session_id)),
             exact_export_encoder,
             evpn_end_of_rib: false,
-            evpn_recovery_reset,
-            evpn_recovery_reset_receipt,
-            evpn_recovery_reset_retry_reported,
-            evpn_feed_completion,
-            evpn_admitted_count,
-            group_recovery_fallback,
-            selection_initial_pending,
-            selection_partial_pending,
-            selection_initial_admitted,
-            selection_partial_caught_up,
-            selection_initial_admitted_valid,
+            evpn_recovery_reset: None,
+            evpn_recovery_reset_receipt: None,
+            evpn_recovery_reset_retry_reported: false,
+            evpn_feed_completion: None,
+            evpn_admitted_count: 0,
+            group_recovery_fallback: None,
+            selection_initial_pending: false,
+            selection_partial_pending: [false; 4],
+            selection_initial_admitted: [0; 6],
+            selection_partial_caught_up: false,
+            selection_initial_admitted_valid: false,
             export_policy_counters,
         };
         self.drop_evpn_feed_receipts(peer, Some(session_id));
-        self.evpn_feed_receipt_count += usize::from(record.evpn_feed_completion.is_some());
         let sessions = self.live_sessions.entry(peer).or_default();
         // Same id = the same session re-announcing itself (legacy id-0
         // emitters collapse every session to one id): replace in place so
@@ -1843,14 +1762,15 @@ impl RibManager {
                 .evpn_recovery_handle(peer)
                 .is_some_and(|handle| !self.evpn_recovery.is_dormant(handle))
         {
-            // Same-channel replay retained actual admitted keys while its
-            // private bodies and old group were retired during registration.
+            // A live owner without an owning group hands its admitted keys
+            // to the private projection.
             self.begin_private_evpn_handoff(peer);
         }
         true
     }
 
-    /// Seed metric series while retaining exact same-channel UC/VPN truth.
+    /// Seed metric series, keeping the held UC/VPN admitted counts of a
+    /// re-activated record that already carries them.
     fn initialize_outbound_registration_gauges(&self, peer: PeerId) {
         let peer_label = peer.label();
         let unicast = crate::manager::helpers::UNICAST_FAMILIES;

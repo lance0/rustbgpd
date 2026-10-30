@@ -1982,9 +1982,6 @@ fn late_private_arm(size: usize) -> Work {
             local_llgr_stale_time: 0,
         });
         waiter_rx = Some(join(&mut manager, 5, false, None).0);
-        for (index, tx) in senders.iter().enumerate() {
-            manager.handle_update(late_private_up(member(index), tx.clone()));
-        }
     });
     assert!(manager.selection_deferred(family));
     apply(&mut receivers, &mut wires, false);
@@ -2025,16 +2022,12 @@ fn late_private_arm(size: usize) -> Work {
         );
         assert!(!manager.dirty_peers.contains(&member(index)));
     }
-    drop(waiter_rx);
-    eprintln!("private late-GR capture/replay N={count}: {work:?}");
+    drop((waiter_rx, senders));
+    eprintln!("private late-GR capture N={count}: {work:?}");
     work
 }
 
 #[test]
-fn private_late_gr_capture_and_replay_work_is_linear() {
-    assert_linear(
-        "private late-GR capture/replay",
-        &[ALL, ""],
-        late_private_arm,
-    );
+fn private_late_gr_capture_work_is_linear() {
+    assert_linear("private late-GR capture", &[ALL, ""], late_private_arm);
 }

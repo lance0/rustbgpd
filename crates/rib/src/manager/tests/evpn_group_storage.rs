@@ -519,11 +519,12 @@ fn assert_negotiated_rtc_evpn_stays_private(manager: &mut RibManager, member: Pe
 }
 
 #[test]
-fn negotiated_rtc_exclusion_survives_registration_replay_and_regroup() {
-    let (mut manager, member, gid, mut output) = fixture_with_rtc(true);
+fn negotiated_rtc_exclusion_survives_reregistration_and_regroup() {
+    let (mut manager, member, gid, _first_output) = fixture_with_rtc(true);
     assert_negotiated_rtc_evpn_stays_private(&mut manager, member, gid);
-    // A second real registration retains the original group during replay,
-    // so a fresh disabled constructor cannot make the replay check vacuous.
+    // A second real registration retains the original group during the
+    // re-registration, so a fresh disabled constructor cannot make the
+    // re-registration check vacuous.
     let second = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
     let (sender, mut second_output) = mpsc::channel(8);
     register_with_rtc(&mut manager, second, sender, true);
@@ -537,14 +538,14 @@ fn negotiated_rtc_exclusion_survives_registration_replay_and_regroup() {
     }
     assert_negotiated_rtc_evpn_stays_private(&mut manager, second, gid);
 
-    let sender = manager.outbound_peers[&member].clone();
+    let (sender, mut output) = mpsc::channel(8);
     register_with_rtc(&mut manager, member, sender, true);
     assert_eq!(manager.grouped_member_of(member), Some(gid));
     assert_negotiated_rtc_evpn_stays_private(&mut manager, member, gid);
-    let replay = output
+    let initial = output
         .try_recv()
-        .expect("same-connection registration admits its replay");
-    assert!(replay.evpn_announce.is_empty());
+        .expect("the new connection admits its initial feed");
+    assert!(initial.evpn_announce.is_empty());
     while let Ok(update) = output.try_recv() {
         assert!(update.evpn_announce.is_empty());
     }
@@ -723,31 +724,6 @@ fn private_capture_reads_only_actual_admitted_keys_without_settling_the_shared_f
     assert!(
         !manager.finish_evpn_recovery(member),
         "capture is not a completed shared delivery barrier"
-    );
-}
-
-#[test]
-fn same_token_replay_captures_old_shared_projection_without_guessing_an_empty_heal() {
-    let (mut manager, member, gid, _output) = fixture();
-    let old = received(100);
-    let owner = manager.evpn_recovery_handle(member).unwrap();
-    stage(&mut manager, gid, &old);
-    manager
-        .loc_rib
-        .recompute_evpn(old.key(), std::iter::empty());
-    let sender = manager.outbound_peers[&member].clone();
-    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
-    register(&mut manager, member, sender);
-    assert_eq!(manager.evpn_recovery_handle(member), Some(owner));
-    assert_eq!(
-        manager.evpn_recovery.proof_keys(owner).unwrap(),
-        Some([old.key()].to_vec())
-    );
-    assert!(manager.dirty_peers.contains(&member));
-    assert!(!manager.finish_evpn_recovery(member));
-    assert!(
-        !manager.settle_evpn_recovery(member, [].into_iter()),
-        "an empty partial replay never proves that the old key was withdrawn"
     );
 }
 

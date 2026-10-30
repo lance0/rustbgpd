@@ -1892,6 +1892,20 @@ async fn unregistered_session_message_keeps_legacy_accept_behavior() {
 // RibUpdate events to exercise the stale lifecycle.
 // ---------------------------------------------------------------------------
 
+/// Transport replaces the outbound channel whenever a session ends, so a
+/// second `PeerUp` for the same session on the same channel is a bug.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "same-channel PeerUp replay")]
+fn same_channel_peer_up_is_rejected() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, _out_rx) = mpsc::channel(8);
+    manager.handle_update(test_peer_up(peer, 11, out_tx.clone()));
+    manager.handle_update(test_peer_up(peer, 11, out_tx));
+}
+
 // ---------------------------------------------------------------------------
 // LAN-475: deferred outbound registration — a mass reconnect must not
 // head-of-line block re-announcement delivery to established peers behind
