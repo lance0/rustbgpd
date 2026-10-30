@@ -936,16 +936,32 @@ impl RibManager {
             .filter(|&peer| self.helper_stale_exempt_runnable(peer))
             .collect();
         for peer in ready {
-            let withdraw: Vec<(Prefix, u32)> = self.helper_stale_exempt[&peer]
+            // A route-bearing envelope carries the current session's export
+            // snapshot, or the transport resets the session.
+            let Some(encoder) = self.peer_export_encoders.get(&peer) else {
+                continue;
+            };
+            let add_path = self.peer_add_path_send_families.get(&peer);
+            // Keys follow the current session's Add-Path mode: without it,
+            // every path of the ended session is the prefix's one key.
+            let keys: std::collections::BTreeSet<(Prefix, u32)> = self.helper_stale_exempt[&peer]
                 .keys
                 .iter()
-                .copied()
+                .map(|&(prefix, path_id)| {
+                    let family = prefix_family(&prefix);
+                    let keyed = add_path.is_some_and(|families| families.contains(&family));
+                    (prefix, if keyed { path_id } else { 0 })
+                })
+                .collect();
+            let withdraw: Vec<(Prefix, u32)> = keys
+                .into_iter()
                 .filter(|&(prefix, path_id)| {
                     self.selection_deferred(prefix_family(&prefix))
                         && !self.advertises_unicast_key(peer, prefix, path_id)
                 })
                 .collect();
             let update = OutboundRouteUpdate {
+                exact_export_snapshot: Some(encoder.snapshot()),
                 withdraw,
                 ..OutboundRouteUpdate::default()
             };
@@ -961,8 +977,10 @@ impl RibManager {
         }
     }
 
-    /// A later session is registered, has sent its table and can take the
-    /// withdrawals now.
+    /// A later session is registered and has sent every row the hold lets
+    /// it send, its live exempt rows included, so it can take the
+    /// withdrawals now. A dirty session that is partially caught up has done
+    /// so; an ORF-gated one has not sent its initial table yet.
     pub(super) fn helper_stale_exempt_runnable(&self, peer: PeerId) -> bool {
         self.outbound_peers.get(&peer).is_some_and(|current| {
             self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
@@ -971,8 +989,9 @@ impl RibManager {
                     .upgrade()
                     .is_some_and(|ended| ended.same_channel(current))
             })
-        }) && !self.dirty_peers.contains(&peer)
+        }) && (!self.dirty_peers.contains(&peer) || self.selection_partial_caught_up(peer))
             && !self.pending_initial_registrations.contains(&peer)
+            && !self.peer_orf_pending.contains_key(&peer)
     }
 
     /// Clear the per-session outbound state shared by the `PeerDown` and

@@ -1575,3 +1575,42 @@ fn stale_rtbh_at_a_gr_helper_leaves_the_wire_inside_the_hold() {
     }
     assert!(failed.is_empty(), "{failed:#?}");
 }
+
+/// A grouped receiver's session ends cleanly toward a GR helper while an
+/// RTBH host is on the wire; the new session registers behind a full
+/// writer, the writer frees, and the host is deleted before the new table
+/// is admitted. Its resync then leaves it dirty but partially caught up,
+/// with the received ordinary row still held, and that must not hold back
+/// the stale RTBH's withdrawal.
+#[test]
+fn partially_caught_up_reconnect_withdraws_a_stale_rtbh() {
+    let config = Config {
+        grouped: true,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = [Op::Receive { prefix: 3 }];
+    let hold = [
+        Op::Inject {
+            prefix: 0,
+            path: 2,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: true,
+        },
+        Op::Backpressure(false),
+        Op::Delete { prefix: 0, path: 2 },
+        Op::Drain,
+    ];
+    if let Some(reason) = failure(config, &setup, &hold) {
+        panic!("{reason}");
+    }
+}

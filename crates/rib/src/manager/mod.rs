@@ -3915,7 +3915,7 @@ impl RibManager {
                 .filter(|peer| self.force_outbound_peers.remove(peer))
                 .collect();
             self.dirty_peers = selected;
-            self.distribute_changes(&HashSet::new(), &HashSet::new());
+            self.distribute_changes_without_stale_flush();
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);

@@ -8017,6 +8017,21 @@ impl RibManager {
             HashMap::new(),
             None,
         );
+        self.flush_helper_stale_exempt();
+    }
+
+    /// [`Self::distribute_changes`] for the resync tick's sliced pass, which
+    /// hides withheld dirty peers until it restores them, so it leaves the
+    /// stale exempt flush to the tick.
+    pub(super) fn distribute_changes_without_stale_flush(&mut self) {
+        self.distribute_changes_inner(
+            &HashSet::new(),
+            &HashSet::new(),
+            false,
+            false,
+            HashMap::new(),
+            None,
+        );
     }
 
     pub(super) fn distribute_changes(
@@ -8032,6 +8047,7 @@ impl RibManager {
             HashMap::new(),
             None,
         );
+        self.flush_helper_stale_exempt();
     }
 
     /// [`Self::distribute_changes`] restricted to `targets`: other clean
@@ -8051,6 +8067,7 @@ impl RibManager {
             HashMap::new(),
             Some(targets),
         );
+        self.flush_helper_stale_exempt();
     }
 
     pub(super) fn distribute_changes_after_advertised_page_advance(
@@ -8066,6 +8083,7 @@ impl RibManager {
             HashMap::new(),
             None,
         );
+        self.flush_helper_stale_exempt();
     }
 
     pub(in crate::manager) fn distribute_changes_with_evpn_feeds(
@@ -8081,6 +8099,7 @@ impl RibManager {
             feeds,
             None,
         );
+        self.flush_helper_stale_exempt();
     }
 
     /// Whether a clean member has rejection-inventory work in `scope`:
@@ -8160,7 +8179,6 @@ impl RibManager {
         } else {
             super::with_executor_handoff(|| pass(self, true));
         }
-        self.flush_helper_stale_exempt();
     }
 
     /// Whether shared staging refreshes a per-client-best group's denial
