@@ -6863,9 +6863,10 @@ impl RibManager {
 
     /// Apply Address-Prefix ORF entries pushed by a peer (RFC 5291/5292).
     ///
-    /// Accepted updates lift the initial-advertisement gate. The sweep runs
-    /// for `IMMEDIATE` or a malformed-field reset (RFC 5291 §6); `DEFER`
-    /// installs the filter for outbound churn and a later route refresh.
+    /// Only an `IMMEDIATE` update lifts the initial-advertisement gate
+    /// (RFC 5291 §6). The sweep runs for `IMMEDIATE` or a malformed-field
+    /// reset; `DEFER` installs the filter for outbound churn and leaves a
+    /// gated family gated until a plain or `IMMEDIATE` ROUTE-REFRESH.
     #[expect(
         clippy::too_many_lines,
         reason = "filter install, gate lift, change detection and the RFC 5291 sweep are one accepted ORF update"
@@ -6977,8 +6978,13 @@ impl RibManager {
                 );
             }
         }
-        // An accepted ORF message is itself a ROUTE-REFRESH (RFC 5291 §6).
-        self.lift_orf_gate(peer, family);
+        // RFC 5291 §6: the gate lifts on a ROUTE-REFRESH without ORF entries
+        // or with When-to-refresh IMMEDIATE. DEFER (and an unknown value)
+        // must not start advertising a family the peer has not asked for.
+        let lifts_gate = when == WhenToRefresh::Immediate;
+        if lifts_gate {
+            self.lift_orf_gate(peer, family);
+        }
         self.reap_empty_orf_filter(peer, family);
         if self.orf_filter(peer, family) != installed.as_ref() {
             self.advance_export_settings();
@@ -6989,11 +6995,12 @@ impl RibManager {
             // resync below is the gated flood: move the family into
             // `pending_eor` and mark the peer dirty so the resync piggybacks
             // the EoR behind the flooded routes (or flushes it standalone
-            // when the filter yields no routes). A DEFER update lifts the
-            // gate without flooding, so the deferral stays put and rides the
+            // when the filter yields no routes). A reset without IMMEDIATE
+            // leaves the gate up, so the deferral stays put and rides the
             // later plain ROUTE-REFRESH or IMMEDIATE update that actually
             // advertises the family.
-            if let Some(families) = self.gr_deferred_eor.get_mut(&peer)
+            if lifts_gate
+                && let Some(families) = self.gr_deferred_eor.get_mut(&peer)
                 && families.remove(&family)
             {
                 if families.is_empty() {

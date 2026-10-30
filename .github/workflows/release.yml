@@ -64,8 +64,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace
 
+  release-build-features:
+    # Fail-closed publication gate: the shipped package set must not
+    # resolve `bench-internals`. Selecting the bench/scale harnesses
+    # (for example with `--workspace`) unifies that feature into the
+    # daemon through rustbgpd-transport and rustbgpd-rib. Resolves the
+    # exact `Build release binaries` command for every target.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1 # stable
+        with:
+          toolchain: stable
+      - run: python3 scripts/check_release_build_features.py
+
   build:
-    needs: verify-tag-version
+    needs: [verify-tag-version, release-build-features]
     strategy:
       matrix:
         include:
@@ -117,9 +132,13 @@ jobs:
         # as the global allocator + allocator gauges on /metrics).
         # tikv-jemalloc-sys cross-compiles for aarch64 via the
         # aarch64-linux-gnu-gcc toolchain installed above.
+        # Select the shipped packages, never --workspace: the bench/scale
+        # harnesses are workspace members, and feature unification would
+        # build the shipped daemon with rustbgpd-rib/bench-internals. The
+        # release-build-features job checks this exact command.
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --locked --workspace --release --features rustbgpd/jemalloc --target ${{ matrix.target }}
+        run: cargo build --locked -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatcher-adapter --release --features rustbgpd/jemalloc --target ${{ matrix.target }}
 
       - name: Package binaries
         run: |
@@ -267,7 +286,7 @@ jobs:
   release:
     # Publication is impossible unless the tag/version gate, the test
     # gate, and both package builds all succeeded for this commit.
-    needs: [verify-tag-version, test, build]
+    needs: [verify-tag-version, release-build-features, test, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create the GitHub release
