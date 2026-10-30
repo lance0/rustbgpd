@@ -479,3 +479,228 @@ fn llgr_timer_nonnegotiated_purge_services_all_family_writers() {
         );
     }
 }
+
+const BGPLS: (Afi, Safi) = (Afi::BgpLs, Safi::BgpLs);
+const ORR_STAGES: [&str; 7] = [
+    "orr_scan",
+    "orr_build",
+    "orr_compare",
+    "orr_vantages",
+    "orr_spf",
+    "orr_signature",
+    "orr_retire",
+];
+
+fn orr_vantage() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(10, 0, 1, 2))
+}
+
+/// A bidirectional chain of `nodes` with one prefix per node; node 1 owns
+/// the vantage's interface address.
+fn chain_topology(peer: Ipv4Addr, nodes: u8) -> Vec<crate::route::BgpLsRibRoute> {
+    use crate::orr::fixtures::{link_route, prefix_route, v4_interface, v4_neighbor};
+    let mut routes = Vec::new();
+    for node in 1..=nodes {
+        routes.push(prefix_route(
+            peer,
+            node,
+            Ipv4Addr::new(172, 16, node, 0),
+            24,
+            Some(1),
+        ));
+        if node < nodes {
+            for (local, remote) in [(node, node + 1), (node + 1, node)] {
+                routes.push(link_route(
+                    peer,
+                    local,
+                    remote,
+                    Some(1),
+                    &[
+                        v4_interface(Ipv4Addr::new(10, 0, local, remote)),
+                        v4_neighbor(Ipv4Addr::new(10, 0, remote, local)),
+                    ],
+                ));
+            }
+        }
+    }
+    routes
+}
+
+/// Drive the actual GR-timer caller into LLGR with ORR configured. One BGP-LS
+/// feeder restarts; a steady feeder advertises the same topology, so the
+/// rebuild still scans, compares, runs SPF and retires a full topology after
+/// a purge. Returns how many queued readiness queries each stage answered,
+/// and the capacity growth of every ORR rebuild destination.
+fn run_orr_llgr_case(
+    nodes: u8,
+    promote: bool,
+) -> (
+    BTreeMap<&'static str, usize>,
+    crate::orr::rebuild_growth::Growth,
+) {
+    let (_tx, rx) = mpsc::channel(1);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx);
+    let restarting = Ipv4Addr::new(10, 9, 9, 1);
+    let steady = Ipv4Addr::new(10, 9, 9, 2);
+    manager
+        .peer_orr_vantage
+        .insert(peer_v4(Ipv4Addr::new(10, 0, 0, 2)), orr_vantage());
+    for feed in [restarting, steady] {
+        let peer = peer_v4(feed);
+        manager.ribs.insert(peer, AdjRibIn::new(peer));
+        manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+            session_id: 0,
+            peer,
+            announced: chain_topology(feed, nodes),
+            withdrawn: Vec::new(),
+        });
+        drain_route_chunks(&mut manager);
+    }
+    assert_eq!(manager.orr.resolved.get(&orr_vantage()), Some(&true));
+    let peer = peer_v4(restarting);
+    let routes = manager.ribs[&peer].bgpls_len();
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    let llgr = if promote { BGPLS } else { unicast };
+    manager.handle_update(gr_with_llgr(
+        peer,
+        120,
+        vec![BGPLS, unicast],
+        vec![llgr],
+        3600,
+    ));
+
+    let pending = Arc::new(Mutex::new(
+        None::<(
+            &'static str,
+            oneshot::Receiver<Result<usize, crate::RibReadinessError>>,
+        )>,
+    ));
+    let answered = Arc::new(Mutex::new(BTreeMap::<&'static str, usize>::new()));
+    manager.flush_poll_budget = Duration::ZERO;
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let pending = Arc::clone(&pending);
+        let answered = Arc::clone(&answered);
+        move |stage| {
+            if let Some((previous, mut reply)) = pending.lock().unwrap().take() {
+                reply
+                    .try_recv()
+                    .unwrap_or_else(|error| {
+                        panic!("{previous}: queued readiness query not answered inside: {error}")
+                    })
+                    .unwrap();
+                *answered.lock().unwrap().entry(previous).or_default() += 1;
+            }
+            let (reply, response) = oneshot::channel();
+            readiness_tx
+                .try_send(crate::RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: Instant::now(),
+                })
+                .unwrap();
+            *pending.lock().unwrap() = Some((stage, response));
+        }
+    }));
+    crate::orr::rebuild_growth::take();
+    manager.sweep_gr_stale(peer);
+    manager.replacement_readiness_test_hook = None;
+    let growth = crate::orr::rebuild_growth::take();
+
+    let retained: Vec<_> = manager.ribs[&peer]
+        .iter_bgpls()
+        .map(|route| (route.is_stale, route.is_llgr_stale))
+        .collect();
+    if promote {
+        assert_eq!(retained, vec![(false, true); routes]);
+    } else {
+        assert!(retained.is_empty(), "non-LLGR BGP-LS must purge");
+    }
+    assert_eq!(manager.orr.resolved.get(&orr_vantage()), Some(&true));
+    assert_eq!(manager.orr.topology.node_count(), usize::from(nodes));
+    assert_eq!(
+        manager.orr.topology.link_count(),
+        2 * usize::from(nodes - 1)
+    );
+    let answered = answered.lock().unwrap().clone();
+    (answered, growth)
+}
+
+/// BGP-LS LLGR promotion and purge reached from the GR timer rebuild ORR
+/// under the readiness owner; a readiness query queued during every ORR
+/// unit is answered inside that unit, not after the rebuild.
+#[test]
+fn llgr_bgpls_orr_rebuild_answers_readiness_inside_every_unit() {
+    for promote in [true, false] {
+        let (answered, _) = run_orr_llgr_case(8, promote);
+        for stage in ORR_STAGES {
+            assert!(
+                answered.get(stage).copied().unwrap_or(0) >= 2,
+                "promote={promote}: no interior {stage} service: {answered:?}"
+            );
+        }
+    }
+}
+
+/// Growth control per unit: as the BGP-LS inventory quadruples, every
+/// inventory-sized ORR unit adds interior checkpoints at least in step with
+/// the added nodes, the vantage unit stays independent of inventory, and no
+/// reserved rebuild destination grows inside a checkpoint slice.
+#[test]
+fn llgr_bgpls_orr_rebuild_work_between_checkpoints_stays_bounded() {
+    for promote in [true, false] {
+        let (small, small_growth) = run_orr_llgr_case(16, promote);
+        let (large, large_growth) = run_orr_llgr_case(64, promote);
+        for stage in ORR_STAGES {
+            let small = small.get(stage).copied().unwrap_or(0);
+            let large = large.get(stage).copied().unwrap_or(0);
+            if stage == "orr_vantages" {
+                assert!(
+                    small >= 2,
+                    "promote={promote}: {stage} has no interior service"
+                );
+                assert_eq!(
+                    small, large,
+                    "promote={promote}: vantage work must not scale with BGP-LS inventory"
+                );
+            } else {
+                assert!(
+                    large >= small + 48,
+                    "promote={promote}: {stage} checkpoints {small} -> {large} \
+                     do not grow with 48 added nodes"
+                );
+            }
+        }
+        for (nodes, growth) in [(16, &small_growth), (64, &large_growth)] {
+            let mut failures = Vec::new();
+            for destination in [
+                "orr_build_order",
+                "orr_build_seen",
+                "orr_build_node_keys",
+                "orr_build_node_ix",
+                "orr_build_links",
+                "orr_build_addr_index",
+                "orr_build_adjacency",
+                "orr_prefix_signature",
+                "orr_vantages",
+                "orr_spf_dist",
+                "orr_spf_heap",
+                "orr_spf_signature",
+                "orr_changed",
+                "orr_spf_results",
+                "orr_resolved",
+                "orr_signatures",
+            ] {
+                let (fills, largest) = growth.get(destination).copied().unwrap_or_default();
+                if fills == 0 || largest != 0 {
+                    failures.push((destination, fills, largest));
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "promote={promote}, nodes={nodes}: (destination, fills, growth inside one \
+                 checkpoint slice) must be filled without growth: {failures:?}"
+            );
+        }
+    }
+}
