@@ -3429,14 +3429,12 @@ impl RibManager {
                 // outbound path ID moved rather than left: withdrawing its
                 // old key while the announcement is refused would drop it.
                 let mut moved = HashSet::new();
-                if !batch.withdraw.is_empty() {
-                    for route in batch.unicast.announce.iter() {
-                        checkpoint();
-                        if let Some(source) =
-                            self.exported_local_source(peer, route, &batch.local_sources)
-                        {
-                            moved.insert((route.prefix, source.path_id));
-                        }
+                for route in batch.unicast.announce.iter() {
+                    checkpoint();
+                    if let Some(source) =
+                        self.exported_local_source(peer, route, &batch.local_sources)
+                    {
+                        moved.insert((route.prefix, source.path_id));
                     }
                 }
                 self.replacement_checkpoint(true);
@@ -3453,6 +3451,29 @@ impl RibManager {
                     }) && seen.insert((prefix, path_id))
                     {
                         withdraw.push((prefix, path_id));
+                    }
+                }
+                // A refused announcement can also implicitly replace a
+                // departing exempt source's key, as when a deleted Add-Path
+                // rank-1 RTBH path is re-ranked by its sibling. Withdraw that
+                // key only while the replacing exempt source keeps its own
+                // admitted key, so the prefix never loses its blackhole.
+                if let Some(rib) = self.adj_ribs_out.get(&peer) {
+                    for route in batch.unicast.announce.iter() {
+                        checkpoint();
+                        let (prefix, path_id) = (route.prefix, route.path_id);
+                        let departing = rib.local_export_source(&prefix, path_id).filter(|old| {
+                            old.deferral_exempt && !moved.contains(&(prefix, old.path_id))
+                        });
+                        let replacement_held = self
+                            .exported_local_source(peer, route, &batch.local_sources)
+                            .and_then(|new| rib.local_source_outbound_path_id(&prefix, new.path_id))
+                            .and_then(|held| rib.local_export_source(&prefix, held))
+                            .is_some_and(|held| held.deferral_exempt);
+                        if departing.is_some() && replacement_held && seen.insert((prefix, path_id))
+                        {
+                            withdraw.push((prefix, path_id));
+                        }
                     }
                 }
                 super::retire_hash_set(&mut moved, &mut || checkpoint());

@@ -3245,15 +3245,16 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
     assert!(!manager.dirty_peers.contains(&observer));
 }
 
-/// A withdrawal that only moves a live RTBH path to another Add-Path rank
-/// is not a removal: refused proof must not salvage it while the matching
-/// announcement waits.
-#[test]
+/// Refused proof while a deleted RTBH path's key is re-announced for its
+/// surviving sibling. With Add-Path the sibling only moves rank: withdraw
+/// the deleted path's key and keep the sibling's old key. With one path per
+/// prefix the replacement has no other key, so the deleted path stays: the
+/// prefix must never lose its blackhole.
 #[expect(
     clippy::too_many_lines,
-    reason = "one Add-Path transcript covers pre-hold admission, refused proof, the rank move and release"
+    reason = "one transcript covers pre-hold admission, refused proof, the replacement and release"
 )]
-fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
+fn assert_refused_proof_rtbh_replacement(add_path: bool) {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
@@ -3265,13 +3266,18 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
             add_path_send_families,
             add_path_send_max,
             sendable_families,
+            export_policy,
             ..
         } = &mut up
         {
-            *per_client_best = true;
             *sendable_families = vec![FAMILY];
-            *add_path_send_families = vec![FAMILY];
-            *add_path_send_max = 2;
+            if add_path {
+                *per_client_best = true;
+                *add_path_send_families = vec![FAMILY];
+                *add_path_send_max = 2;
+            } else {
+                *export_policy = Some(private_policy(None));
+            }
         }
         up
     };
@@ -3288,6 +3294,7 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
     let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
     let prefix = Prefix::V4(host);
+    let first = u32::from(add_path);
     // Path 17 ranks first on local preference; path 23 second.
     for (path_id, preference) in [(17, 200), (23, 100)] {
         let mut route = make_route_with_lp(host, SOURCE, preference);
@@ -3317,9 +3324,12 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     });
     drain_route_chunks(&mut manager);
     apply_wire(&mut rx, &mut wire);
-    assert!(wire.contains_key(&(ordinary, 1)));
-    assert_eq!(wire[&(prefix, 1)].local_pref(), 200);
-    assert_eq!(wire[&(prefix, 2)].local_pref(), 100);
+    assert!(wire.contains_key(&(ordinary, first)));
+    assert_eq!(wire[&(prefix, first)].local_pref(), 200);
+    assert_eq!(
+        wire.get(&(prefix, 2)).map(Route::local_pref),
+        add_path.then_some(100)
+    );
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
     manager.handle_update(registration(tx));
     apply_wire(&mut rx, &mut wire);
@@ -3340,6 +3350,8 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     assert!(manager.group_recovery_fallback(observer).is_some());
     assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    let before = wire.len();
+    assert_eq!(manager.actual_unicast_advertised_count(observer), before);
 
     let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::WithdrawInjected {
@@ -3354,16 +3366,35 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(manager.selection_deferred(FAMILY));
     assert!(
-        updates
-            .iter()
-            .all(|update| update.withdraw.is_empty() && update.announce.is_empty()),
-        "path 23 moving from rank 2 to rank 1 needs the refused admission"
+        updates.iter().all(|update| update.announce.is_empty()),
+        "re-announcing path 23 needs the refused admission"
     );
-    assert_eq!(
-        wire.get(&(prefix, 2)).map(Route::local_pref),
-        Some(100),
-        "the still-injected RTBH path stays advertised"
-    );
+    let withdrawn: Vec<_> = updates
+        .iter()
+        .flat_map(|update| &update.withdraw)
+        .copied()
+        .collect();
+    if add_path {
+        assert_eq!(withdrawn, [(prefix, 1)], "the deleted rank-1 path leaves");
+        assert_eq!(
+            wire.get(&(prefix, 2)).map(Route::local_pref),
+            Some(100),
+            "the surviving RTBH path keeps its old rank"
+        );
+        assert_eq!(
+            manager.actual_unicast_advertised_count(observer),
+            before - 1
+        );
+    } else {
+        assert_eq!(withdrawn, [], "the replacement has no other key");
+        assert_eq!(
+            wire.get(&(prefix, 0)).map(Route::local_pref),
+            Some(200),
+            "the prefix stays blackholed until the replacement is admitted"
+        );
+        assert_eq!(manager.actual_unicast_advertised_count(observer), before);
+    }
+    assert!(wire.keys().any(|key| key.0 == prefix));
 
     manager.handle_update(RibUpdate::EndOfRib {
         peer: peer_v4(WAITER),
@@ -3377,7 +3408,22 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     }
     assert_eq!(
         wire.keys().copied().collect::<HashSet<_>>(),
-        HashSet::from([(prefix, 1), (pending, 1), (ordinary, 1)])
+        HashSet::from([(prefix, first), (pending, first), (ordinary, first)])
     );
-    assert_eq!(wire[&(prefix, 1)].local_pref(), 100);
+    assert_eq!(wire[&(prefix, first)].local_pref(), 100);
+    assert_eq!(
+        manager.actual_unicast_advertised_count(observer),
+        wire.len()
+    );
+    assert!(!manager.dirty_peers.contains(&observer));
+}
+
+#[test]
+fn refused_proof_withdraws_a_deleted_add_path_rtbh_and_keeps_its_moved_sibling() {
+    assert_refused_proof_rtbh_replacement(true);
+}
+
+#[test]
+fn refused_proof_keeps_a_single_best_prefix_blackholed_across_rtbh_replacement() {
+    assert_refused_proof_rtbh_replacement(false);
 }
