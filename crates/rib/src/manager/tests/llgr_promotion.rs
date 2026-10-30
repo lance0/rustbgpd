@@ -627,6 +627,17 @@ fn run_with_readiness_probe(
     readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
     work: impl FnOnce(&mut RibManager),
 ) -> BTreeMap<&'static str, usize> {
+    run_with_readiness_observations(manager, readiness_tx, work).0
+}
+
+/// [`run_with_readiness_probe`] that also returns every answered query's
+/// `(stage, Loc-RIB count)` in order, including the query answered by the
+/// owner's final checkpoint.
+fn run_with_readiness_observations(
+    manager: &mut RibManager,
+    readiness_tx: mpsc::Sender<crate::RibReadinessQuery>,
+    work: impl FnOnce(&mut RibManager),
+) -> (BTreeMap<&'static str, usize>, Vec<(&'static str, usize)>) {
     let (reply, mut pre_queued) = oneshot::channel();
     readiness_tx
         .try_send(crate::RibReadinessQuery::LocRibCount {
@@ -640,20 +651,20 @@ fn run_with_readiness_probe(
             oneshot::Receiver<Result<usize, crate::RibReadinessError>>,
         )>,
     ));
-    let answered = Arc::new(Mutex::new(BTreeMap::<&'static str, usize>::new()));
+    let observations = Arc::new(Mutex::new(Vec::<(&'static str, usize)>::new()));
     manager.flush_poll_budget = Duration::ZERO;
     manager.replacement_readiness_test_hook = Some(Arc::new({
         let pending = Arc::clone(&pending);
-        let answered = Arc::clone(&answered);
+        let observations = Arc::clone(&observations);
         move |stage| {
             if let Some((previous, mut reply)) = pending.lock().unwrap().take() {
-                reply
+                let count = reply
                     .try_recv()
                     .unwrap_or_else(|error| {
                         panic!("{previous}: queued readiness query not answered inside: {error}")
                     })
                     .unwrap();
-                *answered.lock().unwrap().entry(previous).or_default() += 1;
+                observations.lock().unwrap().push((previous, count));
             }
             let (reply, response) = oneshot::channel();
             readiness_tx
@@ -667,11 +678,20 @@ fn run_with_readiness_probe(
     }));
     work(manager);
     manager.replacement_readiness_test_hook = None;
-    let mut answered = answered.lock().unwrap().clone();
+    let mut observations = observations.lock().unwrap().clone();
+    if let Some((stage, mut reply)) = pending.lock().unwrap().take()
+        && let Ok(count) = reply.try_recv()
+    {
+        observations.push((stage, count.unwrap()));
+    }
+    let mut answered = BTreeMap::new();
+    for (stage, _) in &observations {
+        *answered.entry(*stage).or_default() += 1;
+    }
     if pre_queued.try_recv().is_ok() {
         answered.insert(PRE_QUEUED, 1);
     }
-    answered
+    (answered, observations)
 }
 
 fn readiness_manager() -> (RibManager, mpsc::Sender<crate::RibReadinessQuery>) {
@@ -970,6 +990,10 @@ fn announce_fresh(manager: &mut RibManager, family: (Afi, Safi), index: u8) {
 
 /// [`run_llgr_expiry_case`] with `fresh` non-expiring routes announced
 /// after promotion, before the LLGR deadline fires.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual-caller fixture pins retention, survivors and every readiness count together"
+)]
 fn run_llgr_expiry_case_with_fresh(
     family: (Afi, Safi),
     routes: u8,
@@ -1026,7 +1050,7 @@ fn run_llgr_expiry_case_with_fresh(
 
     // Growth recorded during setup is not the expiry's.
     crate::orr::rebuild_growth::take();
-    let answered = run_with_readiness_probe(
+    let (answered, observations) = run_with_readiness_observations(
         &mut manager,
         readiness_tx,
         RibManager::sweep_expired_llgr_stale,
@@ -1035,6 +1059,41 @@ fn run_llgr_expiry_case_with_fresh(
         retained(&manager),
         0,
         "{family:?}: expiry purges the family"
+    );
+    // Readiness serves the Loc-RIB count as each completed withdrawal
+    // publishes it: every unicast selection step drops exactly one prefix,
+    // other families leave the count alone, and the owner's final answer is
+    // the settled count.
+    let final_count = if family.1 == Safi::Unicast {
+        initial_count - usize::from(routes)
+    } else {
+        initial_count
+    };
+    let selections: Vec<_> = observations
+        .iter()
+        .filter_map(|&(stage, count)| (stage == "selection_recompute").then_some(count))
+        .collect();
+    let expected_selections: Vec<_> = if family.1 == Safi::Unicast {
+        (1..=usize::from(routes))
+            .map(|removed| initial_count - removed)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        selections, expected_selections,
+        "{family:?}: every completed withdrawal publishes its exact count"
+    );
+    assert!(
+        observations
+            .iter()
+            .all(|&(_, count)| (final_count..=initial_count).contains(&count)),
+        "{family:?}: counts outside [{final_count}, {initial_count}]: {observations:?}"
+    );
+    assert_eq!(
+        observations.last().map(|&(_, count)| count),
+        Some(final_count),
+        "{family:?}: the final answer is the settled count"
     );
     let survivors = match family.1 {
         Safi::FlowSpec => manager.ribs[&peer].flowspec_lens()[1],

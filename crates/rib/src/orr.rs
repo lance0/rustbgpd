@@ -514,6 +514,24 @@ pub(crate) mod rebuild_growth {
     pub(crate) fn take() -> Growth {
         GROWTH.take()
     }
+
+    /// Unicast selection's `changed` set: record growth under a readiness
+    /// owner; without one, a pass that changed nothing must not have
+    /// reserved anything.
+    pub(crate) fn record_selection<T>(
+        owned: bool,
+        reserved: usize,
+        changed: &std::collections::HashSet<T>,
+    ) {
+        if owned {
+            record("recompute_best_changed", reserved, changed.capacity());
+        } else {
+            assert!(
+                !changed.is_empty() || changed.capacity() == 0,
+                "an unowned pass with no changed prefix must not pre-reserve"
+            );
+        }
+    }
 }
 
 /// Element-wise slice equality with a checkpoint per compared element.

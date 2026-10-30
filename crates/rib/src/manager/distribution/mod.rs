@@ -7746,9 +7746,10 @@ impl RibManager {
             super::replacement_readiness_checkpoint_at(&readiness, "selection_candidates", false);
         };
         self.record_deferred_unicast(affected);
-        // Changed prefixes are a subset of `affected`; reserving them up
-        // front keeps inserts from rehashing between selection checkpoints.
-        let mut changed = HashSet::with_capacity(affected.len());
+        // `changed` is a subset of `affected`: an owner reserves it so inserts
+        // never rehash between checkpoints; unowned passes grow it lazily.
+        let owned = readiness.is_some();
+        let mut changed = HashSet::with_capacity(if owned { affected.len() } else { 0 });
         checkpoint();
         #[cfg(test)]
         let reserved = changed.capacity();
@@ -7858,7 +7859,7 @@ impl RibManager {
             self.selection_readiness_checkpoint();
         }
         #[cfg(test)]
-        crate::orr::rebuild_growth::record("recompute_best_changed", reserved, changed.capacity());
+        crate::orr::rebuild_growth::record_selection(owned, reserved, &changed);
         crate::manager::helpers::set_loc_rib_prefixes(
             &self.metrics,
             crate::manager::helpers::UNICAST_FAMILIES,
