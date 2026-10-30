@@ -356,6 +356,8 @@ def analyze(run_dir: str, rows: list[dict], cycle_lines: list[str], meta: dict,
             management_raw: bytes, min_slope_seconds: float) -> dict:
     cycles = rs.parse_cycles(cycle_lines)
     evpn = parse_evpn_cycles(cycle_lines)
+    daemon_log = analyze_daemon_log(run_dir)
+    cycles["sighup_settled"] = daemon_log["value"]["sighup_settlements_unix"]
     base = rs.analyze(rows, cycles, {**meta, "planned_trips": 0}, min_slope_seconds)
     gates = {name: base["gates"][name] for name in REUSED_GATES}
     peak = base["peak_rss_mb"]
@@ -390,13 +392,13 @@ def analyze(run_dir: str, rows: list[dict], cycle_lines: list[str], meta: dict,
     gates["evpn_sessions_not_lost"] = {"value": evpn["lost"][:20], "pass": not evpn["lost"]}
     gates["sent_counters_monotone"] = sent_series_monotone(
         Path(run_dir) / "metrics-snapshots.txt.gz")
-    gates["daemon_log"] = analyze_daemon_log(run_dir)
+    gates["daemon_log"] = daemon_log
     gates["evpn_deferral_recovery"] = deferral_recovery(
         run_dir, evpn["epochs"], meta, gates["daemon_log"])
     gates.update(rs.analyze_management_load(
         management_raw, meta,
         gates["daemon_log"]["value"]["first_administrative_shutdown_unix"],
-        cycles, EVPN_OPERATIONS, evpn_identity,
+        cycles, EVPN_OPERATIONS, evpn_identity, run_dir,
     ))
     return {
         "verdict": "pass" if all(g["pass"] for g in gates.values()) else "fail",

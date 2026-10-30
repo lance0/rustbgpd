@@ -501,7 +501,12 @@ whole table in one response and decode up to a finite 64 MiB ceiling (roughly
 currently as `out of range`. The ceiling is client-side compatibility headroom
 only: it does not add pagination, reduce daemon snapshot work, make filters
 cheaper, guarantee arbitrary table sizes, or change third-party gRPC clients.
-Paginated unicast listings, streams, and control RPCs keep tonic's 4 MiB
+Full metrics snapshots use the same 64 MiB decode ceiling in `metrics`,
+`doctor`, `top`, and `evpn diagnose`. Doctor includes the complete snapshot
+in its diagnostic bundle and marks the system section partial if the metrics
+RPC fails, including when the snapshot exceeds that ceiling.
+
+Paginated unicast listings, streams, and other control RPCs keep tonic's 4 MiB
 default. `rib fib --limit N [--page-token T]` returns one bounded page instead;
 the older `--page-size` spelling remains a hidden alias.
 A `received`/`advertised` view, `--limit`, `--page-token`, `--prefix`

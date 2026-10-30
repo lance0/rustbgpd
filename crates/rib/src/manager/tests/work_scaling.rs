@@ -583,6 +583,11 @@ fn deferred_flowspec_replay(size: usize) -> Work {
             families: vec![FLOWSPEC],
         }],
     });
+    arm_selection_waiter(
+        &mut manager,
+        peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+        &[FLOWSPEC],
+    );
     let mut local = crate::test_support::make_flowspec_route(Ipv4Addr::UNSPECIFIED);
     local.peer = LOCAL_PEER;
     local.origin_type = crate::route::RouteOrigin::Local;
@@ -636,5 +641,1095 @@ fn deferred_flowspec_replay_work_is_linear() {
         "received FlowSpec replay during selection deferral",
         &[ALL, "selection_flowspec"],
         deferred_flowspec_replay,
+    );
+}
+
+fn deferred_unicast_manager() -> (mpsc::Sender<RibUpdate>, RibManager) {
+    let (tx, manager) = manager();
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_mins(2),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+        }],
+    });
+    arm_selection_waiter(
+        &mut manager,
+        peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+        &[(Afi::Ipv4, Safi::Unicast)],
+    );
+    (tx, manager)
+}
+
+fn deferred_local_unicast(prefix: Ipv4Prefix) -> Route {
+    let mut route = make_route(prefix, Ipv4Addr::UNSPECIFIED);
+    route.peer = LOCAL_PEER;
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.path_id = 17;
+    route.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        PathAttribute::NextHop(Ipv4Addr::UNSPECIFIED),
+        PathAttribute::Communities(vec![0xFFFF_029A]),
+    ]);
+    route
+}
+
+fn inject_deferred_unicast(manager: &mut RibManager, route: Route) -> crate::update::InjectOutcome {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route, reply });
+    response.try_recv().unwrap().unwrap()
+}
+
+/// A received-only prefix must not start an Add-Path candidate walk for
+/// every receiver during the hold. The measured local replacement keeps
+/// selection and output live, so skipping all work cannot satisfy the bar.
+fn deferred_unicast_received_replay(size: usize) -> Work {
+    let (_tx, mut manager) = deferred_unicast_manager();
+    let mut receivers = Vec::new();
+    for index in 0..size {
+        let peer = member(index);
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 1,
+            encoder: ReusableExactExportEncoder::new(
+                u64::try_from(index).unwrap() + 1,
+                WIRE_PROFILE,
+            ),
+        });
+        let (outbound_tx, rx) = mpsc::channel(4096);
+        let mut up = test_peer_up(peer, 1, outbound_tx);
+        if let RibUpdate::PeerUp {
+            add_path_send_families,
+            add_path_send_max,
+            ..
+        } = &mut up
+        {
+            *add_path_send_families = vec![(Afi::Ipv4, Safi::Unicast)];
+            *add_path_send_max = 2;
+        }
+        manager.handle_update(up);
+        receivers.push(rx);
+    }
+    let mut local = deferred_local_unicast(prefix(200, 0));
+    assert_eq!(
+        inject_deferred_unicast(&mut manager, local.clone()),
+        crate::update::InjectOutcome::Created
+    );
+    for receiver in &mut receivers {
+        assert_eq!(drain(std::slice::from_mut(receiver)), (1, 0));
+    }
+
+    let work = checkpoints_in(|| {
+        manager.handle_update(routes_from(external(), 0, 1, size * ROUTES));
+        drain_route_chunks(&mut manager);
+        AttrSet::edit(&mut local.attributes, |attributes| {
+            attributes.push(PathAttribute::Med(17));
+        });
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, local),
+            crate::update::InjectOutcome::Replaced
+        );
+    });
+
+    assert!(manager.selection_deferred((Afi::Ipv4, Safi::Unicast)));
+    assert_eq!(manager.ribs[&external()].len(), size * ROUTES);
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), 1);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        size * ROUTES + 1
+    );
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    let selected: Vec<_> = manager.loc_rib.iter().collect();
+    assert_eq!(selected.len(), 1);
+    assert_eq!((selected[0].peer, selected[0].path_id), (LOCAL_PEER, 17));
+    assert!(!selected[0].is_stale && !selected[0].is_llgr_stale);
+    for receiver in &mut receivers {
+        let mut announcements = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            assert_eq!(update.withdraw, Vec::new());
+            assert_eq!(update.end_of_rib, Vec::new());
+            announcements.extend(update.announce.iter().cloned());
+        }
+        assert_eq!(
+            announcements.len(),
+            1,
+            "one changed local announcement per receiver"
+        );
+        assert_eq!(
+            (
+                announcements[0].peer,
+                announcements[0].prefix,
+                announcements[0].path_id
+            ),
+            (LOCAL_PEER, Prefix::V4(prefix(200, 0)), 1)
+        );
+    }
+    eprintln!("deferred unicast received replay size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn deferred_unicast_received_replay_work_is_linear() {
+    assert_linear(
+        "received unicast replay during selection deferral",
+        &[ALL, "selection_candidates"],
+        deferred_unicast_received_replay,
+    );
+}
+
+/// Grow retained source RIBs alongside distinct local injections, keeping
+/// one outbound receiver. A local lookup must not scan every retained RIB
+/// for every injected prefix.
+fn deferred_unicast_local_replay(size: usize) -> Work {
+    let (_tx, mut manager) = deferred_unicast_manager();
+    let mut receivers = members(&mut manager, 1, false, None);
+    for index in 0..size {
+        let source = peer_v4(Ipv4Addr::new(
+            198,
+            51,
+            100,
+            u8::try_from(index + 1).unwrap(),
+        ));
+        manager.handle_update(routes_from(source, 0, index, ROUTES));
+        drain_route_chunks(&mut manager);
+        assert_eq!(manager.ribs[&source].len(), ROUTES);
+    }
+    assert_eq!(drain(&mut receivers), (0, 0));
+    assert_eq!(manager.loc_rib.len(), 0);
+
+    let work = checkpoints_in(|| {
+        for index in 0..size * ROUTES {
+            assert_eq!(
+                inject_deferred_unicast(&mut manager, deferred_local_unicast(prefix(200, index))),
+                crate::update::InjectOutcome::Created
+            );
+        }
+    });
+
+    assert!(manager.selection_deferred((Afi::Ipv4, Safi::Unicast)));
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), size * ROUTES);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        2 * size * ROUTES
+    );
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    assert_eq!(manager.loc_rib.len(), size * ROUTES);
+    assert!(manager.loc_rib.iter().all(|route| {
+        route.peer == LOCAL_PEER && route.path_id == 17 && !route.is_stale && !route.is_llgr_stale
+    }));
+    let mut announcements = Vec::new();
+    while let Ok(update) = receivers[0].try_recv() {
+        assert_eq!(update.withdraw, Vec::new());
+        assert_eq!(update.end_of_rib, Vec::new());
+        announcements.extend(update.announce.iter().cloned());
+    }
+    assert_eq!(announcements.len(), size * ROUTES);
+    assert!(
+        announcements
+            .iter()
+            .all(|route| route.peer == LOCAL_PEER && route.path_id == 0)
+    );
+    let actual: BTreeSet<_> = announcements
+        .into_iter()
+        .map(|route| route.prefix)
+        .collect();
+    let expected: BTreeSet<_> = (0..size * ROUTES)
+        .map(|index| Prefix::V4(prefix(200, index)))
+        .collect();
+    assert_eq!(actual, expected);
+    eprintln!("deferred unicast local replay size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn deferred_unicast_local_replay_work_is_linear() {
+    assert_linear(
+        "local unicast replay during selection deferral",
+        &[ALL, "selection_candidates"],
+        deferred_unicast_local_replay,
+    );
+}
+
+/// All paths share an NLRI. Original ordinary paths precede eligible paths,
+/// so rescanning original intent per outbound rank would add quadratic work.
+fn deferred_unicast_sibling_initial_replay(size: usize) -> Work {
+    let count = size * ROUTES;
+    let (_tx, mut manager) = deferred_unicast_manager();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24);
+    for index in 0..count {
+        let mut route = deferred_local_unicast(prefix);
+        route.path_id = u32::try_from(index).unwrap();
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+        });
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, route),
+            crate::update::InjectOutcome::Created
+        );
+    }
+    assert_eq!(manager.loc_rib.len(), 0);
+    for index in count..2 * count - 1 {
+        let mut route = deferred_local_unicast(prefix);
+        route.path_id = u32::try_from(index).unwrap();
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, route),
+            crate::update::InjectOutcome::Created
+        );
+    }
+    let target = member(2);
+    let mut receiver = None;
+    let work = checkpoints_in(|| {
+        let mut route = deferred_local_unicast(prefix);
+        route.path_id = u32::try_from(2 * count - 1).unwrap();
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, route),
+            crate::update::InjectOutcome::Created
+        );
+        let (outbound_tx, rx) = mpsc::channel(16);
+        let mut up = test_peer_up(target, 1, outbound_tx);
+        if let RibUpdate::PeerUp {
+            add_path_send_families,
+            add_path_send_max,
+            ..
+        } = &mut up
+        {
+            *add_path_send_families = vec![(Afi::Ipv4, Safi::Unicast)];
+            *add_path_send_max = u32::try_from(count).unwrap();
+        }
+        manager.handle_update(up);
+        receiver = Some(rx);
+    });
+    assert!(manager.selection_deferred((Afi::Ipv4, Safi::Unicast)));
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), 2 * count);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        2 * count
+    );
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    let selected: Vec<_> = manager.loc_rib.iter().collect();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].peer, LOCAL_PEER);
+    assert!(selected[0].path_id >= u32::try_from(count).unwrap());
+    assert!(
+        selected[0]
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+    );
+    let mut paths = BTreeSet::new();
+    while let Ok(update) = receiver.as_mut().unwrap().try_recv() {
+        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(update.end_of_rib, [] as [(Afi, Safi); 0]);
+        for route in update.announce.iter() {
+            assert_eq!(route.prefix, Prefix::V4(prefix));
+            assert_eq!(route.peer, LOCAL_PEER);
+            assert!(
+                route
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+            );
+            assert!(paths.insert(route.path_id), "each wire path appears once");
+        }
+    }
+    assert_eq!(paths, (1..=u32::try_from(count).unwrap()).collect());
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryAdvertisedCount {
+        peer: target,
+        reply,
+    });
+    assert_eq!(response.try_recv().unwrap(), count);
+    eprintln!("deferred unicast sibling initial replay size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn deferred_unicast_sibling_initial_replay_work_is_linear() {
+    assert_linear(
+        "same-prefix RTBH Add-Path initial replay during selection deferral",
+        &[ALL, "selection_candidates"],
+        deferred_unicast_sibling_initial_replay,
+    );
+}
+
+/// A late grouped member has no proof of frozen ordinary rows. Replaying
+/// local RTBH must maintain its actual counts without walking the growing
+/// frozen table or admitted-key proof after every single-route commit.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dormant-to-held growth shape keeps exact wire, public count and stale-count assertions beside the measured injection loop"
+)]
+fn deferred_initial_admission_local_replay(size: usize) -> Work {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let count = size * ROUTES;
+    let source = member(0);
+    let observer = member(1);
+    let waiter = member(2);
+    let late = member(3);
+    let (_tx, manager) = manager();
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_mins(2),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: waiter,
+            families: vec![family],
+        }],
+    });
+    let mut source_rx = join(&mut manager, 0, false, None).0;
+    let mut observer_rx = join(&mut manager, 1, false, None).0;
+    assert!(!manager.selection_deferred(family));
+    for receiver in [&mut source_rx, &mut observer_rx] {
+        let initial = receiver.try_recv().unwrap();
+        assert!(initial.announce.is_empty());
+        assert_eq!(initial.end_of_rib, vec![family]);
+        assert!(receiver.try_recv().is_err());
+    }
+    manager.handle_update(routes_from(source, 1, 1, count));
+    drain_route_chunks(&mut manager);
+    let ordinary: BTreeSet<_> = (0..count)
+        .map(|index| Prefix::V4(prefix(1, index)))
+        .collect();
+    let mut before = BTreeSet::new();
+    while let Ok(update) = observer_rx.try_recv() {
+        assert!(update.withdraw.is_empty() && update.end_of_rib.is_empty());
+        assert_eq!(
+            update.refresh_markers,
+            [] as [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 0]
+        );
+        for route in update.announce.iter() {
+            assert_eq!(route.peer, source);
+            assert!(
+                before.insert(route.prefix),
+                "setup cannot duplicate a route"
+            );
+        }
+    }
+    assert_eq!(before, ordinary);
+    let gid = manager.grouped_member_of(observer).unwrap();
+    assert_eq!(manager.group_ribs[&gid].table.len(), count);
+
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: waiter,
+        session_id: 1,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![family],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let mut waiter_rx = join(&mut manager, 2, false, None).0;
+    assert!(manager.selection_deferred(family));
+    let mut late_rx = join(&mut manager, 3, false, None).0;
+    assert_eq!(manager.grouped_member_of(late), Some(gid));
+    assert!(
+        manager
+            .pending_group_admitted
+            .get(&late)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(waiter_rx.try_recv().is_err() && late_rx.try_recv().is_err());
+
+    let work = checkpoints_in(|| {
+        for index in 0..count {
+            assert_eq!(
+                inject_deferred_unicast(&mut manager, deferred_local_unicast(prefix(200, index))),
+                crate::update::InjectOutcome::Created
+            );
+        }
+    });
+
+    assert!(manager.selection_deferred(family));
+    assert_eq!(manager.ribs[&source].len(), count);
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), count);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        2 * count
+    );
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    assert_eq!(manager.loc_rib.len(), 2 * count);
+    assert!(
+        manager
+            .loc_rib
+            .iter()
+            .all(|route| !route.is_stale && !route.is_llgr_stale)
+    );
+    let local: BTreeSet<_> = (0..count)
+        .map(|index| Prefix::V4(prefix(200, index)))
+        .collect();
+    for receiver in [
+        &mut source_rx,
+        &mut observer_rx,
+        &mut waiter_rx,
+        &mut late_rx,
+    ] {
+        let mut actual = BTreeSet::new();
+        while let Ok(update) = receiver.try_recv() {
+            assert!(update.withdraw.is_empty() && update.end_of_rib.is_empty());
+            assert_eq!(
+                update.refresh_markers,
+                [] as [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 0]
+            );
+            for route in update.announce.iter() {
+                assert_eq!(route.peer, LOCAL_PEER);
+                assert!(
+                    actual.insert(route.prefix),
+                    "one local announcement per receiver"
+                );
+            }
+        }
+        assert_eq!(actual, local);
+    }
+    let (reply, mut bmp) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryBmpPeerStats { reply });
+    let bmp = bmp.try_recv().unwrap();
+    for (peer, expected) in [(observer, 2 * count), (late, count)] {
+        let expected_prefixes: BTreeSet<_> = local
+            .iter()
+            .copied()
+            .chain(ordinary.iter().copied().filter(|_| peer == observer))
+            .collect();
+        let advertised = manager.grouped_advertised_routes(peer).unwrap();
+        assert_eq!(advertised.len(), expected);
+        assert_eq!(
+            advertised
+                .iter()
+                .map(|route| route.prefix)
+                .collect::<BTreeSet<_>>(),
+            expected_prefixes
+        );
+        let (reply, mut public_count) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryAdvertisedCount { peer, reply });
+        assert_eq!(public_count.try_recv().unwrap(), expected);
+        assert_eq!(
+            manager.grouped_advertised_unicast_lens(peer),
+            Some([expected, 0])
+        );
+        assert_eq!(
+            bmp.adj_rib_out_post[&peer],
+            vec![(family, u64::try_from(expected).unwrap())]
+        );
+    }
+    eprintln!("deferred initial-admission local replay size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn deferred_initial_admission_local_replay_work_is_linear() {
+    assert_linear(
+        "local RTBH replay beside frozen initial-admission proofs",
+        &[ALL, "selection_candidates"],
+        deferred_initial_admission_local_replay,
+    );
+}
+
+fn post_miss_observer(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let peer = member(1);
+    manager.handle_update(RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id: 1,
+        encoder: ReusableExactExportEncoder::new(2, WIRE_PROFILE),
+    });
+    let (outbound_tx, outbound_rx) = mpsc::channel(1);
+    let mut up = test_peer_up(peer, 1, outbound_tx);
+    if let RibUpdate::PeerUp { peer_asn, .. } = &mut up {
+        *peer_asn = 65_101;
+    }
+    manager.handle_update(up);
+    outbound_rx
+}
+
+fn post_miss_drain(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    wires: &mut [BTreeMap<Prefix, Route>],
+) -> Vec<usize> {
+    receivers
+        .iter_mut()
+        .zip(wires)
+        .map(|(rx, wire)| {
+            let mut markers = 0;
+            while let Ok(update) = rx.try_recv() {
+                assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+                assert_eq!(
+                    update.refresh_markers,
+                    [] as [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 0]
+                );
+                for route in update.announce.iter() {
+                    assert_eq!(route.path_id, 0);
+                    assert!(!route.is_stale && !route.is_llgr_stale);
+                    wire.insert(route.prefix, route.clone());
+                }
+                for family in update.end_of_rib {
+                    assert_eq!(family, (Afi::Ipv4, Safi::Unicast));
+                    markers += 1;
+                }
+            }
+            markers
+        })
+        .collect()
+}
+
+fn post_miss_advertised_counts(manager: &mut RibManager, expected: [usize; 4]) {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let (reply, mut bmp) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryBmpPeerStats { reply });
+    let bmp = bmp.try_recv().unwrap();
+    for (index, count) in expected.into_iter().enumerate() {
+        let peer = member(index);
+        let (reply, mut public) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryAdvertisedCount { peer, reply });
+        assert_eq!(public.try_recv().unwrap(), count);
+        assert_eq!(
+            manager.grouped_advertised_unicast_lens(peer),
+            Some([count, 0])
+        );
+        assert_eq!(
+            bmp.adj_rib_out_post[&peer],
+            vec![(family, u64::try_from(count).unwrap())]
+        );
+    }
+}
+
+/// A real writer miss must not turn subsequent held RTBH deltas into full
+/// resyncs of the growing table, while frozen admitted rows remain owned.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the post-miss growth transcript keeps exact writer, retained-intent, count and release-cleanup assertions beside measured injections"
+)]
+fn deferred_post_miss_rtbh_replay(size: usize) -> Work {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let count = size * ROUTES;
+    let source = member(0);
+    let observer = member(1);
+    let waiter = member(2);
+    let (_tx, manager) = manager();
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_mins(2),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: waiter,
+            families: vec![family],
+        }],
+    });
+    let mut receivers = vec![
+        join(&mut manager, 0, false, None).0,
+        post_miss_observer(&mut manager),
+        join(&mut manager, 3, false, None).0,
+    ];
+    let mut wires = vec![BTreeMap::new(); 3];
+    assert!(!manager.selection_deferred(family));
+    assert_eq!(post_miss_drain(&mut receivers, &mut wires), [1, 1, 1]);
+    let ordinary: BTreeSet<_> = (0..count)
+        .map(|index| Prefix::V4(prefix(1, index)))
+        .collect();
+    for index in 0..count {
+        let IpAddr::V4(next_hop) = source.addr() else {
+            unreachable!("test source is IPv4")
+        };
+        let mut update = test_routes_received(source, vec![make_route(prefix(1, index), next_hop)]);
+        if let RibUpdate::RoutesReceived { session_id, .. } = &mut update {
+            *session_id = 1;
+        }
+        manager.handle_update(update);
+        drain_route_chunks(&mut manager);
+        assert_eq!(post_miss_drain(&mut receivers, &mut wires), [0, 0, 0]);
+    }
+    assert!(wires[0].is_empty());
+    for wire in &wires[1..] {
+        assert_eq!(wire.keys().copied().collect::<BTreeSet<_>>(), ordinary);
+    }
+    assert!(!manager.dirty_peers.contains(&observer));
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: waiter,
+        session_id: 1,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![family],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    receivers.insert(2, join(&mut manager, 2, false, None).0);
+    wires.insert(2, BTreeMap::new());
+    assert!(manager.selection_deferred(family));
+    assert_eq!(post_miss_drain(&mut receivers, &mut wires), [0; 4]);
+    for index in [count, count + 1] {
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, deferred_local_unicast(prefix(200, index))),
+            crate::update::InjectOutcome::Created
+        );
+        if index == count {
+            assert_eq!(manager.outbound_peers[&observer].capacity(), 0);
+            assert!(!manager.dirty_peers.contains(&observer));
+        }
+    }
+    assert!(manager.dirty_peers.contains(&observer));
+    assert_eq!(post_miss_drain(&mut receivers, &mut wires), [0; 4]);
+    assert!(!wires[1].contains_key(&Prefix::V4(prefix(200, count + 1))));
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert_eq!(post_miss_drain(&mut receivers, &mut wires), [0; 4]);
+    assert!(wires[1].contains_key(&Prefix::V4(prefix(200, count + 1))));
+    assert!(manager.dirty_peers.contains(&observer));
+    assert!(manager.pending_group_admitted.contains_record(observer));
+    let work = checkpoints_in(|| {
+        for index in 0..count {
+            assert_eq!(
+                inject_deferred_unicast(&mut manager, deferred_local_unicast(prefix(200, index))),
+                crate::update::InjectOutcome::Created
+            );
+            assert_eq!(post_miss_drain(&mut receivers, &mut wires), [0; 4]);
+        }
+    });
+    let local: BTreeSet<_> = (0..count + 2)
+        .map(|index| Prefix::V4(prefix(200, index)))
+        .collect();
+    let all: BTreeSet<_> = ordinary.union(&local).copied().collect();
+    for (index, wire) in wires.iter().enumerate() {
+        assert_eq!(
+            wire.keys().copied().collect::<BTreeSet<_>>(),
+            if index == 0 || index == 2 {
+                &local
+            } else {
+                &all
+            }
+            .clone()
+        );
+    }
+    assert_eq!(wires[1].len(), 2 * count + 2);
+    assert_eq!(manager.ribs[&source].len(), count);
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), count + 2);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        2 * count + 2
+    );
+    assert_eq!(manager.loc_rib.len(), 2 * count + 2);
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    assert!(
+        manager
+            .loc_rib
+            .iter()
+            .all(|route| !route.is_stale && !route.is_llgr_stale)
+    );
+    assert!(manager.selection_deferred(family));
+    assert!(manager.dirty_peers.contains(&observer));
+    let admitted = manager.pending_group_admitted.get(&observer).unwrap();
+    assert_eq!(admitted.len(), all.len());
+    for prefix in &all {
+        assert!(admitted.contains(&crate::update::ExactExportKey::Unicast(*prefix, 0)));
+    }
+    post_miss_advertised_counts(
+        &mut manager,
+        [count + 2, 2 * count + 2, count + 2, 2 * count + 2],
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: waiter,
+        session_id: 1,
+        afi: family.0,
+        safi: family.1,
+    });
+    let mut release_markers = post_miss_drain(&mut receivers, &mut wires);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    for (total, markers) in release_markers
+        .iter_mut()
+        .zip(post_miss_drain(&mut receivers, &mut wires))
+    {
+        *total += markers;
+    }
+    assert_eq!(release_markers, [0, 0, 1, 0]);
+    assert!(!manager.selection_deferred(family));
+    assert!(manager.dirty_peers.is_empty());
+    for (index, wire) in wires.iter().enumerate() {
+        assert!(
+            !manager
+                .pending_group_admitted
+                .contains_record(member(index)),
+            "peer {index} retains its proof after release"
+        );
+        assert_eq!(
+            wire.keys().copied().collect::<BTreeSet<_>>(),
+            if index == 0 { &local } else { &all }.clone()
+        );
+    }
+    post_miss_advertised_counts(
+        &mut manager,
+        [count + 2, 2 * count + 2, 2 * count + 2, 2 * count + 2],
+    );
+    eprintln!("deferred post-miss RTBH replay size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn deferred_post_miss_rtbh_replay_work_is_linear() {
+    assert_linear(
+        "post-miss RTBH replay beside frozen admitted routes",
+        &[ALL, "selection_candidates"],
+        deferred_post_miss_rtbh_replay,
+    );
+}
+
+fn receive_policy_rejection(manager: &mut RibManager, index: usize, local_pref: u32) {
+    let source = member(0);
+    let IpAddr::V4(next_hop) = source.addr() else {
+        unreachable!("test source is IPv4")
+    };
+    let mut update = test_routes_received(
+        source,
+        vec![make_route_with_lp(prefix(1, index), next_hop, local_pref)],
+    );
+    if let RibUpdate::RoutesReceived { session_id, .. } = &mut update {
+        *session_id = 1;
+    }
+    manager.handle_update(update);
+    drain_route_chunks(manager);
+}
+
+fn policy_rejection_events(manager: &RibManager, target: PeerId) -> usize {
+    manager
+        .route_event_history
+        .iter()
+        .filter(|event| {
+            event.event_type == RouteEventType::PolicyFiltered
+                && event.target_peer == Some(target.addr())
+        })
+        .count()
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual-caller growth transcript pins retained history, event edges, wire output and withdrawal cleanup"
+)]
+fn incremental_policy_rejection_updates(size: usize) -> Work {
+    let count = size * ROUTES;
+    let source = member(0);
+    let target = member(1);
+    let (_tx, mut manager) = manager();
+    let policy = super::export_explain::deny_local_pref_at_least(200);
+    let mut receivers = vec![
+        join(&mut manager, 0, false, None).0,
+        join(&mut manager, 1, false, Some(policy)).0,
+    ];
+    for rx in &mut receivers {
+        let initial = rx.try_recv().unwrap();
+        assert!(initial.announce.is_empty());
+        assert_eq!(initial.end_of_rib, [(Afi::Ipv4, Safi::Unicast)]);
+        assert!(rx.try_recv().is_err());
+    }
+    let work = checkpoints_in(|| {
+        for index in 0..count {
+            receive_policy_rejection(&mut manager, index, 200);
+            assert_eq!(drain(&mut receivers), (0, 0));
+        }
+    });
+    let expected: HashSet<_> = (0..count)
+        .map(|index| PolicyFilteredRouteKey {
+            target_peer: target,
+            source_peer: source,
+            prefix: Prefix::V4(prefix(1, index)),
+            path_id: 0,
+        })
+        .collect();
+    assert_eq!(retained_policy_rejection_keys(&manager, target), expected);
+    assert_eq!(policy_rejection_events(&manager, target), count);
+    for event in manager.route_event_history.iter().filter(|event| {
+        event.event_type == RouteEventType::PolicyFiltered
+            && event.target_peer == Some(target.addr())
+    }) {
+        assert_eq!(event.peer, Some(source.addr()));
+        assert_eq!(event.path_id, 0);
+        assert_eq!(event.reason, "policy_denied");
+        assert!(expected.iter().any(|key| key.prefix == event.prefix));
+    }
+    assert_eq!(manager.ribs[&source].len(), count);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        count
+    );
+    assert_eq!(manager.loc_rib.len(), count);
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    assert!(
+        manager
+            .loc_rib
+            .iter()
+            .all(|route| !route.is_stale && !route.is_llgr_stale)
+    );
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryAdvertisedCount {
+        peer: target,
+        reply,
+    });
+    assert_eq!(response.try_recv().unwrap(), 0);
+
+    let last = count - 1;
+    receive_policy_rejection(&mut manager, last, 200);
+    assert_eq!(drain(&mut receivers), (0, 0));
+    assert_eq!(policy_rejection_events(&manager, target), count);
+    assert_eq!(retained_policy_rejection_keys(&manager, target), expected);
+    receive_policy_rejection(&mut manager, last, 100);
+    assert_eq!(drain(&mut receivers), (1, 0));
+    assert_eq!(policy_rejection_events(&manager, target), count);
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, target).len(),
+        count - 1
+    );
+    receive_policy_rejection(&mut manager, last, 200);
+    assert_eq!(drain(&mut receivers), (0, 1));
+    assert_eq!(policy_rejection_events(&manager, target), count + 1);
+    assert_eq!(retained_policy_rejection_keys(&manager, target), expected);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source,
+        session_id: 1,
+        announced: Vec::new(),
+        withdrawn: vec![(Prefix::V4(prefix(1, last)), 0)],
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    assert_eq!(drain(&mut receivers), (0, 0));
+    let mut without_last = expected.clone();
+    without_last.retain(|key| key.prefix != Prefix::V4(prefix(1, last)));
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, target),
+        without_last
+    );
+    assert_eq!(policy_rejection_events(&manager, target), count + 1);
+    receive_policy_rejection(&mut manager, last, 200);
+    assert_eq!(drain(&mut receivers), (0, 0));
+    assert_eq!(retained_policy_rejection_keys(&manager, target), expected);
+    assert_eq!(policy_rejection_events(&manager, target), count + 2);
+    assert_eq!(manager.ribs[&source].len(), count);
+    assert_eq!(manager.loc_rib.len(), count);
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: target,
+        session_id: 1,
+    });
+    assert!(!manager.policy_filtered_routes.contains_key(&target));
+    assert_eq!(manager.ribs[&source].len(), count);
+    assert_eq!(manager.loc_rib.len(), count);
+    eprintln!("incremental policy rejection size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn incremental_policy_rejection_updates_work_is_linear() {
+    assert_linear(
+        "incremental policy rejection retention",
+        &[ALL, "policy_filtered_retained"],
+        incremental_policy_rejection_updates,
+    );
+}
+
+fn late_private_up(peer: PeerId, outbound_tx: mpsc::Sender<OutboundRouteUpdate>) -> RibUpdate {
+    let mut up = test_peer_up(peer, 1, outbound_tx);
+    if let RibUpdate::PeerUp {
+        per_client_best,
+        add_path_send_families,
+        add_path_send_max,
+        ..
+    } = &mut up
+    {
+        *per_client_best = true;
+        *add_path_send_families = vec![(Afi::Ipv4, Safi::Unicast)];
+        *add_path_send_max = 2;
+    }
+    up
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual-caller shape measures private capture and replay with exact wire, public-count and release assertions"
+)]
+fn late_private_arm(size: usize) -> Work {
+    let count = size * ROUTES;
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let source = member(4);
+    let waiter = member(5);
+    let (_tx, mut manager) = manager();
+    manager = manager.with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: waiter,
+            families: vec![family],
+        }],
+    });
+    let mut source_rx = join(&mut manager, 4, false, None).0;
+    let mut receivers = Vec::new();
+    let mut senders = Vec::new();
+    for index in 0..4 {
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer: member(index),
+            session_id: 1,
+            encoder: ReusableExactExportEncoder::new(
+                u64::try_from(index).unwrap() + 10,
+                WIRE_PROFILE,
+            ),
+        });
+        let (tx, mut rx) = mpsc::channel(4096);
+        manager.handle_update(late_private_up(member(index), tx.clone()));
+        assert_eq!(rx.try_recv().unwrap().end_of_rib, [family]);
+        senders.push(tx);
+        receivers.push(rx);
+    }
+    let host = prefix(200, 0);
+    let mut local = deferred_local_unicast(host);
+    local.path_id = 17;
+    inject_deferred_unicast(&mut manager, local);
+    let mut received = (0..count)
+        .map(|index| {
+            make_route(
+                prefix(1, index),
+                match source.addr() {
+                    IpAddr::V4(address) => address,
+                    IpAddr::V6(_) => unreachable!(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut sibling = make_route_with_lp(
+        host,
+        match source.addr() {
+            IpAddr::V4(address) => address,
+            IpAddr::V6(_) => unreachable!(),
+        },
+        10,
+    );
+    sibling.path_id = 11;
+    received.push(sibling);
+    let mut update = test_routes_received(source, received);
+    if let RibUpdate::RoutesReceived { session_id, .. } = &mut update {
+        *session_id = 1;
+    }
+    manager.handle_update(update);
+    drain_route_chunks(&mut manager);
+    let mut wires = vec![BTreeMap::new(); 4];
+    let apply = |receivers: &mut Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+                 wires: &mut Vec<BTreeMap<(Prefix, u32), Route>>,
+                 allow_marker: bool| {
+        for (rx, wire) in receivers.iter_mut().zip(wires) {
+            while let Ok(update) = rx.try_recv() {
+                assert!(allow_marker || update.end_of_rib.is_empty());
+                assert!(update.end_of_rib.iter().all(|marker| *marker == family));
+                for key in update.withdraw {
+                    assert!(wire.remove(&key).is_some());
+                }
+                for route in update.announce.iter() {
+                    assert!(!route.is_stale && !route.is_llgr_stale);
+                    wire.insert((route.prefix, route.path_id), route.clone());
+                }
+            }
+        }
+    };
+    apply(&mut receivers, &mut wires, false);
+    assert!(wires.iter().all(|wire| wire.len() == count + 2));
+    while source_rx.try_recv().is_ok() {}
+    let mut waiter_rx = None;
+    let work = checkpoints_in(|| {
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: waiter,
+            session_id: 1,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: vec![family],
+            peer_enhanced_refresh: true,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        });
+        waiter_rx = Some(join(&mut manager, 5, false, None).0);
+        for (index, tx) in senders.iter().enumerate() {
+            manager.handle_update(late_private_up(member(index), tx.clone()));
+        }
+    });
+    assert!(manager.selection_deferred(family));
+    apply(&mut receivers, &mut wires, false);
+    let (reply, mut bmp) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryBmpPeerStats { reply });
+    let bmp = bmp.try_recv().unwrap();
+    for (index, wire) in wires.iter().enumerate() {
+        let peer = member(index);
+        assert_eq!(wire.len(), count + 2);
+        let (reply, mut public) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryAdvertisedCount { peer, reply });
+        assert_eq!(public.try_recv().unwrap(), wire.len());
+        assert_eq!(
+            bmp.adj_rib_out_post[&peer]
+                .iter()
+                .find(|(f, _)| *f == family)
+                .unwrap()
+                .1,
+            u64::try_from(wire.len()).unwrap()
+        );
+        assert!(manager.pending_group_admitted.get(&peer).is_some());
+    }
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: waiter,
+        session_id: 1,
+        afi: family.0,
+        safi: family.1,
+    });
+    apply(&mut receivers, &mut wires, true);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    apply(&mut receivers, &mut wires, true);
+    for (index, wire) in wires.iter().enumerate() {
+        assert_eq!(wire.len(), count + 2);
+        assert!(
+            !manager
+                .pending_group_admitted
+                .contains_record(member(index))
+        );
+        assert!(!manager.dirty_peers.contains(&member(index)));
+    }
+    drop(waiter_rx);
+    eprintln!("private late-GR capture/replay N={count}: {work:?}");
+    work
+}
+
+#[test]
+fn private_late_gr_capture_and_replay_work_is_linear() {
+    assert_linear(
+        "private late-GR capture/replay",
+        &[ALL, ""],
+        late_private_arm,
     );
 }

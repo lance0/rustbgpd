@@ -3131,6 +3131,7 @@ async fn run_vpn_swap_case(
                         },
                         &manager.metrics,
                     );
+                super::arm_selection_waiter(manager, peer_v4(F), &[(Afi::Ipv4, Safi::MplsVpn)]);
             }
         },
     );

@@ -41,6 +41,7 @@ def analyze_daemon_log(run_dir):
     banner = []
     banner_seen = False
     first_administrative_shutdown = None
+    sighup_settlements = []
 
     def defect(message):
         nonlocal defects
@@ -97,6 +98,9 @@ def analyze_daemon_log(run_dir):
                     observed = stamp.timestamp()
                     if first_administrative_shutdown is None or observed < first_administrative_shutdown:
                         first_administrative_shutdown = observed
+                if (fields["message"] == "runtime config settlement settled"
+                        and fields.get("kind") == "sighup"):
+                    sighup_settlements.append(stamp.timestamp())
                 if level == "WARN":
                     warnings[fields["message"]] += 1
                 elif level == "ERROR":
@@ -114,6 +118,7 @@ def analyze_daemon_log(run_dir):
         "value": {"records": records, "errors": errors, "defects": defects,
                   "warnings_by_message": dict(sorted(warnings.items())),
                   "first_administrative_shutdown_unix": first_administrative_shutdown,
+                  "sighup_settlements_unix": sorted(sighup_settlements),
                   "examples": examples},
         "pass": records > 0 and errors == 0 and defects == 0,
     }

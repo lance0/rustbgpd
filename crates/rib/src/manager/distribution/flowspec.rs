@@ -43,7 +43,7 @@ impl RibManager {
                 if active_refresh.contains(&(key.afi, Safi::FlowSpec))
                     && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
                 {
-                    stale.retain(|stale_key| {
+                    stale.retain(|stale_key, ()| {
                         let keep = stale_key.afi != key.afi || stale_key.rule != key.rule;
                         if !keep {
                             *removed_stale_counts
@@ -107,7 +107,7 @@ impl RibManager {
                 rib.insert_flowspec(route);
                 if active_refresh.contains(&(stale_key.afi, Safi::FlowSpec))
                     && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
-                    && stale.remove(&stale_key)
+                    && stale.remove(&stale_key).is_some()
                 {
                     *removed_stale_counts
                         .entry((stale_key.afi, Safi::FlowSpec))

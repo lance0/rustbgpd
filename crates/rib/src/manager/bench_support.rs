@@ -630,7 +630,7 @@ pub struct EvpnGroupBenchReceipt {
 }
 
 impl RibManager {
-    /// Enable dormant EVPN ownership for a closed, EVPN-capable test cohort.
+    /// Enable dormant EVPN ownership for eligible benchmark peers.
     /// RTC and per-client-best groups remain private, and ordinary group
     /// eligibility (including Add-Path exclusion) is unchanged. This hook is
     /// compiled out of normal builds and has no configuration/RPC/environment
@@ -638,11 +638,7 @@ impl RibManager {
     ///
     /// # Panics
     ///
-    /// Panics if active or deferred peer registrations already exist. Every
-    /// grouped fixture peer must negotiate EVPN. New owned groups must form
-    /// during initial registration before EVPN routes arrive; regrouping into
-    /// an absent destination is unsupported and asserts before handoff planning.
-    /// Existing unit-only regroup controls do not use this hook.
+    /// Panics if active or deferred peer registrations already exist.
     #[must_use]
     pub fn with_bench_evpn_group_ownership(mut self) -> Self {
         assert!(
@@ -1894,21 +1890,7 @@ impl RibManager {
     }
 
     fn bench_selection_deferral_ledger_cleared(&self) -> bool {
-        // `DeferredSelectionKeys` deliberately exposes no production
-        // introspection. Its derived Debug is exhaustive over every retained
-        // set/map/byte counter; compare that state to a fresh ledger while
-        // ignoring the fixture-local limit value.
-        fn without_limits(debug: &str) -> &str {
-            debug
-                .split_once(", limits:")
-                .map_or(debug, |(state, _)| state)
-        }
-        let actual = format!("{:?}", self.deferred_selection_keys);
-        let empty = format!(
-            "{:?}",
-            super::selection_deferral::DeferredSelectionKeys::default()
-        );
-        without_limits(&actual) == without_limits(&empty)
+        self.deferred_selection_keys.is_cleared()
     }
 
     /// Queue one Loc-RIB-count sentinel, time the exact production expiry
@@ -2735,7 +2717,7 @@ impl RibManager {
     /// same reverse-index collector used by Add-Path selection.
     #[must_use]
     pub fn bench_unicast_candidate_count(&self, prefix: Prefix) -> usize {
-        Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &prefix).count()
+        Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &prefix, false).count()
     }
 
     /// Reset the production-path counters immediately before one measured

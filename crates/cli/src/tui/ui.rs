@@ -640,10 +640,15 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
             let limit_label = limit
                 .limit
                 .map_or_else(|| "unlimited".to_string(), |value| value.to_string());
+            let usage = if limit.usage == u64::MAX {
+                "unknown".to_string()
+            } else {
+                limit.usage.to_string()
+            };
             let headroom = match (limit.limit, limit.headroom) {
                 (None, _) => "not applicable".to_string(),
-                (Some(_), Some(value)) => value.to_string(),
-                (Some(_), None) => "unknown".to_string(),
+                (Some(_), Some(value)) if limit.usage != u64::MAX => value.to_string(),
+                (Some(_), _) => "unknown".to_string(),
             };
             let reason = limit
                 .reason
@@ -652,7 +657,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
             all_lines.push(Line::from(Span::styled(
                 format!(
                     "  Outbound {}: usage={} limit={limit_label} headroom={headroom} blocking={}{}",
-                    limit.family, limit.usage, limit.blocking, reason
+                    limit.family, usage, limit.blocking, reason
                 ),
                 Style::default().fg(if limit.blocking {
                     theme.error
@@ -1600,6 +1605,40 @@ mod tests {
         assert!(
             line.contains(expected),
             "detail row {label:?} did not contain {expected:?}: {line:?}"
+        );
+    }
+
+    #[test]
+    fn peer_detail_distinguishes_unknown_outbound_usage_from_unlimited() {
+        let mut neighbor = safety_neighbor();
+        for limit in &mut neighbor.outbound_prefix_limits {
+            limit.usage = u64::MAX;
+            limit.headroom = None;
+        }
+        let mut app = App::new();
+        app.on_data(snapshot(vec![neighbor.clone()], Freshness::Fresh));
+        app.view = View::PeerDetail("192.0.2.2".into());
+        let rendered = rendered_detail(&mut app, 130, 50);
+        assert_detail_row(
+            &rendered,
+            "Outbound ipv4_unicast:",
+            "usage=unknown limit=unlimited headroom=not applicable",
+        );
+        assert_detail_row(
+            &rendered,
+            "Outbound ipv6_unicast:",
+            "usage=unknown limit=50 headroom=unknown",
+        );
+        assert!(!rendered.contains(&u64::MAX.to_string()));
+
+        neighbor.outbound_prefix_limits[1].usage = 0;
+        neighbor.outbound_prefix_limits[1].headroom = Some(50);
+        app.on_data(snapshot(vec![neighbor], Freshness::Fresh));
+        let rendered = rendered_detail(&mut app, 130, 50);
+        assert_detail_row(
+            &rendered,
+            "Outbound ipv6_unicast:",
+            "usage=0 limit=50 headroom=50",
         );
     }
 

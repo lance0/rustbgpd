@@ -1074,8 +1074,13 @@ agrees with `rbgp rib advertised <addr>`. Prometheus exposes the
 same truth as `bgp_outbound_prefix_usage`, `bgp_outbound_prefix_limit`,
 `bgp_outbound_prefix_headroom`, and `bgp_outbound_prefix_blocking`, plus the
 `bgp_outbound_prefix_blocked_total` attempt counter — all labeled by peer and
-family only. An episode logs once when it opens and once when a recovery
-resync proves nothing is still withheld, never per prefix.
+family only. If incomplete recovery loses the exact admission proof,
+unique-prefix usage can be unknown while route/path and stale counts remain
+exact. The CLI renders `unknown`; API and CLI JSON retain the documented
+`UINT64_MAX` usage sentinel. Usage and headroom metric series are absent
+until recovery restores a known count; the configured maximum and blocking
+state remain visible. An episode logs once when it opens and once when a
+recovery resync proves nothing is still withheld, never per prefix.
 
 Edits are live and never reset the session, but they are transactional:
 raising or removing a maximum schedules one coalesced resync of just that peer
@@ -2280,15 +2285,28 @@ daemon may advertise `R=1` after a planned restart, but configured kernel
 installers still advertise `forwarding_preserved = false`. The daemon never
 restores route state from the optional shutdown checkpoint. During that
 marker-backed startup it
-freezes the effective static GR peer/family roster and defers each family's
-route selection plus initial table/EoR until all eligible current sessions
-send EoR or the remaining marker window expires. `gr_restart_time` therefore
-bounds both the advertised restart window and, via the maximum effective value
-across static peers, the process-start selection deferral. FlowSpec rules
-injected through the API are the exception: they are selected and sent at
-once, while received FlowSpec rules and the FlowSpec EoR still wait
-([ADR-0141 amendment](../adr/0141-injection-owner-lease.md#amendment-injected-flowspec-skips-selection-deferral-2026-10-26)).
-Injected unicast routes stay deferred.
+captures the effective static GR peer/family roster, but waits for EoR only
+from sessions that have re-established since the restart. Each family's
+selection-deferral roster starts dormant and applies no hold until a roster
+peer re-establishes a session for it. A configured neighbor that stays down or never returns does
+not hold selection. New current sessions can join an active family wait;
+once all current waiters are satisfied, excluded or down, that family
+releases permanently and a later peer does not re-arm it. An eligible
+re-established session missing EoR still holds selection until completion or
+the remaining marker window expires. See the
+[startup selection amendment](../adr/0141-injection-owner-lease.md#amendment-wait-for-re-established-gr-peers-2026-10-27).
+`gr_restart_time` therefore bounds both the advertised restart window and,
+via the maximum effective value
+across static peers, the process-start selection deferral. API-injected
+RTBH unicast routes (`/32`, `/128` or standard BLACKHOLE `65535:666`) and
+FlowSpec rules are exceptions: only those local candidates compete while
+selection is deferred, subject to the existing export policy and admission
+checks. Other injected unicast, including untagged defaults and aggregates,
+waits like received candidates. Received candidates remain retained and
+ineligible until selection becomes available. Family EoR still waits for
+release selection and the existing completion gates. See the ADR-0141 amendments for
+[unicast](../adr/0141-injection-owner-lease.md#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27)
+and [FlowSpec](../adr/0141-injection-owner-lease.md#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).
 
 During a same-address collision, ordinary replacement still re-arms the
 replacement session as an EoR waiter and stale predecessor EoR is rejected. If
@@ -2303,10 +2321,10 @@ the waiter and only the matching peer EoRR releases it. An ordinary EoR, stray
 EoRR, or local refresh timeout cannot declare convergence. The original
 marker-bounded timer remains the overall fallback.
 
-`rbgp neighbor <address>` shows `Selection Deferral` rows while active and
-retains their `all_eor`, `collision_refresh`, `all_excluded` (the gate
-completed with every waiter excluded or deleted — zero completion markers
-consumed), or `timer` release reason afterward. Metrics are
+`rbgp neighbor <address>` shows per-family `Selection Deferral` rows.
+A dormant roster has `active = false`, zero remaining time and no release
+reason. Released rows retain their `all_eor`, `collision_refresh`, `all_excluded` (the gate
+completed without a current waiter delivering a completion marker), or `timer` release reason afterward. Metrics are
 `bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,
 `bgp_selection_deferral_releases_total`, and
 `bgp_selection_deferral_timeouts_total`. The process-wide deferred-identity
@@ -2420,10 +2438,13 @@ restarting peer's routes) and does not bound this window.
 
 This window is independent of RFC 4724 selection deferral (see the
 implementation note under [Graceful Restart](#graceful-restart-rfc-4724)).
-Deferral holds route selection, and with it injected unicast routes; the grace
-window holds only the End-of-RIB marker. `MarkReplayComplete` and
+Deferral holds selection of received candidates and ordinary injected unicast;
+local RTBH unicast (`/32`, `/128` or standard BLACKHOLE `65535:666`) and
+FlowSpec rules are exempt. The grace window holds only the End-of-RIB
+marker. `MarkReplayComplete` and
 `gr_eor_replay_owners` release the grace window and never shorten selection
-deferral. End-of-RIB leaves only when both have released.
+deferral or other convergence and refresh holds. End-of-RIB leaves only when
+all applicable gates have released.
 
 A reload stores a new `gr_eor_grace_time` for the next planned restart; it
 does not change a window already running. `gr_eor_replay_owners` is read once

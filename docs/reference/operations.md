@@ -47,7 +47,8 @@ configured, use `GET /readyz` on that listener as the orchestrator readiness
 signal; it returns ready once the PeerManager answers an O(1) actor ping and
 the RIB actor answers its O(1) Loc-RIB count query within one shared 200 ms
 deadline. The readiness ping does not collect peer inventory or query session
-state; `GetHealth` continues to return that detailed snapshot. The `starting
+state; `GetHealth` adds the Established-peer count, read from the state each
+session publishes, again without querying sessions. The `starting
 rustbgpd` log line means process startup reached runtime wiring, not that every
 actor has answered a readiness probe yet. Under the shipped `Type=notify`
 systemd unit the daemon also sends `READY=1` only after every configured gRPC
@@ -1942,9 +1943,9 @@ name it.
 | `bgp_max_prefix_blocking{peer,family,stage}` | 1 while a `max_prefix_action = "block"` episode is open for a finite bound — net-new prefixes are being withheld until usage falls back under the bound; present for every finite bound, reaped with the other capacity series |
 | `bgp_add_path_receive_limit_attempts_total{peer,family,action}` | Net-new received Add-Path ID admission attempts beyond the per-prefix cap for negotiated `ipv4_unicast` or `ipv6_unicast`; a repeated withheld ID counts again, but an admitted-ID replacement does not. `action` is `block`, `shutdown`, or `warning`. No prefix label or per-prefix gauge. Reaped when the configured peer is deleted |
 | `bgp_orf_capacity_rejections_total{peer,family}` | Address-Prefix ORF groups rejected because an ADD would exceed the 4,096-entry cap for `ipv4_unicast` or `ipv6_unicast`; the installed filter is retained. Reaped on configured peer deletion |
-| `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Series reaped on session teardown |
+| `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Absent while unique-prefix usage is unknown during incomplete admission recovery; restored when known. Series reaped on session teardown |
 | `bgp_outbound_prefix_limit{peer,family}` | Effective finite `max_prefixes_out_*` for the same family; absent means unlimited, never zero. A family that becomes unlimited drops this series rather than keeping a stale value |
-| `bgp_outbound_prefix_headroom{peer,family}` | Saturating `limit - usage`; absent while the family is unlimited |
+| `bgp_outbound_prefix_headroom{peer,family}` | Saturating `limit - usage`; absent while the family is unlimited or unique-prefix usage is unknown |
 | `bgp_outbound_prefix_blocking{peer,family}` | 1 while a blocking episode is open — the peer's advertised view is intentionally diverging from group intent until capacity recovers |
 | `bgp_outbound_prefix_blocked_total{peer,family}` | Net-new prefixes dropped from this peer's outbound vector by its configured maximum. Deliberately carries no prefix label: the blocked set is exactly the unbounded quantity the limit exists to contain — use `rbgp rib advertised <addr>` (or `rbgp rib --prefix <P> advertised <addr> --explain` for a single prefix's gates) against the export policy to find what is missing |
 | `bgp_rib_attr_intern_global_size` | Unique attribute sets in the daemon-wide cross-peer intern table (attribute-memory dedup across ALL peers). Tracks reclaim sweeps and growth under churn; a monotonic slope under steady-state churn indicates an intern leak. Replaces the per-peer `bgp_rib_attr_intern_size{peer}` gauge |

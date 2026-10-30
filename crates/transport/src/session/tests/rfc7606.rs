@@ -1182,7 +1182,6 @@ async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
     rfc7606_drain(&mut rib_rx);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 42), 32);
     let values = [
-        (25_u8, (0_u8..20).collect::<Vec<_>>()),
         (34_u8, vec![0, 2, 0x5a, 0xa5, 0, 6]),
         (36_u8, vec![1, 0, 0, 0, 0, 0, 0, 0]),
         (37, vec![2, 0, 4, 1, 99, 0, 0]),
@@ -1255,6 +1254,73 @@ async fn assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent() {
             .all(|attribute| attribute.type_code() != 42)
     );
     assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
+#[tokio::test]
+async fn ipv6_extended_communities_reach_rib_and_egress_with_received_partial() {
+    let raw = std::array::from_fn(|index| u8::try_from(index).unwrap());
+    let community = rustbgpd_wire::Ipv6ExtendedCommunity::new(raw);
+    for partial in [false, true] {
+        let expected = if partial {
+            PathAttribute::Ipv6ExtendedCommunitiesPartial(vec![community])
+        } else {
+            PathAttribute::Ipv6ExtendedCommunities(vec![community])
+        };
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        assert!(matches!(
+            read_single_bgp_message(&mut server).await,
+            Message::Open(_)
+        ));
+        assert!(matches!(
+            read_single_bgp_message(&mut server).await,
+            Message::Keepalive
+        ));
+        rfc7606_drain(&mut rib_rx);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 42), 32);
+        let mut extra = vec![0xc0 | if partial { 0x20 } else { 0 }, 25, 20];
+        extra.extend(raw);
+        session
+            .process_update(rfc7606_update(rfc7606_attr_bytes(&extra), &[prefix]))
+            .await;
+        let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected typed IPv6 extended community announcement");
+        };
+        assert_eq!(announced.len(), 1);
+        assert_eq!(
+            announced[0]
+                .attributes
+                .iter()
+                .find(|attribute| attribute.type_code() == 25),
+            Some(&expected)
+        );
+        session.send_route_update(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            announce: vec![announced[0].clone()].into(),
+            next_hop_override: vec![None].into(),
+            ..empty_outbound_update()
+        });
+        let Message::Update(egress) = read_single_bgp_message(&mut server).await else {
+            panic!("expected outbound UPDATE");
+        };
+        assert!(
+            egress
+                .path_attributes
+                .windows(extra.len())
+                .any(|window| window == extra)
+        );
+        let parsed = egress.parse(true, false, &[]).unwrap();
+        assert_eq!(
+            parsed
+                .attributes
+                .iter()
+                .find(|attribute| attribute.type_code() == 25),
+            Some(&expected)
+        );
+        assert_eq!(session.fsm.state(), SessionState::Established);
+    }
 }
 
 #[tokio::test]

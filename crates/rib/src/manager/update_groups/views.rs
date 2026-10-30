@@ -472,11 +472,12 @@ impl RibManager {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
+        let initial = self.initial_group_admitted(peer);
         Some(
             group
                 .table
                 .iter()
-                .inspect(move |_| self.replacement_checkpoint(false))
+                .inspect(move |_| self.replacement_checkpoint_at("grouped_advertised_input", false))
                 .filter_map(move |staged| {
                     // The substitution sits at the same (prefix, path_id 0)
                     // slot, so the member-local overlays key identically for
@@ -484,7 +485,9 @@ impl RibManager {
                     let route = group
                         .adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)?
                         .route;
-                    (!rejected.is_some_and(|keys| {
+                    (initial.is_none_or(|admitted| {
+                        admitted.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+                    }) && !rejected.is_some_and(|keys| {
                         keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
                     }) && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
                     .then_some(route)
@@ -502,8 +505,11 @@ impl RibManager {
         let rtc = group.rtc_negotiated();
         let filter = self.peer_rt_membership.get(&peer);
         let rejected = self.peer_unexportable.get(&peer);
+        let initial = self.initial_group_admitted(peer);
         Some(group.table.iter_vpn().filter(move |route| {
             route.peer != peer
+                && initial
+                    .is_none_or(|admitted| admitted.contains(&ExactExportKey::Vpn(route.key())))
                 && (!rtc || filter.is_some_and(|filter| super::rt_passes(Some(filter), route)))
                 && !rejected.is_some_and(|keys| keys.contains(&ExactExportKey::Vpn(route.key())))
         }))
@@ -522,6 +528,7 @@ impl RibManager {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
+        let initial = self.initial_group_admitted(peer);
         Some(
             group
                 .table
@@ -540,6 +547,9 @@ impl RibManager {
                     // duplicating its prefix (the underlying iterator
                     // filters on staged keys only).
                     (after.is_none_or(|cursor| route_query_key(route) > cursor)
+                        && initial.is_none_or(|admitted| {
+                            admitted.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+                        })
                         && !rejected.is_some_and(|keys| {
                             keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
                         })
@@ -573,6 +583,9 @@ impl RibManager {
         self.grouped_advertised_count_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
+        if let Some(counts) = self.initial_group_admitted_counts(peer) {
+            return Some(counts[0] + counts[1]);
+        }
         if self.outbound_prefix_limits.contains_key(&peer) {
             // A limited member advertises its admitted projection, and that
             // is decided per family — so reuse the single definition of
@@ -612,6 +625,9 @@ impl RibManager {
         peer: PeerId,
     ) -> Option<[usize; 2]> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
+        if let Some(counts) = self.initial_group_admitted_counts(peer) {
+            return Some([counts[0], counts[1]]);
+        }
         if self.outbound_prefix_limits.contains_key(&peer) {
             return Some(
                 crate::manager::outbound_prefix_limits::LIMITED_FAMILIES
@@ -647,6 +663,9 @@ impl RibManager {
     ) -> Option<[usize; 2]> {
         let gid = self.vpn_grouped_member_of(peer)?;
         let group = self.group_ribs.get(&gid)?;
+        if let Some(counts) = self.initial_group_admitted_counts(peer) {
+            return Some([counts[2], counts[3]]);
+        }
         let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
         let mut lens = [0_usize; 2];
         for ((afi, safi), count) in group.family_counts_for(peer) {
@@ -676,6 +695,9 @@ impl RibManager {
     pub(in crate::manager) fn grouped_vpn_advertised_count(&self, peer: PeerId) -> Option<usize> {
         let gid = self.vpn_grouped_member_of(peer)?;
         let group = self.group_ribs.get(&gid)?;
+        if let Some(counts) = self.initial_group_admitted_counts(peer) {
+            return Some(counts[2] + counts[3]);
+        }
         let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
         let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
             keys.iter()
@@ -705,11 +727,29 @@ impl RibManager {
     ) -> Option<Vec<((Afi, Safi), u64)>> {
         let gid = self.grouped_member_of(peer)?;
         let group = self.group_ribs.get(&gid)?;
+        if let Some(admitted) = self.initial_group_admitted_counts(peer) {
+            let families = [
+                (Afi::Ipv4, Safi::Unicast),
+                (Afi::Ipv6, Safi::Unicast),
+                (Afi::Ipv4, Safi::MplsVpn),
+                (Afi::Ipv6, Safi::MplsVpn),
+            ];
+            return Some(
+                families
+                    .into_iter()
+                    .zip(admitted)
+                    .filter(|((_, safi), count)| {
+                        *count != 0 && (*safi == Safi::Unicast || group.stages_vpn())
+                    })
+                    .map(|(family, count)| (family, u64::try_from(count).unwrap_or(u64::MAX)))
+                    .collect(),
+            );
+        }
         let mut counts = group.family_counts_for(peer);
         let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
         if let Some(rejected) = self.peer_unexportable.get(&peer) {
             for key in rejected {
-                self.replacement_checkpoint(false);
+                self.replacement_checkpoint_at("grouped_family_count_input", false);
                 let family = match key {
                     // Subtract only while the member's derived view
                     // holds a backstop-delivered route at the rejected

@@ -297,7 +297,9 @@ Edges:
 - **Graceful Restart selection deferral** delays distribution of the expiry
   withdrawal exactly as it delays an injected add today.
   *Injected FlowSpec rules no longer wait; see
-  [Amendment: injected FlowSpec skips selection deferral](#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).*
+  [Amendment: injected FlowSpec skips selection deferral](#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).
+  The unicast exception is now limited to RTBH; see
+  [the latest amendment](#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27).*
 
 ### 5. Failure direction
 
@@ -551,6 +553,10 @@ re-add. Both limits belong in the bridge's documentation.
 
 ## Amendment: injected FlowSpec skips selection deferral (2026-10-26)
 
+*The unicast boundary below records the decision on this date. The
+[subsequent amendment](#amendment-injected-unicast-skips-selection-deferral-2026-10-27)
+extends the exemption to injected unicast routes.*
+
 After a planned restart, RFC 4724 selection deferral held every injected
 FlowSpec rule until the deferral released. With a static Graceful Restart
 neighbor that never comes up, that took the full maximum effective
@@ -589,3 +595,124 @@ those tables, so holding it buys little safety and delays a mitigation.
   unicast injection sooner can remove never-up static Graceful Restart
   neighbors, set `graceful_restart = false` on them, or lower
   `gr_restart_time`.
+
+## Amendment: injected unicast skips selection deferral (2026-10-27)
+
+*This records the initial unicast decision. The
+[later amendment](#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27)
+limits the exception to RTBH.*
+
+Controllers replaying RTBH host routes after a planned restart need those
+routes advertised while a Graceful Restart neighbor remains down. The
+previous unicast boundary delayed that local intent along with received
+routes. The exemption now covers all API-injected IPv4 and IPv6 unicast
+routes from the local Adj-RIB-In peer `0.0.0.0`, leased and unleased, with
+every injection `path_id`. It is not restricted by prefix length or the
+presence of the RFC 7999 BLACKHOLE community. No RPC, flag or configuration
+option is added.
+
+- **Candidate competition.** While selection is deferred for the family,
+  only local candidates participate in ordinary best path, Add-Path, ORR and
+  per-client best selection. Received candidates remain retained and
+  ineligible, even when their attributes would beat a local route. Local
+  candidates compete under the existing rules and export policies. Initial
+  tables, dirty resyncs and explanations use the same candidate boundary.
+  When selection becomes available, ordinary competition resumes over the
+  full candidate set. This includes collision failback that stages selection
+  while completion markers remain held. A received winner can then replace
+  a local route, which reads `not_selected` for that destination.
+- **Removal and leases.** Delete and lease expiry remove local intent and
+  distribute the resulting withdrawal or another eligible local path during
+  deferral. Removing the last local path does not expose a received fallback
+  until selection becomes available. Ownership, generation fencing,
+  renewal, expiry lag and refusal semantics are unchanged.
+- **Export and completion.** Existing family, policy, next-hop-self and
+  admission checks still apply. `COMMITTED` describes the exact route admitted
+  to the peer's outbound channel and recorded in its Adj-RIB-Out, not remote receipt,
+  acceptance or forwarding. End-of-RIB remains behind release selection and
+  all existing convergence and refresh holds. `MarkReplayComplete` releases
+  only the separate replay grace window; it does not release selection
+  deferral or the other completion gates.
+- **Standards and tradeoff.**
+  [RFC 4724 §4.1](https://www.rfc-editor.org/rfc/rfc4724.html#section-4.1)
+  requires family-wide route selection deferral and gives no explicit
+  local-origin exception. This policy deliberately departs from that
+  requirement, extending the existing FlowSpec exception.
+  UPDATE-before-End-of-RIB ordering does not itself authorize the departure.
+  It permits an injected ordinary prefix, including a default route, to
+  become a temporary winner before received alternatives settle. A helper
+  can retain other stale Add-Path advertisements alongside
+  newly replayed paths until End-of-RIB or its stale-route timer removes
+  them ([RFC 4724 §4.2](https://www.rfc-editor.org/rfc/rfc4724.html#section-4.2),
+  [RFC 7911 §5](https://www.rfc-editor.org/rfc/rfc7911.html#section-5)).
+  The [RFC 7999 BLACKHOLE community](https://www.rfc-editor.org/rfc/rfc7999.html#section-2)
+  remains advisory; early local export promises no remote discard or
+  forwarding outcome.
+
+## Amendment: limit unicast deferral bypass to RTBH (2026-10-27)
+
+The general unicast exception above was wider than the controller recovery
+problem: an untagged default or aggregate could become a temporary winner
+before received alternatives settled. Selection deferral now bypasses only
+local RTBH candidates.
+
+- **RTBH boundary.** A unicast route injected through the local peer
+  `0.0.0.0` skips deferral when it is an IPv4 `/32`, an IPv6 `/128`, or
+  carries the standard BLACKHOLE community `65535:666` (RFC 7999), of any
+  prefix length. This applies to leased and unleased entries and every
+  injection `path_id`. Other injected unicast, including untagged defaults
+  and aggregates, waits like received routes. There is no new RPC field or
+  configuration option. A host prefix qualifies without a BLACKHOLE
+  community; this classification promises no remote discard action.
+- **Candidate and removal paths.** Only eligible local RTBH candidates
+  compete while unicast selection is deferred, across ordinary best path,
+  Add-Path, ORR, per-client best, initial tables, dirty recovery and
+  explanations. A received candidate remains retained even if it would beat
+  the local one, and becomes eligible when selection resumes. Delete and
+  lease expiry remove local intent immediately without exposing a deferred
+  received fallback. Existing policy, next-hop-self, admission, ownership
+  and generation rules are unchanged.
+- **FlowSpec and completion.** The existing exemption for API-injected
+  FlowSpec rules is unchanged. Family End-of-RIB still follows release
+  selection and all convergence, refresh and replay-grace gates.
+  `gr_eor_grace_time` holds completion independently of selection.
+  `MarkReplayComplete` releases only that replay grace window; it does not
+  satisfy a peer's End-of-RIB wait or another completion gate.
+  `COMMITTED` remains local outbound-channel/Adj-RIB-Out evidence, not remote
+  acceptance or forwarding.
+- **Standards scope.** The RTBH exemption remains a deliberate departure
+  from [RFC 4724 §4.1](https://www.rfc-editor.org/rfc/rfc4724.html#section-4.1),
+  which provides no explicit local-origin exception. UPDATE-before-End-of-RIB
+  ordering does not authorize early selection. A host or BLACKHOLE-tagged
+  route can still temporarily win before received alternatives become
+  eligible; a helper can retain other stale Add-Path advertisements until
+  End-of-RIB or its own stale timer. The narrower boundary reduces the scope
+  of that tradeoff and restores deferral for ordinary injected unicast.
+
+## Amendment: wait for re-established GR peers (2026-10-27)
+
+After a marker-backed planned restart, the captured static GR peer/family
+roster starts dormant. It applies no selection hold before an eligible
+roster peer re-establishes a session for that family. A configured neighbor
+that stays down or never returns does not hold selection.
+
+Only eligible current sessions owe End-of-RIB. New sessions can join an
+active family wait; when its current waiters are satisfied, excluded or
+down, the family releases permanently. A later peer does not re-arm it.
+A re-established peer missing End-of-RIB still holds selection until it
+completes or the existing marker-derived upper bound expires. The bound
+remains the maximum effective `gr_restart_time` counted from shutdown.
+Session fencing, GR-family and Restart-State exclusions, and collision
+refresh completion still apply.
+
+The [RTBH-only exception](#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27)
+remains unchanged. Activating a hold preserves routes already admitted to
+each current session, while eligible RTBH updates and withdrawals continue.
+Missing ordinary initial-table rows are replayed before their completion
+marker after release. Conditional advertisement settling pauses during a
+hold and resumes with its full interval. The independent replay-complete
+grace window and other completion gates remain in force.
+
+This changes startup selection and completion behavior without adding an
+RPC field or configuration option. It does not qualify remote acceptance,
+forwarding, scale or production EVPN ownership.

@@ -23,6 +23,9 @@ pub(super) enum FamilyReplayKind {
     PrefixLimitRecovery,
     /// Explicit operator replay; observes gates and adds no protocol refresh markers.
     OperatorReplay,
+    /// Fill missing initial slots after the ordinary selection-release
+    /// pass; preserve its admitted-key proof and add no protocol markers.
+    SelectionRelease,
 }
 
 /// Whether the shared family replay reached the outbound commit boundary.
@@ -679,6 +682,18 @@ impl RibManager {
     }
 
     pub(super) fn handle_begin_route_refresh(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                manager.begin_route_refresh_with_readiness(peer, afi, safi);
+            });
+        });
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "snapshot dispatch keeps all seven family exclusions and retirement checkpoints together"
+    )]
+    fn begin_route_refresh_with_readiness(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "beginning enhanced route refresh");
         self.refresh_in_progress
             .entry(peer)
@@ -705,82 +720,114 @@ impl RibManager {
         //   4. GR/LLGR-stale acquired DURING the window is unreachable — GR
         //      entry is session-down, which drops every refresh window for
         //      the peer (`clear_peer_refresh_state`).
+        let readiness = self.replacement_readiness.clone();
+        let visit =
+            || super::replacement_readiness_checkpoint_at(&readiness, "borr_snapshot", false);
+        let retire =
+            || super::replacement_readiness_checkpoint_at(&readiness, "borr_retirement", false);
         let mut stale_count = 0usize;
         if let Some(rib) = self.ribs.get(&peer) {
             if safi == Safi::FlowSpec {
                 let stale = self.refresh_stale_flowspec.entry(peer).or_default();
-                stale.retain(|key| key.afi != afi);
-                for route in rib
-                    .iter_flowspec()
-                    .filter(|route| route.afi == afi && !route.is_stale && !route.is_llgr_stale)
-                {
-                    if stale.insert(route.key()) {
+                stale.retain(|key, ()| {
+                    retire();
+                    key.afi != afi
+                });
+                for route in rib.iter_flowspec().inspect(|_| visit()) {
+                    if route.afi == afi
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
                 let stale = self.refresh_stale_bgpls.entry(peer).or_default();
-                stale.retain(|key| key.family != bgpls_family);
-                for route in rib.iter_bgpls().filter(|route| {
-                    route.family == bgpls_family && !route.is_stale && !route.is_llgr_stale
-                }) {
-                    if stale.insert(route.key()) {
+                stale.retain(|key, ()| {
+                    retire();
+                    key.family != bgpls_family
+                });
+                for route in rib.iter_bgpls().inspect(|_| visit()) {
+                    if route.family == bgpls_family
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if safi == Safi::MplsVpn {
                 let stale = self.refresh_stale_vpn.entry(peer).or_default();
-                stale.retain(|key| key.afi_safi() != (afi, safi));
-                for route in rib.iter_vpn().filter(|route| {
-                    route.afi_safi() == (afi, safi) && !route.is_stale && !route.is_llgr_stale
-                }) {
-                    if stale.insert(route.key()) {
+                stale.retain(|key, ()| {
+                    retire();
+                    key.afi_safi() != (afi, safi)
+                });
+                for route in rib.iter_vpn().inspect(|_| visit()) {
+                    if route.afi_safi() == (afi, safi)
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if safi == Safi::LabeledUnicast {
                 let stale = self.refresh_stale_labeled.entry(peer).or_default();
-                stale.retain(|key| key.afi_safi() != (afi, safi));
-                for route in rib.iter_labeled().filter(|route| {
-                    route.afi_safi() == (afi, safi) && !route.is_stale && !route.is_llgr_stale
-                }) {
-                    if stale.insert(route.key()) {
+                stale.retain(|key, ()| {
+                    retire();
+                    key.afi_safi() != (afi, safi)
+                });
+                for route in rib.iter_labeled().inspect(|_| visit()) {
+                    if route.afi_safi() == (afi, safi)
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
                 let stale = self.refresh_stale_evpn.entry(peer).or_default();
-                stale.clear();
-                for route in rib
-                    .iter_evpn()
-                    .filter(|route| !route.is_stale && !route.is_llgr_stale)
-                {
-                    if stale.insert(route.key()) {
+                stale.retain(|_, ()| {
+                    retire();
+                    false
+                });
+                for route in rib.iter_evpn().inspect(|_| visit()) {
+                    if !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if safi == Safi::RtConstrain {
-                // RTC is a single family (AFI 1 only), so clearing the whole
-                // per-peer set is safe — the EVPN pattern, not the VPN one.
+                // RTC has only AFI 1, so no other family shares this inventory.
                 let stale = self.refresh_stale_rtc.entry(peer).or_default();
-                stale.clear();
-                for route in rib
-                    .iter_rtc()
-                    .filter(|route| !route.is_stale && !route.is_llgr_stale)
-                {
-                    if stale.insert(route.key()) {
+                stale.retain(|_, ()| {
+                    retire();
+                    false
+                });
+                for route in rib.iter_rtc().inspect(|_| visit()) {
+                    if !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else {
                 let stale = self.refresh_stale_routes.entry(peer).or_default();
-                stale.retain(|(prefix, _)| prefix_family(prefix) != (afi, safi));
-                for route in rib.iter().filter(|route| {
-                    prefix_family(&route.prefix) == (afi, safi)
+                stale.retain(|(prefix, _), ()| {
+                    retire();
+                    prefix_family(prefix) != (afi, safi)
+                });
+                for route in rib.iter().inspect(|_| visit()) {
+                    if prefix_family(&route.prefix) == (afi, safi)
                         && !route.is_stale
                         && !route.is_llgr_stale
-                }) {
-                    if stale.insert((route.prefix, route.path_id)) {
+                        && stale.insert((route.prefix, route.path_id), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
@@ -929,16 +976,17 @@ impl RibManager {
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
                 self.lift_orf_gate(peer, family);
-                // A GR restarter's EoR may have been withheld at PeerUp while
-                // the ORF gate was active. Only the peer refresh that lifts
-                // that gate may consume and flush this protocol deferral.
+                // GR or selection release may owe the ORF-gated initial
+                // flood. Only the peer refresh may consume this obligation.
                 let deferred_eor = self
                     .gr_deferred_eor
                     .get(&peer)
                     .is_some_and(|families| families.contains(&family));
                 (suppress_eor, deferred_eor)
             }
-            FamilyReplayKind::PrefixLimitRecovery | FamilyReplayKind::OperatorReplay => {
+            FamilyReplayKind::PrefixLimitRecovery
+            | FamilyReplayKind::OperatorReplay
+            | FamilyReplayKind::SelectionRelease => {
                 let orf_pending = self
                     .peer_orf_pending
                     .get(&peer)
@@ -949,6 +997,26 @@ impl RibManager {
                 (true, false)
             }
         };
+        if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
+            if family == (Afi::L2Vpn, Safi::Evpn)
+                && (self.evpn_grouped_member_of(peer).is_some()
+                    || self.has_private_evpn_handoff(peer))
+            {
+                return FamilyReplayOutcome::Deferred;
+            }
+            let grouped = match family.1 {
+                Safi::Unicast => self.grouped_member_of(peer).is_some(),
+                Safi::MplsVpn => self.vpn_grouped_member_of(peer).is_some(),
+                _ => false,
+            };
+            if grouped && !self.pending_group_admitted.contains_key(&peer) {
+                if !self.retain_initial_group_admitted(peer) {
+                    return FamilyReplayOutcome::Committed;
+                }
+                self.mark_outbound_dirty(peer);
+                return FamilyReplayOutcome::Failed;
+            }
+        }
         let orf_filter = self
             .peer_orf_filters
             .get(&peer)
@@ -1557,18 +1625,16 @@ impl RibManager {
                         unicast.announce.push(route);
                     }
                 }
-                let mut filtered = group
+                let filtered = group
                     .policy_filtered_for_member_with_checkpoint(peer, &all_prefixes, &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     })
                     .into_iter();
-                for key in filtered.by_ref() {
-                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
-                    current_policy_filtered_routes.insert(key);
-                }
-                super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
-                drop(filtered);
-                super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    filtered,
+                    &self.replacement_readiness,
+                );
                 grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
                     peer,
                     Some(&all_prefixes),
@@ -1603,6 +1669,10 @@ impl RibManager {
                         &refresh_view,
                         &self.peer_is_rr_client,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         peer,
                         target_peer_asn,
                         target_peer_group,
@@ -1645,6 +1715,10 @@ impl RibManager {
                         &refresh_view,
                         &self.peer_is_rr_client,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         peer,
                         target_peer_asn,
                         target_peer_group,
@@ -1684,6 +1758,10 @@ impl RibManager {
                         orr_topology,
                         orr_spf,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         peer,
                         target_peer_asn,
                         target_peer_group,
@@ -1723,6 +1801,10 @@ impl RibManager {
                         &refresh_view,
                         &self.peer_is_rr_client,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         &mut target,
                         target_is_ebgp,
                         interpret_rfc1997,
@@ -1745,9 +1827,11 @@ impl RibManager {
                         },
                     );
                 }
-                current_policy_filtered_routes.extend(unicast.policy_filtered.drain(..).inspect(
-                    |_| super::replacement_readiness_checkpoint(&self.replacement_readiness, false),
-                ));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &self.replacement_readiness,
+                );
             }
             // The refresh view is intentionally empty so permitted routes are
             // re-advertised for ROUTE-REFRESH. That empty view cannot discover
@@ -1834,11 +1918,133 @@ impl RibManager {
                 self.replacement_checkpoint(false);
             });
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
-            super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
-                self.replacement_checkpoint(false);
-            });
+            super::retire_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
+                &self.replacement_readiness,
+            );
             self.replacement_checkpoint(true);
             return FamilyReplayOutcome::Failed;
+        }
+        if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
+            let proof = self.pending_group_admitted.get(&peer);
+            let private = self.adj_ribs_out.get(&peer);
+            let announce = std::mem::take(&mut unicast.announce);
+            let next_hop_override = std::mem::take(&mut unicast.next_hop_override);
+            for (route, action) in announce.into_iter().zip(next_hop_override) {
+                self.replacement_checkpoint(false);
+                let admitted = if member_of.is_some() {
+                    // Ordinary release already committed every changed slot;
+                    // only unchanged rows omitted from the held initial dump
+                    // can still be missing from this exact member's proof.
+                    proof.as_ref().is_some_and(|proof| {
+                        proof.contains(&crate::update::ExactExportKey::Unicast(
+                            route.prefix,
+                            route.path_id,
+                        ))
+                    })
+                } else {
+                    private.is_some_and(|rib| {
+                        rib.get(&route.prefix, route.path_id).is_some_and(|old| {
+                            super::helpers::routes_equal(old, &route)
+                                && rib.next_hop_override(&route.prefix, route.path_id)
+                                    == action.as_ref()
+                        })
+                    })
+                };
+                if !admitted {
+                    unicast.announce.push(route);
+                    unicast.next_hop_override.push(action);
+                }
+            }
+            unicast.withdraw.retain(|(prefix, path_id)| {
+                self.replacement_checkpoint(false);
+                if member_of.is_some() {
+                    proof.as_ref().is_some_and(|proof| {
+                        proof.contains(&crate::update::ExactExportKey::Unicast(*prefix, *path_id))
+                    })
+                } else {
+                    private.is_some_and(|rib| rib.get(prefix, *path_id).is_some())
+                }
+            });
+            fs_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_flowspec(&route.selection_key()).is_some_and(|old| {
+                        old.peer == route.peer && old.attributes == route.attributes
+                    })
+                })
+            });
+            fs_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_flowspec(key).is_some())
+            });
+            evpn_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_evpn(&route.key())
+                        .is_some_and(|old| super::helpers::evpn_routes_equal(old, route))
+                })
+            });
+            evpn_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_evpn(key).is_some())
+            });
+            bgpls_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_bgpls(&route.key())
+                        .is_some_and(|old| super::helpers::bgpls_routes_equal(old, route))
+                })
+            });
+            bgpls_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_bgpls(key).is_some())
+            });
+            vpn_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                if vpn_member_of.is_some() {
+                    !proof.as_ref().is_some_and(|proof| {
+                        proof.contains(&crate::update::ExactExportKey::Vpn(route.key()))
+                    })
+                } else {
+                    !private.is_some_and(|rib| {
+                        rib.get_vpn(&route.key())
+                            .is_some_and(|old| super::helpers::vpn_routes_equal(old, route))
+                    })
+                }
+            });
+            vpn_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                if vpn_member_of.is_some() {
+                    proof.as_ref().is_some_and(|proof| {
+                        proof.contains(&crate::update::ExactExportKey::Vpn(key.clone()))
+                    })
+                } else {
+                    private.is_some_and(|rib| rib.get_vpn(key).is_some())
+                }
+            });
+            labeled_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_labeled(&route.key())
+                        .is_some_and(|old| super::helpers::labeled_routes_equal(old, route))
+                })
+            });
+            labeled_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_labeled(key).is_some())
+            });
+            rtc_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_rtc(&route.key())
+                        .is_some_and(|old| super::helpers::rtc_routes_equal(old, route))
+                })
+            });
+            rtc_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_rtc(key).is_some())
+            });
         }
         // Only this shape preserves the current advertised view until the
         // exact probe: withdrawals can retire rejection-overlay entries,
@@ -1852,6 +2058,7 @@ impl RibManager {
                 .is_some_and(|group| !group.per_client_best);
         let mut group_prior = crate::fast_hash::FastSet::default();
         if !defer_grouped_refresh_prior
+            && !matches!(replay_kind, FamilyReplayKind::SelectionRelease)
             && member_of.is_some()
             && let Some(routes) = self.grouped_advertised_routes(peer)
         {
@@ -1860,7 +2067,8 @@ impl RibManager {
                 crate::update::ExactExportKey::Unicast(route.prefix, route.path_id)
             }));
         }
-        if let Some(gid) = vpn_member_of
+        if !matches!(replay_kind, FamilyReplayKind::SelectionRelease)
+            && let Some(gid) = vpn_member_of
             && let Some(group) = self.group_ribs.get(&gid)
         {
             let filter = self.member_rt_filter(peer);
@@ -1910,9 +2118,9 @@ impl RibManager {
                     ]
                 },
             ),
-            FamilyReplayKind::PrefixLimitRecovery | FamilyReplayKind::OperatorReplay => {
-                (vec![], vec![])
-            }
+            FamilyReplayKind::PrefixLimitRecovery
+            | FamilyReplayKind::OperatorReplay
+            | FamilyReplayKind::SelectionRelease => (vec![], vec![]),
         };
         if let Some(seal) = evpn_complete_feed.as_mut() {
             // Full data admission establishes coverage before the ordered
@@ -1951,11 +2159,33 @@ impl RibManager {
                 probe_cache: &mut shared.probe_cache,
                 lazy_group_prior: None,
             });
-        if let Err(failure) = self
-            .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+        let selection_noop = matches!(replay_kind, FamilyReplayKind::SelectionRelease)
+            && announce.is_empty()
+            && unicast.withdraw.is_empty()
+            && fs_announce.is_empty()
+            && fs_withdraw.is_empty()
+            && evpn_announce.is_empty()
+            && evpn_withdraw.is_empty()
+            && bgpls_announce.is_empty()
+            && bgpls_withdraw.is_empty()
+            && vpn_announce.is_empty()
+            && vpn_withdraw.is_empty()
+            && labeled_announce.is_empty()
+            && labeled_withdraw.is_empty()
+            && rtc_announce.is_empty()
+            && rtc_withdraw.is_empty();
+        let admission = if selection_noop {
+            super::retire_hash_set(&mut group_prior, &mut || self.replacement_checkpoint(false));
+            Ok(())
+        } else {
+            self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
-                    force_unicast_replay: true,
+                    local_sources: unicast.local_sources,
+                    force_unicast_replay: !matches!(
+                        replay_kind,
+                        FamilyReplayKind::SelectionRelease
+                    ),
                     defer_grouped_refresh_prior,
                     unicast_otc_prechecked,
                     announce_source_exclusion,
@@ -1984,7 +2214,8 @@ impl RibManager {
                 None,
                 None,
             )
-        {
+        };
+        if let Err(failure) = admission {
             if let Some(blocking) = prior_blocking {
                 self.set_outbound_blocking(peer, afi, blocking);
             }
@@ -1997,7 +2228,7 @@ impl RibManager {
                 FamilyReplayKind::PrefixLimitRecovery => {
                     warn!(%peer, ?family, reason = failure.as_str(), "prefix-limit recovery replay not sent");
                 }
-                FamilyReplayKind::OperatorReplay => {
+                FamilyReplayKind::OperatorReplay | FamilyReplayKind::SelectionRelease => {
                     warn!(%peer, ?family, reason = failure.as_str(), "explicit outbound replay not sent");
                 }
             }
@@ -2006,9 +2237,10 @@ impl RibManager {
                 self.replacement_checkpoint(false);
             });
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
-            super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
-                self.replacement_checkpoint(false);
-            });
+            super::retire_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
+                &self.replacement_readiness,
+            );
             self.replacement_checkpoint(true);
             return FamilyReplayOutcome::Failed;
         }
@@ -2029,15 +2261,11 @@ impl RibManager {
                     }
                 }
                 self.pending_eor.entry(peer).or_default().insert(family);
-                // The gated flood was just enqueued above; flushing now keeps
-                // the EoR behind it on the channel. A dirty peer defers to the
-                // resync paths instead — they flush pending EoR only AFTER a
-                // successful resync, and flushing here would emit any OTHER
-                // deferred families' EoR ahead of the resync that replays
-                // their table.
-                if !self.dirty_peers.contains(&peer) {
-                    self.flush_pending_eor(peer);
-                }
+            }
+            // The flood above completes an initial marker owed through either
+            // selection deferral or the GR-specific ORF hold.
+            if (initial_eor_owed || deferred_eor) && !self.dirty_peers.contains(&peer) {
+                self.flush_pending_eor(peer);
             }
         }
         super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
@@ -2045,11 +2273,25 @@ impl RibManager {
             self.replacement_checkpoint(false);
         });
         super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
-        super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
-            self.replacement_checkpoint(false);
-        });
+        super::retire_policy_filtered_routes_with_readiness(
+            &mut current_policy_filtered_routes,
+            &self.replacement_readiness,
+        );
         self.replacement_checkpoint(true);
+        if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
+            self.complete_initial_selection_replay(peer);
+            self.retire_completed_initial_group_admitted(peer);
+        }
         FamilyReplayOutcome::Committed
+    }
+
+    /// Already-pending initial markers also wait for their family's ORF flood.
+    pub(super) fn pending_eor_held(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
+        self.eor_held(peer, family)
+            || self
+                .gr_deferred_eor
+                .get(&peer)
+                .is_some_and(|held| held.contains(&family))
     }
 
     /// Try to send any deferred `EoR` markers for a peer.
@@ -2061,7 +2303,7 @@ impl RibManager {
             return;
         };
         let (blocked, ready): (HashSet<_>, HashSet<_>) = families.into_iter().partition(|family| {
-            self.eor_held(peer, *family)
+            self.pending_eor_held(peer, *family)
                 || (*family == (Afi::L2Vpn, Safi::Evpn)
                     && (self.evpn_grouped_member_of(peer).is_some()
                         || self.has_private_evpn_handoff(peer))
@@ -2089,9 +2331,13 @@ impl RibManager {
             if !marker_only {
                 self.mark_outbound_dirty(peer);
             }
-        } else if evpn_marker {
-            let bits = Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
-            self.evpn_feed_markers_admitted(peer, &tx, bits);
+        } else {
+            if evpn_marker {
+                let bits = Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
+                self.evpn_feed_markers_admitted(peer, &tx, bits);
+            }
+            self.complete_initial_selection_replay(peer);
+            self.retire_completed_initial_group_admitted(peer);
         }
     }
 
@@ -2154,7 +2400,7 @@ impl RibManager {
             .get(&peer)
             .map(|stale| {
                 stale
-                    .iter()
+                    .keys()
                     .copied()
                     .filter(|(prefix, _)| prefix_family(prefix) == family)
                     .collect()
@@ -2165,7 +2411,7 @@ impl RibManager {
             .get(&peer)
             .map(|stale| {
                 stale
-                    .iter()
+                    .keys()
                     .filter(|key| key.afi == afi && safi == Safi::FlowSpec)
                     .cloned()
                     .collect()
@@ -2174,7 +2420,7 @@ impl RibManager {
         let stale_evpn_keys: Vec<EvpnRouteKey> = if family == (Afi::L2Vpn, Safi::Evpn) {
             self.refresh_stale_evpn
                 .get(&peer)
-                .map(|stale| stale.iter().copied().collect())
+                .map(|stale| stale.keys().copied().collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -2185,7 +2431,7 @@ impl RibManager {
                     .get(&peer)
                     .map(|stale| {
                         stale
-                            .iter()
+                            .keys()
                             .filter(|key| key.family == bgpls_family)
                             .cloned()
                             .collect()
@@ -2199,7 +2445,7 @@ impl RibManager {
                 .get(&peer)
                 .map(|stale| {
                     stale
-                        .iter()
+                        .keys()
                         .filter(|key| key.afi_safi() == family)
                         .cloned()
                         .collect()
@@ -2214,7 +2460,7 @@ impl RibManager {
                     .get(&peer)
                     .map(|stale| {
                         stale
-                            .iter()
+                            .keys()
                             .filter(|key| key.afi_safi() == family)
                             .copied()
                             .collect()
@@ -2226,7 +2472,7 @@ impl RibManager {
         let stale_rtc_keys: Vec<crate::route::RtcRibRouteKey> = if safi == Safi::RtConstrain {
             self.refresh_stale_rtc
                 .get(&peer)
-                .map(|stale| stale.iter().cloned().collect())
+                .map(|stale| stale.keys().cloned().collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -2312,7 +2558,7 @@ impl RibManager {
 
         let clear_route_stale_entry = if let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
         {
-            stale.retain(|(prefix, _)| prefix_family(prefix) != family);
+            stale.retain(|(prefix, _), ()| prefix_family(prefix) != family);
             stale.is_empty()
         } else {
             false
@@ -2323,7 +2569,7 @@ impl RibManager {
 
         let clear_flowspec_stale_entry =
             if let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer) {
-                stale.retain(|key| !(key.afi == afi && safi == Safi::FlowSpec));
+                stale.retain(|key, ()| !(key.afi == afi && safi == Safi::FlowSpec));
                 stale.is_empty()
             } else {
                 false
@@ -2341,7 +2587,7 @@ impl RibManager {
         if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
             let clear_bgpls_stale_entry =
                 if let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer) {
-                    stale.retain(|key| key.family != bgpls_family);
+                    stale.retain(|key, ()| key.family != bgpls_family);
                     stale.is_empty()
                 } else {
                     false
@@ -2352,7 +2598,7 @@ impl RibManager {
         }
         if safi == Safi::MplsVpn {
             let clear_vpn_stale_entry = if let Some(stale) = self.refresh_stale_vpn.get_mut(&peer) {
-                stale.retain(|key| key.afi_safi() != family);
+                stale.retain(|key, ()| key.afi_safi() != family);
                 stale.is_empty()
             } else {
                 false
@@ -2364,7 +2610,7 @@ impl RibManager {
         if safi == Safi::LabeledUnicast {
             let clear_labeled_stale_entry =
                 if let Some(stale) = self.refresh_stale_labeled.get_mut(&peer) {
-                    stale.retain(|key| key.afi_safi() != family);
+                    stale.retain(|key, ()| key.afi_safi() != family);
                     stale.is_empty()
                 } else {
                     false

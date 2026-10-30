@@ -648,6 +648,28 @@ impl fmt::Display for ExtendedCommunity {
         }
     }
 }
+
+/// One RFC 5701 IPv6-address-specific extended community, retained losslessly.
+///
+/// These twenty-octet values belong to path attribute 25, independently of
+/// the eight-octet RFC 4360 values in attribute 16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ipv6ExtendedCommunity([u8; 20]);
+
+impl Ipv6ExtendedCommunity {
+    /// Retain every octet, including unknown types and reserved bits.
+    #[must_use]
+    pub const fn new(value: [u8; 20]) -> Self {
+        Self(value)
+    }
+
+    /// The complete RFC 5701 community in network byte order.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 20] {
+        &self.0
+    }
+}
+
 /// RFC 8092 Large Community — 12-byte value: `(global_admin, local_data1, local_data2)`.
 ///
 /// Each field is a 32-bit unsigned integer. Display format: `"65001:100:200"`.
@@ -713,6 +735,10 @@ pub enum PathAttribute {
     /// A valid received RFC 4360 EXTENDED COMMUNITIES attribute carrying the
     /// RFC 4271 Partial bit.
     ExtendedCommunitiesPartial(Vec<ExtendedCommunity>),
+    /// RFC 5701 twenty-octet IPv6-address-specific extended communities.
+    Ipv6ExtendedCommunities(Vec<Ipv6ExtendedCommunity>),
+    /// RFC 5701 communities carrying the received RFC 4271 Partial bit.
+    Ipv6ExtendedCommunitiesPartial(Vec<Ipv6ExtendedCommunity>),
     /// RFC 8092 LARGE COMMUNITIES. Duplicate values are normalized at
     /// decode and encode boundaries while retaining first-seen order.
     LargeCommunities(Vec<LargeCommunity>),
@@ -765,6 +791,9 @@ impl PathAttribute {
             Self::ExtendedCommunities(_) | Self::ExtendedCommunitiesPartial(_) => {
                 attr_type::EXTENDED_COMMUNITIES
             }
+            Self::Ipv6ExtendedCommunities(_) | Self::Ipv6ExtendedCommunitiesPartial(_) => {
+                attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY
+            }
             Self::LargeCommunities(_) | Self::LargeCommunitiesPartial(_) => {
                 attr_type::LARGE_COMMUNITIES
             }
@@ -800,11 +829,13 @@ impl PathAttribute {
             }
             Self::Communities(_)
             | Self::ExtendedCommunities(_)
+            | Self::Ipv6ExtendedCommunities(_)
             | Self::LargeCommunities(_)
             | Self::PmsiTunnel(_)
             | Self::OnlyToCustomer(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
             Self::CommunitiesPartial(_)
             | Self::ExtendedCommunitiesPartial(_)
+            | Self::Ipv6ExtendedCommunitiesPartial(_)
             | Self::LargeCommunitiesPartial(_)
             | Self::PmsiTunnelPartial(_)
             | Self::OnlyToCustomerPartial(_) => {
@@ -853,6 +884,17 @@ impl PathAttribute {
             Self::ExtendedCommunities(values) | Self::ExtendedCommunitiesPartial(values) => {
                 Some(values)
             }
+            _ => None,
+        }
+    }
+
+    /// RFC 5701 twenty-octet community values, independent of Partial.
+    #[inline]
+    #[must_use]
+    pub fn ipv6_extended_communities(&self) -> Option<&[Ipv6ExtendedCommunity]> {
+        match self {
+            Self::Ipv6ExtendedCommunities(values)
+            | Self::Ipv6ExtendedCommunitiesPartial(values) => Some(values),
             _ => None,
         }
     }
@@ -1447,7 +1489,6 @@ fn assigned_unsupported_flags(type_code: u8) -> Option<u8> {
         | attr_type::BGPSEC_PATH
         | attr_type::EDGE_METADATA => Some(attr_flags::OPTIONAL),
         attr_type::TUNNEL_ENCAPSULATION
-        | attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY
         | attr_type::PE_DISTINGUISHER_LABELS
         | attr_type::COMMUNITY_CONTAINER
         | attr_type::DOMAIN_PATH
@@ -2036,6 +2077,31 @@ fn decode_attribute_value(
                 Ok(PathAttribute::ExtendedCommunitiesPartial(communities))
             } else {
                 Ok(PathAttribute::ExtendedCommunities(communities))
+            }
+        }
+        attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY => {
+            let chunks = match value.as_chunks::<20>() {
+                (chunks, []) if !chunks.is_empty() => chunks,
+                _ => {
+                    return Err(DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                        data: attr_error_data(flags, type_code, value),
+                        detail: format!(
+                            "IPv6 extended communities length {} not a non-zero multiple of 20",
+                            value.len()
+                        ),
+                    });
+                }
+            };
+            let communities = chunks
+                .iter()
+                .copied()
+                .map(Ipv6ExtendedCommunity::new)
+                .collect();
+            if flags & attr_flags::PARTIAL != 0 {
+                Ok(PathAttribute::Ipv6ExtendedCommunitiesPartial(communities))
+            } else {
+                Ok(PathAttribute::Ipv6ExtendedCommunities(communities))
             }
         }
         attr_type::ORIGINATOR_ID => {
@@ -2933,6 +2999,7 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         | attr_type::AS4_AGGREGATOR
         | attr_type::COMMUNITIES
         | attr_type::EXTENDED_COMMUNITIES
+        | attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY
         | attr_type::LARGE_COMMUNITIES
         | attr_type::PMSI_TUNNEL
         | attr_type::ONLY_TO_CUSTOMER => Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
@@ -3283,6 +3350,26 @@ fn encode_path_attributes_with_scratch<'a>(
                 type_code = attr_type::EXTENDED_COMMUNITIES;
                 for &c in communities {
                     value_scratch.extend_from_slice(&c.as_u64().to_be_bytes());
+                }
+            }
+            PathAttribute::Ipv6ExtendedCommunities(communities)
+            | PathAttribute::Ipv6ExtendedCommunitiesPartial(communities) => {
+                if communities.is_empty() {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY",
+                        value: "empty attribute is prohibited by RFC 7606 section 7.15".to_string(),
+                    });
+                }
+                flags = attr_flags::OPTIONAL
+                    | attr_flags::TRANSITIVE
+                    | if matches!(attr, PathAttribute::Ipv6ExtendedCommunitiesPartial(_)) {
+                        attr_flags::PARTIAL
+                    } else {
+                        0
+                    };
+                type_code = attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY;
+                for community in communities {
+                    value_scratch.extend_from_slice(community.as_bytes());
                 }
             }
             PathAttribute::LargeCommunities(communities)

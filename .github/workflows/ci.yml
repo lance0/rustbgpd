@@ -221,6 +221,7 @@ jobs:
           bash -n tests/interop/scripts/test-m121-evpn-all-active-frr.sh
           shellcheck -x tests/interop/scripts/test-m121-evpn-all-active-frr.sh
           python3 tests/interop/scripts/test_interop_signal_cleanup.py
+          python3 tests/interop/scripts/test_m27_captured_output.py
           python3 tests/interop/scripts/test_m66_failure_diagnostics.py
           python3 tests/interop/scripts/test_m67_rerun_mode.py
           python3 tests/interop/scripts/test_m69_df_wait_checker.py
@@ -332,7 +333,10 @@ jobs:
           esac
           scripts/check-proto.sh "$base"
       - run: python3 scripts/reflow-release-notes.py --selftest
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Lint the RIB separately so workspace feature unification cannot hide diagnostics.
+      - run: |
+          cargo clippy --locked -p rustbgpd-rib --all-targets -- -D warnings
+          cargo clippy --locked --workspace --all-targets -- -D warnings
       # `tokio-codec` is intentionally off by default, so the workspace lint
       # above does not compile its public adapter, tests, or example.
       - run: cargo clippy --locked -p rustbgpd-wire --all-targets --features tokio-codec -- -D warnings

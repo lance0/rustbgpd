@@ -79,8 +79,13 @@ intent before deciding what to retry.
 `FlowSpecAction` is inventoried in both directions: `AddFlowSpec` accepts it
 and `ListFlowSpecRoutes` returns it typed. That includes traffic-rate-bytes,
 traffic-rate-packets (`traffic_rate_packets`), traffic-action,
-traffic-marking and the three redirect forms. Every action community is also
-echoed raw in `FlowSpecRouteEntry.extended_communities`, and that echo stays.
+traffic-marking, the three VRF redirect forms, and direct target-IP
+redirect/copy (`redirect_ip`). Every 8-octet action community is also echoed
+raw in `FlowSpecRouteEntry.extended_communities`; 20-octet IPv6 communities
+are echoed losslessly in `ipv6_extended_communities`. The two raw lists keep
+unknown values, reserved bits, order and duplicates. The additive field and
+message-graph amendment is recorded in
+[ADR-0143](../adr/0143-flowspec-direct-ip-actions.md).
 A redirect read back as `0.ASN:value` uses RFC 5396 asdot+, which keeps the
 4-octet-AS encoding when the rule is re-injected. This pins the API shape
 only: it adds no forwarding, installation or enforcement guarantee for any
@@ -103,10 +108,10 @@ The following shared surfaces remain **outside v1**:
 The message-graph digest includes the shared messages as a review tripwire;
 it does not promote the excluded fields or modes. `OK` means local mutation,
 and the advertised view means admission to the destination's outbound channel.
-Selection may be deferred during GR; a full outbound channel leaves prior
-committed rows visible until resynchronization. Neither observation proves
-remote acceptance. Local intent is process-local and must be re-injected by
-the controller after a daemon restart.
+Received selection may be deferred during GR; a full outbound channel leaves
+prior committed rows visible until resynchronization. Neither observation
+proves remote acceptance. Local intent is process-local and must be
+re-injected by the controller after a daemon restart.
 
 The [dated dual-stack qualification](../artifacts/interop/m22-flowspec-controller-20261002/README.md)
 supplies the controller lifecycle evidence: 100 rules, 50 per AFI, against
@@ -134,24 +139,47 @@ absent. After restarting the daemon, re-inject desired rules and verify local
 intent separately from committed advertisements and remote observations.
 
 A planned restart (SIGTERM with a Graceful Restart marker in
-`runtime_state_dir`) arms RFC 4724 selection deferral when any static
-neighbor has Graceful Restart enabled. Re-injected FlowSpec rules are selected
-and sent to Established peers at once; rules received from peers, and the
-FlowSpec End-of-RIB, wait for the deferral to release
-([api.md](api.md#flowspec-injection-contract)). Re-injected unicast routes,
-RTBH host routes included, wait too: `ListPathExportDispositions` reports them
-`PENDING` with reason `selection_deferred`, and
-`NeighborState.selection_deferral` shows the active family rows. The window
-lasts until every static Graceful Restart neighbor has sent End-of-RIB for the
-family or been excluded (for example, its OPEN lacks Graceful Restart for that
-family), and at most the maximum effective `gr_restart_time`, counted from
-shutdown (120 seconds by default). A neighbor that never comes up holds the
-window for the whole time, including toward peers that are already
-Established. `MarkReplayComplete` does not end it; it releases only the
-separate [End-of-RIB grace window](configuration.md#planned-restart-end-of-rib-grace-window).
-To shorten the window, remove placeholder neighbors that will not come up,
-set `graceful_restart = false` on neighbors that are not expected to return,
-or lower `gr_restart_time`.
+`runtime_state_dir`) retains the static GR peer/family roster. Each family's
+selection-deferral roster starts dormant and applies no hold until a roster
+peer re-establishes a session for it. Only eligible re-established peers wait
+for End-of-RIB; a configured neighbor that stays down or never returns does
+not hold selection. New current sessions can join an active family wait.
+Once its current waiters are satisfied, excluded or down, the family releases
+permanently; a later peer does not re-arm it. See the
+[startup selection amendment](../adr/0141-injection-owner-lease.md#amendment-wait-for-re-established-gr-peers-2026-10-27).
+Re-injected RTBH unicast and FlowSpec rules are eligible for selection and export during an active hold, subject to ordinary policy
+and admission. RTBH eligibility means an IPv4 `/32`, IPv6 `/128`, or any
+prefix carrying standard BLACKHOLE `65535:666`, leased or unleased and with
+any local `path_id`. A host route qualifies without BLACKHOLE; the
+classification promises no remote discard. Other injected unicast, including
+untagged defaults and aggregates, waits like received candidates. While
+selection is deferred, only eligible local candidates compete in every
+selection mode; received candidates remain retained and ineligible.
+`ListPathExportDispositions` reports local outbound-channel admission as
+`COMMITTED`, never remote acceptance or enforcement. Other eligible local
+candidates, policy and admission can still
+withhold or delay an export. See the API contracts for
+[unicast](api.md#unicast-injection-contract) and
+[FlowSpec](api.md#flowspec-injection-contract).
+
+`NeighborState.selection_deferral` shows per-family startup state. Ordinary
+competition resumes when selection becomes available, including when
+collision failback stages selection while completion markers remain held.
+The marker-bounded window lasts at most the maximum effective
+`gr_restart_time`, counted from shutdown (120 seconds by default). An eligible
+re-established peer missing End-of-RIB still holds selection until that
+completion or the bound. End-of-RIB follows release selection and all existing
+completion gates. `MarkReplayComplete` releases only the separate
+[End-of-RIB grace window](configuration.md#planned-restart-end-of-rib-grace-window);
+it does not end selection deferral or the other convergence and refresh
+holds. Delete and lease expiry withdraw local intent during deferral without
+advertising a received fallback.
+
+The unicast RTBH exemption remains a deliberate exception to RFC 4724 §4.1;
+see the [ADR-0141 amendment](../adr/0141-injection-owner-lease.md#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27).
+To shorten the upper bound for re-established peers that have not sent
+End-of-RIB, lower the maximum effective `gr_restart_time` across static peers
+before the next planned restart.
 
 This promotion changes no configuration shape, default or release anchor.
 The existing consecutive-release configuration fixture chain remains the
@@ -519,9 +547,11 @@ These meanings are part of the inventoried RPC contract:
   observed Idle/down state. Consumers must check `stale` before interpreting
   the state.
 - `GetHealth`: `healthy=true` means the core snapshot was obtained, not that
-  every session or the dataplane is healthy. `active_peers` counts only
-  non-stale `Established` observations, so an unavailable peer is excluded
-  without asserting it is down. Core snapshot failure returns an RPC error:
+  every session or the dataplane is healthy. `active_peers` counts
+  configured peers whose session reports `Established`, from the state each
+  session publishes on every FSM transition rather than a per-session query;
+  a session that has ended is not counted. Core snapshot failure returns an
+  RPC error:
   `UNAVAILABLE` when a core actor misses the probe deadline, which may be
   transient (busy) or persistent (wedged), so a caller may retry once and
   should treat a repeated miss as a failure; `INTERNAL` for every other

@@ -1,0 +1,40 @@
+name: Release build features
+
+# The release build must not resolve `bench-internals` in the shipped
+# packages. Any manifest can change feature unification, so every
+# Cargo.toml triggers the check.
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - Cargo.lock
+      - .github/workflows/release.yml
+      - .github/workflows/release-build-features.yml
+      - scripts/check_release_build_features.py
+      - scripts/test_check_release_build_features.py
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - Cargo.lock
+      - .github/workflows/release.yml
+      - .github/workflows/release-build-features.yml
+      - scripts/check_release_build_features.py
+      - scripts/test_check_release_build_features.py
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1 # stable
+        with:
+          toolchain: stable
+      - name: Test release build feature guard
+        run: python3 -m unittest -v scripts/test_check_release_build_features.py
+      - name: Check release build features
+        run: python3 scripts/check_release_build_features.py

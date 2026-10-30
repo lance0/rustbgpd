@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-use crate::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerReadinessQuery};
+use crate::peer_types::{PeerManagerCommand, PeerManagerReadinessQuery};
 use rustbgpd_rib::{RibReadinessError, RibReadinessQuery, RibUpdate};
 
 /// Total deadline for the core actor readiness probe.
@@ -97,8 +97,8 @@ impl DaemonGate {
 /// Snapshot returned by a successful core actor probe.
 #[derive(Debug)]
 pub struct CoreHealthSnapshot {
-    /// Peer snapshots returned by the peer manager.
-    pub peers: Vec<PeerInfo>,
+    /// Configured peers whose session is Established.
+    pub active_peers: usize,
     /// Current Loc-RIB best-path count.
     pub total_routes: usize,
 }
@@ -162,6 +162,10 @@ impl CoreReadinessProbe {
 
     /// Probe `PeerManager` responsiveness and RIB readiness.
     ///
+    /// Both actors are queried concurrently under one shared deadline, so a
+    /// slow but healthy answer from one does not spend the other's budget.
+    /// When both fail, the peer-manager error is reported.
+    ///
     /// A daemon with zero configured peers or zero routes can still be ready.
     /// During an actor-owned export-policy transition, the dedicated RIB lane
     /// remains responsive but reports a stalled owner once its age reaches 30
@@ -177,12 +181,21 @@ impl CoreReadinessProbe {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
         }
         let deadline = Instant::now() + CORE_READINESS_DEADLINE;
-        self.ping_peer_manager(deadline).await?;
-        self.query_rib(deadline).await?;
+        tokio::try_join!(
+            biased;
+            self.ping_peer_manager(deadline),
+            self.query_rib(deadline)
+        )?;
         Ok(())
     }
 
     /// Return the same core actor snapshot used by `GetHealth`.
+    ///
+    /// As in [`Self::check`], the peer-manager count and the RIB count are
+    /// queried concurrently under one shared deadline. The peer manager
+    /// counts Established peers from the state each session publishes, so
+    /// the answer does not wait on sessions draining a post-reload export
+    /// burst.
     ///
     /// # Errors
     ///
@@ -194,28 +207,28 @@ impl CoreReadinessProbe {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
         }
         let deadline = Instant::now() + CORE_READINESS_DEADLINE;
-        let peers = self.query_peer_manager(deadline).await?;
-        let total_routes = self.query_rib(deadline).await?;
+        let (active_peers, total_routes) = tokio::try_join!(
+            biased;
+            self.count_active_peers(deadline),
+            self.query_rib(deadline)
+        )?;
         Ok(CoreHealthSnapshot {
-            peers,
+            active_peers,
             total_routes,
         })
     }
 
-    async fn query_peer_manager(
-        &self,
-        deadline: Instant,
-    ) -> Result<Vec<PeerInfo>, CoreReadinessError> {
+    async fn count_active_peers(&self, deadline: Instant) -> Result<usize, CoreReadinessError> {
         timeout_until(deadline, CoreReadinessError::PeerManagerTimedOut, async {
             let (reply_tx, reply_rx) = oneshot::channel();
             if let Some(readiness_tx) = &self.peer_mgr_readiness_tx {
                 readiness_tx
-                    .send(PeerManagerReadinessQuery::ListPeers { reply: reply_tx })
+                    .send(PeerManagerReadinessQuery::ActivePeers { reply: reply_tx })
                     .await
                     .map_err(|_| CoreReadinessError::PeerManagerUnavailable)?;
             } else {
                 self.peer_mgr_tx
-                    .send(PeerManagerCommand::ListPeers { reply: reply_tx })
+                    .send(PeerManagerCommand::ActivePeers { reply: reply_tx })
                     .await
                     .map_err(|_| CoreReadinessError::PeerManagerUnavailable)?;
             }
@@ -377,13 +390,15 @@ mod tests {
 
     async fn reply_to_peer_manager(
         peer_rx: &mut mpsc::Receiver<PeerManagerCommand>,
-        peers: Vec<PeerInfo>,
+        active_peers: usize,
     ) {
         let command = peer_rx.recv().await.expect("peer manager command");
-        let PeerManagerCommand::ListPeers { reply } = command else {
-            panic!("expected ListPeers command");
+        let PeerManagerCommand::ActivePeers { reply } = command else {
+            panic!("expected ActivePeers command");
         };
-        reply.send(peers).expect("peer reply receiver is alive");
+        reply
+            .send(active_peers)
+            .expect("peer reply receiver is alive");
     }
 
     async fn reply_to_peer_manager_ping(peer_rx: &mut mpsc::Receiver<PeerManagerCommand>) {
@@ -406,12 +421,12 @@ mod tests {
 
     async fn reply_to_core_probe(
         peer_rx: &mut mpsc::Receiver<PeerManagerCommand>,
-        peers: Vec<PeerInfo>,
+        active_peers: usize,
         rib_rx: &mut mpsc::Receiver<RibUpdate>,
         total_routes: usize,
     ) {
         tokio::join!(
-            reply_to_peer_manager(peer_rx, peers),
+            reply_to_peer_manager(peer_rx, active_peers),
             reply_to_rib(rib_rx, total_routes)
         );
     }
@@ -476,12 +491,12 @@ mod tests {
 
         let snapshot = tokio::join!(
             probe.snapshot(),
-            reply_to_core_probe(&mut peer_rx, Vec::new(), &mut rib_rx, 17)
+            reply_to_core_probe(&mut peer_rx, 3, &mut rib_rx, 17)
         )
         .0
         .expect("probe should succeed");
 
-        assert!(snapshot.peers.is_empty());
+        assert_eq!(snapshot.active_peers, 3);
         assert_eq!(snapshot.total_routes, 17);
     }
 
@@ -519,12 +534,12 @@ mod tests {
             CoreReadinessProbe::new(peer_tx, rib_tx).with_peer_manager_readiness(readiness_tx);
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
-            let PeerManagerReadinessQuery::ListPeers { reply } =
+            let PeerManagerReadinessQuery::ActivePeers { reply } =
                 readiness_rx.recv().await.expect("readiness query")
             else {
-                panic!("expected ListPeers readiness query");
+                panic!("expected ActivePeers readiness query");
             };
-            reply.send(Vec::new()).unwrap();
+            reply.send(0).unwrap();
             reply_to_rib(&mut rib_rx, 9).await;
         });
 
@@ -532,6 +547,100 @@ mod tests {
         assert!(
             peer_rx.try_recv().is_err(),
             "ordinary peer-manager command lane must remain untouched"
+        );
+    }
+
+    /// After a reload commit both actors can be slow to answer while the
+    /// export burst runs. Each half fits the 200 ms deadline; run in sequence
+    /// they did not. The RIB query must be issued while the peer-manager reply
+    /// is still withheld, and the probe must succeed once both answers arrive.
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_queries_rib_while_peer_manager_reply_is_withheld() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_tx).with_peer_manager_readiness(readiness_tx);
+        let started = Instant::now();
+        let health = tokio::spawn(async move { probe.snapshot().await });
+
+        let PeerManagerReadinessQuery::ActivePeers { reply: peers_reply } = readiness_rx
+            .recv()
+            .await
+            .expect("peer-manager readiness query")
+        else {
+            panic!("GetHealth must ask the peer manager for its active-peer count");
+        };
+        let rib_query = tokio::time::timeout(CORE_READINESS_DEADLINE, rib_rx.recv())
+            .await
+            .expect("the RIB query must not wait for the peer-manager reply")
+            .expect("RIB query");
+        let RibUpdate::QueryLocRibCount { reply: rib_reply } = rib_query else {
+            panic!("expected QueryLocRibCount command");
+        };
+
+        // Both halves take 150 ms of the shared 200 ms deadline.
+        tokio::time::advance(Duration::from_millis(150)).await;
+        rib_reply.send(23).unwrap();
+        peers_reply.send(0).unwrap();
+
+        let snapshot = health
+            .await
+            .unwrap()
+            .expect("two halves inside the deadline make a healthy snapshot");
+        assert_eq!(snapshot.total_routes, 23);
+        assert!(started.elapsed() < CORE_READINESS_DEADLINE);
+    }
+
+    /// `/readyz` composes the peer-manager ping and the RIB count the same
+    /// way, so the same overlap holds for [`CoreReadinessProbe::check`].
+    #[tokio::test(start_paused = true)]
+    async fn check_queries_rib_while_peer_manager_ping_is_withheld() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_tx).with_peer_manager_readiness(readiness_tx);
+        let ready = tokio::spawn(async move { probe.check().await });
+
+        let PeerManagerReadinessQuery::Ping { reply: ping_reply } = readiness_rx
+            .recv()
+            .await
+            .expect("peer-manager readiness ping")
+        else {
+            panic!("readiness must ping the peer manager");
+        };
+        let rib_query = tokio::time::timeout(CORE_READINESS_DEADLINE, rib_rx.recv())
+            .await
+            .expect("the RIB query must not wait for the peer-manager ping")
+            .expect("RIB query");
+        let RibUpdate::QueryLocRibCount { reply: rib_reply } = rib_query else {
+            panic!("expected QueryLocRibCount command");
+        };
+        tokio::time::advance(Duration::from_millis(150)).await;
+        rib_reply.send(0).unwrap();
+        ping_reply.send(()).unwrap();
+
+        ready
+            .await
+            .unwrap()
+            .expect("two halves inside the deadline keep readiness green");
+    }
+
+    /// When both halves fail, the peer-manager error still wins, as it did
+    /// when the halves ran in sequence.
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_halves_report_the_peer_manager_miss_first() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+        assert_eq!(
+            probe.snapshot().await.unwrap_err(),
+            CoreReadinessError::PeerManagerTimedOut
+        );
+        assert_eq!(
+            probe.check().await.unwrap_err(),
+            CoreReadinessError::PeerManagerTimedOut
         );
     }
 
@@ -544,7 +653,7 @@ mod tests {
             CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            reply_to_peer_manager(&mut peer_rx, 0).await;
             let RibReadinessQuery::LocRibCount { reply, .. } =
                 rib_readiness_rx.recv().await.expect("RIB readiness query");
             reply.send(Ok(11)).unwrap();
@@ -598,7 +707,7 @@ mod tests {
             CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            reply_to_peer_manager(&mut peer_rx, 0).await;
             let RibReadinessQuery::LocRibCount { reply, .. } =
                 rib_readiness_rx.recv().await.expect("RIB readiness query");
             reply
@@ -624,7 +733,7 @@ mod tests {
             CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            reply_to_peer_manager(&mut peer_rx, 0).await;
             let RibReadinessQuery::LocRibCount { reply, .. } =
                 rib_readiness_rx.recv().await.expect("RIB readiness query");
             reply
@@ -649,7 +758,7 @@ mod tests {
         let probe =
             CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
         let (result, ()) = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            reply_to_peer_manager(&mut peer_rx, 0).await;
             let RibReadinessQuery::LocRibCount { reply, .. } =
                 rib_readiness_rx.recv().await.unwrap();
             reply
@@ -723,11 +832,11 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_fails_when_rib_sender_is_closed() {
-        let (probe, mut peer_rx) = probe_with_closed_rib();
+        let (probe, _peer_rx) = probe_with_closed_rib();
 
-        let (result, ()) = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
-        });
+        // The halves run concurrently: a closed RIB fails the probe without
+        // waiting for the peer-manager answer.
+        let result = probe.snapshot().await;
 
         assert_eq!(
             result.expect_err("closed RIB channel should fail"),
@@ -743,8 +852,8 @@ mod tests {
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
             let command = peer_rx.recv().await.expect("peer manager command");
-            let PeerManagerCommand::ListPeers { reply } = command else {
-                panic!("expected ListPeers command");
+            let PeerManagerCommand::ActivePeers { reply } = command else {
+                panic!("expected ActivePeers command");
             };
             drop(reply);
         });
@@ -762,7 +871,7 @@ mod tests {
         let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            reply_to_peer_manager(&mut peer_rx, 0).await;
             let command = rib_rx.recv().await.expect("RIB command");
             let RibUpdate::QueryLocRibCount { reply } = command else {
                 panic!("expected QueryLocRibCount command");
@@ -869,7 +978,7 @@ mod tests {
         let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            reply_to_peer_manager(&mut peer_rx, 0).await;
         });
 
         assert_eq!(

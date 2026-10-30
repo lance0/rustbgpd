@@ -1,0 +1,329 @@
+{
+  "verdict": "pass",
+  "samples": 2920,
+  "reloads_issued": 48,
+  "reloads_complete": 48,
+  "trips_executed": 6,
+  "trips_planned": 6,
+  "peak_rss_mb": 656.5,
+  "rss_late_slope_per_hour": 1.0193481942457738,
+  "intern_late_slope_per_hour": -0.0034484126392637115,
+  "slope_window_evaluated": true,
+  "max_registration_wait_sec": 0,
+  "gates": {
+    "min_samples": {
+      "value": 2920,
+      "limit": 2592.0,
+      "pass": true
+    },
+    "session_floor": {
+      "value": {
+        "violations": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "reload_accounting": {
+      "value": {
+        "issued": 48,
+        "complete": 48,
+        "planned": 48
+      },
+      "pass": true
+    },
+    "trip_accounting": {
+      "value": {
+        "executed": 6,
+        "planned": 6,
+        "defects": {}
+      },
+      "pass": true
+    },
+    "exceeded_exact": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "flap_budget": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "msgs_sent_monotone": {
+      "value": {
+        "breaks": 0
+      },
+      "pass": true
+    },
+    "readyz": {
+      "value": {
+        "bad_samples": 0,
+        "status_failures": 0,
+        "latency_failures": 0,
+        "longest_consecutive": 0,
+        "first": [],
+        "in_reload_window": 0,
+        "limit_ms": 250.0,
+        "limit_consecutive": 3,
+        "sample_scrape_failures": 0,
+        "observation_gaps": [],
+        "observation_gap_count": 0
+      },
+      "pass": true
+    },
+    "rss_peak_mb": {
+      "value": 656.5,
+      "limit": 3072.0,
+      "pass": true
+    },
+    "rss_late_slope_per_hour": {
+      "value": 1.0193481942457738,
+      "limit": 10.0,
+      "pass": true,
+      "note": null
+    },
+    "intern_late_slope_per_hour": {
+      "value": -0.0034484126392637115,
+      "limit": 100.0,
+      "pass": true,
+      "note": null
+    },
+    "no_abort": {
+      "value": [],
+      "pass": true
+    },
+    "outbound_registration_wait": {
+      "value": {
+        "max_seconds": 0,
+        "at_elapsed_sec": 0.0,
+        "samples_over_limit": 0
+      },
+      "limit": 300,
+      "pass": true
+    },
+    "daemon_log": {
+      "value": {
+        "records": 79613,
+        "errors": 0,
+        "defects": 0,
+        "warnings_by_message": {
+          "TCP connect failed": 6,
+          "inbound connection from unknown peer, dropping": 294,
+          "max prefix exceeded": 6,
+          "outbound update not sent \u2014 marking dirty for resync": 4,
+          "update-group recovery lacks complete admitted proof; retaining conservative withdrawal duties": 4
+        },
+        "first_administrative_shutdown_unix": 1793166320.966527,
+        "sighup_settlements_unix": [
+          1793078729.45167,
+          1793080536.068784,
+          1793082342.943634,
+          1793084150.32995,
+          1793085957.421893,
+          1793087765.140074,
+          1793089572.58367,
+          1793091380.002432,
+          1793093308.907807,
+          1793095116.816175,
+          1793096924.266362,
+          1793098731.243959,
+          1793100538.079937,
+          1793102345.182737,
+          1793104152.472038,
+          1793105959.35228,
+          1793107888.14907,
+          1793109695.644508,
+          1793111503.322271,
+          1793113310.685449,
+          1793115117.675128,
+          1793116925.481494,
+          1793118732.400195,
+          1793120539.824407,
+          1793122467.863245,
+          1793124274.858874,
+          1793126082.351743,
+          1793127889.01398,
+          1793129696.417805,
+          1793131503.928406,
+          1793133311.204635,
+          1793135118.542993,
+          1793137047.404606,
+          1793138853.901111,
+          1793140661.364671,
+          1793142468.766207,
+          1793144275.505277,
+          1793146083.729342,
+          1793147891.263725,
+          1793149698.963298,
+          1793151627.266549,
+          1793153434.751403,
+          1793155242.116411,
+          1793157049.244027,
+          1793158856.903639,
+          1793160663.325282,
+          1793162470.759369,
+          1793164277.842364
+        ],
+        "examples": []
+      },
+      "pass": true
+    },
+    "management_evidence": {
+      "value": {
+        "errors": [],
+        "count_mismatches": []
+      },
+      "pass": true
+    },
+    "management_lifetime": {
+      "value": {
+        "load_start": 3142318.710132,
+        "measured_start": 3142318.832405206,
+        "measured_end": 3229946.349414086,
+        "stop_requested": 3229946.385053,
+        "load_end": 3229946.386622,
+        "last_operation_completed": 3229945.90865,
+        "engine_finish_release": 3229946.514506049,
+        "load_end_unix": 1793166320.7737148,
+        "engine_first_shutdown_unix": 1793166320.966527
+      },
+      "pass": true
+    },
+    "management_operations": {
+      "value": {
+        "metrics": 87601,
+        "neighbor": 17526,
+        "policy_stats": 17526,
+        "rib_prefix": 17526,
+        "doctor": 147
+      },
+      "pass": true
+    },
+    "management_completion": {
+      "value": {
+        "metrics": {
+          "scheduled": 87628,
+          "completed": 87601,
+          "ratio": 0.9996918793079838
+        },
+        "neighbor": {
+          "scheduled": 17526,
+          "completed": 17526,
+          "ratio": 1.0
+        },
+        "policy_stats": {
+          "scheduled": 17526,
+          "completed": 17526,
+          "ratio": 1.0
+        },
+        "rib_prefix": {
+          "scheduled": 17526,
+          "completed": 17526,
+          "ratio": 1.0
+        },
+        "doctor": {
+          "scheduled": 147,
+          "completed": 147,
+          "ratio": 1.0
+        }
+      },
+      "limit": 0.9,
+      "pass": true
+    },
+    "management_cadence": {
+      "value": {
+        "defects": [],
+        "operations": {
+          "metrics": {
+            "missed": 27,
+            "per_reload": {
+              "2": 1,
+              "4": 1,
+              "7": 1,
+              "8": 1,
+              "9": 1,
+              "11": 1,
+              "12": 1,
+              "13": 1,
+              "15": 1,
+              "17": 1,
+              "18": 1,
+              "19": 1,
+              "23": 1,
+              "24": 1,
+              "27": 1,
+              "28": 1,
+              "29": 1,
+              "31": 1,
+              "32": 1,
+              "34": 1,
+              "38": 1,
+              "40": 1,
+              "42": 1,
+              "43": 1,
+              "44": 1,
+              "45": 1,
+              "48": 1
+            },
+            "outside_windows": []
+          },
+          "neighbor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "policy_stats": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "rib_prefix": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "doctor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          }
+        }
+      },
+      "limit": 2,
+      "pass": true
+    },
+    "management_failures": {
+      "value": {
+        "count": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "management_availability": {
+      "value": {
+        "count": 0,
+        "per_operation": {
+          "metrics": 0,
+          "neighbor": 0,
+          "policy_stats": 0,
+          "rib_prefix": 0,
+          "doctor": 0
+        },
+        "misses": [],
+        "violations": [],
+        "limit_consecutive": 2,
+        "limit_per_operation": 3,
+        "reload_margin_sec": 10.0
+      },
+      "pass": true
+    },
+    "management_doctor": {
+      "value": {
+        "attempts": 147,
+        "failures": [],
+        "availability_misses": 0
+      },
+      "pass": true
+    }
+  }
+}

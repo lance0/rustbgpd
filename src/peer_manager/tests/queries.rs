@@ -952,3 +952,131 @@ fn validation_policy_posture_resolves_prospective_ranges_and_caps_before_resolut
     );
     assert_eq!(capped.rpki_invalid.reason, "incomplete");
 }
+
+/// A manager with both read lanes (the operator lane sets the detached-read
+/// limit) and two sessions that accept `QueryState` but never answer it, so
+/// a peer snapshot's fan-out runs to its whole `PEER_QUERY_TIMEOUT`, as it
+/// can while sessions drain a reload's exports.
+fn manager_with_held_session_state() -> (
+    PeerManager,
+    mpsc::Sender<PeerManagerCommand>,
+    mpsc::Sender<PeerManagerReadinessQuery>,
+    mpsc::Sender<EnqueuedOperatorQuery>,
+) {
+    let (tx, rx) = mpsc::channel(4);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let mut manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx)
+    .with_operator_queries(operator_rx);
+    for host in 1..=2 {
+        insert_test_managed_peer(
+            &mut manager,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, host)),
+            stalled_policy_query_handle(),
+            false,
+        );
+    }
+    (manager, tx, readiness_tx, operator_tx)
+}
+
+/// Core probes over a stub RIB that answers every Loc-RIB count at once.
+fn core_probe(
+    command_tx: &mpsc::Sender<PeerManagerCommand>,
+    readiness_tx: &mpsc::Sender<PeerManagerReadinessQuery>,
+) -> rustbgpd_api::health_probe::CoreReadinessProbe {
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::QueryLocRibCount { reply } = update {
+                let _ = reply.send(0);
+            }
+        }
+    });
+    rustbgpd_api::health_probe::CoreReadinessProbe::new(command_tx.clone(), rib_tx)
+        .with_peer_manager_readiness(readiness_tx.clone())
+}
+
+/// Queue a peer snapshot (`ListPeers`) on the readiness lane whose sessions
+/// hold `QueryState`, then issue `GetHealth` and `/readyz`. Both must answer
+/// before the snapshot's session fan-out can end:
+///
+/// - Answered in place, the snapshot held the readiness lane for the whole
+///   fan-out, so a probe queued behind it missed its 200 ms deadline right
+///   after a reload commit.
+/// - `GetHealth` itself must not wait on sessions. When it counted
+///   Established peers from a `QueryState` fan-out, a runtime saturated by
+///   the post-commit export burst woke that fan-out late and `GetHealth`
+///   still missed its deadline.
+async fn health_probes_overtake_a_held_peer_snapshot(
+    readiness_tx: &mpsc::Sender<PeerManagerReadinessQuery>,
+    probe: &rustbgpd_api::health_probe::CoreReadinessProbe,
+) {
+    let started = tokio::time::Instant::now();
+    let (reply, peer_snapshot) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::ListPeers { reply })
+        .await
+        .unwrap();
+    let (health, ready) = tokio::join!(probe.snapshot(), probe.check());
+    ready.expect("readiness inside its deadline while a peer snapshot waits on sessions");
+    let health = health.expect("GetHealth inside its deadline while sessions hold QueryState");
+    assert_eq!(health.active_peers, 0, "no session is Established");
+    assert!(
+        started.elapsed() < PEER_QUERY_TIMEOUT,
+        "the health probes waited {:?} on the held sessions",
+        started.elapsed()
+    );
+    let peers = peer_snapshot.await.expect("peer snapshot answered");
+    assert!(peers.iter().all(|peer| peer.stale));
+}
+
+#[tokio::test(start_paused = true)]
+async fn health_probes_are_not_held_behind_a_peer_snapshot_in_the_run_loop() {
+    let (manager, command_tx, readiness_tx, _operator_tx) = manager_with_held_session_state();
+    let actor = tokio::spawn(manager.run());
+    let probe = core_probe(&command_tx, &readiness_tx);
+
+    health_probes_overtake_a_held_peer_snapshot(&readiness_tx, &probe).await;
+
+    command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+}
+
+/// The same overlap while a reload's destination prestage reply is withheld:
+/// the owner waits in `await_with_readiness_budget`, which serves both probes.
+#[tokio::test(start_paused = true)]
+async fn health_probes_are_not_held_behind_a_peer_snapshot_while_prestage_is_withheld() {
+    let (mut manager, command_tx, readiness_tx, _operator_tx) = manager_with_held_session_state();
+    let probe = core_probe(&command_tx, &readiness_tx);
+    let (prestage_reply, prestage_wait) = oneshot::channel::<()>();
+
+    let (prestaged, ()) = tokio::join!(
+        manager.await_with_readiness_budget(
+            prestage_wait,
+            RIB_REPLY_TIMEOUT,
+            OperatorReadAdmission::Served,
+        ),
+        async {
+            health_probes_overtake_a_held_peer_snapshot(&readiness_tx, &probe).await;
+            prestage_reply.send(()).unwrap();
+        }
+    );
+    assert!(
+        matches!(prestaged, Some(Ok(()))),
+        "the owner resumes once the prestage reply arrives"
+    );
+    for (_, managed) in manager.peers.drain() {
+        let _ = managed.into_parts().0.shutdown().await;
+    }
+}

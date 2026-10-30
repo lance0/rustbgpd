@@ -3019,7 +3019,7 @@
       "id": 63,
       "type": "timeseries",
       "title": "Outbound prefix capacity",
-      "description": "Current peer/family usage, finite limit, saturating headroom, and 0/1 blocking state. Limit and headroom are absent when unlimited; cumulative blocked events are intentionally excluded.",
+      "description": "Current peer/family usage, finite limit, saturating headroom, and 0/1 blocking state. Limit and headroom are absent when unlimited. Usage and headroom are absent while unique-prefix usage is unknown during recovery; known limit and blocking remain visible. Cumulative blocked events are intentionally excluded.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 169 },
       "fieldConfig": {

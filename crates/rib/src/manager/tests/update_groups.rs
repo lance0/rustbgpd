@@ -271,6 +271,11 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
                 families: ipv4_sendable(),
             }],
         });
+        super::arm_selection_waiter(
+            &mut manager,
+            PeerId::from_addr("192.0.2.51".parse().unwrap()),
+            &ipv4_sendable(),
+        );
         manager.flush_poll_budget = std::time::Duration::ZERO;
     }
     let (general_reply, mut general_response) = oneshot::channel();
@@ -11534,6 +11539,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
             families: vec![family],
         }],
     });
+    super::arm_selection_waiter(&mut manager, peer_v4(source), &[family]);
     manager.flush_poll_budget = Duration::ZERO;
     let (sender, mut output) = mpsc::channel(8);
     let mut registration = super::update_groups_recovery::peer_up(peer, sender, None);
@@ -12923,13 +12929,35 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
 }
 
 #[test]
-fn replay_readiness_restores_empty_and_force_scopes_without_wrapping_clean_fanout() {
+fn replay_readiness_restores_empty_force_and_owned_clean_fanout_scopes() {
     let (mut manager, peers, mut outbound) = direct_clean_transition_manager(2, 0, None);
     let (tx, rx) = mpsc::channel(8);
     manager.readiness_rx = Some(rx);
     manager.replacement_readiness_receipts.clear();
     full_channel_pass(&mut manager, &[20, 21], &[]);
-    assert!(manager.replacement_readiness_receipts.is_empty());
+    assert!(!manager.replacement_readiness_receipts.is_empty());
+    assert!(
+        manager
+            .replacement_readiness_receipts
+            .iter()
+            .all(|receipt| receipt.count == 2)
+    );
+    assert!(manager.replacement_readiness.is_none());
+    assert!(manager.readiness_rx.is_some());
+    manager.replacement_readiness_receipts.clear();
+    let mut response = queue_replacement_readiness(&tx);
+    let prefixes = HashSet::from([full_channel_prefix(20), full_channel_prefix(21)]);
+    manager.distribute_changes(&prefixes, &prefixes);
+    assert_eq!(response.try_recv().unwrap(), Ok(2));
+    assert!(!manager.replacement_readiness_receipts.is_empty());
+    assert!(
+        manager
+            .replacement_readiness_receipts
+            .iter()
+            .all(|receipt| receipt.count == 2)
+    );
+    assert!(manager.replacement_readiness.is_none());
+    assert!(manager.readiness_rx.is_some());
     for rx in &mut outbound {
         while rx.try_recv().is_ok() {}
     }
@@ -17180,9 +17208,17 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
         path_id: 0,
     };
     let residue = manager.policy_filtered_routes.entry(grouped).or_default();
-    assert!(residue.remove(&key(denied)), "the join recorded the denial");
-    residue.insert(key(permitted));
-    residue.insert(key(absent));
+    let keys = residue.get_mut(&Prefix::V4(denied)).unwrap();
+    assert!(keys.remove(&key(denied)), "recorded denial");
+    if keys.is_empty() {
+        residue.remove(&Prefix::V4(denied));
+    }
+    for prefix in [permitted, absent] {
+        residue
+            .entry(Prefix::V4(prefix))
+            .or_default()
+            .insert(key(prefix));
+    }
     manager
         .peer_otc_blocked
         .entry(grouped)
@@ -17213,7 +17249,7 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
             .policy_filtered_routes
             .get(&peer)
             .into_iter()
-            .flatten()
+            .flat_map(|prefixes| prefixes.values().flatten())
             .map(|key| format!("{key:?}"))
             .collect();
         let otc_blocked = manager

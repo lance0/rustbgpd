@@ -231,6 +231,7 @@ fn comparison_key() -> GroupKey {
         sendable_ipv6_unicast: false,
         sendable_vpnv4: false,
         sendable_vpnv6: false,
+        owns_evpn: false,
         rtc_negotiated: false,
         per_client_best: false,
         llgr_families: vec![(1, 1)],
@@ -456,6 +457,7 @@ fn comparison_reasons_cover_every_group_key_axis() {
     check!(sendable_ipv6_unicast = true => D::NegotiatedFamilies);
     check!(sendable_vpnv4 = true => D::NegotiatedFamilies);
     check!(sendable_vpnv6 = true => D::NegotiatedFamilies);
+    check!(owns_evpn = true => D::NegotiatedFamilies);
     check!(rtc_negotiated = true => D::NegotiatedFamilies);
     check!(per_client_best = true => D::PerClientBest);
     check!(llgr_families = vec![(2, 1)] => D::LlgrFamilies);
@@ -664,6 +666,7 @@ fn runner_up_grows_one_shard_per_insert() {
             group.apply_lane(
                 prefix,
                 Some(RunnerUp {
+                    local_source: None,
                     route: route(prefix, OTHER2),
                     nh: None,
                     source_attrs: None,
@@ -842,6 +845,7 @@ fn announce_delta(p: Prefix, src: PeerId, old: Option<PeerId>) -> GroupDelta {
     let new = route(p, src);
     let source_attrs = capture_source_attrs(&new);
     GroupDelta {
+        local_source: None,
         prefix: p,
         path_id: 0,
         new: Some((new, None)),
@@ -856,6 +860,7 @@ fn announce_delta(p: Prefix, src: PeerId, old: Option<PeerId>) -> GroupDelta {
 
 fn withdraw_delta(p: Prefix, old: Option<PeerId>) -> GroupDelta {
     GroupDelta {
+        local_source: None,
         prefix: p,
         path_id: 0,
         new: None,
@@ -1260,6 +1265,7 @@ fn pcb_all_denied_withdraws_and_clears_lane() {
     group.apply_lane(
         p,
         Some(RunnerUp {
+            local_source: None,
             route: route(p, OTHER2),
             nh: None,
             source_attrs: None,
@@ -1294,6 +1300,7 @@ fn pcb_no_candidates_stages_nothing_and_clears() {
     group.apply_lane(
         p,
         Some(RunnerUp {
+            local_source: None,
             route: route(p, OTHER2),
             nh: None,
             source_attrs: None,
@@ -1933,6 +1940,7 @@ fn pcb_table_build_pass_populates_lane() {
 /// directly.
 fn lane_entry(route: Route, winner_source: PeerId, label: &str, comm: Option<u32>) -> RunnerUp {
     RunnerUp {
+        local_source: None,
         route,
         nh: Some(NextHopAction::Self_),
         source_attrs: comm.map(|c| AttrSet::new(vec![PathAttribute::Communities(vec![c])])),
@@ -1954,6 +1962,7 @@ fn adv_entry_derivation_matrix() {
     // Non-own staged entry: passthrough with its table residue.
     let mut group = per_client_best_group(Some(named_permit_chain("staged")));
     group.apply_delta(&GroupDelta {
+        local_source: None,
         prefix: p,
         path_id: 0,
         new: Some((route_with_comm(p, OTHER1, 7), Some(NextHopAction::Self_))),
@@ -2113,6 +2122,7 @@ fn pcb_family_counts_lane_term_is_per_family() {
     );
     set_peer(&mut w6, MEMBER);
     group.apply_delta(&GroupDelta {
+        local_source: None,
         prefix: p6,
         path_id: 0,
         new: Some((w6.clone(), None)),
@@ -2298,6 +2308,7 @@ fn pcb_join_counters_replay_lane_permit() {
     // p1: winner MEMBER, runner-up OTHER2 in the lane. p2: winner
     // OTHER1. Every completed chain evaluation uses one sentinel.
     group.apply_delta(&GroupDelta {
+        local_source: None,
         prefix: p1,
         path_id: 0,
         new: Some((route(p1, MEMBER), None)),
@@ -2318,6 +2329,7 @@ fn pcb_join_counters_replay_lane_permit() {
         )),
     );
     group.apply_delta(&GroupDelta {
+        local_source: None,
         prefix: p2,
         path_id: 0,
         new: Some((route(p2, OTHER1), None)),
@@ -5057,6 +5069,7 @@ fn source_control_passthrough_keeps_dense_residue_empty() {
     let mut group = empty_group();
     assert!(group.source_control_passthrough);
     group.apply_delta(&GroupDelta {
+        local_source: None,
         prefix: p,
         path_id: 0,
         new: Some((source.clone(), None)),
@@ -5101,6 +5114,7 @@ fn source_control_modifying_mode_preserves_historical_residue_and_transition() {
     assert!(!group.source_control_passthrough);
     let policy_label = group.permit_policy_label.clone();
     group.apply_delta(&GroupDelta {
+        local_source: None,
         prefix: p,
         path_id: 0,
         new: Some((staged, None)),
@@ -6363,6 +6377,7 @@ fn route_with_comm(p: Prefix, src: PeerId, comm: u32) -> Route {
 fn announce_route_delta(new: Route) -> GroupDelta {
     let source_attrs = capture_source_attrs(&new);
     GroupDelta {
+        local_source: None,
         prefix: new.prefix,
         path_id: 0,
         new: Some((new, None)),

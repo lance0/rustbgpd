@@ -29,6 +29,7 @@ mod peer_lifecycle;
 mod queries;
 mod replacement_summaries;
 use crate::PeerId;
+use crate::fast_hash::ShardedMap;
 use peer_lifecycle::{PeerUpRegistration, SessionTeardownDisposition};
 mod route_refresh;
 mod selection_deferral;
@@ -810,20 +811,20 @@ pub struct RibManager {
     /// Per-peer/per-family deadlines for active enhanced route refresh windows.
     refresh_deadlines: graceful_restart::DeadlineMap<(PeerId, Afi, Safi)>,
     /// Unicast routes still awaiting replacement during an inbound refresh.
-    refresh_stale_routes: HashMap<PeerId, HashSet<(Prefix, u32)>>,
+    refresh_stale_routes: HashMap<PeerId, ShardedMap<(Prefix, u32), ()>>,
     /// `FlowSpec` routes still awaiting replacement during an inbound refresh.
-    refresh_stale_flowspec: HashMap<PeerId, HashSet<crate::route::FlowSpecRouteKey>>,
+    refresh_stale_flowspec: HashMap<PeerId, ShardedMap<crate::route::FlowSpecRouteKey, ()>>,
     /// EVPN routes still awaiting replacement during an inbound refresh.
-    refresh_stale_evpn: HashMap<PeerId, HashSet<rustbgpd_wire::EvpnRouteKey>>,
+    refresh_stale_evpn: HashMap<PeerId, ShardedMap<rustbgpd_wire::EvpnRouteKey, ()>>,
     /// BGP-LS routes still awaiting replacement during an inbound refresh.
-    refresh_stale_bgpls: HashMap<PeerId, HashSet<crate::route::BgpLsRouteKey>>,
+    refresh_stale_bgpls: HashMap<PeerId, ShardedMap<crate::route::BgpLsRouteKey, ()>>,
     /// VPNv4/VPNv6 routes still awaiting replacement during an inbound refresh.
-    refresh_stale_vpn: HashMap<PeerId, HashSet<crate::route::VpnRibRouteKey>>,
+    refresh_stale_vpn: HashMap<PeerId, ShardedMap<crate::route::VpnRibRouteKey, ()>>,
     /// Labeled-unicast route keys marked stale by an in-progress RFC 7313
     /// enhanced route refresh (the SAFI 4 sibling of `refresh_stale_vpn`).
-    refresh_stale_labeled: HashMap<PeerId, HashSet<crate::route::LabeledRibRouteKey>>,
+    refresh_stale_labeled: HashMap<PeerId, ShardedMap<crate::route::LabeledRibRouteKey, ()>>,
     /// RT-Constrain routes still awaiting replacement during an inbound refresh.
-    refresh_stale_rtc: HashMap<PeerId, HashSet<crate::route::RtcRibRouteKey>>,
+    refresh_stale_rtc: HashMap<PeerId, ShardedMap<crate::route::RtcRibRouteKey, ()>>,
     /// O(1) per-peer/per-family stale-entry counts for refresh observability.
     refresh_stale_counts: HashMap<(PeerId, Afi, Safi), usize>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
@@ -908,9 +909,11 @@ pub struct RibManager {
     /// immediate `EoR` would tell the restarter our initial update is
     /// complete and trigger its stale-route sweep BEFORE the gated flood
     /// arrives — a self-inflicted blackhole window. The `EoR` is emitted
-    /// after the gate lifts and the gated flood is sent. Non-GR ORF peers
-    /// keep the immediate `EoR`: a client that never sends ROUTE-REFRESH
-    /// would otherwise never see `EoR` at all.
+    /// after the gate lifts and the gated flood is sent. A marker held by
+    /// selection deferral or replay grace records the same obligation at
+    /// `PeerUp` or family unlock. Other non-GR ORF peers keep the immediate
+    /// `EoR`, including a pending marker whose initial honest-empty send
+    /// encountered backpressure, and a family withheld at selection release.
     gr_deferred_eor: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Peers whose RT-Constrain-filtered families (VPN, EVPN) keep their
     /// initial-table `EoR` in `pending_eor` until the peer's RT-Constrain
@@ -958,8 +961,9 @@ pub struct RibManager {
     fib_candidate_changes_tx: watch::Sender<u64>,
     /// Currently surfaced unicast export-policy denials. This keeps
     /// route-level policy-filtered events transition-based instead of
-    /// re-emitting on every dirty or forced outbound resync.
-    policy_filtered_routes: HashMap<PeerId, HashSet<PolicyFilteredRouteKey>>,
+    /// re-emitting on every dirty or forced outbound resync. Prefix buckets
+    /// keep incremental refreshes independent of unrelated rejected routes.
+    policy_filtered_routes: HashMap<PeerId, BTreeMap<Prefix, HashSet<PolicyFilteredRouteKey>>>,
     /// The attached session's export-policy totals handle, keyed by target
     /// peer. The handle belongs to the neighbor (`PeerUp` carries it), so the
     /// totals outlive this registration; only the RIB's reference ends with
@@ -1868,6 +1872,18 @@ pub(super) struct LiveSessionRecord {
     /// Actual group-owned EVPN admission, including clean deltas without keys.
     evpn_admitted_count: usize,
     group_recovery_fallback: Option<update_groups::RecoveryFallbackCause>,
+    /// Initial unicast replay omitted rows behind process-start selection.
+    /// Own its admitted-key proof independently of End-of-RIB replay grace.
+    selection_initial_pending: bool,
+    /// A process-start hold retains this receiver's admitted projection.
+    selection_partial_pending: [bool; 4],
+    /// Every currently exportable change is admitted; only held work remains.
+    selection_partial_caught_up: bool,
+    /// Actual admitted UC-v4/v6 and VPN-v4/v6 path counts, then UC-v4/v6
+    /// prefix counts. Final batch deltas keep frozen-view gauges O(batch).
+    selection_initial_admitted: [usize; 6],
+    /// Counts remain truthful if a later bounded proof reservation refuses.
+    selection_initial_admitted_valid: bool,
     /// The neighbor's export-policy totals, installed with the registration.
     export_policy_counters: crate::update::ExportPolicyCounters,
 }
@@ -2037,6 +2053,73 @@ pub(super) struct PolicyFilteredRouteKey {
     pub(super) source_peer: PeerId,
     pub(super) prefix: Prefix,
     pub(super) path_id: u32,
+}
+
+/// A prefix can contribute many rejected source/path identities. Grow an
+/// empty allocation from the exact incoming identity bound, never by
+/// reserving a populated set or assuming prefix cardinality is sufficient.
+#[expect(
+    clippy::ref_option,
+    reason = "inventory work borrows its existing readiness owner"
+)]
+fn extend_policy_filtered_routes_with_readiness(
+    routes: &mut HashSet<PolicyFilteredRouteKey>,
+    mut incoming: impl ExactSizeIterator<Item = PolicyFilteredRouteKey>,
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+) {
+    let required = routes.len().saturating_add(incoming.len());
+    if required > routes.capacity() {
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        let mut replacement = HashSet::with_capacity(required);
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        #[cfg(test)]
+        let capacity = replacement.capacity();
+        for key in routes.drain() {
+            replacement_readiness_checkpoint_at(readiness, "policy_filtered_rebuild", false);
+            replacement.insert(key);
+            #[cfg(test)]
+            assert_eq!(
+                replacement.capacity(),
+                capacity,
+                "policy-filtered inventory grew during old-key rebuild"
+            );
+        }
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        drop(std::mem::replace(routes, replacement));
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+    }
+    #[cfg(test)]
+    let capacity = routes.capacity();
+    for key in incoming.by_ref() {
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_input", false);
+        routes.insert(key);
+        #[cfg(test)]
+        assert_eq!(
+            routes.capacity(),
+            capacity,
+            "policy-filtered inventory grew during candidate insertion"
+        );
+    }
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+    drop(incoming);
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+}
+
+#[expect(
+    clippy::ref_option,
+    reason = "inventory cleanup borrows its existing readiness owner"
+)]
+fn retire_policy_filtered_routes_with_readiness(
+    routes: &mut HashSet<PolicyFilteredRouteKey>,
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+) {
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
+    for _ in routes.drain() {
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", false);
+    }
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
+    drop(std::mem::take(routes));
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
 }
 
 enum PendingRouteChunk {
@@ -3551,8 +3634,10 @@ impl RibManager {
     /// message makes it runnable and the next event loop turn arms this timer
     /// again.
     fn resync_tick_pending(&self) -> bool {
-        !self.dirty_peers.is_empty()
-            || !self.pending_inbound_refresh.is_empty()
+        self.dirty_peers.iter().any(|&peer| {
+            self.replacement_checkpoint(false);
+            !self.selection_partial_caught_up(peer)
+        }) || !self.pending_inbound_refresh.is_empty()
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {
                     self.replacement_checkpoint(false);
@@ -3638,7 +3723,9 @@ impl RibManager {
                 });
                 after
                     .chain(wrapped)
-                    .filter(|peer| !attempted.contains(*peer))
+                    .filter(|peer| {
+                        !attempted.contains(*peer) && !self.selection_partial_caught_up(**peer)
+                    })
                     .take(1)
                     .copied()
                     .collect()
@@ -3674,7 +3761,7 @@ impl RibManager {
             let unattempted_remain = self
                 .dirty_peers
                 .iter()
-                .any(|peer| !attempted.contains(peer));
+                .any(|peer| !attempted.contains(peer) && !self.selection_partial_caught_up(*peer));
             if !unattempted_remain {
                 return recovered;
             }
@@ -4350,13 +4437,19 @@ impl RibManager {
                     },
                 );
             }
-            RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
+            RibUpdate::InjectRoute { route, reply } => {
+                self.with_selection_readiness(|manager| manager.handle_inject_route(route, reply));
+            }
             RibUpdate::InjectLeasedRoute {
                 route,
                 owner,
                 lease_seconds,
                 reply,
-            } => self.handle_inject_leased_route(route, &owner, lease_seconds, reply),
+            } => {
+                self.with_selection_readiness(|manager| {
+                    manager.handle_inject_leased_route(route, &owner, lease_seconds, reply);
+                });
+            }
             RibUpdate::WithdrawInjected {
                 prefix,
                 path_id,
@@ -4365,15 +4458,18 @@ impl RibManager {
                 override_owner,
                 reply,
             } => {
-                self.handle_withdraw_injected(
-                    prefix,
-                    path_id,
-                    allow_missing,
-                    &owner,
-                    override_owner,
-                    reply,
-                );
-                self.retire_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
+                self.with_selection_readiness(|manager| {
+                    manager.handle_withdraw_injected(
+                        prefix,
+                        path_id,
+                        allow_missing,
+                        &owner,
+                        override_owner,
+                        reply,
+                    );
+                    manager
+                        .retire_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
+                });
             }
             RibUpdate::ExpireInjectionLeases { leases } => {
                 self.handle_expire_injection_leases(&leases);
@@ -5408,40 +5504,85 @@ impl RibManager {
         let _ = self.route_events_tx.send(event);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "prefix-scoped rejection mutation and transition event publication share one commit"
+    )]
     pub(super) fn update_policy_filtered_routes_for_prefixes(
         &mut self,
         target_peer: PeerId,
         prefixes: &HashSet<Prefix>,
         current: &HashSet<PolicyFilteredRouteKey>,
     ) {
+        if current.is_empty() && !self.policy_filtered_routes.contains_key(&target_peer) {
+            return;
+        }
         let readiness = &self.replacement_readiness;
         let checkpoint = || replacement_readiness_checkpoint(readiness, false);
+        let allocation_checkpoint = || replacement_readiness_checkpoint(readiness, true);
+        let retained_checkpoint = || {
+            #[cfg(test)]
+            replacement_readiness_checkpoint_at(readiness, "policy_filtered_retained", false);
+            #[cfg(not(test))]
+            checkpoint();
+        };
         let peer_routes = self.policy_filtered_routes.entry(target_peer).or_default();
-        peer_routes.retain(|key| {
+        for prefix in prefixes {
+            retained_checkpoint();
+            let empty = peer_routes.get_mut(prefix).is_some_and(|keys| {
+                keys.retain(|key| {
+                    retained_checkpoint();
+                    current.contains(key)
+                });
+                keys.is_empty()
+            });
+            if empty {
+                allocation_checkpoint();
+                drop(peer_routes.remove(prefix));
+                allocation_checkpoint();
+            }
+        }
+        allocation_checkpoint();
+        let mut incoming: Vec<_> = current.iter().inspect(|_| checkpoint()).copied().collect();
+        allocation_checkpoint();
+        incoming.sort_unstable_by(|left, right| {
             checkpoint();
-            !prefixes.contains(&key.prefix) || current.contains(key)
+            left.prefix.cmp(&right.prefix)
         });
-        let required = peer_routes.len().saturating_add(current.len());
-        if required > peer_routes.capacity() {
+        allocation_checkpoint();
+        let mut newly_filtered = Vec::with_capacity(incoming.len());
+        allocation_checkpoint();
+        for group in incoming.chunk_by(|left, right| {
             checkpoint();
-            let mut replacement = HashSet::with_capacity(required);
-            for key in peer_routes.drain() {
-                replacement.insert(key);
+            left.prefix == right.prefix
+        }) {
+            retained_checkpoint();
+            let keys = peer_routes.entry(group[0].prefix).or_default();
+            let required = keys.len().saturating_add(group.len());
+            if required > keys.capacity() {
+                allocation_checkpoint();
+                let mut replacement = HashSet::with_capacity(required);
+                allocation_checkpoint();
+                for key in keys.drain() {
+                    checkpoint();
+                    replacement.insert(key);
+                }
+                allocation_checkpoint();
+                drop(std::mem::replace(keys, replacement));
+                allocation_checkpoint();
+            }
+            for key in group.iter().copied() {
                 checkpoint();
-            }
-            drop(std::mem::replace(peer_routes, replacement));
-            checkpoint();
-        }
-        let mut newly_filtered = Vec::with_capacity(current.len());
-        checkpoint();
-        for key in current.iter().copied() {
-            checkpoint();
-            if peer_routes.insert(key) {
-                newly_filtered.push(key);
+                if keys.insert(key) {
+                    newly_filtered.push(key);
+                }
             }
         }
+        retire_vec(&mut incoming, &mut || checkpoint());
         if peer_routes.is_empty() {
+            allocation_checkpoint();
             self.policy_filtered_routes.remove(&target_peer);
+            allocation_checkpoint();
         }
         let mut newly_filtered = newly_filtered.into_iter();
         // Resolved only when an event is published.
@@ -5480,9 +5621,27 @@ impl RibManager {
     }
 
     pub(super) fn clear_policy_filtered_routes_for_peer(&mut self, target_peer: PeerId) {
-        if let Some(mut routes) = self.policy_filtered_routes.remove(&target_peer) {
-            retire_hash_set(&mut routes, &mut || self.replacement_checkpoint(false));
+        if !self.policy_filtered_routes.contains_key(&target_peer) {
+            return;
         }
+        with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                if let Some(mut routes) = manager.policy_filtered_routes.remove(&target_peer) {
+                    while let Some((_, mut keys)) = routes.pop_first() {
+                        manager.replacement_checkpoint_at("policy_filtered_history_cleanup", false);
+                        retire_hash_set(&mut keys, &mut || {
+                            manager.replacement_checkpoint_at(
+                                "policy_filtered_history_cleanup",
+                                false,
+                            );
+                        });
+                    }
+                    manager.replacement_checkpoint_at("policy_filtered_history_cleanup", true);
+                    drop(routes);
+                    manager.replacement_checkpoint_at("policy_filtered_history_cleanup", true);
+                }
+            });
+        });
     }
 
     fn publish_evpn_route_event(&mut self, event: crate::event::EvpnRouteEvent) {
@@ -5519,7 +5678,7 @@ impl RibManager {
                 }
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5533,7 +5692,7 @@ impl RibManager {
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5578,7 +5737,7 @@ impl RibManager {
                 }
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_vpn.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5592,7 +5751,7 @@ impl RibManager {
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_vpn.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5647,7 +5806,7 @@ impl RibManager {
                 }
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_labeled.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5661,7 +5820,7 @@ impl RibManager {
                 affected.insert(key);
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_labeled.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5715,7 +5874,7 @@ impl RibManager {
                 }
                 if active_refresh
                     && let Some(stale) = self.refresh_stale_rtc.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     removed_stale += 1;
                 }
@@ -5726,7 +5885,7 @@ impl RibManager {
                 needs_intern_gc |= rib.insert_rtc(route);
                 if active_refresh
                     && let Some(stale) = self.refresh_stale_rtc.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     removed_stale += 1;
                 }
@@ -5815,20 +5974,10 @@ impl RibManager {
             // remain grouped, so this VPN delta walk does not cover EVPN:
             // restage its private view under the new Φ. Future grouped RTC
             // needs OLD Φ capture before publication and separate qualification.
-            // A dirty peer's pending resync already does. While EVPN
-            // selection is deferred nothing EVPN has been selected or
-            // advertised (the startup gate is one-shot and the only Loc-RIB
-            // EVPN writer returns early), and release distributes every key
-            // as new under the then-current Φ, so skipping loses nothing.
+            // A dirty peer's pending resync already does. A dormant startup
+            // can have advertised rows before the first waiter arms; release
+            // restages that frozen private inventory under the current Φ.
             let evpn_deferred = self.selection_deferred((Afi::L2Vpn, Safi::Evpn));
-            debug_assert!(
-                !evpn_deferred
-                    || self
-                        .adj_ribs_out
-                        .get(&peer)
-                        .is_none_or(|rib_out| rib_out.evpn_len() == 0),
-                "EVPN advertised while EVPN selection is still deferred"
-            );
             if !self.dirty_peers.contains(&peer) && !evpn_deferred {
                 let readiness = self.replacement_readiness.clone();
                 let mut checkpoint = || {

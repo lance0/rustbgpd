@@ -630,11 +630,6 @@ fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
             transitive_conflict: ErrorDisposition::TreatAsWithdraw,
         },
         Case {
-            code: 25,
-            canonical: 0xc0,
-            transitive_conflict: ErrorDisposition::TreatAsWithdraw,
-        },
-        Case {
             code: 26,
             canonical: 0x80,
             transitive_conflict: ErrorDisposition::AttributeDiscard,
@@ -734,7 +729,7 @@ fn assigned_unsupported_class_matrix_is_fail_closed_without_semantic_support() {
 
 #[test]
 fn assigned_unsupported_opaque_flags_and_neighboring_fences_stay_orthogonal() {
-    for code in [23, 25, 27, 34, 40, 128] {
+    for code in [23, 27, 34, 40, 128] {
         let value = assigned_value(code);
         for flags in [0xe0, 0xf0] {
             let input = if flags == 0xf0 {
@@ -924,7 +919,7 @@ fn community_container_rejects_every_framing_boundary_and_duplicate() {
 }
 
 #[test]
-fn ipv6_specific_extended_community_enforces_length_and_opaque_propagation() {
+fn ipv6_specific_extended_community_enforces_length_and_preserves_partial() {
     for length in [20_usize, 40] {
         let value: Vec<u8> = (0..length)
             .map(|octet| u8::try_from(octet).unwrap())
@@ -938,14 +933,19 @@ fn ipv6_specific_extended_community_enforces_length_and_opaque_propagation() {
             let strict = decode_path_attributes(&input, true, &[]).unwrap();
             let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
             assert!(revised.malformed.is_empty());
-            let [PathAttribute::Unknown(raw)] = strict.as_slice() else {
-                panic!("type 25 must remain opaque");
-            };
-            assert_eq!(raw.data.as_ref(), value);
+            assert_eq!(strict.len(), 1);
+            assert_eq!(strict, revised.attributes);
+            let communities = strict[0].ipv6_extended_communities().unwrap();
+            let retained: Vec<u8> = communities
+                .iter()
+                .flat_map(|value| value.as_bytes().iter().copied())
+                .collect();
+            assert_eq!(retained, value);
+            assert_eq!(strict[0].flags(), flags);
             let mut emitted = Vec::new();
             encode_path_attributes(&revised.attributes, &mut emitted, true, false).unwrap();
-            let mut expected = input;
-            expected[0] |= 0x20;
+            // Typed encoding canonicalizes a short payload's length header.
+            let expected = attribute(flags, 25, &value);
             assert_eq!(emitted, expected);
         }
     }
@@ -960,6 +960,16 @@ fn ipv6_specific_extended_community_enforces_length_and_opaque_propagation() {
         let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
         assert!(revised.attributes.is_empty());
         assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+    }
+
+    for flags in [0x80, 0x40, 0x00] {
+        let input = attribute(flags, 25, &[0; 20]);
+        let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+        assert!(revised.attributes.is_empty());
         assert_eq!(
             revised.malformed[0].disposition,
             ErrorDisposition::TreatAsWithdraw

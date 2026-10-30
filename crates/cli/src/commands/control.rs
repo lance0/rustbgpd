@@ -128,7 +128,8 @@ pub async fn health(connection: Connection, json: bool, liveness: bool) -> Resul
         let out = json_health(&resp);
         output::print_json_pretty(&out)?;
     } else {
-        // `active_peers` counts only non-stale Established sessions.
+        // `active_peers` counts configured peers whose session reports
+        // Established.
         outln!(
             "Status:            {}",
             output::colored_health(resp.healthy)
@@ -144,8 +145,7 @@ pub async fn health(connection: Connection, json: bool, liveness: bool) -> Resul
 }
 
 pub async fn metrics(connection: Connection) -> Result<(), CliError> {
-    let mut client =
-        ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.metrics_client();
     let resp = read_rpc("GetMetrics", client.get_metrics(MetricsRequest {}))
         .await?
         .into_inner();

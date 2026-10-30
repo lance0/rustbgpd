@@ -929,6 +929,8 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
                     "active; waiter={}; session={session}; blocking={}; remaining={}ms",
                     row.waiter_state, row.blocking_waiters, row.remaining_millis
                 )
+            } else if row.release_reason.is_empty() {
+                format!("dormant; waiter={}; session={session}", row.waiter_state)
             } else {
                 format!(
                     "released={}; waiter={}; session={session}",
@@ -948,9 +950,17 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
         for row in &n.outbound_prefix_limits {
             // Unlimited prints as `unlimited`, never a synthetic 0, and a
             // blocking family names the stable reason it is withholding.
+            let usage = if row.usage == u64::MAX {
+                "unknown".to_string()
+            } else {
+                row.usage.to_string()
+            };
             let capacity = match (row.limit, row.headroom) {
-                (Some(limit), Some(headroom)) => format!("limit={limit}; headroom={headroom}"),
-                _ => "limit=unlimited".to_string(),
+                (Some(limit), Some(headroom)) if row.usage != u64::MAX => {
+                    format!("limit={limit}; headroom={headroom}")
+                }
+                (Some(limit), _) => format!("limit={limit}; headroom=unknown"),
+                (None, _) => "limit=unlimited".to_string(),
             };
             let blocking = row
                 .reason
@@ -958,10 +968,7 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
                 .map_or_else(String::new, |reason| format!("; blocking={reason}"));
             rows.line(
                 1,
-                format!(
-                    "{:<14} usage={}; {capacity}{blocking}",
-                    row.family, row.usage
-                ),
+                format!("{:<14} usage={}; {capacity}{blocking}", row.family, usage),
             );
         }
     }
@@ -2524,6 +2531,75 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn neighbor_detail_distinguishes_dormant_active_and_released_selection() {
+        for (active, release_reason, waiter_state, session, expected) in [
+            (
+                false,
+                "",
+                "awaiting_session",
+                None,
+                "  family-value — dormant; waiter=awaiting_session; session=none",
+            ),
+            (
+                true,
+                "",
+                "awaiting_eor",
+                Some(105),
+                "  family-value — active; waiter=awaiting_eor; session=105; blocking=106; remaining=107ms",
+            ),
+            (
+                false,
+                "release_reason-value",
+                "waiter_state-value",
+                Some(105),
+                "  family-value — released=release_reason-value; waiter=waiter_state-value; session=105",
+            ),
+        ] {
+            let mut state = neighbor_projection_fixture();
+            let row = &mut state.selection_deferral[0];
+            row.active = active;
+            row.release_reason = release_reason.into();
+            row.waiter_state = waiter_state.into();
+            row.waiter_session_id = session;
+            let rendered = render_neighbor_detail_human(&state);
+            let (_, section) = rendered.split_once("Selection Deferral:\n").unwrap();
+            assert_eq!(section.lines().next().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn outbound_capacity_unknown_retains_numeric_json_and_known_limits() {
+        let mut state = neighbor_projection_fixture();
+        state.outbound_prefix_limits = vec![crate::proto::OutboundPrefixLimitState {
+            family: "ipv4_unicast".to_string(),
+            usage: u64::MAX,
+            limit: Some(100),
+            headroom: None,
+            blocking: false,
+            reason: None,
+        }];
+        let human = render_neighbor_detail_human(&state);
+        assert!(human.contains("usage=unknown; limit=100; headroom=unknown"));
+        assert!(!human.contains(&u64::MAX.to_string()));
+        let json = captured_neighbor_detail(&state);
+        assert_eq!(
+            json["outbound_prefix_limits"][0]["usage"].as_u64(),
+            Some(u64::MAX)
+        );
+        assert_eq!(json["outbound_prefix_limits"][0]["limit"], 100);
+        assert!(json["outbound_prefix_limits"][0].get("headroom").is_none());
+
+        state.outbound_prefix_limits[0].limit = None;
+        let human = render_neighbor_detail_human(&state);
+        assert!(human.contains("usage=unknown; limit=unlimited"));
+        state.outbound_prefix_limits[0].usage = 0;
+        state.outbound_prefix_limits[0].limit = Some(100);
+        state.outbound_prefix_limits[0].headroom = Some(100);
+        let human = render_neighbor_detail_human(&state);
+        assert!(human.contains("usage=0; limit=100; headroom=100"));
     }
 
     /// Golden human layout over the exhaustive fixture: one value column

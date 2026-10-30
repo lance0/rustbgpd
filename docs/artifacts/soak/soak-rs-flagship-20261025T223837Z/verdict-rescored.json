@@ -1,0 +1,346 @@
+{
+  "verdict": "pass",
+  "samples": 2921,
+  "reloads_issued": 48,
+  "reloads_complete": 48,
+  "trips_executed": 6,
+  "trips_planned": 6,
+  "peak_rss_mb": 680.0,
+  "rss_late_slope_per_hour": 1.3390015238934367,
+  "intern_late_slope_per_hour": -0.003436234959280248,
+  "slope_window_evaluated": true,
+  "max_registration_wait_sec": 0,
+  "gates": {
+    "min_samples": {
+      "value": 2921,
+      "limit": 2592.0,
+      "pass": true
+    },
+    "session_floor": {
+      "value": {
+        "violations": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "reload_accounting": {
+      "value": {
+        "issued": 48,
+        "complete": 48,
+        "planned": 48
+      },
+      "pass": true
+    },
+    "trip_accounting": {
+      "value": {
+        "executed": 6,
+        "planned": 6,
+        "defects": {}
+      },
+      "pass": true
+    },
+    "exceeded_exact": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "flap_budget": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "msgs_sent_monotone": {
+      "value": {
+        "breaks": 0
+      },
+      "pass": true
+    },
+    "readyz": {
+      "value": {
+        "bad_samples": 0,
+        "status_failures": 0,
+        "latency_failures": 0,
+        "longest_consecutive": 0,
+        "first": [],
+        "in_reload_window": 0,
+        "limit_ms": 250.0,
+        "limit_consecutive": 3,
+        "sample_scrape_failures": 0,
+        "observation_gaps": [],
+        "observation_gap_count": 0
+      },
+      "pass": true
+    },
+    "rss_peak_mb": {
+      "value": 680.0,
+      "limit": 3072.0,
+      "pass": true
+    },
+    "rss_late_slope_per_hour": {
+      "value": 1.3390015238934367,
+      "limit": 10.0,
+      "pass": true,
+      "note": null
+    },
+    "intern_late_slope_per_hour": {
+      "value": -0.003436234959280248,
+      "limit": 100.0,
+      "pass": true,
+      "note": null
+    },
+    "no_abort": {
+      "value": [],
+      "pass": true
+    },
+    "outbound_registration_wait": {
+      "value": {
+        "max_seconds": 0,
+        "at_elapsed_sec": 0.0,
+        "samples_over_limit": 0
+      },
+      "limit": 300,
+      "pass": true
+    },
+    "daemon_log": {
+      "value": {
+        "records": 79506,
+        "errors": 0,
+        "defects": 0,
+        "warnings_by_message": {
+          "TCP connect failed": 6,
+          "inbound connection from unknown peer, dropping": 294,
+          "max prefix exceeded": 6
+        },
+        "first_administrative_shutdown_unix": 1793056586.733713,
+        "sighup_settlements_unix": [
+          1792968983.422975,
+          1792970789.544593,
+          1792972596.892538,
+          1792974404.134498,
+          1792976212.19617,
+          1792978019.517188,
+          1792979826.476225,
+          1792981633.756752,
+          1792983562.384019,
+          1792985370.598564,
+          1792987178.67795,
+          1792988986.003071,
+          1792990792.126059,
+          1792992599.535077,
+          1792994408.017078,
+          1792996214.609852,
+          1792998144.300395,
+          1792999951.519392,
+          1793001758.63849,
+          1793003566.081427,
+          1793005374.592131,
+          1793007182.890232,
+          1793008991.167855,
+          1793010798.324839,
+          1793012726.881583,
+          1793014534.832607,
+          1793016342.653161,
+          1793018150.194696,
+          1793019957.378657,
+          1793021764.311441,
+          1793023571.796866,
+          1793025379.070371,
+          1793027309.133881,
+          1793029116.889384,
+          1793030924.928808,
+          1793032731.555198,
+          1793034538.512834,
+          1793036347.434942,
+          1793038154.623519,
+          1793039962.920357,
+          1793041891.536535,
+          1793043698.722452,
+          1793045506.232315,
+          1793047312.982804,
+          1793049120.831132,
+          1793050929.186593,
+          1793052735.402917,
+          1793054542.965644
+        ],
+        "examples": []
+      },
+      "pass": true
+    },
+    "management_evidence": {
+      "value": {
+        "errors": [],
+        "count_mismatches": []
+      },
+      "pass": true
+    },
+    "management_lifetime": {
+      "value": {
+        "load_start": 3032572.596101,
+        "measured_start": 3032572.715823205,
+        "measured_end": 3120212.096965695,
+        "stop_requested": 3120212.134372,
+        "load_end": 3120212.136874,
+        "last_operation_completed": 3120211.778019,
+        "engine_finish_release": 3120212.263288283,
+        "load_end_unix": 1793056586.5239666,
+        "engine_first_shutdown_unix": 1793056586.733713
+      },
+      "pass": true
+    },
+    "management_operations": {
+      "value": {
+        "metrics": 87608,
+        "neighbor": 17528,
+        "policy_stats": 17528,
+        "rib_prefix": 17528,
+        "doctor": 147
+      },
+      "pass": true
+    },
+    "management_completion": {
+      "value": {
+        "metrics": {
+          "scheduled": 87640,
+          "completed": 87608,
+          "ratio": 0.9996348699224099
+        },
+        "neighbor": {
+          "scheduled": 17528,
+          "completed": 17528,
+          "ratio": 1.0
+        },
+        "policy_stats": {
+          "scheduled": 17528,
+          "completed": 17528,
+          "ratio": 1.0
+        },
+        "rib_prefix": {
+          "scheduled": 17528,
+          "completed": 17528,
+          "ratio": 1.0
+        },
+        "doctor": {
+          "scheduled": 147,
+          "completed": 147,
+          "ratio": 1.0
+        }
+      },
+      "limit": 0.9,
+      "pass": true
+    },
+    "management_cadence": {
+      "value": {
+        "defects": [],
+        "operations": {
+          "metrics": {
+            "missed": 32,
+            "per_reload": {
+              "2": 1,
+              "3": 1,
+              "5": 1,
+              "6": 1,
+              "7": 1,
+              "8": 1,
+              "9": 1,
+              "10": 1,
+              "11": 1,
+              "15": 1,
+              "16": 1,
+              "17": 1,
+              "18": 1,
+              "19": 1,
+              "20": 1,
+              "22": 1,
+              "25": 1,
+              "26": 1,
+              "29": 1,
+              "30": 1,
+              "31": 1,
+              "34": 1,
+              "36": 1,
+              "37": 1,
+              "39": 1,
+              "42": 1,
+              "43": 1,
+              "44": 1,
+              "45": 1,
+              "46": 1,
+              "47": 1,
+              "48": 1
+            },
+            "outside_windows": []
+          },
+          "neighbor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "policy_stats": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "rib_prefix": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "doctor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          }
+        }
+      },
+      "limit": 2,
+      "pass": true
+    },
+    "management_failures": {
+      "value": {
+        "count": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "management_availability": {
+      "value": {
+        "count": 1,
+        "per_operation": {
+          "metrics": 0,
+          "neighbor": 0,
+          "policy_stats": 0,
+          "rib_prefix": 0,
+          "doctor": 1
+        },
+        "misses": [
+          {
+            "operation": "doctor",
+            "result": "doctor_check_failed",
+            "exit": 2,
+            "stderr_excerpt": "",
+            "doctor_output": "doctor-report-0083.json",
+            "failed_checks": [
+              "daemon.healthy"
+            ],
+            "detail": "health RPC failed: code: 'The service is currently unavailable', message: \"peer manager probe timed out (200ms deadline)\" (retried once after the first attempt was unavailable: peer manager probe timed out (200ms deadline))",
+            "timestamp": "2026-10-26T12:35:47.786Z",
+            "reload": 28
+          }
+        ],
+        "violations": [],
+        "limit_consecutive": 2,
+        "limit_per_operation": 3,
+        "reload_margin_sec": 10.0
+      },
+      "pass": true
+    },
+    "management_doctor": {
+      "value": {
+        "attempts": 147,
+        "failures": [],
+        "availability_misses": 1
+      },
+      "pass": true
+    }
+  }
+}

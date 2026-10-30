@@ -26,6 +26,40 @@ use crate::test_support::{
 };
 use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
+pub(super) fn retained_policy_rejection_keys(
+    manager: &RibManager,
+    target: PeerId,
+) -> HashSet<PolicyFilteredRouteKey> {
+    manager
+        .policy_filtered_routes
+        .get(&target)
+        .into_iter()
+        .flat_map(|prefixes| prefixes.values().flat_map(|keys| keys.iter().copied()))
+        .collect()
+}
+
+pub(super) fn arm_selection_waiter(
+    manager: &mut RibManager,
+    peer: PeerId,
+    families: &[(Afi, Safi)],
+) {
+    let transitions = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .classify_session(
+            peer,
+            77,
+            false,
+            &families.iter().copied().collect(),
+            &manager.metrics,
+        );
+    assert!(
+        transitions.is_empty(),
+        "the fixture owes a current-session EoR"
+    );
+}
+
 /// Capture the published export rows of a running manager (ADR-0136). A
 /// primary-lane round trip first: every primary message is its own run-loop
 /// turn, so the publication point has run for all earlier work.
@@ -1418,6 +1452,7 @@ mod bmp;
 mod conditional_advertisement;
 mod conditional_advertisement_export;
 mod dataplane_paging;
+mod deferred_session_ingress;
 mod distribution_window;
 mod eor_deferral_accounting;
 mod eor_grace;
@@ -1453,19 +1488,31 @@ mod non_unicast_pushdown;
 mod orf;
 mod orr;
 mod outbound_commit_accounting;
+mod outbound_limit_install;
 mod outbound_prefix_limits;
 mod outbound_resync_state;
 mod paged_query;
 mod peer_identity;
 mod per_client_best;
 mod policy;
+mod policy_filtered_inventory;
 mod ready_drain;
 mod refresh;
+mod refresh_snapshot;
 mod replay;
 mod rpki;
 mod rs_control;
 mod rtc;
 mod selection_deferral;
+mod selection_deferral_backpressure;
+mod selection_deferral_conditional_timer;
+mod selection_deferral_dirty_rtbh;
+mod selection_deferral_mutations;
+mod selection_deferral_orf_edges;
+mod selection_deferral_recording;
+mod selection_deferral_rtc_join;
+mod selection_deferral_startup;
+mod selection_deferral_startup_gate_edges;
 mod session_export_policy;
 mod slice_timing;
 mod timer_cutoffs;

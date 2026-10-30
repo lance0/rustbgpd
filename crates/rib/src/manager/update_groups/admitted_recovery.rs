@@ -269,6 +269,56 @@ impl<'a> AdmittedKeyView<'a> {
         Key::try_from(key).is_ok_and(|key| self.contains_key(key))
     }
 
+    /// Visit one prefix's admitted path IDs without walking unrelated keys.
+    pub(in crate::manager) fn visit_unicast_prefix_paths(
+        self,
+        prefix: Prefix,
+        checkpoint: &mut impl FnMut(bool),
+        visit: &mut impl FnMut(u32),
+    ) {
+        let lower = Key::Unicast(prefix, 0);
+        let begin = self.universe.partition_point(|key| {
+            checkpoint(false);
+            *key < lower
+        });
+        for (index, key) in self.universe.iter().enumerate().skip(begin) {
+            checkpoint(false);
+            let Key::Unicast(key_prefix, path_id) = key else {
+                break;
+            };
+            if *key_prefix != prefix {
+                break;
+            }
+            if self.words[index / 64] & (1_u64 << (index % 64)) != 0 {
+                visit(*path_id);
+            }
+        }
+        let begin = self.sparse.partition_point(|key| {
+            checkpoint(false);
+            *key < lower
+        });
+        for key in &self.sparse[begin..] {
+            checkpoint(false);
+            let Key::Unicast(key_prefix, path_id) = key else {
+                break;
+            };
+            if *key_prefix != prefix {
+                break;
+            }
+            visit(*path_id);
+        }
+    }
+
+    pub(in crate::manager) fn unicast_prefix_paths(
+        self,
+        prefix: Prefix,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> usize {
+        let mut count = 0;
+        self.visit_unicast_prefix_paths(prefix, checkpoint, &mut |_| count += 1);
+        count
+    }
+
     #[cfg(test)]
     pub(in crate::manager) fn iter(self) -> impl Iterator<Item = ExactExportKey> + 'a {
         self.iter_with_checkpoint(|_| {})
@@ -1971,15 +2021,19 @@ impl AdmittedRecovery {
         let keys = &mut record.keys.0;
         let mut withdrawals = withdrawals;
         let mut withdrawn = withdrawals.next();
-        keys.retain(|key| {
-            checkpoint(false);
-            while withdrawn.is_some_and(|withdrawal| withdrawal < *key) {
+        if withdrawn.is_some() {
+            keys.retain(|key| {
                 checkpoint(false);
-                withdrawn = withdrawals.next();
-            }
-            withdrawn != Some(*key)
-        });
+                while withdrawn.is_some_and(|withdrawal| withdrawal < *key) {
+                    checkpoint(false);
+                    withdrawn = withdrawals.next();
+                }
+                withdrawn != Some(*key)
+            });
+        }
         let old_len = keys.len();
+        let singleton = announcements.size_hint().1.is_some_and(|upper| upper <= 1);
+        let mut needs_sort = false;
         for key in announcements {
             checkpoint(false);
             if let Ok(position) = universe.binary_search(&key) {
@@ -1988,14 +2042,34 @@ impl AdmittedRecovery {
                     record.words[position / 64] |= bit;
                     record.masked += 1;
                 }
+            } else if singleton {
+                let Err(position) = keys.binary_search_by(|old| {
+                    checkpoint(false);
+                    old.cmp(&key)
+                }) else {
+                    continue;
+                };
+                if keys.len() == keys.capacity() {
+                    return Err(self.fail(index, self.missing_proof(peer), checkpoint));
+                }
+                let end = keys.len();
+                keys.push(key);
+                // A singleton before a small high-key suffix need not sort
+                // every already admitted key. Account for every moved slot.
+                for displaced in (position..end).rev() {
+                    checkpoint(false);
+                    keys.swap(displaced, displaced + 1);
+                }
             } else if keys[..old_len].binary_search(&key).is_err() {
                 if keys.len() == keys.capacity() {
                     return Err(self.fail(index, self.missing_proof(peer), checkpoint));
                 }
+                // Sorted appends preserve the proof without a full key walk.
+                needs_sort |= keys.last().is_some_and(|last| *last >= key);
                 keys.push(key);
             }
         }
-        if keys.len() != old_len {
+        if needs_sort {
             Self::sort_keys(keys, checkpoint);
         }
         Ok(true)
@@ -2244,6 +2318,50 @@ mod tests {
             ledger.push_capture(peer, key).unwrap();
         }
         ledger.seal_capture(peer).unwrap();
+    }
+
+    #[test]
+    fn prefix_path_count_uses_only_its_masked_and_sparse_range() {
+        let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+        let v6 = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            "2001:db8::".parse().unwrap(),
+            64,
+        ));
+        let mut universe: Vec<_> = (0..4096_u32)
+            .map(|n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
+            .collect();
+        universe.extend([
+            Key::Unicast(v4, 1),
+            Key::Unicast(v4, 2),
+            Key::Unicast(v6, 1),
+        ]);
+        universe.sort_unstable();
+        let mut words = vec![0; universe.len().div_ceil(64)];
+        for key in [Key::Unicast(v4, 2), Key::Unicast(v6, 1)] {
+            let index = universe.binary_search(&key).unwrap();
+            words[index / 64] |= 1_u64 << (index % 64);
+        }
+        let sparse = [Key::Unicast(v4, 3)];
+        let view = AdmittedKeyView {
+            universe: &universe,
+            words: &words,
+            sparse: &sparse,
+            masked: 2,
+        };
+        let mut visits = 0;
+        assert_eq!(view.unicast_prefix_paths(v4, &mut |_| visits += 1), 2);
+        assert_eq!(view.unicast_prefix_paths(v6, &mut |_| visits += 1), 1);
+        assert_eq!(
+            view.unicast_prefix_paths(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+                &mut |_| visits += 1
+            ),
+            0
+        );
+        assert!(
+            visits < 100,
+            "range count must not walk the unrelated 4096-key universe: {visits}"
+        );
     }
 
     #[test]
@@ -3115,6 +3233,98 @@ mod tests {
             }
             assert!(comparisons <= 64, "tiny suffix walked {comparisons} keys");
         }
+    }
+
+    #[test]
+    fn singleton_sparse_insertion_moves_only_two_high_sentinels() {
+        let mut work = Vec::new();
+        for count in [64_u32, 256] {
+            let key = |n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0);
+            let all: Vec<_> = (0..count + 2).map(key).collect();
+            let mut ledger = AdmittedRecovery::new();
+            ledger.insert_empty(peer(1)).unwrap();
+            ledger
+                .reserve_admitted(peer(1), all.iter().copied())
+                .unwrap();
+            ledger
+                .apply_reserved_admitted_with_checkpoint(
+                    peer(1),
+                    [key(count), key(count + 1)].into_iter(),
+                    [].into_iter(),
+                    &mut |_| {},
+                )
+                .unwrap();
+            ledger.fail_next_allocation_for_test();
+            let mut visits = 0;
+            for n in 0..count {
+                // Match production's filtered ANN iterator: lower bound zero,
+                // while its upper bound still proves a singleton.
+                ledger
+                    .apply_reserved_admitted_with_checkpoint(
+                        peer(1),
+                        [key(n)].into_iter().filter(|_| true),
+                        [].into_iter(),
+                        &mut |_| visits += 1,
+                    )
+                    .unwrap();
+            }
+            assert!(
+                ledger.fail_next_allocation,
+                "reserved insertion performs no allocation"
+            );
+            assert_eq!(
+                ledger.get(&peer(1)).unwrap().iter().collect::<Vec<_>>(),
+                all.into_iter()
+                    .map(ExactExportKey::from)
+                    .collect::<Vec<_>>()
+            );
+            work.push(visits);
+        }
+        eprintln!("two-high-sentinel singleton work: {work:?}");
+        assert!(
+            work[1] <= work[0] * 8,
+            "singleton sparse insertion grew {work:?}"
+        );
+    }
+
+    #[test]
+    fn singleton_sorted_sparse_admission_work_is_linear() {
+        let mut work = Vec::new();
+        for count in [64_u32, 256] {
+            let raw: Vec<_> = (0..count)
+                .map(|n| Key::Unicast(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(n), 32)), 0))
+                .collect();
+            let mut ledger = AdmittedRecovery::new();
+            ledger.insert_empty(peer(1)).unwrap();
+            ledger
+                .reserve_admitted(peer(1), raw.iter().copied())
+                .unwrap();
+            let before = ledger.bytes();
+            ledger.fail_next_allocation_for_test();
+            let mut visits = 0;
+            for key in &raw {
+                ledger
+                    .apply_reserved_admitted_with_checkpoint(
+                        peer(1),
+                        std::iter::once(*key),
+                        std::iter::empty(),
+                        &mut |_| visits += 1,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                ledger.get(&peer(1)).unwrap().iter().collect::<Vec<_>>(),
+                raw.iter()
+                    .copied()
+                    .map(ExactExportKey::from)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(ledger.bytes(), before);
+            assert!(ledger.fail_next_allocation);
+            assert!(visits >= raw.len());
+            work.push(visits);
+        }
+        assert!(work[1] <= 8 * work[0], "sparse admission work: {work:?}");
     }
 
     #[test]

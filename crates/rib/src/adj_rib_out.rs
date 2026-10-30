@@ -22,6 +22,28 @@ use crate::route::{
 use crate::slab::RouteSlab;
 use crate::update::{RouteQueryKey, route_query_key};
 
+/// Original local intent behind an exported unicast key. Export policy and
+/// Add-Path rank rewriting cannot reconstruct this from the stored route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalExportSource {
+    pub(crate) path_id: u32,
+    pub(crate) deferral_exempt: bool,
+}
+
+impl LocalExportSource {
+    pub(crate) fn from_route(route: &Route) -> Option<Self> {
+        (route.peer == PeerId::LOCAL).then(|| Self {
+            path_id: route.path_id,
+            deferral_exempt: match route.prefix {
+                Prefix::V4(prefix) => prefix.len == 32,
+                Prefix::V6(prefix) => prefix.len == 128,
+            } || route
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE),
+        })
+    }
+}
+
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
 /// Routes are keyed by `(Prefix, path_id)` for Add-Path (RFC 7911).
@@ -34,6 +56,8 @@ pub struct AdjRibOut {
     /// also backs the group RIB-Out table (`GroupRibOut`), whose route map
     /// was the largest heap component in docs/perf/rebaseline-2026-07.md.
     routes: RouteSlab<Route>,
+    /// Only local rows need pre-policy identity; received route bodies grow no field.
+    local_export_sources: ShardedMap<(Prefix, u32), LocalExportSource>,
     /// Explicit `Specific` unicast actions admitted alongside route bodies.
     /// None uses the immutable session profile's default and needs no entry;
     /// `Self_` lives in `self_next_hop`. A hashed entry is 44 B plus one
@@ -49,7 +73,7 @@ pub struct AdjRibOut {
     /// Primary index: prefix → `(path_id, slab handle)` pairs, backed by a
     /// family-split prefix trie. `SmallVec<[(u32, u32); 1]>` inlines the
     /// single-best case (`path_id=0`) without heap allocation; Add-Path
-    /// multi-path spills to heap transparently.
+    /// multi-path spills to heap transparently. Pairs stay sorted by path ID.
     prefix_path_ids: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
@@ -244,6 +268,7 @@ impl AdjRibOut {
         Self {
             peer,
             routes: RouteSlab::with_capacity(capacity),
+            local_export_sources: ShardedMap::default(),
             next_hop_overrides: ShardedMap::default(),
             self_next_hop: Vec::new(),
             self_next_hop_count: 0,
@@ -330,7 +355,10 @@ impl AdjRibOut {
     /// Insert or replace an advertised route with checkpoints around index
     /// walks and possible allocation edges.
     pub(crate) fn insert_with(&mut self, route: Route, checkpoint: &mut impl FnMut()) {
+        let key = (route.prefix, route.path_id);
+        let source = LocalExportSource::from_route(&route);
         self.insert_with_next_hop(route, None, checkpoint);
+        self.set_local_export_source(key, source);
     }
 
     pub(crate) fn insert_with_next_hop(
@@ -344,24 +372,37 @@ impl AdjRibOut {
         checkpoint();
         let ids = self.prefix_path_ids.entry_or_default(route.prefix);
         checkpoint();
-        let handle = ids.iter().find_map(|(id, handle)| {
-            checkpoint();
-            (*id == key.1).then_some(*handle)
-        });
-        let handle = if let Some(handle) = handle {
-            checkpoint();
-            self.routes.set(handle, route);
-            checkpoint();
-            handle
+        let position = if ids.last().is_none_or(|(id, _)| *id < key.1) {
+            Err(ids.len())
         } else {
-            checkpoint();
-            let v6 = matches!(key.0, Prefix::V6(_));
-            track(&mut self.second_family.unicast, v6, true, false);
-            let handle = self.routes.insert(route);
-            checkpoint();
-            ids.push((key.1, handle));
-            checkpoint();
-            handle
+            ids.binary_search_by(|(id, _)| {
+                checkpoint();
+                id.cmp(&key.1)
+            })
+        };
+        let handle = match position {
+            Ok(position) => {
+                let handle = ids[position].1;
+                checkpoint();
+                self.routes.set(handle, route);
+                checkpoint();
+                handle
+            }
+            Err(position) => {
+                checkpoint();
+                let v6 = matches!(key.0, Prefix::V6(_));
+                track(&mut self.second_family.unicast, v6, true, false);
+                let handle = self.routes.insert(route);
+                checkpoint();
+                ids.push((key.1, handle));
+                for index in (position..ids.len() - 1).rev() {
+                    checkpoint();
+                    ids[index + 1] = ids[index];
+                }
+                ids[position] = (key.1, handle);
+                checkpoint();
+                handle
+            }
         };
         let is_self = matches!(action, Some(NextHopAction::Self_));
         self.set_self_next_hop(handle, is_self);
@@ -369,6 +410,69 @@ impl AdjRibOut {
             checkpoint();
             self.next_hop_overrides.insert(key, action);
             checkpoint();
+        }
+    }
+
+    /// Move actual common-family admission without copying route bodies.
+    pub(crate) fn take_common_routes(&mut self) -> Self {
+        let mut retained = Self::new(self.peer);
+        std::mem::swap(&mut retained.routes, &mut self.routes);
+        std::mem::swap(
+            &mut retained.local_export_sources,
+            &mut self.local_export_sources,
+        );
+        std::mem::swap(
+            &mut retained.next_hop_overrides,
+            &mut self.next_hop_overrides,
+        );
+        std::mem::swap(&mut retained.self_next_hop, &mut self.self_next_hop);
+        std::mem::swap(
+            &mut retained.self_next_hop_count,
+            &mut self.self_next_hop_count,
+        );
+        std::mem::swap(&mut retained.prefix_path_ids, &mut self.prefix_path_ids);
+        std::mem::swap(&mut retained.vpn_routes, &mut self.vpn_routes);
+        std::mem::swap(&mut retained.vpn_key_path_ids, &mut self.vpn_key_path_ids);
+        std::mem::swap(&mut retained.vpn_keys, &mut self.vpn_keys);
+        std::mem::swap(&mut retained.vpn_key_log, &mut self.vpn_key_log);
+        std::mem::swap(
+            &mut retained.second_family.unicast,
+            &mut self.second_family.unicast,
+        );
+        std::mem::swap(&mut retained.second_family.vpn, &mut self.second_family.vpn);
+        retained
+    }
+
+    pub(crate) fn take_local_export_sources(
+        &mut self,
+    ) -> ShardedMap<(Prefix, u32), LocalExportSource> {
+        std::mem::take(&mut self.local_export_sources)
+    }
+
+    pub(crate) fn adopt_local_export_sources(
+        &mut self,
+        sources: ShardedMap<(Prefix, u32), LocalExportSource>,
+    ) {
+        self.local_export_sources = sources;
+    }
+
+    pub(crate) fn local_export_source(
+        &self,
+        prefix: &Prefix,
+        path_id: u32,
+    ) -> Option<LocalExportSource> {
+        self.local_export_sources.get(&(*prefix, path_id)).copied()
+    }
+
+    pub(crate) fn set_local_export_source(
+        &mut self,
+        key: (Prefix, u32),
+        source: Option<LocalExportSource>,
+    ) {
+        if let Some(source) = source {
+            self.local_export_sources.insert(key, source);
+        } else {
+            self.local_export_sources.remove(&key);
         }
     }
 
@@ -430,15 +534,19 @@ impl AdjRibOut {
             let Some(ids) = self.prefix_path_ids.get_mut(prefix) else {
                 return false;
             };
-            let pos = ids.iter().position(|(id, _)| {
+            let Ok(pos) = ids.binary_search_by(|(id, _)| {
                 checkpoint();
-                *id == path_id
-            });
-            let Some(pos) = pos else {
+                id.cmp(&path_id)
+            }) else {
                 return false;
             };
+            let handle = ids[pos].1;
+            for index in pos..ids.len() - 1 {
+                checkpoint();
+                ids[index] = ids[index + 1];
+            }
             checkpoint();
-            let (_, handle) = ids.swap_remove(pos);
+            let _ = ids.pop();
             checkpoint();
             (handle, ids.is_empty())
         };
@@ -451,6 +559,7 @@ impl AdjRibOut {
         }
         checkpoint();
         self.next_hop_overrides.remove(&(*prefix, path_id));
+        self.local_export_sources.remove(&(*prefix, path_id));
         self.set_self_next_hop(handle, false);
         let retired = self.routes.remove(handle);
         let removed = retired.is_some();
@@ -472,12 +581,9 @@ impl AdjRibOut {
     }
 
     fn handle(&self, prefix: &Prefix, path_id: u32) -> Option<u32> {
-        let (_, handle) = self
-            .prefix_path_ids
-            .get(prefix)?
-            .iter()
-            .find(|(id, _)| *id == path_id)?;
-        Some(*handle)
+        let ids = self.prefix_path_ids.get(prefix)?;
+        let position = ids.binary_search_by_key(&path_id, |(id, _)| *id).ok()?;
+        Some(ids[position].1)
     }
 
     /// Iterate over all advertised routes.
@@ -556,6 +662,7 @@ impl AdjRibOut {
         self.second_family.unicast = 0;
         self.routes.clear();
         self.next_hop_overrides.clear();
+        self.local_export_sources.clear();
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
@@ -574,13 +681,14 @@ impl AdjRibOut {
         self.second_family.unicast = 0;
         self.routes = RouteSlab::default();
         self.next_hop_overrides = ShardedMap::default();
+        self.local_export_sources = ShardedMap::default();
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids = FamilyPrefixMap::default();
     }
 
-    /// Retire and release unicast state with checkpoints around every route,
-    /// index entry, and final backing allocation.
+    /// Retire and release unicast bodies for group transfer. Local admission
+    /// provenance stays with this receiver across the ownership change.
     pub(crate) fn release_unicast_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.second_family.unicast = 0;
         self.routes.release_with(checkpoint);
@@ -668,6 +776,7 @@ impl AdjRibOut {
         self.second_family = SecondFamilyCounts::default();
         self.routes.clear();
         self.next_hop_overrides.clear();
+        self.local_export_sources.clear();
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
@@ -687,6 +796,7 @@ impl AdjRibOut {
         self.second_family = SecondFamilyCounts::default();
         self.routes.retire_with(checkpoint);
         retire_sharded_map(&mut self.next_hop_overrides, checkpoint);
+        retire_sharded_map(&mut self.local_export_sources, checkpoint);
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);
@@ -1176,6 +1286,110 @@ mod tests {
     }
 
     #[test]
+    fn unicast_path_index_tracks_unordered_replacement_withdrawal_and_reuse() {
+        let v6 = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            "2001:db8::".parse().unwrap(),
+            32,
+        ));
+        for prefix in [prefix_a(), v6] {
+            let mut rib = AdjRibOut::new(PeerId::from_addr("192.0.2.1".parse().unwrap()));
+            let mut expected = std::collections::BTreeMap::new();
+            for path_id in [9, 1, 7, 3, 11, 0] {
+                let route = make_route(prefix, path_id);
+                expected.insert(path_id, route.next_hop);
+                rib.insert_with_next_hop(route, Some(NextHopAction::Self_), &mut || {});
+            }
+            let handle = rib.handle(&prefix, 7).unwrap();
+            let mut changed = make_route(prefix, 7);
+            changed.next_hop = "192.0.2.99".parse().unwrap();
+            expected.insert(7, changed.next_hop);
+            rib.insert(changed);
+            assert_eq!(rib.handle(&prefix, 7), Some(handle));
+            assert_eq!(rib.next_hop_override(&prefix, 7), None);
+            let slots = rib.unicast_slot_count();
+            for path_id in [3, 9, 0] {
+                assert!(rib.withdraw(&prefix, path_id));
+                assert!(rib.get(&prefix, path_id).is_none());
+                assert_eq!(rib.next_hop_override(&prefix, path_id), None);
+                expected.remove(&path_id);
+            }
+            assert!(!rib.withdraw(&prefix, 3));
+            assert_eq!(rib.handle(&prefix, 7), Some(handle));
+            for path_id in [9, 0, 3] {
+                let route = make_route(prefix, path_id);
+                expected.insert(path_id, route.next_hop);
+                rib.insert(route);
+            }
+            assert_eq!(rib.unicast_slot_count(), slots);
+            assert_eq!(rib.handle(&prefix, 7), Some(handle));
+            assert_eq!(rib.len(), expected.len());
+            assert_eq!(rib.path_ids_for_prefix(&prefix).len(), expected.len());
+            assert_eq!(
+                rib.iter_prefix(&prefix)
+                    .map(|route| (route.path_id, route.next_hop))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+                expected,
+            );
+            for (path_id, next_hop) in expected {
+                assert_eq!(rib.get(&prefix, path_id).unwrap().next_hop, next_hop);
+                let action = if [1, 11].contains(&path_id) {
+                    Some(&NextHopAction::Self_)
+                } else {
+                    None
+                };
+                assert_eq!(rib.next_hop_override(&prefix, path_id), action);
+            }
+            let mut check_ids = rib.path_ids_for_prefix(&prefix).to_vec();
+            check_ids.sort_unstable();
+            assert_eq!(check_ids, vec![0, 1, 3, 7, 9, 11]);
+        }
+    }
+
+    #[test]
+    fn same_prefix_unicast_admission_work_is_linear() {
+        let mut costs = Vec::new();
+        for count in [64_u32, 256] {
+            let mut rib = AdjRibOut::with_capacity(
+                PeerId::from_addr("192.0.2.1".parse().unwrap()),
+                usize::try_from(count).unwrap(),
+            );
+            let prefix = prefix_a();
+            let mut visits = 0;
+            for path_id in 0..count {
+                rib.insert_with_next_hop(
+                    make_route(prefix, path_id),
+                    Some(NextHopAction::Self_),
+                    &mut || visits += 1,
+                );
+            }
+            assert_eq!(rib.len(), usize::try_from(count).unwrap());
+            assert_eq!(
+                rib.family_lens().unicast,
+                [usize::try_from(count).unwrap(), 0]
+            );
+            assert_eq!(
+                rib.path_ids_for_prefix(&prefix).as_slice(),
+                (0..count).collect::<Vec<_>>()
+            );
+            for path_id in 0..count {
+                let route = rib.get(&prefix, path_id).unwrap();
+                assert_eq!(route.path_id, path_id);
+                assert!(!route.is_stale && !route.is_llgr_stale);
+                assert_eq!(
+                    rib.next_hop_override(&prefix, path_id),
+                    Some(&NextHopAction::Self_)
+                );
+            }
+            costs.push(visits);
+        }
+        eprintln!("same-prefix admission checkpoints: {costs:?}");
+        assert!(
+            costs[1] <= 8 * costs[0],
+            "same-prefix admission work: {costs:?}"
+        );
+    }
+
+    #[test]
     fn unicast_action_residue_follows_exact_admitted_key_lifecycle() {
         let mut rib = AdjRibOut::new(PeerId::from_addr("192.0.2.1".parse().unwrap()));
         let prefix = prefix_a();
@@ -1347,6 +1561,73 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
         }
+    }
+
+    #[test]
+    fn common_route_move_preserves_indexes_actions_and_provenance() {
+        let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
+        let mut rib = AdjRibOut::new(peer).with_vpn_key_log();
+        let v4 = prefix_a();
+        let v6 = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            "2001:db8::".parse().unwrap(),
+            32,
+        ));
+        let mut local = make_route(v4, 7);
+        local.peer = crate::PeerId::LOCAL;
+        local.origin_type = crate::route::RouteOrigin::Local;
+        AttrSet::edit(&mut local.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![
+                rustbgpd_wire::COMMUNITY_BLACKHOLE,
+            ]));
+        });
+        let source = LocalExportSource::from_route(&local);
+        rib.insert_with_next_hop(local, Some(NextHopAction::Self_), &mut || {});
+        rib.set_local_export_source((v4, 7), source);
+        assert_eq!(rib.local_export_source(&v4, 7), source);
+        let specific = NextHopAction::Specific("2001:db8::1".parse().unwrap());
+        rib.insert_with_next_hop(make_route(v6, 2), Some(specific.clone()), &mut || {});
+        rib.insert(make_route(v6, 9));
+        let vpn4 = make_vpn_route(vpn_nlri([10, 1, 0, 0], 24, 100), 1);
+        let mut vpn6 = make_vpn_route(vpn_nlri([10, 2, 0, 0], 24, 200), 1);
+        vpn6.nlri.prefix = VpnPrefix::v6("2001:db8:2::".parse().unwrap(), 64).unwrap();
+        vpn6.path_id = 4;
+        let vpn4_key = vpn4.key();
+        let vpn6_key = vpn6.key();
+        rib.insert_vpn(vpn4);
+        rib.insert_vpn(vpn6);
+        let version = rib.vpn_key_version();
+        let flow = crate::test_support::make_flowspec_route("192.0.2.9".parse().unwrap());
+        rib.insert_flowspec(flow);
+        let mut retained = rib.take_common_routes();
+        assert_eq!(rib.family_lens().unicast, [0, 0]);
+        assert_eq!(rib.family_lens().vpn, [0, 0]);
+        assert_eq!(rib.flowspec_len(), 1);
+        assert_eq!(retained.flowspec_len(), 0);
+        assert_eq!(retained.family_lens().unicast, [1, 2]);
+        assert_eq!(retained.family_lens().vpn, [1, 1]);
+        assert_eq!(retained.unicast_prefix_count(Afi::Ipv6), 1);
+        assert_eq!(retained.path_ids_for_prefix(&v6).as_slice(), [2, 9]);
+        assert_eq!(
+            retained.next_hop_override(&v4, 7),
+            Some(&NextHopAction::Self_)
+        );
+        assert_eq!(retained.next_hop_override(&v6, 2), Some(&specific));
+        assert_eq!(
+            retained.local_export_source(&v4, 7),
+            Some(LocalExportSource {
+                path_id: 7,
+                deferral_exempt: true
+            })
+        );
+        assert_eq!(retained.vpn_path_ids_for_key(&vpn4_key.nlri_key), [0]);
+        assert_eq!(retained.vpn_path_ids_for_key(&vpn6_key.nlri_key), [4]);
+        assert_eq!(retained.vpn_key_version(), version);
+        assert!(retained.vpn_key_log_capacity().is_some());
+        rib.retire_with(&mut || {});
+        assert!(retained.withdraw(&v6, 2));
+        assert_eq!(retained.path_ids_for_prefix(&v6).as_slice(), [9]);
+        assert!(retained.remove_vpn(&vpn6_key));
+        assert_eq!(retained.family_lens().vpn, [1, 0]);
     }
 
     /// A batch whose keys all land in one nearly full shard must reserve
@@ -1569,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpointed_unicast_mutations_visit_path_ids() {
+    fn checkpointed_unicast_mutations_cover_index_updates() {
         let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let prefix = prefix_a();
         let mut checkpoints = 0;
@@ -1577,7 +1858,22 @@ mod tests {
         rib.insert_with(make_route(prefix, 1), &mut || checkpoints += 1);
         rib.insert_with(make_route(prefix, 2), &mut || checkpoints += 1);
 
-        assert!(checkpoints >= 11);
+        // Increasing IDs append without walking earlier siblings.
+        assert!(checkpoints >= 10);
+        assert_eq!(rib.path_ids_for_prefix(&prefix).as_slice(), [1, 2]);
+
+        checkpoints = 0;
+        rib.insert_with(make_route(prefix, 0), &mut || checkpoints += 1);
+        assert!(
+            checkpoints >= 9,
+            "search and both shifted pairs are covered"
+        );
+        checkpoints = 0;
+        assert!(rib.withdraw_with(&prefix, 0, &mut || checkpoints += 1));
+        assert!(
+            checkpoints >= 8,
+            "search and both shifted pairs are covered"
+        );
         assert_eq!(rib.path_ids_for_prefix(&prefix).as_slice(), [1, 2]);
 
         checkpoints = 0;

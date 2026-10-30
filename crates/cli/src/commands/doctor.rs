@@ -1145,6 +1145,11 @@ fn outbound_prefix_limit_checks(
     rows.iter()
         .filter(|row| row.blocking)
         .map(|row| {
+            let usage = if row.usage == u64::MAX {
+                "unknown".to_string()
+            } else {
+                row.usage.to_string()
+            };
             let limit = row
                 .limit
                 .map_or_else(|| "unlimited".to_string(), |limit| limit.to_string());
@@ -1161,7 +1166,7 @@ fn outbound_prefix_limit_checks(
                 status: CheckStatus::Fail,
                 detail: format!(
                     "peer {identity} family {} is intentionally withholding routes: usage {}, limit {limit}, reason {reason}",
-                    row.family, row.usage
+                    row.family, usage
                 ),
             }
         })
@@ -3753,7 +3758,7 @@ async fn run_with_deadlines(
                 CheckStatus::Ok,
                 format!("daemon reachable at {}", opts.daemon_address),
             )?;
-            let mut control = ControlServiceClient::with_interceptor(
+            let control = ControlServiceClient::with_interceptor(
                 connection.channel(),
                 connection.interceptor(),
             );
@@ -3869,10 +3874,11 @@ async fn run_with_deadlines(
             }
 
             // system/metrics.prom.
+            let mut metrics = connection.metrics_client();
             match rpc_with_timeout(
                 "GetMetrics",
                 read_budget,
-                control.get_metrics(MetricsRequest {}),
+                metrics.get_metrics(MetricsRequest {}),
             )
             .await
             {
@@ -5539,6 +5545,14 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 .contains("reason outbound_prefix_limit_reached")
         );
 
+        let mut unknown_usage = blocking;
+        unknown_usage.usage = u64::MAX;
+        unknown_usage.headroom = None;
+        let unknown = outbound_prefix_limit_checks("fe80::1%eth0", &[unknown_usage.clone()]);
+        assert!(unknown[0].detail.contains("usage unknown, limit 100"));
+        assert!(!unknown[0].detail.contains(&u64::MAX.to_string()));
+        unknown_usage.blocking = false;
+        assert!(outbound_prefix_limit_checks("fe80::1%eth0", &[unknown_usage]).is_empty());
         assert!(outbound_prefix_limit_checks("fe80::1%eth1", &[nonblocking, unlimited]).is_empty());
         assert!(outbound_prefix_limit_checks("fe80::1%eth1", &[]).is_empty());
     }
@@ -7977,6 +7991,71 @@ paths = ["x"]
     }
 
     // ---- bundle integration ------------------------------------------
+
+    #[tokio::test]
+    async fn doctor_collects_complete_metrics_above_four_mib() {
+        let server = spawn_mock_server(None).await;
+        let metrics = crate::test_support::thousand_peer_metrics().await;
+        assert!(metrics.len() > 4 * 1024 * 1024);
+        *server.state.metrics_text.lock().await = Some(metrics.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        run(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+                pre_upgrade: None,
+            },
+        )
+        .await
+        .unwrap();
+        let files = extract_bundle(&bundle_path);
+        assert_eq!(find(&files, "system/metrics.prom"), redact_text(&metrics));
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert_eq!(manifest["sections"]["system"], "collected");
+        assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_metrics_failure_as_partial_system_section() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .metrics_failures_remaining
+            .store(1, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        run(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+                pre_upgrade: None,
+            },
+        )
+        .await
+        .unwrap();
+        let files = extract_bundle(&bundle_path);
+        assert!(!files.iter().any(|(name, _)| name == "system/metrics.prom"));
+        find(&files, "system/health.json");
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert!(
+            manifest["sections"]["system"]
+                .as_str()
+                .unwrap()
+                .starts_with("partial: metrics RPC failed:")
+        );
+        assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 1);
+    }
 
     /// Extract a produced tar.gz into (root-relative path -> contents).
     fn extract_bundle(path: &Path) -> Vec<(String, String)> {

@@ -2361,16 +2361,17 @@ pub struct NeighborRibSnapshotResponse {
 ///
 /// `usage` is the post-policy, post-OTC, post-exact-export admitted
 /// unique-prefix count — the same truth advertised-route queries report,
-/// never the shared update-group table's count.
+/// never the shared update-group table's count. Unavailable usage during
+/// recovery is represented by `u64::MAX`, with no numeric headroom.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundPrefixLimitFamilyState {
     /// `ipv4_unicast` or `ipv6_unicast`.
     pub family: String,
-    /// Distinct prefixes currently admitted for this family.
+    /// Distinct prefixes currently admitted, or `u64::MAX` while unknown.
     pub usage: u64,
     /// Configured maximum; `None` is unlimited, never a synthesized zero.
     pub limit: Option<u32>,
-    /// Saturating `limit - usage`; `None` while unlimited.
+    /// Saturating `limit - usage`; `None` while unlimited or usage is unknown.
     pub headroom: Option<u32>,
     /// Whether a blocking episode is open for this family.
     pub blocking: bool,
@@ -2430,7 +2431,7 @@ pub struct OutboundPrefixLimitViolation {
     pub peer: PeerId,
     /// `ipv4_unicast` or `ipv6_unicast`.
     pub family: String,
-    /// Distinct prefixes currently advertised.
+    /// Distinct prefixes currently advertised, or `u64::MAX` while unknown.
     pub usage: u64,
     /// The candidate the operator asked for.
     pub requested: u32,
@@ -2441,6 +2442,15 @@ pub struct OutboundPrefixLimitViolation {
 /// link-local addresses still says which link's session blocks it.
 impl std::fmt::Display for OutboundPrefixLimitViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.usage == u64::MAX {
+            return write!(
+                f,
+                "{} {} advertised prefix usage is unknown during recovery; cannot apply the requested maximum {}",
+                self.peer.label(),
+                self.family,
+                self.requested
+            );
+        }
         write!(
             f,
             "{} {} advertises {} prefixes, above the requested maximum {}",

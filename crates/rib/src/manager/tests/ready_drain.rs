@@ -16,6 +16,7 @@ fn timer_manager(rx: mpsc::Receiver<RibUpdate>, query_rx: mpsc::Receiver<RibUpda
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });
+    arm_selection_waiter(&mut manager, source, &[(Afi::Ipv6, Safi::Unicast)]);
     manager.ribs.insert(source, AdjRibIn::new(source));
     manager
 }
@@ -330,4 +331,165 @@ async fn event_loop_batches_primary_updates_within_the_poll_budget() {
         applied_in_one_poll(false, Duration::from_secs(3600)).await,
         16
     );
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor transcript pins readiness before injection acknowledgement and ordinary reads after it"
+)]
+async fn assert_injected_unicast_readiness_during_deferral(leased: bool) {
+    let (tx, rx) = mpsc::channel(8);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx)
+        .with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: Duration::from_mins(2),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+                families: vec![(Afi::Ipv4, Safi::Unicast)],
+            }],
+        });
+    arm_selection_waiter(
+        &mut manager,
+        peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+        &[(Afi::Ipv4, Safi::Unicast)],
+    );
+    manager.flush_poll_budget = Duration::ZERO;
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    manager.replacement_readiness_test_hook = Some(Arc::new(move |stage| {
+        if stage != "selection_candidates" {
+            return;
+        }
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call < 2 {
+            entered_tx.send(call).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }
+    }));
+    let actor = tokio::spawn(manager.run());
+    let injected_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 17), 32);
+    let mut route = make_route(injected_prefix, Ipv4Addr::UNSPECIFIED);
+    route.peer = LOCAL_PEER;
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.path_id = 17;
+    route.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        PathAttribute::NextHop(Ipv4Addr::UNSPECIFIED),
+        PathAttribute::Communities(vec![0xFFFF_029A]),
+    ]);
+    let injection_tx = tx.clone();
+    let mut injection = tokio::spawn(async move {
+        if leased {
+            let (reply, response) = oneshot::channel();
+            injection_tx
+                .send(RibUpdate::InjectLeasedRoute {
+                    route,
+                    owner: "readiness".to_string(),
+                    lease_seconds: 30,
+                    reply,
+                })
+                .await
+                .unwrap();
+            response.await.unwrap().map(|(outcome, _)| outcome)
+        } else {
+            let (reply, response) = oneshot::channel();
+            injection_tx
+                .send(RibUpdate::InjectRoute { route, reply })
+                .await
+                .unwrap();
+            response.await.unwrap()
+        }
+    });
+
+    let entered = tokio::select! {
+        entry = entered_rx.recv() => entry,
+        outcome = &mut injection => {
+            panic!("injection completed without entering selection readiness: {outcome:?}");
+        }
+    };
+    assert_eq!(entered, Some(0));
+    let (reply, mut readiness) = oneshot::channel();
+    readiness_tx
+        .try_send(RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: Instant::now(),
+        })
+        .unwrap();
+    let (reply, mut ordinary) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    release_tx.send(()).unwrap();
+    let entered = tokio::select! {
+        entry = entered_rx.recv() => entry,
+        outcome = &mut injection => {
+            panic!("injection completed without entering its next selection checkpoint: {outcome:?}");
+        }
+    };
+    assert_eq!(entered, Some(1));
+    let observed = readiness.try_recv();
+    let ordinary_waited = matches!(
+        ordinary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    let injection_waited = !injection.is_finished();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        observed,
+        Ok(Ok(0)),
+        "readiness must answer before selection mutates the count"
+    );
+    assert!(
+        ordinary_waited,
+        "ordinary reads must remain behind the injection"
+    );
+    assert!(
+        injection_waited,
+        "readiness must answer before the injection acknowledgement"
+    );
+    assert_eq!(
+        injection.await.unwrap().unwrap(),
+        crate::update::InjectOutcome::Created
+    );
+    assert_eq!(ordinary.await.unwrap(), 1);
+
+    let (reply, response) = oneshot::channel();
+    readiness_tx
+        .send(RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: Instant::now(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap().unwrap(), 1);
+    let retained = query_received_routes(&tx, LOCAL_PEER).await;
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        (retained[0].prefix, retained[0].path_id),
+        (Prefix::V4(injected_prefix), 17)
+    );
+    assert!(!retained[0].is_stale && !retained[0].is_llgr_stale);
+    drop(tx);
+    drop(query_tx);
+    drop(readiness_tx);
+    actor.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn injected_unicast_keeps_answering_readiness_during_selection_deferral() {
+    assert_injected_unicast_readiness_during_deferral(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leased_unicast_keeps_answering_readiness_during_selection_deferral() {
+    assert_injected_unicast_readiness_during_deferral(true).await;
 }

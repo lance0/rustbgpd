@@ -1290,6 +1290,36 @@ impl RetainedConnectionState {
     }
 }
 
+/// Whether one session actor's FSM is Established, published by the actor so
+/// the peer manager can count Established peers without a `QueryState` round
+/// trip to every session. The actor publishes after every FSM event and
+/// clears it when it ends, however it ends.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EstablishedPublication(Arc<AtomicBool>);
+
+impl EstablishedPublication {
+    fn get(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// The session actor's writer for its [`EstablishedPublication`].
+#[derive(Debug, Default)]
+pub(crate) struct EstablishedPublisher(EstablishedPublication);
+
+impl EstablishedPublisher {
+    pub(crate) fn publish(&self, established: bool) {
+        self.0.0.store(established, Ordering::Release);
+    }
+}
+
+impl Drop for EstablishedPublisher {
+    /// A stopped, aborted or panicked actor is not Established.
+    fn drop(&mut self) {
+        self.publish(false);
+    }
+}
+
 /// Handle for controlling a spawned peer session.
 ///
 /// Dropping the handle does not stop the session — call [`shutdown`](Self::shutdown)
@@ -1299,6 +1329,7 @@ pub struct PeerHandle {
     task: JoinHandle<Result<(), TransportError>>,
     import_policy_counters: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
     gr_retained_connection: RetainedConnectionState,
+    established: EstablishedPublication,
 }
 
 /// Channel buffer size for peer commands.
@@ -1393,6 +1424,7 @@ impl PeerHandle {
             task,
             import_policy_counters: watch::channel(None).1,
             gr_retained_connection: RetainedConnectionState::default(),
+            established: EstablishedPublication::default(),
         }
     }
 
@@ -1409,6 +1441,7 @@ impl PeerHandle {
             task,
             import_policy_counters,
             gr_retained_connection: RetainedConnectionState::default(),
+            established: EstablishedPublication::default(),
         }
     }
 
@@ -1617,6 +1650,8 @@ impl PeerHandle {
         let (import_publication, import_policy_counters) = watch::channel(None);
         let gr_retained_connection = RetainedConnectionState::default();
         let retained_connection = gr_retained_connection.clone();
+        let established = EstablishedPublication::default();
+        let publisher = EstablishedPublisher(established.clone());
         let span = peer_session_span(&config);
         let task = tokio::spawn(
             async move {
@@ -1638,6 +1673,7 @@ impl PeerHandle {
                 );
                 session.set_import_policy_counters(import_publication);
                 session.gr_retained_connection = retained_connection;
+                session.established = publisher;
                 session.run().await
             }
             .instrument(span),
@@ -1647,6 +1683,7 @@ impl PeerHandle {
             task,
             import_policy_counters,
             gr_retained_connection,
+            established,
         }
     }
 
@@ -1795,6 +1832,8 @@ impl PeerHandle {
         let (import_publication, import_policy_counters) = watch::channel(None);
         let gr_retained_connection = RetainedConnectionState::default();
         let retained_connection = gr_retained_connection.clone();
+        let established = EstablishedPublication::default();
+        let publisher = EstablishedPublisher(established.clone());
         let span = peer_session_span(&config);
         let task = tokio::spawn(
             async move {
@@ -1819,6 +1858,7 @@ impl PeerHandle {
                 );
                 session.set_import_policy_counters(import_publication);
                 session.gr_retained_connection = retained_connection;
+                session.established = publisher;
                 session.run().await
             }
             .instrument(span),
@@ -1828,6 +1868,7 @@ impl PeerHandle {
             task,
             import_policy_counters,
             gr_retained_connection,
+            established,
         }
     }
 
@@ -2859,6 +2900,15 @@ impl PeerHandle {
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.task.is_finished()
+    }
+
+    /// Whether this session's FSM is Established, as the session last
+    /// published it. No round trip: a session busy writing still reads true,
+    /// and an ended session reads false. Fixture handles built with
+    /// [`Self::from_parts`] always read false.
+    #[must_use]
+    pub fn is_established(&self) -> bool {
+        self.established.get()
     }
 }
 

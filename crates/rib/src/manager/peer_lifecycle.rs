@@ -26,11 +26,10 @@ use crate::update::OutboundRouteUpdate;
 /// of `{PeerUp(winner), PeerUp(loser), PeerDown(loser)}` in the RFC 4271
 /// §6.8 collision window.
 pub(super) enum SessionTeardownDisposition {
-    /// No registered session for the peer (never registered, already torn
-    /// down, or in a GR window) — keep the pre-stamping accept-all
-    /// behavior.
+    /// No registered or live session for the peer — keep the pre-stamping
+    /// accept-all behavior.
     NoRegistration,
-    /// The stamped id is not the active registration: a teardown from a
+    /// The stamped id is not the current session: a teardown from a
     /// superseded (or already-dropped) session. Discarded whole; if the
     /// session was still tracked as live it has been pruned.
     DiscardStale,
@@ -161,6 +160,9 @@ impl RibManager {
                 self.peer_down_teardown(peer);
             }
         }
+        if !matches!(disposition, SessionTeardownDisposition::DiscardStale) {
+            self.settle_selection_sessions();
+        }
         disposition
     }
 
@@ -169,8 +171,8 @@ impl RibManager {
     /// `live_sessions` (it is down, whatever else happens) and classifies
     /// the event against the active registration. Discards are logged at
     /// INFO + counted in `bgp_rib_stale_peer_down_ignored_total`; a
-    /// teardown for a peer with no registered session keeps the
-    /// pre-stamping accept-all behavior and is never discarded.
+    /// teardown for a peer with neither registration nor a live session
+    /// keeps the pre-stamping accept-all behavior and is never discarded.
     pub(super) fn classify_session_teardown(
         &mut self,
         peer: PeerId,
@@ -192,20 +194,9 @@ impl RibManager {
         self.pending_peer_source_context.remove(&(peer, session_id));
         self.pending_peer_policy_context.remove(&(peer, session_id));
         self.drop_evpn_feed_receipts(peer, Some(session_id));
-        let Some(&registered) = self.outbound_session_ids.get(&peer) else {
-            // No registration. Ordinarily `live_sessions` is empty for the
-            // peer here and the full teardown proceeds; during the LAN-475
-            // deferral window sessions are tracked but not yet registered,
-            // so classify against them: prune the stamped session, and when
-            // another live session remains take the ordinary failover path
-            // (reset + re-register + inbound ROUTE-REFRESH request) — the
-            // survivor's registration may simply defer again.
-            let survivor_remains = self.live_sessions.get_mut(&peer).is_some_and(|sessions| {
-                sessions.retain(|s| s.session_id != session_id);
-                !sessions.is_empty()
-            });
-            if survivor_remains {
-                return SessionTeardownDisposition::FailOver;
+        let Some(registered) = self.current_session_id(peer) else {
+            if let Some(selection) = self.selection_deferral.as_mut() {
+                selection.session_down(peer, session_id, &self.metrics);
             }
             self.live_sessions.remove(&peer);
             return SessionTeardownDisposition::NoRegistration;
@@ -224,7 +215,7 @@ impl RibManager {
                 stale_session_id = session_id,
                 registered_session_id = registered,
                 "discarding stale session teardown from a superseded session — \
-                 the registered session's state is untouched"
+                 the current session's state is untouched"
             );
             self.metrics
                 .record_rib_stale_peer_down_ignored(&peer.label());
@@ -248,12 +239,22 @@ impl RibManager {
         }
     }
 
+    /// Registration is authoritative; a deferred session already owns ingress.
+    fn current_session_id(&self, peer: PeerId) -> Option<u64> {
+        self.outbound_session_ids.get(&peer).copied().or_else(|| {
+            self.live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .map(|record| record.session_id)
+        })
+    }
+
     /// Session-identity gate for the data-plane-affecting messages a
     /// session emits while Established (`RoutesReceived`, `EndOfRib`,
     /// `BeginRouteRefresh`/`EndRouteRefresh`, `RouteRefreshRequest`,
     /// `PeerOrfUpdate`). Returns `true` when the message must be
-    /// discarded: a registration exists for the peer and the stamped id
-    /// is not the active session — a message from a superseded session
+    /// discarded: a registered or deferred live session owns the peer and
+    /// the stamped id is not that session — a message from a superseded session
     /// (RFC 4271 §6.8 collision window) queued behind the replacement's
     /// `PeerUp`. Without the gate, such a message would mutate the
     /// REPLACEMENT session's state: stale routes landing in its
@@ -262,15 +263,10 @@ impl RibManager {
     /// ORF entries installed as its outbound filter. Registration context
     /// uses session-stamped staging instead of this data-message gate.
     ///
-    /// A message for a peer with NO registration keeps the pre-stamping
-    /// accept-all behavior, mirroring the teardown rule in
-    /// [`Self::classify_session_teardown`]. Unlike teardowns there is no
-    /// GR-window case to protect here — per-producer FIFO means a
-    /// session's data messages are always delivered between its own
-    /// `PeerUp` (which registers) and its own down event (after which it
-    /// emits nothing), so an unregistered data message can only come
-    /// from a legacy emitter that never registered, and dropping those
-    /// would change behavior for no safety gain.
+    /// Before outbound registration completes, the newest live record already
+    /// owns inbound state. Only a peer with neither registration nor a live
+    /// session keeps the pre-stamping legacy accept-all behavior. Staged OPEN
+    /// context remains separate from this data-message gate.
     ///
     /// Discards are logged at INFO (same shape as the stale-teardown
     /// discard) and counted in
@@ -285,7 +281,7 @@ impl RibManager {
         event: &'static str,
         kind: StaleSessionMessageKind,
     ) -> bool {
-        let Some(&registered) = self.outbound_session_ids.get(&peer) else {
+        let Some(registered) = self.current_session_id(peer) else {
             return false;
         };
         if registered == session_id {
@@ -297,7 +293,7 @@ impl RibManager {
             stale_session_id = session_id,
             registered_session_id = registered,
             "discarding stale session message from a superseded session — \
-             the registered session's state is untouched"
+             the current session's state is untouched"
         );
         self.metrics
             .record_rib_stale_session_message_ignored(&peer.label(), kind);
@@ -346,6 +342,11 @@ impl RibManager {
         );
         self.metrics
             .record_rib_outbound_registration_failover(&peer.label());
+        // Deferred registration may still bind the waiter to this survivor.
+        // Clearing its inbound table requires fresh replay proof as well.
+        if let Some(selection) = self.selection_deferral.as_mut() {
+            selection.session_down(peer, survivor_session_id, &self.metrics);
+        }
         // Same reset shape as the replacement-PeerUp: the dead session's
         // received routes go, GR/LLGR-retained routes stay (deadline-
         // bounded, swept on End-of-RIB or expiry).
@@ -859,6 +860,12 @@ impl RibManager {
         reason = "outbound teardown keeps per-registration cleanup and detached table retirement in their existing ownership order"
     )]
     fn clear_outbound_peer_state_inner(&mut self, peer: PeerId, same_connection_replay: bool) {
+        let retain_admission = same_connection_replay && self.retain_initial_group_admitted(peer);
+        // A refused capture has no key ledger to replace these actual bodies.
+        // Only the exact channel with a proven-complete private table keeps it.
+        let retain_private_body = retain_admission
+            && self.pending_group_admitted.get(&peer).is_none()
+            && self.private_common_admission_complete(peer);
         self.invalidate_evpn_feed_completion(peer);
         if !same_connection_replay {
             self.retire_evpn_recovery(peer);
@@ -881,6 +888,9 @@ impl RibManager {
         );
         // Any family's removed committed rows end an advertised-view walk.
         if let Some(mut rib) = self.adj_ribs_out.remove(&peer) {
+            let retained_common = retain_private_body.then(|| rib.take_common_routes());
+            let local_sources = (same_connection_replay && retained_common.is_none())
+                .then(|| rib.take_local_export_sources());
             if !rib.is_empty_all_families() {
                 self.advance_advertised_pages();
             }
@@ -922,6 +932,13 @@ impl RibManager {
                     manager.replacement_checkpoint(true);
                 });
             });
+            if let Some(retained) = retained_common {
+                self.adj_ribs_out.insert(peer, retained);
+            } else if let Some(sources) = local_sources {
+                let mut retained = AdjRibOut::new(peer);
+                retained.adopt_local_export_sources(sources);
+                self.adj_ribs_out.insert(peer, retained);
+            }
         }
         // The gauge reports the size of the table removed on the line
         // above, so it is zeroed here rather than at the `PeerDown` call
@@ -933,7 +950,10 @@ impl RibManager {
         // the hold window; this series carries what we would actually
         // re-advertise, which is nothing until the peer returns.
         let peer_label = peer.label();
-        for &(family, ..) in rustbgpd_wire::CONFIGURED_FAMILIES {
+        for &(family, _, safi) in rustbgpd_wire::CONFIGURED_FAMILIES {
+            if retain_admission && matches!(safi, Safi::Unicast | Safi::MplsVpn) {
+                continue;
+            }
             self.metrics
                 .set_adj_rib_out_prefixes(&peer_label, family, 0);
         }
@@ -942,9 +962,11 @@ impl RibManager {
         // session was advertising. A reconnect starts empty and admits its
         // initial feed up to the cap, so stale accounting can neither
         // consume a new generation's capacity nor clear its episode.
-        self.outbound_prefix_limits.remove(&peer);
-        self.outbound_limit_control.reap_peer(peer);
-        self.metrics.reap_outbound_prefix_capacity(&peer.label());
+        if !retain_admission {
+            self.outbound_prefix_limits.remove(&peer);
+            self.outbound_limit_control.reap_peer(peer);
+            self.metrics.reap_outbound_prefix_capacity(&peer.label());
+        }
         self.export_chains.remove(&peer);
         if self.peer_sendable_families.remove(&peer).is_some() {
             self.outbound_roster_generation = self.outbound_roster_generation.wrapping_add(1);
@@ -1052,7 +1074,9 @@ impl RibManager {
             });
         }
         self.pending_extra_withdraws.remove(&peer);
-        self.release_group_admitted_keys(peer);
+        if !same_connection_replay {
+            self.release_group_admitted_keys(peer);
+        }
         self.remove_update_group_member(peer);
         // The extra-withdraw drop above mutates residue even for a peer
         // whose membership removal doesn't touch a group.
@@ -1132,6 +1156,25 @@ impl RibManager {
                     .get(&peer)
                     .is_some_and(|previous| previous.same_channel(&outbound_tx));
             if same_connection_replay {
+                let held = self.selection_receiver_held_families(peer);
+                if held.into_iter().any(|held| held) {
+                    // A same-channel replay keeps OLD on the wire while its
+                    // private bodies are retired. Transfer its limited prefix
+                    // ownership before that table disappears.
+                    if self.grouped_member_of(peer).is_none()
+                        && !self.private_unicast_admission_incomplete(peer)
+                    {
+                        self.carry_outbound_admitted_across_regroup(peer, true);
+                    }
+                    self.capture_group_admitted_keys_for_send(peer);
+                    if let Some(record) = self.newest_live_session_mut(peer, session_id) {
+                        for (pending, held) in record.selection_partial_pending.iter_mut().zip(held)
+                        {
+                            *pending |= held;
+                        }
+                    }
+                    self.seed_initial_group_admitted_counts(peer);
+                }
                 self.prepare_evpn_registration_replay(peer);
             }
             self.clear_outbound_peer_state_inner(peer, same_connection_replay);
@@ -1171,6 +1214,23 @@ impl RibManager {
         let evpn_admitted_count = previous_session
             .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
             .map_or(0, |record| record.evpn_admitted_count);
+        let (
+            selection_initial_pending,
+            selection_partial_pending,
+            selection_initial_admitted,
+            selection_partial_caught_up,
+            selection_initial_admitted_valid,
+        ) = previous_session
+            .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
+            .map_or((false, [false; 4], [0; 6], false, false), |record| {
+                (
+                    record.selection_initial_pending,
+                    record.selection_partial_pending,
+                    record.selection_initial_admitted,
+                    record.selection_partial_caught_up,
+                    record.selection_initial_admitted_valid,
+                )
+            });
         let source_context = self
             .pending_peer_source_context
             .remove(&(peer, session_id))
@@ -1233,6 +1293,11 @@ impl RibManager {
             evpn_feed_completion,
             evpn_admitted_count,
             group_recovery_fallback,
+            selection_initial_pending,
+            selection_partial_pending,
+            selection_initial_admitted,
+            selection_partial_caught_up,
+            selection_initial_admitted_valid,
             export_policy_counters,
         };
         self.drop_evpn_feed_receipts(peer, Some(session_id));
@@ -1541,6 +1606,7 @@ impl RibManager {
         // gate releases existing peers first, while collision failback can
         // stage the current table for this peer's normal initial dump below
         // without emitting the held convergence marker.
+        let previously_deferred = self.deferred_selection_families();
         let transitions = match registration {
             ActiveSessionRegistration::PeerUp => {
                 if let Some(gr_context) = gr_context {
@@ -1558,6 +1624,9 @@ impl RibManager {
                             )
                         })
                 } else {
+                    if let Some(selection) = self.selection_deferral.as_mut() {
+                        selection.unclassified_session(peer, session_id, &self.metrics);
+                    }
                     Vec::new()
                 }
             }
@@ -1587,6 +1656,8 @@ impl RibManager {
                         transition_count = transitions.len(),
                         "exact collision-failback survivor classified against the RFC 4724 roster (enhanced-refresh waiters hold convergence until EoRR)"
                     );
+                } else if let Some(selection) = self.selection_deferral.as_mut() {
+                    selection.unclassified_session(peer, session_id, &self.metrics);
                 }
                 waiting.unwrap_or_default()
             }
@@ -1595,6 +1666,7 @@ impl RibManager {
             transitions,
             "all ordinary selection waiters satisfied or excluded",
         );
+        self.reselect_newly_deferred_local(&previously_deferred);
 
         // LAN-475: the initial table dump is a full O(table) staged pass on
         // the single-threaded RIB actor. A mass reconnect (e.g. tens of
@@ -1680,16 +1752,7 @@ impl RibManager {
             // charged owner while its channel/session maps still identify it.
             self.retire_evpn_recovery(peer);
         }
-        let peer_label = peer.label();
-        let unicast = crate::manager::helpers::UNICAST_FAMILIES;
-        crate::manager::helpers::set_rib_prefixes(&self.metrics, &peer_label, unicast, [0, 0]);
-        // Selective steady-state refresh relies on every family series already
-        // existing. Eager zeroes also keep scrape shape stable for a peer that
-        // never advertises one of the negotiated families.
-        for &(family, ..) in rustbgpd_wire::CONFIGURED_FAMILIES {
-            self.metrics
-                .set_adj_rib_out_prefixes(&peer_label, family, 0);
-        }
+        self.initialize_outbound_registration_gauges(peer);
         self.outbound_peers.insert(peer, outbound_tx);
         self.outbound_session_ids.insert(peer, session_id);
         self.metrics.set_rib_outbound_registered_peers(
@@ -1785,6 +1848,43 @@ impl RibManager {
             self.begin_private_evpn_handoff(peer);
         }
         true
+    }
+
+    /// Seed metric series while retaining exact same-channel UC/VPN truth.
+    fn initialize_outbound_registration_gauges(&self, peer: PeerId) {
+        let peer_label = peer.label();
+        let unicast = crate::manager::helpers::UNICAST_FAMILIES;
+        crate::manager::helpers::set_rib_prefixes(&self.metrics, &peer_label, unicast, [0, 0]);
+        // Selective steady-state refresh relies on every family series already
+        // existing. Eager zeroes also keep scrape shape stable for a peer that
+        // never advertises one of the negotiated families.
+        let retained = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|records| records.last())
+            .filter(|record| {
+                record.selection_initial_admitted_valid
+                    && record
+                        .selection_partial_pending
+                        .into_iter()
+                        .any(|held| held)
+            })
+            .map(|record| record.selection_initial_admitted);
+        for &(family, afi, safi) in rustbgpd_wire::CONFIGURED_FAMILIES {
+            let slot = match (afi, safi) {
+                (Afi::Ipv4, Safi::Unicast) => Some(0),
+                (Afi::Ipv6, Safi::Unicast) => Some(1),
+                (Afi::Ipv4, Safi::MplsVpn) => Some(2),
+                (Afi::Ipv6, Safi::MplsVpn) => Some(3),
+                _ => None,
+            };
+            let count = retained.zip(slot).map_or(0, |(counts, slot)| counts[slot]);
+            self.metrics.set_adj_rib_out_prefixes(
+                &peer_label,
+                family,
+                super::helpers::gauge_val(count),
+            );
+        }
     }
 
     /// Insert the local default RT-Constrain NLRI into the `LOCAL_PEER`
@@ -2051,7 +2151,7 @@ impl RibManager {
         }
     }
 
-    /// Build one plain-group inventory for a join (all released families) or
+    /// Build one plain-group inventory for a join (including injected unicast) or
     /// a refresh (one already released family). No member state is committed.
     pub(super) fn build_group_replay(
         &self,
@@ -2067,13 +2167,15 @@ impl RibManager {
         let mut announce = Vec::new();
         let mut next_hop_override = Vec::new();
         let mut only_source = None;
+        let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
         for route in group.table.iter() {
             super::replacement_readiness_checkpoint_at(&self.replacement_readiness, label, false);
             let route_family = prefix_family(&route.prefix);
-            if family.map_or_else(
-                || self.selection_deferred(route_family),
-                |family| family != route_family,
-            ) {
+            if family.is_some_and(|family| family != route_family)
+                || (self.selection_deferred(route_family)
+                    && !self
+                        .unicast_export_deferral_exempt(route, &mut unicast_deferral_exemptions))
+            {
                 continue;
             }
             if announce.is_empty() {
@@ -2135,7 +2237,7 @@ impl RibManager {
                 self.policy_filtered_routes
                     .get(&peer)
                     .into_iter()
-                    .flat_map(|keys| keys.iter().map(|key| key.prefix)),
+                    .flat_map(|prefixes| prefixes.keys().copied()),
             )
             .inspect(|_| checkpoint())
             .filter(|prefix| in_inventory(prefix))
@@ -2143,7 +2245,8 @@ impl RibManager {
     }
 
     /// Borrowed group entries a joining member replays: the resolved
-    /// `adv(m)` slot of every staged key outside a selection-deferred family
+    /// `adv(m)` slot of every eligible staged key, including local injections
+    /// in a selection-deferred family,
     /// whose source control does not suppress it toward this member. The
     /// vector grows with the retained set; selection deferral or
     /// route-server suppression can leave a small replay from a full table,
@@ -2157,11 +2260,9 @@ impl RibManager {
         mut checkpoint: impl FnMut(),
     ) -> Vec<super::update_groups::AdvEntry<'a>> {
         let mut replay = Vec::new();
+        let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
         for staged in group.table.iter() {
             checkpoint();
-            if self.selection_deferred(prefix_family(&staged.prefix)) {
-                continue;
-            }
             // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
             // ADR-0126 Decision 4): the staged winner for a
             // non-source member, the lane runner-up for the
@@ -2171,6 +2272,12 @@ impl RibManager {
             let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
                 continue;
             };
+            if self.selection_deferred(prefix_family(&entry.route.prefix))
+                && !self
+                    .unicast_export_deferral_exempt(entry.route, &mut unicast_deferral_exemptions)
+            {
+                continue;
+            }
             let (source_communities, source_large_communities) =
                 group.source_control_for_route(entry.route, entry.source_attrs);
             if super::distribution::rs_control::rs_control_suppressed(
@@ -2221,9 +2328,12 @@ impl RibManager {
             families
                 .iter()
                 .copied()
-                // A deferred FlowSpec Loc-RIB holds only injected rules,
-                // which are dumped now; its EoR waits for the release.
-                .filter(|family| family.1 == Safi::FlowSpec || !self.selection_deferred(*family))
+                // Deferred unicast and FlowSpec select only injected routes;
+                // their initial UPDATEs pass while End-of-RIB stays held.
+                .filter(|family| {
+                    matches!(family.1, Safi::Unicast | Safi::FlowSpec)
+                        || !self.selection_deferred(*family)
+                })
                 .collect::<Vec<_>>()
         });
         let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
@@ -2289,6 +2399,10 @@ impl RibManager {
             }
             self.mark_outbound_dirty_inner(peer, false);
             self.retry_evpn_recovery_reset(peer);
+            super::retire_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
+                &readiness,
+            );
             return;
         }
         let member_of = self.grouped_member_of(peer);
@@ -2323,8 +2437,7 @@ impl RibManager {
             .inspect(|_| checkpoint_at("initial_inventory"))
             .filter(|prefix| {
                 let family = prefix_family(prefix);
-                !self.selection_deferred(family)
-                    && !orf_gated.contains(&family)
+                !orf_gated.contains(&family)
                     && sendable
                         .as_ref()
                         .is_some_and(|families| families.contains(&family))
@@ -2417,15 +2530,16 @@ impl RibManager {
                     vpn_announce.push(route.clone());
                 }
             }
-            current_policy_filtered_routes.extend(
+            super::extend_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
                 group
                     .policy_filtered_for_member_with_checkpoint(
                         peer,
                         &all_prefixes,
                         &mut checkpoint,
                     )
-                    .into_iter()
-                    .inspect(|_| checkpoint()),
+                    .into_iter(),
+                &readiness,
             );
             grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
                 peer,
@@ -2482,6 +2596,9 @@ impl RibManager {
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
+                    self.selection_deferral.as_ref().is_some_and(|deferral| {
+                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                    }),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -2508,7 +2625,11 @@ impl RibManager {
                     false, // initial dump — equality check is correct
                     &mut checkpoint,
                 );
-                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &readiness,
+                );
             } else if per_client_best {
                 // RFC 7947 §2.3.2 per-client best-path: the first
                 // export-policy-permitted candidate from the per-target
@@ -2526,6 +2647,9 @@ impl RibManager {
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
+                    self.selection_deferral.as_ref().is_some_and(|deferral| {
+                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                    }),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -2552,7 +2676,11 @@ impl RibManager {
                     false, // initial dump — equality check is correct
                     &mut checkpoint,
                 );
-                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &readiness,
+                );
             } else if let Some((orr_topology, orr_spf)) = orr_ctx {
                 // ORR peer with a resolved vantage: per-vantage best.
                 Self::distribute_orr_best_prefix_with_checkpoint(
@@ -2563,6 +2691,9 @@ impl RibManager {
                     orr_topology,
                     orr_spf,
                     prefix,
+                    self.selection_deferral.as_ref().is_some_and(|deferral| {
+                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                    }),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -2585,7 +2716,11 @@ impl RibManager {
                     false, // initial dump — equality check is correct
                     &mut checkpoint,
                 );
-                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &readiness,
+                );
             } else {
                 let mut target = super::distribution::ExportTarget::Peer {
                     peer,
@@ -2600,6 +2735,9 @@ impl RibManager {
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
+                    self.selection_deferral
+                        .as_ref()
+                        .is_some_and(|deferral| deferral.selection_deferred(prefix_family(prefix))),
                     &mut target,
                     target_is_ebgp,
                     interpret_rfc1997,
@@ -2618,7 +2756,11 @@ impl RibManager {
                     false, // initial dump — equality check is correct
                     &mut checkpoint,
                 );
-                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &readiness,
+                );
             }
         }
 
@@ -2651,6 +2793,13 @@ impl RibManager {
                 &mut fs_withdraw,
                 &mut checkpoint,
             );
+            fs_announce.retain(|route| {
+                checkpoint();
+                route.peer == super::helpers::LOCAL_PEER
+                    || !self.selection_deferral.as_ref().is_some_and(|selection| {
+                        selection.selection_deferred((route.afi, Safi::FlowSpec))
+                    })
+            });
         }
 
         let mut evpn_complete_feed = None;
@@ -2900,8 +3049,79 @@ impl RibManager {
         // will send nothing there, and a restarting peer must not wait out
         // its RFC 4724 §4.1 selection deferral for it. Both go through the
         // same GR/ORF and convergence holds below.
-        // A deferred FlowSpec family is dumped above, but its release queues
-        // the EoR only after the released selection is staged.
+        // Record selection-held initial markers so release does not repeat an
+        // EoR already sent by a session that joined while the roster was dormant.
+        for family in negotiated_sendable.iter().flatten().copied() {
+            if self.selection_convergence_held(family) {
+                self.pending_eor.entry(peer).or_default().insert(family);
+                if orf_gated.contains(&family) {
+                    self.gr_deferred_eor.entry(peer).or_default().insert(family);
+                }
+            }
+        }
+        // Empty/new groups omit no preselected row. Retaining their proof
+        // would charge each ordinary replay against every later local add.
+        let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
+        let omitted_unicast = member_of
+            .and_then(|gid| self.group_ribs.get(&gid))
+            .is_some_and(|group| {
+                group.table.iter().inspect(|_| checkpoint()).any(|staged| {
+                    let Some(entry) =
+                        group.adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)
+                    else {
+                        return false;
+                    };
+                    let family = prefix_family(&entry.route.prefix);
+                    let (communities, large) =
+                        group.source_control_for_route(entry.route, entry.source_attrs);
+                    self.selection_deferred(family)
+                        && !self.unicast_export_deferral_exempt(
+                            entry.route,
+                            &mut unicast_deferral_exemptions,
+                        )
+                        && !super::distribution::rs_control::rs_control_suppressed(
+                            communities,
+                            large,
+                            rs_control_asn.zip(target_peer_asn),
+                        )
+                })
+            });
+        let omitted_vpn = self
+            .vpn_grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))
+            .is_some_and(|group| {
+                let filter = self.member_rt_filter(peer);
+                group
+                    .table
+                    .iter_vpn()
+                    .inspect(|_| checkpoint())
+                    .any(|route| {
+                        self.selection_deferred(route.afi_safi())
+                            && route.peer != peer
+                            && (!group.rtc_negotiated()
+                                || super::update_groups::rt_passes(filter.as_ref(), route))
+                    })
+            });
+        let selection_initial_pending = omitted_unicast || omitted_vpn;
+        if let Some(session_id) = self.outbound_session_ids.get(&peer).copied()
+            && let Some(record) = self.newest_live_session_mut(peer, session_id)
+        {
+            record.selection_initial_pending = selection_initial_pending;
+            if !record
+                .selection_partial_pending
+                .into_iter()
+                .any(|held| held)
+            {
+                record.selection_initial_admitted = [0; 6];
+                record.selection_initial_admitted_valid = false;
+            }
+        }
+        if self.retain_initial_group_admitted(peer) {
+            self.seed_initial_group_admitted_counts(peer);
+        }
+        if self.private_unicast_admission_incomplete(peer) {
+            self.mark_selection_partial_recovery(peer);
+        }
         let mut eor_families: Vec<_> = sendable
             .iter()
             .flatten()
@@ -2934,7 +3154,10 @@ impl RibManager {
                 .collect();
             if !deferred.is_empty() {
                 eor_families.retain(|family| !deferred.contains(family));
-                self.gr_deferred_eor.insert(peer, deferred);
+                self.gr_deferred_eor
+                    .entry(peer)
+                    .or_default()
+                    .extend(deferred);
             }
         }
 
@@ -3012,6 +3235,7 @@ impl RibManager {
             self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
+                    local_sources: unicast.local_sources,
                     force_unicast_replay: true,
                     unicast_otc_prechecked,
                     announce_source_exclusion,
@@ -3048,6 +3272,10 @@ impl RibManager {
                 self.pending_eor.entry(peer).or_default().insert(*f);
             }
             self.mark_outbound_dirty(peer);
+            super::retire_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
+                &readiness,
+            );
             return;
         }
         self.update_policy_filtered_routes_for_prefixes(
@@ -3055,8 +3283,13 @@ impl RibManager {
             &all_prefixes,
             &current_policy_filtered_routes,
         );
+        super::retire_policy_filtered_routes_with_readiness(
+            &mut current_policy_filtered_routes,
+            &readiness,
+        );
         let owned_evpn_covered = !evpn_coverage_required || self.evpn_feed_is_current(peer);
         if !self.dirty_peers.contains(&peer)
+            && !self.retain_initial_group_admitted(peer)
             && owned_evpn_covered
             && self.finish_evpn_recovery(peer)
         {
