@@ -3459,10 +3459,7 @@ impl RibManager {
                 // key only while the replacing exempt source provably keeps
                 // its own admitted key, so the prefix never loses its
                 // blackhole. Provenance, not the prefix index, proves it: a
-                // keys-only replay retires bodies but keeps provenance. A
-                // source that moves vacates its old key, so that key is in
-                // this batch's own announcements or withdrawals; looking only
-                // there keeps the cost to the batch, not the peer's table.
+                // keys-only replay retires bodies but keeps provenance.
                 #[cfg(test)]
                 let mut visits = 0;
                 if let Some(rib) = self.adj_ribs_out.get(&peer) {
@@ -3492,25 +3489,13 @@ impl RibManager {
                         let mut prefixes: HashSet<_> =
                             departures.iter().map(|&(prefix, _, _)| prefix).collect();
                         let mut held = HashSet::new();
-                        let batch_keys = batch
-                            .unicast
-                            .announce
-                            .iter()
-                            .map(|route| (route.prefix, route.path_id))
-                            .chain(batch.withdraw.iter().copied());
-                        for (prefix, path_id) in batch_keys {
+                        for (&(prefix, _), source) in rib.local_export_sources() {
                             checkpoint();
-                            if !prefixes.contains(&prefix) {
-                                continue;
-                            }
                             #[cfg(test)]
                             {
                                 visits += 1;
                             }
-                            if let Some(source) = rib
-                                .local_export_source(&prefix, path_id)
-                                .filter(|source| source.deferral_exempt)
-                            {
+                            if source.deferral_exempt && prefixes.contains(&prefix) {
                                 held.insert((prefix, source.path_id));
                             }
                         }
@@ -9857,10 +9842,7 @@ impl RibManager {
                         let extras = (admitted.is_none() && common_recovery_fallback)
                             .then(|| self.pending_extra_withdraws.get(&peer))
                             .flatten();
-                        // Without proof, a keys-only replay's retained local
-                        // provenance still names keys this peer actually holds.
-                        let provenance = admitted.is_none() && common_recovery_fallback;
-                        if admitted.is_some() || extras.is_some() || provenance {
+                        if admitted.is_some() || extras.is_some() {
                             let mut announced: HashSet<_> = unicast
                                 .announce
                                 .iter()
@@ -9907,11 +9889,6 @@ impl RibManager {
                                             path_id: 0,
                                         },
                                     ));
-                                }
-                            }
-                            if provenance {
-                                for (&(prefix, path_id), _) in rib_out.local_export_sources() {
-                                    stage_missing(ExactExportKey::Unicast(prefix, path_id));
                                 }
                             }
                             super::retire_hash_set(&mut announced, &mut || checkpoint());
