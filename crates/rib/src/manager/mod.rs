@@ -5183,10 +5183,13 @@ impl RibManager {
                 revision,
                 reply,
             } => {
+                // Only a removal retires the key's export rejections; a
+                // refused or absent delete changes nothing.
                 let retired = ExactExportKey::FlowSpec(key.clone());
                 let owner = crate::injection_lease::guarded_owner(&owner);
-                self.handle_withdraw_flowspec(key, true, &owner, false, Some(revision), reply);
-                self.retire_exact_export_rejections([retired]);
+                if self.handle_withdraw_flowspec(key, true, &owner, false, Some(revision), reply) {
+                    self.retire_exact_export_rejections([retired]);
+                }
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
             RibUpdate::WithdrawEvpn { key, reply } => {

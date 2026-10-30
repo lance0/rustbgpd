@@ -2015,12 +2015,17 @@ async fn a_guarded_add_stalled_past_its_window_starts_no_lease() {
     h.stop().await;
 }
 
-/// The window caps the deadline on an unchanged re-add, even below a later
-/// deadline a renewal set, and on a renewal.
+/// A guarded add with an older window does not shorten a later deadline,
+/// and never extends past its own window. An unchanged re-add through a
+/// short window stops at that window's expiry; after a renewal through a
+/// longer window, the same re-add keeps the later deadline, so a delayed add
+/// cannot expire live sibling keys early. A renewal still sets the deadline
+/// exactly, capped by its window.
 ///
-/// Break-to-red: without the cap, the re-add keeps the renewed deadline.
+/// Break-to-red: capping after taking the maximum lets the late re-add pull
+/// the renewed deadline back to the short window's expiry.
 #[tokio::test(start_paused = true)]
-async fn the_window_caps_an_unchanged_readd_and_a_renewal() {
+async fn a_guarded_add_never_shortens_and_never_passes_its_window() {
     let h = Harness::start().await;
     let (short, _) = h.leases.issue_window("ctl", 30).unwrap();
     let (outcome, g) = guarded_add(&h.tx, guarded_rule(1, 1), "ctl", short, 1)
@@ -2031,20 +2036,34 @@ async fn the_window_caps_an_unchanged_readd_and_a_renewal() {
         guarded_lease(&h, "ctl")[0].remaining,
         Duration::from_secs(30)
     );
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert_eq!(
+        guarded_add(&h.tx, guarded_rule(1, 1), "ctl", short, 1)
+            .await
+            .unwrap(),
+        (InjectOutcome::Unchanged, g)
+    );
+    assert_eq!(
+        guarded_lease(&h, "ctl")[0].remaining,
+        Duration::from_secs(20),
+        "the re-add stops at its own window's expiry"
+    );
+
     let (long, _) = h.leases.issue_window("ctl", 120).unwrap();
     assert_eq!(
         h.leases.renew_guarded("ctl", g, 60, long),
         Ok(Duration::from_secs(60))
     );
-    tokio::time::advance(Duration::from_secs(10)).await;
-
-    let (outcome, again) = guarded_add(&h.tx, guarded_rule(1, 1), "ctl", short, 1)
-        .await
-        .unwrap();
-    assert_eq!((outcome, again), (InjectOutcome::Unchanged, g));
+    assert_eq!(
+        guarded_add(&h.tx, guarded_rule(1, 1), "ctl", short, 1)
+            .await
+            .unwrap(),
+        (InjectOutcome::Unchanged, g)
+    );
     assert_eq!(
         guarded_lease(&h, "ctl")[0].remaining,
-        Duration::from_secs(20)
+        Duration::from_secs(60),
+        "the older window does not pull the deadline back"
     );
     assert_eq!(
         h.leases.renew_guarded("ctl", g, 60, short),
@@ -2055,6 +2074,142 @@ async fn the_window_caps_an_unchanged_readd_and_a_renewal() {
         Duration::from_secs(20)
     );
     h.stop().await;
+}
+
+/// A lease shortened through `renew_guarded` expires at the shortened
+/// deadline: its keys leave the RIB and the wire then, not at the deadline
+/// the add set.
+///
+/// Break-to-red: an expiry task that keeps sleeping to the old deadline
+/// leaves the rule in place past the shortened one.
+#[tokio::test(start_paused = true)]
+async fn a_shortened_guarded_lease_expires_at_the_new_deadline() {
+    let mut h = Harness::start().await;
+    let (window, _) = h.leases.issue_window("ctl", 120).unwrap();
+    let (_, g) = guarded_add(&h.tx, guarded_rule(1, 1), "ctl", window, 1)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+    assert_eq!(
+        guarded_lease(&h, "ctl")[0].remaining,
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        h.leases.renew_guarded("ctl", g, 10, window),
+        Ok(Duration::from_secs(10))
+    );
+    h.settle().await;
+
+    tokio::time::advance(Duration::from_secs(9)).await;
+    h.settle().await;
+    assert_eq!(flowspec_changes(&h.drain()), 0);
+    assert_eq!(local_rules(&h.tx).await.len(), 1);
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    h.settle().await;
+    let withdrawn: usize = h
+        .drain()
+        .iter()
+        .map(|update| update.flowspec_withdraw.len())
+        .sum();
+    assert_eq!(withdrawn, 1, "withdrawn on the wire at the new deadline");
+    assert_eq!(local_rules(&h.tx).await, Vec::new());
+    assert_eq!(guarded_lease(&h, "ctl"), Vec::new());
+    h.stop().await;
+}
+
+/// A guarded add with a nonzero path ID is refused before admission: the
+/// local rule key, the ownership index and the withdraw path all assume
+/// path ID 0. Nothing changes: no lease, no rule, nothing on the wire.
+///
+/// Break-to-red: without the check, the add is admitted under a key the
+/// guarded delete cannot reach.
+#[tokio::test(start_paused = true)]
+async fn a_guarded_add_with_a_path_id_is_refused() {
+    let mut h = Harness::start().await;
+    let (window, _) = h.leases.issue_window("ctl", 120).unwrap();
+    let mut route = guarded_rule(1, 1);
+    route.path_id = 7;
+    let result = guarded_add(&h.tx, route, "ctl", window, 1).await;
+    assert!(
+        matches!(result, Err(RibCommandError::Internal(_))),
+        "{result:?}"
+    );
+    h.settle().await;
+    assert_eq!(flowspec_changes(&h.drain()), 0);
+    assert_eq!(local_rules(&h.tx).await, Vec::new());
+    assert_eq!(guarded_lease(&h, "ctl"), Vec::new());
+    h.stop().await;
+}
+
+/// Only a guarded delete that removes a rule retires the key's exact-export
+/// rejections. A refused delete (another revision) runs no retirement, and
+/// an absent key's recorded rejection stays; the delete that removes a rule
+/// retires its key and no other.
+///
+/// Break-to-red: retiring unconditionally runs the retirement for the
+/// refusal and drops the absent key's rejection.
+#[tokio::test(start_paused = true)]
+async fn only_a_removing_guarded_delete_retires_export_rejections() {
+    let mut manager = manager_for_keys();
+    let (window, _) = manager.injection_leases().issue_window("ctl", 120).unwrap();
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectGuardedFlowSpec {
+        route: guarded_rule(1, 1),
+        owner: "ctl".to_string(),
+        lease_seconds: 60,
+        fence: GuardedFence {
+            window,
+            revision: NonZeroU64::new(1).unwrap(),
+        },
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+    let rejected = |octet| ExactExportKey::FlowSpec(rule_key(octet));
+    manager
+        .peer_unexportable
+        .insert(TARGET, HashSet::from([rejected(1), rejected(2)]));
+    let retirements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let retirements = Arc::clone(&retirements);
+        move |seam| {
+            if seam == "exact_rejection_retirement" {
+                retirements.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }));
+    let delete = |manager: &mut RibManager, octet: u8, revision: u64| {
+        let (reply, mut rx) = oneshot::channel();
+        manager.with_replacement_readiness(|manager| {
+            manager.handle_update(RibUpdate::WithdrawGuardedFlowSpec {
+                key: rule_key(octet),
+                owner: "ctl".to_string(),
+                revision: NonZeroU64::new(revision).unwrap(),
+                reply,
+            });
+        });
+        rx.try_recv().unwrap()
+    };
+
+    assert_conflict(delete(&mut manager, 1, 2), LeaseConflict::RevisionMismatch);
+    assert!(!delete(&mut manager, 2, 1).unwrap().removed);
+    assert_eq!(
+        retirements.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no retirement for a refused or absent delete"
+    );
+    assert_eq!(
+        manager.peer_unexportable[&TARGET],
+        HashSet::from([rejected(1), rejected(2)])
+    );
+
+    assert!(delete(&mut manager, 1, 1).unwrap().removed);
+    assert_eq!(
+        manager.peer_unexportable[&TARGET],
+        HashSet::from([rejected(2)]),
+        "the removed key's rejection is retired, the absent key's is not"
+    );
 }
 
 /// A delete of an older revision delayed behind a delete and a newer add of

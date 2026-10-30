@@ -468,13 +468,16 @@ impl InjectionLeases {
     /// [`MAX_LIVE_OWNERS`] live leases; nothing changes.
     pub fn admit(&self, owner: &str, lease_seconds: u32) -> Result<InjectionTag, LeaseRejection> {
         self.admit_at(owner, lease_seconds, None, Instant::now)
+            .map(|(tag, _)| tag)
     }
 
     /// [`admit`](Self::admit), and with `window` a guarded admission
     /// (ADR-0144 §2): `owner` is the stored guarded name, the window must be
     /// live and issued to it at this instant, and the deadline becomes
-    /// `min(max(current, now + lease_seconds), window expiry)`, even when that
-    /// shortens it.
+    /// `max(current, min(now + lease_seconds, window expiry))`: never
+    /// shortened, and never extended past the window. Also returns the live
+    /// owner count, read under the same lock, so the caller need not take it
+    /// again before the insert.
     ///
     /// # Errors
     ///
@@ -485,7 +488,7 @@ impl InjectionLeases {
         owner: &str,
         lease_seconds: u32,
         window: Option<MutationWindowId>,
-    ) -> Result<InjectionTag, LeaseRejection> {
+    ) -> Result<(InjectionTag, usize), LeaseRejection> {
         self.admit_at(owner, lease_seconds, window, Instant::now)
     }
 
@@ -495,7 +498,7 @@ impl InjectionLeases {
         lease_seconds: u32,
         window: Option<MutationWindowId>,
         clock: impl FnOnce() -> Instant,
-    ) -> Result<InjectionTag, LeaseRejection> {
+    ) -> Result<(InjectionTag, usize), LeaseRejection> {
         let mut state = self.lock();
         let now = clock();
         let cap = match window {
@@ -517,14 +520,17 @@ impl InjectionLeases {
                 revision: None,
             };
             let lease = state.owners.get_mut(owner).expect("present above");
-            let deadline = capped(lease.deadline.max(now + lease_for));
-            if deadline != lease.deadline {
-                lease.deadline = deadline;
+            // An add never shortens the shared deadline, so a delayed add
+            // with an older window cannot expire live sibling keys early.
+            let extended = capped(now + lease_for);
+            if extended > lease.deadline {
+                lease.deadline = extended;
                 lease.lease_seconds = lease_seconds;
             }
+            let live = state.live_count(now);
             drop(state);
             self.changed.notify_one();
-            return Ok(tag);
+            return Ok((tag, live));
         }
         // Capacity counts live leases by deadline: unreaped expired records
         // do not hold a slot, and a rejection moves nothing.
@@ -546,6 +552,7 @@ impl InjectionLeases {
                 lease_seconds,
             },
         );
+        let live = state.live_count(now);
         drop(state);
         self.changed.notify_one();
         tracing::info!(
@@ -555,11 +562,14 @@ impl InjectionLeases {
             lease_seconds,
             "injection lease generation started"
         );
-        Ok(InjectionTag {
-            owner: name,
-            generation,
-            revision: None,
-        })
+        Ok((
+            InjectionTag {
+                owner: name,
+                generation,
+                revision: None,
+            },
+            live,
+        ))
     }
 
     /// Renew `owner`'s lease if `generation` is live, setting the deadline to
@@ -932,7 +942,11 @@ mod tests {
             let base = Instant::now();
             let offset_ms = Arc::new(AtomicU64::new(0));
             let reads = Arc::new(AtomicUsize::new(0));
-            let g = table.admit_at("ctl", 5, None, || base).unwrap().generation;
+            let g = table
+                .admit_at("ctl", 5, None, || base)
+                .unwrap()
+                .0
+                .generation;
 
             let guard = table.lock();
             let contender = {
@@ -952,7 +966,7 @@ mod tests {
                     if leased_add {
                         table
                             .admit_at("ctl", 5, None, clock)
-                            .map(|tag| tag.generation)
+                            .map(|(tag, _)| tag.generation)
                             .ok()
                     } else {
                         table.renew_at("ctl", g, 5, None, clock).ok().map(|_| g)
@@ -983,7 +997,9 @@ mod tests {
         lease_seconds: u32,
         window: MutationWindowId,
     ) -> Result<InjectionTag, LeaseRejection> {
-        table.admit_with(&guarded_owner(owner), lease_seconds, Some(window))
+        table
+            .admit_with(&guarded_owner(owner), lease_seconds, Some(window))
+            .map(|(tag, _)| tag)
     }
 
     fn remaining(table: &InjectionLeases, owner: &str) -> Duration {
@@ -1048,7 +1064,9 @@ mod tests {
             );
         }
         assert_eq!(
-            table.admit_with("ctl", 60, Some(window)),
+            table
+                .admit_with("ctl", 60, Some(window))
+                .map(|(tag, _)| tag),
             Err(LeaseRejection::WindowNotLive),
             "the window belongs to the guarded name"
         );
@@ -1072,7 +1090,8 @@ mod tests {
     }
 
     /// The deadline never passes the window's expiry: on a new generation,
-    /// on a renewal, and on a join, which it may shorten.
+    /// on a renewal (which sets it exactly and may shorten it), and on a
+    /// join, which never shortens it either.
     #[tokio::test(start_paused = true)]
     async fn the_window_caps_the_deadline() {
         let table = InjectionLeases::new();
@@ -1081,18 +1100,20 @@ mod tests {
         assert_eq!(remaining(&table, "ctl"), Duration::from_secs(30));
         tokio::time::advance(Duration::from_secs(10)).await;
         assert_eq!(
-            table.renew_guarded("ctl", g, 60, short),
-            Ok(Duration::from_secs(20))
+            table.renew_guarded("ctl", g, 5, short),
+            Ok(Duration::from_secs(5))
         );
+        // A join extends to its own window's expiry, not past it.
+        assert_eq!(guarded_tag(&table, "ctl", 60, short).unwrap().generation, g);
+        assert_eq!(remaining(&table, "ctl"), Duration::from_secs(20));
         let (long, _) = table.issue_window("ctl", 120).unwrap();
         assert_eq!(
             table.renew_guarded("ctl", g, 60, long),
             Ok(Duration::from_secs(60))
         );
-        // A join through the short window pulls the deadline in to its
-        // expiry, unlike a legacy join, which never shortens.
+        // A join through the older, shorter window keeps the later deadline.
         assert_eq!(guarded_tag(&table, "ctl", 60, short).unwrap().generation, g);
-        assert_eq!(remaining(&table, "ctl"), Duration::from_secs(20));
+        assert_eq!(remaining(&table, "ctl"), Duration::from_secs(60));
     }
 
     /// Guarded names are outside the owner alphabet, so a legacy request can

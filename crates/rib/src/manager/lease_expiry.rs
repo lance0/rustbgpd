@@ -150,7 +150,7 @@ impl RibManager {
                 ));
             }
         }
-        let mut tag = self
+        let (mut tag, live_owners) = self
             .injection_leases
             .admit_with(
                 owner,
@@ -164,8 +164,7 @@ impl RibManager {
             .or_default()
             .insert(key.clone());
         self.injected_owners.insert(key.clone(), tag.clone());
-        self.metrics
-            .set_injection_leases(gauge_val(self.injection_leases.live_owner_count()));
+        self.metrics.set_injection_leases(gauge_val(live_owners));
         Ok(tag)
     }
 

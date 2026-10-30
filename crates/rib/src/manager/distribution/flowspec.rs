@@ -178,6 +178,15 @@ impl RibManager {
             Result<(InjectOutcome, LeaseGeneration), RibCommandError>,
         >,
     ) {
+        // Local rules are keyed with path ID 0, which the ownership index and
+        // the withdraw path assume; any other is refused before admission.
+        if route.path_id != 0 {
+            let _ = reply.send(Err(RibCommandError::internal(format!(
+                "guarded FlowSpec add with path_id {}; local rules use 0",
+                route.path_id
+            ))));
+            return;
+        }
         let owner = crate::injection_lease::guarded_owner(owner);
         let result = self.inject_leased_flowspec(route, &owner, lease_seconds, Some(fence));
         let _ = reply.send(result);
@@ -264,6 +273,8 @@ impl RibManager {
         Ok((outcome, generation))
     }
 
+    /// Withdraw a local `FlowSpec` rule and reply; returns whether a rule was
+    /// removed.
     pub(in crate::manager) fn handle_withdraw_flowspec(
         &mut self,
         key: FlowSpecKey,
@@ -274,7 +285,7 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<
             Result<crate::update::InjectedRemoval, RibCommandError>,
         >,
-    ) {
+    ) -> bool {
         let owned_key = InjectedKey::FlowSpec(key.clone());
         let route_key = FlowSpecRouteKey {
             afi: key.afi,
@@ -297,7 +308,7 @@ impl RibManager {
             })
         {
             let _ = reply.send(Err(rejection));
-            return;
+            return false;
         }
         let rib = self
             .ribs
@@ -317,7 +328,9 @@ impl RibManager {
             fs_affected.insert(key);
             self.recompute_and_distribute_flowspec(&fs_affected);
             let _ = reply.send(Ok(crate::update::InjectedRemoval { removed: true, tag }));
-        } else if allow_missing {
+            return true;
+        }
+        if allow_missing {
             let _ = reply.send(Ok(crate::update::InjectedRemoval {
                 removed: false,
                 tag: None,
@@ -328,6 +341,7 @@ impl RibManager {
                 key.afi, key.rule
             ))));
         }
+        false
     }
 
     /// Stage `FlowSpec` announces and withdrawals for a set of rules.
