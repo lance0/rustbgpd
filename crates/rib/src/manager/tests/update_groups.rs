@@ -12929,35 +12929,26 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
 }
 
 #[test]
-fn replay_readiness_restores_empty_force_and_owned_clean_fanout_scopes() {
+fn replay_readiness_restores_empty_and_force_scopes_without_wrapping_clean_fanout() {
     let (mut manager, peers, mut outbound) = direct_clean_transition_manager(2, 0, None);
     let (tx, rx) = mpsc::channel(8);
     manager.readiness_rx = Some(rx);
     manager.replacement_readiness_receipts.clear();
     full_channel_pass(&mut manager, &[20, 21], &[]);
-    assert!(!manager.replacement_readiness_receipts.is_empty());
-    assert!(
-        manager
-            .replacement_readiness_receipts
-            .iter()
-            .all(|receipt| receipt.count == 2)
-    );
-    assert!(manager.replacement_readiness.is_none());
-    assert!(manager.readiness_rx.is_some());
-    manager.replacement_readiness_receipts.clear();
+    assert!(manager.replacement_readiness_receipts.is_empty());
+    // Clean fanout owns no readiness episode: the lane stays with the actor
+    // loop and is answered there, not at a replacement fence.
     let mut response = queue_replacement_readiness(&tx);
     let prefixes = HashSet::from([full_channel_prefix(20), full_channel_prefix(21)]);
     manager.distribute_changes(&prefixes, &prefixes);
-    assert_eq!(response.try_recv().unwrap(), Ok(2));
-    assert!(!manager.replacement_readiness_receipts.is_empty());
-    assert!(
-        manager
-            .replacement_readiness_receipts
-            .iter()
-            .all(|receipt| receipt.count == 2)
-    );
+    assert!(matches!(
+        response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(manager.replacement_readiness_receipts.is_empty());
     assert!(manager.replacement_readiness.is_none());
-    assert!(manager.readiness_rx.is_some());
+    manager.drain_readiness_queries(None);
+    assert_eq!(response.try_recv().unwrap(), Ok(2));
     for rx in &mut outbound {
         while rx.try_recv().is_ok() {}
     }
@@ -17208,16 +17199,10 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
         path_id: 0,
     };
     let residue = manager.policy_filtered_routes.entry(grouped).or_default();
-    let keys = residue.get_mut(&Prefix::V4(denied)).unwrap();
-    assert!(keys.remove(&key(denied)), "recorded denial");
-    if keys.is_empty() {
-        residue.remove(&Prefix::V4(denied));
-    }
+    let recorded = residue.remove(&Prefix::V4(denied));
+    assert!(matches!(recorded, Some(PolicyFilteredBucket::One(k)) if k == key(denied)));
     for prefix in [permitted, absent] {
-        residue
-            .entry(Prefix::V4(prefix))
-            .or_default()
-            .insert(key(prefix));
+        residue.insert(Prefix::V4(prefix), PolicyFilteredBucket::One(key(prefix)));
     }
     manager
         .peer_otc_blocked
@@ -17249,7 +17234,11 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
             .policy_filtered_routes
             .get(&peer)
             .into_iter()
-            .flat_map(|prefixes| prefixes.values().flatten())
+            .flat_map(|prefixes| {
+                prefixes
+                    .values()
+                    .flat_map(super::super::PolicyFilteredBucket::iter)
+            })
             .map(|key| format!("{key:?}"))
             .collect();
         let otc_blocked = manager

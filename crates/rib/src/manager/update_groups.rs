@@ -1687,6 +1687,19 @@ impl GroupRibOut {
         }
     }
 
+    /// Whether any group denial falls in `prefixes`, walking the smaller side.
+    pub(in crate::manager) fn has_policy_filtered_in(&self, prefixes: &HashSet<Prefix>) -> bool {
+        if prefixes.len() <= self.policy_filtered.len() {
+            prefixes
+                .iter()
+                .any(|prefix| self.policy_filtered.get(prefix).is_some())
+        } else {
+            self.policy_filtered
+                .iter()
+                .any(|(prefix, _)| prefixes.contains(prefix))
+        }
+    }
+
     /// The member's view of the group-verdict denial set, restamped
     /// with the member as target and restricted to `prefixes` (the
     /// pass's evaluation scope). The member's own-sourced denials are

@@ -7995,6 +7995,38 @@ impl RibManager {
         );
     }
 
+    /// Whether a clean member has rejection-inventory work in `scope`:
+    /// retained history or a group denial there, or an export policy that
+    /// per-peer staging can deny under. Clean members without it stay
+    /// unowned, so an ordinary pass creates no readiness owner.
+    fn clean_member_rejection_work(
+        &self,
+        peer: PeerId,
+        member_of: Option<usize>,
+        scope: &HashSet<Prefix>,
+    ) -> bool {
+        let history = self
+            .policy_filtered_routes
+            .get(&peer)
+            .is_some_and(|history| {
+                if scope.len() <= history.len() {
+                    scope.iter().any(|prefix| history.contains_key(prefix))
+                } else {
+                    history.keys().any(|prefix| scope.contains(prefix))
+                }
+            });
+        history
+            || match member_of {
+                Some(gid) => self
+                    .group_ribs
+                    .get(&gid)
+                    .is_some_and(|group| group.has_policy_filtered_in(scope)),
+                // Any ungrouped export policy counts: knowing whether it
+                // denies in scope would take the staging evaluation itself.
+                None => self.export_policy_for(peer).is_some(),
+            }
+    }
+
     fn clone_distribution_metrics(
         metrics: &BgpMetrics,
         #[cfg(any(test, feature = "bench-internals"))] stats: &mut super::AdjRibOutCommitStats,
@@ -8008,34 +8040,11 @@ impl RibManager {
         metrics.clone()
     }
 
-    fn distribute_changes_inner(
-        &mut self,
-        best_changed: &HashSet<Prefix>,
-        all_affected: &HashSet<Prefix>,
-        service_ingest_readiness: bool,
-        advertised_generation_already_advanced: bool,
-        evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
-        targets: Option<&HashSet<PeerId>>,
-    ) {
-        // Selection has completed before export. Keep executor opportunities
-        // across staging, independent member transactions and shared cleanup.
-        super::with_executor_handoff(|| {
-            self.distribute_changes_with_readiness(
-                best_changed,
-                all_affected,
-                service_ingest_readiness,
-                advertised_generation_already_advanced,
-                evpn_feeds,
-                targets,
-            );
-        });
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "distribution loop coordinates dirty peers, forced resync, and all families"
     )]
-    fn distribute_changes_with_readiness(
+    fn distribute_changes_inner(
         &mut self,
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
@@ -8044,7 +8053,12 @@ impl RibManager {
         mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
     ) {
-        let prep_installed = self.begin_replacement_readiness();
+        // Clean incremental fanout owns no readiness episode: its work is
+        // bounded by the pass. Shared preparation and cleanup of a replay
+        // pass own one each, so their ages never bleed into a member's.
+        let prep_installed = (!self.dirty_peers.is_empty()
+            || !self.force_outbound_peers.is_empty())
+            && self.begin_replacement_readiness();
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -8164,15 +8178,20 @@ impl RibManager {
             #[cfg(any(test, feature = "bench-internals"))]
             &mut self.adj_rib_out_commit_stats,
         );
+        // Staging can mark members dirty. Check here, before any peer work;
+        // sends below only dirty their own current member, never a later one.
+        // Clean incremental fanout retains its existing synchronous fast path.
+        let replay_handoff = !self.dirty_peers.is_empty() || !self.force_outbound_peers.is_empty();
         // Shared preparation cannot donate its age to later independent
         // member transactions. A genuine outer owner remains unchanged.
         drop(readiness);
         self.finish_readiness_owner(prep_installed);
         let distribute_peers = || {
             for peer in peers {
-                // Clean and replay members own independent readiness episodes;
-                // an existing outer owner's identity and age are retained.
-                let installed = self.begin_replacement_readiness();
+                // Replay members and members with rejection-inventory work own
+                // independent readiness episodes; an existing outer owner's
+                // identity and age are retained.
+                let mut installed = false;
                 'member: {
                     let readiness = self.replacement_readiness.clone();
                     let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -8255,6 +8274,9 @@ impl RibManager {
                         break 'member;
                     }
                     let resync = is_dirty || is_force;
+                    installed = resync && self.begin_replacement_readiness();
+                    let readiness = self.replacement_readiness.clone();
+                    let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
                     let private_evpn_recovery = (resync && !evpn_group_owned)
                         .then(|| self.evpn_recovery_handle(peer))
                         .flatten();
@@ -8313,6 +8335,10 @@ impl RibManager {
                             .get(&peer)
                             .map_or(0, |extra| extra.unicast.len());
                         capacity += self.peer_otc_blocked.get(&peer).map_or(0, HashMap::len);
+                        capacity += self
+                            .policy_filtered_routes
+                            .get(&peer)
+                            .map_or(0, std::collections::BTreeMap::len);
                         self.replacement_checkpoint(true);
                         let mut all = HashSet::with_capacity(capacity);
                         self.replacement_checkpoint(true);
@@ -8398,6 +8424,13 @@ impl RibManager {
                         }
                         if let Some(blocked) = self.peer_otc_blocked.get(&peer) {
                             all.extend(blocked.keys().inspect(|_| checkpoint()).copied());
+                        }
+                        // Retained denials whose route left while the peer was
+                        // dirty are in none of the sources above; the resync
+                        // must revisit them to retire the stale history, as
+                        // initial export does.
+                        if let Some(history) = self.policy_filtered_routes.get(&peer) {
+                            all.extend(history.keys().inspect(|_| checkpoint()).copied());
                         }
                         Cow::Owned(all)
                     } else if let Some(gid) = member_of {
@@ -8807,6 +8840,13 @@ impl RibManager {
                         );
                     }
 
+                    if !installed
+                        && self.clean_member_rejection_work(peer, member_of, &effective_prefixes)
+                    {
+                        installed = self.begin_replacement_readiness();
+                    }
+                    let readiness = self.replacement_readiness.clone();
+                    let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
                     if let Cow::Owned(prefixes) = &effective_prefixes {
                         self.replacement_capacity(
                             "effective_prefixes",
@@ -10074,8 +10114,12 @@ impl RibManager {
                 self.finish_readiness_owner(installed);
             }
         };
-        distribute_peers();
-        let retirement_installed = self.begin_replacement_readiness();
+        if replay_handoff {
+            super::with_executor_handoff(distribute_peers);
+        } else {
+            distribute_peers();
+        }
+        let retirement_installed = replay_handoff && self.begin_replacement_readiness();
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         // One line per pass that mixes unicast withdrawals and announcements

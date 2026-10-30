@@ -962,7 +962,7 @@ pub struct RibManager {
     /// route-level policy-filtered events transition-based instead of
     /// re-emitting on every dirty or forced outbound resync. Prefix buckets
     /// keep incremental refreshes independent of unrelated rejected routes.
-    policy_filtered_routes: HashMap<PeerId, BTreeMap<Prefix, HashSet<PolicyFilteredRouteKey>>>,
+    policy_filtered_routes: HashMap<PeerId, BTreeMap<Prefix, PolicyFilteredBucket>>,
     /// The attached session's export-policy totals handle, keyed by target
     /// peer. The handle belongs to the neighbor (`PeerUp` carries it), so the
     /// totals outlive this registration; only the RIB's reference ends with
@@ -2052,6 +2052,89 @@ pub(super) struct PolicyFilteredRouteKey {
     pub(super) source_peer: PeerId,
     pub(super) prefix: Prefix,
     pub(super) path_id: u32,
+}
+
+/// One prefix's retained export-policy denials toward one target. Most
+/// prefixes carry a single denied source/path identity, which stays inline;
+/// a set is allocated only for two or more.
+#[derive(Debug)]
+pub(super) enum PolicyFilteredBucket {
+    One(PolicyFilteredRouteKey),
+    Many(HashSet<PolicyFilteredRouteKey>),
+}
+
+impl PolicyFilteredBucket {
+    #[cfg(test)]
+    pub(super) fn iter(&self) -> impl Iterator<Item = &PolicyFilteredRouteKey> {
+        let (one, many) = match self {
+            Self::One(key) => (Some(key), None),
+            Self::Many(keys) => (None, Some(keys)),
+        };
+        one.into_iter().chain(many.into_iter().flatten())
+    }
+
+    /// Keep only identities still denied; `false` when none remain.
+    fn retain(&mut self, mut keep: impl FnMut(&PolicyFilteredRouteKey) -> bool) -> bool {
+        match self {
+            Self::One(key) => keep(key),
+            Self::Many(keys) => {
+                keys.retain(|key| keep(key));
+                !keys.is_empty()
+            }
+        }
+    }
+
+    /// Record `group` (one prefix's current denials), pushing identities not
+    /// already retained. Growth allocates the exact existing-plus-incoming
+    /// bound once and moves old keys between checkpoints.
+    fn insert_group(
+        &mut self,
+        group: &[PolicyFilteredRouteKey],
+        newly_filtered: &mut Vec<PolicyFilteredRouteKey>,
+        checkpoint: &impl Fn(),
+        allocation_checkpoint: &impl Fn(),
+    ) {
+        if let Self::One(key) = self
+            && group.iter().all(|incoming| {
+                checkpoint();
+                incoming == key
+            })
+        {
+            return;
+        }
+        let required = group.len().saturating_add(match self {
+            Self::One(_) => 1,
+            Self::Many(keys) => keys.len(),
+        });
+        if !matches!(self, Self::Many(keys) if keys.capacity() >= required) {
+            allocation_checkpoint();
+            let mut replacement = HashSet::with_capacity(required);
+            allocation_checkpoint();
+            match self {
+                Self::One(key) => {
+                    replacement.insert(*key);
+                }
+                Self::Many(keys) => {
+                    for key in keys.drain() {
+                        checkpoint();
+                        replacement.insert(key);
+                    }
+                }
+            }
+            allocation_checkpoint();
+            drop(std::mem::replace(self, Self::Many(replacement)));
+            allocation_checkpoint();
+        }
+        let Self::Many(keys) = self else {
+            unreachable!("growth installed a set")
+        };
+        for key in group.iter().copied() {
+            checkpoint();
+            if keys.insert(key) {
+                newly_filtered.push(key);
+            }
+        }
+    }
 }
 
 /// A prefix can contribute many rejected source/path identities. Grow an
@@ -5526,20 +5609,32 @@ impl RibManager {
             checkpoint();
         };
         let peer_routes = self.policy_filtered_routes.entry(target_peer).or_default();
-        for prefix in prefixes {
-            retained_checkpoint();
-            let empty = peer_routes.get_mut(prefix).is_some_and(|keys| {
-                keys.retain(|key| {
-                    retained_checkpoint();
-                    current.contains(key)
-                });
-                keys.is_empty()
-            });
-            if empty {
-                allocation_checkpoint();
-                drop(peer_routes.remove(prefix));
-                allocation_checkpoint();
+        let refresh = |keys: &mut PolicyFilteredBucket| {
+            keys.retain(|key| {
+                retained_checkpoint();
+                current.contains(key)
+            })
+        };
+        // Walk whichever side is smaller: a clean transition passes the
+        // whole table as scope for every member, while the history usually
+        // holds a few prefixes.
+        if prefixes.len() <= peer_routes.len() {
+            for prefix in prefixes {
+                retained_checkpoint();
+                if peer_routes
+                    .get_mut(prefix)
+                    .is_some_and(|keys| !refresh(keys))
+                {
+                    allocation_checkpoint();
+                    drop(peer_routes.remove(prefix));
+                    allocation_checkpoint();
+                }
             }
+        } else {
+            peer_routes.retain(|prefix, keys| {
+                retained_checkpoint();
+                !prefixes.contains(prefix) || refresh(keys)
+            });
         }
         allocation_checkpoint();
         let mut incoming: Vec<_> = current.iter().inspect(|_| checkpoint()).copied().collect();
@@ -5556,25 +5651,20 @@ impl RibManager {
             left.prefix == right.prefix
         }) {
             retained_checkpoint();
-            let keys = peer_routes.entry(group[0].prefix).or_default();
-            let required = keys.len().saturating_add(group.len());
-            if required > keys.capacity() {
-                allocation_checkpoint();
-                let mut replacement = HashSet::with_capacity(required);
-                allocation_checkpoint();
-                for key in keys.drain() {
+            match peer_routes.entry(group[0].prefix) {
+                std::collections::btree_map::Entry::Vacant(slot) if group.len() == 1 => {
                     checkpoint();
-                    replacement.insert(key);
+                    slot.insert(PolicyFilteredBucket::One(group[0]));
+                    newly_filtered.push(group[0]);
                 }
-                allocation_checkpoint();
-                drop(std::mem::replace(keys, replacement));
-                allocation_checkpoint();
-            }
-            for key in group.iter().copied() {
-                checkpoint();
-                if keys.insert(key) {
-                    newly_filtered.push(key);
-                }
+                entry => entry
+                    .or_insert_with(|| PolicyFilteredBucket::Many(HashSet::new()))
+                    .insert_group(
+                        group,
+                        &mut newly_filtered,
+                        &checkpoint,
+                        &allocation_checkpoint,
+                    ),
             }
         }
         retire_vec(&mut incoming, &mut || checkpoint());
@@ -5626,14 +5716,16 @@ impl RibManager {
         with_executor_handoff(|| {
             self.with_replacement_readiness(|manager| {
                 if let Some(mut routes) = manager.policy_filtered_routes.remove(&target_peer) {
-                    while let Some((_, mut keys)) = routes.pop_first() {
+                    while let Some((_, keys)) = routes.pop_first() {
                         manager.replacement_checkpoint_at("policy_filtered_history_cleanup", false);
-                        retire_hash_set(&mut keys, &mut || {
-                            manager.replacement_checkpoint_at(
-                                "policy_filtered_history_cleanup",
-                                false,
-                            );
-                        });
+                        if let PolicyFilteredBucket::Many(mut keys) = keys {
+                            retire_hash_set(&mut keys, &mut || {
+                                manager.replacement_checkpoint_at(
+                                    "policy_filtered_history_cleanup",
+                                    false,
+                                );
+                            });
+                        }
                     }
                     manager.replacement_checkpoint_at("policy_filtered_history_cleanup", true);
                     drop(routes);

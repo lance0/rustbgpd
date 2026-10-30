@@ -348,7 +348,11 @@ fn peer_up_initial_table_work_is_linear() {
 
 #[test]
 fn policy_reload_work_is_linear() {
-    assert_linear("policy reload", &[ALL, "shared_inventory"], policy_reload);
+    assert_linear(
+        "policy reload",
+        &[ALL, "shared_inventory", "policy_filtered_retained"],
+        policy_reload,
+    );
 }
 
 #[test]
@@ -1559,6 +1563,222 @@ fn incremental_policy_rejection_updates_work_is_linear() {
         &[ALL, "policy_filtered_retained"],
         incremental_policy_rejection_updates,
     );
+}
+
+fn withdraw_policy_rejection(manager: &mut RibManager, index: usize) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: member(0),
+        session_id: 1,
+        announced: Vec::new(),
+        withdrawn: vec![(Prefix::V4(prefix(1, index)), 0)],
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    });
+    drain_route_chunks(manager);
+}
+
+/// A deny-all-above-LP-200 target holding one permitted route (index 1)
+/// and one denied route (index 0), with the target's channel then filled.
+fn rejection_history_with_full_target(
+    ungrouped: bool,
+) -> (RibManager, Vec<mpsc::Receiver<OutboundRouteUpdate>>) {
+    let target = member(1);
+    let (_tx, mut manager) = manager();
+    manager.test_force_ungrouped = ungrouped;
+    let policy = super::export_explain::deny_local_pref_at_least(200);
+    let mut receivers = vec![
+        join(&mut manager, 0, false, None).0,
+        join(&mut manager, 1, false, Some(policy)).0,
+    ];
+    assert_eq!(manager.grouped_member_of(target).is_none(), ungrouped);
+    receive_policy_rejection(&mut manager, 1, 100);
+    receive_policy_rejection(&mut manager, 0, 200);
+    drain(&mut receivers);
+    assert_eq!(policy_rejection_events(&manager, target), 1);
+    assert_eq!(retained_policy_rejection_keys(&manager, target).len(), 1);
+    let sender = manager.outbound_peers[&target].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    (manager, receivers)
+}
+
+/// The dirty resync after the channel drains must retire the withdrawn
+/// denial's history, so its next denial is a new `PolicyFiltered` event.
+fn resync_retires_stale_rejection_history(
+    mut manager: RibManager,
+    mut receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let target = member(1);
+    assert!(manager.dirty_peers.contains(&target));
+    drain(&mut receivers);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert!(!manager.dirty_peers.contains(&target), "resync committed");
+    assert!(
+        retained_policy_rejection_keys(&manager, target).is_empty(),
+        "the dirty resync must retire the withdrawn route's denial"
+    );
+    receive_policy_rejection(&mut manager, 0, 200);
+    assert_eq!(retained_policy_rejection_keys(&manager, target).len(), 1);
+    assert_eq!(
+        policy_rejection_events(&manager, target),
+        2,
+        "a denial after the withdrawal is a new PolicyFiltered event"
+    );
+}
+
+/// The denied route is withdrawn while the dirty target's resync waits on
+/// its full channel.
+fn deferred_withdraw_rejection_history(ungrouped: bool) {
+    let (mut manager, receivers) = rejection_history_with_full_target(ungrouped);
+    manager.mark_outbound_dirty(member(1));
+    withdraw_policy_rejection(&mut manager, 0);
+    assert_eq!(manager.loc_rib.len(), 1);
+    assert_eq!(retained_policy_rejection_keys(&manager, member(1)).len(), 1);
+    resync_retires_stale_rejection_history(manager, receivers);
+}
+
+#[test]
+fn deferred_withdraw_rejection_history_grouped() {
+    deferred_withdraw_rejection_history(false);
+}
+
+#[test]
+fn deferred_withdraw_rejection_history_ungrouped() {
+    deferred_withdraw_rejection_history(true);
+}
+
+/// One UPDATE withdraws the denied route and announces a permitted one; the
+/// clean target's send fails on its full channel, so the pass's history
+/// refresh never commits.
+fn failed_send_rejection_history(ungrouped: bool) {
+    let (mut manager, receivers) = rejection_history_with_full_target(ungrouped);
+    let source = member(0);
+    let IpAddr::V4(next_hop) = source.addr() else {
+        unreachable!("test source is IPv4")
+    };
+    let mut update = test_routes_received(
+        source,
+        vec![make_route_with_lp(prefix(1, 2), next_hop, 100)],
+    );
+    if let RibUpdate::RoutesReceived {
+        session_id,
+        withdrawn,
+        ..
+    } = &mut update
+    {
+        *session_id = 1;
+        withdrawn.push((Prefix::V4(prefix(1, 0)), 0));
+    }
+    manager.handle_update(update);
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.loc_rib.len(), 2);
+    assert_eq!(retained_policy_rejection_keys(&manager, member(1)).len(), 1);
+    resync_retires_stale_rejection_history(manager, receivers);
+}
+
+#[test]
+fn failed_send_rejection_history_grouped() {
+    failed_send_rejection_history(false);
+}
+
+#[test]
+fn failed_send_rejection_history_ungrouped() {
+    failed_send_rejection_history(true);
+}
+
+/// One clean single-prefix pass to [`SMALL`] members without export
+/// policies has no replay or rejection-inventory work: it creates no
+/// readiness owner, and a readiness query queued across it is answered at
+/// the actor-loop seam.
+fn clean_pass_owns_no_readiness(ungrouped: bool) {
+    let (_tx, mut manager) = manager();
+    manager.test_force_ungrouped = ungrouped;
+    let mut receivers = members(&mut manager, SMALL, false, None);
+    assert_eq!(manager.grouped_member_of(member(0)).is_none(), ungrouped);
+    manager.handle_update(routes_from(external(), 0, 1, 1));
+    drain_route_chunks(&mut manager);
+    assert_eq!(drain(&mut receivers), (SMALL, 0));
+    let (tx, rx) = mpsc::channel(1);
+    manager.readiness_rx = Some(rx);
+    let (reply, mut response) = oneshot::channel();
+    tx.try_send(crate::update::RibReadinessQuery::LocRibCount {
+        reply,
+        enqueued: std::time::Instant::now(),
+    })
+    .unwrap();
+    manager.replacement_readiness_receipts.clear();
+    manager.handle_update(routes_from(external(), 0, 2, 1));
+    drain_route_chunks(&mut manager);
+    assert_eq!(drain(&mut receivers), (SMALL, 0));
+    assert_eq!(
+        manager.replacement_readiness_receipts.len(),
+        0,
+        "{:?}",
+        manager.replacement_readiness_receipts
+    );
+    assert_eq!(response.try_recv().unwrap(), Ok(2));
+    let seams = histogram_sample_counts_by_label(
+        &manager.metrics,
+        "bgp_rib_readiness_query_wait_seconds",
+        "seam",
+    );
+    assert_eq!(seams["actor_loop"], 1, "{seams:?}");
+    assert_eq!(seams["policy_transition_fence"], 0, "{seams:?}");
+}
+
+#[test]
+fn clean_grouped_pass_owns_no_readiness() {
+    clean_pass_owns_no_readiness(false);
+}
+
+#[test]
+fn clean_ungrouped_pass_owns_no_readiness() {
+    clean_pass_owns_no_readiness(true);
+}
+
+/// A prefix with one retained denial keeps it inline; only two or more
+/// allocate a set.
+#[test]
+fn single_denial_history_bucket_is_inline() {
+    use std::mem::size_of;
+    let key = |source| PolicyFilteredRouteKey {
+        target_peer: member(1),
+        source_peer: member(source),
+        prefix: Prefix::V4(prefix(1, 0)),
+        path_id: 0,
+    };
+    let (_tx, mut manager) = manager();
+    manager.update_policy_filtered_routes_for_prefixes(
+        member(1),
+        &HashSet::from([Prefix::V4(prefix(1, 0))]),
+        &HashSet::from([key(0)]),
+    );
+    let history = &manager.policy_filtered_routes[&member(1)];
+    assert!(matches!(
+        history[&Prefix::V4(prefix(1, 0))],
+        PolicyFilteredBucket::One(retained) if retained == key(0)
+    ));
+    manager.update_policy_filtered_routes_for_prefixes(
+        member(1),
+        &HashSet::from([Prefix::V4(prefix(1, 0))]),
+        &HashSet::from([key(0), key(2)]),
+    );
+    let history = &manager.policy_filtered_routes[&member(1)];
+    let PolicyFilteredBucket::Many(keys) = &history[&Prefix::V4(prefix(1, 0))] else {
+        panic!("two denials share a set");
+    };
+    assert_eq!(keys, &HashSet::from([key(0), key(2)]));
+    // One retained slot: the map entry plus, before, a set allocated for a
+    // single key (hashbrown: 4 buckets of keys plus 4 + 16 control bytes).
+    let inline = size_of::<(Prefix, PolicyFilteredBucket)>();
+    let set = size_of::<(Prefix, HashSet<PolicyFilteredRouteKey>)>()
+        + 4 * size_of::<PolicyFilteredRouteKey>()
+        + 4
+        + 16;
+    eprintln!("single-denial history slot: {set} B before, {inline} B inline");
+    assert!(inline <= size_of::<(Prefix, HashSet<PolicyFilteredRouteKey>)>());
 }
 
 fn late_private_up(peer: PeerId, outbound_tx: mpsc::Sender<OutboundRouteUpdate>) -> RibUpdate {
