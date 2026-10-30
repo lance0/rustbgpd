@@ -1513,10 +1513,19 @@ fn gr_walk_work_counts_grow_per_unit() {
                 }
             }
         }
-        let dense = count(&run_gr_walk_case(unicast, walk, 8, 0), route_unit);
-        let sparse = count(&run_gr_walk_case(unicast, walk, 8, 240), route_unit);
-        if sparse < dense + 240 {
-            failures.push((walk, unicast, "vacant slab slots", dense, sparse));
+        let dense = run_gr_walk_case(unicast, walk, 8, 0);
+        let sparse = run_gr_walk_case(unicast, walk, 8, 240);
+        // GR entry also re-collects the retained unicast routes slot by slot.
+        let units: &[&str] = if walk == GrWalk::Entry {
+            &[route_unit, inventory_unit]
+        } else {
+            &[route_unit]
+        };
+        for &unit in units {
+            let (dense, sparse) = (count(&dense, unit), count(&sparse, unit));
+            if sparse < dense + 240 {
+                failures.push((walk, unicast, unit, dense, sparse));
+            }
         }
     }
     assert!(
@@ -1535,4 +1544,36 @@ fn gr_walk_work_counts_grow_per_unit() {
             "{family:?}: GR-entry affected sets must fill without growth: {growth:?}"
         );
     }
+}
+
+/// A consecutive restart deletes every `FlowSpec` rule still GR-stale from the
+/// previous one. Each deleted rule is visited, removed between two
+/// checkpoints and its owned key released between checkpoints too, so GR
+/// entry's route unit answers at least four queries per deleted rule.
+#[test]
+fn gr_entry_consecutive_restart_releases_deleted_flowspec_rules() {
+    let run = |rules: u8| {
+        let flowspec = (Afi::Ipv4, Safi::FlowSpec);
+        let (mut manager, readiness_tx) = readiness_manager();
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+        manager.ribs.insert(peer, AdjRibIn::new(peer));
+        for index in 5..5 + rules {
+            announce_case(&mut manager, flowspec, index, false);
+        }
+        manager.handle_update(gr_with_llgr(peer, 120, vec![flowspec], Vec::new(), 0));
+        let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
+            manager.handle_update(gr_with_llgr(peer, 120, vec![flowspec], Vec::new(), 0));
+        });
+        assert_eq!(
+            manager.ribs[&peer].flowspec_len(),
+            0,
+            "every stale rule is deleted"
+        );
+        answered.get("gr_mark").copied().unwrap_or(0)
+    };
+    let (small, large) = (run(8), run(40));
+    assert!(
+        large >= small + 4 * 32,
+        "gr_mark answered {small} for 8 deleted rules and {large} for 40"
+    );
 }

@@ -634,7 +634,7 @@ impl RibManager {
         }
 
         if let Some(rib) = self.ribs.get(&peer) {
-            for route in rib.iter().inspect(|_| inventory()) {
+            for route in rib.iter_slots().inspect(|_| inventory()).flatten() {
                 affected.insert(route.prefix);
             }
             for route in rib.iter_flowspec().inspect(|_| inventory()) {

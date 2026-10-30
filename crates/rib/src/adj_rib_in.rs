@@ -706,6 +706,12 @@ impl AdjRibIn {
         self.routes.iter()
     }
 
+    /// Every allocated unicast slot, vacancies included, so a checkpointed
+    /// walk can yield between holes of a sparse table.
+    pub(crate) fn iter_slots(&self) -> impl Iterator<Item = Option<&Route>> {
+        self.routes.iter_slots()
+    }
+
     /// Iterate unicast routes in route-query identity order, beginning at
     /// the cursor prefix and excluding identities at or before `after`.
     ///
@@ -3058,7 +3064,11 @@ impl AdjRibIn {
             });
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
+            checkpoint();
         }
+        // The deleted keys own rule components; release them between
+        // checkpoints rather than when this frame returns.
+        retire_llgr_keys(already_stale, checkpoint);
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
         self.flowspec_routes
