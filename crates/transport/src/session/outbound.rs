@@ -147,7 +147,12 @@ impl PendingOutbound {
     /// Keep a completed or abandoned envelope only while its inventory is
     /// released in bounded steps; nothing more is sent from it. A replay
     /// envelope carries no announcement inventory and is dropped as before.
+    /// An envelope already retiring takes no extra step, so teardown paths
+    /// that meet in one turn still release at most one slice.
     pub(super) fn into_retiring(mut self) -> Option<Self> {
+        if self.retiring() {
+            return Some(self);
+        }
         (self.update.replay.is_none() && self.begin_retirement()).then_some(self)
     }
 
@@ -542,6 +547,24 @@ impl PeerSession {
             .pending_outbound
             .take()
             .and_then(PendingOutbound::into_retiring);
+    }
+
+    /// An exiting session task would drop the session, and any inventory
+    /// still retiring with it, in one turn. Hand that remainder to its own
+    /// task, which releases one slice per yield; the exit never waits on it.
+    pub(super) fn hand_off_retirement(&mut self) {
+        let Some(mut pending) = self
+            .pending_outbound
+            .take()
+            .and_then(PendingOutbound::into_retiring)
+        else {
+            return;
+        };
+        tokio::spawn(async move {
+            while pending.retire_step() {
+                tokio::task::yield_now().await;
+            }
+        });
     }
 
     pub(super) fn expire_outbound_admission(&mut self) {
