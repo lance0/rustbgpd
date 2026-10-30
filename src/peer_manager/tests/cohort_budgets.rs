@@ -282,19 +282,18 @@ async fn api_publication_compensation_admits_reads_without_admitting_mutations()
     assert_api_policy_reads(ApiPolicyEntry::PublicationCompensation).await;
 }
 
-/// Cohort-setup starvation, readiness shape: a continuous readiness-query
-/// flood is serviced while each session command is in flight. Servicing time
-/// must not be charged against `PEER_POLICY_UPDATE_TIMEOUT`, so a session
-/// that acknowledges while the actor is busy with the flood (650 ms wall, of
-/// which almost none is time the actor spent waiting on the session) still
-/// commits instead of timing out the reload.
+/// Cohort-setup readiness shape: a probe arrives every 10 ms while each
+/// session command is in flight. Every probe is answered during the wait,
+/// and a session that acknowledges inside `PEER_POLICY_UPDATE_TIMEOUT` still
+/// commits. Readiness queries never wait on a session, so their servicing
+/// takes no measurable time; the budget pause for admitted reads that do is
+/// pinned by `bfd_reload_ack_budget_excludes_admitted_operator_read_time`.
 #[tokio::test(start_paused = true)]
-async fn readiness_servicing_is_not_charged_to_cohort_session_deadlines() {
+async fn readiness_probes_are_served_during_cohort_session_hot_apply() {
     use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
 
     let first = IpAddr::V4(Ipv4Addr::new(10, 37, 1, 1));
     let second = IpAddr::V4(Ipv4Addr::new(10, 37, 1, 2));
-    let parked = IpAddr::V4(Ipv4Addr::new(10, 37, 1, 3));
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
     let rib = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
@@ -330,31 +329,30 @@ async fn readiness_servicing_is_not_charged_to_cohort_session_deadlines() {
             peer,
             busy_established_export_session(
                 peer,
-                Duration::from_millis(650),
+                Duration::from_millis(450),
                 Arc::clone(&installs),
             ),
             false,
         );
     }
-    // A parked bystander session that never answers state queries makes every
-    // serviced `ListPeers` cost the full `PEER_QUERY_TIMEOUT`.
-    insert_test_managed_peer(&mut manager, parked, stalled_policy_query_handle(), false);
 
-    // Continuous flood: one query queued at all times, the next sent as soon
-    // as the previous one is answered.
+    // Each probe must answer inside its deadline; a miss ends the flooder.
+    let answered = Arc::new(AtomicUsize::new(0));
+    let probes = Arc::clone(&answered);
     let flooder = tokio::spawn(async move {
         loop {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            if readiness_tx
-                .send(PeerManagerReadinessQuery::ListPeers { reply: reply_tx })
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let (reply, response) = oneshot::channel();
+            readiness_tx
+                .send(PeerManagerReadinessQuery::Ping { reply })
                 .await
-                .is_err()
-            {
-                break;
-            }
-            if reply_rx.await.is_err() {
-                break;
-            }
+                .unwrap();
+            let deadline = rustbgpd_api::health_probe::CORE_READINESS_DEADLINE;
+            tokio::time::timeout(deadline, response)
+                .await
+                .unwrap()
+                .unwrap();
+            probes.fetch_add(1, Ordering::SeqCst);
         }
     });
 
@@ -372,6 +370,12 @@ async fn readiness_servicing_is_not_charged_to_cohort_session_deadlines() {
         .apply_resolved_policy_snapshot(targets)
         .await
         .expect("readiness servicing must not consume the session hot-apply deadlines");
+    // Two sequential 450 ms session waits at one probe per 10 ms.
+    let answered = answered.load(Ordering::SeqCst);
+    assert!(
+        !flooder.is_finished() && answered >= 88,
+        "{answered} probes"
+    );
     assert_eq!(installs.load(Ordering::SeqCst), 2);
     assert_eq!(
         manager.peers.get(&key(first)).unwrap().export_policy,

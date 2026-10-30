@@ -430,10 +430,7 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
                 PeerManagerReadinessQuery::ActivePeers { reply } => {
                     let _ = reply.send(1);
                 }
-                PeerManagerReadinessQuery::Ping { .. }
-                | PeerManagerReadinessQuery::ListPeers { .. } => {
-                    panic!("unexpected readiness query")
-                }
+                PeerManagerReadinessQuery::Ping { .. } => panic!("unexpected readiness query"),
             }
         }
     });

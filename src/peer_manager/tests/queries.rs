@@ -164,13 +164,11 @@ fn blocked_snapshot_query_handle(
     PeerHandle::from_parts(commands, task)
 }
 
-async fn assert_canceled_list_peers_releases_driver(use_readiness_lane: bool) {
-    use rustbgpd_api::peer_types::PeerManagerReadinessQuery;
-
+async fn assert_canceled_list_peers_releases_driver(use_operator_lane: bool) {
     let (tx, rx) = mpsc::channel(1);
-    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let (operator_tx, operator_rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(8);
-    let mut manager = PeerManager::new(
+    let manager = PeerManager::new(
         rx,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
@@ -179,8 +177,12 @@ async fn assert_canceled_list_peers_releases_driver(use_readiness_lane: bool) {
         BgpMetrics::new(),
         rib_tx,
         None,
-    )
-    .with_readiness_queries(readiness_rx);
+    );
+    let mut manager = if use_operator_lane {
+        manager.with_operator_queries(operator_rx)
+    } else {
+        manager
+    };
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
     let (release, release_rx) = oneshot::channel();
     let (observed, mut observations) = mpsc::unbounded_channel();
@@ -193,11 +195,14 @@ async fn assert_canceled_list_peers_releases_driver(use_readiness_lane: bool) {
     let actor = tokio::spawn(manager.run());
 
     let (canceled_reply, canceled_response) = oneshot::channel();
-    if use_readiness_lane {
-        readiness_tx
-            .send(PeerManagerReadinessQuery::ListPeers {
-                reply: canceled_reply,
-            })
+    if use_operator_lane {
+        operator_tx
+            .send(
+                PeerManagerOperatorQuery::ListPeers {
+                    reply: canceled_reply,
+                }
+                .into(),
+            )
             .await
             .unwrap();
     } else {
@@ -207,11 +212,11 @@ async fn assert_canceled_list_peers_releases_driver(use_readiness_lane: bool) {
         .await
         .unwrap();
     }
-    // The bounded peer-manager/readiness channel accepting another item proves
+    // The bounded peer-manager/operator channel accepting another item proves
     // the actor consumed the snapshot request. Its one session query is then
     // synchronously spawned and parked behind the deliberately full channel.
-    while if use_readiness_lane {
-        readiness_tx.capacity() == 0
+    while if use_operator_lane {
+        operator_tx.capacity() == 0
     } else {
         tx.capacity() == 0
     } {
@@ -249,9 +254,9 @@ async fn assert_canceled_list_peers_releases_driver(use_readiness_lane: bool) {
     );
 
     let (reply, response) = oneshot::channel();
-    if use_readiness_lane {
-        readiness_tx
-            .send(PeerManagerReadinessQuery::ListPeers { reply })
+    if use_operator_lane {
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
             .await
             .unwrap();
     } else {
@@ -276,11 +281,11 @@ async fn canceled_ordinary_list_peers_aborts_blocked_session_driver() {
     assert_canceled_list_peers_releases_driver(false).await;
 }
 
-/// Load-bearing readiness-lane proof: bypassing the shared complete-only
+/// Load-bearing operator-lane proof: bypassing the shared complete-only
 /// answer path or detaching its driver admits a late `QueryState` after the
-/// health caller is gone.
+/// operator caller is gone.
 #[tokio::test(start_paused = true)]
-async fn canceled_readiness_list_peers_aborts_blocked_session_driver() {
+async fn canceled_operator_list_peers_aborts_blocked_session_driver() {
     assert_canceled_list_peers_releases_driver(true).await;
 }
 
@@ -1007,29 +1012,17 @@ fn core_probe(
         .with_peer_manager_readiness(readiness_tx.clone())
 }
 
-/// Queue a peer snapshot (`ListPeers`) on the readiness lane whose sessions
-/// hold `QueryState`, then issue `GetHealth` and `/readyz`. Both must answer
-/// before the snapshot's session fan-out can end:
-///
-/// - Answered in place, the snapshot held the readiness lane for the whole
-///   fan-out, so a probe queued behind it missed its 200 ms deadline right
-///   after a reload commit.
-/// - `GetHealth` itself must not wait on sessions. When it counted
-///   Established peers from a `QueryState` fan-out, a runtime saturated by
-///   the post-commit export burst woke that fan-out late and `GetHealth`
-///   still missed its deadline.
-async fn health_probes_overtake_a_held_peer_snapshot(
-    readiness_tx: &mpsc::Sender<PeerManagerReadinessQuery>,
+/// Issue `GetHealth` and `/readyz` while every session holds `QueryState`.
+/// Both must answer before a session fan-out could end: when `GetHealth`
+/// counted Established peers from a `QueryState` fan-out, a runtime
+/// saturated by the post-commit export burst woke that fan-out late and
+/// `GetHealth` missed its 200 ms deadline.
+async fn health_probes_answer_while_sessions_hold_state(
     probe: &rustbgpd_api::health_probe::CoreReadinessProbe,
 ) {
     let started = tokio::time::Instant::now();
-    let (reply, peer_snapshot) = oneshot::channel();
-    readiness_tx
-        .send(PeerManagerReadinessQuery::ListPeers { reply })
-        .await
-        .unwrap();
     let (health, ready) = tokio::join!(probe.snapshot(), probe.check());
-    ready.expect("readiness inside its deadline while a peer snapshot waits on sessions");
+    ready.expect("readiness inside its deadline while sessions hold QueryState");
     let health = health.expect("GetHealth inside its deadline while sessions hold QueryState");
     assert_eq!(health.active_peers, 0, "no session is Established");
     assert!(
@@ -1037,29 +1030,33 @@ async fn health_probes_overtake_a_held_peer_snapshot(
         "the health probes waited {:?} on the held sessions",
         started.elapsed()
     );
-    let peers = peer_snapshot.await.expect("peer snapshot answered");
-    assert!(peers.iter().all(|peer| peer.stale));
 }
 
 #[tokio::test(start_paused = true)]
-async fn health_probes_are_not_held_behind_a_peer_snapshot_in_the_run_loop() {
+async fn health_probes_do_not_wait_on_held_sessions_in_the_run_loop() {
     let (manager, command_tx, readiness_tx, _operator_tx) = manager_with_held_session_state();
     let actor = tokio::spawn(manager.run());
     let probe = core_probe(&command_tx, &readiness_tx);
 
-    health_probes_overtake_a_held_peer_snapshot(&readiness_tx, &probe).await;
+    health_probes_answer_while_sessions_hold_state(&probe).await;
 
     command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     actor.await.unwrap();
 }
 
-/// The same overlap while a reload's destination prestage reply is withheld:
-/// the owner waits in `await_with_readiness_budget`, which serves both probes.
+/// The same probes while a reload's destination prestage reply is withheld:
+/// the owner waits in `await_with_readiness_budget`, which serves both probes
+/// while an admitted operator `ListPeers` is detached on the held sessions.
 #[tokio::test(start_paused = true)]
 async fn health_probes_are_not_held_behind_a_peer_snapshot_while_prestage_is_withheld() {
-    let (mut manager, command_tx, readiness_tx, _operator_tx) = manager_with_held_session_state();
+    let (mut manager, command_tx, readiness_tx, operator_tx) = manager_with_held_session_state();
     let probe = core_probe(&command_tx, &readiness_tx);
     let (prestage_reply, prestage_wait) = oneshot::channel::<()>();
+    let (reply, peer_snapshot) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+        .await
+        .unwrap();
 
     let (prestaged, ()) = tokio::join!(
         manager.await_with_readiness_budget(
@@ -1068,7 +1065,7 @@ async fn health_probes_are_not_held_behind_a_peer_snapshot_while_prestage_is_wit
             OperatorReadAdmission::Served,
         ),
         async {
-            health_probes_overtake_a_held_peer_snapshot(&readiness_tx, &probe).await;
+            health_probes_answer_while_sessions_hold_state(&probe).await;
             prestage_reply.send(()).unwrap();
         }
     );
@@ -1076,6 +1073,10 @@ async fn health_probes_are_not_held_behind_a_peer_snapshot_while_prestage_is_wit
         matches!(prestaged, Some(Ok(()))),
         "the owner resumes once the prestage reply arrives"
     );
+    let peers = peer_snapshot
+        .await
+        .expect("detached peer snapshot answered");
+    assert!(peers.iter().all(|peer| peer.stale));
     for (_, managed) in manager.peers.drain() {
         let _ = managed.into_parts().0.shutdown().await;
     }

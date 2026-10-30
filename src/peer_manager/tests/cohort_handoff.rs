@@ -1302,19 +1302,18 @@ async fn export_only_snapshot_handoff_batches_the_authoritative_apply() {
         );
         let (readiness_reply, readiness_response) = oneshot::channel();
         readiness_tx
-            .send(PeerManagerReadinessQuery::ListPeers {
+            .send(PeerManagerReadinessQuery::Ping {
                 reply: readiness_reply,
             })
             .await
             .unwrap();
-        let infos = tokio::time::timeout(
+        tokio::time::timeout(
             rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
             readiness_response,
         )
         .await
         .expect("readiness must remain live while the batched RIB reply is held")
         .unwrap();
-        assert_eq!(infos.len(), peers.len());
         reply.send(Ok(())).unwrap();
     };
     let (result, ()) = tokio::join!(apply, drive_rib);
@@ -1412,13 +1411,18 @@ async fn export_only_snapshot_handoff_skips_missing_peer_and_continues_without_r
 
         let (readiness_reply, readiness_response) = oneshot::channel();
         readiness_tx
-            .send(PeerManagerReadinessQuery::ListPeers {
+            .send(PeerManagerReadinessQuery::Ping {
                 reply: readiness_reply,
             })
             .await
             .unwrap();
-        let infos = readiness_response.await.unwrap();
-        assert_eq!(infos.len(), peers.len());
+        tokio::time::timeout(
+            rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+            readiness_response,
+        )
+        .await
+        .expect("readiness must remain live while the batched RIB reply is held")
+        .unwrap();
 
         reply.send(Ok(())).unwrap();
         tokio::task::yield_now().await;
@@ -2176,19 +2180,18 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
     for _ in 0..8 {
         let (readiness_reply, readiness_response) = oneshot::channel();
         readiness_tx
-            .send(PeerManagerReadinessQuery::ListPeers {
+            .send(PeerManagerReadinessQuery::Ping {
                 reply: readiness_reply,
             })
             .await
             .unwrap();
-        let infos = tokio::time::timeout(
+        tokio::time::timeout(
             rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
             readiness_response,
         )
         .await
         .expect("live readiness must stay inside the unchanged 200ms deadline")
         .unwrap();
-        assert_eq!(infos.len(), peers.len());
     }
     let (health_rib_tx, mut health_rib_rx) = mpsc::channel(1);
     let probe =
@@ -2250,19 +2253,18 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
 
     let (late_readiness_reply, late_readiness_response) = oneshot::channel();
     readiness_tx
-        .send(PeerManagerReadinessQuery::ListPeers {
+        .send(PeerManagerReadinessQuery::Ping {
             reply: late_readiness_reply,
         })
         .await
         .unwrap();
-    let late_infos = tokio::time::timeout(
+    tokio::time::timeout(
         rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
         late_readiness_response,
     )
     .await
     .expect("readiness must remain live beyond the former five-second cohort timeout")
     .unwrap();
-    assert_eq!(late_infos.len(), peers.len());
     assert_eq!(attempts.load(Ordering::SeqCst), peers.len());
 
     rib_reply
@@ -2275,10 +2277,6 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
 }
 
 #[tokio::test(start_paused = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the readiness regression keeps cancellation and live probing in one held transaction"
-)]
 async fn export_only_snapshot_services_readiness_during_stalled_session_apply() {
     use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, ResolvedPeerPolicy};
 
@@ -2339,7 +2337,7 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
     let (cancelled_reply, cancelled_response) = oneshot::channel();
     drop(cancelled_response);
     readiness_tx
-        .send(PeerManagerReadinessQuery::ListPeers {
+        .send(PeerManagerReadinessQuery::ActivePeers {
             reply: cancelled_reply,
         })
         .await
@@ -2350,32 +2348,19 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
 
     let (readiness_reply, readiness_response) = oneshot::channel();
     readiness_tx
-        .send(PeerManagerReadinessQuery::ListPeers {
+        .send(PeerManagerReadinessQuery::ActivePeers {
             reply: readiness_reply,
         })
         .await
         .unwrap();
-    let infos = tokio::time::timeout(
+    let active = tokio::time::timeout(
         rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
         readiness_response,
     )
     .await
     .expect("readiness must beat the unchanged 200ms deadline")
     .unwrap();
-    assert_eq!(infos.len(), 2);
-    assert!(
-        infos
-            .iter()
-            .find(|info| info.address == stalled)
-            .is_some_and(|info| info.stale),
-        "the independently stalled session must be reported as stale, not fabricated healthy"
-    );
-    assert!(
-        infos
-            .iter()
-            .find(|info| info.address == responsive)
-            .is_some_and(|info| !info.stale)
-    );
+    assert_eq!(active, 0, "no test session publishes Established");
 
     release.notify_one();
     let RibUpdate::ReplacePeerExportPolicies {
@@ -2388,7 +2373,7 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
         .send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed))
         .unwrap();
     apply_response.await.unwrap().unwrap();
-    assert_session_state_query_count(&state_queries, 1).await;
+    assert_session_state_query_count(&state_queries, 0).await;
     command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     manager_task.await.unwrap();
 }
@@ -2582,11 +2567,16 @@ async fn export_only_snapshot_restores_newest_first_after_rib_batch_failure() {
         batch_seen_rx.await.unwrap();
         let (reply, response) = oneshot::channel();
         readiness_tx
-            .send(PeerManagerReadinessQuery::ListPeers { reply })
+            .send(PeerManagerReadinessQuery::Ping { reply })
             .await
             .unwrap();
-        let infos = response.await.unwrap();
-        assert_eq!(infos.len(), 2);
+        tokio::time::timeout(
+            rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+            response,
+        )
+        .await
+        .expect("readiness must remain live while the RIB batch reply is held")
+        .unwrap();
         release_batch.notify_one();
     };
     let (result, ()) = tokio::join!(apply, readiness);

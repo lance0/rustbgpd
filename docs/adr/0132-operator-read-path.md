@@ -780,3 +780,16 @@ to approximately the parent's completion, not clearly below it. If the
 candidate misses the bar by less than that window's spread, the next
 question is the unfenced prestage probe cost. That separate decision must
 not be answered by relaxing this bar.
+
+## Amendment (2026-10-30): the readiness lane no longer reads sessions
+
+**Status of this amendment:** accepted and implemented.
+
+`GetHealth` now asks the peer manager for `ActivePeers`, which counts
+Established peers from the state each session publishes without sending a
+session query. Readiness `ListPeers` had no other sender and was removed, so
+the readiness lane carries only `Ping` and `ActivePeers`, and neither waits
+on a session. The `CORE_READINESS_DEADLINE` and `health` / `GetHealth` rows
+above describe the earlier behavior. Neighbor snapshots remain on the
+operator and ordinary lanes, and the detached collection selected in the
+2026-10-10 amendment is unchanged.

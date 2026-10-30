@@ -267,7 +267,7 @@ fn full_max_prefix_restart_channel(release_after: Option<Duration>) -> PeerHandl
 
 /// Load-bearing aggregate-restart proof:
 /// - sequential per-peer waits make the handler exceed the exact 500 ms bound;
-/// - bypassing `await_with_readiness` leaves the queued snapshot unanswered at 100 ms;
+/// - bypassing `await_with_readiness` leaves the queued probe unanswered at 150 ms;
 /// - applying futures in completion order publishes the high peer before the low peer;
 /// - retaining the breach text instead of the delivery failure breaks the exact recovery error.
 #[tokio::test(start_paused = true)]
@@ -316,15 +316,15 @@ async fn due_max_prefix_restarts_share_one_readiness_serving_deadline() {
     let mut events = mgr.session_events_tx.subscribe();
     let (readiness_reply, readiness_response) = oneshot::channel();
     readiness_tx
-        .send(PeerManagerReadinessQuery::ListPeers {
+        .send(PeerManagerReadinessQuery::ActivePeers {
             reply: readiness_reply,
         })
         .await
         .unwrap();
     let started = tokio::time::Instant::now();
     let readiness = tokio::spawn(async move {
-        let peers = readiness_response.await.unwrap();
-        (tokio::time::Instant::now(), peers)
+        let active = readiness_response.await.unwrap();
+        (tokio::time::Instant::now(), active)
     });
     let handler = tokio::spawn(async move {
         mgr.handle_due_max_prefix_restarts().await;
@@ -332,15 +332,15 @@ async fn due_max_prefix_restarts_share_one_readiness_serving_deadline() {
     });
     tokio::task::yield_now().await;
 
-    // Check between the snapshot's 100 ms per-session bound and the 200 ms
-    // readiness contract, avoiding an assertion on the timeout timer's edge.
+    // Check inside the 200 ms readiness contract, while every restart still
+    // waits on its full channel.
     tokio::time::advance(Duration::from_millis(150)).await;
     for _ in 0..5 {
         tokio::task::yield_now().await;
     }
     assert!(readiness.is_finished());
-    let (readiness_at, peers) = readiness.await.unwrap();
-    assert_eq!(peers.len(), 3);
+    let (readiness_at, active) = readiness.await.unwrap();
+    assert_eq!(active, 0, "no test session publishes Established");
     assert!(readiness_at - started < Duration::from_millis(200));
 
     tokio::time::advance(Duration::from_millis(150)).await;
@@ -380,44 +380,32 @@ async fn due_max_prefix_restarts_share_one_readiness_serving_deadline() {
     );
 }
 
-fn straddling_restart_channel(starts: Arc<AtomicU32>) -> PeerHandle {
+/// A full session channel whose receiver the test drains itself, so it can
+/// free the slot at an exact point relative to the restart deadline.
+fn straddling_restart_channel() -> (PeerHandle, mpsc::Receiver<rustbgpd_transport::PeerCommand>) {
     use rustbgpd_transport::PeerCommand;
 
-    let (commands, mut receiver) = mpsc::channel(1);
+    let (commands, receiver) = mpsc::channel(1);
     commands
         .try_send(PeerCommand::CollisionDump)
         .expect("pre-fill the straddling command channel");
-    let task = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(550)).await;
-        let _ = receiver.recv().await;
-        while let Some(command) = receiver.recv().await {
-            if matches!(command, PeerCommand::Start) {
-                starts.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        Ok(())
-    });
-    PeerHandle::from_parts(commands, task)
+    let task = tokio::spawn(std::future::pending());
+    (PeerHandle::from_parts(commands, task), receiver)
 }
 
-/// Load-bearing expired-deadline proof: replacing the biased deadline-first
-/// select with `timeout_at` lets the newly writable send win when the second
-/// readiness snapshot returns after the deadline, enabling the peer and
-/// incrementing `starts` at 550 ms.
+/// Load-bearing expired-deadline proof: the deadline timer fires and the
+/// session channel gains room before the restart future is next polled.
+/// Replacing the biased deadline-first select with `timeout_at` lets the
+/// newly writable send win, enabling the peer and delivering a late `Start`.
 #[tokio::test(start_paused = true)]
 async fn readiness_straddle_cannot_accept_a_late_max_prefix_start() {
     use rustbgpd_api::peer_types::PeerManagerReadinessQuery;
 
     let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 83));
-    let starts = Arc::new(AtomicU32::new(0));
     let (readiness_tx, readiness_rx) = mpsc::channel(2);
     let mut mgr = test_peer_manager().with_readiness_queries(readiness_rx);
-    insert_test_managed_peer(
-        &mut mgr,
-        address,
-        straddling_restart_channel(starts.clone()),
-        false,
-    );
+    let (handle, mut session_rx) = straddling_restart_channel();
+    insert_test_managed_peer(&mut mgr, address, handle, false);
     let managed = mgr.peers.get_mut(&key(address)).unwrap();
     managed.enabled = false;
     managed.max_prefix_restart_seconds = Some(1);
@@ -430,26 +418,38 @@ async fn readiness_straddle_cannot_accept_a_late_max_prefix_start() {
     });
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(450)).await;
-    let (second_reply, second_response) = oneshot::channel();
+    let (ping_reply, ping_response) = oneshot::channel();
     readiness_tx
-        .send(PeerManagerReadinessQuery::ListPeers {
-            reply: second_reply,
-        })
+        .send(PeerManagerReadinessQuery::Ping { reply: ping_reply })
         .await
         .unwrap();
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(100)).await;
-    for _ in 0..5 {
-        tokio::task::yield_now().await;
-    }
-    second_response.await.unwrap();
+    tokio::time::timeout(
+        rustbgpd_api::health_probe::CORE_READINESS_DEADLINE,
+        ping_response,
+    )
+    .await
+    .expect("readiness is served while the restart waits")
+    .unwrap();
+    assert!(!handler.is_finished());
+
+    // This task wakes from the same timer tick as the restart deadline and,
+    // as the runtime's main future, runs before the handler: the slot frees
+    // after the deadline fired but before the restart future observes it.
+    tokio::time::sleep_until(started + Duration::from_millis(500)).await;
+    assert!(matches!(
+        session_rx.try_recv(),
+        Ok(rustbgpd_transport::PeerCommand::CollisionDump)
+    ));
     let mgr = handler.await.unwrap();
 
     assert_eq!(
         tokio::time::Instant::now() - started,
-        Duration::from_millis(550)
+        Duration::from_millis(500)
     );
-    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(
+        session_rx.try_recv().is_err(),
+        "no Start may be delivered after the deadline"
+    );
     assert!(!mgr.peers[&key(address)].enabled);
     assert!(
         mgr.max_prefix_latches[&key(address)]

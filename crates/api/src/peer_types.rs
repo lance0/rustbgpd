@@ -1869,11 +1869,6 @@ pub enum PeerManagerReadinessQuery {
         /// Reply channel returning the Established-peer count.
         reply: oneshot::Sender<usize>,
     },
-    /// Return a live snapshot of all configured peers.
-    ListPeers {
-        /// Reply channel returning all peer snapshots.
-        reply: oneshot::Sender<Vec<PeerInfo>>,
-    },
 }
 
 /// Information about a configured dynamic neighbor range.
