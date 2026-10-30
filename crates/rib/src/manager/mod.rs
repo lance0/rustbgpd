@@ -1187,10 +1187,13 @@ pub struct RibManager {
     /// intersects these with the member's actual admitted-key proof. Cleared
     /// on resync success.
     pending_extra_withdraws: HashMap<PeerId, update_groups::ExtraWithdraws>,
-    /// Exempt (RTBH or host) unicast keys a grouped member missed the
-    /// withdrawal of while dirty. Its group table no longer names them.
-    /// Cleared when the member syncs and at session end.
-    dirty_exempt_withdraws: HashMap<PeerId, HashSet<(Prefix, u32)>>,
+    /// Exempt (RTBH or host) unicast keys withdrawn outright during the
+    /// current selection hold: per update group, and per private receiver
+    /// once its withdrawal is queued. A session that ends before its queued
+    /// withdrawal reaches the peer leaves that row stale at a GR helper,
+    /// and the group table or Adj-RIB-Out no longer names it. Bounded per
+    /// owner by [`HELPER_STALE_EXEMPT_LIMIT`]; cleared when the hold ends.
+    hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, HashSet<(Prefix, u32)>>,
     /// Exempt unicast keys an ended session of a GR-capable peer may still
     /// hold as stale (RFC 4724 §4.2). The peer drops stale routes only at
     /// our End-of-RIB, which a selection hold defers until release, so the
@@ -1937,12 +1940,28 @@ pub(super) struct LiveSessionRecord {
     export_policy_counters: crate::update::ExportPolicyCounters,
 }
 
+/// Keys one stale-exempt set or hold ledger holds at most. Past it the
+/// remaining keys stay at the helper until our End-of-RIB, as without the
+/// carry.
+const HELPER_STALE_EXEMPT_LIMIT: usize = 1 << 16;
+
+/// Who a hold-scoped exempt withdrawal was sent to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HoldWithdrawOwner {
+    Group(usize),
+    Peer(PeerId),
+}
+
 /// Exempt keys a GR-capable peer may hold stale from an ended session.
 #[derive(Debug)]
 struct HelperStaleExempt {
     /// The ended session's writer. Its withdrawals belong to a later one.
     ended: mpsc::WeakSender<OutboundRouteUpdate>,
     keys: HashSet<(Prefix, u32)>,
+    /// The last flush withdrew everything it could: each remaining key waits
+    /// for a route change or an ORF gate, which runs the next flush, so the
+    /// resync timer need not.
+    settled: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2746,7 +2765,7 @@ impl RibManager {
             group_ribs: HashMap::new(),
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
-            dirty_exempt_withdraws: HashMap::new(),
+            hold_exempt_withdrawn: HashMap::new(),
             helper_stale_exempt: HashMap::new(),
             pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
@@ -3794,9 +3813,9 @@ impl RibManager {
             self.replacement_checkpoint(false);
             !self.selection_partial_caught_up(peer)
         }) || !self.pending_inbound_refresh.is_empty()
-            || self.helper_stale_exempt.keys().any(|&peer| {
+            || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
-                self.helper_stale_exempt_runnable(peer)
+                !carried.settled && self.helper_stale_exempt_runnable(peer)
             })
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {

@@ -471,3 +471,237 @@ fn orf_gated_reconnect_keeps_its_live_rtbh_until_the_initial_table() {
         "the ORF lifts the gate and re-sends it"
     );
 }
+
+/// The stale RTBH `rtbh` must leave the peer inside the hold once the new
+/// session `session` (on `rx`) has been driven by the resync timer, while
+/// the live `kept` RTBH never leaves.
+fn assert_withdrawn_inside_hold(
+    manager: &mut RibManager,
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    rib: &mut PeerRib,
+    rtbh: Ipv4Prefix,
+    kept: Ipv4Prefix,
+) {
+    let kept_key = (Prefix::V4(kept), 0);
+    let mut markers = 0;
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+        markers += apply(rx, rib, Some(kept_key));
+    }
+    assert!(manager.selection_deferred(FAMILY), "still inside the hold");
+    assert_eq!(markers, 0, "End-of-RIB stays deferred until release");
+    assert!(
+        !rib.contains_key(&(Prefix::V4(rtbh), 0)),
+        "the deleted RTBH leaves the helper inside the hold; peer {rib:?}"
+    );
+    assert_eq!(rib.get(&kept_key), Some(&false), "the live RTBH is re-sent");
+}
+
+/// A queued withdrawal is not a delivered one: a session that ends before
+/// the peer reads its queue leaves the deleted RTBH stale at the helper,
+/// while the Adj-RIB-Out no longer names it. Red proof: without the hold's
+/// queued-withdrawal ledger the RTBH stays until release.
+#[test]
+fn queued_rtbh_withdrawal_dropped_at_session_end_is_resent() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    // The withdrawal is queued, and the session ends before the peer reads it.
+    delete(&mut manager, rtbh);
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    assert!(rib.contains_key(&(Prefix::V4(rtbh), 0)));
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, false, false);
+    assert_withdrawn_inside_hold(&mut manager, &mut new_rx, &mut rib, rtbh, kept);
+}
+
+/// The transport closes the channel before the RIB learns the session
+/// ended. A grouped receiver's withdrawal then fails on the closed writer,
+/// and the group table no longer names the RTBH. Red proof: without the
+/// group's hold ledger the RTBH stays until release.
+#[test]
+fn grouped_rtbh_withdrawn_in_the_closed_channel_window_is_resent() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, true, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    clean_end(&mut manager, 82);
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, true, false);
+    assert_withdrawn_inside_hold(&mut manager, &mut new_rx, &mut rib, rtbh, kept);
+}
+
+/// A replacement session can register before the RIB learns that the
+/// previous one ended; that ending is then discarded as superseded. Red
+/// proof: without the carry on the replacement path the RTBH stays.
+#[test]
+fn replacement_session_carries_the_superseded_sessions_stale_rtbh() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    let occupied: Vec<_> = std::iter::from_fn(|| old_tx.clone().try_reserve_owned().ok()).collect();
+    delete(&mut manager, rtbh);
+    drop(occupied);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, false, false);
+    // The ended session's own teardown arrives late and is discarded.
+    clean_end(&mut manager, 82);
+    assert_withdrawn_inside_hold(&mut manager, &mut new_rx, &mut rib, rtbh, kept);
+}
+
+/// An ORF gate holds only its own family's initial table: the other
+/// family's carried keys are withdrawn, and the gated family's wait in the
+/// carried set until the peer's ORF lifts the gate.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one two-family transcript arms the hold, flaps the session and checks each family"
+)]
+fn orf_gate_holds_back_only_its_own_family() {
+    const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![FAMILY, V6],
+            }],
+        });
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let register_both = |manager: &mut RibManager, session_id: u64| {
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: observer,
+            session_id,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: vec![FAMILY, V6],
+            peer_enhanced_refresh: true,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        });
+        let (tx, rx) = mpsc::channel(64);
+        let mut up = super::lifecycle::test_peer_up(observer, session_id, tx.clone());
+        if let RibUpdate::PeerUp {
+            sendable_families,
+            export_policy,
+            negotiated_orf_recv,
+            ..
+        } = &mut up
+        {
+            *sendable_families = vec![FAMILY, V6];
+            *export_policy = Some(private_policy(None));
+            *negotiated_orf_recv = vec![FAMILY];
+        }
+        manager.handle_update(up);
+        (tx, rx)
+    };
+    let (_old_tx, mut old_rx) = register_both(&mut manager, 82);
+    permit_all_orf(&mut manager, 82);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    // The waiter establishes for both families, which arms the hold.
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: peer_v4(WAITER),
+        session_id: 83,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![FAMILY, V6],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (waiter_tx, _waiter_rx) = mpsc::channel(64);
+    let mut waiter_up = super::lifecycle::test_peer_up(peer_v4(WAITER), 83, waiter_tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut waiter_up
+    {
+        *sendable_families = vec![FAMILY, V6];
+    }
+    manager.handle_update(waiter_up);
+    assert!(manager.selection_deferred(FAMILY) && manager.selection_deferred(V6));
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let mut v6 = make_route(v4, SOURCE);
+    set_peer(&mut v6, crate::PeerId::LOCAL);
+    v6.origin_type = crate::route::RouteOrigin::Local;
+    v6.prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:1::2".parse().unwrap(), 128));
+    v6.next_hop = "2001:db8::81".parse().unwrap();
+    let v6_key = (v6.prefix, 0);
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route: v6, reply });
+    result.try_recv().unwrap().unwrap();
+    inject_rtbh(&mut manager, v4);
+    apply(&mut old_rx, &mut rib, None);
+    assert!(rib.contains_key(&v6_key) && rib.contains_key(&(Prefix::V4(v4), 0)));
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix: v6_key.0,
+        path_id: 0,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    assert!(result.try_recv().unwrap().unwrap().removed);
+    let (_new_tx, mut new_rx) = register_both(&mut manager, 182);
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+        apply(&mut new_rx, &mut rib, Some((Prefix::V4(v4), 0)));
+    }
+    assert!(
+        !rib.contains_key(&v6_key),
+        "the ungated family's deleted RTBH leaves inside the hold; peer {rib:?}"
+    );
+    assert_eq!(
+        rib.get(&(Prefix::V4(v4), 0)),
+        Some(&true),
+        "the gated family's live RTBH stays stale until its table"
+    );
+    assert!(
+        manager
+            .helper_stale_exempt
+            .get(&observer)
+            .is_some_and(|carried| carried.keys.contains(&(Prefix::V4(v4), 0))),
+        "the gated family's key waits in the carried set"
+    );
+}

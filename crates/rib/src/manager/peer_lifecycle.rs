@@ -784,6 +784,7 @@ impl RibManager {
         keep_series: bool,
     ) {
         self.peer_down_teardown(peer);
+        self.forget_helper_stale_exempt(peer);
         self.eor_grace_peer_deleted(peer, keep_series);
         self.pending_peer_export_context
             .retain(|(context_peer, _), _| *context_peer != peer);
@@ -841,6 +842,7 @@ impl RibManager {
         );
         // Idempotent, and it covers every family's retained routes.
         self.peer_down_teardown(peer);
+        self.forget_helper_stale_exempt(peer);
         // Live: checked above, and only this actor releases handles.
         let _ = peer.rebind(endpoint);
     }
@@ -851,7 +853,16 @@ impl RibManager {
     /// session may hold, so the next session can withdraw deleted ones
     /// while a selection hold defers that End-of-RIB.
     fn carry_helper_stale_exempt(&mut self, peer: PeerId, session_id: u64) {
-        let missed = self.dirty_exempt_withdraws.remove(&peer);
+        let queued = self
+            .hold_exempt_withdrawn
+            .remove(&super::HoldWithdrawOwner::Peer(peer));
+        if !self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
+        {
+            return;
+        }
         let helper = self
             .live_sessions
             .get(&peer)
@@ -865,8 +876,20 @@ impl RibManager {
         if !helper {
             return;
         }
-        let mut keys = missed.unwrap_or_default();
-        let table = match self.grouped_member_of(peer) {
+        // The exempt rows the session holds or may still hold: its table's,
+        // and those withdrawn outright in the hold, which may not have
+        // reached the peer. The flush withdraws none whose key still has a
+        // desired row, so an over-carried key never removes a row the
+        // helper rightly keeps.
+        let mut keys = queued.unwrap_or_default();
+        let gid = self.grouped_member_of(peer);
+        if let Some(group) = gid.and_then(|gid| {
+            self.hold_exempt_withdrawn
+                .get(&super::HoldWithdrawOwner::Group(gid))
+        }) {
+            keys.extend(group.iter().copied());
+        }
+        let table = match gid {
             Some(gid) => self.group_ribs.get(&gid).map(|group| &group.table),
             None => self.adj_ribs_out.get(&peer),
         };
@@ -875,7 +898,8 @@ impl RibManager {
                 table
                     .local_export_sources()
                     .filter(|(_, source)| source.deferral_exempt)
-                    .map(|(key, _)| *key),
+                    .map(|(key, _)| *key)
+                    .take(super::HELPER_STALE_EXEMPT_LIMIT.saturating_sub(keys.len())),
             );
         }
         let Some(ended) = self.outbound_peers.get(&peer).map(mpsc::Sender::downgrade) else {
@@ -888,10 +912,54 @@ impl RibManager {
                     .or_insert_with(|| super::HelperStaleExempt {
                         ended: ended.clone(),
                         keys: HashSet::new(),
+                        settled: false,
                     });
             carried.ended = ended;
-            carried.keys.extend(keys);
+            carried.settled = false;
+            let room = super::HELPER_STALE_EXEMPT_LIMIT.saturating_sub(carried.keys.len());
+            carried.keys.extend(keys.into_iter().take(room));
         }
+    }
+
+    /// Keep an exempt key withdrawn outright in the hold, up to the limit.
+    pub(super) fn record_hold_exempt_withdrawn(
+        &mut self,
+        owner: super::HoldWithdrawOwner,
+        keys: impl IntoIterator<Item = (Prefix, u32)>,
+    ) {
+        let ledger = self.hold_exempt_withdrawn.entry(owner).or_default();
+        let room = super::HELPER_STALE_EXEMPT_LIMIT.saturating_sub(ledger.len());
+        ledger.extend(keys.into_iter().take(room));
+        if ledger.is_empty() {
+            self.hold_exempt_withdrawn.remove(&owner);
+        }
+    }
+
+    /// A deleted or rebound neighbor's next session is a different peer's.
+    fn forget_helper_stale_exempt(&mut self, peer: PeerId) {
+        self.helper_stale_exempt.remove(&peer);
+        self.hold_exempt_withdrawn
+            .remove(&super::HoldWithdrawOwner::Peer(peer));
+    }
+
+    /// Whether the prefix still has any candidate route, selected or held
+    /// back by the hold. A GR helper's stale row there may be the right
+    /// one, so the flush leaves it for our End-of-RIB.
+    fn desires_unicast_prefix(&self, prefix: Prefix) -> bool {
+        self.loc_rib.get(&prefix).is_some()
+            || self
+                .ribs
+                .values()
+                .any(|rib| rib.iter_prefix(&prefix).next().is_some())
+    }
+
+    /// The carried keys this peer can withdraw now: not in a family whose
+    /// initial table an ORF gate still holds.
+    fn helper_stale_flushable(&self, peer: PeerId, key: (Prefix, u32)) -> bool {
+        !self
+            .peer_orf_pending
+            .get(&peer)
+            .is_some_and(|gated| gated.contains(&prefix_family(&key.0)))
     }
 
     /// Whether the current session holds this unicast key.
@@ -943,26 +1011,30 @@ impl RibManager {
             };
             let add_path = self.peer_add_path_send_families.get(&peer);
             // Keys follow the current session's Add-Path mode: without it,
-            // every path of the ended session is the prefix's one key.
-            let keys: std::collections::BTreeSet<(Prefix, u32)> = self.helper_stale_exempt[&peer]
-                .keys
-                .iter()
-                .map(|&(prefix, path_id)| {
-                    let family = prefix_family(&prefix);
-                    let keyed = add_path.is_some_and(|families| families.contains(&family));
-                    (prefix, if keyed { path_id } else { 0 })
-                })
-                .collect();
-            let withdraw: Vec<(Prefix, u32)> = keys
-                .into_iter()
-                .filter(|&(prefix, path_id)| {
-                    self.selection_deferred(prefix_family(&prefix))
-                        && !self.advertises_unicast_key(peer, prefix, path_id)
-                })
-                .collect();
+            // every path of the ended session is the prefix's one key. A key
+            // the session advertises is its own now. One whose prefix still
+            // has a route, or whose family an ORF gate holds, waits.
+            let mut withdraw = std::collections::BTreeSet::new();
+            let mut waiting = HashSet::new();
+            for &key in &self.helper_stale_exempt[&peer].keys {
+                let (prefix, path_id) = key;
+                let family = prefix_family(&prefix);
+                let keyed = add_path.is_some_and(|families| families.contains(&family));
+                let path_id = if keyed { path_id } else { 0 };
+                if !self.selection_deferred(family)
+                    || self.advertises_unicast_key(peer, prefix, path_id)
+                {
+                    continue;
+                }
+                if self.helper_stale_flushable(peer, key) && !self.desires_unicast_prefix(prefix) {
+                    withdraw.insert((prefix, path_id));
+                } else {
+                    waiting.insert(key);
+                }
+            }
             let update = OutboundRouteUpdate {
                 exact_export_snapshot: Some(encoder.snapshot()),
-                withdraw,
+                withdraw: withdraw.into_iter().collect(),
                 ..OutboundRouteUpdate::default()
             };
             // A full writer keeps the set for the next tick.
@@ -972,7 +1044,12 @@ impl RibManager {
                     Err(TrySendError::Full(_))
                 )
             {
-                self.helper_stale_exempt.remove(&peer);
+                if waiting.is_empty() {
+                    self.helper_stale_exempt.remove(&peer);
+                } else if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
+                    carried.keys = waiting;
+                    carried.settled = true;
+                }
             }
         }
     }
@@ -991,7 +1068,12 @@ impl RibManager {
             })
         }) && (!self.dirty_peers.contains(&peer) || self.selection_partial_caught_up(peer))
             && !self.pending_initial_registrations.contains(&peer)
-            && !self.peer_orf_pending.contains_key(&peer)
+            && self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
+                carried
+                    .keys
+                    .iter()
+                    .any(|&key| self.helper_stale_flushable(peer, key))
+            })
     }
 
     /// Clear the per-session outbound state shared by the `PeerDown` and
@@ -1197,7 +1279,8 @@ impl RibManager {
             });
         }
         self.pending_extra_withdraws.remove(&peer);
-        self.dirty_exempt_withdraws.remove(&peer);
+        self.hold_exempt_withdrawn
+            .remove(&super::HoldWithdrawOwner::Peer(peer));
         self.release_group_admitted_keys(peer);
         self.remove_update_group_member(peer);
         // The extra-withdraw drop above mutates residue even for a peer
@@ -1264,6 +1347,11 @@ impl RibManager {
             );
             self.metrics
                 .record_rib_outbound_registration_replaced(&peer.label());
+            // The replaced session may have ended cleanly at a GR helper; its
+            // own teardown arrives later and is discarded as superseded.
+            if let Some(previous_session_id) = self.outbound_session_ids.get(&peer).copied() {
+                self.carry_helper_stale_exempt(peer, previous_session_id);
+            }
             if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
                 self.clear_policy_filtered_routes_for_peer(peer);
                 self.clear_peer_adj_rib_in(peer);

@@ -4892,6 +4892,10 @@ impl RibManager {
             // enter this block and therefore retain their zero label cost.
             let peer_label = peer.label();
             let loc_rib_len = self.loc_rib.len();
+            let hold_active = self
+                .selection_deferral
+                .as_ref()
+                .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates);
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
@@ -4950,6 +4954,23 @@ impl RibManager {
                 rib_out.reserve_rtc_with(additional, &mut || checkpoint());
                 super::replacement_readiness_checkpoint(&readiness, true);
             }
+            // Queued is not delivered: a session ending first leaves an
+            // exempt row it withdrew stale at a GR helper, and this table
+            // will no longer name it. Read its provenance before the commit.
+            let queued_exempt_withdrawals: Vec<(Prefix, u32)> = if hold_active {
+                withdraw
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|(prefix, path_id)| {
+                        rib_out
+                            .local_export_source(prefix, *path_id)
+                            .is_some_and(|source| source.deferral_exempt)
+                    })
+                    .copied()
+                    .collect()
+            } else {
+                Vec::new()
+            };
             if grouped_unicast_count.is_none() {
                 for (route, action) in announce
                     .iter()
@@ -5019,6 +5040,16 @@ impl RibManager {
                 checkpoint();
                 rib_out.set_local_export_source((prefix, path_id), None);
             }
+            if !queued_exempt_withdrawals.is_empty() {
+                self.record_hold_exempt_withdrawn(
+                    super::HoldWithdrawOwner::Peer(peer),
+                    queued_exempt_withdrawals,
+                );
+            }
+            let rib_out = self
+                .adj_ribs_out
+                .get_mut(&peer)
+                .expect("the committed Adj-RIB-Out exists");
             for route in announce
                 .iter()
                 .filter(|route| announce_source_exclusion != Some(route.peer))

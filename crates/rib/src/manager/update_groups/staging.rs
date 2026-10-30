@@ -466,6 +466,23 @@ impl RibManager {
             labeled_filtered = per_client_best_result.policy_filtered;
         }
         self.replacement_checkpoint(true);
+        // The committed table forgets a withdrawn row's provenance; keep the
+        // exempt rows withdrawn outright in the hold for a GR helper's flap.
+        if self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::super::selection_deferral::SelectionDeferral::has_active_gates)
+        {
+            let withdrawn = out
+                .deltas
+                .iter()
+                .filter(|delta| delta.new.is_none() && delta.withdrawn_exempt())
+                .map(|delta| (delta.prefix, delta.path_id));
+            self.record_hold_exempt_withdrawn(
+                super::super::HoldWithdrawOwner::Group(gid),
+                withdrawn,
+            );
+        }
         let readiness = &self.replacement_readiness;
         let mut checkpoint = || replacement_readiness_checkpoint(readiness, false);
         let group = Self::staged_group_mut(&mut self.group_ribs, gid);

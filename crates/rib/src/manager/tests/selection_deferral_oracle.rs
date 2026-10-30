@@ -704,6 +704,35 @@ impl Harness {
                     update.refresh_markers
                 );
             }
+            // I6: a GR helper rightly keeps the ended session's stale
+            // ordinary row until our End-of-RIB; inside the hold only a key
+            // whose prefix a fresh session would not advertise at all may
+            // leave.
+            if self.held
+                && update.withdraw.iter().any(|key| {
+                    self.stale.contains(key)
+                        && self
+                            .wire
+                            .get(key)
+                            .is_some_and(|&injection| !self.injections[injection].exempt)
+                })
+            {
+                let expected = self.expected();
+                for key in &update.withdraw {
+                    let retained = self.stale.contains(key)
+                        && self
+                            .wire
+                            .get(key)
+                            .is_some_and(|&injection| !self.injections[injection].exempt);
+                    prop_assert!(
+                        !retained || !expected.keys().any(|wanted| wanted.0 == key.0),
+                        "I6: withdrew the stale ordinary row {}#{} a GR helper keeps inside the hold; wire {}",
+                        key.0,
+                        key.1,
+                        show(&self.wire)
+                    );
+                }
+            }
             for key in &update.withdraw {
                 self.wire.remove(key);
                 self.stale.remove(key);
@@ -882,6 +911,22 @@ impl Harness {
     /// A known open defect that explains a deleted exempt row still on the
     /// wire after a drain in the hold, or `None`.
     fn known_stale_blackhole(&self, key: (Prefix, u32)) -> Option<&'static str> {
+        // LAN-2727: a GR helper keeps the ended session's deleted RTBH
+        // stale until release while its prefix still has another route:
+        // the helper may hold that route at the key instead, and keeping a
+        // route it rightly holds comes first.
+        let candidate = (0..PREFIXES)
+            .find(|&index| prefix(index) == key.0)
+            .is_some_and(|index| {
+                self.local
+                    .range((index, 0)..(index + 1, 0))
+                    .next()
+                    .is_some()
+                    || self.received.contains_key(&index)
+            });
+        if self.stale.contains(&key) && candidate {
+            return allowed("LAN-2727");
+        }
         // LAN-2701: under refused proof, a private receiver keeps a deleted
         // RTBH until release when the refused retry itself announced its
         // current row: a new RTBH, or a path the retry moved onto the
@@ -1613,4 +1658,132 @@ fn partially_caught_up_reconnect_withdraws_a_stale_rtbh() {
     if let Some(reason) = failure(config, &setup, &hold) {
         panic!("{reason}");
     }
+}
+
+/// I6 against the over-carry: a grouped receiver holds an ordinary aggregate,
+/// misses an RTBH that replaces it behind a full writer, and flaps toward a
+/// GR helper; the RTBH is deleted before the new session's table is
+/// admitted, and the aggregate is desired again but held. The helper keeps
+/// its stale aggregate until release. Red proof:
+/// without the desired-row check the flush withdraws it.
+#[test]
+fn stale_ordinary_row_survives_an_over_carried_rtbh_key() {
+    let setup = [Op::Inject {
+        prefix: 2,
+        path: 0,
+        preference: 0,
+        blackhole: false,
+    }];
+    let hold = [
+        Op::Backpressure(true),
+        Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 2,
+            blackhole: true,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: true,
+            gr_families: true,
+            writer_full: true,
+        },
+        Op::Delete { prefix: 2, path: 1 },
+        Op::Backpressure(false),
+        Op::Drain,
+    ];
+    let mut failed = Vec::new();
+    for grouped in [true, false] {
+        let config = Config {
+            grouped,
+            add_path: false,
+            per_client_best: false,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        if let Some(reason) = failure(config, &setup, &hold) {
+            failed.push(format!("grouped={grouped}: {reason}"));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// A carried RTBH key whose prefix still has another route waits; once
+/// that route is deleted too, the next flush withdraws the stale RTBH
+/// inside the hold. Red proof: dropping the waiting keys after the first
+/// flush leaves it until release.
+#[test]
+fn waiting_stale_rtbh_leaves_once_its_prefix_has_no_route() {
+    let reconnect = Op::Reconnect {
+        notification: false,
+        helper: false,
+        gr_families: false,
+        writer_full: true,
+    };
+    let cases = [
+        (
+            Config {
+                grouped: false,
+                add_path: false,
+                per_client_best: false,
+                orf: false,
+                limit: false,
+                late: false,
+            },
+            vec![
+                Op::Inject {
+                    prefix: 2,
+                    path: 0,
+                    preference: 0,
+                    blackhole: true,
+                },
+                Op::Inject {
+                    prefix: 2,
+                    path: 1,
+                    preference: 0,
+                    blackhole: false,
+                },
+                reconnect.clone(),
+                Op::Delete { prefix: 2, path: 0 },
+                Op::RefuseProof,
+                Op::Delete { prefix: 2, path: 1 },
+                Op::Drain,
+            ],
+        ),
+        (
+            Config {
+                grouped: false,
+                add_path: true,
+                per_client_best: false,
+                orf: false,
+                limit: false,
+                late: false,
+            },
+            vec![
+                Op::Inject {
+                    prefix: 1,
+                    path: 1,
+                    preference: 0,
+                    blackhole: false,
+                },
+                Op::Inject {
+                    prefix: 1,
+                    path: 0,
+                    preference: 0,
+                    blackhole: false,
+                },
+                reconnect,
+                Op::Delete { prefix: 1, path: 1 },
+                Op::RefuseProof,
+                Op::Delete { prefix: 1, path: 0 },
+                Op::Drain,
+            ],
+        ),
+    ];
+    let failed: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(config, hold)| failure(config, &[], &hold))
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
 }
