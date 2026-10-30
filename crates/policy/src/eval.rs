@@ -31,7 +31,7 @@ use crate::engine::{
 use crate::ir::{
     ArithOp, Cmp, CommunityAttribute, CommunityAttributes, CompiledChain, CompiledPolicy,
     DatasetProbe, ForEachNode, LoopSource, MatchExpr, Term, TermAction, TermActionView,
-    ValidationDimension, ValueCmpOp, ValueExpr, ValueField,
+    ValidationDimension, ValueCmpOp, ValueExpr, ValueField, is_well_known_community,
 };
 use crate::sets::prefix_entry_matches;
 
@@ -732,20 +732,33 @@ pub(crate) fn exec_remove_large_community_admin(
 }
 
 /// Stage a removal of every arrived community of each listed attribute not
-/// already staged for removal. Like [`exec_remove_large_community_admin`], a
-/// route carrying more values of a listed attribute than its wire bound fails
-/// closed (`false`) before any scan, so the compile-time pre-payment holds.
+/// already staged for removal, keeping well-known standard communities
+/// ([`is_well_known_community`]): `remove community *` never strips
+/// `NO_EXPORT` and its kin unless they are named. Like
+/// [`exec_remove_large_community_admin`], a route carrying more values of a
+/// listed attribute than its wire bound fails closed (`false`) before any
+/// scan, so the compile-time pre-payment holds.
 pub(crate) fn exec_remove_all_communities(
     attributes: CommunityAttributes,
     ctx: &RouteContext<'_>,
     continued: &mut Option<RouteModifications>,
 ) -> bool {
-    fn stage<T: Copy + Eq + std::hash::Hash>(arrived: &[T], staged: &[T], out: &mut Vec<T>) {
+    fn stage<T: Copy + Eq + std::hash::Hash>(
+        arrived: &[T],
+        staged: &[T],
+        keep: impl Fn(T) -> bool,
+        out: &mut Vec<T>,
+    ) {
         if arrived.is_empty() {
             return;
         }
         let mut seen: HashSet<T> = staged.iter().copied().collect();
-        out.extend(arrived.iter().copied().filter(|value| seen.insert(*value)));
+        out.extend(
+            arrived
+                .iter()
+                .copied()
+                .filter(|value| !keep(*value) && seen.insert(*value)),
+        );
     }
     let arrived = |attribute| match attribute {
         CommunityAttribute::Standard => ctx.communities.len(),
@@ -763,6 +776,7 @@ pub(crate) fn exec_remove_all_communities(
         stage(
             ctx.communities,
             staged.map_or(&[], |mods| &mods.communities_remove),
+            is_well_known_community,
             &mut mods.communities_remove,
         );
     }
@@ -770,6 +784,7 @@ pub(crate) fn exec_remove_all_communities(
         stage(
             ctx.extended_communities,
             staged.map_or(&[], |mods| &mods.extended_communities_remove),
+            |_| false,
             &mut mods.extended_communities_remove,
         );
     }
@@ -777,6 +792,7 @@ pub(crate) fn exec_remove_all_communities(
         stage(
             ctx.large_communities,
             staged.map_or(&[], |mods| &mods.large_communities_remove),
+            |_| false,
             &mut mods.large_communities_remove,
         );
     }
