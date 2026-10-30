@@ -9,13 +9,14 @@
 //! community, so a wire row names the exact injection it came from.
 //!
 //! Invariants:
-//! - I1, never unblackhole: during the hold, a prefix whose fresh export
-//!   carries an exempt path and that had an exempt row on the wire keeps
-//!   one; after a drain with a free writer, admitted proof and no ORF gate,
-//!   every such prefix carries a live exempt row.
+//! - I1, never unblackhole: after every UPDATE in the hold, a prefix whose
+//!   fresh export carries an exempt path and that had an exempt row on the
+//!   wire keeps one; after a drain with a free writer, admitted proof and no
+//!   ORF gate, every such prefix carries a live exempt row.
 //! - I2, exact convergence: after release and drain, the wire equals a fresh
 //!   session's full dump, computed from the final intent alone.
-//! - I3: `actual_unicast_advertised_count` equals the wire key count.
+//! - I3: `actual_unicast_advertised_count` equals the wire key count, less
+//!   only the skew an allowed stale row is known to cause.
 //! - I4, no resurrection: a deleted or replaced exempt path is never
 //!   announced again.
 //!
@@ -146,7 +147,8 @@ fn config_strategy() -> impl Strategy<Value = Config> {
         any::<bool>(),
     )
         .prop_map(|(grouped, add_path, per_client_best, orf, limit)| Config {
-            grouped: grouped && !add_path,
+            // Add-Path and ORF receivers are always private.
+            grouped: grouped && !add_path && !orf,
             add_path,
             per_client_best,
             orf,
@@ -210,6 +212,8 @@ struct Harness {
     orf_gated: bool,
     held: bool,
     replayed: bool,
+    /// A replay in the hold found the receiver in an update group.
+    grouped_replayed: bool,
     refused: bool,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
@@ -249,6 +253,7 @@ impl Harness {
             orf_gated: config.orf,
             held: false,
             replayed: false,
+            grouped_replayed: false,
             refused: false,
             blackholed: BTreeMap::new(),
         };
@@ -463,6 +468,8 @@ impl Harness {
             Op::Backpressure(false) => self.occupied.clear(),
             Op::Replay { refuse_capture } => {
                 self.replayed |= self.held;
+                self.grouped_replayed |=
+                    self.held && self.manager.grouped_member_of(peer_v4(OBSERVER)).is_some();
                 if refuse_capture {
                     self.manager
                         .pending_group_admitted
@@ -547,6 +554,11 @@ impl Harness {
                 );
                 self.wire.insert((route.prefix, route.path_id), injection);
             }
+            // A withdraw and re-announce in separate UPDATEs leaves the
+            // peer unblackholed in between, so check each one.
+            if self.held {
+                self.check_blackholed()?;
+            }
         }
         if self
             .manager
@@ -627,15 +639,20 @@ impl Harness {
         None
     }
 
-    /// I1 at every step of the hold; its liveness half after a clean drain.
-    fn check_hold(&mut self, drained: bool) -> Checked {
-        let wanted: BTreeSet<usize> = self
-            .expected()
+    /// Prefixes whose fresh export carries an exempt path.
+    fn wanted_blackholes(&self) -> BTreeSet<usize> {
+        self.expected()
             .values()
             .map(|&injection| &self.injections[injection])
             .filter(|injection| injection.exempt)
             .map(|injection| injection.prefix)
-            .collect();
+            .collect()
+    }
+
+    /// I1's safety half, after every UPDATE in the hold: a prefix that
+    /// should be blackholed keeps an exempt row once it had one.
+    fn check_blackholed(&mut self) -> Checked {
+        let wanted = self.wanted_blackholes();
         let blackholed = self.exempt_rows();
         let fallback = self
             .manager
@@ -655,6 +672,12 @@ impl Harness {
             );
         }
         self.blackholed = blackholed;
+        Ok(())
+    }
+
+    /// I1's liveness half after a clean drain in the hold.
+    fn check_hold(&mut self, drained: bool) -> Checked {
+        let wanted = self.wanted_blackholes();
         let settled = drained
             && self.occupied.is_empty()
             && !self.orf_gated
@@ -729,7 +752,7 @@ impl Harness {
         }
         // LAN-2690: a grouped receiver replayed during the hold never
         // withdraws a row removed in that hold.
-        if self.config.grouped && self.replayed && !self.injections[injection].live {
+        if self.grouped_replayed && !self.injections[injection].live {
             return allowed("LAN-2690");
         }
         // LAN-2691: once a same-channel replay and a refused
@@ -752,30 +775,40 @@ impl Harness {
         let missing = expected
             .iter()
             .any(|(key, value)| wire.get(key) != Some(value));
-        let mut extra = wire
+        let extra: Vec<_> = wire
             .iter()
             .filter(|(key, _)| !expected.contains_key(key))
-            .peekable();
+            .collect();
         let known = !missing
-            && extra.peek().is_some()
+            && !extra.is_empty()
             && extra
-                .all(|(&key, &injection)| self.known_stale(key, injection, &expected).is_some());
-        if known {
-            // The stale rows also skew the actual count until a refresh.
-            return Ok(());
-        }
+                .iter()
+                .all(|&(&key, &injection)| self.known_stale(key, injection, &expected).is_some());
         prop_assert!(
-            wire == expected,
+            known || wire == expected,
             "I2: released wire {} differs from a fresh dump {}",
             show(&wire),
             show(&expected)
         );
+        // Each allowed defect's own count skew, per stale row: the daemon
+        // stops counting a row it failed to withdraw, except that a grouped
+        // receiver under a limit (LAN-2690) still counts it in its limiter
+        // inventory.
+        let stale = extra
+            .iter()
+            .filter(|&&(&key, &injection)| {
+                known
+                    && !(self.config.limit
+                        && self.known_stale(key, injection, &expected) == Some("LAN-2690"))
+            })
+            .count();
         let actual = self
             .manager
             .actual_unicast_advertised_count(peer_v4(OBSERVER));
         prop_assert!(
-            actual == wire.len(),
-            "I3: actual advertised count {actual} differs from {} wire keys",
+            actual == wire.len() - stale,
+            "I3: actual advertised count {actual} differs from {} wire keys less {stale} \
+             allowed stale rows",
             wire.len()
         );
         Ok(())
@@ -790,11 +823,19 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
         harness.observe()?;
     }
     harness.drain()?;
+    prop_assert!(
+        harness
+            .manager
+            .grouped_member_of(peer_v4(OBSERVER))
+            .is_some()
+            == config.grouped,
+        "the configuration names the receiver's real distribution mode"
+    );
+    harness.blackholed = harness.exempt_rows();
     harness.waiter = Some(connect(&mut harness.manager, WAITER, 64, true, false));
     harness.held = true;
     prop_assert!(harness.manager.selection_deferred(FAMILY));
     harness.observe()?;
-    harness.blackholed = harness.exempt_rows();
     for op in hold {
         if std::env::var("ORACLE_TRACE").is_ok() {
             eprintln!(
@@ -919,4 +960,69 @@ fn gr_hold_matches_a_fresh_session_model() {
     let (setup, hold) = minimize(config, setup, hold, &label);
     let reason = failure(config, &setup, &hold).unwrap_or(reason);
     panic!("{reason}\nminimized: {config:#?}\nsetup: {setup:#?}\nhold: {hold:#?}");
+}
+
+/// I1 must see a withdraw and re-announce split across two UPDATEs: the
+/// peer is unblackholed between them, though the channel's end state
+/// matches its start.
+#[test]
+fn i1_catches_a_transient_unblackhole_between_updates() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+    };
+    let transient = |held: bool| {
+        let mut harness = Harness::new(config);
+        harness.apply(&Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        });
+        harness.drain().unwrap();
+        let host = prefix(0);
+        assert_eq!(harness.wire.get(&(host, 0)), Some(&0));
+        harness.blackholed = harness.exempt_rows();
+        let Prefix::V4(v4) = host else { unreachable!() };
+        let mut route = make_route_with_lp(v4, SOURCE, 100);
+        route.attributes = AttrSet::new(vec![PathAttribute::Communities(vec![IDENTITY_ASN << 16])]);
+        // A seeded transient: the live RTBH row leaves and comes back.
+        harness
+            .tx
+            .try_send(OutboundRouteUpdate {
+                withdraw: vec![(host, 0)],
+                ..OutboundRouteUpdate::default()
+            })
+            .unwrap();
+        harness
+            .tx
+            .try_send(OutboundRouteUpdate {
+                announce: Arc::new(vec![route]),
+                ..OutboundRouteUpdate::default()
+            })
+            .unwrap();
+        harness.held = held;
+        let observed = harness.observe().map(|_| ());
+        if observed.is_ok() {
+            assert_eq!(
+                harness.wire.get(&(host, 0)),
+                Some(&0),
+                "the end state matches"
+            );
+        }
+        observed.and_then(|()| harness.check_blackholed())
+    };
+    let error = transient(true).expect_err("per-update I1 sees the gap");
+    assert!(
+        error
+            .to_string()
+            .contains("I1: 198.51.100.1/32 lost its exempt row")
+    );
+    assert!(
+        transient(false).is_ok(),
+        "a check after the whole channel cannot see it"
+    );
 }
