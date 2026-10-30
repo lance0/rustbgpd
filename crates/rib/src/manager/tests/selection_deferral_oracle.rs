@@ -240,6 +240,10 @@ struct Harness {
     reannounced: Option<BTreeSet<usize>>,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
+    /// Wire keys whose current row a dirty retry announced while its proof
+    /// was refused, and the keys the in-flight `RefuseProof` announced.
+    refused_retry_rows: HashSet<(Prefix, u32)>,
+    refusing: Option<HashSet<(Prefix, u32)>>,
     /// The receiver's current transport session.
     session: u64,
     /// Keys a GR helper retains as stale from a previous session until our
@@ -290,6 +294,8 @@ impl Harness {
             hold_starting: false,
             reannounced: None,
             blackholed: BTreeMap::new(),
+            refused_retry_rows: HashSet::new(),
+            refusing: None,
             session: OBSERVER_SESSION,
             stale: HashSet::new(),
             helper: true,
@@ -409,8 +415,14 @@ impl Harness {
         if self.helper && !notification {
             // RFC 4724 4.2: a peer that advertised the GR capability keeps
             // our routes as stale after the session ends, and deletes them
-            // at our End-of-RIB on the new session.
+            // at our End-of-RIB on the new session. "To deal with possible
+            // consecutive restarts, a route (from the peer) previously
+            // marked as stale MUST be deleted."
+            for key in std::mem::take(&mut self.stale) {
+                self.wire.remove(&key);
+            }
             self.stale = self.wire.keys().copied().collect();
+            self.blackholed = self.exempt_rows();
         } else {
             // A NOTIFICATION, or a peer without GR, drops our routes: no
             // blackhole survives the reset.
@@ -640,6 +652,8 @@ impl Harness {
                     &HashSet::new(),
                     &HashSet::from([peer_v4(OBSERVER)]),
                 );
+                // Record what this retry admits once its updates arrive.
+                self.refusing = Some(HashSet::new());
                 self.manager
                     .pending_group_admitted
                     .disarm_allocation_failure_for_test();
@@ -693,6 +707,7 @@ impl Harness {
             for key in &update.withdraw {
                 self.wire.remove(key);
                 self.stale.remove(key);
+                self.refused_retry_rows.remove(key);
             }
             // The transport sends an envelope's withdrawals as their own
             // UPDATEs before its announcements, and splits announcements with
@@ -739,8 +754,13 @@ impl Harness {
                 "I4: removed exempt injection {injection} re-announced at {:?}",
                 (route.prefix, route.path_id)
             );
-            self.wire.insert((route.prefix, route.path_id), injection);
-            self.stale.remove(&(route.prefix, route.path_id));
+            let key = (route.prefix, route.path_id);
+            self.wire.insert(key, injection);
+            self.stale.remove(&key);
+            self.refused_retry_rows.remove(&key);
+            if let Some(refusing) = self.refusing.as_mut() {
+                refusing.insert(key);
+            }
             if self.held {
                 self.check_blackholed()?;
             }
@@ -869,13 +889,14 @@ impl Harness {
             return allowed("LAN-2703");
         }
         // LAN-2701: under refused proof, a private receiver keeps a deleted
-        // RTBH until release when the refused retry itself admitted it, or
-        // when it holds the Add-Path key an unadmitted exempt path would take.
+        // RTBH until release when the refused retry itself announced its
+        // current row: a new RTBH, or a path the retry moved onto the
+        // Add-Path key an unadmitted exempt path would take.
         let refused = self
             .manager
             .group_recovery_fallback(peer_v4(OBSERVER))
             .is_some();
-        if !self.config.grouped && refused {
+        if !self.config.grouped && refused && self.refused_retry_rows.contains(&key) {
             return allowed("LAN-2701");
         }
         None
@@ -893,11 +914,15 @@ impl Harness {
             if !row.exempt || !row.deleted {
                 continue;
             }
-            let replaced = self.wire.values().any(|&other| {
-                let other = &self.injections[other];
-                other.prefix == row.prefix && other.exempt && other.live
-            });
-            let last_blackhole = wanted.contains(&row.prefix) && !replaced;
+            let exempt_rows = self
+                .wire
+                .values()
+                .filter(|&&other| {
+                    let other = &self.injections[other];
+                    other.prefix == row.prefix && other.exempt
+                })
+                .count();
+            let last_blackhole = wanted.contains(&row.prefix) && exempt_rows == 1;
             prop_assert!(
                 last_blackhole || self.known_stale_blackhole((prefix_key, path_id)).is_some(),
                 "I5: deleted exempt injection {injection} still on the wire at {prefix_key}#{path_id} \
@@ -1026,6 +1051,19 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
         }
         harness.apply(op);
         harness.observe()?;
+        // The retry's rows count as refused only while its proof is refused.
+        let refusing = harness.refusing.take();
+        if harness
+            .manager
+            .group_recovery_fallback(peer_v4(OBSERVER))
+            .is_some()
+        {
+            harness
+                .refused_retry_rows
+                .extend(refusing.unwrap_or_default());
+        } else {
+            harness.refused_retry_rows.clear();
+        }
         let drained = matches!(op, Op::Drain);
         if drained {
             harness.drain()?;
@@ -1333,7 +1371,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
 
 /// I5: an RTBH the operator deletes during the hold leaves the wire inside
 /// the hold, for private and grouped receivers, before and after the
-/// receiver's session flaps onto a new channel.
+/// receiver's session flaps onto a new channel, and under a refused proof.
 #[test]
 fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
     let config = |grouped| Config {
@@ -1373,8 +1411,23 @@ fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
             Op::Drain,
         ]
     };
+    // The RTBH predates the dirty retry, so a refused proof does not keep it.
+    let refused = vec![
+        Op::Backpressure(true),
+        Op::Inject {
+            prefix: 1,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::RefuseProof,
+        delete.clone(),
+        Op::Drain,
+    ];
     let cases = [
         ("private", config(false), plain.clone()),
+        ("private, proof refused", config(false), refused.clone()),
+        ("grouped, proof refused", config(true), refused),
         ("grouped", config(true), plain),
         ("private, reset", config(false), reconnected(true)),
         ("grouped, reset", config(true), reconnected(true)),
@@ -1396,4 +1449,69 @@ fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
         })
         .collect();
     assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The wire model drops a row a GR helper already held as stale when the
+/// session flaps again before our End-of-RIB (RFC 4724 4.2).
+#[test]
+fn consecutive_flaps_drop_rows_already_stale() {
+    let mut harness = Harness::new(Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    });
+    harness.apply(&Op::Inject {
+        prefix: 0,
+        path: 0,
+        preference: 0,
+        blackhole: false,
+    });
+    harness.drain().unwrap();
+    let key = (prefix(0), 0);
+    let flap = Op::Reconnect {
+        notification: false,
+        helper: true,
+        gr_families: true,
+        writer_full: true,
+    };
+    harness.apply(&flap);
+    harness.observe().unwrap();
+    assert!(
+        harness.stale.contains(&key),
+        "the first flap retains the row"
+    );
+    harness.apply(&flap);
+    harness.observe().unwrap();
+    assert!(
+        !harness.wire.contains_key(&key) && harness.blackholed.is_empty(),
+        "the second flap deletes the row the first left stale"
+    );
+}
+
+/// I5's last-row exception covers only a prefix's single exempt row: with
+/// two obsolete RTBH rows and the replacement still pending, it flags both.
+#[test]
+fn i5_flags_obsolete_rtbh_rows_beyond_the_last() {
+    let mut harness = Harness::new(Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    });
+    for path in [1, 2] {
+        let obsolete = harness.new_injection(0, 0, true);
+        harness.injections[obsolete].live = false;
+        harness.injections[obsolete].deleted = true;
+        harness.wire.insert((prefix(0), path), obsolete);
+    }
+    let pending = harness.new_injection(0, 1, true);
+    harness.local.insert((0, 2), pending);
+    assert!(harness.check_deleted_blackholes().is_err());
+    harness.wire.remove(&(prefix(0), 2));
+    assert!(harness.check_deleted_blackholes().is_ok());
 }
