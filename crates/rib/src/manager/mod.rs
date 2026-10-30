@@ -66,7 +66,12 @@ use tracing::{debug, info, warn};
 /// Let independent response tasks run while a synchronous actor retains
 /// exclusive state ownership. Current-thread embedders remain synchronous.
 fn with_executor_handoff<T>(work: impl FnOnce() -> T) -> T {
-    if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+    #[cfg(test)]
+    EXECUTOR_HANDOFFS.with(|handoffs| {
+        let (entered, open) = handoffs.get();
+        handoffs.set((entered + 1, open + 1));
+    });
+    let result = if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
         matches!(
             handle.runtime_flavor(),
             tokio::runtime::RuntimeFlavor::MultiThread
@@ -75,7 +80,25 @@ fn with_executor_handoff<T>(work: impl FnOnce() -> T) -> T {
         tokio::task::block_in_place(work)
     } else {
         work()
-    }
+    };
+    #[cfg(test)]
+    EXECUTOR_HANDOFFS.with(|handoffs| {
+        let (entered, open) = handoffs.get();
+        handoffs.set((entered, open - 1));
+    });
+    result
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Executor handoffs this thread entered, and how many are open now.
+    static EXECUTOR_HANDOFFS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+fn executor_handoffs() -> (usize, usize) {
+    EXECUTOR_HANDOFFS.with(std::cell::Cell::get)
 }
 
 /// Add one export batch's tally for `peer` to its neighbor's totals, one map
@@ -2074,15 +2097,27 @@ impl PolicyFilteredBucket {
         one.into_iter().chain(many.into_iter().flatten())
     }
 
-    /// Keep only identities still denied; `false` when none remain.
-    fn retain(&mut self, mut keep: impl FnMut(&PolicyFilteredRouteKey) -> bool) -> bool {
-        match self {
-            Self::One(key) => keep(key),
-            Self::Many(keys) => {
-                keys.retain(|key| keep(key));
-                !keys.is_empty()
-            }
+    /// Keep only identities still denied; `false` when none remain. A set
+    /// left with one identity releases its allocation and stores it inline.
+    fn retain(
+        &mut self,
+        mut keep: impl FnMut(&PolicyFilteredRouteKey) -> bool,
+        allocation_checkpoint: &impl Fn(),
+    ) -> bool {
+        let keys = match self {
+            Self::One(key) => return keep(key),
+            Self::Many(keys) => keys,
+        };
+        keys.retain(|key| keep(key));
+        if keys.len() == 1
+            && let Some(&key) = keys.iter().next()
+        {
+            allocation_checkpoint();
+            drop(std::mem::replace(self, Self::One(key)));
+            allocation_checkpoint();
+            return true;
         }
+        !keys.is_empty()
     }
 
     /// Record `group` (one prefix's current denials), pushing identities not
@@ -5611,10 +5646,13 @@ impl RibManager {
         };
         let peer_routes = self.policy_filtered_routes.entry(target_peer).or_default();
         let refresh = |keys: &mut PolicyFilteredBucket| {
-            keys.retain(|key| {
-                retained_checkpoint();
-                current.contains(key)
-            })
+            keys.retain(
+                |key| {
+                    retained_checkpoint();
+                    current.contains(key)
+                },
+                &allocation_checkpoint,
+            )
         };
         // Walk whichever side is smaller: a clean transition passes the
         // whole table as scope for every member, while the history usually

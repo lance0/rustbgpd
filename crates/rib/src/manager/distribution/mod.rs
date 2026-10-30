@@ -8047,11 +8047,45 @@ impl RibManager {
         metrics.clone()
     }
 
+    fn distribute_changes_inner(
+        &mut self,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+        service_ingest_readiness: bool,
+        advertised_generation_already_advanced: bool,
+        evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
+        targets: Option<&HashSet<PeerId>>,
+    ) {
+        let pass = |manager: &mut Self, replay: bool| {
+            manager.distribute_changes_with_readiness(
+                best_changed,
+                all_affected,
+                service_ingest_readiness,
+                advertised_generation_already_advanced,
+                evpn_feeds,
+                targets,
+                replay,
+            );
+        };
+        // A replay pass owns its shared preparation and retirement; keep
+        // executor opportunities across the whole pass. Clean incremental
+        // fanout keeps its synchronous fast path.
+        if self.dirty_peers.is_empty() && self.force_outbound_peers.is_empty() {
+            pass(self, false);
+        } else {
+            super::with_executor_handoff(|| pass(self, true));
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "distribution loop coordinates dirty peers, forced resync, and all families"
     )]
-    fn distribute_changes_inner(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the replay flag records the executor handoff decided by the caller"
+    )]
+    fn distribute_changes_with_readiness(
         &mut self,
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
@@ -8059,13 +8093,12 @@ impl RibManager {
         advertised_generation_already_advanced: bool,
         mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
+        replay: bool,
     ) {
         // Clean incremental fanout owns no readiness episode: its work is
         // bounded by the pass. Shared preparation and cleanup of a replay
         // pass own one each, so their ages never bleed into a member's.
-        let prep_installed = (!self.dirty_peers.is_empty()
-            || !self.force_outbound_peers.is_empty())
-            && self.begin_replacement_readiness();
+        let prep_installed = replay && self.begin_replacement_readiness();
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -8189,6 +8222,15 @@ impl RibManager {
         // sends below only dirty their own current member, never a later one.
         // Clean incremental fanout retains its existing synchronous fast path.
         let replay_handoff = !self.dirty_peers.is_empty() || !self.force_outbound_peers.is_empty();
+        // A clean member with rejection-inventory work owns a readiness
+        // episode below; the pass scope bounds each member's scope, so this
+        // finds every such member before the fanout starts.
+        let fanout_handoff = replay_handoff
+            || peers.iter().any(|&peer| {
+                let member_of = self.grouped_member_of(peer);
+                self.clean_member_rejection_work(peer, member_of, &best_changed)
+                    || self.clean_member_rejection_work(peer, member_of, &all_affected)
+            });
         // Shared preparation cannot donate its age to later independent
         // member transactions. A genuine outer owner remains unchanged.
         drop(readiness);
@@ -10121,12 +10163,12 @@ impl RibManager {
                 self.finish_readiness_owner(installed);
             }
         };
-        if replay_handoff {
+        if fanout_handoff {
             super::with_executor_handoff(distribute_peers);
         } else {
             distribute_peers();
         }
-        let retirement_installed = replay_handoff && self.begin_replacement_readiness();
+        let retirement_installed = replay && self.begin_replacement_readiness();
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         // One line per pass that mixes unicast withdrawals and announcements

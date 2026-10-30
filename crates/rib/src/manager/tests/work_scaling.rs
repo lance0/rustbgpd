@@ -1709,6 +1709,7 @@ fn clean_pass_owns_no_readiness(ungrouped: bool) {
     })
     .unwrap();
     manager.replacement_readiness_receipts.clear();
+    let (handoffs, _) = crate::manager::executor_handoffs();
     manager.handle_update(routes_from(external(), 0, 2, 1));
     drain_route_chunks(&mut manager);
     assert_eq!(drain(&mut receivers), (SMALL, 0));
@@ -1718,6 +1719,11 @@ fn clean_pass_owns_no_readiness(ungrouped: bool) {
         "{:?}",
         manager.replacement_readiness_receipts
     );
+    assert_eq!(
+        crate::manager::executor_handoffs().0,
+        handoffs,
+        "clean fanout stays on the synchronous fast path"
+    );
     assert_eq!(response.try_recv().unwrap(), Ok(2));
     let seams = histogram_sample_counts_by_label(
         &manager.metrics,
@@ -1726,6 +1732,74 @@ fn clean_pass_owns_no_readiness(ungrouped: bool) {
     );
     assert_eq!(seams["actor_loop"], 1, "{seams:?}");
     assert_eq!(seams["policy_transition_fence"], 0, "{seams:?}");
+}
+
+/// Every owned readiness episode of a distribution pass, a clean member's
+/// rejection-inventory transaction or a replay pass's preparation, member
+/// and retirement, runs inside an executor handoff, so a one-worker runtime
+/// keeps other tasks moving.
+fn owned_distribution_runs_under_handoff(ungrouped: bool) {
+    let target = member(1);
+    let (_tx, mut manager) = manager();
+    manager.test_force_ungrouped = ungrouped;
+    let policy = super::export_explain::deny_local_pref_at_least(200);
+    let mut receivers = vec![
+        join(&mut manager, 0, false, None).0,
+        join(&mut manager, 1, false, Some(policy)).0,
+    ];
+    assert_eq!(manager.grouped_member_of(target).is_none(), ungrouped);
+    drain(&mut receivers);
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let observed = Arc::clone(&observed);
+        move |stage| {
+            let open = crate::manager::executor_handoffs().1;
+            observed.lock().unwrap().push((stage, open > 0));
+        }
+    }));
+    let owned = |manager: &mut RibManager, pass: &str, work: &dyn Fn(&mut RibManager)| {
+        manager.replacement_readiness_receipts.clear();
+        work(manager);
+        let observed = std::mem::take(&mut *observed.lock().unwrap());
+        let owners = manager.replacement_readiness_receipts.len();
+        assert!(owners > 0, "{pass}: no owned episode");
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|(stage, _)| *stage == "terminal_cleanup")
+                .count(),
+            owners,
+            "{pass}: {observed:?}"
+        );
+        assert!(
+            observed.iter().all(|(_, handed_off)| *handed_off),
+            "{pass}: owned checkpoint outside an executor handoff: {observed:?}"
+        );
+        owners
+    };
+    owned(&mut manager, "clean rejection", &|manager| {
+        receive_policy_rejection(manager, 0, 200);
+    });
+    assert_eq!(policy_rejection_events(&manager, target), 1);
+    let owners = owned(&mut manager, "replay", &|manager| {
+        manager.mark_outbound_dirty(target);
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    });
+    // Preparation, the dirty member and retirement, after a grouped
+    // member's own dirty-marking capture.
+    assert_eq!(owners, 3 + usize::from(!ungrouped));
+    assert!(!manager.dirty_peers.contains(&target));
+    manager.replacement_readiness_test_hook = None;
+}
+
+#[test]
+fn owned_grouped_distribution_runs_under_handoff() {
+    owned_distribution_runs_under_handoff(false);
+}
+
+#[test]
+fn owned_ungrouped_distribution_runs_under_handoff() {
+    owned_distribution_runs_under_handoff(true);
 }
 
 #[test]
@@ -1770,6 +1844,17 @@ fn single_denial_history_bucket_is_inline() {
         panic!("two denials share a set");
     };
     assert_eq!(keys, &HashSet::from([key(0), key(2)]));
+    // Back to one denial: the set's allocation is released.
+    manager.update_policy_filtered_routes_for_prefixes(
+        member(1),
+        &HashSet::from([Prefix::V4(prefix(1, 0))]),
+        &HashSet::from([key(2)]),
+    );
+    let history = &manager.policy_filtered_routes[&member(1)];
+    assert!(matches!(
+        history[&Prefix::V4(prefix(1, 0))],
+        PolicyFilteredBucket::One(retained) if retained == key(2)
+    ));
     // One retained slot: the map entry plus, before, a set allocated for a
     // single key (hashbrown: 4 buckets of keys plus 4 + 16 control bytes).
     let inline = size_of::<(Prefix, PolicyFilteredBucket)>();
