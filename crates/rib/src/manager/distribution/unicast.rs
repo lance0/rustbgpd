@@ -1570,6 +1570,17 @@ impl RibManager {
             let mut memo = super::ExportMemo::default();
             let (mut modified, nh_action) = memo.apply(best, &result.modifications);
             modified.path_id = 0;
+            // The advertised row is this per-client-best peer's wire form:
+            // route-server control prepends and scrubs as its live multipath
+            // tail and group emit seams do. Live ORR staging applies none.
+            if let (None, Some(rs_asn), Some(peer_asn)) = (orr, rs_control_asn, target_peer_asn) {
+                let prepend = super::rs_control::rs_control_prepend_count(
+                    best.large_communities(),
+                    rs_asn,
+                    peer_asn,
+                );
+                super::rs_control::apply_rs_control_egress(&mut modified, rs_asn, prepend);
+            }
             let existing = rib_out.and_then(|out| out.get(&prefix, 0));
             let in_sync = existing.is_some_and(|existing| {
                 crate::manager::helpers::unicast_routes_equal_for_profile(

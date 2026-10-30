@@ -3558,6 +3558,17 @@ fn assert_deferred_explain(explanation: &crate::update::ExplainAdvertisedRoute, 
         "{label}: {explanation:?}"
     );
     assert!(explanation.deny_validation.is_empty(), "{label}");
+    // A displaced stop is named only in the deciding stop's detail, never
+    // as a current reason.
+    let detail = &explanation.gates.last().expect("deciding stop").detail;
+    assert!(
+        explanation
+            .reasons
+            .iter()
+            .skip(1)
+            .all(|reason| !detail.contains(&format!("({}:", reason.code))),
+        "{label}: {explanation:?}"
+    );
 }
 
 fn source_less_explain(
@@ -3896,8 +3907,10 @@ fn late_session_gets_only_the_rtbh_path_beside_a_frozen_ordinary_path() {
     }
 }
 
-/// A grouped route-server client's wire row is the shared row after its own
-/// control-community scrub, so readback and explain compare in that form.
+/// A route-server client's wire row is the selected row after its own
+/// control-community scrub, so readback and explain compare in that form:
+/// grouped single-best and per-client-best members, and a private
+/// per-client-best peer.
 #[test]
 fn grouped_rs_client_reads_back_its_post_control_row() {
     const RS_AS: u32 = 65_000;
@@ -3917,67 +3930,83 @@ fn grouped_rs_client_reads_back_its_post_control_row() {
         });
         route
     };
-    let mut manager = restart_unicast_manager(false);
-    let observer = PeerId::from_addr(v4(4));
-    manager.handle_update(RibUpdate::SetPeerRsControl {
-        peer: observer,
-        session_id: 0,
-        rs_control_asn: Some(RS_AS),
-    });
-    let mut rx = deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::Single, false);
-    assert!(manager.grouped_member_of(observer).is_some());
-    let _ = deferred_unicast_drain(&mut rx);
-    inject(&mut manager, tagged(None));
-    let announced: Vec<_> = deferred_unicast_drain(&mut rx)
-        .iter()
-        .flat_map(|update| update.announce.iter().cloned())
-        .collect();
-    assert_eq!(announced.len(), 1);
-    assert!(
-        announced[0].large_communities().is_empty(),
-        "the member's wire form is scrubbed"
-    );
-    let committed = |manager: &mut RibManager| {
-        let page = query(manager, prefix, 23, None, 10).unwrap();
-        let export = row(&page, observer);
-        (export.disposition, export.reason.clone())
-    };
-    assert_eq!(
-        committed(&mut manager),
-        (RouteExportDisposition::Committed, String::new()),
-        "before the hold"
-    );
+    for mode in [
+        DeferredUnicastMode::Single,
+        DeferredUnicastMode::GroupedPerClient,
+        DeferredUnicastMode::PrivatePerClient,
+    ] {
+        let mut manager = restart_unicast_manager(false);
+        let observer = PeerId::from_addr(v4(4));
+        manager.handle_update(RibUpdate::SetPeerRsControl {
+            peer: observer,
+            session_id: 0,
+            rs_control_asn: Some(RS_AS),
+        });
+        let mut rx = deferred_unicast_peer(&mut manager, observer, mode, false);
+        assert_eq!(
+            manager.grouped_member_of(observer).is_some(),
+            !matches!(mode, DeferredUnicastMode::PrivatePerClient),
+            "{mode:?}"
+        );
+        let _ = deferred_unicast_drain(&mut rx);
+        inject(&mut manager, tagged(None));
+        let announced: Vec<_> = deferred_unicast_drain(&mut rx)
+            .iter()
+            .flat_map(|update| update.announce.iter().cloned())
+            .collect();
+        assert_eq!(announced.len(), 1);
+        assert!(
+            announced[0].large_communities().is_empty(),
+            "the member's wire form is scrubbed"
+        );
+        let committed = |manager: &mut RibManager| {
+            let page = query(manager, prefix, 23, None, 10).unwrap();
+            let export = row(&page, observer);
+            (export.disposition, export.reason.clone())
+        };
+        assert_eq!(
+            committed(&mut manager),
+            (RouteExportDisposition::Committed, String::new()),
+            "{mode:?}: before the hold"
+        );
+        let explanation = source_less_explain(&mut manager, observer, prefix);
+        assert_eq!(
+            (explanation.decision, explanation.already_advertised),
+            (crate::update::ExplainDecision::Advertise, true),
+            "{mode:?}: before the hold: {explanation:?}"
+        );
 
-    let _waiter_rx = connect_restart_waiter(&mut manager);
-    assert!(manager.selection_deferred(prefix_family(&prefix)));
-    assert_eq!(
-        committed(&mut manager),
-        (RouteExportDisposition::Committed, String::new()),
-        "the unchanged frozen row during the hold"
-    );
-    let explanation = source_less_explain(&mut manager, observer, prefix);
-    assert_eq!(
-        (explanation.decision, explanation.already_advertised),
-        (crate::update::ExplainDecision::Advertise, true),
-        "{explanation:?}"
-    );
+        let _waiter_rx = connect_restart_waiter(&mut manager);
+        assert!(manager.selection_deferred(prefix_family(&prefix)));
+        assert_eq!(
+            committed(&mut manager),
+            (RouteExportDisposition::Committed, String::new()),
+            "{mode:?}: the unchanged frozen row during the hold"
+        );
+        let explanation = source_less_explain(&mut manager, observer, prefix);
+        assert_eq!(
+            (explanation.decision, explanation.already_advertised),
+            (crate::update::ExplainDecision::Advertise, true),
+            "{mode:?}: {explanation:?}"
+        );
 
-    let (reply, mut response) = oneshot::channel();
-    manager.handle_update(RibUpdate::InjectRoute {
-        route: tagged(Some(7)),
-        reply,
-    });
-    response.try_recv().unwrap().unwrap();
-    assert_eq!(
-        committed(&mut manager),
-        (
-            RouteExportDisposition::Pending,
-            "selection_deferred".to_string()
-        ),
-        "a changed injection waits for release"
-    );
-    assert_deferred_explain(
-        &source_less_explain(&mut manager, observer, prefix),
-        "changed rs-control injection",
-    );
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute {
+            route: tagged(Some(7)),
+            reply,
+        });
+        response.try_recv().unwrap().unwrap();
+        assert_eq!(
+            committed(&mut manager),
+            (
+                RouteExportDisposition::Pending,
+                "selection_deferred".to_string()
+            ),
+            "{mode:?}: a changed injection waits for release"
+        );
+        assert_deferred_explain(
+            &source_less_explain(&mut manager, observer, prefix),
+            &format!("{mode:?}: changed rs-control injection"),
+        );
+    }
 }

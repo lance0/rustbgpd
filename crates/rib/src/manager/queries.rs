@@ -4646,6 +4646,10 @@ fn defer_frozen_export_change(explanation: &mut crate::update::ExplainAdvertised
             "{message}; after release the {} gate would stop it ({}: {})",
             stop.gate, stop.code, stop.detail
         );
+        // The displaced stop is hypothetical now; unrelated diagnostics stay.
+        explanation
+            .reasons
+            .retain(|reason| reason.code != stop.code);
     }
     explanation.gates.push(crate::update::ExportGateStep {
         gate: "adj_rib_out",
