@@ -31,6 +31,12 @@
 #   FRR absence    <= local absence + 5 s
 #   FRR session Established at the end
 #   control: the legacy rule is still at FRR 5 s after its original deadline
+#   INVALID also when the late guarded renewal or the lease listing fails, or
+#   when reads fail up to a deadline: a failed read never counts as absence.
+#
+# QUAL_FAULT seeds a fault for the red proofs of the INVALID paths:
+#   frr-read    pauses FRR while its absence is polled, so every FRR read fails
+#   late-renew  sends the late guarded renewal with a stale generation
 #
 # Times are wall-clock seconds on this host. A window's expiry is bounded
 # from below by the issue request's send time plus its lifetime. Local
@@ -93,7 +99,9 @@ on_exit() {
     trap - EXIT INT TERM HUP
     [ -n "$CONTROLLER_PID" ] && kill "$CONTROLLER_PID" 2>/dev/null
     [ -n "$LEGACY_PID" ] && kill "$LEGACY_PID" 2>/dev/null
+    [ "${QUAL_FAULT:-}" = frr-read ] && docker unpause "$FRR" >/dev/null 2>&1
     docker exec "$RUSTBGPD" cat /var/log/rustbgpd.log >"$OUT_DIR/$PHASE-daemon.log" 2>&1
+    [ -f "$STATE_DIR/events" ] && cp "$STATE_DIR/events" "$OUT_DIR/$PHASE-events"
     containerlab destroy -t "$TOPO_FILE" --cleanup >/dev/null 2>&1
     rm -rf "$STATE_DIR"
     exit "$code"
@@ -149,33 +157,79 @@ legacy_controller() {
     done
 }
 
-# Whether $1 is among the local rules (0.0.0.0 view).
-local_has() {
-    grpcurl_call -d '{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "receivedPeerAddress": "0.0.0.0"}' \
-        "$GRPC_ADDR" rustbgpd.v1.RibService/ListFlowSpecRoutes 2>/dev/null \
-        | grep -q "\"prefix\": \"$1\""
+# Each probe prints "present", "absent" or "error". A failed read, or a reply
+# without the expected shape, is an error and never counts as absence.
+
+# Whether $1 is among the local rules (0.0.0.0 view). The reply must be the
+# acknowledged local-intent view.
+local_state() {
+    local reply
+    reply=$(grpcurl_call -d '{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "receivedPeerAddress": "0.0.0.0"}' \
+        "$GRPC_ADDR" rustbgpd.v1.RibService/ListFlowSpecRoutes 2>/dev/null) || { echo error; return; }
+    printf '%s' "$reply" | python3 -c '
+import json, sys
+try:
+    reply = json.load(sys.stdin)
+except ValueError:
+    print("error"); sys.exit()
+if reply.get("receivedView") is not True:
+    print("error"); sys.exit()
+prefixes = {
+    component.get("prefix")
+    for row in reply.get("receivedRoutes", [])
+    for component in row.get("route", {}).get("components", [])
+}
+print("present" if sys.argv[1] in prefixes else "absent")
+' "$1"
 }
 
-frr_has() {
-    docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json" 2>/dev/null | grep -q "${1%/32}"
+# Whether FRR's FlowSpec table holds a rule for destination $1. The reply
+# must be FRR's JSON table.
+frr_state() {
+    local reply
+    reply=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json" 2>/dev/null) || { echo error; return; }
+    printf '%s' "$reply" | python3 -c '
+import json, sys
+text = sys.stdin.read()
+start = text.find("{")
+try:
+    table = json.loads(text[start:]) if start >= 0 else None
+except ValueError:
+    table = None
+if not isinstance(table, dict):
+    print("error"); sys.exit()
+print("present" if sys.argv[1] in json.dumps(table) else "absent")
+' "$1"
 }
+
+local_has() { [ "$(local_state "$1")" = present ]; }
+frr_has() { [ "$(frr_state "$1")" = present ]; }
 
 frr_established() {
     docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
         | grep -q '"bgpState":"Established"'
 }
 
-# Poll until $1 (local_has or frr_has) reports $2 absent; print the receive
-# time of the first absent reply.
+# Poll $1 (local_state or frr_state) until it reads $2 absent; print the
+# receive time of the first absent reply. A read error is retried within the
+# deadline. Returns 1 when the rule is still present at the deadline and 2
+# when the last read before the deadline failed: absence was never read.
 wait_absent() {
-    local probe=$1 prefix=$2 limit=$3
+    local probe=$1 prefix=$2 limit=$3 state="" errors=0
     while python3 -c "import sys,time; sys.exit(time.time() >= $limit)"; do
-        if ! "$probe" "$prefix"; then
-            now
-            return 0
-        fi
+        state=$("$probe" "$prefix")
+        case "$state" in
+            absent)
+                [ "$errors" -gt 0 ] && event "$probe read_errors $errors"
+                now
+                return 0
+                ;;
+            error) errors=$((errors + 1)) ;;
+        esac
         sleep 0.2
     done
+    event "$probe read_errors $errors last $state"
+    [ "$state" = error ] && return 2
     return 1
 }
 
@@ -260,13 +314,23 @@ main() {
     fi
     local renewed list_sent list_recv remaining deadline_hi
     sleep "$(calc "max(0, $t_w - 6 - $(now))")"
-    renewed=$(grpc "{\"owner\": \"$OWNER\", \"generation\": $generation, \"leaseSeconds\": 60, \"window\": $window}" \
-        RenewGuardedLease 2>&1)
+    local renew_generation=$generation
+    [ "${QUAL_FAULT:-}" = late-renew ] && renew_generation='{"incarnation": "1", "sequence": "1"}'
+    if ! renewed=$(grpc "{\"owner\": \"$OWNER\", \"generation\": $renew_generation, \"leaseSeconds\": 60, \"window\": $window}" \
+        RenewGuardedLease 2>&1) \
+        || ! printf '%s' "$renewed" | python3 -c 'import json,sys; json.load(sys.stdin)["leaseRemainingMs"]' 2>/dev/null; then
+        event "late_guarded_renew failed $renewed"
+        verdict late_guarded_renew INVALID "the late 60 s guarded renewal did not succeed, so it was not exercised"
+        return
+    fi
     event "late_guarded_renew $renewed"
     list_sent=$(now)
-    remaining=$(grpcurl_call -d "{\"owner\": \"guarded:$OWNER\"}" "$GRPC_ADDR" \
+    if ! remaining=$(grpcurl_call -d "{\"owner\": \"guarded:$OWNER\"}" "$GRPC_ADDR" \
         rustbgpd.v1.InjectionService/ListInjectionLeases \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin)["leases"][0]["leaseRemainingMs"])')
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["leases"][0]["leaseRemainingMs"])'); then
+        verdict lease_deadline INVALID "the lease listing could not be read"
+        return
+    fi
     list_recv=$(now)
     deadline_hi=$(calc "$list_recv + $remaining / 1000")
     if python3 -c "import sys; sys.exit(not ($deadline_hi <= $t_w + ($list_recv - $list_sent) + 0.25))"; then
@@ -287,10 +351,23 @@ main() {
     limit=$(calc "$t_w + $STALL_MS / 1000 + 20")
     # FRR is polled on its own, so a local read held behind a stalled RIB
     # turn cannot delay the FRR observation.
-    (wait_absent frr_has "$RULE" "$limit" >"$STATE_DIR/frr_absent") &
+    if [ "${QUAL_FAULT:-}" = frr-read ]; then
+        # Seeded fault: every FRR read fails until the deadline.
+        event "fault frr-read: pausing FRR"
+        docker pause "$FRR" >/dev/null
+    fi
+    (wait_absent frr_state "$RULE" "$limit" >"$STATE_DIR/frr_absent"; echo $? >"$STATE_DIR/frr_status") &
     frr_poller=$!
-    if local_polled=$(wait_absent local_has "$RULE" "$limit"); then
+    local local_status=0
+    local_polled=$(wait_absent local_state "$RULE" "$limit") || local_status=$?
+    if [ "$local_status" -eq 2 ]; then
         wait "$frr_poller"
+        verdict local_absence INVALID "local reads failed up to t_w + S + 20 s; absence was never read"
+        return
+    fi
+    if [ "$local_status" -eq 0 ]; then
+        wait "$frr_poller"
+        [ "${QUAL_FAULT:-}" = frr-read ] && docker unpause "$FRR" >/dev/null
         frr_gone=$(cat "$STATE_DIR/frr_absent")
         # A read can wait behind a later stalled turn, so the first absent
         # poll only bounds the withdrawal from above; the daemon's record of
@@ -316,7 +393,9 @@ main() {
         wait "$frr_poller"
         return
     fi
-    if [ -n "$frr_gone" ]; then
+    if [ "$(cat "$STATE_DIR/frr_status")" = 2 ]; then
+        verdict frr_absence INVALID "FRR reads failed up to t_w + S + 20 s; absence was never read"
+    elif [ -n "$frr_gone" ]; then
         if python3 -c "import sys; sys.exit(not ($frr_gone <= $local_gone + 5))"; then
             verdict frr_absence PASS "absent $(calc "round($frr_gone - $local_gone, 3)") s after local absence (bar 5 s)"
         else
@@ -326,10 +405,12 @@ main() {
         verdict frr_absence FAIL "still at FRR at t_w + S + 20 s"
     fi
     sleep "$(calc "max(0, $legacy_deadline + 5 - $(now))")"
-    if $legacy_renewed && frr_has "$LEGACY_RULE"; then
+    local legacy_state
+    legacy_state=$(frr_state "$LEGACY_RULE")
+    if $legacy_renewed && [ "$legacy_state" = present ]; then
         verdict legacy_control PASS "the legacy rule is still at FRR $(calc "round($(now) - $legacy_deadline, 1)") s past its deadline after a late renewal"
     else
-        verdict legacy_control INVALID "the late legacy renewal did not extend the legacy rule (renewed=$legacy_renewed)"
+        verdict legacy_control INVALID "the late legacy renewal did not extend the legacy rule (renewed=$legacy_renewed, FRR read $legacy_state)"
     fi
     if frr_established; then
         verdict session PASS "FRR session Established throughout"
@@ -342,7 +423,6 @@ main() {
         printf '"lease_deadline_hi": %s, "local_absent": %s, "local_absent_polled": %s, "frr_absent": %s, "legacy_deadline": %s}\n' \
             "$deadline_hi" "$local_gone" "$local_polled" "${frr_gone:-null}" "$legacy_deadline"
     } >"$OUT_DIR/$PHASE.json"
-    cp "$STATE_DIR/events" "$OUT_DIR/$PHASE-events"
 }
 
 main

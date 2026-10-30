@@ -12,6 +12,9 @@
 #   - control: AddLeasedFlowSpec on the same server returns OK and changes
 #     both listings (otherwise the run is INVALID: the server was not
 #     serving or not mutable).
+# A failed or malformed listing, before or after, makes the run INVALID
+# before anything is compared. QUAL_FAULT=after-read stops the daemon before
+# the after-snapshot, for the red proof of that path.
 #
 #   OUT_DIR=/abs/dir bash tests/interop/scripts/qualify-guarded-flowspec-rollback.sh
 set -uo pipefail
@@ -81,12 +84,25 @@ call '{}' ControlService/GetHealth >"$OUT_DIR/rollback-health.json" 2>&1 \
 docker inspect -f '{{.Image}} {{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}' "$NAME" \
     >"$OUT_DIR/rollback-image"
 
+# Write both listings to $1. Each read must succeed and return JSON (the
+# local-intent read must acknowledge its view); otherwise the run is INVALID
+# before anything is compared, so two identical read errors cannot pass.
 snapshot() {
-    {
-        call '{}' InjectionService/ListInjectionLeases
-        call '{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "receivedPeerAddress": "0.0.0.0"}' \
-            RibService/ListFlowSpecRoutes
-    } 2>&1
+    local out=$1 leases rules
+    if ! leases=$(call '{}' InjectionService/ListInjectionLeases 2>&1) \
+        || ! printf '%s' "$leases" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), dict)' 2>/dev/null; then
+        printf '%s\n' "$leases" >"$out"
+        verdict snapshot INVALID "ListInjectionLeases failed for $(basename "$out"); see that file"
+        exit 2
+    fi
+    if ! rules=$(call '{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "receivedPeerAddress": "0.0.0.0"}' \
+        RibService/ListFlowSpecRoutes 2>&1) \
+        || ! printf '%s' "$rules" | python3 -c 'import json,sys; assert json.load(sys.stdin).get("receivedView") is True' 2>/dev/null; then
+        printf '%s\n' "$rules" >"$out"
+        verdict snapshot INVALID "ListFlowSpecRoutes failed for $(basename "$out"); see that file"
+        exit 2
+    fi
+    printf '%s\n%s\n' "$leases" "$rules" >"$out"
 }
 
 RULE='{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "components": [{"type": 1, "prefix": "203.0.113.9/32"}], "actions": [{"trafficRate": {"rate": 0}}]}'
@@ -95,7 +111,7 @@ WINDOW='{"incarnation": "1", "sequence": "1"}'
 PRESENT='{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC", "components": [{"type": 1, "prefix": "203.0.113.20/32"}], "actions": [{"trafficRate": {"rate": 0}}]}'
 call "$PRESENT" InjectionService/AddFlowSpec >/dev/null 2>&1 \
     || { verdict start INVALID "the pre-existing rule could not be added"; exit 2; }
-snapshot >"$OUT_DIR/rollback-before"
+snapshot "$OUT_DIR/rollback-before"
 : >"$OUT_DIR/rollback-calls"
 any_ok=false
 for method_body in \
@@ -112,7 +128,11 @@ for method_body in \
         printf '%s %s\n' "$method" "$(printf '%s' "$reply" | grep -o 'Code: [A-Za-z]*' | head -1)" >>"$OUT_DIR/rollback-calls"
     fi
 done
-snapshot >"$OUT_DIR/rollback-after"
+if [ "${QUAL_FAULT:-}" = after-read ]; then
+    # Seeded fault: the daemon is gone when the after-snapshot is read.
+    docker stop "$NAME" >/dev/null
+fi
+snapshot "$OUT_DIR/rollback-after"
 
 if $any_ok; then
     verdict guarded_refused FAIL "a guarded call returned OK; see rollback-calls"
@@ -126,7 +146,7 @@ else
 fi
 if call "{\"rule\": $RULE, \"lease\": {\"owner\": \"qual\", \"leaseSeconds\": 30}}" \
     InjectionService/AddLeasedFlowSpec >"$OUT_DIR/rollback-control" 2>&1 \
-    && snapshot >"$OUT_DIR/rollback-control-after" \
+    && snapshot "$OUT_DIR/rollback-control-after" \
     && ! cmp -s "$OUT_DIR/rollback-after" "$OUT_DIR/rollback-control-after"; then
     verdict legacy_control PASS "AddLeasedFlowSpec committed and changed the inventory"
 else

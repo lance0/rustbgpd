@@ -1,0 +1,12 @@
+1793372562.263480121 guarded_added {"incarnation": "225501163924103216", "sequence": "2"}
+1793372581.508665080 late_legacy_renew ok
+1793372586.438876532 late_guarded_renew {
+  "generation": {
+    "incarnation": "225501163924103216",
+    "sequence": "2"
+  },
+  "leaseRemainingMs": 5991
+}
+1793372586.528004852 fault frr-read: pausing FRR
+1793372620.449417706 frr_state read_errors 152 last error
+1793372620.534516043 local_absent_polled 1793372592.611398521 local_absent_logged 1793372592.411475

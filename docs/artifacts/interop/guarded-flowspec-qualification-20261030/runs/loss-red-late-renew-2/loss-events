@@ -1,0 +1,11 @@
+1793372787.609164648 guarded_added {"incarnation": "15091953600189899855", "sequence": "2"}
+1793372806.851247563 late_legacy_renew ok
+1793372811.768935393 late_guarded_renew failed ERROR:
+  Code: FailedPrecondition
+  Message: lease generation is not live; re-add the owner's desired state
+  Details:
+  1)	{
+    	  "@error": "google.rpc.ErrorInfo is not recognized; see @value for raw binary message data",
+    	  "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+    	  "@value": "ChNHRU5FUkFUSU9OX05PVF9MSVZFEghydXN0YmdwZA=="
+    	}
