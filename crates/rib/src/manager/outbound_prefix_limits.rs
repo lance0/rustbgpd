@@ -249,10 +249,15 @@ impl TypedGroupedAdmitted {
                 let mut admitted = HashSet::with_capacity(capacity);
                 #[cfg(test)]
                 let reserved = admitted.capacity();
-                admitted.extend(prefixes.into_iter().filter_map(|prefix| match prefix {
-                    Prefix::V4(prefix) => Some(prefix),
-                    Prefix::V6(_) => None,
-                }));
+                // Add-Path repeats a prefix, and inserting even a duplicate
+                // into a full set grows it: look before inserting.
+                for prefix in prefixes {
+                    if let Prefix::V4(prefix) = prefix
+                        && !admitted.contains(&prefix)
+                    {
+                        admitted.insert(prefix);
+                    }
+                }
                 #[cfg(test)]
                 assert_eq!(
                     admitted.capacity(),
@@ -265,10 +270,13 @@ impl TypedGroupedAdmitted {
                 let mut admitted = HashSet::with_capacity(capacity);
                 #[cfg(test)]
                 let reserved = admitted.capacity();
-                admitted.extend(prefixes.into_iter().filter_map(|prefix| match prefix {
-                    Prefix::V6(prefix) => Some(prefix),
-                    Prefix::V4(_) => None,
-                }));
+                for prefix in prefixes {
+                    if let Prefix::V6(prefix) = prefix
+                        && !admitted.contains(&prefix)
+                    {
+                        admitted.insert(prefix);
+                    }
+                }
                 #[cfg(test)]
                 assert_eq!(
                     admitted.capacity(),

@@ -836,29 +836,9 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_default()
 }
 
-/// `run`, with a known daemon assertion allowed.
-fn checked(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(config, setup, hold)))
-        .unwrap_or_else(|panic| {
-            let message = panic_message(&*panic);
-            // LAN-2693: an Add-Path replay under a prefix limit
-            // re-inserts a duplicate prefix into an exactly reserved set.
-            if config.add_path
-                && config.limit
-                && message.contains("inventory grew while filling")
-                && allowed("LAN-2693").is_some()
-            {
-                return Ok(());
-            }
-            std::panic::resume_unwind(panic)
-        })
-}
-
 /// The failing invariant's message, or a panic's.
 fn failure(config: Config, setup: &[Op], hold: &[Op]) -> Option<String> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        checked(config, setup, hold)
-    })) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(config, setup, hold))) {
         Ok(Ok(())) => None,
         Ok(Err(error)) => Some(error.to_string()),
         Err(panic) => Some(panic_message(&*panic)),
@@ -927,7 +907,7 @@ fn gr_hold_matches_a_fresh_session_model() {
         proptest::collection::vec(hold_strategy(), 1..40),
     );
     let Err(error) = runner.run(&strategy, |(config, setup, hold)| {
-        checked(config, &setup, &hold)
+        run(config, &setup, &hold)
     }) else {
         return;
     };
