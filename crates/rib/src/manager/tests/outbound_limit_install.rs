@@ -339,6 +339,55 @@ fn outbound_limit_install_reserves_unique_prefix_growth_ipv6() {
     install_reserves_unique_prefix_growth(Afi::Ipv6);
 }
 
+/// Split horizon hides the member's own routes from its projection, so a
+/// member originating most of the shared table must not retain capacity for
+/// the whole table: the limit bounds the set for its lifetime.
+fn install_reservation_is_bounded_by_limit(afi: Afi) {
+    const ORIGINATED: u32 = 32_768;
+    const LIMIT: u32 = 64;
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let member = peer_v4(Ipv4Addr::new(192, 0, 2, 241));
+    let mut output = register_peer_with_families(&mut manager, member, &dual_stack_sendable());
+    let other = peer_v4(Ipv4Addr::new(192, 0, 2, 240));
+    let originated: Vec<_> = (0..ORIGINATED)
+        .map(|index| install_route(afi, index, member))
+        .collect();
+    for chunk in originated.chunks(256) {
+        announce(&mut manager, member, chunk.to_vec());
+        while output.try_recv().is_ok() {}
+    }
+    let remote: Vec<_> = (0..4)
+        .map(|index| install_route(afi, 100_000 + index, other))
+        .collect();
+    let expected = remote.iter().map(|route| route.prefix).collect();
+    announce(&mut manager, other, remote);
+    while output.try_recv().is_ok() {}
+    let gid = manager.grouped_member_of(member).unwrap();
+    assert_eq!(
+        manager.group_ribs[&gid].table.unicast_prefix_count(afi),
+        usize::try_from(ORIGINATED).unwrap() + 4
+    );
+    prepare(&mut manager, 1, selected_config(member, afi, Some(LIMIT))).unwrap();
+    apply(&mut manager, 1, true).unwrap();
+    assert_inventory(&manager, member, afi, &expected);
+    let capacity = manager.outbound_prefix_limits[&member].grouped_capacity(afi);
+    assert!(
+        capacity <= 2 * LIMIT as usize,
+        "retained capacity {capacity} exceeds twice the limit {LIMIT}"
+    );
+}
+
+#[test]
+fn outbound_limit_install_reservation_is_bounded_by_limit_ipv4() {
+    install_reservation_is_bounded_by_limit(Afi::Ipv4);
+}
+
+#[test]
+fn outbound_limit_install_reservation_is_bounded_by_limit_ipv6() {
+    install_reservation_is_bounded_by_limit(Afi::Ipv6);
+}
+
 #[test]
 fn outbound_limit_install_retires_only_removed_family_and_keeps_recovery_idempotent() {
     let (mut manager, peer, expected, mut output) = install_fixture(Afi::Ipv4, 8);
