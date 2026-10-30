@@ -2,7 +2,9 @@
 //!
 //! Random operation sequences drive a real `RibManager` through the matrix
 //! of a selection hold, exempt local RTBH and host routes, Add-Path ranks,
-//! backpressure, refused recovery proof and an Address Prefix ORF. A tiny reference model
+//! backpressure, refused recovery proof, an Address Prefix ORF and the
+//! receiver's session flaps (a new channel and session id, with RFC 4724
+//! stale retention at a GR-capable peer). A tiny reference model
 //! keeps the local and received intent; the receiver's wire is rebuilt from
 //! the updates it actually got. Every route carries a unique identity
 //! community, so a wire row names the exact injection it came from.
@@ -17,11 +19,14 @@
 //! - I3: `actual_unicast_advertised_count` equals the wire key count.
 //! - I4, no resurrection: a deleted or replaced exempt path is never
 //!   announced again.
+//! - I5, prompt removal: after a drain with a free writer in the hold, an
+//!   exempt row the operator deleted has left the wire, unless it is the
+//!   prefix's last exempt row while an exempt export is still intended.
 //!
 //! Each case fixes one receiver configuration (private or grouped,
-//! single-best or Add-Path, per-client-best, ORF, prefix limit), builds a
-//! pre-hold table, starts the hold, runs the operations, then releases and
-//! drains. Received routes stay on their own prefixes, so the model never
+//! single-best or Add-Path, per-client-best, ORF, prefix limit, and whether
+//! its first session arrives inside the hold), builds a pre-hold table,
+//! starts the hold, runs the operations, then releases and drains. Received routes stay on their own prefixes, so the model never
 //! ranks a received path against a local one. Not modelled: IPv6, LLGR,
 //! leases, export policy edits, a second hold, more than one receiver.
 //!
@@ -93,6 +98,8 @@ struct Config {
     orf: bool,
     /// A configured prefix limit makes recovery depend on exact proof.
     limit: bool,
+    /// The receiver's first session establishes inside the hold.
+    late: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +130,21 @@ enum Op {
     /// admission-proof allocation.
     RefuseProof,
     Drain,
+    /// The receiver's session ends and re-establishes on a new channel and
+    /// session id, as the transport does. The dying session decides what
+    /// happens to it: a clean end (`notification` false) toward a peer whose
+    /// OPEN listed GR families reaches the RIB as `PeerGracefulRestart`,
+    /// otherwise as `PeerDown`; and a peer whose OPEN carried any GR
+    /// capability keeps our routes as stale after a clean end (RFC 4724
+    /// 4.2), until our End-of-RIB on the new session. `helper` and
+    /// `gr_families` describe the new session's OPEN; `writer_full` fills
+    /// the new channel before its initial table.
+    Reconnect {
+        notification: bool,
+        helper: bool,
+        gr_families: bool,
+        writer_full: bool,
+    },
 }
 
 fn config_strategy() -> impl Strategy<Value = Config> {
@@ -132,15 +154,19 @@ fn config_strategy() -> impl Strategy<Value = Config> {
         any::<bool>(),
         any::<bool>(),
         any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(grouped, add_path, per_client_best, orf, limit)| Config {
-            // Add-Path and ORF receivers are always private.
-            grouped: grouped && !add_path && !orf,
-            add_path,
-            per_client_best,
-            orf,
-            limit,
-        })
+        .prop_map(
+            |(grouped, add_path, per_client_best, orf, limit, late)| Config {
+                // Add-Path and ORF receivers are always private.
+                grouped: grouped && !add_path && !orf,
+                add_path,
+                per_client_best,
+                orf,
+                limit,
+                late,
+            },
+        )
 }
 
 fn intent_strategy() -> impl Strategy<Value = Op> {
@@ -167,6 +193,15 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
         2 => any::<bool>().prop_map(Op::Backpressure),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
+        2 => (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+            |(notification, helper, gr_families, writer_full)| Op::Reconnect {
+                notification,
+                // Families come only inside a GR capability.
+                helper: helper || gr_families,
+                gr_families,
+                writer_full,
+            }
+        ),
     ]
 }
 
@@ -175,8 +210,14 @@ struct Injection {
     preference: u32,
     exempt: bool,
     live: bool,
+    /// The operator deleted it (a replacement only retires it).
+    deleted: bool,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the model tracks independent per-case history, gate and session flags"
+)]
 struct Harness {
     config: Config,
     manager: RibManager,
@@ -199,6 +240,22 @@ struct Harness {
     reannounced: Option<BTreeSet<usize>>,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
+    /// Wire keys whose current row a dirty retry announced while its proof
+    /// was refused, and the keys the in-flight `RefuseProof` announced.
+    refused_retry_rows: HashSet<(Prefix, u32)>,
+    refusing: Option<HashSet<(Prefix, u32)>>,
+    /// The receiver's current transport session.
+    session: u64,
+    /// Keys a GR helper retains as stale from a previous session until our
+    /// End-of-RIB on the current one.
+    stale: HashSet<(Prefix, u32)>,
+    /// The current session's peer OPEN carried a GR capability: it keeps
+    /// our routes as stale when the session ends cleanly.
+    helper: bool,
+    /// The current session's peer OPEN listed GR families.
+    gr_families: bool,
+    /// The receiver has an established session.
+    registered: bool,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -237,8 +294,75 @@ impl Harness {
             hold_starting: false,
             reannounced: None,
             blackholed: BTreeMap::new(),
+            refused_retry_rows: HashSet::new(),
+            refusing: None,
+            session: OBSERVER_SESSION,
+            stale: HashSet::new(),
+            helper: true,
+            gr_families: true,
+            registered: false,
         };
-        harness.register();
+        if !config.late {
+            harness.establish();
+        }
+        harness
+    }
+
+    /// The transport's Established sequence on the current channel and
+    /// session: staged context, `PeerUp`, `PeerAddPathLimits`, then the
+    /// configured limit and the peer's first ORF.
+    fn establish(&mut self) {
+        self.registered = true;
+        let observer = peer_v4(OBSERVER);
+        let session_id = self.session;
+        self.manager.handle_update(RibUpdate::SetPeerExportContext {
+            peer: observer,
+            session_id,
+            local_role: None,
+        });
+        self.manager.handle_update(RibUpdate::SetPeerRsControl {
+            peer: observer,
+            session_id,
+            rs_control_asn: None,
+        });
+        self.manager
+            .handle_update(RibUpdate::SetPeerExportPolicyCounters {
+                peer: observer,
+                session_id,
+                counters: crate::update::ExportPolicyCounters::default(),
+            });
+        self.manager
+            .handle_update(RibUpdate::SetPeerGracefulRestartContext {
+                peer: observer,
+                session_id,
+                peer_restart_state: false,
+                peer_gr_helper: self.helper,
+                peer_gr_families: if self.gr_families {
+                    vec![FAMILY]
+                } else {
+                    vec![]
+                },
+                peer_enhanced_refresh: true,
+                peer_llgr_families: vec![],
+                local_llgr_stale_time: 0,
+            });
+        self.manager.handle_update(RibUpdate::SetPeerPolicyContext {
+            peer: observer,
+            session_id,
+            peer_group: None,
+        });
+        self.register();
+        self.manager.handle_update(RibUpdate::PeerAddPathLimits {
+            peer: observer,
+            session_id,
+            limits: if self.config.add_path {
+                vec![(FAMILY, u32::try_from(ADD_PATH_MAX).unwrap())]
+            } else {
+                vec![]
+            },
+        });
+        let config = self.config;
+        let harness = self;
         if config.limit {
             super::outbound_prefix_limits::prepare(
                 &mut harness.manager,
@@ -251,12 +375,78 @@ impl Harness {
         if config.orf {
             harness.push_orf(0);
         }
-        harness
+    }
+
+    /// A production session flap: the old channel and its queued updates
+    /// die, a new channel and session id register.
+    fn reconnect(&mut self, flap: &Op) {
+        let &Op::Reconnect {
+            notification,
+            helper,
+            gr_families,
+            writer_full,
+        } = flap
+        else {
+            unreachable!("only a Reconnect flaps the session")
+        };
+        let observer = peer_v4(OBSERVER);
+        // `fsm.rs`: GR retention of the peer's routes needs its GR families
+        // and an end that is not a NOTIFICATION teardown.
+        if self.gr_families && !notification {
+            self.manager.handle_update(RibUpdate::PeerGracefulRestart {
+                peer: observer,
+                session_id: self.session,
+                restart_time: 120,
+                stale_routes_time: 360,
+                gr_families: vec![FAMILY],
+                peer_llgr_capable: false,
+                peer_llgr_families: vec![],
+                llgr_stale_time: 0,
+            });
+        } else {
+            self.manager.handle_update(RibUpdate::PeerDown {
+                peer: observer,
+                session_id: self.session,
+            });
+        }
+        // The transport discards the dying session's queued updates.
+        self.occupied.clear();
+        while self.rx.try_recv().is_ok() {}
+        if self.helper && !notification {
+            // RFC 4724 4.2: a peer that advertised the GR capability keeps
+            // our routes as stale after the session ends, and deletes them
+            // at our End-of-RIB on the new session. "To deal with possible
+            // consecutive restarts, a route (from the peer) previously
+            // marked as stale MUST be deleted."
+            for key in std::mem::take(&mut self.stale) {
+                self.wire.remove(&key);
+            }
+            self.stale = self.wire.keys().copied().collect();
+            self.blackholed = self.exempt_rows();
+        } else {
+            // A NOTIFICATION, or a peer without GR, drops our routes: no
+            // blackhole survives the reset.
+            self.wire.clear();
+            self.stale.clear();
+            self.blackholed.clear();
+        }
+        self.helper = helper;
+        self.gr_families = gr_families;
+        let (tx, rx) = mpsc::channel(4);
+        self.tx = tx;
+        self.rx = rx;
+        self.session += 1000;
+        if writer_full {
+            let writer = self.tx.clone();
+            self.occupied =
+                std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+        }
+        self.establish();
     }
 
     fn register(&mut self) {
         let mut up =
-            super::lifecycle::test_peer_up(peer_v4(OBSERVER), OBSERVER_SESSION, self.tx.clone());
+            super::lifecycle::test_peer_up(peer_v4(OBSERVER), self.session, self.tx.clone());
         if let RibUpdate::PeerUp {
             export_policy,
             per_client_best,
@@ -319,7 +509,7 @@ impl Harness {
         let (reply, mut response) = oneshot::channel();
         self.manager.handle_update(RibUpdate::PeerOrfUpdate {
             peer: peer_v4(OBSERVER),
-            session_id: OBSERVER_SESSION,
+            session_id: self.session,
             afi: FAMILY.0,
             safi: FAMILY.1,
             when: WhenToRefresh::Immediate,
@@ -346,6 +536,7 @@ impl Harness {
             preference,
             exempt,
             live: true,
+            deleted: false,
         });
         self.injections.len() - 1
     }
@@ -356,6 +547,10 @@ impl Harness {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match keeps every operation's daemon call beside its model update"
+    )]
     fn apply(&mut self, op: &Op) {
         match *op {
             Op::Inject {
@@ -408,6 +603,9 @@ impl Harness {
                 });
                 result.try_recv().unwrap().unwrap();
                 let old = self.local.remove(&(index, path));
+                if let Some(old) = old {
+                    self.injections[old].deleted = true;
+                }
                 self.retire(old);
             }
             Op::Receive { prefix: index } => {
@@ -431,7 +629,8 @@ impl Harness {
                 self.retire(old);
             }
             Op::Orf { deny } => {
-                if self.config.orf {
+                // A receiver with no session yet sends no ORF.
+                if self.config.orf && self.registered {
                     self.push_orf(deny);
                 }
             }
@@ -453,11 +652,14 @@ impl Harness {
                     &HashSet::new(),
                     &HashSet::from([peer_v4(OBSERVER)]),
                 );
+                // Record what this retry admits once its updates arrive.
+                self.refusing = Some(HashSet::new());
                 self.manager
                     .pending_group_admitted
                     .disarm_allocation_failure_for_test();
             }
             Op::Drain => {}
+            Op::Reconnect { .. } => self.reconnect(op),
         }
     }
 
@@ -504,6 +706,8 @@ impl Harness {
             }
             for key in &update.withdraw {
                 self.wire.remove(key);
+                self.stale.remove(key);
+                self.refused_retry_rows.remove(key);
             }
             // The transport sends an envelope's withdrawals as their own
             // UPDATEs before its announcements, and splits announcements with
@@ -522,6 +726,16 @@ impl Harness {
             let observed = self.apply_announcements(&update);
             self.reannounced = None;
             observed?;
+            // Our End-of-RIB ends a GR helper's retention: it purges every
+            // stale row this session did not re-announce.
+            if update.end_of_rib.contains(&FAMILY) && !self.stale.is_empty() {
+                for key in std::mem::take(&mut self.stale) {
+                    self.wire.remove(&key);
+                }
+                if self.held {
+                    self.check_blackholed()?;
+                }
+            }
         }
         Ok(updates)
     }
@@ -540,7 +754,13 @@ impl Harness {
                 "I4: removed exempt injection {injection} re-announced at {:?}",
                 (route.prefix, route.path_id)
             );
-            self.wire.insert((route.prefix, route.path_id), injection);
+            let key = (route.prefix, route.path_id);
+            self.wire.insert(key, injection);
+            self.stale.remove(&key);
+            self.refused_retry_rows.remove(&key);
+            if let Some(refusing) = self.refusing.as_mut() {
+                refusing.insert(key);
+            }
             if self.held {
                 self.check_blackholed()?;
             }
@@ -659,8 +879,65 @@ impl Harness {
         Ok(())
     }
 
-    /// I1's liveness half after a clean drain in the hold.
+    /// A known open defect that explains a deleted exempt row still on the
+    /// wire after a drain in the hold, or `None`.
+    fn known_stale_blackhole(&self, key: (Prefix, u32)) -> Option<&'static str> {
+        // LAN-2703: a GR helper keeps a row from the session that ended as
+        // stale until our End-of-RIB, which the hold defers to release; a
+        // row deleted before the new session re-sent it is never withdrawn.
+        if self.stale.contains(&key) {
+            return allowed("LAN-2703");
+        }
+        // LAN-2701: under refused proof, a private receiver keeps a deleted
+        // RTBH until release when the refused retry itself announced its
+        // current row: a new RTBH, or a path the retry moved onto the
+        // Add-Path key an unadmitted exempt path would take.
+        let refused = self
+            .manager
+            .group_recovery_fallback(peer_v4(OBSERVER))
+            .is_some();
+        if !self.config.grouped && refused && self.refused_retry_rows.contains(&key) {
+            return allowed("LAN-2701");
+        }
+        None
+    }
+
+    /// I5 after a drain with a free writer in the hold: an exempt row the
+    /// operator deleted has left the wire, unless it is the prefix's last
+    /// exempt row while an exempt export is still intended (never
+    /// unblackhole: LAN-2674 and LAN-2692 keep it until its replacement is
+    /// admitted).
+    fn check_deleted_blackholes(&self) -> Checked {
+        let wanted = self.wanted_blackholes();
+        for (&(prefix_key, path_id), &injection) in &self.wire {
+            let row = &self.injections[injection];
+            if !row.exempt || !row.deleted {
+                continue;
+            }
+            let exempt_rows = self
+                .wire
+                .values()
+                .filter(|&&other| {
+                    let other = &self.injections[other];
+                    other.prefix == row.prefix && other.exempt
+                })
+                .count();
+            let last_blackhole = wanted.contains(&row.prefix) && exempt_rows == 1;
+            prop_assert!(
+                last_blackhole || self.known_stale_blackhole((prefix_key, path_id)).is_some(),
+                "I5: deleted exempt injection {injection} still on the wire at {prefix_key}#{path_id} \
+                 after a drain in the hold; wire {}",
+                show(&self.wire)
+            );
+        }
+        Ok(())
+    }
+
+    /// I1's liveness half after a clean drain in the hold, and I5.
     fn check_hold(&mut self, drained: bool) -> Checked {
+        if drained && self.occupied.is_empty() {
+            self.check_deleted_blackholes()?;
+        }
         let wanted = self.wanted_blackholes();
         let settled = drained
             && self.occupied.is_empty()
@@ -743,11 +1020,12 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     }
     harness.drain()?;
     prop_assert!(
-        harness
-            .manager
-            .grouped_member_of(peer_v4(OBSERVER))
-            .is_some()
-            == config.grouped,
+        config.late
+            || harness
+                .manager
+                .grouped_member_of(peer_v4(OBSERVER))
+                .is_some()
+                == config.grouped,
         "the configuration names the receiver's real distribution mode"
     );
     harness.blackholed = harness.exempt_rows();
@@ -757,6 +1035,11 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     harness.hold_starting = true;
     harness.observe()?;
     harness.hold_starting = false;
+    if config.late {
+        // The receiver's first session establishes inside the hold.
+        harness.establish();
+        harness.observe()?;
+    }
     for op in hold {
         if std::env::var("ORACLE_TRACE").is_ok() {
             eprintln!(
@@ -768,6 +1051,19 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
         }
         harness.apply(op);
         harness.observe()?;
+        // The retry's rows count as refused only while its proof is refused.
+        let refusing = harness.refusing.take();
+        if harness
+            .manager
+            .group_recovery_fallback(peer_v4(OBSERVER))
+            .is_some()
+        {
+            harness
+                .refused_retry_rows
+                .extend(refusing.unwrap_or_default());
+        } else {
+            harness.refused_retry_rows.clear();
+        }
         let drained = matches!(op, Op::Drain);
         if drained {
             harness.drain()?;
@@ -894,6 +1190,7 @@ fn i1_catches_a_transient_unblackhole_between_updates() {
         per_client_best: false,
         orf: false,
         limit: false,
+        late: false,
     };
     let transient = |held: bool| {
         let mut harness = Harness::new(config);
@@ -959,6 +1256,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
         per_client_best: false,
         orf: false,
         limit: false,
+        late: false,
     };
     let replaced = |held: bool, between_phases: bool| {
         let mut harness = Harness::new(config);
@@ -1020,6 +1318,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
         per_client_best: false,
         orf: false,
         limit: false,
+        late: false,
     };
     let swapped = |per_announcement: bool| {
         let mut harness = Harness::new(config);
@@ -1068,4 +1367,151 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
         swapped(false).is_ok(),
         "a check after all announcements cannot see it"
     );
+}
+
+/// I5: an RTBH the operator deletes during the hold leaves the wire inside
+/// the hold, for private and grouped receivers, before and after the
+/// receiver's session flaps onto a new channel, and under a refused proof.
+#[test]
+fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
+    let config = |grouped| Config {
+        grouped,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = vec![
+        Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Receive { prefix: 3 },
+    ];
+    let delete = Op::Delete { prefix: 0, path: 0 };
+    let plain = vec![
+        Op::Backpressure(true),
+        delete.clone(),
+        Op::Backpressure(false),
+        Op::Drain,
+    ];
+    let reconnected = |notification| {
+        vec![
+            Op::Reconnect {
+                notification,
+                helper: true,
+                gr_families: true,
+                writer_full: false,
+            },
+            Op::Drain,
+            delete.clone(),
+            Op::Drain,
+        ]
+    };
+    // The RTBH predates the dirty retry, so a refused proof does not keep it.
+    let refused = vec![
+        Op::Backpressure(true),
+        Op::Inject {
+            prefix: 1,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::RefuseProof,
+        delete.clone(),
+        Op::Drain,
+    ];
+    let cases = [
+        ("private", config(false), plain.clone()),
+        ("private, proof refused", config(false), refused.clone()),
+        ("grouped, proof refused", config(true), refused),
+        ("grouped", config(true), plain),
+        ("private, reset", config(false), reconnected(true)),
+        ("grouped, reset", config(true), reconnected(true)),
+        (
+            "private, flapped toward a GR helper",
+            config(false),
+            reconnected(false),
+        ),
+        (
+            "grouped, flapped toward a GR helper",
+            config(true),
+            reconnected(false),
+        ),
+    ];
+    let failed: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(name, config, hold)| {
+            failure(config, &setup, &hold).map(|reason| format!("{name}: {reason}"))
+        })
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The wire model drops a row a GR helper already held as stale when the
+/// session flaps again before our End-of-RIB (RFC 4724 4.2).
+#[test]
+fn consecutive_flaps_drop_rows_already_stale() {
+    let mut harness = Harness::new(Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    });
+    harness.apply(&Op::Inject {
+        prefix: 0,
+        path: 0,
+        preference: 0,
+        blackhole: false,
+    });
+    harness.drain().unwrap();
+    let key = (prefix(0), 0);
+    let flap = Op::Reconnect {
+        notification: false,
+        helper: true,
+        gr_families: true,
+        writer_full: true,
+    };
+    harness.apply(&flap);
+    harness.observe().unwrap();
+    assert!(
+        harness.stale.contains(&key),
+        "the first flap retains the row"
+    );
+    harness.apply(&flap);
+    harness.observe().unwrap();
+    assert!(
+        !harness.wire.contains_key(&key) && harness.blackholed.is_empty(),
+        "the second flap deletes the row the first left stale"
+    );
+}
+
+/// I5's last-row exception covers only a prefix's single exempt row: with
+/// two obsolete RTBH rows and the replacement still pending, it flags both.
+#[test]
+fn i5_flags_obsolete_rtbh_rows_beyond_the_last() {
+    let mut harness = Harness::new(Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    });
+    for path in [1, 2] {
+        let obsolete = harness.new_injection(0, 0, true);
+        harness.injections[obsolete].live = false;
+        harness.injections[obsolete].deleted = true;
+        harness.wire.insert((prefix(0), path), obsolete);
+    }
+    let pending = harness.new_injection(0, 1, true);
+    harness.local.insert((0, 2), pending);
+    assert!(harness.check_deleted_blackholes().is_err());
+    harness.wire.remove(&(prefix(0), 2));
+    assert!(harness.check_deleted_blackholes().is_ok());
 }
