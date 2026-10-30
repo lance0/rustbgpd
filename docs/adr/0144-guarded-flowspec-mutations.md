@@ -85,14 +85,19 @@ wait for queue admission and RIB backlog alike.
 The window also **caps the lease deadline**:
 
 - A guarded add, including an unchanged re-add, sets the owner's deadline to
-  `min(max(current, now + lease_seconds), window expiry)`. For an owner with
+  `max(current, min(now + lease_seconds, window expiry))`. For an owner with
   no live lease, `current` is absent and the deadline is
   `min(now + lease_seconds, window expiry)`.
-- A guarded renewal sets it to `min(now + lease_seconds, window expiry)`.
+- A guarded renewal sets it to exactly `min(now + lease_seconds, window
+  expiry)`, which may shorten it, as `RenewLease` may.
 
-A guarded owner's lease therefore never outlives the latest window it used.
-Unlike a legacy leased add, a guarded add can shorten the deadline, but only
-down to the window's expiry.
+Like a legacy leased add, a guarded add never shortens the deadline. The
+deadline is shared by every key the owner holds, so a delayed add carrying an
+older window that is still live would otherwise pull it back and expire live
+sibling keys early. A guarded add also never extends the deadline past its own
+window. Every deadline is set under some window, so a guarded owner's lease
+never outlives the latest expiry among the windows it used, and no window
+expires more than H after it was issued.
 
 **Limits.** These are constants, not configuration, as in ADR-0141 §7:
 
