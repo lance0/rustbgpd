@@ -2,7 +2,9 @@
 //!
 //! Random operation sequences drive a real `RibManager` through the matrix
 //! of a selection hold, exempt local RTBH and host routes, Add-Path ranks,
-//! backpressure, refused recovery proof and an Address Prefix ORF. A tiny reference model
+//! backpressure, refused recovery proof, an Address Prefix ORF and the
+//! receiver's session flaps (a new channel and session id, with RFC 4724
+//! stale retention at a GR-capable peer). A tiny reference model
 //! keeps the local and received intent; the receiver's wire is rebuilt from
 //! the updates it actually got. Every route carries a unique identity
 //! community, so a wire row names the exact injection it came from.
@@ -17,11 +19,14 @@
 //! - I3: `actual_unicast_advertised_count` equals the wire key count.
 //! - I4, no resurrection: a deleted or replaced exempt path is never
 //!   announced again.
+//! - I5, prompt removal: after a drain with a free writer in the hold, an
+//!   exempt row the operator deleted has left the wire, unless it is the
+//!   prefix's last exempt row while an exempt export is still intended.
 //!
 //! Each case fixes one receiver configuration (private or grouped,
-//! single-best or Add-Path, per-client-best, ORF, prefix limit), builds a
-//! pre-hold table, starts the hold, runs the operations, then releases and
-//! drains. Received routes stay on their own prefixes, so the model never
+//! single-best or Add-Path, per-client-best, ORF, prefix limit, and whether
+//! its first session arrives inside the hold), builds a pre-hold table,
+//! starts the hold, runs the operations, then releases and drains. Received routes stay on their own prefixes, so the model never
 //! ranks a received path against a local one. Not modelled: IPv6, LLGR,
 //! leases, export policy edits, a second hold, more than one receiver.
 //!
@@ -198,9 +203,6 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
             }
         ),
     ]
-    .prop_filter("investigation: production ops only", |op| {
-        std::env::var("ORACLE_NO_REPLAY").is_err() || !matches!(op, Op::Replay { .. })
-    })
 }
 
 struct Injection {
@@ -212,6 +214,10 @@ struct Injection {
     deleted: bool,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the model tracks independent per-case history, gate and session flags"
+)]
 struct Harness {
     config: Config,
     manager: RibManager,
@@ -529,6 +535,10 @@ impl Harness {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match keeps every operation's daemon call beside its model update"
+    )]
     fn apply(&mut self, op: &Op) {
         match *op {
             Op::Inject {
@@ -861,7 +871,11 @@ impl Harness {
         // LAN-2701: under refused proof, a private receiver keeps a deleted
         // RTBH until release when the refused retry itself admitted it, or
         // when it holds the Add-Path key an unadmitted exempt path would take.
-        if !self.config.grouped && self.refused {
+        let refused = self
+            .manager
+            .group_recovery_fallback(peer_v4(OBSERVER))
+            .is_some();
+        if !self.config.grouped && refused {
             return allowed("LAN-2701");
         }
         None
