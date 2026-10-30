@@ -1683,7 +1683,7 @@ explain outcomes, not transport errors.
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{
     "peer_address": "10.0.0.2",
-    "afi_safi": "IPV4_UNICAST",
+    "afi_safi": "ADDRESS_FAMILY_IPV4_UNICAST",
     "prefix": "192.0.2.0",
     "prefix_length": 24
   }' \
@@ -2252,7 +2252,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 # Watch changes for a specific peer and family
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  -d '{"categories": ["EVENT_CATEGORY_ROUTE"], "neighbor_address": "10.0.0.2", "afi_safi": "IPV4_UNICAST"}' \
+  -d '{"categories": ["EVENT_CATEGORY_ROUTE"], "neighbor_address": "10.0.0.2", "afi_safi": "ADDRESS_FAMILY_IPV4_UNICAST"}' \
   localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
@@ -2285,7 +2285,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 # Filter by peer and IPv4 unicast
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  -d '{"neighbor_address": "10.0.0.2", "afi_safi": "IPV4_UNICAST", "limit": 50}' \
+  -d '{"neighbor_address": "10.0.0.2", "afi_safi": "ADDRESS_FAMILY_IPV4_UNICAST", "limit": 50}' \
   localhost:50051 rustbgpd.v1.RibService/ListRouteEvents
 
 # Drill into one exact prefix
@@ -4003,7 +4003,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{
-    "rule": {"afi_safi": "IPV4_FLOWSPEC",
+    "rule": {"afi_safi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
              "components": [{"type": 1, "prefix": "203.0.113.7/32"}],
              "actions": [{"traffic_rate": {"rate": 0}}]},
     "lease": {"owner": "scrubber", "lease_seconds": 30},
