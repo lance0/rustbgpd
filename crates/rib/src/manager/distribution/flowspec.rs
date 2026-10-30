@@ -257,6 +257,18 @@ impl RibManager {
             self.check_injected_owner(&owned_key, "")?;
             (None, None)
         };
+        // An identical re-add has already joined or extended the lease and
+        // retagged the key; as for unicast, it returns before touching the
+        // stored rule. A recompute would change nothing, but with validation
+        // disabled its candidate scan reads every FlowSpec row, so a
+        // controller reconciling N rules would pay O(N^2).
+        if outcome == InjectOutcome::Unchanged {
+            debug!(afi = ?key.afi, rule = %key.rule, ?outcome, "injected local FlowSpec route");
+            if let Some((tag, lease_seconds)) = &started {
+                crate::injection_lease::log_generation_started(tag, *lease_seconds);
+            }
+            return Ok((outcome, generation));
+        }
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
