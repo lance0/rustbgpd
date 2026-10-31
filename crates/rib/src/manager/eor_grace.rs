@@ -312,6 +312,9 @@ impl RibManager {
         {
             self.flush_pending_eor(peer);
         }
+        // A carry kept for this window retires once nothing else can hold
+        // the peer's End-of-RIB.
+        self.retire_helper_stale_exempt();
         (grace.helper_session, held)
     }
 
@@ -324,6 +327,19 @@ impl RibManager {
             .map(EorGraceTarget::Interface)
             .filter(|target| self.eor_grace.contains_key(target))
             .unwrap_or(addressed)
+    }
+
+    /// Whether a grace window is still open for `peer`, covering `family`
+    /// when one is given: our End-of-RIB toward it may be held by grace.
+    pub(super) fn eor_grace_covers(&self, peer: PeerId, family: Option<(Afi, Safi)>) -> bool {
+        self.eor_grace
+            .get(&self.eor_grace_target(peer))
+            .is_some_and(|grace| family.is_none_or(|family| grace.families.contains(&family)))
+    }
+
+    /// Whether any grace window is still open.
+    pub(super) fn eor_grace_open(&self) -> bool {
+        !self.eor_grace.is_empty()
     }
 
     /// Whether the grace window holds `family`'s End-of-RIB toward `peer`.

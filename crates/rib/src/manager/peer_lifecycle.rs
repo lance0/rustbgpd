@@ -926,13 +926,9 @@ impl RibManager {
             self.peer_may_hold_stale.remove(&peer);
             return;
         }
-        // A hold that arms before the next session's End-of-RIB defers it,
-        // so a teardown before the hold arms carries too.
-        if !self
-            .selection_deferral
-            .as_ref()
-            .is_some_and(super::selection_deferral::SelectionDeferral::may_hold)
-        {
+        // Carry while our next End-of-RIB toward the peer may be held: by a
+        // selection hold, armed now or later, or by its replay grace window.
+        if !self.helper_stale_may_hold(peer) {
             return;
         }
         self.with_peer_teardown_readiness(|manager| {
@@ -1068,14 +1064,16 @@ impl RibManager {
     }
 
     /// Withdraw the carried stale exempt keys a caught-up session does not
-    /// advertise. Its live exempt rows are already on the wire, so no prefix
-    /// loses its last exempt row early; a key the peer no longer holds makes
-    /// the withdrawal a no-op. End-of-RIB is never brought forward. Once
-    /// the hold releases, that End-of-RIB purges the rest.
+    /// advertise while our End-of-RIB for their family is held. Its live
+    /// exempt rows are already on the wire, so no prefix loses its last
+    /// exempt row early; a key the peer no longer holds makes the withdrawal
+    /// a no-op. End-of-RIB is never brought forward; once it is sent it
+    /// purges whatever stale rows remain.
     pub(super) fn flush_helper_stale_exempt(&mut self, changed: &HashSet<Prefix>) {
-        if self.helper_stale_exempt.is_empty() || !self.helper_stale_exempt_in_hold() {
+        if self.helper_stale_exempt.is_empty() {
             return;
         }
+        self.retire_helper_stale_exempt();
         for peer in self.helper_stale_exempt_ready(changed) {
             // A route-bearing envelope carries the current session's export
             // snapshot, or the transport resets the session.
@@ -1116,11 +1114,11 @@ impl RibManager {
                 let family = prefix_family(&prefix);
                 let keyed = add_path.is_some_and(|families| families.contains(&family));
                 let path_id = if keyed { path_id } else { 0 };
-                // A key is withdrawn only while its family's End-of-RIB gate
-                // holds, and retires once that End-of-RIB can no longer be
-                // deferred or has gone out; selection can be staged while the
-                // gate still holds. A family whose gate may still arm keeps
-                // its keys for that gate.
+                // A key is withdrawn only while our End-of-RIB for its family
+                // is held (a selection gate, staged or not, or replay grace),
+                // and retires once that End-of-RIB can no longer be held or
+                // has gone out. A family whose End-of-RIB may still be held
+                // later keeps its keys until then.
                 let retired = if let Some(&(_, retired)) =
                     retired_families.iter().find(|(seen, _)| *seen == family)
                 {
@@ -1132,7 +1130,7 @@ impl RibManager {
                 };
                 if retired || self.advertises_unicast_key(peer, prefix, path_id) {
                     done.push(key);
-                } else if !self.selection_convergence_held(family) {
+                } else if !self.eor_held(peer, family) {
                     if !gate_blocked.contains(&family) {
                         gate_blocked.push(family);
                     }
@@ -1212,56 +1210,66 @@ impl RibManager {
         ready
     }
 
-    /// Whether a hold is armed, so carried keys can be flushed. Otherwise
-    /// retire what no hold can still need: every carry and ledger once no
-    /// family can be held, else each carry whose next session is synced.
-    /// Before any hold arms, a synced session has sent its unicast
-    /// End-of-RIB, which purges the rows the helper kept.
-    pub(super) fn helper_stale_exempt_in_hold(&mut self) -> bool {
-        if !self
-            .selection_deferral
+    /// Whether our End-of-RIB toward `peer` may still be held for some
+    /// family: a selection gate is unreleased, or a replay grace window
+    /// covers the peer. Neither, and no carry or ledger is kept for it.
+    pub(super) fn helper_stale_may_hold(&self, peer: PeerId) -> bool {
+        self.selection_deferral
             .as_ref()
             .is_some_and(super::selection_deferral::SelectionDeferral::may_hold)
-        {
+            || self.eor_grace_covers(peer, None)
+    }
+
+    /// [`Self::helper_stale_may_hold`] for any peer.
+    pub(super) fn helper_stale_may_hold_any(&self) -> bool {
+        self.selection_deferral
+            .as_ref()
+            .is_some_and(super::selection_deferral::SelectionDeferral::may_hold)
+            || self.eor_grace_open()
+    }
+
+    /// [`Self::helper_stale_may_hold`] for one family.
+    fn helper_stale_family_may_hold(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
+        self.selection_deferral
+            .as_ref()
+            .is_some_and(|selection| selection.may_hold_family(family))
+            || self.eor_grace_covers(peer, Some(family))
+    }
+
+    /// Retire what no held End-of-RIB can still need: every carry and ledger
+    /// once no peer's End-of-RIB can be held, else each carry and private
+    /// ledger of a peer whose End-of-RIB can no longer be held. A carry
+    /// whose families' End-of-RIB went out retires key by key in the flush.
+    pub(super) fn retire_helper_stale_exempt(&mut self) {
+        if self.helper_stale_exempt.is_empty() && self.hold_exempt_withdrawn.is_empty() {
+            return;
+        }
+        if !self.helper_stale_may_hold_any() {
             self.helper_stale_exempt.clear();
             self.hold_exempt_withdrawn.clear();
-            return false;
+            return;
         }
-        if self
-            .selection_deferral
-            .as_ref()
-            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
-        {
-            return true;
-        }
-        let synced: Vec<PeerId> = self
+        let peers: Vec<PeerId> = self
             .helper_stale_exempt
             .keys()
             .copied()
-            .filter(|&peer| self.helper_stale_exempt_synced(peer))
+            .filter(|&peer| !self.helper_stale_may_hold(peer))
             .collect();
-        for peer in synced {
+        for peer in peers {
             self.helper_stale_exempt.remove(&peer);
         }
-        false
-    }
-
-    /// A later session has sent its whole table and its unicast
-    /// End-of-RIB: it is registered and clean, no ORF gate holds a family's
-    /// initial table, and no unicast End-of-RIB is still queued (held by a
-    /// gate or replay grace, deferred behind an ORF table, or not yet
-    /// admitted by a full writer).
-    pub(super) fn helper_stale_exempt_synced(&self, peer: PeerId) -> bool {
-        self.helper_stale_exempt_current(peer)
-            && !self.peer_orf_pending.contains_key(&peer)
-            && !self
-                .pending_eor
-                .get(&peer)
-                .is_some_and(|families| families.iter().any(|&(_, safi)| safi == Safi::Unicast))
-            && !self
-                .gr_deferred_eor
-                .get(&peer)
-                .is_some_and(|families| families.iter().any(|&(_, safi)| safi == Safi::Unicast))
+        let ledgers: Vec<super::HoldWithdrawOwner> = self
+            .hold_exempt_withdrawn
+            .keys()
+            .copied()
+            .filter(|owner| match *owner {
+                super::HoldWithdrawOwner::Peer(peer) => !self.helper_stale_may_hold(peer),
+                super::HoldWithdrawOwner::Group(_) => false,
+            })
+            .collect();
+        for owner in ledgers {
+            self.hold_exempt_withdrawn.remove(&owner);
+        }
     }
 
     /// A later session than the carry's is registered, clean, and past its
@@ -1294,23 +1302,20 @@ impl RibManager {
                     .is_some_and(|gated| gated.contains(family))
             })
             || carried.gate_blocked.iter().any(|&family| {
-                self.selection_convergence_held(family)
-                    || self.helper_stale_family_retired(peer, family)
+                self.eor_held(peer, family) || self.helper_stale_family_retired(peer, family)
             })
     }
 
-    /// No hold can need `family`'s carried keys at `peer` any more: the
-    /// family is released, or its gate is open and the current session has
-    /// sent its End-of-RIB, which purges the rows the helper kept.
+    /// No held End-of-RIB can need `family`'s carried keys at `peer` any
+    /// more: neither a selection gate nor a grace window can hold it, or it
+    /// is not held and the current session has sent it, which purges the
+    /// rows the helper kept.
     fn helper_stale_family_retired(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
         let unicast_eor_queued = |queued: Option<&HashSet<(Afi, Safi)>>| {
             queued.is_some_and(|families| families.contains(&family))
         };
-        !self
-            .selection_deferral
-            .as_ref()
-            .is_some_and(|selection| selection.may_hold_family(family))
-            || (!self.selection_convergence_held(family)
+        !self.helper_stale_family_may_hold(peer, family)
+            || (!self.eor_held(peer, family)
                 && self.helper_stale_exempt_current(peer)
                 && !self
                     .peer_orf_pending
