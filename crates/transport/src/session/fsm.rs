@@ -1,8 +1,8 @@
 use super::{
     Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, IpAddr, Ipv4Addr, Message,
-    NotificationCode, OUTBOUND_BUFFER, PeerDownReason, PeerSession, RibUpdate, Safi,
-    SessionDownReason, SessionLifecycleNotification, SessionNotification,
-    SessionNotificationDirection, SessionState, cease_subcode, debug, info, mpsc, warn,
+    NotificationCode, PeerDownReason, PeerSession, RibUpdate, Safi, SessionDownReason,
+    SessionLifecycleNotification, SessionNotification, SessionNotificationDirection, SessionState,
+    cease_subcode, debug, info, mpsc, warn,
 };
 use rustbgpd_rib::update::ExactExportErrorCode;
 use rustbgpd_telemetry::reason_labels::ExactExportReason;
@@ -1520,11 +1520,11 @@ impl PeerSession {
                     }
 
                     // Recreate outbound channel to discard stale updates
-                    // from the dying session. The old sender held by RIB
-                    // manager is already invalidated by PeerDown/PeerGR.
-                    let (new_tx, new_rx) = mpsc::channel(OUTBOUND_BUFFER);
-                    self.outbound_tx = new_tx;
-                    self.outbound_rx = new_rx;
+                    // from the dying session. The RIB manager's sender to
+                    // the old channel is invalidated by the PeerDown/PeerGR
+                    // sent below. Envelopes still queued are discarded
+                    // unsent, and their inventory is released off this turn.
+                    self.retire_off_turn(None);
 
                     let rib_msg = gr_update.unwrap_or(RibUpdate::PeerDown {
                         peer: self.rib_peer(),

@@ -262,6 +262,318 @@ async fn outbound_pacing_resource_deadline_is_finite_with_send_hold_disabled() {
     actor.await.unwrap();
 }
 
+const QUEUE_SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+const QUEUED_ROUTES: usize = 5 * QUEUE_SLICE;
+
+/// Counts the live entries of queued envelopes: routes by their shared
+/// attribute set, byte payloads by the owner `marker` they share.
+struct QueuedInventory {
+    held: Arc<AttrSet>,
+    base: usize,
+    marker: Arc<()>,
+}
+
+impl QueuedInventory {
+    fn live(&self) -> usize {
+        Arc::strong_count(&self.held) - self.base + Arc::strong_count(&self.marker) - 1
+    }
+
+    fn marked(&self) -> Bytes {
+        // Held only so the payload's drop releases it.
+        struct Marked {
+            _owner: Arc<()>,
+        }
+        impl AsRef<[u8]> for Marked {
+            fn as_ref(&self) -> &[u8] {
+                b"marked"
+            }
+        }
+        Bytes::from_owner(Marked {
+            _owner: Arc::clone(&self.marker),
+        })
+    }
+
+    /// `per_family` entries of every heap-owning payload outside the
+    /// announce families, each counted by [`Self::live`] except the
+    /// `FlowSpec` withdrawals, whose keys own no shared handle to count.
+    fn add_other_families(&self, update: &mut OutboundRouteUpdate, per_family: usize) {
+        let bgpls = make_bgpls_route(1);
+        update.flowspec_announce = (0..per_family)
+            .map(|_| FlowSpecRoute {
+                attributes: vec![PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+                    flags: 0xc0,
+                    type_code: 250,
+                    data: self.marked(),
+                })],
+                ..make_flowspec_route()
+            })
+            .collect();
+        update.flowspec_withdraw = (0..per_family)
+            .map(|_| FlowSpecKey {
+                afi: Afi::Ipv4,
+                rule: make_flowspec_route().rule,
+            })
+            .collect();
+        update.bgpls_announce = (0..per_family)
+            .map(|_| rustbgpd_rib::BgpLsRibRoute {
+                attributes: Arc::clone(&self.held),
+                ..bgpls.clone()
+            })
+            .collect();
+        update.bgpls_withdraw = (0..per_family)
+            .map(|_| {
+                let mut nlri = bgpls.nlri.key();
+                nlri.payload = self.marked();
+                rustbgpd_rib::BgpLsRouteKey {
+                    family: bgpls.family,
+                    nlri,
+                    path_id: 0,
+                }
+            })
+            .collect();
+        update.rtc_announce = (0..per_family)
+            .map(|_| rustbgpd_rib::RtcRibRoute {
+                attributes: Arc::clone(&self.held),
+                ..make_rtc_rib_route(1)
+            })
+            .collect();
+        update.otc_blocked = (0..per_family)
+            .map(|_| Route {
+                attributes: Arc::clone(&self.held),
+                ..make_route(100)
+            })
+            .collect();
+    }
+}
+
+/// An Established session whose active envelope waits on a full writer
+/// queue, so it cannot finish within the close-drain budget, and a second
+/// full-table envelope, not yet queued, that is the last owner of its
+/// routes. The returned writer receiver keeps that queue full, and the
+/// returned peer end of the connection keeps it open, so only the close
+/// under test ends the session.
+async fn queued_last_owner_session() -> (
+    PeerSession,
+    TcpStream,
+    mpsc::Sender<PeerCommand>,
+    mpsc::Receiver<RibUpdate>,
+    mpsc::Receiver<Bytes>,
+    OutboundRouteUpdate,
+    QueuedInventory,
+) {
+    let (mut session, commands, rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, peer) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    session.writer_join.take().unwrap().abort();
+    let (bulk, writer) = mpsc::channel(1);
+    bulk.try_send(Bytes::from_static(b"held")).unwrap();
+    session.writer_bulk_tx = Some(bulk);
+    session
+        .handle_outbound_route_update(pacing_update(&session, pacing_routes(5_000, true)))
+        .await;
+
+    let held = make_route(100).attributes;
+    let base = Arc::strong_count(&held);
+    let routes = (0..u32::try_from(QUEUED_ROUTES).unwrap())
+        .map(|index| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32)),
+            attributes: Arc::clone(&held),
+            ..make_route(100)
+        })
+        .collect();
+    let envelope = pacing_update(&session, routes);
+    let inventory = QueuedInventory {
+        held,
+        base,
+        marker: Arc::new(()),
+    };
+    assert_eq!(inventory.live(), QUEUED_ROUTES);
+    (session, peer, commands, rib_rx, writer, envelope, inventory)
+}
+
+/// Poll the session task by hand, so each recorded release is one
+/// synchronous step: a single poll of the session, or one clock advance
+/// (paused time) in which any other task (the paced release) runs once.
+/// Returns the time `run()` took to exit.
+async fn run_by_step(
+    session: &mut PeerSession,
+    inventory: &QueuedInventory,
+    released: &mut Vec<usize>,
+) -> std::time::Duration {
+    let started = tokio::time::Instant::now();
+    let mut run = std::pin::pin!(session.run());
+    loop {
+        let before = inventory.live();
+        let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+        released.push(before - inventory.live());
+        if let std::task::Poll::Ready(result) = polled {
+            result.unwrap();
+            return started.elapsed();
+        }
+        let before = inventory.live();
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        released.push(before - inventory.live());
+    }
+}
+
+/// The Shutdown command closed the session with its Cease NOTIFICATION,
+/// not through a remote disconnect.
+fn assert_administrative_close(session: &PeerSession) {
+    assert_eq!(
+        session.config.neighbor_counters.notifications_sent(),
+        1,
+        "the administrative close, not a remote disconnect, ended the session"
+    );
+}
+
+/// Drop the session, then give the paced release room to finish, recording
+/// each step; every queued route must be freed, no step above one slice.
+async fn finish_queued_release(
+    session: PeerSession,
+    inventory: &QueuedInventory,
+    mut released: Vec<usize>,
+) {
+    let before = inventory.live();
+    drop(session);
+    released.push(before - inventory.live());
+    for _ in 0..4 * QUEUED_ROUTES / QUEUE_SLICE {
+        let before = inventory.live();
+        tokio::task::yield_now().await;
+        released.push(before - inventory.live());
+    }
+    let nonzero: Vec<_> = released
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, batch)| *batch > 0)
+        .collect();
+    assert_eq!(
+        inventory.live(),
+        0,
+        "queued routes are all released: {nonzero:?}"
+    );
+    assert!(
+        released.iter().all(|&batch| batch <= QUEUE_SLICE),
+        "one step released more than {QUEUE_SLICE} queued routes; nonzero steps: {nonzero:?}"
+    );
+}
+
+/// Session teardown discards the RIB-to-session queue unsent, and a queued
+/// envelope may hold the last reference to its inventory: the release is
+/// paced like the active envelope's, never one synchronous drop, and the
+/// teardown neither waits for it nor runs past the close-drain budget.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_down_paces_queued_inventory_release() {
+    let (mut session, _peer, commands, _rib_rx, _writer, envelope, inventory) =
+        queued_last_owner_session().await;
+    session.outbound_tx.try_send(envelope).unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    let elapsed = run_by_step(&mut session, &inventory, &mut released).await;
+    assert_administrative_close(&session);
+    assert!(
+        elapsed <= 2 * super::writer::CLOSE_FLUSH_BUDGET,
+        "the session task exits on its close budget, not after the release"
+    );
+    assert!(
+        inventory.live() > 0,
+        "the teardown does not wait for the release"
+    );
+    finish_queued_release(session, &inventory, released).await;
+}
+
+/// A session task can exit while Established, without the teardown that
+/// discards the queue (here every command sender is gone). The queue still
+/// drops with the session, so the exit hands it to the paced release too.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_exit_without_session_down_paces_queued_inventory_release() {
+    let (mut session, _peer, commands, _rib_rx, _writer, envelope, inventory) =
+        queued_last_owner_session().await;
+    session.outbound_tx.try_send(envelope).unwrap();
+    drop(commands);
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "this exit never tore the session down"
+    );
+    assert!(
+        inventory.live() > 0,
+        "the exit does not wait for the release"
+    );
+    finish_queued_release(session, &inventory, released).await;
+}
+
+/// A sender that reserved its permit before the teardown (the RIB reserves
+/// before it commits) still delivers after the queue is closed. That
+/// envelope is paced as well, not stranded in the old channel and freed
+/// whole by whichever handle to it drops last.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_permit_reserved_before_teardown_is_paced() {
+    let (mut session, _peer, commands, rib_rx, _writer, envelope, inventory) =
+        queued_last_owner_session().await;
+    let permit = session.outbound_tx.clone().try_reserve_owned().unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    assert_administrative_close(&session);
+    let sender = permit.send(envelope);
+    assert!(sender.is_closed(), "the old queue is closed");
+    assert_eq!(inventory.live(), QUEUED_ROUTES);
+    // The RIB still holds senders to the old queue (its registration is
+    // buffered in `rib_rx`); dropping them is its PeerDown turn.
+    let before = inventory.live();
+    drop(rib_rx);
+    drop(sender);
+    released.push(before - inventory.live());
+    finish_queued_release(session, &inventory, released).await;
+}
+
+/// `FlowSpec`, BGP-LS, RT-Constrain and OTC-blocked payloads stay in the
+/// envelope while it sends. A queued envelope holding only those is
+/// retired as well, a slice per step, not dropped whole.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_down_paces_queued_other_family_release() {
+    let (mut session, _peer, commands, _rib_rx, _writer, envelope, inventory) =
+        queued_last_owner_session().await;
+    drop(envelope);
+    let mut update = pacing_update(&session, Vec::new());
+    inventory.add_other_families(&mut update, QUEUE_SLICE + 1);
+    session.outbound_tx.try_send(update).unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    assert_administrative_close(&session);
+    assert!(
+        inventory.live() > 0,
+        "the teardown does not wait for the release"
+    );
+    finish_queued_release(session, &inventory, released).await;
+}
+
+/// A mixed envelope shares one slice budget across its unicast routes and
+/// every other family: its last unicast slice must not carry the rest out
+/// in the same step.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_down_paces_queued_mixed_family_release() {
+    let (mut session, _peer, commands, _rib_rx, _writer, mut envelope, inventory) =
+        queued_last_owner_session().await;
+    inventory.add_other_families(&mut envelope, QUEUE_SLICE / 2);
+    session.outbound_tx.try_send(envelope).unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    assert_administrative_close(&session);
+    assert!(
+        inventory.live() > 0,
+        "the teardown does not wait for the release"
+    );
+    finish_queued_release(session, &inventory, released).await;
+}
+
 #[tokio::test]
 async fn outbound_pacing_samples_backlog_before_envelope_completion() {
     let (mut session, _commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);
