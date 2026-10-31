@@ -1396,15 +1396,20 @@ impl RibManager {
                 if candidate_result.action != PolicyAction::Permit {
                     continue;
                 }
-                let (candidate_modified, _) =
+                let (candidate_modified, candidate_action) =
                     rank_memo.apply(candidate, &candidate_result.modifications);
                 if super::no_advertise_export_suppressed(candidate_modified.communities()) {
                     continue;
                 }
-                if add_path_keys.is_some() {
+                if let Some(keys) = add_path_keys.as_ref() {
                     permitted.push((
                         candidate,
-                        blackholing(candidate, &candidate_modified, target_local_role),
+                        keys.sendable_blackholing(
+                            blackholing(candidate, &candidate_modified, target_local_role),
+                            &candidate_modified,
+                            candidate_action.as_ref(),
+                            || snapshot,
+                        ),
                     ));
                     continue;
                 }
@@ -2093,6 +2098,7 @@ impl RibManager {
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
         wire: &AdjRibOut,
+        exact_export: Option<&dyn crate::update::ExactExportEncoder>,
         local_role: Option<rustbgpd_wire::BgpRole>,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
@@ -2203,6 +2209,8 @@ impl RibManager {
             || ConditionalGate::requires_as_path_string(conditional);
         let mut keys = (!stage_path_id_zero)
             .then(|| AddPathKeys::new(wire, prefix, local_only, ribs, checkpoint));
+        // Captured on the first probe only; see `AddPathKeys::sendable_blackholing`.
+        let mut snapshot = None;
         let mut changed: smallvec::SmallVec<[_; 2]> = smallvec::SmallVec::new();
         let mut next_rank: u32 = 1;
         let limit = if send_max == u32::MAX {
@@ -2299,7 +2307,18 @@ impl RibManager {
             // A path that keeps its key stages now; the others wait until
             // every staged path has claimed what it keeps.
             match keys.as_mut().map(|keys| {
-                let blackholing = blackholing(candidate, &modified, local_role);
+                let blackholing = keys.sendable_blackholing(
+                    blackholing(candidate, &modified, local_role),
+                    &modified,
+                    nh_action.as_ref(),
+                    || {
+                        snapshot
+                            .get_or_insert_with(|| {
+                                exact_export.map(crate::update::ExactExportEncoder::snapshot)
+                            })
+                            .as_deref()
+                    },
+                );
                 (blackholing, keys.keep(candidate, blackholing))
             }) {
                 Some((_, Ok(key))) => modified.path_id = key,
@@ -3411,6 +3430,13 @@ pub(in crate::manager) fn lease_rejection(
 /// - any other new path takes a freed key, lowest first, then the lowest
 ///   unused key.
 ///
+/// A path blackholes for the plan only if the commit will send it. The RFC
+/// 9234 OTC gate's drops never count. Nor, while the wire holds a blackhole
+/// row, does a path the session's exact encoder rejects (an UPDATE over the
+/// receiver's message ceiling, say): the commit drops it and owes its key's
+/// previous row a withdrawal, which the transport sends before the sendable
+/// replacement's announcement.
+///
 /// During a selection hold the candidate set holds only exempt local paths,
 /// and a frozen row (received, or an ordinary injection still present) keeps
 /// its key: the hold preserves what each session already admitted, and an
@@ -3451,6 +3477,9 @@ pub(in crate::manager) struct AddPathKeys {
     blackhole_keys: smallvec::SmallVec<[u32; 4]>,
     /// Some staged path blackholes; for the invariant check.
     any_blackholing: bool,
+    /// The wire holds a blackholing row, so a key handover can unblackhole
+    /// the prefix; only then do staged paths need an exact-export probe.
+    wire_blackholes: bool,
     /// Wire rows a staged path kept; when every wire row is kept nothing is
     /// withdrawn.
     kept: usize,
@@ -3507,6 +3536,7 @@ impl AddPathKeys {
             assigned: smallvec::SmallVec::new(),
             blackhole_keys: smallvec::SmallVec::new(),
             any_blackholing: false,
+            wire_blackholes: false,
             kept: 0,
             hold,
         };
@@ -3526,9 +3556,10 @@ impl AddPathKeys {
             let carries_blackhole = route
                 .communities()
                 .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE);
-            if cfg!(debug_assertions)
-                && (carries_blackhole || source.is_some_and(|source| source.deferral_exempt))
-            {
+            let blackholes =
+                carries_blackhole || source.is_some_and(|source| source.deferral_exempt);
+            keys.wire_blackholes |= blackholes;
+            if cfg!(debug_assertions) && blackholes {
                 keys.blackhole_keys.push(path_id);
             }
             if let Some(source) = source {
@@ -3769,6 +3800,31 @@ impl AddPathKeys {
         self.kept == self.occupied.len()
     }
 
+    /// `blackholing`, unless the wire holds a blackhole row and the
+    /// session's exact encoder rejects `route` (see the type's plan). Called
+    /// before [`Self::keep`], so a rejected path neither keeps nor takes a
+    /// blackhole key. `snapshot` runs at most once, only for that probe.
+    pub(in crate::manager) fn sendable_blackholing<'a>(
+        &self,
+        blackholing: bool,
+        route: &crate::route::Route,
+        next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
+        snapshot: impl FnOnce() -> Option<&'a dyn crate::update::ExactExportSnapshot>,
+    ) -> bool {
+        // Without a snapshot the commit refuses the whole envelope, so no
+        // path is known to be rejected.
+        blackholing
+            && (!self.wire_blackholes
+                || snapshot().is_none_or(|snapshot| {
+                    snapshot
+                        .probe_announcement(crate::update::ExactExportCandidate::Unicast {
+                            route,
+                            next_hop_override,
+                        })
+                        .is_ok()
+                }))
+    }
+
     /// The withdraw phase goes first, so a plan that withdrew every
     /// blackholing row on the wire while it still sent one would leave the
     /// prefix unblackholed until the announcement. The class handoff keeps
@@ -3902,5 +3958,92 @@ fn stage_multipath_row(
         out.record_local_source(candidate, modified.path_id);
         out.next_hop_override.push(nh_action);
         out.announce.push(modified);
+    }
+}
+
+#[cfg(test)]
+mod sendable_blackholing_tests {
+    use super::*;
+    use crate::update::{
+        ExactExportCandidate, ExactExportError, ExactExportErrorCode, ExactExportResult,
+        ExactExportSnapshot,
+    };
+
+    struct Verdict(bool);
+
+    impl ExactExportSnapshot for Verdict {
+        fn owner_id(&self) -> u64 {
+            0
+        }
+
+        fn generation(&self) -> u64 {
+            0
+        }
+
+        fn probe_announcement(
+            &self,
+            _candidate: ExactExportCandidate<'_>,
+        ) -> Result<ExactExportResult, ExactExportError> {
+            if self.0 {
+                Ok(ExactExportResult {
+                    encoded_len: 64,
+                    max_len: 4_096,
+                    generation: 0,
+                })
+            } else {
+                Err(ExactExportError::new(
+                    ExactExportErrorCode::MessageTooLong,
+                    "over the ceiling",
+                ))
+            }
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn keys_over(blackhole_row: bool) -> (AddPathKeys, crate::route::Route) {
+        let prefix = Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            Ipv4Addr::new(203, 0, 113, 7),
+            32,
+        ));
+        let mut row = crate::test_support::make_route_with_path_id(prefix, 1);
+        if blackhole_row {
+            row.attributes =
+                crate::attr_set::AttrSet::new(vec![rustbgpd_wire::PathAttribute::Communities(
+                    vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+                )]);
+        }
+        let mut wire = AdjRibOut::new(row.peer);
+        wire.insert(row.clone());
+        let keys = AddPathKeys::new(&wire, &prefix, false, &HashMap::new(), &mut || {});
+        (keys, row)
+    }
+
+    /// Only a blackholing path at a prefix whose wire holds a blackhole row
+    /// is probed, and only a rejected one stops counting as blackholing.
+    #[test]
+    fn only_a_wire_blackhole_makes_a_blackholing_path_probe() {
+        let (keys, route) = keys_over(false);
+        for blackholing in [false, true] {
+            assert_eq!(
+                keys.sendable_blackholing(blackholing, &route, None, || unreachable!(
+                    "no probe without a blackhole row on the wire"
+                )),
+                blackholing
+            );
+        }
+        let (keys, route) = keys_over(true);
+        assert!(
+            !keys.sendable_blackholing(false, &route, None, || unreachable!(
+                "an ordinary path needs no probe"
+            ))
+        );
+        assert!(keys.sendable_blackholing(true, &route, None, || Some(&Verdict(true))));
+        assert!(!keys.sendable_blackholing(true, &route, None, || Some(&Verdict(false))));
+        // No snapshot: the commit refuses the envelope, so nothing is known
+        // to be rejected.
+        assert!(keys.sendable_blackholing(true, &route, None, || None));
     }
 }

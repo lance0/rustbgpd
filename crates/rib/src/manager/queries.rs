@@ -3741,6 +3741,17 @@ impl RibManager {
                     export_pol.is_some_and(PolicyChain::requires_as_path_string);
                 let mut permitted: Vec<(&crate::route::Route, bool)> = Vec::new();
                 let mut export_memo = distribution::ExportMemo::default();
+                // Rank picks the paths; their keys follow live staging, on
+                // an empty wire before the peer's first commit.
+                let empty = AdjRibOut::new(peer_addr);
+                let mut keys = distribution::AddPathKeys::new(
+                    self.adj_ribs_out.get(&peer_addr).unwrap_or(&empty),
+                    &prefix,
+                    self.selection_deferred(family),
+                    &self.ribs,
+                    &mut || {},
+                );
+                let mut snapshot = None;
                 for cand in &filtered {
                     if permitted.len() >= limit {
                         break;
@@ -3792,30 +3803,31 @@ impl RibManager {
                     if result.action != PolicyAction::Permit {
                         continue;
                     }
-                    let (modified, _) = export_memo.apply(cand, &result.modifications);
+                    let (modified, action) = export_memo.apply(cand, &result.modifications);
                     if distribution::no_advertise_export_suppressed(modified.communities()) {
                         continue;
                     }
-                    permitted.push((
-                        *cand,
+                    let blackholing = keys.sendable_blackholing(
                         distribution::blackholing(
                             cand,
                             &modified,
                             self.peer_local_roles.get(&peer_addr).copied().flatten(),
                         ),
-                    ));
+                        &modified,
+                        action.as_ref(),
+                        || {
+                            snapshot
+                                .get_or_insert_with(|| {
+                                    self.peer_export_encoders
+                                        .get(&peer_addr)
+                                        .map(|encoder| encoder.snapshot())
+                                })
+                                .as_deref()
+                        },
+                    );
+                    permitted.push((*cand, blackholing));
                 }
-                // Rank picks the paths; their keys follow live staging, on
-                // an empty wire before the peer's first commit.
-                let empty = AdjRibOut::new(peer_addr);
-                let keys = distribution::AddPathKeys::new(
-                    self.adj_ribs_out.get(&peer_addr).unwrap_or(&empty),
-                    &prefix,
-                    self.selection_deferred(family),
-                    &self.ribs,
-                    &mut || {},
-                )
-                .assign_all(&permitted, limit, &mut || {});
+                let keys = keys.assign_all(&permitted, limit, &mut || {});
                 for ((cand, _), key) in permitted.into_iter().zip(keys) {
                     if self
                         .peer_unexportable
