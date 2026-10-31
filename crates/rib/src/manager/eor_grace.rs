@@ -281,8 +281,9 @@ impl RibManager {
             );
         }
         // One retirement for the whole batch: a carry kept for these windows
-        // retires once nothing else can hold its peer's End-of-RIB.
-        self.request_helper_stale_retire();
+        // retires once nothing else can hold its peer's End-of-RIB. Each
+        // released window already counted as a hold source ending.
+        self.retire_helper_stale_exempt();
         Ok(ReplayComplete::Released)
     }
 
@@ -378,16 +379,18 @@ impl RibManager {
             }
             return;
         }
-        self.eor_grace.remove(&target);
         self.eor_grace_deadlines.remove(&target);
-        self.request_helper_stale_retire();
+        if self.eor_grace.remove(&target).is_some() {
+            self.request_helper_stale_retire();
+        }
     }
 
     pub(super) fn retire_eor_grace_interface(&mut self, interface: Arc<str>) {
         let target = EorGraceTarget::Interface(interface);
-        self.eor_grace.remove(&target);
         self.eor_grace_deadlines.remove(&target);
-        self.request_helper_stale_retire();
+        if self.eor_grace.remove(&target).is_some() {
+            self.request_helper_stale_retire();
+        }
     }
 
     pub(super) fn next_eor_grace_deadline(&mut self) -> Option<tokio::time::Instant> {
@@ -443,7 +446,9 @@ impl RibManager {
                 );
             }
         }
-        // One retirement for every window this deadline released.
-        self.request_helper_stale_retire();
+        // One retirement for every window this deadline released; each
+        // counted as a hold source ending, so a shared-timer deadline that
+        // released none (an RTC or ORF hold) costs nothing here.
+        self.retire_helper_stale_exempt();
     }
 }

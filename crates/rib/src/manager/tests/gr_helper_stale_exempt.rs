@@ -2502,3 +2502,20 @@ fn grace_end_under_a_selection_gate_defers_retirement_to_its_release() {
     );
     assert!(manager.hold_exempt_withdrawn.is_empty(), "and every ledger");
 }
+
+/// With grace still open and many ledgers in place, a deadline that
+/// releases no grace window (the shared hold timer also serves RTC and ORF
+/// holds), a deleted neighbor without a window and an unknown interface
+/// retirement do no retirement walk. Red proof: requesting a pass whether
+/// or not a window ended walks every owner each time.
+#[test]
+fn unrelated_hold_events_do_not_walk_the_owners() {
+    let (mut manager, deadline, _receivers) = grace_ledgers(16, true);
+    let work = super::work_scaling::checkpoints_in(|| {
+        manager.expire_eor_grace(deadline - Duration::from_secs(1));
+        manager.eor_grace_peer_deleted(peer_v4(Ipv4Addr::new(192, 0, 2, 77)), false);
+        manager.retire_eor_grace_interface(Arc::from("eth-unknown"));
+    });
+    assert_eq!(work.get("helper_stale_retire"), None, "no walk: {work:?}");
+    assert_eq!(peer_ledgers(&manager), 16, "nothing retired");
+}
