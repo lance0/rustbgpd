@@ -11,7 +11,7 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 // Aliased to the std name so the storage types read unchanged.
 use smallvec::SmallVec;
 
-use crate::fast_hash::{FastMap as HashMap, FastState, ShardedMap};
+use crate::fast_hash::{FastMap as HashMap, FastState, LargeShardedMap, ShardedMap};
 use crate::loc_rib::{FamilyLens, SecondFamilyCounts, split, track};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
@@ -78,7 +78,7 @@ pub struct AdjRibOut {
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN routes advertised to this peer, keyed by RFC 7432 route identity.
-    evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
+    evpn_routes: LargeShardedMap<EvpnRouteKey, EvpnRibRoute>,
     /// BGP-LS routes advertised to this peer, keyed by opaque RFC 9552 identity.
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes advertised to this peer, keyed by RD + prefix identity.
@@ -90,10 +90,10 @@ pub struct AdjRibOut {
     /// Labeled-unicast routes advertised to this peer, keyed by prefix +
     /// path-id identity. Deliberately separate from the unicast `routes` map
     /// (ADR-0077 §2).
-    labeled_routes: HashMap<LabeledRibRouteKey, LabeledRibRoute>,
+    labeled_routes: LargeShardedMap<LabeledRibRouteKey, LabeledRibRoute>,
     /// Secondary index: labeled prefix → advertised Add-Path path IDs (the
     /// SAFI 4 analog of `vpn_key_path_ids`).
-    labeled_key_path_ids: HashMap<Prefix, SmallVec<[u32; 1]>>,
+    labeled_key_path_ids: LargeShardedMap<Prefix, SmallVec<[u32; 1]>>,
     /// RT-Constrain routes advertised to this peer, keyed by RFC 4684 identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
     /// Changes whenever the set of VPN keys may have changed.
@@ -218,8 +218,8 @@ pub(crate) fn reserve_hash_map<K: Eq + std::hash::Hash, V>(
 }
 
 /// [`retire_hash_map`] for each shard of a [`ShardedMap`].
-pub(crate) fn retire_sharded_map<K, V>(
-    map: &mut ShardedMap<K, V>,
+pub(crate) fn retire_sharded_map<K, V, const SPLIT: usize, const N: usize, const PRESIZE: usize>(
+    map: &mut ShardedMap<K, V, SPLIT, N, PRESIZE>,
     checkpoint: &mut impl RetirementCheckpoint,
 ) {
     for shard in map.shards_mut() {
@@ -237,8 +237,14 @@ pub(crate) fn retire_sharded_map<K, V>(
 
 /// [`release_hash_map`] for a [`ShardedMap`]: retire every shard, then drop
 /// the shard tables.
-pub(crate) fn release_sharded_map<K, V>(
-    map: &mut ShardedMap<K, V>,
+pub(crate) fn release_sharded_map<
+    K,
+    V,
+    const SPLIT: usize,
+    const N: usize,
+    const PRESIZE: usize,
+>(
+    map: &mut ShardedMap<K, V, SPLIT, N, PRESIZE>,
     checkpoint: &mut impl RetirementCheckpoint,
 ) {
     retire_sharded_map(map, checkpoint);
@@ -274,12 +280,12 @@ impl AdjRibOut {
             self_next_hop_count: 0,
             prefix_path_ids: FamilyPrefixMap::default(),
             flowspec_routes: HashMap::default(),
-            evpn_routes: HashMap::default(),
+            evpn_routes: LargeShardedMap::default(),
             bgpls_routes: HashMap::default(),
             vpn_routes: ShardedMap::default(),
             vpn_key_path_ids: ShardedMap::default(),
-            labeled_routes: HashMap::default(),
-            labeled_key_path_ids: HashMap::default(),
+            labeled_routes: LargeShardedMap::default(),
+            labeled_key_path_ids: LargeShardedMap::default(),
             rtc_routes: HashMap::default(),
             vpn_keys: VpnKeyVersion::new(),
             vpn_key_log: None,
@@ -727,7 +733,7 @@ impl AdjRibOut {
 
     /// Release actual private EVPN state after complete group admission.
     pub(crate) fn release_evpn_with(&mut self, checkpoint: &mut impl FnMut()) {
-        release_hash_map(&mut self.evpn_routes, checkpoint);
+        release_sharded_map(&mut self.evpn_routes, checkpoint);
     }
 
     /// Reserve both VPN advertised-route indexes for a known outbound batch.
@@ -784,13 +790,13 @@ impl AdjRibOut {
         self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
-        retire_hash_map(&mut self.evpn_routes, checkpoint);
+        retire_sharded_map(&mut self.evpn_routes, checkpoint);
         retire_hash_map(&mut self.bgpls_routes, checkpoint);
         self.vpn_keys_released();
         retire_sharded_map(&mut self.vpn_routes, checkpoint);
         retire_sharded_map(&mut self.vpn_key_path_ids, checkpoint);
-        retire_hash_map(&mut self.labeled_routes, checkpoint);
-        retire_hash_map(&mut self.labeled_key_path_ids, checkpoint);
+        retire_sharded_map(&mut self.labeled_routes, checkpoint);
+        retire_sharded_map(&mut self.labeled_key_path_ids, checkpoint);
         retire_hash_map(&mut self.rtc_routes, checkpoint);
     }
 
@@ -943,7 +949,7 @@ impl AdjRibOut {
 
     /// Reserve the EVPN advertised-route map for a known outbound batch.
     pub(crate) fn reserve_evpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
-        reserve_hash_map(&mut self.evpn_routes, additional, checkpoint);
+        self.evpn_routes.reserve_count_with(additional, checkpoint);
     }
 
     /// Insert or replace an advertised EVPN route.
@@ -1089,8 +1095,10 @@ impl AdjRibOut {
         additional: usize,
         checkpoint: &mut impl FnMut(),
     ) {
-        reserve_hash_map(&mut self.labeled_routes, additional, checkpoint);
-        reserve_hash_map(&mut self.labeled_key_path_ids, additional, checkpoint);
+        self.labeled_routes
+            .reserve_count_with(additional, checkpoint);
+        self.labeled_key_path_ids
+            .reserve_count_with(additional, checkpoint);
     }
 
     /// Insert or replace an advertised labeled route.
@@ -1099,7 +1107,7 @@ impl AdjRibOut {
         if self.labeled_routes.insert(key, route).is_none() {
             let v6 = matches!(key.prefix, Prefix::V6(_));
             track(&mut self.second_family.labeled, v6, true, false);
-            let ids = self.labeled_key_path_ids.entry(key.prefix).or_default();
+            let ids = self.labeled_key_path_ids.get_or_default(key.prefix);
             if !ids.contains(&key.path_id) {
                 ids.push(key.path_id);
             }
@@ -1481,6 +1489,114 @@ mod tests {
             },
             |rib| rib.next_hop_overrides.capacity(),
         );
+    }
+
+    /// A distinct advertised EVPN MAC/IP route per `i`.
+    fn evpn_mac_ip(i: u32) -> EvpnRibRoute {
+        let b = i.to_be_bytes();
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        EvpnRibRoute {
+            route: rustbgpd_wire::EvpnRoute::MacIp(rustbgpd_wire::EvpnMacIp {
+                rd: RouteDistinguisher([0, 1, 10, 0, 0, 1, 0, 1]),
+                esi: rustbgpd_wire::EthernetSegmentIdentifier([0; 10]),
+                ethernet_tag: rustbgpd_wire::EthernetTagId(0),
+                mac: rustbgpd_wire::MacAddress([2, 0, b[0], b[1], b[2], b[3]]),
+                ip: Some(IpAddr::V4(Ipv4Addr::from(i))),
+                label1: rustbgpd_wire::MplsLabel::new(10_100),
+                label2: None,
+            }),
+            next_hop: peer.addr(),
+            link_local_next_hop: None,
+            peer,
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    /// A distinct advertised labeled /32 per `i`.
+    fn labeled_host(i: u32) -> LabeledRibRoute {
+        let mut route = make_labeled_route([0; 4], 32, 0, 2);
+        route.nlri.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(i), 32));
+        route
+    }
+
+    /// Inserts past a plain map's 229,376-entry doubling, which would
+    /// rehash that many entries at once.
+    const PAST_LARGE_DOUBLING: usize =
+        2 * crate::fast_hash::LARGE_SHARD_SPLIT_AT + crate::fast_hash::LARGE_SHARD_SPLIT_AT / 8;
+
+    /// One receiver's EVPN map is a plain table up to the large split point
+    /// and then grows one shard at a time: no insert rehashes more than
+    /// `LARGE_SHARD_SPLIT_AT` entries. Red proof: a plain map fails at its
+    /// doubling past 229,376 entries.
+    #[test]
+    fn evpn_map_grows_by_at_most_one_large_split_per_insert() {
+        crate::fast_hash::assert_growth_bounded_by(
+            "Adj-RIB-Out EVPN routes",
+            &mut AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+            |rib, i| rib.insert_evpn(evpn_mac_ip(i)),
+            |rib| rib.evpn_routes.capacity(),
+            PAST_LARGE_DOUBLING,
+            crate::fast_hash::LARGE_SHARD_SPLIT_AT,
+        );
+    }
+
+    /// The labeled route map and its prefix index both grow like the EVPN
+    /// map.
+    #[test]
+    fn labeled_maps_grow_by_at_most_one_large_split_per_insert() {
+        for (name, capacity) in [
+            (
+                "Adj-RIB-Out labeled routes",
+                (|rib: &AdjRibOut| rib.labeled_routes.capacity()) as fn(&AdjRibOut) -> usize,
+            ),
+            ("Adj-RIB-Out labeled prefix index", |rib: &AdjRibOut| {
+                rib.labeled_key_path_ids.capacity()
+            }),
+        ] {
+            crate::fast_hash::assert_growth_bounded_by(
+                name,
+                &mut AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+                |rib, i| rib.insert_labeled(labeled_host(i)),
+                capacity,
+                PAST_LARGE_DOUBLING,
+                crate::fast_hash::LARGE_SHARD_SPLIT_AT,
+            );
+        }
+    }
+
+    /// Worst single insert while one receiver's EVPN and labeled maps fill,
+    /// on the public insert path. Run with
+    /// `cargo test -p rustbgpd-rib --profile scale --lib -- --ignored
+    /// adj_rib_out_resize_probe --nocapture --test-threads=1`.
+    #[test]
+    #[ignore = "measurement"]
+    fn adj_rib_out_resize_probe() {
+        fn worst<R>(routes: Vec<R>, mut insert: impl FnMut(&mut AdjRibOut, R)) -> f64 {
+            let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+            let mut worst = std::time::Duration::ZERO;
+            for route in routes {
+                let started = Instant::now();
+                insert(&mut rib, route);
+                worst = worst.max(started.elapsed());
+            }
+            worst.as_secs_f64() * 1e3
+        }
+        for count in [100_000_u32, 300_000, 1_000_000] {
+            let evpn = worst(
+                (0..count).map(evpn_mac_ip).collect(),
+                AdjRibOut::insert_evpn,
+            );
+            let labeled = worst(
+                (0..count).map(labeled_host).collect(),
+                AdjRibOut::insert_labeled,
+            );
+            println!("RESIZE routes={count} evpn_worst_ms={evpn:.1} labeled_worst_ms={labeled:.1}");
+        }
     }
 
     fn prefix_a() -> Prefix {

@@ -1542,6 +1542,18 @@ impl RibManager {
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
         checkpoint();
         self.wake_selection_partial_recovery(family);
+        if !self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(SelectionDeferral::has_active_gates)
+        {
+            // The hold no longer defers our End-of-RIB, which purges the
+            // stale rows a GR helper keeps once it is sent. A planned-restart
+            // grace window can still hold it queued; the carry is not kept
+            // for that window.
+            self.hold_exempt_withdrawn.clear();
+            self.helper_stale_exempt.clear();
+        }
         tracing::info!(
             afi = ?family.0,
             safi = ?family.1,

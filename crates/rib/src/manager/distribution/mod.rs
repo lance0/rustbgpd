@@ -5037,6 +5037,10 @@ impl RibManager {
             // enter this block and therefore retain their zero label cost.
             let peer_label = peer.label();
             let loc_rib_len = self.loc_rib.len();
+            let hold_active = self
+                .selection_deferral
+                .as_ref()
+                .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates);
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
@@ -5095,6 +5099,23 @@ impl RibManager {
                 rib_out.reserve_rtc_with(additional, &mut || checkpoint());
                 super::replacement_readiness_checkpoint(&readiness, true);
             }
+            // Queued is not delivered: a session ending first leaves an
+            // exempt row it withdrew stale at a GR helper, and this table
+            // will no longer name it. Read its provenance before the commit.
+            let queued_exempt_withdrawals: Vec<(Prefix, u32)> = if hold_active {
+                withdraw
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|(prefix, path_id)| {
+                        rib_out
+                            .local_export_source(prefix, *path_id)
+                            .is_some_and(|source| source.deferral_exempt)
+                    })
+                    .copied()
+                    .collect()
+            } else {
+                Vec::new()
+            };
             if grouped_unicast_count.is_none() {
                 for (route, action) in announce
                     .iter()
@@ -5164,6 +5185,17 @@ impl RibManager {
                 checkpoint();
                 rib_out.set_local_export_source((prefix, path_id), None);
             }
+            if !queued_exempt_withdrawals.is_empty() {
+                self.record_hold_exempt_withdrawn(
+                    super::HoldWithdrawOwner::Peer(peer),
+                    queued_exempt_withdrawals,
+                    "family_commit",
+                );
+            }
+            let rib_out = self
+                .adj_ribs_out
+                .get_mut(&peer)
+                .expect("the committed Adj-RIB-Out exists");
             for route in announce
                 .iter()
                 .filter(|route| announce_source_exclusion != Some(route.peer))
@@ -8192,6 +8224,21 @@ impl RibManager {
             HashMap::new(),
             None,
         );
+        self.flush_helper_stale_exempt(all_affected);
+    }
+
+    /// [`Self::distribute_changes`] for the resync tick's sliced pass, which
+    /// hides withheld dirty peers until it restores them, so it leaves the
+    /// stale exempt flush to the tick.
+    pub(super) fn distribute_changes_without_stale_flush(&mut self) {
+        self.distribute_changes_inner(
+            &HashSet::new(),
+            &HashSet::new(),
+            false,
+            false,
+            HashMap::new(),
+            None,
+        );
     }
 
     pub(super) fn distribute_changes(
@@ -8207,6 +8254,7 @@ impl RibManager {
             HashMap::new(),
             None,
         );
+        self.flush_helper_stale_exempt(all_affected);
     }
 
     /// [`Self::distribute_changes`] restricted to `targets`: other clean
@@ -8226,6 +8274,7 @@ impl RibManager {
             HashMap::new(),
             Some(targets),
         );
+        self.flush_helper_stale_exempt(changed);
     }
 
     pub(super) fn distribute_changes_after_advertised_page_advance(
@@ -8241,6 +8290,7 @@ impl RibManager {
             HashMap::new(),
             None,
         );
+        self.flush_helper_stale_exempt(all_affected);
     }
 
     pub(in crate::manager) fn distribute_changes_with_evpn_feeds(
@@ -8256,6 +8306,7 @@ impl RibManager {
             feeds,
             None,
         );
+        self.flush_helper_stale_exempt(&HashSet::new());
     }
 
     /// Whether a clean member has rejection-inventory work in `scope`:

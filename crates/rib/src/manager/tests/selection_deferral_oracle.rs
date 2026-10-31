@@ -987,6 +987,35 @@ impl Harness {
                     update.refresh_markers
                 );
             }
+            // I6: a GR helper rightly keeps the ended session's stale
+            // ordinary row until our End-of-RIB; inside the hold only a key
+            // whose prefix a fresh session would not advertise at all may
+            // leave.
+            if self.held
+                && update.withdraw.iter().any(|key| {
+                    self.stale.contains(key)
+                        && self
+                            .wire
+                            .get(key)
+                            .is_some_and(|&injection| !self.injections[injection].exempt)
+                })
+            {
+                let expected = self.expected();
+                for key in &update.withdraw {
+                    let retained = self.stale.contains(key)
+                        && self
+                            .wire
+                            .get(key)
+                            .is_some_and(|&injection| !self.injections[injection].exempt);
+                    prop_assert!(
+                        !retained || !expected.keys().any(|wanted| wanted.0 == key.0),
+                        "I6: withdrew the stale ordinary row {}#{} a GR helper keeps inside the hold; wire {}",
+                        key.0,
+                        key.1,
+                        show(&self.wire)
+                    );
+                }
+            }
             for key in &update.withdraw {
                 self.wire.remove(key);
                 self.stale.remove(key);
@@ -1227,11 +1256,25 @@ impl Harness {
     /// A known open defect that explains a deleted exempt row still on the
     /// wire after a drain in the hold, or `None`.
     fn known_stale_blackhole(&self, key: (Prefix, u32)) -> Option<&'static str> {
-        // LAN-2703: a GR helper keeps a row from the session that ended as
-        // stale until our End-of-RIB, which the hold defers to release; a
-        // row deleted before the new session re-sent it is never withdrawn.
-        if self.stale.contains(&key) {
-            return allowed("LAN-2703");
+        // LAN-2727: a GR helper keeps the ended session's deleted RTBH
+        // stale until release while its prefix still has another route:
+        // the helper may hold that route at the key instead, and keeping a
+        // route it rightly holds comes first.
+        let candidate = (0..PREFIXES)
+            .find(|&index| prefix(index) == key.0)
+            .is_some_and(|index| {
+                self.local
+                    .range((index, 0)..(index + 1, 0))
+                    .next()
+                    .is_some()
+                    || self
+                        .received
+                        .range((index, 0)..(index + 1, 0))
+                        .next()
+                        .is_some()
+            });
+        if self.stale.contains(&key) && candidate {
+            return allowed("LAN-2727");
         }
         None
     }
@@ -1889,6 +1932,243 @@ fn i5_flags_obsolete_rtbh_rows_beyond_the_last() {
     assert!(harness.check_deleted_blackholes().is_err());
     harness.wire.remove(&(prefix(0), 2));
     assert!(harness.check_deleted_blackholes().is_ok());
+}
+
+/// I5 across a clean flap toward a GR helper: the peer keeps the ended
+/// session's rows stale until our End-of-RIB, which the hold defers, so an
+/// RTBH deleted before the new session re-sends it must be withdrawn on the
+/// new session inside the hold. The two minimized flap orders, for host and
+/// BLACKHOLE-aggregate RTBHs, private and grouped. Red proof: without the
+/// carried stale exempt keys every case keeps the deleted RTBH.
+#[test]
+fn stale_rtbh_at_a_gr_helper_leaves_the_wire_inside_the_hold() {
+    let flap = |writer_full| Op::Reconnect {
+        notification: false,
+        helper: true,
+        gr_families: true,
+        writer_full,
+    };
+    let mut failed = Vec::new();
+    for grouped in [false, true] {
+        let config = Config {
+            grouped,
+            add_path: false,
+            per_client_best: false,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        for (prefix, blackhole) in [(1, false), (2, true)] {
+            let inject = Op::Inject {
+                prefix,
+                path: 1,
+                preference: 0,
+                blackhole,
+            };
+            let delete = Op::Delete { prefix, path: 1 };
+            let orders = [
+                (
+                    "delete behind the new writer",
+                    vec![
+                        inject.clone(),
+                        flap(true),
+                        delete.clone(),
+                        Op::Backpressure(false),
+                        Op::Drain,
+                    ],
+                ),
+                (
+                    "delete stuck before the flap",
+                    vec![
+                        inject.clone(),
+                        Op::Backpressure(true),
+                        delete.clone(),
+                        flap(false),
+                        Op::Drain,
+                    ],
+                ),
+            ];
+            for (order, hold) in orders {
+                if let Some(reason) = failure(config, &[], &hold) {
+                    failed.push(format!(
+                        "grouped={grouped} prefix {prefix} {order}: {reason}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// A grouped receiver's session ends cleanly toward a GR helper while an
+/// RTBH host is on the wire; the new session registers behind a full
+/// writer, the writer frees, and the host is deleted before the new table
+/// is admitted. Its resync then leaves it dirty but partially caught up,
+/// with the received ordinary row still held, and that must not hold back
+/// the stale RTBH's withdrawal.
+#[test]
+fn partially_caught_up_reconnect_withdraws_a_stale_rtbh() {
+    let config = Config {
+        grouped: true,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = [Op::Receive {
+        prefix: 3,
+        path: 0,
+        preference: 0,
+        blackhole: false,
+    }];
+    let hold = [
+        Op::Inject {
+            prefix: 0,
+            path: 2,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: true,
+        },
+        Op::Backpressure(false),
+        Op::Delete { prefix: 0, path: 2 },
+        Op::Drain,
+    ];
+    if let Some(reason) = failure(config, &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// I6 against the over-carry: a grouped receiver holds an ordinary aggregate,
+/// misses an RTBH that replaces it behind a full writer, and flaps toward a
+/// GR helper; the RTBH is deleted before the new session's table is
+/// admitted, and the aggregate is desired again but held. The helper keeps
+/// its stale aggregate until release. Red proof:
+/// without the desired-row check the flush withdraws it.
+#[test]
+fn stale_ordinary_row_survives_an_over_carried_rtbh_key() {
+    let setup = [Op::Inject {
+        prefix: 2,
+        path: 0,
+        preference: 0,
+        blackhole: false,
+    }];
+    let hold = [
+        Op::Backpressure(true),
+        Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 2,
+            blackhole: true,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: true,
+            gr_families: true,
+            writer_full: true,
+        },
+        Op::Delete { prefix: 2, path: 1 },
+        Op::Backpressure(false),
+        Op::Drain,
+    ];
+    // Grouped only: behind a full writer a private Adj-RIB-Out keeps the
+    // aggregate, so the RTBH key is never carried. The private form is
+    // `private_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh`.
+    let config = Config {
+        grouped: true,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    if let Some(reason) = failure(config, &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// A carried RTBH key whose prefix still has another route waits; once
+/// that route is deleted too, the next flush withdraws the stale RTBH
+/// inside the hold. Red proof: dropping the waiting keys after the first
+/// flush leaves it until release.
+#[test]
+fn waiting_stale_rtbh_leaves_once_its_prefix_has_no_route() {
+    let reconnect = Op::Reconnect {
+        notification: false,
+        helper: false,
+        gr_families: false,
+        writer_full: true,
+    };
+    let cases = [
+        (
+            Config {
+                grouped: false,
+                add_path: false,
+                per_client_best: false,
+                orf: false,
+                limit: false,
+                late: false,
+            },
+            vec![
+                Op::Inject {
+                    prefix: 2,
+                    path: 0,
+                    preference: 0,
+                    blackhole: true,
+                },
+                Op::Inject {
+                    prefix: 2,
+                    path: 1,
+                    preference: 0,
+                    blackhole: false,
+                },
+                reconnect.clone(),
+                Op::Delete { prefix: 2, path: 0 },
+                Op::RefuseProof,
+                Op::Delete { prefix: 2, path: 1 },
+                Op::Drain,
+            ],
+        ),
+        (
+            Config {
+                grouped: false,
+                add_path: true,
+                per_client_best: false,
+                orf: false,
+                limit: false,
+                late: false,
+            },
+            vec![
+                Op::Inject {
+                    prefix: 1,
+                    path: 1,
+                    preference: 0,
+                    blackhole: false,
+                },
+                Op::Inject {
+                    prefix: 1,
+                    path: 0,
+                    preference: 0,
+                    blackhole: false,
+                },
+                reconnect,
+                Op::Delete { prefix: 1, path: 1 },
+                Op::RefuseProof,
+                Op::Delete { prefix: 1, path: 0 },
+                Op::Drain,
+            ],
+        ),
+    ];
+    let failed: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(config, hold)| failure(config, &[], &hold))
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 /// Each `Regroup` trigger really moves a grouped receiver onto the per-peer

@@ -17,6 +17,28 @@ pub(crate) const SHARD_SPLIT_AT: usize = 1 << 14;
 /// of a 1.23M-key load.
 pub(crate) const SHARDS: usize = 16;
 
+/// Entries a [`LargeShardedMap`] holds in one table before it splits: a full
+/// 131,072-bucket table, whose doubling would rehash every entry at once.
+///
+/// jemalloc returns a freed allocation of 8 MiB or more at once and keeps a
+/// smaller one for up to its 10 s decay. Splitting early, as [`ShardedMap`]
+/// does, makes every replaced shard table small; across one map per
+/// receiver those retained tables raised the daemon high-water mark by about 0.95 GiB at
+/// 150 receivers of 75k EVPN routes each. Below this size the map is one
+/// table, exactly a plain map.
+pub(crate) const LARGE_SHARD_SPLIT_AT: usize = 114_688;
+/// Tables in a split [`LargeShardedMap`]: each shard rehashes at most about
+/// 1/8 of the entries, about 25 ms per 114,688 EVPN routes.
+pub(crate) const LARGE_SHARDS: usize = 8;
+/// A [`LargeShardedMap`] splits into shards sized for twice its entries,
+/// exactly the room the plain map's doubling would allocate.
+pub(crate) const LARGE_SHARD_PRESIZE: usize = 2;
+
+/// A [`ShardedMap`] for one receiver's large per-family table: one table
+/// until a doubling would rehash [`LARGE_SHARD_SPLIT_AT`] entries at once.
+pub(crate) type LargeShardedMap<K, V> =
+    ShardedMap<K, V, LARGE_SHARD_SPLIT_AT, LARGE_SHARDS, LARGE_SHARD_PRESIZE>;
+
 /// The one hash a [`ShardedMap`] computes per operation. It picks the shard
 /// and probes, inserts into and regrows the shard's table, so the two can
 /// never disagree.
@@ -26,19 +48,25 @@ fn hash_of<Q: std::hash::Hash + ?Sized>(key: &Q) -> u64 {
     FastState::default().hash_one(key)
 }
 
-/// The shard for `hash` once a map is split: a multiplicative mix, then the
-/// top four bits. The raw top bits are hashbrown's tag and the raw low bits
-/// its bucket index, so neither is used directly.
+/// The shard for `hash` once a map of `N` shards is split: a multiplicative
+/// mix, then the top log2(`N`) bits. The raw top bits are hashbrown's tag
+/// and the raw low bits its bucket index, so neither is used directly.
 #[inline]
-fn shard_of(hash: u64) -> usize {
-    // The top four bits select one of 16 shards.
-    usize::try_from(hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 60).expect("four bits fit usize")
+fn shard_of<const N: usize>(hash: u64) -> usize {
+    const {
+        assert!(
+            N.is_power_of_two() && N > 1,
+            "shard count is a power of two"
+        );
+    };
+    usize::try_from(hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - N.trailing_zeros()))
+        .expect("shard index fits usize")
 }
 
 /// The shard a key occupies once a [`ShardedMap`] is split.
 #[cfg(test)]
 pub(crate) fn shard_index<Q: std::hash::Hash + ?Sized>(key: &Q) -> usize {
-    shard_of(hash_of(key))
+    shard_of::<SHARDS>(hash_of(key))
 }
 
 /// Grow `table` through `insert` past one table's split limit and assert that
@@ -49,16 +77,37 @@ pub(crate) fn shard_index<Q: std::hash::Hash + ?Sized>(key: &Q) -> usize {
 pub(crate) fn assert_growth_bounded<T>(
     name: &str,
     table: &mut T,
-    mut insert: impl FnMut(&mut T, u32),
+    insert: impl FnMut(&mut T, u32),
     capacity: impl Fn(&T) -> usize,
 ) {
-    let count = u32::try_from(SHARD_SPLIT_AT * 2).expect("test size fits u32");
+    assert_growth_bounded_by(
+        name,
+        table,
+        insert,
+        capacity,
+        SHARD_SPLIT_AT * 2,
+        SHARD_SPLIT_AT,
+    );
+}
+
+/// [`assert_growth_bounded`] for `count` inserts and a per-insert growth
+/// `bound`.
+#[cfg(test)]
+pub(crate) fn assert_growth_bounded_by<T>(
+    name: &str,
+    table: &mut T,
+    mut insert: impl FnMut(&mut T, u32),
+    capacity: impl Fn(&T) -> usize,
+    count: usize,
+    bound: usize,
+) {
+    let count = u32::try_from(count).expect("test size fits u32");
     let mut before = capacity(table);
     for i in 0..count {
         insert(table, i);
         let after = capacity(table);
         assert!(
-            after.saturating_sub(before) <= SHARD_SPLIT_AT,
+            after.saturating_sub(before) <= bound,
             "{name}: insert {i} grew capacity {before} -> {after}, rehashing the whole table"
         );
         before = after;
@@ -78,19 +127,33 @@ pub(crate) type Shard<K, V> = hashbrown::HashTable<(K, V)>;
 /// inline, so it costs one branch and no indirection over a plain map, and
 /// the table pointer's niche keeps the map the size of one table.
 /// Iteration order is unspecified, as for any hash map.
+///
+/// `SPLIT` entries fill the single table before it splits into `N` shards,
+/// each sized for `PRESIZE` times its share of the entries. The defaults are
+/// the general-purpose map; [`LargeShardedMap`] is the per-receiver one.
 #[derive(Debug)]
-pub(crate) enum ShardedMap<K, V> {
+pub(crate) enum ShardedMap<
+    K,
+    V,
+    const SPLIT: usize = SHARD_SPLIT_AT,
+    const N: usize = SHARDS,
+    const PRESIZE: usize = 1,
+> {
     One(Shard<K, V>),
-    Split(Box<[Shard<K, V>; SHARDS]>),
+    Split(Box<[Shard<K, V>; N]>),
 }
 
-impl<K, V> Default for ShardedMap<K, V> {
+impl<K, V, const SPLIT: usize, const N: usize, const PRESIZE: usize> Default
+    for ShardedMap<K, V, SPLIT, N, PRESIZE>
+{
     fn default() -> Self {
         Self::One(Shard::new())
     }
 }
 
-impl<K, V> ShardedMap<K, V> {
+impl<K, V, const SPLIT: usize, const N: usize, const PRESIZE: usize>
+    ShardedMap<K, V, SPLIT, N, PRESIZE>
+{
     pub(crate) fn shards(&self) -> &[Shard<K, V>] {
         match self {
             Self::One(one) => std::slice::from_ref(one),
@@ -109,7 +172,7 @@ impl<K, V> ShardedMap<K, V> {
     fn shard(&self, hash: u64) -> &Shard<K, V> {
         match self {
             Self::One(one) => one,
-            Self::Split(shards) => &shards[shard_of(hash)],
+            Self::Split(shards) => &shards[shard_of::<N>(hash)],
         }
     }
 
@@ -117,7 +180,7 @@ impl<K, V> ShardedMap<K, V> {
     fn shard_mut(&mut self, hash: u64) -> &mut Shard<K, V> {
         match self {
             Self::One(one) => one,
-            Self::Split(shards) => &mut shards[shard_of(hash)],
+            Self::Split(shards) => &mut shards[shard_of::<N>(hash)],
         }
     }
 
@@ -171,12 +234,14 @@ impl<K, V> ShardedMap<K, V> {
     }
 }
 
-impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
+impl<K: Eq + std::hash::Hash, V, const SPLIT: usize, const N: usize, const PRESIZE: usize>
+    ShardedMap<K, V, SPLIT, N, PRESIZE>
+{
     pub(crate) fn with_capacity(capacity: usize) -> Self {
-        if capacity < SHARD_SPLIT_AT {
+        if capacity < SPLIT {
             return Self::One(Shard::with_capacity(capacity));
         }
-        let per_shard = capacity.div_ceil(SHARDS);
+        let per_shard = capacity.div_ceil(N);
         Self::Split(Box::new(std::array::from_fn(|_| {
             Shard::with_capacity(per_shard)
         })))
@@ -185,24 +250,24 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
     /// Split before an insert would grow the single table past the limit.
     #[inline]
     fn split_if_full(&mut self) {
-        if matches!(self, Self::One(one) if one.len() >= SHARD_SPLIT_AT) {
+        if matches!(self, Self::One(one) if one.len() >= SPLIT) {
             self.split();
         }
     }
 
     /// Move a single table's entries into the shards. Inserts split at
-    /// `SHARD_SPLIT_AT`, so this moves at most that many entries.
+    /// `SPLIT`, so this moves at most that many entries.
     fn split(&mut self) {
         let Self::One(one) = self else {
             return;
         };
         let one = std::mem::take(one);
-        let per_shard = one.len().div_ceil(SHARDS);
-        let mut shards: Box<[Shard<K, V>; SHARDS]> =
+        let per_shard = one.len().saturating_mul(PRESIZE).div_ceil(N);
+        let mut shards: Box<[Shard<K, V>; N]> =
             Box::new(std::array::from_fn(|_| Shard::with_capacity(per_shard)));
         for entry in one {
             let hash = hash_of(&entry.0);
-            shards[shard_of(hash)].insert_unique(hash, entry, |(key, _)| hash_of(key));
+            shards[shard_of::<N>(hash)].insert_unique(hash, entry, |(key, _)| hash_of(key));
         }
         *self = Self::Split(shards);
     }
@@ -311,16 +376,16 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
         keys: impl IntoIterator<Item = K>,
         checkpoint: &mut impl FnMut(),
     ) {
-        let mut missing = [0_usize; SHARDS];
+        let mut missing = [0_usize; N];
         let mut total = 0_usize;
         for key in keys {
             checkpoint();
             if !self.contains_key(&key) {
-                missing[shard_of(hash_of(&key))] += 1;
+                missing[shard_of::<N>(hash_of(&key))] += 1;
                 total += 1;
             }
         }
-        if self.len().saturating_add(total) >= SHARD_SPLIT_AT {
+        if self.len().saturating_add(total) >= SPLIT {
             self.split();
             checkpoint();
         }
@@ -329,6 +394,25 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
             shards => {
                 for (shard, additional) in shards.iter_mut().zip(missing) {
                     reserve_shard(shard, additional, checkpoint);
+                }
+            }
+        }
+    }
+
+    /// Pre-grow for a batch of up to `additional` new keys that are not
+    /// known yet. A split map gives each shard an even share, so a skewed
+    /// batch can still regrow one shard, which moves only that shard.
+    pub(crate) fn reserve_count_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
+        if self.len().saturating_add(additional) >= SPLIT {
+            self.split();
+            checkpoint();
+        }
+        match self.shards_mut() {
+            [single] => reserve_shard(single, additional, checkpoint),
+            shards => {
+                let share = additional.div_ceil(N);
+                for shard in shards {
+                    reserve_shard(shard, share, checkpoint);
                 }
             }
         }
@@ -425,7 +509,8 @@ impl<S: std::iter::FusedIterator<Item = I>, I: ExactSizeIterator> std::iter::Fus
 {
 }
 
-impl<K, Q, V> std::ops::Index<&Q> for ShardedMap<K, V>
+impl<K, Q, V, const SPLIT: usize, const N: usize, const PRESIZE: usize> std::ops::Index<&Q>
+    for ShardedMap<K, V, SPLIT, N, PRESIZE>
 where
     K: Eq + std::hash::Hash + std::borrow::Borrow<Q>,
     Q: Eq + std::hash::Hash + ?Sized,
@@ -499,7 +584,44 @@ mod tests {
 
     use rustbgpd_wire::{Ipv6Prefix, Prefix, RouteDistinguisher, VpnPrefix, VpnRouteKey};
 
-    use super::{AddrState, FastMap, FastState, SHARD_SPLIT_AT, SHARDS, ShardedMap};
+    use super::{
+        AddrState, FastMap, FastState, LARGE_SHARD_SPLIT_AT, LARGE_SHARDS, LargeShardedMap,
+        SHARD_SPLIT_AT, SHARDS, ShardedMap,
+    };
+
+    /// The defaults are the general-purpose layout every existing map uses.
+    #[test]
+    fn sharded_map_defaults_are_the_general_purpose_layout() {
+        fn general(_: &ShardedMap<u32, u32, 16_384, 16, 1>) {}
+        general(&ShardedMap::<u32, u32>::default());
+        assert_eq!((SHARD_SPLIT_AT, SHARDS), (1 << 14, 16));
+        let mut map = ShardedMap::<u32, u32>::default();
+        for i in 0..=u32::try_from(SHARD_SPLIT_AT).unwrap() {
+            map.insert(i, i);
+        }
+        assert_eq!(map.shards().len(), SHARDS);
+    }
+
+    /// A large map stays one plain table through its split point, then
+    /// splits into shards sized for twice the entries, as a doubling would.
+    #[test]
+    fn large_map_splits_late_into_presized_shards() {
+        let mut map = LargeShardedMap::<u32, u32>::default();
+        let split = u32::try_from(LARGE_SHARD_SPLIT_AT).unwrap();
+        for i in 0..split {
+            map.insert(i, i);
+        }
+        assert_eq!(map.shards().len(), 1);
+        assert_eq!(map.capacity(), LARGE_SHARD_SPLIT_AT);
+        map.insert(split, split);
+        assert_eq!(map.shards().len(), LARGE_SHARDS);
+        // The room a doubling of the full single table would have made, no
+        // more than twice over.
+        let share = (2 * LARGE_SHARD_SPLIT_AT).div_ceil(LARGE_SHARDS);
+        assert!(map.shards().iter().all(|shard| shard.capacity() >= share));
+        assert!(map.capacity() <= 4 * LARGE_SHARD_SPLIT_AT);
+        assert!((0..=split).all(|i| map.get(&i) == Some(&i)));
+    }
 
     const RD: RouteDistinguisher = RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 1]);
 
@@ -677,7 +799,7 @@ mod tests {
     #[test]
     fn sharded_map_splits_once_then_grows_one_shard_per_insert() {
         let total = u32::try_from(SHARD_SPLIT_AT * 4).unwrap();
-        let mut map = ShardedMap::default();
+        let mut map = ShardedMap::<_, _>::default();
         for i in 0..total {
             let capacities: Vec<usize> = map.shards().iter().map(super::Shard::capacity).collect();
             let was_split = map.shards().len() == SHARDS;
@@ -715,7 +837,7 @@ mod tests {
     #[test]
     fn sharded_map_iterators_report_exact_size_and_skip_shards() {
         let total = SHARD_SPLIT_AT * 4 + 3;
-        let mut map = ShardedMap::default();
+        let mut map = ShardedMap::<_, _>::default();
         let mut reference = FastMap::default();
         for i in 0..u32::try_from(total).unwrap() {
             map.insert(vpnv4_key(i), i);
@@ -771,7 +893,7 @@ mod tests {
         let v6 = sequential_vpnv6_keys(KEYS, 128, 0);
         let v4: Vec<_> = (0..u32::try_from(KEYS).unwrap()).map(vpnv4_key).collect();
         for (family, keys) in [("v4", v4), ("v6", v6)] {
-            let mut map = ShardedMap::default();
+            let mut map = ShardedMap::<_, _>::default();
             for key in keys {
                 map.insert(key, ());
             }
