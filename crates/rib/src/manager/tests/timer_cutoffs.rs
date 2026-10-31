@@ -1026,3 +1026,115 @@ async fn later_llgr_deadline_waits_for_its_own_backlog() {
         "B's fresh route replaces its LLGR-stale one in place: {trace:?}"
     );
 }
+
+/// An advertise-if-absent definition over one exact condition prefix with a
+/// 5 s settle time.
+fn absent_if(name: &str, condition: Ipv4Prefix) -> crate::ConditionalAdvertisement {
+    crate::ConditionalAdvertisement {
+        name: Arc::from(name),
+        advertise_policy: rustbgpd_policy::PolicyChain::default(),
+        advertise_if: crate::ConditionalAdvertiseIf::Absent,
+        condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(Prefix::V4(
+            condition,
+        ))],
+        condition_policy: None,
+        settle_time: Duration::from_secs(5),
+        retiring: false,
+    }
+}
+
+/// Definition X's settle deadline falls due with a long batch queued, and
+/// the drain runs past definition Y's later deadline. Y's condition, which
+/// appeared one second after X's, is withdrawn again before Y's deadline,
+/// so Y must keep its applied state: X's turn applies only X. Red proof:
+/// firing every settle deadline up to the current time at X's turn applies
+/// Y's transient observation and suppresses its advertisement.
+#[tokio::test(start_paused = true)]
+async fn later_conditional_settle_waits_for_its_own_backlog() {
+    let c = Ipv4Addr::new(10, 0, 0, 41);
+    let x_condition = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32);
+    let y_condition = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 2), 32);
+    let (tx, rx) = mpsc::channel(16);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let _c_rx = connect_peer(&mut manager, c, 1, false, false);
+    let _ = manager.install_conditional_advertisements(vec![
+        absent_if("x", x_condition),
+        absent_if("y", y_condition),
+    ]);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let _ = manager.fire_conditional_advertisement_timers(tokio::time::Instant::now());
+    let transitions = |name: &str| {
+        counter_metric_value(
+            &metrics,
+            "bgp_conditional_advertisement_transitions_total",
+            &[("name", name)],
+        )
+    };
+    assert!(
+        (transitions("x") - 1.0).abs() < f64::EPSILON,
+        "X advertises"
+    );
+    assert!(
+        (transitions("y") - 1.0).abs() < f64::EPSILON,
+        "Y advertises"
+    );
+
+    manager.handle_update(received(c, 1, vec![make_route(x_condition, c)]));
+    while manager.process_next_route_chunk() {}
+    tokio::time::advance(Duration::from_secs(1)).await;
+    manager.handle_update(received(c, 1, vec![make_route(y_condition, c)]));
+    while manager.process_next_route_chunk() {}
+    let start = tokio::time::Instant::now();
+    let deadline = |manager: &RibManager, name| {
+        manager
+            .conditional_advertisement_state(name)
+            .and_then(|(_, _, deadline)| deadline)
+    };
+    assert_eq!(
+        deadline(&manager, "x"),
+        Some(start + Duration::from_secs(4))
+    );
+    assert_eq!(
+        deadline(&manager, "y"),
+        Some(start + Duration::from_secs(5))
+    );
+
+    tx.try_send(long_batch(c)).unwrap();
+    tokio::time::advance(Duration::from_secs(4)).await;
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending(),
+        "X's deadline captures the long batch and its drain starts"
+    );
+    // After X's cutoff, one second before Y's own deadline.
+    tx.try_send(RibUpdate::RoutesReceived {
+        peer: peer_v4(c),
+        session_id: 1,
+        announced: Vec::new(),
+        withdrawn: vec![(Prefix::V4(y_condition), 0)],
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    })
+    .unwrap();
+    let (reply, mut barrier) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    run_until(&mut actor, &mut barrier);
+
+    assert!(
+        (transitions("y") - 1.0).abs() < f64::EPSILON,
+        "Y's condition settled back before its deadline; transitions={}",
+        transitions("y")
+    );
+    assert!(
+        (transitions("x") - 2.0).abs() < f64::EPSILON,
+        "X's deadline fired and suppressed it"
+    );
+}
