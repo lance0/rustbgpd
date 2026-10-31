@@ -2806,3 +2806,60 @@ async fn rtc_eor_cap_waits_for_pre_cap_route_batch() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// The shared timer fires late for the earlier of two RFC 4684 §6 holds,
+/// past the later one, while the later peer's RT-Constrain End-of-RIB is
+/// still queued: only the due hold expires, so that End-of-RIB releases the
+/// later hold in its own turn. Red proof: expiring every hold up to `now`
+/// sends the later peer's VPN End-of-RIB at the earlier cap.
+#[tokio::test(start_paused = true)]
+async fn rtc_eor_hold_later_cap_waits_for_its_own_turn() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let up = |manager: &mut RibManager, address: Ipv4Addr| {
+        let (tx, rx) = mpsc::channel(64);
+        let mut up = super::lifecycle::test_peer_up(peer_v4(address), 0, tx);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = VPN_FAMILIES.to_vec();
+            sendable_families.push((Afi::Ipv4, Safi::RtConstrain));
+        }
+        manager.handle_update(up);
+        rx
+    };
+    let vpn_eor = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|update| {
+            update
+                .end_of_rib
+                .iter()
+                .any(|family| VPN_FAMILIES.contains(family))
+        })
+    };
+    let earlier = Ipv4Addr::new(10, 0, 0, 2);
+    let later = Ipv4Addr::new(10, 0, 0, 3);
+    let mut earlier_rx = up(&mut manager, earlier);
+    let first = manager.next_eor_hold_deadline().expect("the earlier hold");
+    tokio::time::advance(Duration::from_secs(10)).await;
+    let mut later_rx = up(&mut manager, later);
+    assert!(!vpn_eor(&mut earlier_rx));
+    assert!(!vpn_eor(&mut later_rx));
+    tokio::time::advance(crate::manager::RTC_EOR_HOLD_CAP).await;
+    manager.expire_eor_holds(first);
+    assert!(vpn_eor(&mut earlier_rx), "the due hold expires");
+    assert!(
+        !vpn_eor(&mut later_rx),
+        "the later hold waits for its own turn"
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(later),
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::RtConstrain,
+    });
+    assert!(
+        vpn_eor(&mut later_rx),
+        "its RT-Constrain End-of-RIB releases it"
+    );
+}

@@ -1504,8 +1504,22 @@ separate from control-plane-only families advertising F=1.
   plain refresh to sweep advertisements and withdrawals.
 - A non-GR peer gets an empty End-of-RIB for a gated family at once, and a
   withheld family's empty End-of-RIB is never held for the peer's refresh. A
-  marker held by GR, selection deferral or replay grace waits for the gated
-  table instead.
+  marker held by GR or selection deferral, or by replay grace when a family
+  unlocks mid-session, waits for the gated table instead, for at most 60
+  seconds from when it was first held; after that it goes out once the hold
+  ends, unless the peer's refresh is already queued. A marker replay grace
+  holds at the initial table goes out when the grace window ends.
+- A configured neighbor whose previous session advertised Graceful Restart
+  may still hold our routes stale and deletes them at our End-of-RIB (RFC
+  4724 §4.2). Its gated families' initial End-of-RIB follows the gated table
+  too, for at most 60 seconds (the RFC 4684 §6 filter-wait default); a peer
+  that has not refreshed by then gets the End-of-RIB without the table, and
+  a refresh that our own selection deferral already queued keeps the marker
+  behind its table. A GR restarter's previous session always advertised
+  Graceful Restart, so the same cap bounds its held marker; its own
+  Selection_Deferral_Timer bounds that wait anyway (§4.1). The RIB does not
+  see whether that session ended with a NOTIFICATION, so such an end also
+  delays the marker.
 - Unknown `When-to-refresh` values are invalid control input: rustbgpd resets
   the negotiated Address-Prefix ORF list for that family/type and forces a safe
   resync instead of treating the value as defer-like state.

@@ -863,6 +863,26 @@ impl RibManager {
                         .entry(peer)
                         .or_default()
                         .insert(family);
+                    // The peer's first refresh found the initial marker
+                    // still unsent (an ORF cap released it into the hold):
+                    // it now follows this response's table, as it does when
+                    // the response is not deferred.
+                    let first_refresh = self
+                        .peer_orf_pending
+                        .get(&peer)
+                        .is_some_and(|gated| gated.contains(&family));
+                    if first_refresh
+                        && self
+                            .pending_eor
+                            .get(&peer)
+                            .is_some_and(|pending| pending.contains(&family))
+                        && self
+                            .peer_sendable_families
+                            .get(&peer)
+                            .is_some_and(|sendable| sendable.contains(&family))
+                    {
+                        self.gr_deferred_eor.entry(peer).or_default().insert(family);
+                    }
                     debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 convergence gate");
                     return FamilyReplayOutcome::Deferred;
                 }
