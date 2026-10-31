@@ -1997,6 +1997,10 @@ struct HelperStaleExempt {
     settled: bool,
     /// Families whose waiting keys an ORF gate held at the last flush.
     orf_blocked: Vec<(Afi, Safi)>,
+    /// Families whose waiting keys a gate that may still arm held at the
+    /// last flush: their End-of-RIB is not yet sent, so their keys wait
+    /// for that gate to arm or for the End-of-RIB.
+    gate_blocked: Vec<(Afi, Safi)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3950,8 +3954,17 @@ impl RibManager {
         }) || !self.pending_inbound_refresh.is_empty()
             || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
-                self.helper_stale_needs_rescan(peer, carried)
-                    && self.helper_stale_exempt_runnable(peer)
+                // Outside a hold the next tick retires a synced session's.
+                if self
+                    .selection_deferral
+                    .as_ref()
+                    .is_some_and(selection_deferral::SelectionDeferral::has_active_gates)
+                {
+                    self.helper_stale_needs_rescan(peer, carried)
+                        && self.helper_stale_exempt_runnable(peer)
+                } else {
+                    self.helper_stale_exempt_synced(peer)
+                }
             })
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {

@@ -467,11 +467,12 @@ impl RibManager {
         }
         self.replacement_checkpoint(true);
         // The committed table forgets a withdrawn row's provenance; keep the
-        // exempt rows withdrawn outright in the hold for a GR helper's flap.
+        // exempt rows withdrawn outright while a hold may defer our
+        // End-of-RIB, for a GR helper's flap.
         if self
             .selection_deferral
             .as_ref()
-            .is_some_and(super::super::selection_deferral::SelectionDeferral::has_active_gates)
+            .is_some_and(super::super::selection_deferral::SelectionDeferral::may_hold)
         {
             let withdrawn = out
                 .deltas

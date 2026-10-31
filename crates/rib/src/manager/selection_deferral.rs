@@ -510,6 +510,17 @@ impl SelectionDeferral {
         self.active.values().any(|gate| gate.armed)
     }
 
+    /// Whether a family is still unreleased: its gate is armed, or a waiter
+    /// can still arm it before the deadline.
+    pub(super) fn may_hold(&self) -> bool {
+        !self.active.is_empty()
+    }
+
+    /// [`Self::may_hold`] for one family.
+    pub(super) fn may_hold_family(&self, family: (Afi, Safi)) -> bool {
+        self.active.contains_key(&family)
+    }
+
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.active
             .get(&family)
@@ -1529,6 +1540,9 @@ impl RibManager {
             }
         }
         });
+        // A family released before it ever armed skips the completion, so
+        // retire what no hold can still need here too.
+        self.helper_stale_exempt_in_hold();
     }
 
     fn complete_selection_family(
@@ -1542,18 +1556,10 @@ impl RibManager {
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
         checkpoint();
         self.wake_selection_partial_recovery(family);
-        if !self
-            .selection_deferral
-            .as_ref()
-            .is_some_and(SelectionDeferral::has_active_gates)
-        {
-            // The hold no longer defers our End-of-RIB, which purges the
-            // stale rows a GR helper keeps once it is sent. A planned-restart
-            // grace window can still hold it queued; the carry is not kept
-            // for that window.
-            self.hold_exempt_withdrawn.clear();
-            self.helper_stale_exempt.clear();
-        }
+        // A released family's End-of-RIB purges the stale rows a GR helper
+        // keeps once it is sent. Carries and ledgers wait only while a
+        // family can still be held, or for a session not yet synced.
+        self.helper_stale_exempt_in_hold();
         tracing::info!(
             afi = ?family.0,
             safi = ?family.1,
