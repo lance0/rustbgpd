@@ -11,7 +11,7 @@ use super::*;
 use rustbgpd_api::peer_types::SessionLifecycleEventType;
 use rustbgpd_rib::update::OutboundRouteUpdate;
 use rustbgpd_rib::{PeerEndpoint, PeerId, PeerRetention, RibManager};
-use rustbgpd_transport::{SessionEndRetention, SessionLifecycleNotification, SessionRole};
+use rustbgpd_transport::{SessionEndRetention, SessionRole};
 
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const MEMBER: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9));
@@ -19,21 +19,31 @@ const MEMBER_ASN: u32 = 65002;
 
 /// The session ended with GR retention of its routes.
 const THEIRS: SessionEndRetention = SessionEndRetention {
+    established: true,
     theirs: true,
     ours_for: None,
 };
 /// The session ended with the member, as our helper, holding ours for 120 s.
 const OURS: SessionEndRetention = SessionEndRetention {
+    established: true,
     theirs: false,
     ours_for: Some(Duration::from_secs(120)),
 };
 /// Both.
 const BOTH: SessionEndRetention = SessionEndRetention {
+    established: true,
     theirs: true,
     ours_for: Some(Duration::from_secs(120)),
 };
-/// Nothing held, as after a Hard Reset or a session that never established.
+/// Nothing held after an Established period, as after a Hard Reset.
+const HARD_RESET: SessionEndRetention = SessionEndRetention {
+    established: true,
+    theirs: false,
+    ours_for: None,
+};
+/// A session that never reached Established.
 const NOTHING: SessionEndRetention = SessionEndRetention {
+    established: false,
     theirs: false,
     ours_for: None,
 };
@@ -106,20 +116,6 @@ async fn open_from(mgr: &mut PeerManager, asn: u32) -> PeerId {
 
 async fn open_validated(mgr: &mut PeerManager) -> PeerId {
     open_from(mgr, MEMBER_ASN).await
-}
-
-/// The member's session reaches Established.
-fn established(mgr: &mut PeerManager) {
-    let session_id = mgr.peers[&key(MEMBER)].session_id();
-    mgr.handle_session_lifecycle_notification(&SessionLifecycleNotification::StateChanged {
-        session_id,
-        role: SessionRole::Primary,
-        peer_addr: MEMBER,
-        peer_asn: Some(MEMBER_ASN),
-        old: SessionState::OpenConfirm,
-        new: SessionState::Established,
-        teardown_cause: None,
-    });
 }
 
 /// The member's session goes idle after its session reported `end`.
@@ -334,9 +330,10 @@ async fn retained_member(
 /// reconnects inside the restart time. The reconnect is the same RIB peer
 /// and the same managed neighbor (no second `PEER_ADDED`), so its
 /// End-of-RIB ends the retention: the route it re-sent stays, the rest are
-/// swept; at Established the live neighbor owns the identity. Red proof:
-/// deleting the member at idle purges the retained routes at once and gives
-/// the reconnect a new handle.
+/// swept. Its session's own end, which reports that it reached Established,
+/// then decides, not the old retention. Red proof: deleting the member at
+/// idle purges the retained routes at once and gives the reconnect a new
+/// handle; resuming the old retention regardless keeps it past a Hard Reset.
 #[tokio::test]
 async fn retained_member_reconnects_as_the_same_peer_and_its_eor_ends_retention() {
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
@@ -359,8 +356,6 @@ async fn retained_member_reconnects_as_the_same_peer_and_its_eor_ends_retention(
         peer,
         "it resumes the same handle"
     );
-    established(&mut mgr);
-    assert!(mgr.retained_dynamic.is_empty(), "the live neighbor owns it");
     let (tx, _rx) = mpsc::channel(16);
     send_all(
         &rib_tx,
@@ -390,6 +385,16 @@ async fn retained_member_reconnects_as_the_same_peer_and_its_eor_ends_retention(
     assert_eq!(
         presence_events(&mgr, SessionLifecycleEventType::PeerRemoved),
         0
+    );
+
+    // The reconnect's own end decides: it reached Established, so the old
+    // retention is not restored, and a Hard Reset end holds nothing.
+    idle(&mut mgr, HARD_RESET).await;
+    assert!(mgr.retained_dynamic.is_empty());
+    assert_eq!(mgr.dynamic_peer_count, 0);
+    assert_eq!(
+        presence_events(&mgr, SessionLifecycleEventType::PeerRemoved),
+        1
     );
     rib_task.abort();
 }
@@ -760,4 +765,188 @@ async fn due_members_share_one_query_and_an_unanswered_one_backs_off() {
         drop(held_replies);
     }
     drop(clients);
+}
+
+/// An answer about an earlier retention of the address does not apply to a
+/// newer one: here the member was deleted and retained anew while the query
+/// was out, and the answer that nothing is retained must not delete the new
+/// retention. Red proof: matching the answer by address alone deletes it.
+#[tokio::test]
+async fn an_answer_about_an_earlier_retention_is_ignored() {
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut mgr = manager_on(rib_tx);
+    let _client = accept(&mut mgr).await;
+    mgr.peers[&key(MEMBER)]
+        .transport_config
+        .rib_peer
+        .resolve(|| PeerEndpoint::new(MEMBER, None), MEMBER_ASN);
+    idle(&mut mgr, THEIRS).await;
+    mgr.check_due_retained_dynamic().await;
+    let reply = loop {
+        if let RibUpdate::QueryPeerRetentions { reply, .. } = rib_rx.recv().await.unwrap() {
+            break reply;
+        }
+    };
+    let _ = reply.send(vec![PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    }]);
+    let pass = mgr.retention.pass.as_mut().expect("one pass");
+    let answer = (&mut pass.answer).await.unwrap();
+
+    // Meanwhile the address was retained anew.
+    let newer = mgr.retained_dynamic.get_mut(&key(MEMBER)).unwrap();
+    newer.retained_at += Duration::from_millis(1);
+    let check_at = newer.check_at;
+    mgr.finish_retention_pass(answer).await;
+    let newer = &mgr.retained_dynamic[&key(MEMBER)];
+    assert!(newer.theirs, "the newer retention still holds the routes");
+    assert_eq!(newer.check_at, check_at);
+    assert_eq!(mgr.dynamic_peer_count, 1);
+}
+
+/// Complete the member's handshake from `asn` over `client` with a GR
+/// capability that lists no family (a helper only, FRR's default), then
+/// deliver the session's notifications as the run loop would.
+async fn establish_from(mgr: &mut PeerManager, client: &mut TcpStream, asn: u32) {
+    use super::collision::{read_bgp_message, send_bgp_message};
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(client, &mut buf).await,
+        Message::Open(_)
+    ));
+    let open = OpenMessage {
+        version: 4,
+        my_as: u16::try_from(asn).unwrap(),
+        hold_time: 90,
+        bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+        capabilities: vec![
+            Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            Capability::FourOctetAs { asn },
+            Capability::GracefulRestart {
+                restart_state: false,
+                notification: false,
+                restart_time: 120,
+                families: vec![],
+            },
+        ],
+    };
+    send_bgp_message(client, &Message::Open(open)).await;
+    assert!(matches!(
+        read_bgp_message(client, &mut buf).await,
+        Message::Keepalive
+    ));
+    send_bgp_message(client, &Message::Keepalive).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !mgr.peers[&key(MEMBER)].handle().is_established() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the session establishes");
+    while let Ok(notification) = mgr.session_notify_rx.try_recv() {
+        mgr.handle_session_notification(notification).await;
+    }
+}
+
+/// Close the client end and deliver the session's notifications until it
+/// went idle, as the run loop would.
+async fn drop_until_idle(mgr: &mut PeerManager, client: TcpStream) {
+    drop(client);
+    while mgr.peers.contains_key(&key(MEMBER)) {
+        let notification =
+            tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+                .await
+                .expect("the session reports going idle")
+                .unwrap();
+        mgr.handle_session_notification(notification).await;
+    }
+}
+
+/// The blocker's shape end to end, with the session's own report of its
+/// end: a member whose OPEN carries a GR capability listing no family is
+/// still our helper, so its transport loss keeps its identity for the
+/// window it may hold our routes, and its counters. Its reconnect from the
+/// same AS resumes both. Red proof: keying the hold of ours on listed
+/// families deletes the member at idle.
+#[tokio::test]
+async fn helper_only_member_is_retained_from_its_sessions_own_end() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let mut client = accept(&mut mgr).await;
+    establish_from(&mut mgr, &mut client, MEMBER_ASN).await;
+    let peer = mgr.peers[&key(MEMBER)]
+        .transport_config
+        .rib_peer
+        .get()
+        .expect("the validated OPEN resolved its identity");
+    drop_until_idle(&mut mgr, client).await;
+    let retained = &mgr.retained_dynamic[&key(MEMBER)];
+    assert!(!retained.theirs, "no family listed: nothing of theirs held");
+    assert!(retained.ours_until.is_some(), "it may hold ours");
+    assert_eq!(mgr.neighbor_counters[&key(MEMBER)].flaps(), 1);
+
+    let mut client = accept(&mut mgr).await;
+    establish_from(&mut mgr, &mut client, MEMBER_ASN).await;
+    let live = &mgr.peers[&key(MEMBER)].transport_config;
+    assert_eq!(
+        live.rib_peer.get(),
+        Some(peer),
+        "it resumes the same handle"
+    );
+    assert_eq!(
+        live.neighbor_counters.flaps(),
+        1,
+        "its fresh counter block continues the old"
+    );
+    drop(client);
+    loc_rib_count(&rib_tx).await;
+    rib_task.abort();
+}
+
+/// A reconnect from another AS starts its counters at zero, as a new
+/// neighbor does, while the same AS continues them. Red proof: handing the
+/// reconnect the retained counter block carries the old speaker's counts.
+#[tokio::test]
+async fn reconnect_from_another_as_counts_afresh() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let mut client = accept(&mut mgr).await;
+    establish_from(&mut mgr, &mut client, MEMBER_ASN).await;
+    drop_until_idle(&mut mgr, client).await;
+    assert_eq!(mgr.neighbor_counters[&key(MEMBER)].flaps(), 1);
+
+    let mut client = accept(&mut mgr).await;
+    establish_from(&mut mgr, &mut client, 65099).await;
+    assert!(mgr.retained_dynamic.is_empty());
+    assert_eq!(mgr.neighbor_counters[&key(MEMBER)].flaps(), 0);
+    assert_eq!(
+        mgr.peers[&key(MEMBER)]
+            .transport_config
+            .neighbor_counters
+            .flaps(),
+        0
+    );
+    drop(client);
+    loc_rib_count(&rib_tx).await;
+    rib_task.abort();
+}
+
+/// An in-range connection refused before its session starts, here for a
+/// missing peer group, does not evict a neighbor kept while it may hold our
+/// routes. Red proof: evicting at the limit check loses the member to a
+/// connection that is dropped anyway.
+#[tokio::test]
+async fn a_refused_accept_evicts_nothing() {
+    let other = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10));
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    mgr.dynamic_neighbor_limit = 1;
+    retained_member(&mut mgr, &rib_tx, OURS).await;
+    mgr.current_config.peer_groups.clear();
+    let _refused = accept_at(&mut mgr, other).await;
+    assert!(mgr.peers.is_empty(), "the connection is refused");
+    assert!(mgr.retained_dynamic.contains_key(&key(MEMBER)));
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    rib_task.abort();
 }

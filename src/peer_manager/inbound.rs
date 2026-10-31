@@ -431,18 +431,15 @@ impl PeerManager {
                 return;
             }
             // Check dynamic peer limit; a retained identity already counts,
-            // and one kept only while it may hold our routes gives way.
+            // and one kept only while it may hold our routes gives way once
+            // the accept passes its other checks.
             let retained = self
                 .retained_dynamic
                 .contains_key(&PeerKey::new(peer_ip, None));
-            if !retained
-                && self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize
-                && self.match_dynamic_range(peer_ip).is_some()
-            {
-                self.evict_retained_dynamic_for_slot().await;
-            }
+            let at_limit =
+                !retained && self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize;
             if let Some(range) = self.match_dynamic_range(peer_ip) {
-                if !retained && self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
+                if at_limit && !self.has_evictable_retained_dynamic() {
                     self.metrics.record_dynamic_neighbor_limit_rejection();
                     self.metrics
                         .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
@@ -500,7 +497,13 @@ impl PeerManager {
                 let rfc8212_external = resolved.rfc8212_external;
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
                 let mut transport = self.build_transport_config(&cfg);
-                transport.neighbor_counters = self.neighbor_counters_for(&dynamic_peer_key);
+                // A reconnect to a retained neighbor counts afresh until its
+                // OPEN shows the same AS.
+                transport.neighbor_counters = if retained {
+                    rustbgpd_transport::NeighborCounters::default()
+                } else {
+                    self.neighbor_counters_for(&dynamic_peer_key)
+                };
                 // A dynamic neighbor gets its RIB identity only once its
                 // OPEN validates: the session allocates it on first use. A
                 // retained identity resumes, with what the RIB holds for it.
@@ -587,6 +590,12 @@ impl PeerManager {
                         self.local_forwarding_state.clone(),
                     ));
 
+                if at_limit && !self.evict_retained_dynamic_for_slot().await {
+                    self.metrics.record_dynamic_neighbor_limit_rejection();
+                    self.metrics
+                        .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
+                    return;
+                }
                 let session_id = self.allocate_session_id();
                 let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
                     transport.clone(),

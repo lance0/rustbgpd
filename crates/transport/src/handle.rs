@@ -1294,6 +1294,9 @@ impl RetainedConnectionState {
 /// period ended, as the session decided when it left Established.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionEndRetention {
+    /// The session reached Established: the rest describes how that period
+    /// ended. Published by the session actor itself, never dropped.
+    pub established: bool,
     /// The session handed the peer's routes to the RIB for GR or LLGR
     /// retention.
     pub theirs: bool,

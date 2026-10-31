@@ -1759,11 +1759,17 @@ fn notification_descriptions_preserve_registered_and_numeric_inner_causes() {
 }
 
 /// What the peer, as our helper, may hold of ours once the session leaves
-/// Established: our restart time, plus our LLGR stale time only when both
-/// sides advertised LLGR, and nothing after a Hard Reset, a NOTIFICATION
-/// without the N bit (RFC 8538 §3), or from a peer that advertised neither
-/// capability. Red proof: dropping any guard changes its row.
+/// Established: our restart time whenever it advertised any GR capability,
+/// families or not (RFC 4724 §3), plus our LLGR stale time only when both
+/// sides advertised LLGR; nothing after a Hard Reset either way, a
+/// NOTIFICATION without the N bit (RFC 8538 §3), with local GR off, or from
+/// a peer with no GR capability. Red proof: dropping any guard, or keying on
+/// listed families, changes its row.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a table test: one row per session-end input, then one shared check"
+)]
 async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
     #[derive(Clone, Copy)]
     #[expect(
@@ -1773,25 +1779,44 @@ async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
     struct Case {
         name: &'static str,
         peer_gr: bool,
+        families: bool,
         peer_llgr: bool,
+        local_gr: bool,
         local_llgr: u32,
         notification: bool,
         n_bit: bool,
-        hard_reset: bool,
+        received_hard_reset: bool,
+        sent_hard_reset: bool,
         expect: Option<u64>,
     }
     let base = Case {
         name: "transport loss",
         peer_gr: true,
+        families: true,
         peer_llgr: false,
+        local_gr: true,
         local_llgr: 0,
         notification: false,
         n_bit: false,
-        hard_reset: false,
+        received_hard_reset: false,
+        sent_hard_reset: false,
         expect: Some(90),
     };
     for case in [
         base,
+        Case {
+            name: "helper-only GR capability",
+            families: false,
+            ..base
+        },
+        Case {
+            name: "helper-only GR capability with LLGR",
+            families: false,
+            peer_llgr: true,
+            local_llgr: 600,
+            expect: Some(690),
+            ..base
+        },
         Case {
             name: "both advertised LLGR",
             peer_llgr: true,
@@ -1810,6 +1835,12 @@ async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
             ..base
         },
         Case {
+            name: "local GR off",
+            local_gr: false,
+            expect: None,
+            ..base
+        },
+        Case {
             name: "NOTIFICATION without the N bit",
             notification: true,
             expect: None,
@@ -1822,15 +1853,23 @@ async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
             ..base
         },
         Case {
-            name: "Hard Reset",
+            name: "Hard Reset received",
             notification: true,
             n_bit: true,
-            hard_reset: true,
+            received_hard_reset: true,
             expect: None,
             ..base
         },
         Case {
-            name: "peer advertised neither",
+            name: "Hard Reset sent",
+            notification: true,
+            n_bit: true,
+            sent_hard_reset: true,
+            expect: None,
+            ..base
+        },
+        Case {
+            name: "no GR capability",
             peer_gr: false,
             expect: None,
             ..base
@@ -1838,15 +1877,36 @@ async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
     ] {
         let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
         let mut neg = negotiated_session(65002, false);
-        neg.peer_gr_capable = case.peer_gr;
+        let gr_families = if case.families {
+            vec![rustbgpd_wire::GracefulRestartFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+            }]
+        } else {
+            vec![]
+        };
+        if case.peer_gr {
+            neg.peer_capabilities
+                .push(rustbgpd_wire::Capability::GracefulRestart {
+                    restart_state: false,
+                    notification: case.n_bit,
+                    restart_time: 120,
+                    families: gr_families.clone(),
+                });
+        }
+        // As negotiation derives them: listed families make it GR-capable.
+        neg.peer_gr_capable = case.peer_gr && case.families;
+        neg.peer_gr_families = gr_families;
         neg.peer_llgr_capable = case.peer_llgr;
         neg.peer_notification_gr = case.n_bit;
-        session.config.peer.graceful_restart = true;
+        session.config.peer.graceful_restart = case.local_gr;
         session.config.peer.gr_restart_time = 90;
         session.config.llgr_stale_time = case.local_llgr;
         session.negotiated = Some(Arc::new(neg));
         session.notification_teardown = case.notification;
-        session.received_hard_reset = case.hard_reset;
+        session.received_hard_reset = case.received_hard_reset;
+        session.sent_hard_reset = case.sent_hard_reset;
         session.execute_actions(vec![Action::SessionDown]).await;
         assert_eq!(
             session.established.end_retention().ours_for,

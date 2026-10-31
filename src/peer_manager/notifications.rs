@@ -391,7 +391,7 @@ impl PeerManager {
                             self.seed_peer_truth_metrics(&peer_key, false);
                             self.publish_peer_info_metric(&peer_key);
                             info!(peer = %peer_addr, "retained dynamic peer disabled after terminal block or failed RIB retirement fence");
-                        } else if self.resume_retained_dynamic(&peer_key) {
+                        } else if self.resume_retained_dynamic(&peer_key, end_retention) {
                             // A reconnect that never reached Established: the
                             // retention it waited on stands, unchanged.
                         } else if self.retain_dynamic_identity(&peer_key, &managed, end_retention) {
@@ -667,14 +667,6 @@ impl PeerManager {
             self.learn_dynamic_remote_asn(&peer_key, peer_asn);
         }
         self.note_unnumbered_session_state(&peer_key, *old, *new);
-        if *new == rustbgpd_fsm::SessionState::Established
-            && self
-                .peers
-                .get(&peer_key)
-                .is_some_and(|managed| managed.session_id() == session_id)
-        {
-            self.retained_dynamic_established(&peer_key);
-        }
         self.publish_state_lifecycle_event(&peer_key, role, *old, *new, teardown_cause.as_deref());
     }
 

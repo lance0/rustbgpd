@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_rib::{PeerRetention, RibUpdate};
-use rustbgpd_transport::{RibPeerSlot, SessionEndRetention};
+use rustbgpd_transport::{NeighborCounters, RibPeerSlot, SessionEndRetention};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
@@ -38,6 +38,9 @@ pub(super) struct RetainedDynamicPeer {
     /// The neighbor's resolved slot, handed back when a reconnect that never
     /// reached Established goes idle.
     pub(super) slot: RibPeerSlot,
+    /// The neighbor's counter block. A reconnect counts in a fresh block,
+    /// which continues this one only once it proves the same neighbor.
+    pub(super) counters: NeighborCounters,
     pub(super) accepted: AcceptedDynamicRange,
     pub(super) remote_asn: u32,
     pub(super) retained_at: Instant,
@@ -74,9 +77,10 @@ impl Default for RetentionChecks {
     }
 }
 
-/// The batched retention query in flight, for these neighbors in order.
+/// The batched retention query in flight, for these neighbors in order,
+/// each with the `retained_at` of the retention it asked about.
 pub(super) struct RetentionPass {
-    pub(super) peers: Vec<PeerKey>,
+    pub(super) peers: Vec<(PeerKey, Instant)>,
     pub(super) answer: tokio::task::JoinHandle<Option<Vec<PeerRetention>>>,
 }
 
@@ -105,6 +109,7 @@ impl PeerManager {
         let ours_until = end.ours_for.map(|window| now + window + hold);
         let mut retained = RetainedDynamicPeer {
             slot: managed.transport_config.rib_peer.clone(),
+            counters: managed.transport_config.neighbor_counters.clone(),
             accepted,
             remote_asn: managed.remote_asn,
             retained_at: now,
@@ -140,11 +145,19 @@ impl PeerManager {
     pub(super) async fn retained_dynamic_open_from(&mut self, peer: &PeerKey, peer_asn: u32) {
         let Some(retained) = self
             .retained_dynamic
-            .get(peer)
-            .filter(|retained| retained.check_at.is_none() && retained.remote_asn != peer_asn)
+            .get_mut(peer)
+            .filter(|retained| retained.check_at.is_none())
         else {
             return;
         };
+        if retained.remote_asn == peer_asn {
+            // The same neighbor: its fresh counter block continues the old.
+            if let Some(live) = self.neighbor_counters.get(peer) {
+                live.absorb(&retained.counters);
+                retained.counters = live.clone();
+            }
+            return;
+        }
         let previous_asn = retained.remote_asn;
         let handle = retained.slot.get();
         self.retained_dynamic.remove(peer);
@@ -182,19 +195,28 @@ impl PeerManager {
             .is_some()
     }
 
-    /// The reconnect reached Established: the live neighbor owns the
-    /// identity from here.
-    pub(super) fn retained_dynamic_established(&mut self, peer: &PeerKey) {
-        self.retained_dynamic.remove(peer);
-    }
-
-    /// The reconnect went idle without reaching Established: the retention
-    /// it waited on stands unchanged and is checked again. `false` when the
-    /// address has none.
-    pub(super) fn resume_retained_dynamic(&mut self, peer: &PeerKey) -> bool {
+    /// A reconnect from a retained neighbor's address went idle. If it never
+    /// reached Established, as its session's own end report says, the
+    /// retention it waited on stands unchanged and is checked again, and its
+    /// counts join the neighbor's. If it did, its own end decides from here
+    /// and the old retention is dropped. `false` when nothing was resumed.
+    pub(super) fn resume_retained_dynamic(
+        &mut self,
+        peer: &PeerKey,
+        end: SessionEndRetention,
+    ) -> bool {
         let Some(retained) = self.retained_dynamic.get_mut(peer) else {
             return false;
         };
+        if end.established {
+            self.retained_dynamic.remove(peer);
+            return false;
+        }
+        if let Some(live) = self.neighbor_counters.get(peer) {
+            retained.counters.absorb(live);
+        }
+        self.neighbor_counters
+            .insert(peer.clone(), retained.counters.clone());
         self.rib_peers.insert(peer.clone(), retained.slot.clone());
         retained.check_at = Some(Instant::now());
         true
@@ -261,6 +283,13 @@ impl PeerManager {
             .iter()
             .map(|peer| self.retained_dynamic[peer].slot.current(peer.address))
             .collect();
+        let ask = ask
+            .into_iter()
+            .map(|peer| {
+                let retained_at = self.retained_dynamic[&peer].retained_at;
+                (peer, retained_at)
+            })
+            .collect();
         let rib_tx = self.rib_tx.clone();
         let answer = tokio::spawn(async move {
             let (reply, response) = tokio::sync::oneshot::channel();
@@ -304,12 +333,10 @@ impl PeerManager {
                 retry_secs = retry.as_secs(),
                 "the RIB did not answer a retained dynamic neighbor check; retrying"
             );
-            for peer in pass.peers {
-                if self
-                    .retained_dynamic
-                    .get(&peer)
-                    .is_some_and(|retained| retained.check_at.is_some())
-                {
+            for (peer, retained_at) in pass.peers {
+                if self.retained_dynamic.get(&peer).is_some_and(|retained| {
+                    retained.check_at.is_some() && retained.retained_at == retained_at
+                }) {
                     self.set_retained_check(&peer, Some(now + retry));
                 }
             }
@@ -317,13 +344,12 @@ impl PeerManager {
         };
         self.retention.backoff = RETENTION_RETRY;
         let mut delete = Vec::new();
-        for (peer, retention) in pass.peers.into_iter().zip(answer) {
-            // Gone, or live again while the query was out.
-            let Some(retained) = self
-                .retained_dynamic
-                .get_mut(&peer)
-                .filter(|retained| retained.check_at.is_some())
-            else {
+        for ((peer, retained_at), retention) in pass.peers.into_iter().zip(answer) {
+            // Gone, live again, or retained anew while the query was out:
+            // the answer was about an earlier retention.
+            let Some(retained) = self.retained_dynamic.get_mut(&peer).filter(|retained| {
+                retained.check_at.is_some() && retained.retained_at == retained_at
+            }) else {
                 continue;
             };
             retained.theirs = retention.stale_routes > 0;
@@ -370,18 +396,24 @@ impl PeerManager {
     /// only because it may hold our routes. `false` when there is none: a
     /// neighbor whose routes the RIB retains keeps its slot.
     pub(super) async fn evict_retained_dynamic_for_slot(&mut self) -> bool {
-        let Some(peer) = self
-            .retained_dynamic
-            .iter()
-            .filter(|(_, retained)| retained.check_at.is_some() && !retained.theirs)
-            .min_by_key(|(_, retained)| retained.retained_at)
-            .map(|(peer, _)| peer.clone())
-        else {
+        let Some(peer) = self.oldest_evictable_retained_dynamic() else {
             return false;
         };
         info!(peer = %peer, "dynamic neighbor limit reached: evicting the oldest idle neighbor kept only while it may hold our routes");
         self.delete_retained_dynamic(&peer).await;
         true
+    }
+
+    pub(super) fn has_evictable_retained_dynamic(&self) -> bool {
+        self.oldest_evictable_retained_dynamic().is_some()
+    }
+
+    fn oldest_evictable_retained_dynamic(&self) -> Option<PeerKey> {
+        self.retained_dynamic
+            .iter()
+            .filter(|(_, retained)| retained.check_at.is_some() && !retained.theirs)
+            .min_by_key(|(_, retained)| retained.retained_at)
+            .map(|(peer, _)| peer.clone())
     }
 
     /// Delete an idle retained neighbor now, releasing its RIB identity. A

@@ -3,7 +3,8 @@
 - Keep an idle `[[dynamic_neighbors]]` peer's RIB identity, and its
   `dynamic_neighbor_limit` slot, while graceful restart may still hold routes
   on either side: the GR or LLGR stale routes we retain for it, and, when its
-  last session made it our helper, ours it may retain, for our restart time
+  last session made it our helper (any GR capability, including a
+  helper-only one listing no family), ours it may retain, for our restart time
   plus our LLGR stale time when both sides advertised LLGR, plus a hold time.
   A session that ended with a Hard Reset, or a NOTIFICATION without the
   RFC 8538 N bit, leaves nothing of ours held. Its automatic removal used to
@@ -22,7 +23,8 @@
 - A reconnect to a retained dynamic neighbor whose OPEN comes from a
   different AS is a new speaker: it gets a new RIB identity, and the GR or
   LLGR routes retained for the last one, and that one's hold of ours, are
-  purged with the old identity.
+  purged with the old identity. Its counters start afresh; a reconnect from
+  the same AS continues them.
 - An interface-only neighbor's binding retirement no longer forgets that the
   ended session may still hold our routes stale, so a rebind to the same
   endpoint keeps its ORF-gated End-of-RIB behind the table.

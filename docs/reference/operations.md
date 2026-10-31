@@ -2739,7 +2739,8 @@ retention-only row (source `retention only (no session or configuration)`,
 `rbgp neighbor <address>` still shows it. Doctor runs only the retention
 check for such a row. The neighbor keeps its RIB identity and its
 dynamic-neighbor slot until that retention ends and, when its last session
-made it our helper, until it can no longer hold our routes: our restart time,
+made it our helper (any GR capability does, including one that lists no
+family), until it can no longer hold our routes: our restart time,
 plus our `llgr_stale_time` when both sides advertised LLGR, plus the hold time
 after the session ended. A session that ended with a Hard Reset, or with a
 NOTIFICATION when the RFC 8538 N bit was not negotiated, leaves the peer
