@@ -4895,10 +4895,7 @@ impl RibManager {
             // enter this block and therefore retain their zero label cost.
             let peer_label = peer.label();
             let loc_rib_len = self.loc_rib.len();
-            let hold_active = self
-                .selection_deferral
-                .as_ref()
-                .is_some_and(super::selection_deferral::SelectionDeferral::may_hold);
+            let hold_active = self.helper_stale_may_hold(peer);
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
