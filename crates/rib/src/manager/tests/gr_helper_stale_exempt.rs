@@ -2313,3 +2313,23 @@ fn grace_batch_release_retires_linearly() {
         grace_batch_release,
     );
 }
+
+/// The carried-family shortcut reads only the first and last keys, which
+/// holds while `Prefix` orders every IPv4 prefix before every IPv6 one.
+/// A reordered or added variant fails here.
+#[test]
+fn carried_keys_sort_ipv4_before_ipv6() {
+    const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+    let last_v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::BROADCAST, 32));
+    let first_v6 = Prefix::V6(Ipv6Prefix::new("::".parse().unwrap(), 0));
+    assert!(last_v4 < first_v6);
+    let keys = std::collections::BTreeSet::from([
+        (first_v6, 0),
+        (Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)), 3),
+        (last_v4, 7),
+    ]);
+    assert_eq!(
+        super::peer_lifecycle::carried_families(&keys).collect::<Vec<_>>(),
+        [FAMILY, V6]
+    );
+}

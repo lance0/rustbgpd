@@ -149,6 +149,17 @@ pub(super) fn insert_bounded(
     }
 }
 
+/// The unicast families `keys` cover. `Prefix` orders every `V4` before
+/// every `V6`, so the first and last keys name each family present.
+pub(super) fn carried_families(
+    keys: &std::collections::BTreeSet<(Prefix, u32)>,
+) -> impl Iterator<Item = (Afi, Safi)> + '_ {
+    keys.first()
+        .into_iter()
+        .chain(keys.last())
+        .map(|(prefix, _)| prefix_family(prefix))
+}
+
 /// Whether any carried key's prefix is in `changed`, walking the smaller
 /// side.
 fn touches_changed(
@@ -1039,10 +1050,15 @@ impl RibManager {
     /// The carried keys this peer can withdraw now: not in a family whose
     /// initial table an ORF gate still holds.
     fn helper_stale_flushable(&self, peer: PeerId, key: (Prefix, u32)) -> bool {
+        self.helper_stale_family_flushable(peer, prefix_family(&key.0))
+    }
+
+    /// [`Self::helper_stale_flushable`] for a family.
+    fn helper_stale_family_flushable(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
         !self
             .peer_orf_pending
             .get(&peer)
-            .is_some_and(|gated| gated.contains(&prefix_family(&key.0)))
+            .is_some_and(|gated| gated.contains(&family))
     }
 
     /// Whether the current session holds this unicast key.
@@ -1317,14 +1333,9 @@ impl RibManager {
                 self.eor_held(peer, family) || self.helper_stale_family_retired(peer, family)
             })
             // A family whose End-of-RIB went out retires its keys, waiting
-            // ones included; the first and last keys name every family
-            // present.
-            || carried
-                .keys
-                .first()
-                .into_iter()
-                .chain(carried.keys.last())
-                .any(|&(prefix, _)| self.helper_stale_family_retired(peer, prefix_family(&prefix)))
+            // ones included.
+            || carried_families(&carried.keys)
+                .any(|family| self.helper_stale_family_retired(peer, family))
     }
 
     /// No held End-of-RIB can need `family`'s carried keys at `peer` any
@@ -1365,14 +1376,9 @@ impl RibManager {
             })
         }) && (!self.dirty_peers.contains(&peer) || self.selection_partial_caught_up(peer))
             && !self.pending_initial_registrations.contains(&peer)
-            // The first and last keys name every family present.
             && self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
-                carried
-                    .keys
-                    .first()
-                    .into_iter()
-                    .chain(carried.keys.last())
-                    .any(|&key| self.helper_stale_flushable(peer, key))
+                carried_families(&carried.keys)
+                    .any(|family| self.helper_stale_family_flushable(peer, family))
             })
     }
 
