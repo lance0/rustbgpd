@@ -1249,7 +1249,10 @@ impl RibManager {
                 .pending_eor
                 .get(&peer)
                 .is_some_and(|families| families.iter().any(|&(_, safi)| safi == Safi::Unicast))
-            && !self.gr_deferred_eor.contains_key(&peer)
+            && !self
+                .gr_deferred_eor
+                .get(&peer)
+                .is_some_and(|families| families.iter().any(|&(_, safi)| safi == Safi::Unicast))
     }
 
     /// A settled set must be walked again: an ORF gate one of its keys
