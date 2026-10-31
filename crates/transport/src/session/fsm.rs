@@ -1438,7 +1438,10 @@ impl PeerSession {
                     });
                     self.established
                         .publish_end_retention(crate::handle::SessionEndRetention {
-                            established: true,
+                            // A session goes down before Established too, by a
+                            // reset or BFD in OpenSent or OpenConfirm; only an
+                            // Established one has negotiated state here.
+                            established: self.negotiated.is_some(),
                             theirs: gr_update.is_some(),
                             ours_for,
                         });

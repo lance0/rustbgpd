@@ -1908,11 +1908,24 @@ async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
         session.received_hard_reset = case.received_hard_reset;
         session.sent_hard_reset = case.sent_hard_reset;
         session.execute_actions(vec![Action::SessionDown]).await;
+        let end = session.established.end_retention();
+        assert!(end.established, "{}", case.name);
         assert_eq!(
-            session.established.end_retention().ours_for,
+            end.ours_for,
             case.expect.map(std::time::Duration::from_secs),
             "{}",
             case.name
         );
     }
+
+    // Down before Established, as by a reset in OpenSent: nothing negotiated,
+    // nothing held, and not reported as an Established period.
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.graceful_restart = true;
+    session.negotiated = None;
+    session.execute_actions(vec![Action::SessionDown]).await;
+    assert_eq!(
+        session.established.end_retention(),
+        crate::handle::SessionEndRetention::default()
+    );
 }

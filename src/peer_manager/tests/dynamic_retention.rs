@@ -950,3 +950,38 @@ async fn a_refused_accept_evicts_nothing() {
     assert_eq!(mgr.dynamic_peer_count, 1);
     rib_task.abort();
 }
+
+/// A reconnect reset before its OPEN, here by an operator reset, never
+/// reached Established, as its session's own end report says: the
+/// retention it waited on stands unchanged and keeps its owner, so the
+/// retained handle is neither orphaned nor its routes left behind. Red
+/// proof: reporting every session end as Established drops the retention,
+/// leaving the old handle live with its stale routes and no owner.
+#[tokio::test]
+async fn reconnect_reset_before_its_open_leaves_the_retention() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let retained_at = mgr.retained_dynamic[&key(MEMBER)].retained_at;
+
+    let _client = accept(&mut mgr).await;
+    mgr.reset_peer(key(MEMBER), None).await.unwrap();
+    while mgr.peers.contains_key(&key(MEMBER)) {
+        let notification =
+            tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+                .await
+                .expect("the reset session reports going idle")
+                .unwrap();
+        mgr.handle_session_notification(notification).await;
+    }
+    let retained = mgr
+        .retained_dynamic
+        .get(&key(MEMBER))
+        .expect("the retention stands");
+    assert_eq!(retained.retained_at, retained_at);
+    assert!(retained.theirs);
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    assert_eq!(mgr.rib_peer_of(&key(MEMBER)), peer, "it keeps its owner");
+    assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
+    assert!(peer.is_live());
+    rib_task.abort();
+}
