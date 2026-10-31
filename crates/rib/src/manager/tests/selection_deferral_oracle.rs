@@ -1372,6 +1372,12 @@ impl Harness {
             self.drain()?;
             self.resync_ticks()?;
         }
+        // Production re-arms the timer while work stays runnable, so work
+        // the ticks never clear would spin it forever.
+        prop_assert!(
+            !self.manager.resync_tick_pending(),
+            "resync work still runnable after {DRAIN_ROUNDS} release ticks"
+        );
         Ok(())
     }
 
