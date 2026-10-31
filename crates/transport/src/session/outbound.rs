@@ -70,26 +70,59 @@ struct RetiringRest {
     otc_blocked: std::vec::IntoIter<Route>,
 }
 
-// The remaining payload vectors free in one step whatever their length, so
-// they need no pacing. A new heap-owning key type must join `RetiringRest`.
-const _: () = assert!(
-    !std::mem::needs_drop::<(Prefix, u32)>()
-        && !std::mem::needs_drop::<super::EvpnRouteKey>()
-        && !std::mem::needs_drop::<super::VpnRibRouteKey>()
-        && !std::mem::needs_drop::<super::LabeledRibRouteKey>()
-        && !std::mem::needs_drop::<super::RtcRibRouteKey>()
-        && !std::mem::needs_drop::<Option<rustbgpd_policy::NextHopAction>>()
-);
+/// A payload left in `update` frees in one step whatever its length, so its
+/// elements must own nothing to drop; a heap-owning one fails to compile
+/// here and belongs in [`RetiringRest`].
+fn freed_in_one_step<T>(_: &[T]) {
+    const { assert!(!std::mem::needs_drop::<T>()) }
+}
 
 impl RetiringRest {
     fn take(update: &mut OutboundRouteUpdate) -> Self {
+        // Exhaustive, so a new payload field does not compile until it is
+        // classified here.
+        let OutboundRouteUpdate {
+            exact_export_snapshot: _,
+            announce_source_exclusion: _,
+            // Retired through `own_if_last`, or moved out at admission.
+            announce: _,
+            evpn_announce: _,
+            vpn_announce: _,
+            labeled_announce: _,
+            withdraw,
+            end_of_rib,
+            replay: _,
+            refresh_markers,
+            next_hop_override,
+            flowspec_announce,
+            flowspec_withdraw,
+            evpn_withdraw,
+            bgpls_announce,
+            bgpls_withdraw,
+            vpn_withdraw,
+            labeled_withdraw,
+            rtc_announce,
+            rtc_withdraw,
+            otc_blocked,
+            request_refresh_all_negotiated: _,
+            shared_group_encode: _,
+            exempt_announce: _,
+        } = update;
+        freed_in_one_step(withdraw);
+        freed_in_one_step(end_of_rib);
+        freed_in_one_step(refresh_markers);
+        freed_in_one_step(next_hop_override.as_slice());
+        freed_in_one_step(evpn_withdraw);
+        freed_in_one_step(vpn_withdraw);
+        freed_in_one_step(labeled_withdraw);
+        freed_in_one_step(rtc_withdraw);
         Self {
-            flowspec_announce: std::mem::take(&mut update.flowspec_announce).into_iter(),
-            flowspec_withdraw: std::mem::take(&mut update.flowspec_withdraw).into_iter(),
-            bgpls_announce: std::mem::take(&mut update.bgpls_announce).into_iter(),
-            bgpls_withdraw: std::mem::take(&mut update.bgpls_withdraw).into_iter(),
-            rtc_announce: std::mem::take(&mut update.rtc_announce).into_iter(),
-            otc_blocked: std::mem::take(&mut update.otc_blocked).into_iter(),
+            flowspec_announce: std::mem::take(flowspec_announce).into_iter(),
+            flowspec_withdraw: std::mem::take(flowspec_withdraw).into_iter(),
+            bgpls_announce: std::mem::take(bgpls_announce).into_iter(),
+            bgpls_withdraw: std::mem::take(bgpls_withdraw).into_iter(),
+            rtc_announce: std::mem::take(rtc_announce).into_iter(),
+            otc_blocked: std::mem::take(otc_blocked).into_iter(),
         }
     }
 
@@ -251,7 +284,10 @@ impl PendingOutbound {
         own_if_last(&mut self.announce, &mut self.update.announce);
         own_if_last(&mut self.vpn_announce, &mut self.update.vpn_announce);
         own_if_last(&mut self.evpn_announce, &mut self.update.evpn_announce);
-        self.retiring_rest = RetiringRest::take(&mut self.update);
+        // A repeated call must not drop an undrained remainder whole.
+        if self.retiring_rest.len() == 0 {
+            self.retiring_rest = RetiringRest::take(&mut self.update);
+        }
         self.shared = None;
         self.capacity_blocked = false;
         self.phase = OUTBOUND_PHASES.len();
@@ -2873,6 +2909,51 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
+
+    /// `FlowSpec` withdrawals own their rule components but no shared handle
+    /// a session test can count, so the retirement budget is pinned here:
+    /// at most one slice per step, a repeated `begin_retirement` included,
+    /// until the family is empty.
+    #[test]
+    fn retirement_releases_flowspec_withdrawals_a_slice_per_step() {
+        const SLICE: usize = super::super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+        let total = 2 * SLICE + 1;
+        let update = OutboundRouteUpdate {
+            flowspec_withdraw: (0..total)
+                .map(|_| FlowSpecKey {
+                    afi: Afi::Ipv4,
+                    rule: FlowSpecRule {
+                        components: Vec::new(),
+                    },
+                })
+                .collect(),
+            ..OutboundRouteUpdate::default()
+        };
+        let mut pending = PendingOutbound::new(update, None, Vec::new());
+        pending.test_slice_cost = Some(Duration::ZERO);
+        let remaining = |pending: &PendingOutbound| pending.retiring_rest.flowspec_withdraw.len();
+        let mut left = total;
+        let mut steps = Vec::new();
+        let mut more = pending.begin_retirement();
+        steps.push(left - remaining(&pending));
+        left = remaining(&pending);
+        if more {
+            more = pending.begin_retirement();
+            steps.push(left - remaining(&pending));
+            left = remaining(&pending);
+        }
+        while more && steps.len() <= total / SLICE + 2 {
+            more = pending.retire_step();
+            steps.push(left - remaining(&pending));
+            left = remaining(&pending);
+        }
+        assert!(
+            steps.iter().all(|&released| released <= SLICE),
+            "a step released more than {SLICE} FlowSpec withdrawals: {steps:?}"
+        );
+        assert_eq!(left, 0, "every FlowSpec withdrawal is released: {steps:?}");
+        assert!(!more);
+    }
 
     /// Blackholing rows lead the envelope and fill slices of their own:
     /// no announce slice mixes them with ordinary rows, and each slice's
