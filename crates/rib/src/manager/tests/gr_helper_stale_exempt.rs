@@ -131,7 +131,9 @@ fn register_with(
     }
     manager.handle_update(up);
     // A deferred registration joins its group when the run loop completes it.
-    if !manager.pending_initial_registrations.contains(&observer) {
+    if manager.pending_initial_registrations.contains(&observer) {
+        assert!(manager.grouped_member_of(observer).is_none());
+    } else {
         assert_eq!(manager.grouped_member_of(observer).is_some(), grouped);
     }
     (tx, rx, occupied)
@@ -1345,6 +1347,10 @@ enum PreHoldDelete {
     /// Before the flap, after the transport closed the channel: the send
     /// fails and only the hold ledger names the row.
     ClosedChannel,
+    /// Queued before the flap and then injected again, so the ledger names
+    /// a key whose RTBH is live: the P1 pin for ledger keys from before the
+    /// hold.
+    QueuedThenReinjected,
 }
 
 /// A helper flaps before any hold arms and its next registration defers
@@ -1378,6 +1384,17 @@ fn pre_hold_flap_into_deferred_registration(grouped: bool, deleted: PreHoldDelet
             old_rx.close();
             delete(&mut manager, rtbh);
         }
+        PreHoldDelete::QueuedThenReinjected => {
+            delete(&mut manager, rtbh);
+            assert!(
+                manager
+                    .hold_exempt_withdrawn
+                    .get(&super::super::HoldWithdrawOwner::Peer(observer))
+                    .is_some_and(|ledger| ledger.contains(&(Prefix::V4(rtbh), 0))),
+                "the queued withdrawal is in the ledger"
+            );
+            inject_rtbh(&mut manager, rtbh);
+        }
     }
     assert!(!manager.selection_deferred(FAMILY), "no hold has armed");
     clean_end(&mut manager, 82);
@@ -1407,6 +1424,21 @@ fn pre_hold_flap_into_deferred_registration(grouped: bool, deleted: PreHoldDelet
     }
     assert!(manager.pending_initial_registrations.is_empty());
     assert_eq!(manager.grouped_member_of(observer).is_some(), grouped);
+    if deleted == PreHoldDelete::QueuedThenReinjected {
+        // The live RTBH is never withdrawn, even briefly.
+        let key = (Prefix::V4(rtbh), 0);
+        apply(&mut new_rx, &mut rib, Some(key));
+        for _ in 0..8 {
+            if !manager.resync_tick_pending() {
+                break;
+            }
+            manager.resync_dirty_peers_bounded();
+            apply(&mut new_rx, &mut rib, Some(key));
+        }
+        assert!(manager.selection_convergence_held(FAMILY));
+        assert_eq!(rib.get(&key), Some(&false), "the live RTBH is re-sent");
+        return;
+    }
     assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
 }
 
@@ -1424,6 +1456,15 @@ fn deferred_registration_into_the_hold_withdraws_a_pre_hold_stale_rtbh() {
 fn pre_hold_queued_rtbh_withdrawal_dropped_at_session_end_is_resent() {
     for grouped in [false, true] {
         pre_hold_flap_into_deferred_registration(grouped, PreHoldDelete::Queued);
+    }
+}
+
+/// A ledger key recorded before the hold whose RTBH is injected again
+/// stays on the wire.
+#[test]
+fn pre_hold_ledger_key_of_a_reinjected_rtbh_keeps_it_live() {
+    for grouped in [false, true] {
+        pre_hold_flap_into_deferred_registration(grouped, PreHoldDelete::QueuedThenReinjected);
     }
 }
 
@@ -1449,6 +1490,24 @@ fn deadline_release_retires_a_carry_whose_peer_never_returns() {
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
     );
     apply(&mut old_rx, &mut rib, None);
+    // A second receiver stays up; a withdrawal queued to it before the hold
+    // is in its ledger.
+    let (_other_tx, mut other_rx, _) = register_peer(
+        &mut manager,
+        Ipv4Addr::new(192, 0, 2, 85),
+        85,
+        false,
+        false,
+        false,
+    );
+    let other_rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 9), 32);
+    inject_rtbh(&mut manager, other_rtbh);
+    delete(&mut manager, other_rtbh);
+    while other_rx.try_recv().is_ok() {}
+    assert!(
+        !manager.hold_exempt_withdrawn.is_empty(),
+        "a ledger is recorded"
+    );
     clean_end(&mut manager, 82);
     assert!(manager.helper_stale_exempt.contains_key(&observer));
     manager.expire_selection_deferral();
