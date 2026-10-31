@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use rustbgpd_api::peer_types::PeerKey;
-use rustbgpd_rib::{PeerRetention, RibUpdate};
+use rustbgpd_rib::{PeerId, PeerRetention, RibUpdate};
 use rustbgpd_transport::{NeighborCounters, RibPeerSlot, SessionEndRetention};
 use tokio::time::Instant;
 use tracing::{info, warn};
@@ -54,6 +54,17 @@ pub(super) struct RetainedDynamicPeer {
     /// When it is checked next; `None` while a reconnect's session is live.
     pub(super) check_at: Option<Instant>,
     pub(super) logged: bool,
+    /// A collision candidate beside the live reconnect. It has its own
+    /// identity slot and counter block, so whichever session wins is judged
+    /// by its own OPEN; promotion installs the winner's.
+    pub(super) candidate: Option<CandidateIdentity>,
+}
+
+/// A collision candidate's own identity, beside a retained reconnect.
+pub(super) struct CandidateIdentity {
+    pub(super) session_id: u64,
+    pub(super) slot: RibPeerSlot,
+    pub(super) counters: NeighborCounters,
 }
 
 /// The checks that end each retention.
@@ -65,6 +76,9 @@ pub(super) struct RetentionChecks {
     /// The ranges changed: re-check which retained neighbors a range still
     /// admits, once no transaction snapshot is staged.
     pub(super) admission_dirty: bool,
+    /// Handles a reconnect or collision candidate resolved for itself that
+    /// no session owns any more: deleted and released from the run loop.
+    pub(super) orphaned: Vec<PeerId>,
 }
 
 impl Default for RetentionChecks {
@@ -73,6 +87,7 @@ impl Default for RetentionChecks {
             pass: None,
             backoff: RETENTION_RETRY,
             admission_dirty: false,
+            orphaned: Vec::new(),
         }
     }
 }
@@ -126,6 +141,7 @@ impl PeerManager {
             // known time.
             check_at: if end.theirs { Some(now) } else { ours_until },
             logged: false,
+            candidate: None,
         };
         if !end.theirs {
             log_retained(peer, &mut retained, None);
@@ -172,7 +188,12 @@ impl PeerManager {
             return;
         };
         info!(peer = %peer, previous_asn, peer_asn, "a reconnect from another AS is another speaker: releasing the retained identity");
-        // The live neighbor keeps the series: they share its label.
+        self.release_side_handle(handle).await;
+    }
+
+    /// Delete and release a handle the live neighbor does not use, keeping
+    /// the series it shares their label with.
+    async fn release_side_handle(&mut self, handle: PeerId) {
         for update in [
             RibUpdate::PeerDeleted {
                 peer: handle,
@@ -189,6 +210,106 @@ impl PeerManager {
                     },
                 )
                 .await;
+        }
+    }
+
+    /// The identity a collision candidate beside a retained reconnect starts
+    /// with: its own resume slot and a fresh counter block. `None` when the
+    /// address has no retention waiting on a reconnect.
+    pub(super) fn retained_dynamic_candidate_identity(
+        &self,
+        peer: &PeerKey,
+    ) -> Option<(RibPeerSlot, NeighborCounters)> {
+        self.retained_dynamic
+            .get(peer)
+            .filter(|retained| retained.check_at.is_none())?;
+        Some((
+            self.retained_dynamic_reconnect_slot(peer)?,
+            NeighborCounters::default(),
+        ))
+    }
+
+    pub(super) fn note_retained_dynamic_candidate(
+        &mut self,
+        peer: &PeerKey,
+        session_id: u64,
+        slot: RibPeerSlot,
+        counters: NeighborCounters,
+    ) {
+        if let Some(retained) = self.retained_dynamic.get_mut(peer) {
+            retained.candidate = Some(CandidateIdentity {
+                session_id,
+                slot,
+                counters,
+            });
+        }
+    }
+
+    /// The candidate `session_id` was promoted: the live neighbor now runs
+    /// on its identity slot and counter block, and a handle the loser
+    /// resolved for itself is released.
+    pub(super) fn promote_retained_dynamic_candidate(&mut self, peer: &PeerKey, session_id: u64) {
+        let Some(retained) = self.retained_dynamic.get_mut(peer) else {
+            return;
+        };
+        if retained
+            .candidate
+            .as_ref()
+            .is_none_or(|candidate| candidate.session_id != session_id)
+        {
+            return;
+        }
+        let Some(candidate) = retained.candidate.take() else {
+            return;
+        };
+        let held = retained.slot.get();
+        let Some(managed) = self.peers.get_mut(peer) else {
+            return;
+        };
+        let loser = managed.transport_config.rib_peer.get();
+        managed.transport_config.rib_peer = candidate.slot.clone();
+        managed.transport_config.neighbor_counters = candidate.counters.clone();
+        self.rib_peers.insert(peer.clone(), candidate.slot.clone());
+        self.neighbor_counters
+            .insert(peer.clone(), candidate.counters);
+        if let Some(loser) = loser.filter(|&loser| Some(loser) != held) {
+            self.retention.orphaned.push(loser);
+        }
+    }
+
+    /// A candidate that is neither pending nor the primary any more lost or
+    /// went away: a handle it resolved for itself is released.
+    pub(super) fn reconcile_retained_dynamic_candidates(&mut self) {
+        let mut orphaned = Vec::new();
+        for (peer, retained) in &mut self.retained_dynamic {
+            let Some(candidate) = retained.candidate.as_ref() else {
+                continue;
+            };
+            let live = self.peers.get(peer).is_some_and(|managed| {
+                managed.session_id() == candidate.session_id
+                    || managed
+                        .pending_inbound
+                        .as_ref()
+                        .is_some_and(|pending| pending.session_id == candidate.session_id)
+            });
+            if live {
+                continue;
+            }
+            if let Some(handle) = candidate
+                .slot
+                .get()
+                .filter(|&handle| Some(handle) != retained.slot.get())
+            {
+                orphaned.push(handle);
+            }
+            retained.candidate = None;
+        }
+        self.retention.orphaned.extend(orphaned);
+    }
+
+    pub(super) async fn release_orphaned_retained_handles(&mut self) {
+        for handle in std::mem::take(&mut self.retention.orphaned) {
+            self.release_side_handle(handle).await;
         }
     }
 
@@ -231,10 +352,24 @@ impl PeerManager {
 
     /// The live reconnect itself is being deleted: give the retained slot
     /// back so its deletion releases the identity.
-    pub(super) fn take_dormant_retained_dynamic(&mut self, peer: &PeerKey) {
-        if let Some(retained) = self.retained_dynamic.remove(peer) {
-            self.rib_peers.insert(peer.clone(), retained.slot);
+    /// `live` is the handle the reconnect itself resolved, if any.
+    pub(super) fn take_dormant_retained_dynamic(&mut self, peer: &PeerKey, live: Option<PeerId>) {
+        let Some(retained) = self.retained_dynamic.remove(peer) else {
+            return;
+        };
+        let held = retained.slot.get();
+        // Handles the reconnect or a candidate resolved for themselves, from
+        // another AS, before their OPEN was handled.
+        let candidate = retained
+            .candidate
+            .as_ref()
+            .and_then(|candidate| candidate.slot.get());
+        for handle in [live, candidate].into_iter().flatten() {
+            if Some(handle) != held && !self.retention.orphaned.contains(&handle) {
+                self.retention.orphaned.push(handle);
+            }
         }
+        self.rib_peers.insert(peer.clone(), retained.slot);
     }
 
     pub(super) fn next_retained_dynamic_check(&self) -> Option<Instant> {

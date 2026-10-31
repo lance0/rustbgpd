@@ -1105,3 +1105,138 @@ async fn staged_ranges_do_not_reject_a_retention_at_idle() {
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
     rib_task.abort();
 }
+
+/// The primary reconnect's OPEN from the retained AS validates, and its
+/// slot resolves to the retained handle before Established (as an
+/// export-policy update can make it), while its `OpenReceived` still waits in
+/// the manager's queue. A candidate then wins the collision against the
+/// primary's identity and sends its OPEN from another AS. The winner runs on
+/// its own handle and counter block: the old identity is released, not the
+/// winner's. Red proof: a candidate that shares the primary's slot inherits
+/// the retained handle, which the handoff then releases under the winner.
+#[tokio::test]
+async fn another_as_candidate_winning_after_the_primary_resolved_has_its_own_identity() {
+    use super::collision::{read_bgp_message, send_bgp_message};
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let mut client = accept(&mut mgr).await;
+    establish_from(&mut mgr, &mut client, MEMBER_ASN).await;
+    let peer = mgr.peers[&key(MEMBER)]
+        .transport_config
+        .rib_peer
+        .get()
+        .unwrap();
+    drop_until_idle(&mut mgr, client).await;
+
+    // The primary's OPEN from the retained AS validates; its report waits in
+    // the manager's queue, so the range's AS is not pinned yet.
+    let mut primary = accept(&mut mgr).await;
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(&mut primary, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(&mut primary, &Message::Open(helper_open(MEMBER_ASN))).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let rustbgpd_transport::StateQueryOutcome::State(state) = mgr.peers[&key(MEMBER)]
+                .handle()
+                .query_state_outcome(Duration::from_secs(1))
+                .await
+                && state.fsm_state == SessionState::OpenConfirm
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the primary validates its OPEN");
+    assert_eq!(
+        mgr.peers[&key(MEMBER)]
+            .transport_config
+            .rib_peer
+            .resolve(|| PeerEndpoint::new(MEMBER, None), MEMBER_ASN),
+        peer,
+        "the primary resolved the retained handle"
+    );
+
+    // A candidate wins against the primary's known identity at once (the
+    // primary is in OpenConfirm), then sends its OPEN from another AS.
+    let primary_session = mgr.peers[&key(MEMBER)].session_id();
+    let mut winner = accept_at(&mut mgr, MEMBER).await;
+    assert_ne!(
+        mgr.peers[&key(MEMBER)].session_id(),
+        primary_session,
+        "the candidate is promoted"
+    );
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(&mut winner, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(&mut winner, &Message::Open(helper_open(65099))).await;
+    let winner_session = mgr.peers[&key(MEMBER)].session_id();
+    loop {
+        let notification =
+            tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+                .await
+                .expect("the winner reports its OPEN")
+                .unwrap();
+        let winners_open = matches!(
+            notification,
+            SessionNotification::OpenReceived { session_id, .. } if session_id == winner_session
+        );
+        mgr.handle_session_notification(notification).await;
+        if winners_open {
+            break;
+        }
+    }
+    mgr.reconcile_retained_dynamic_candidates();
+    mgr.release_orphaned_retained_handles().await;
+
+    let live = &mgr.peers[&key(MEMBER)].transport_config;
+    // The winner's session resolves its slot on first use, as here.
+    let own = live
+        .rib_peer
+        .resolve(|| PeerEndpoint::new(MEMBER, None), 65099);
+    assert_ne!(own, peer, "the winner has its own handle");
+    assert_eq!(live.neighbor_counters.flaps(), 0, "it counts afresh");
+    assert_eq!(mgr.neighbor_counters[&key(MEMBER)].flaps(), 0);
+    assert!(mgr.retained_dynamic.is_empty());
+    loc_rib_count(&rib_tx).await;
+    assert!(!peer.is_live(), "the old identity is released");
+    assert!(own.is_live(), "the winner's own is not");
+    drop((primary, winner));
+    rib_task.abort();
+}
+
+/// A reconnect from another AS resolves a new handle when its OPEN
+/// validates, before the manager handles that OPEN. A rollback without the
+/// range reaps the reconnect first: both the retained handle and the
+/// reconnect's own are deleted and released. Red proof: reaping only the
+/// handle the manager records leaves the reconnect's live with no owner.
+#[tokio::test]
+async fn rollback_before_the_reconnects_open_is_handled_releases_both_handles() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let _client = accept(&mut mgr).await;
+    let own = mgr.peers[&key(MEMBER)]
+        .transport_config
+        .rib_peer
+        .resolve(|| PeerEndpoint::new(MEMBER, None), 65099);
+    assert_ne!(own, peer);
+
+    mgr.dynamic_ranges.clear();
+    assert_eq!(
+        mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
+        1
+    );
+    mgr.release_orphaned_retained_handles().await;
+    assert_eq!(mgr.dynamic_peer_count, 0);
+    assert!(mgr.retained_dynamic.is_empty());
+    loc_rib_count(&rib_tx).await;
+    assert!(!peer.is_live(), "the retained handle is released");
+    assert!(!own.is_live(), "and the reconnect's own");
+    assert_eq!(retention(&rib_tx, peer).await.stale_routes, 0);
+    rib_task.abort();
+}

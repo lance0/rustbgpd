@@ -506,7 +506,7 @@ impl PeerManager {
             let (handle, session_id, mut managed) = managed.into_parts();
             // A reconnect of a retained neighbor: the live peer's deletion
             // releases the retained identity too.
-            self.take_dormant_retained_dynamic(&peer_key);
+            self.take_dormant_retained_dynamic(&peer_key, managed.transport_config.rib_peer.get());
             self.remove_max_prefix_latch(&peer_key);
             self.unregister_session(session_id);
             if let Some(pending) = managed.pending_inbound.take() {

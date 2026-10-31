@@ -2975,6 +2975,10 @@ impl PeerManager {
             if self.retention.admission_dirty && !self.config_snapshot_staged {
                 self.release_unadmitted_retained_dynamic().await;
             }
+            self.reconcile_retained_dynamic_candidates();
+            if !self.retention.orphaned.is_empty() {
+                self.release_orphaned_retained_handles().await;
+            }
             let retained_dynamic_check_at = self.next_retained_dynamic_check();
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {

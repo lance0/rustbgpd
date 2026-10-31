@@ -213,6 +213,12 @@ impl PeerManager {
             return false;
         };
         let mut transport_config = managed.transport_config.clone();
+        // Beside a retained reconnect, a candidate is judged by its own OPEN.
+        let candidate_identity = self.retained_dynamic_candidate_identity(&peer_key);
+        if let Some((slot, counters)) = candidate_identity.as_ref() {
+            transport_config.rib_peer = slot.clone();
+            transport_config.neighbor_counters = counters.clone();
+        }
         let is_dynamic = managed.is_dynamic;
         let import_policy = managed.import_policy.clone();
         let export_policy = managed.export_policy.clone();
@@ -281,6 +287,9 @@ impl PeerManager {
             session_id,
         });
         self.register_session(session_id, &peer_key);
+        if let Some((slot, counters)) = candidate_identity {
+            self.note_retained_dynamic_candidate(&peer_key, session_id, slot, counters);
+        }
         true
     }
 
@@ -1171,6 +1180,7 @@ impl PeerManager {
             *slot = pending.recovery_reset;
         }
         self.register_session(new_session_id, peer_key);
+        self.promote_retained_dynamic_candidate(peer_key, new_session_id);
         Some((old_handle, old_session_id, new_session_id))
     }
 
