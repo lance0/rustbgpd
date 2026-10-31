@@ -1208,18 +1208,25 @@ pub struct RibManager {
     /// intersects these with the member's actual admitted-key proof. Cleared
     /// on resync success.
     pending_extra_withdraws: HashMap<PeerId, update_groups::ExtraWithdraws>,
-    /// Exempt (RTBH or host) unicast keys withdrawn outright during the
-    /// current selection hold: per update group, and per private receiver
-    /// once its withdrawal is queued. A session that ends before its queued
-    /// withdrawal reaches the peer leaves that row stale at a GR helper,
-    /// and the group table or Adj-RIB-Out no longer names it. Bounded per
-    /// owner by [`HELPER_STALE_EXEMPT_LIMIT`]; cleared when the hold ends.
+    /// Exempt (RTBH or host) unicast keys withdrawn outright while our
+    /// End-of-RIB may be held (a selection gate or replay grace): per update
+    /// group, and per private receiver once its withdrawal is queued. A
+    /// session that ends before its queued withdrawal reaches the peer
+    /// leaves that row stale at a GR helper, and the group table or
+    /// Adj-RIB-Out no longer names it. Bounded per owner by
+    /// [`HELPER_STALE_EXEMPT_LIMIT`]; retired once nothing can hold that
+    /// End-of-RIB.
     hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, BTreeSet<(Prefix, u32)>>,
+    /// Hold sources (a selection family, a grace window) that went away
+    /// since the last retirement pass; nonzero means a carry or ledger may
+    /// have become retirable.
+    helper_stale_hold_ends: u32,
     /// Exempt unicast keys an ended session of a GR-capable peer may still
     /// hold as stale (RFC 4724 §4.2). The peer drops stale routes only at
-    /// our End-of-RIB, which a selection hold defers until release, so the
-    /// next session withdraws the ones it does not advertise. Bounded by
-    /// the exempt rows; dropped once no hold is active.
+    /// our End-of-RIB, which a selection hold or replay grace can defer, so
+    /// the next session withdraws the ones it does not advertise while it
+    /// is held. Bounded by the exempt rows; retired per family once that
+    /// End-of-RIB is sent or can no longer be held.
     helper_stale_exempt: HashMap<PeerId, HelperStaleExempt>,
     /// Actual admitted unicast/VPN keys while a member's shared desired view
     /// can advance without delivery. Exact capacity charge is capped at
@@ -1997,9 +2004,9 @@ struct HelperStaleExempt {
     settled: bool,
     /// Families whose waiting keys an ORF gate held at the last flush.
     orf_blocked: Vec<(Afi, Safi)>,
-    /// Families whose waiting keys a gate that may still arm held at the
-    /// last flush: their End-of-RIB is not yet sent, so their keys wait
-    /// for that gate to arm or for the End-of-RIB.
+    /// Families whose waiting keys waited at the last flush because our
+    /// End-of-RIB for them was neither held nor sent: their keys wait for
+    /// it to be held (a gate arms) or to go out.
     gate_blocked: Vec<(Afi, Safi)>,
 }
 
@@ -2808,6 +2815,7 @@ impl RibManager {
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
             hold_exempt_withdrawn: HashMap::new(),
+            helper_stale_hold_ends: 0,
             helper_stale_exempt: HashMap::new(),
             pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
@@ -3954,17 +3962,8 @@ impl RibManager {
         }) || !self.pending_inbound_refresh.is_empty()
             || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
-                // Outside a hold the next tick retires a synced session's.
-                if self
-                    .selection_deferral
-                    .as_ref()
-                    .is_some_and(selection_deferral::SelectionDeferral::has_active_gates)
-                {
-                    self.helper_stale_needs_rescan(peer, carried)
-                        && self.helper_stale_exempt_runnable(peer)
-                } else {
-                    self.helper_stale_exempt_synced(peer)
-                }
+                self.helper_stale_needs_rescan(peer, carried)
+                    && self.helper_stale_exempt_runnable(peer)
             })
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {
