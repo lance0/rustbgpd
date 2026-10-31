@@ -1904,7 +1904,8 @@ label-free. The three slot gauges are materialized when `PeerManager` starts:
 `used` counts accepted dynamic peers that still own a slot, `limit` mirrors
 `global.dynamic_neighbor_limit`, and `headroom` is the saturating difference.
 Ordinary Idle removal and config-rollback reaping return a slot; a terminal
-max-prefix peer retained disabled for explicit recovery still owns one.
+max-prefix peer retained disabled for explicit recovery still owns one, and so
+does an idle peer kept for graceful restart retention until it is deleted.
 `bgp_dynamic_neighbor_limit_rejections_total` increments only when a matching
 inbound dynamic connection is dropped because all slots are occupied.
 `bgp_inbound_connections_dropped_total` breaks accept-path drops down by a
@@ -2730,7 +2731,15 @@ session goes idle; while the RIB still retains its routes it stays listed as a
 retention-only row (source `retention only (no session or configuration)`,
 `"retention_only": true` in JSON) with the same retention rows, and
 `rbgp neighbor <address>` still shows it. Doctor runs only the retention
-check for such a row. `llgr_stale_time` can hold a
+check for such a row. With graceful restart enabled, the neighbor keeps its
+RIB identity and its dynamic-neighbor slot until that retention ends and,
+when its last session made it our helper, until it can no longer hold our
+routes: our restart time plus our `llgr_stale_time` plus the hold time after
+the session ended. A reconnect from the address in that window is the same
+neighbor, so its End-of-RIB completes the restart. A neighbor with nothing
+retained either way is deleted when it goes idle; removing its range, a
+configuration rollback without the range, or a static neighbor added at the
+address deletes it at once. `llgr_stale_time` can hold a
 route for up to about 194 days by design, so `rbgp doctor` reports each
 family in the `llgr` phase as a `peer.<scoped-address>.llgr_retention.<family>`
 warning that names the stale-route count and the time left, not as a failure.

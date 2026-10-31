@@ -303,7 +303,8 @@ peers.
 
 `dynamic_neighbor_limit` caps the number of active peers auto-created from
 `[[dynamic_neighbors]]` ranges. When omitted, rustbgpd allows up to 100 dynamic
-peers at a time.
+peers at a time. An idle peer kept while graceful restart retention may still
+hold routes for it, or ours, counts until it is deleted.
 
 ### `apply_bum_enforcement` — top-level (document-root) key
 

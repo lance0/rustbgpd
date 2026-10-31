@@ -4124,6 +4124,7 @@ impl RibManager {
         let _ = reply.send(crate::update::PeerRetention {
             stale_routes,
             next_deadline,
+            peer_may_retain_ours: self.peer_may_hold_stale.contains(&peer),
         });
     }
     pub(super) fn handle_query_bmp_peer_stats(

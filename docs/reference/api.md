@@ -698,8 +698,11 @@ carries `config.address`, `config.remote_asn` (the ASN the RIB last recorded,
 `gr_retention`; every other configuration and session field is its default.
 `ListNeighbors` merges these rows into address order; `GetNeighborState`
 returns one only for an address without an interface or comparison peer.
-The row disappears when retention ends. `retention_only` is absent on
-ordinary rows and from older daemons, which return no row for such a peer.
+The row disappears when retention ends. The neighbor keeps its RIB identity
+and its `dynamic_neighbor_limit` slot until then (longer when it may still
+hold our routes as our helper), so a reconnect from the address returns as an
+ordinary row for the same neighbor. `retention_only` is absent on ordinary
+rows and from older daemons, which return no row for such a peer.
 
 `outbound_resync_pending` is true while the peer missed outbound delivery and
 waits for the RIB's full export resync; `outbound_dirty_seconds` is the whole

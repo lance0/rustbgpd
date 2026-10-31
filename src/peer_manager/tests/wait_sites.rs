@@ -841,8 +841,8 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "unnumbered.rs::bound_peer_retention",
-        awaits: "RibUpdate::QueryPeerRetention reply (unbound interface-only reconcile)",
+        site: "dynamic.rs::peer_retention",
+        awaits: "RibUpdate::QueryPeerRetention reply (unbound interface-only reconcile, idle dynamic neighbor)",
         drive: Drive::UnboundRetention,
         rib: RibHold::Reply(is_peer_retention),
         session: answer_all,
@@ -1029,6 +1029,7 @@ fn answer_rib(
             let _ = reply.send(rustbgpd_rib::PeerRetention {
                 stale_routes: 0,
                 next_deadline: None,
+                peer_may_retain_ours: false,
             });
         }
         _ => {}
@@ -1634,7 +1635,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             .map_err(|error| error.to_string()),
         Drive::UpdateGroupSnapshot => manager.query_update_group_snapshot().await.map(drop),
         Drive::UnboundRetention => manager
-            .bound_peer_retention(&key(peers[0]))
+            .peer_retention(&key(peers[0]))
             .await
             .map(drop)
             .ok_or_else(|| "the RIB did not report the retention".to_owned()),

@@ -1,5 +1,7 @@
 use std::net::IpAddr;
+use std::time::Duration;
 
+use tokio::time::Instant;
 use tracing::{info, warn};
 
 use rustbgpd_api::peer_types::{DynamicRangeError, PeerKey};
@@ -24,6 +26,27 @@ pub(super) struct DynamicRange {
 }
 
 pub(super) use rustbgpd_rib::update::AcceptedDynamicRange;
+
+/// How long a retention check waits for the RIB to answer.
+pub(super) const RETENTION_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+/// How soon an unanswered retention check is retried.
+const RETENTION_RETRY: Duration = Duration::from_secs(1);
+/// How soon retained routes with no RIB timer armed are checked again.
+pub(super) const RETENTION_RECHECK: Duration = Duration::from_secs(30);
+
+/// A dynamic neighbor whose session ended while graceful restart may still
+/// hold routes on either side. It keeps its RIB identity slot and counter
+/// block, and its place under `dynamic_neighbor_limit`, so a reconnect at the
+/// address resumes as the same RIB peer: the RIB keeps the routes it retains
+/// for the peer, and the state tied to the peer retaining ours.
+pub(super) struct RetainedDynamicPeer {
+    accepted: AcceptedDynamicRange,
+    remote_asn: u32,
+    /// The latest the peer, as our helper, can still hold our routes: our
+    /// restart time, plus our LLGR stale time, plus a hold time.
+    ours_held_until: Instant,
+    check_at: Instant,
+}
 
 impl DynamicRange {
     /// True when `addr` falls within this range's prefix.
@@ -378,6 +401,8 @@ impl PeerManager {
             parse_dynamic_prefix(&dn.prefix)
                 .map_or(true, |(a, l)| crate::config::effective_prefix(a, l) != key)
         });
+        // A retained idle neighbor of the range goes now, as an idle one would.
+        self.recheck_retained_dynamic();
         let affected: Vec<PeerKey> = self
             .peers
             .iter()
@@ -402,9 +427,13 @@ impl PeerManager {
         &self,
         managed: &ManagedPeerState,
     ) -> bool {
-        let Some(accepted) = managed.accepted_dynamic_range.as_ref() else {
-            return false;
-        };
+        managed
+            .accepted_dynamic_range
+            .as_ref()
+            .is_some_and(|accepted| self.dynamic_range_admits(accepted, managed.remote_asn))
+    }
+
+    fn dynamic_range_admits(&self, accepted: &AcceptedDynamicRange, remote_asn: u32) -> bool {
         self.dynamic_ranges.iter().any(|range| {
             // `accepted` is masked via `effective_prefix` (see
             // `accepted_attribution`), but `DynamicRange` keeps the raw
@@ -417,8 +446,142 @@ impl PeerManager {
             range_addr == accepted.addr
                 && range_len == accepted.prefix_len
                 && range.peer_group == accepted.peer_group
-                && (range.remote_asn == 0 || range.remote_asn == managed.remote_asn)
+                && (range.remote_asn == 0 || range.remote_asn == remote_asn)
         })
+    }
+
+    /// Keep an idle dynamic neighbor's identity while graceful restart may
+    /// still hold routes on either side; its first check is due at once.
+    /// `false` when there is nothing to keep: local GR is off, its OPEN never
+    /// validated, or no current range admits it.
+    pub(super) fn retain_dynamic_identity(
+        &mut self,
+        peer: &PeerKey,
+        managed: &ManagedPeerState,
+    ) -> bool {
+        let config = &managed.transport_config.peer;
+        if !config.graceful_restart
+            || managed.transport_config.rib_peer.get().is_none()
+            || !self.dynamic_peer_still_allowed_by_current_ranges(managed)
+        {
+            return false;
+        }
+        let Some(accepted) = managed.accepted_dynamic_range.clone() else {
+            return false;
+        };
+        let now = Instant::now();
+        let window = u64::from(config.gr_restart_time)
+            + u64::from(config.llgr_stale_time)
+            + u64::from(config.hold_time);
+        self.retained_dynamic.insert(
+            peer.clone(),
+            RetainedDynamicPeer {
+                accepted,
+                remote_asn: managed.remote_asn,
+                ours_held_until: now + Duration::from_secs(window),
+                check_at: now,
+            },
+        );
+        true
+    }
+
+    pub(super) fn next_retained_dynamic_check(&self) -> Option<Instant> {
+        self.retained_dynamic
+            .values()
+            .map(|retained| retained.check_at)
+            .min()
+    }
+
+    /// Check every retained dynamic neighbor at once: the ranges changed.
+    pub(super) fn recheck_retained_dynamic(&mut self) {
+        let now = Instant::now();
+        for retained in self.retained_dynamic.values_mut() {
+            retained.check_at = now;
+        }
+    }
+
+    pub(super) async fn settle_due_retained_dynamic(&mut self) {
+        let now = Instant::now();
+        let due: Vec<PeerKey> = self
+            .retained_dynamic
+            .iter()
+            .filter(|(_, retained)| retained.check_at <= now)
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in due {
+            self.settle_retained_dynamic(&peer).await;
+        }
+    }
+
+    /// Delete a retained dynamic neighbor once neither side can still hold
+    /// routes for it, or at once when no current range admits it; otherwise
+    /// check again when that can change. The RIB's next GR or LLGR timer
+    /// sweeps or promotes the routes it retains; the peer's hold of ours
+    /// ends by `ours_held_until`.
+    pub(super) async fn settle_retained_dynamic(&mut self, peer: &PeerKey) {
+        let Some(retained) = self.retained_dynamic.get(peer) else {
+            return;
+        };
+        let ours_held_until = retained.ours_held_until;
+        if self.dynamic_range_admits(&retained.accepted, retained.remote_asn) {
+            // Queued behind the ended session's teardown, which the caller
+            // joined, so the answer reflects it.
+            let retention = self.peer_retention(peer).await;
+            let now = Instant::now();
+            let next = match retention {
+                None => Some(now + RETENTION_RETRY),
+                Some(retention) if retention.stale_routes > 0 => Some(
+                    retention
+                        .next_deadline
+                        .unwrap_or(now + RETENTION_RECHECK)
+                        .max(now + RETENTION_RETRY),
+                ),
+                Some(retention) if retention.peer_may_retain_ours && now < ours_held_until => {
+                    Some(ours_held_until)
+                }
+                Some(_) => None,
+            };
+            if let Some(at) = next {
+                if let Some(retained) = self.retained_dynamic.get_mut(peer) {
+                    retained.check_at = at;
+                }
+                return;
+            }
+        }
+        self.delete_retained_dynamic(peer).await;
+    }
+
+    /// Delete a retained dynamic neighbor now, releasing its RIB identity.
+    pub(super) async fn delete_retained_dynamic(&mut self, peer: &PeerKey) {
+        if self.retained_dynamic.remove(peer).is_none() {
+            return;
+        }
+        self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+        self.refresh_dynamic_neighbor_capacity_metrics();
+        self.reap_deleted_peer_metric_series_for_key(peer).await;
+        info!(peer = %peer, "retained dynamic peer deleted");
+    }
+
+    /// The RIB's GR/LLGR retention for the neighbor's identity; `None` when
+    /// the RIB did not answer in time.
+    pub(super) async fn peer_retention(
+        &mut self,
+        key: &PeerKey,
+    ) -> Option<rustbgpd_rib::PeerRetention> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let request = rustbgpd_rib::RibUpdate::QueryPeerRetention {
+            peer: self.rib_peer_of(key),
+            reply,
+        };
+        let rib_tx = self.rib_tx.clone();
+        let round_trip = tokio::time::timeout(RETENTION_QUERY_TIMEOUT, async move {
+            rib_tx.send(request).await.ok()?;
+            response.await.ok()
+        });
+        self.await_with_readiness(round_trip, super::OperatorReadAdmission::Served)
+            .await
+            .ok()
+            .flatten()
     }
 
     pub(super) fn reconcile_stale_dynamic_max_prefix_restarts(&mut self) {
@@ -518,6 +681,18 @@ impl PeerManager {
                 peer = %peer_key,
                 "config rollback: removed dynamic peer whose accepting range is no longer present"
             );
+        }
+        let retained: Vec<PeerKey> = self
+            .retained_dynamic
+            .iter()
+            .filter(|(_, retained)| {
+                !self.dynamic_range_admits(&retained.accepted, retained.remote_asn)
+            })
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer_key in retained {
+            self.delete_retained_dynamic(&peer_key).await;
+            removed += 1;
         }
         removed
     }

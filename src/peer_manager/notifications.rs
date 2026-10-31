@@ -381,6 +381,12 @@ impl PeerManager {
                             self.seed_peer_truth_metrics(&peer_key, false);
                             self.publish_peer_info_metric(&peer_key);
                             info!(peer = %peer_addr, "retained dynamic peer disabled after terminal block or failed RIB retirement fence");
+                        } else if self.retain_dynamic_identity(&peer_key, &managed) {
+                            // Graceful restart may still hold routes on either
+                            // side: the RIB's for the peer, or the peer's of
+                            // ours. Keep its identity until both lapse, so a
+                            // reconnect resumes as the same RIB peer.
+                            self.settle_retained_dynamic(&peer_key).await;
                         } else {
                             // Producer joins and the required RIB fence found
                             // no terminal block, so auto-removal is authoritative.

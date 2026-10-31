@@ -816,6 +816,9 @@ impl PeerManager {
             return Err(PeerLifecycleError::Invalid(reason));
         }
 
+        // A static neighbor at an idle dynamic neighbor's address is a new
+        // neighbor: the retained identity goes first.
+        self.delete_retained_dynamic(&peer_key).await;
         transport.neighbor_counters = self.neighbor_counters_for(&peer_key);
         transport.interface_only = self.interface_only_owns(peer_key.interface.as_deref());
         transport.dampening_admission = self

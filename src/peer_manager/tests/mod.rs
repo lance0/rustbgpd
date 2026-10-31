@@ -1861,6 +1861,7 @@ mod config_transaction;
 mod configured_owners;
 mod dampening_control;
 mod dynamic_ranges;
+mod dynamic_retention;
 mod events;
 mod export_cohorts;
 mod forwarding_state;

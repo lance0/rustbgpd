@@ -431,8 +431,11 @@ impl PeerManager {
                 return;
             }
             if let Some(range) = self.match_dynamic_range(peer_ip) {
-                // Check dynamic peer limit
-                if self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
+                // Check dynamic peer limit; a retained identity already counts.
+                let retained = self
+                    .retained_dynamic
+                    .contains_key(&PeerKey::new(peer_ip, None));
+                if !retained && self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
                     self.metrics.record_dynamic_neighbor_limit_rejection();
                     self.metrics
                         .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
@@ -492,8 +495,12 @@ impl PeerManager {
                 let mut transport = self.build_transport_config(&cfg);
                 transport.neighbor_counters = self.neighbor_counters_for(&dynamic_peer_key);
                 // A dynamic neighbor gets its RIB identity only once its
-                // OPEN validates: the session allocates it on first use.
-                transport.rib_peer = rustbgpd_transport::RibPeerSlot::allocate_after_open();
+                // OPEN validates: the session allocates it on first use. A
+                // retained identity resumes, with what the RIB holds for it.
+                transport.rib_peer = match self.rib_peers.get(&dynamic_peer_key) {
+                    Some(slot) if retained => slot.clone(),
+                    _ => rustbgpd_transport::RibPeerSlot::allocate_after_open(),
+                };
                 transport.accepted_dynamic_range = Some(accepted_dynamic_range.clone());
                 transport.dampening_admission = match self
                     .configured_owner_admission_for_dynamic(&accepted_dynamic_range, remote_asn)
@@ -649,8 +656,10 @@ impl PeerManager {
                 self.register_session(session_id, &peer_key);
                 self.sync_owned_session_metrics(&peer_key).await;
                 self.publish_peer_info_metric(&peer_key);
-                self.dynamic_peer_count += 1;
-                self.refresh_dynamic_neighbor_capacity_metrics();
+                if self.retained_dynamic.remove(&peer_key).is_none() {
+                    self.dynamic_peer_count += 1;
+                    self.refresh_dynamic_neighbor_capacity_metrics();
+                }
                 // ADR-0112: the accepted child carries the range's pinned
                 // external classification and its resolved chains.
                 self.refresh_rfc8212_policy_metrics(&peer_key);

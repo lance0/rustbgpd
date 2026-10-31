@@ -690,6 +690,8 @@ fn export_peer_up(
 /// remaining time and stale-route count.
 /// Once the GR timer sweeps the routes the row is gone and the address is
 /// not found again. Without the RIB's retained roster neither read sees it.
+/// The peer manager keeps the neighbor's RIB identity until then, so its
+/// `PeerDeleted` follows the sweep, as here.
 #[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
@@ -815,6 +817,18 @@ async fn down_dynamic_neighbor_retention_row_lasts_until_sweep() {
         get("192.0.2.9").await.unwrap_err().code(),
         tonic::Code::NotFound
     );
+    // Only then does the peer manager delete the neighbor and release its
+    // handle; the row stays gone.
+    rib_tx
+        .send(RibUpdate::PeerDeleted {
+            peer,
+            label: None,
+            keep_series: false,
+        })
+        .await
+        .unwrap();
+    rib_tx.send(RibUpdate::ReleasePeer { peer }).await.unwrap();
+    assert_eq!(neighbors(&neighbor).await.neighbors, Vec::new());
     manager_task.abort();
     peer_task.abort();
 }

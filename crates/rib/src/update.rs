@@ -2310,6 +2310,9 @@ pub struct PeerRetention {
     /// The peer's earliest GR or LLGR timer: expiry sweeps the stale routes
     /// or promotes them to LLGR. `None` when no timer is armed.
     pub next_deadline: Option<tokio::time::Instant>,
+    /// The peer's last session ended with the peer as our Graceful Restart
+    /// helper, so it may still retain the routes we sent it.
+    pub peer_may_retain_ours: bool,
 }
 
 /// Helper-side retention phase of one family's stale routes.

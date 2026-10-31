@@ -2588,7 +2588,8 @@ async fn retention_query_follows_gr_then_llgr_to_the_sweep() {
         retention(&mut manager, source),
         crate::update::PeerRetention {
             stale_routes: 0,
-            next_deadline: None
+            next_deadline: None,
+            peer_may_retain_ours: false,
         }
     );
 }
