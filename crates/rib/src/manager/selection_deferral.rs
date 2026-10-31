@@ -516,6 +516,11 @@ impl SelectionDeferral {
         !self.active.is_empty()
     }
 
+    /// [`Self::may_hold`] for one family.
+    pub(super) fn may_hold_family(&self, family: (Afi, Safi)) -> bool {
+        self.active.contains_key(&family)
+    }
+
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.active
             .get(&family)

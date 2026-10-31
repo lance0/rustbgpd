@@ -986,10 +986,12 @@ impl RibManager {
                         keys: std::collections::BTreeSet::new(),
                         settled: false,
                         orf_blocked: Vec::new(),
+                        gate_blocked: Vec::new(),
                     });
             carried.ended = ended;
             carried.settled = false;
             carried.orf_blocked.clear();
+            carried.gate_blocked.clear();
             insert_bounded(&mut carried.keys, keys, &mut checkpoint);
         }
     }
@@ -1093,10 +1095,10 @@ impl RibManager {
             if candidates.is_empty() {
                 continue;
             }
-            let mut orf_blocked = if rescan {
-                Vec::new()
+            let (mut orf_blocked, mut gate_blocked) = if rescan {
+                (Vec::new(), Vec::new())
             } else {
-                carried.orf_blocked.clone()
+                (carried.orf_blocked.clone(), carried.gate_blocked.clone())
             };
             let add_path = self.peer_add_path_send_families.get(&peer);
             // Keys follow the current session's Add-Path mode: without it,
@@ -1112,12 +1114,19 @@ impl RibManager {
                 let family = prefix_family(&prefix);
                 let keyed = add_path.is_some_and(|families| families.contains(&family));
                 let path_id = if keyed { path_id } else { 0 };
-                // Retire a key only once the gate deferring our End-of-RIB
-                // opens; selection can be staged while it still holds.
-                if !self.selection_convergence_held(family)
+                // A key is withdrawn only while its family's End-of-RIB gate
+                // holds, and retires once that End-of-RIB can no longer be
+                // deferred or has gone out; selection can be staged while the
+                // gate still holds. A family whose gate may still arm keeps
+                // its keys for that gate.
+                if self.helper_stale_family_retired(peer, family)
                     || self.advertises_unicast_key(peer, prefix, path_id)
                 {
                     done.push(key);
+                } else if !self.selection_convergence_held(family) {
+                    if !gate_blocked.contains(&family) {
+                        gate_blocked.push(family);
+                    }
                 } else if !self.helper_stale_flushable(peer, key) {
                     if !orf_blocked.contains(&family) {
                         orf_blocked.push(family);
@@ -1167,6 +1176,7 @@ impl RibManager {
             } else {
                 carried.settled = true;
                 carried.orf_blocked = orf_blocked;
+                carried.gate_blocked = gate_blocked;
             }
         }
     }
@@ -1235,15 +1245,7 @@ impl RibManager {
     /// gate or replay grace, deferred behind an ORF table, or not yet
     /// admitted by a full writer).
     pub(super) fn helper_stale_exempt_synced(&self, peer: PeerId) -> bool {
-        self.outbound_peers.get(&peer).is_some_and(|current| {
-            self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
-                !carried
-                    .ended
-                    .upgrade()
-                    .is_some_and(|ended| ended.same_channel(current))
-            })
-        }) && !self.dirty_peers.contains(&peer)
-            && !self.pending_initial_registrations.contains(&peer)
+        self.helper_stale_exempt_current(peer)
             && !self.peer_orf_pending.contains_key(&peer)
             && !self
                 .pending_eor
@@ -1255,8 +1257,23 @@ impl RibManager {
                 .is_some_and(|families| families.iter().any(|&(_, safi)| safi == Safi::Unicast))
     }
 
+    /// A later session than the carry's is registered, clean, and past its
+    /// initial registration.
+    fn helper_stale_exempt_current(&self, peer: PeerId) -> bool {
+        self.outbound_peers.get(&peer).is_some_and(|current| {
+            self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
+                !carried
+                    .ended
+                    .upgrade()
+                    .is_some_and(|ended| ended.same_channel(current))
+            })
+        }) && !self.dirty_peers.contains(&peer)
+            && !self.pending_initial_registrations.contains(&peer)
+    }
+
     /// A settled set must be walked again: an ORF gate one of its keys
-    /// waited on has opened.
+    /// waited on has opened, or a family whose gate could still arm has
+    /// armed or no longer needs its keys.
     pub(super) fn helper_stale_needs_rescan(
         &self,
         peer: PeerId,
@@ -1269,6 +1286,31 @@ impl RibManager {
                     .get(&peer)
                     .is_some_and(|gated| gated.contains(family))
             })
+            || carried.gate_blocked.iter().any(|&family| {
+                self.selection_convergence_held(family)
+                    || self.helper_stale_family_retired(peer, family)
+            })
+    }
+
+    /// No hold can need `family`'s carried keys at `peer` any more: the
+    /// family is released, or its gate is open and the current session has
+    /// sent its End-of-RIB, which purges the rows the helper kept.
+    fn helper_stale_family_retired(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
+        let unicast_eor_queued = |queued: Option<&HashSet<(Afi, Safi)>>| {
+            queued.is_some_and(|families| families.contains(&family))
+        };
+        !self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(|selection| selection.may_hold_family(family))
+            || (!self.selection_convergence_held(family)
+                && self.helper_stale_exempt_current(peer)
+                && !self
+                    .peer_orf_pending
+                    .get(&peer)
+                    .is_some_and(|gated| gated.contains(&family))
+                && !unicast_eor_queued(self.pending_eor.get(&peer))
+                && !unicast_eor_queued(self.gr_deferred_eor.get(&peer)))
     }
 
     /// A later session is registered and has sent every row the hold lets

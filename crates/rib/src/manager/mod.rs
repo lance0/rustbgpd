@@ -1997,6 +1997,10 @@ struct HelperStaleExempt {
     settled: bool,
     /// Families whose waiting keys an ORF gate held at the last flush.
     orf_blocked: Vec<(Afi, Safi)>,
+    /// Families whose waiting keys a gate that may still arm held at the
+    /// last flush: their End-of-RIB is not yet sent, so their keys wait
+    /// for that gate to arm or for the End-of-RIB.
+    gate_blocked: Vec<(Afi, Safi)>,
 }
 
 #[derive(Clone, Debug, Default)]
