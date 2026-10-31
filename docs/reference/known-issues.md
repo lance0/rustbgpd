@@ -45,6 +45,46 @@ resolved.
   permits isolated breaches while retaining them as evidence; they do not
   automatically block release when all agreed acceptance gates pass.
 
+- **A GR helper can keep a deleted RTBH whose prefix still has another
+  route until End-of-RIB.** This applies after a planned restart, when a
+  receiver that is a Graceful Restart helper flaps while End-of-RIB toward
+  it is held by
+  [selection deferral](configuration.md#graceful-restart-rfc-4724) or the
+  [replay grace window](configuration.md#planned-restart-end-of-rib-grace-window).
+  RFC 4724 §4.2 has the helper keep the ended session's routes stale until
+  our End-of-RIB. rustbgpd carries the ended session's RTBH and host
+  (deferral-exempt) keys to the next session and, while End-of-RIB toward
+  the helper is held by selection deferral or the replay grace window,
+  withdraws each one that was deleted and whose prefix has no other route.
+  It deliberately does not withdraw a deleted RTBH whose prefix still has
+  another candidate: a local route, or one received from another peer. Queued updates are discarded when a session ends, so the RIB cannot
+  tell whether the helper holds the stale RTBH at that key or an ordinary
+  route that was never replaced; withdrawing it could remove a route the
+  helper rightly keeps. The candidate counts even when this peer's export
+  policy denies it. The helper therefore keeps that RTBH until whichever
+  comes first: an ordinary route for the prefix is advertised to it at the
+  same key, implicitly replacing the stale row, or End-of-RIB is sent, at
+  the later of selection release and the end of the grace window.
+  Selection release distributes routes while the grace window still holds
+  End-of-RIB, so an exportable replacement normally reaches the helper at
+  release. The RTBH stays until End-of-RIB only while no replacement is
+  advertised at its key: the candidate is denied by this peer's export
+  policy, or is still held by selection deferral, or, toward an Add-Path
+  receiver, the replacement is advertised with a different path ID and the
+  stale RTBH keeps its own. The grace window is at most `gr_eor_grace_time`
+  (`--check` warns above 240 seconds; the schema maximum is 4095), and the
+  helper's own stale-route timer can end it sooner. Tracking is limited to
+  65,536 carried keys per helper peer, and 65,536 withdrawn-in-hold keys per
+  peer or update group; keys past that limit are not recorded, so a deleted
+  RTBH among them stays at the helper until End-of-RIB.
+  Mitigations: keep `gr_eor_grace_time` short; an RTBH controller that
+  replaces a blackhole with an ordinary route at the same prefix should
+  expect the old RTBH to stay at a flapped helper until that replacement is
+  advertised to it, or until End-of-RIB when it is not.
+  `rbgp rib --prefix P advertised PEER --explain` shows what rustbgpd now
+  advertises for the prefix, or why it is held; the helper's own stale-route
+  view shows whether it still holds the RTBH.
+
 ## Resolved
 
 - **MRT snapshot per-entry attribute clones (resolved).** Ordinary IPv4/IPv6

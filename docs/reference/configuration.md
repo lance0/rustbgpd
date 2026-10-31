@@ -2422,6 +2422,20 @@ controller re-adds and then lifts during the hold is withdrawn at once.
 Whether keeping stale routes longer is the right trade during an attack is an
 operator decision.
 
+**A helper that flaps during the hold.** The helper keeps the ended
+session's routes stale until End-of-RIB. While End-of-RIB toward it is held,
+by selection deferral or this grace window, rustbgpd withdraws an RTBH or
+host route deleted since then, but not one whose prefix still has another
+route, local or received from another peer, even if this peer's export
+policy denies it. The helper keeps that RTBH until an ordinary route for the
+prefix is advertised to it at the same key, or until End-of-RIB, whichever
+comes first. An RTBH controller that replaces a blackhole with an ordinary
+route at the same prefix should expect the RTBH to stay while that
+replacement is export-denied, held by selection deferral, or advertised to
+an Add-Path receiver under a different path ID, and should keep
+`gr_eor_grace_time` short. See
+[Known Issues](known-issues.md#open-issues) for the full scope.
+
 **Restart Time and helper limits.** `--check` rejects a window longer than
 the effective `gr_restart_time`, because the hold belongs to the restarting
 window this daemon advertises. That bound is not sufficient. Once the session
