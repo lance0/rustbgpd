@@ -212,7 +212,7 @@ fn received(
 
 async fn settle(manager: &mut RibManager, by: Duration) {
     advance(by).await;
-    let _ = manager.fire_conditional_advertisement_timers();
+    let _ = manager.fire_conditional_advertisement_timers(tokio::time::Instant::now());
 }
 
 fn condition_gauge(metrics: &BgpMetrics, state: &str) -> f64 {

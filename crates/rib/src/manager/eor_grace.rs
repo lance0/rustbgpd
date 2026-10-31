@@ -397,13 +397,13 @@ impl RibManager {
         self.eor_grace_deadlines.min()
     }
 
-    /// Release the windows whose deadline is at or before `due`, the
-    /// deadline the shared hold timer fired for. The run loop drained only
-    /// the work queued when that deadline fell due, so a later window must
-    /// not ride along even if it has passed by now: a replay queued between
-    /// the two deadlines would land behind its End-of-RIB. The release is
-    /// timer-driven only: it does not know whether controller replay
-    /// finished, and the log says so.
+    /// Release the windows whose deadline is at or before `due`, the time
+    /// the shared hold timer's cutoff was captured. The run loop drained the
+    /// work queued before that time, which covers every window due by then;
+    /// a later window must not ride along even if it has passed by now: a
+    /// replay queued after the capture but before its deadline would land
+    /// behind its End-of-RIB. The release is timer-driven only: it does not
+    /// know whether controller replay finished, and the log says so.
     pub(super) fn expire_eor_grace(&mut self, due: tokio::time::Instant) {
         let expired: Vec<EorGraceTarget> = self
             .eor_grace_deadlines

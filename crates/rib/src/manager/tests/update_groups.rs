@@ -9569,9 +9569,12 @@ async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
         let (tx, rx) = mpsc::channel(128);
         manager.rx = rx;
         if let Some(cutoff) = cutoff {
-            manager
-                .expiry_cutoffs
-                .observe(ExpiryTimer::Conditional, true, cutoff);
+            manager.expiry_cutoffs.observe(
+                ExpiryTimer::Conditional,
+                Some(tokio::time::Instant::now()),
+                tokio::time::Instant::now(),
+                cutoff,
+            );
         }
         let flags: Vec<_> = peers
             .iter()
