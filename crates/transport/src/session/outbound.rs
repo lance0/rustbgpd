@@ -8,9 +8,10 @@ use super::{
     Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix, Route,
     RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, debug, info, warn,
 };
-use super::{EvpnRibRoute, LabeledRibRoute, VpnRibRoute};
-#[cfg(test)]
-use super::{FlowSpecRoute, RtcRibRoute};
+use super::{
+    BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute,
+    RtcRibRoute, VpnRibRoute,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,11 +47,69 @@ pub(super) struct PendingOutbound {
     /// Unicast announcements, filled only once the envelope retires (see
     /// [`Self::begin_retirement`]); until then they stay in `update`.
     announce: std::vec::IntoIter<Route>,
+    /// The other heap-owning payloads, likewise moved out of `update` only
+    /// once the envelope retires.
+    retiring_rest: RetiringRest,
     /// Spans every announce slice, so the envelope reports dropped IPv6
     /// next hops once, when its announce phase completes.
     dropped_ipv6_next_hops: DroppedIpv6NextHops,
     #[cfg(test)]
     pub(super) test_slice_cost: Option<Duration>,
+}
+
+/// Payload vectors whose elements own heap memory or a shared reference, and
+/// which the encode path reads in place from `update`. A retiring envelope
+/// releases them under the same slice budget as its announcements.
+#[derive(Default)]
+struct RetiringRest {
+    flowspec_announce: std::vec::IntoIter<FlowSpecRoute>,
+    flowspec_withdraw: std::vec::IntoIter<FlowSpecKey>,
+    bgpls_announce: std::vec::IntoIter<BgpLsRibRoute>,
+    bgpls_withdraw: std::vec::IntoIter<BgpLsRouteKey>,
+    rtc_announce: std::vec::IntoIter<RtcRibRoute>,
+    otc_blocked: std::vec::IntoIter<Route>,
+}
+
+// The remaining payload vectors free in one step whatever their length, so
+// they need no pacing. A new heap-owning key type must join `RetiringRest`.
+const _: () = assert!(
+    !std::mem::needs_drop::<(Prefix, u32)>()
+        && !std::mem::needs_drop::<super::EvpnRouteKey>()
+        && !std::mem::needs_drop::<super::VpnRibRouteKey>()
+        && !std::mem::needs_drop::<super::LabeledRibRouteKey>()
+        && !std::mem::needs_drop::<super::RtcRibRouteKey>()
+        && !std::mem::needs_drop::<Option<rustbgpd_policy::NextHopAction>>()
+);
+
+impl RetiringRest {
+    fn take(update: &mut OutboundRouteUpdate) -> Self {
+        Self {
+            flowspec_announce: std::mem::take(&mut update.flowspec_announce).into_iter(),
+            flowspec_withdraw: std::mem::take(&mut update.flowspec_withdraw).into_iter(),
+            bgpls_announce: std::mem::take(&mut update.bgpls_announce).into_iter(),
+            bgpls_withdraw: std::mem::take(&mut update.bgpls_withdraw).into_iter(),
+            rtc_announce: std::mem::take(&mut update.rtc_announce).into_iter(),
+            otc_blocked: std::mem::take(&mut update.otc_blocked).into_iter(),
+        }
+    }
+
+    fn release(&mut self, left: &mut usize) {
+        *left -= self.flowspec_announce.by_ref().take(*left).count();
+        *left -= self.flowspec_withdraw.by_ref().take(*left).count();
+        *left -= self.bgpls_announce.by_ref().take(*left).count();
+        *left -= self.bgpls_withdraw.by_ref().take(*left).count();
+        *left -= self.rtc_announce.by_ref().take(*left).count();
+        *left -= self.otc_blocked.by_ref().take(*left).count();
+    }
+
+    fn len(&self) -> usize {
+        self.flowspec_announce.len()
+            + self.flowspec_withdraw.len()
+            + self.bgpls_announce.len()
+            + self.bgpls_withdraw.len()
+            + self.rtc_announce.len()
+            + self.otc_blocked.len()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -156,6 +215,7 @@ impl PendingOutbound {
             vpn_announce,
             labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
             announce: Vec::new().into_iter(),
+            retiring_rest: RetiringRest::default(),
             update,
             shared,
             requests,
@@ -191,6 +251,7 @@ impl PendingOutbound {
         own_if_last(&mut self.announce, &mut self.update.announce);
         own_if_last(&mut self.vpn_announce, &mut self.update.vpn_announce);
         own_if_last(&mut self.evpn_announce, &mut self.update.evpn_announce);
+        self.retiring_rest = RetiringRest::take(&mut self.update);
         self.shared = None;
         self.capacity_blocked = false;
         self.phase = OUTBOUND_PHASES.len();
@@ -207,6 +268,7 @@ impl PendingOutbound {
         left -= self.vpn_announce.by_ref().take(left).count();
         left -= self.evpn_announce.by_ref().take(left).count();
         left -= self.labeled_announce.by_ref().take(left).count();
+        self.retiring_rest.release(&mut left);
         let released = self.slice_routes - left;
         let cost = started.elapsed();
         #[cfg(test)]
@@ -225,6 +287,7 @@ impl PendingOutbound {
                 + self.vpn_announce.len()
                 + self.evpn_announce.len()
                 + self.labeled_announce.len()
+                + self.retiring_rest.len()
                 > 0
     }
 
@@ -2852,6 +2915,7 @@ mod tests {
             vpn_announce: Vec::new().into_iter(),
             labeled_announce: Vec::new().into_iter(),
             announce: Vec::new().into_iter(),
+            retiring_rest: RetiringRest::default(),
             dropped_ipv6_next_hops: DroppedIpv6NextHops::default(),
             test_slice_cost: None,
         };

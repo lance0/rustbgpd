@@ -265,16 +265,84 @@ async fn outbound_pacing_resource_deadline_is_finite_with_send_hold_disabled() {
 const QUEUE_SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
 const QUEUED_ROUTES: usize = 5 * QUEUE_SLICE;
 
-/// Counts the live routes of one queued full-table envelope by their shared
-/// attribute set.
+/// Counts the live entries of queued envelopes: routes by their shared
+/// attribute set, byte payloads by the owner `marker` they share.
 struct QueuedInventory {
     held: Arc<AttrSet>,
     base: usize,
+    marker: Arc<()>,
 }
 
 impl QueuedInventory {
     fn live(&self) -> usize {
-        Arc::strong_count(&self.held) - self.base
+        Arc::strong_count(&self.held) - self.base + Arc::strong_count(&self.marker) - 1
+    }
+
+    fn marked(&self) -> Bytes {
+        // Held only so the payload's drop releases it.
+        struct Marked {
+            _owner: Arc<()>,
+        }
+        impl AsRef<[u8]> for Marked {
+            fn as_ref(&self) -> &[u8] {
+                b"marked"
+            }
+        }
+        Bytes::from_owner(Marked {
+            _owner: Arc::clone(&self.marker),
+        })
+    }
+
+    /// `per_family` entries of every heap-owning payload outside the
+    /// announce families, each counted by [`Self::live`] except the
+    /// `FlowSpec` withdrawals, whose keys own no shared handle to count.
+    fn add_other_families(&self, update: &mut OutboundRouteUpdate, per_family: usize) {
+        let bgpls = make_bgpls_route(1);
+        update.flowspec_announce = (0..per_family)
+            .map(|_| FlowSpecRoute {
+                attributes: vec![PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+                    flags: 0xc0,
+                    type_code: 250,
+                    data: self.marked(),
+                })],
+                ..make_flowspec_route()
+            })
+            .collect();
+        update.flowspec_withdraw = (0..per_family)
+            .map(|_| FlowSpecKey {
+                afi: Afi::Ipv4,
+                rule: make_flowspec_route().rule,
+            })
+            .collect();
+        update.bgpls_announce = (0..per_family)
+            .map(|_| rustbgpd_rib::BgpLsRibRoute {
+                attributes: Arc::clone(&self.held),
+                ..bgpls.clone()
+            })
+            .collect();
+        update.bgpls_withdraw = (0..per_family)
+            .map(|_| {
+                let mut nlri = bgpls.nlri.key();
+                nlri.payload = self.marked();
+                rustbgpd_rib::BgpLsRouteKey {
+                    family: bgpls.family,
+                    nlri,
+                    path_id: 0,
+                }
+            })
+            .collect();
+        update.rtc_announce = (0..per_family)
+            .map(|_| rustbgpd_rib::RtcRibRoute {
+                attributes: Arc::clone(&self.held),
+                ..make_rtc_rib_route(1)
+            })
+            .collect();
+        update.otc_blocked = (0..per_family)
+            .map(|_| Route {
+                attributes: Arc::clone(&self.held),
+                ..make_route(100)
+            })
+            .collect();
     }
 }
 
@@ -313,7 +381,11 @@ async fn queued_last_owner_session() -> (
         })
         .collect();
     let envelope = pacing_update(&session, routes);
-    let inventory = QueuedInventory { held, base };
+    let inventory = QueuedInventory {
+        held,
+        base,
+        marker: Arc::new(()),
+    };
     assert_eq!(inventory.live(), QUEUED_ROUTES);
     (session, commands, rib_rx, writer, envelope, inventory)
 }
@@ -353,7 +425,7 @@ async fn finish_queued_release(
     let before = inventory.live();
     drop(session);
     released.push(before - inventory.live());
-    for _ in 0..2 * QUEUED_ROUTES / QUEUE_SLICE {
+    for _ in 0..4 * QUEUED_ROUTES / QUEUE_SLICE {
         let before = inventory.live();
         tokio::task::yield_now().await;
         released.push(before - inventory.live());
@@ -442,6 +514,46 @@ async fn outbound_pacing_permit_reserved_before_teardown_is_paced() {
     drop(rib_rx);
     drop(sender);
     released.push(before - inventory.live());
+    finish_queued_release(session, &inventory, released).await;
+}
+
+/// `FlowSpec`, BGP-LS, RT-Constrain and OTC-blocked payloads stay in the
+/// envelope while it sends. A queued envelope holding only those is
+/// retired as well, a slice per step, not dropped whole.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_down_paces_queued_other_family_release() {
+    let (mut session, commands, _rib_rx, _writer, envelope, inventory) =
+        queued_last_owner_session().await;
+    drop(envelope);
+    let mut update = pacing_update(&session, Vec::new());
+    inventory.add_other_families(&mut update, QUEUE_SLICE + 1);
+    session.outbound_tx.try_send(update).unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    assert!(
+        inventory.live() > 0,
+        "the teardown does not wait for the release"
+    );
+    finish_queued_release(session, &inventory, released).await;
+}
+
+/// A mixed envelope shares one slice budget across its unicast routes and
+/// every other family: its last unicast slice must not carry the rest out
+/// in the same step.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_down_paces_queued_mixed_family_release() {
+    let (mut session, commands, _rib_rx, _writer, mut envelope, inventory) =
+        queued_last_owner_session().await;
+    inventory.add_other_families(&mut envelope, QUEUE_SLICE / 2);
+    session.outbound_tx.try_send(envelope).unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    assert!(
+        inventory.live() > 0,
+        "the teardown does not wait for the release"
+    );
     finish_queued_release(session, &inventory, released).await;
 }
 
