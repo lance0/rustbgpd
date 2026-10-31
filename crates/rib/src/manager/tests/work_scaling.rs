@@ -44,7 +44,7 @@ const ROUTES: usize = 8;
 
 /// Work counts by unit: checkpoints by stage name (`""` when unnamed),
 /// their total under [`ALL`], and any unit a scenario adds.
-type Work = BTreeMap<&'static str, usize>;
+pub(super) type Work = BTreeMap<&'static str, usize>;
 
 /// Every checkpoint, named or not.
 const ALL: &str = "checkpoints";
@@ -52,7 +52,7 @@ const ALL: &str = "checkpoints";
 const ENVELOPES: &str = "member envelopes";
 
 /// Assert that each of `units` grows linearly from [`SMALL`] to [`LARGE`].
-fn assert_linear(contract: &str, units: &[&str], measure: impl Fn(usize) -> Work) {
+pub(super) fn assert_linear(contract: &str, units: &[&str], measure: impl Fn(usize) -> Work) {
     let small = measure(SMALL);
     let large = measure(LARGE);
     let scale = LARGE / SMALL;
@@ -74,7 +74,7 @@ fn assert_linear(contract: &str, units: &[&str], measure: impl Fn(usize) -> Work
 }
 
 /// The checkpoints `work` passes on this thread.
-fn checkpoints_in(work: impl FnOnce()) -> Work {
+pub(super) fn checkpoints_in(work: impl FnOnce()) -> Work {
     let before = checkpoints();
     work();
     let mut counts: Work = checkpoints()

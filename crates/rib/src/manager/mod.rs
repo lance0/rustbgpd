@@ -1187,6 +1187,19 @@ pub struct RibManager {
     /// intersects these with the member's actual admitted-key proof. Cleared
     /// on resync success.
     pending_extra_withdraws: HashMap<PeerId, update_groups::ExtraWithdraws>,
+    /// Exempt (RTBH or host) unicast keys withdrawn outright during the
+    /// current selection hold: per update group, and per private receiver
+    /// once its withdrawal is queued. A session that ends before its queued
+    /// withdrawal reaches the peer leaves that row stale at a GR helper,
+    /// and the group table or Adj-RIB-Out no longer names it. Bounded per
+    /// owner by [`HELPER_STALE_EXEMPT_LIMIT`]; cleared when the hold ends.
+    hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, BTreeSet<(Prefix, u32)>>,
+    /// Exempt unicast keys an ended session of a GR-capable peer may still
+    /// hold as stale (RFC 4724 §4.2). The peer drops stale routes only at
+    /// our End-of-RIB, which a selection hold defers until release, so the
+    /// next session withdraws the ones it does not advertise. Bounded by
+    /// the exempt rows; dropped once no hold is active.
+    helper_stale_exempt: HashMap<PeerId, HelperStaleExempt>,
     /// Actual admitted unicast/VPN keys while a member's shared desired view
     /// can advance without delivery. Exact capacity charge is capped at
     /// 64 MiB per peer and 512 MiB per daemon (provisional qualification
@@ -1925,6 +1938,37 @@ pub(super) struct LiveSessionRecord {
     selection_initial_admitted_valid: bool,
     /// The neighbor's export-policy totals, installed with the registration.
     export_policy_counters: crate::update::ExportPolicyCounters,
+}
+
+/// Keys one stale-exempt set or hold ledger holds at most. Past it the
+/// remaining keys stay at the helper until our End-of-RIB, as without the
+/// carry.
+const HELPER_STALE_EXEMPT_LIMIT: usize = 1 << 16;
+
+/// Who a hold-scoped exempt withdrawal was sent to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HoldWithdrawOwner {
+    Group(usize),
+    Peer(PeerId),
+}
+
+/// Exempt keys a GR-capable peer may hold stale from an ended session.
+#[derive(Debug)]
+struct HelperStaleExempt {
+    /// The ended session's writer. Its withdrawals belong to a later one.
+    ended: mpsc::WeakSender<OutboundRouteUpdate>,
+    /// Ordered so a flush can look up one prefix's keys, and so the first
+    /// and last keys name every unicast family present (IPv4 sorts first).
+    keys: BTreeSet<(Prefix, u32)>,
+    /// The last flush withdrew everything it could: each remaining key waits
+    /// for a route change on its prefix or for an ORF gate in `orf_blocked`,
+    /// and a later flush re-checks only those, so neither the resync timer
+    /// nor an unrelated distribution pass walks the set again. Cleared when
+    /// a flush cannot finish: a full writer, or a skipped set whose prefixes
+    /// changed. The resync timer then runs until a flush settles it.
+    settled: bool,
+    /// Families whose waiting keys an ORF gate held at the last flush.
+    orf_blocked: Vec<(Afi, Safi)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2728,6 +2772,8 @@ impl RibManager {
             group_ribs: HashMap::new(),
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
+            hold_exempt_withdrawn: HashMap::new(),
+            helper_stale_exempt: HashMap::new(),
             pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
             evpn_recovery_reset: None,
@@ -3774,6 +3820,11 @@ impl RibManager {
             self.replacement_checkpoint(false);
             !self.selection_partial_caught_up(peer)
         }) || !self.pending_inbound_refresh.is_empty()
+            || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
+                self.replacement_checkpoint(false);
+                self.helper_stale_needs_rescan(peer, carried)
+                    && self.helper_stale_exempt_runnable(peer)
+            })
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {
                     self.replacement_checkpoint(false);
@@ -3822,6 +3873,7 @@ impl RibManager {
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
         let recovered = self.drain_outbound_limit_recovery();
         self.retry_pending_inbound_refresh_bounded();
+        self.flush_helper_stale_exempt(&HashSet::new());
         self.retry_evpn_feed_markers_bounded();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
@@ -3890,7 +3942,7 @@ impl RibManager {
                 .filter(|peer| self.force_outbound_peers.remove(peer))
                 .collect();
             self.dirty_peers = selected;
-            self.distribute_changes(&HashSet::new(), &HashSet::new());
+            self.distribute_changes_without_stale_flush();
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
