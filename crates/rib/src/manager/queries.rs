@@ -3739,7 +3739,7 @@ impl RibManager {
 
                 let needs_as_path_string =
                     export_pol.is_some_and(PolicyChain::requires_as_path_string);
-                let mut permitted: Vec<(&crate::route::Route, bool)> = Vec::new();
+                let mut permitted: Vec<(&crate::route::Route, Option<bool>)> = Vec::new();
                 let mut export_memo = distribution::ExportMemo::default();
                 // Rank picks the paths; their keys follow live staging, on
                 // an empty wire before the peer's first commit.
@@ -3751,7 +3751,15 @@ impl RibManager {
                     &self.ribs,
                     &mut || {},
                 );
-                let mut snapshot = None;
+                let snapshot = self
+                    .peer_export_encoders
+                    .get(&peer_addr)
+                    .map(|encoder| encoder.snapshot());
+                let rs_control = self
+                    .peer_rs_control
+                    .get(&peer_addr)
+                    .copied()
+                    .zip(target_peer_asn);
                 for cand in &filtered {
                     if permitted.len() >= limit {
                         break;
@@ -3807,25 +3815,23 @@ impl RibManager {
                     if distribution::no_advertise_export_suppressed(modified.communities()) {
                         continue;
                     }
-                    let blackholing = keys.sendable_blackholing(
+                    let class = keys.plan_class(
                         distribution::blackholing(
                             cand,
                             &modified,
                             self.peer_local_roles.get(&peer_addr).copied().flatten(),
                         ),
-                        &modified,
-                        action.as_ref(),
                         || {
-                            snapshot
-                                .get_or_insert_with(|| {
-                                    self.peer_export_encoders
-                                        .get(&peer_addr)
-                                        .map(|encoder| encoder.snapshot())
-                                })
-                                .as_deref()
+                            distribution::exact_exportable(
+                                snapshot.as_deref(),
+                                cand,
+                                &modified,
+                                rs_control,
+                                action.as_ref(),
+                            )
                         },
                     );
-                    permitted.push((*cand, blackholing));
+                    permitted.push((*cand, class));
                 }
                 let keys = keys.assign_all(&permitted, limit, &mut || {});
                 for ((cand, _), key) in permitted.into_iter().zip(keys) {

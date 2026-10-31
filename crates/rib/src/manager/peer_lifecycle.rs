@@ -3775,6 +3775,7 @@ impl RibManager {
                     unicast_otc_prechecked,
                     announce_source_exclusion,
                     shared_group_encode,
+                    exact_export_snapshot: unicast.exact_export_snapshot,
                     withdraw: unicast.withdraw,
                     flowspec_announce: fs_announce,
                     flowspec_withdraw: fs_withdraw,

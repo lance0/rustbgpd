@@ -56,7 +56,7 @@ mod unicast;
 mod vpn;
 
 pub(in crate::manager) use export_memo::ExportMemo;
-pub(in crate::manager) use unicast::{AddPathKeys, blackholing, lease_rejection};
+pub(in crate::manager) use unicast::{AddPathKeys, blackholing, exact_exportable, lease_rejection};
 
 /// Bounds on one cross-message distribution window. Each bound caps a
 /// different cost: queued input messages and ingested routes cap the ingest
@@ -131,6 +131,10 @@ pub(in crate::manager) struct UnicastDistributionResult<P = PolicyFilteredRouteK
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
     pub(in crate::manager) policy_filtered: Vec<P>,
+    /// The exact-export snapshot Add-Path key planning probed with, if it
+    /// probed: the commit reuses it, so both see one session profile.
+    pub(in crate::manager) exact_export_snapshot:
+        Option<Arc<dyn crate::update::ExactExportSnapshot>>,
 }
 
 impl<P> Default for UnicastDistributionResult<P> {
@@ -141,6 +145,7 @@ impl<P> Default for UnicastDistributionResult<P> {
             withdraw: Vec::new(),
             next_hop_override: Vec::new(),
             policy_filtered: Vec::new(),
+            exact_export_snapshot: None,
         }
     }
 }
@@ -273,6 +278,10 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) force_unicast_replay: bool,
     pub(in crate::manager) announce_source_exclusion: Option<PeerId>,
     pub(in crate::manager) shared_group_encode: Option<Arc<crate::update::SharedGroupEncode>>,
+    /// Staging's exact-export snapshot ([`UnicastDistributionResult`]); the
+    /// commit probes with it rather than a fresh one.
+    pub(in crate::manager) exact_export_snapshot:
+        Option<Arc<dyn crate::update::ExactExportSnapshot>>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
     pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -3423,7 +3432,16 @@ impl RibManager {
                     OutboundCommitFailure::Refused(OutboundCommitRefusal::MissingEncoder),
                 );
             };
-            Some(encoder.snapshot())
+            // Add-Path key planning's snapshot, so planning and this
+            // commit's probes see one profile even if the session publishes
+            // a new one in between.
+            Some(
+                batch
+                    .exact_export_snapshot
+                    .take()
+                    .filter(|snapshot| snapshot.owner_id() == encoder.owner_id())
+                    .unwrap_or_else(|| encoder.snapshot()),
+            )
         } else {
             None
         };
@@ -3744,6 +3762,8 @@ impl RibManager {
             force_unicast_replay: _,
             announce_source_exclusion,
             mut shared_group_encode,
+            // Taken above for this commit's probes.
+            exact_export_snapshot: _,
             mut withdraw,
             end_of_rib,
             refresh_markers,
@@ -10345,6 +10365,7 @@ impl RibManager {
                                     unicast_otc_prechecked,
                                     announce_source_exclusion,
                                     shared_group_encode,
+                                    exact_export_snapshot: unicast.exact_export_snapshot,
                                     withdraw: unicast.withdraw,
                                     end_of_rib: pending_eor.clone(),
                                     flowspec_announce: fs_announce,

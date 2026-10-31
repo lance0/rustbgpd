@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::*;
 
 const RECEIVER_SESSION: u64 = 7;
@@ -10,9 +12,14 @@ fn rtbh_prefix() -> Ipv4Prefix {
 /// A received BLACKHOLE path from `SOURCE`, with `filler`
 /// further communities.
 fn blackhole_path(prefix: Ipv4Prefix, path_id: u32, local_pref: u32, filler: u32) -> Route {
-    let source = SOURCE;
     let mut communities = vec![rustbgpd_wire::COMMUNITY_BLACKHOLE];
     communities.extend((0..filler).map(|n| 0xFDE8_0000 | n));
+    path_with(prefix, path_id, local_pref, communities)
+}
+
+/// A received path from `SOURCE` carrying `communities`.
+fn path_with(prefix: Ipv4Prefix, path_id: u32, local_pref: u32, communities: Vec<u32>) -> Route {
+    let source = SOURCE;
     Route {
         prefix: Prefix::V4(prefix),
         peer: PeerId::from_addr(IpAddr::V4(source)),
@@ -62,13 +69,14 @@ async fn next_export(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> OutboundRo
 }
 
 /// A 4 KiB Add-Path receiver (`send_max` 2, the session's real encoder) is
-/// sent `first` from one source peer, then one pass applies `batch`. Returns
-/// the first row's key and the pass's envelope.
-async fn rtbh_then(
-    first: Route,
+/// sent each `setup` batch from one source peer as its own update, then one
+/// pass applies `announced` and `withdrawn`. Returns the wire after setup,
+/// as key to community count, and the pass's envelope.
+async fn setup_then(
+    setup: Vec<Vec<Route>>,
     announced: Vec<Route>,
     withdrawn: Vec<(Prefix, u32)>,
-) -> (u32, OutboundRouteUpdate) {
+) -> (BTreeMap<u32, usize>, OutboundRouteUpdate) {
     let (mut session, rib_rx) = make_test_session_with_metrics_and_identity(
         BgpMetrics::new(),
         SessionIdentity::primary(RECEIVER_SESSION),
@@ -119,17 +127,35 @@ async fn rtbh_then(
         .unwrap();
     assert_ne!(next_export(&mut outbound).await.end_of_rib.len(), 0);
 
-    received(&session, SOURCE, vec![first], vec![]).await;
-    let installed = next_export(&mut outbound).await;
-    assert_eq!(installed.announce.len(), 1);
-    let rtbh_key = installed.announce[0].path_id;
+    let mut wire = BTreeMap::new();
+    for batch in setup {
+        received(&session, SOURCE, batch, vec![]).await;
+        let installed = next_export(&mut outbound).await;
+        for (_, path_id) in &installed.withdraw {
+            wire.remove(path_id);
+        }
+        for route in installed.announce.iter() {
+            wire.insert(route.path_id, route.communities().len());
+        }
+    }
     received(&session, SOURCE, announced, withdrawn).await;
     let pass = next_export(&mut outbound).await;
 
     drop(session);
     drop(query_tx);
     manager_task.await.unwrap();
-    (rtbh_key, pass)
+    (wire, pass)
+}
+
+/// [`setup_then`] for a single RTBH row: its key and the pass's envelope.
+async fn rtbh_then(
+    first: Route,
+    announced: Vec<Route>,
+    withdrawn: Vec<(Prefix, u32)>,
+) -> (u32, OutboundRouteUpdate) {
+    let (wire, pass) = setup_then(vec![vec![first]], announced, withdrawn).await;
+    assert_eq!(wire.len(), 1);
+    (*wire.keys().next().unwrap(), pass)
 }
 
 /// The pass keeps the prefix blackholed between its UPDATEs: the RTBH key
@@ -197,4 +223,33 @@ async fn rtbh_grown_past_the_ceiling_hands_its_key_to_the_sendable_one() {
     )
     .await;
     assert_replaced_in_place(rtbh_key, &pass);
+}
+
+/// An ordinary path at `#1` and an RTBH path at `#2` from one source peer;
+/// the RTBH path then grows past the ceiling and outranks its sibling. The
+/// rejected path holds no row, so the ordinary path keeps `#1`, not the
+/// RTBH row's `#2` with `#1` withdrawn; the unsendable RTBH row's key is
+/// withdrawn, as it would be with no planning at all.
+#[tokio::test]
+async fn rejected_rtbh_leaves_its_same_peer_sibling_on_its_key() {
+    let (wire, pass) = setup_then(
+        vec![
+            vec![path_with(rtbh_prefix(), 1, 200, vec![])],
+            vec![blackhole_path(rtbh_prefix(), 2, 100, 0)],
+        ],
+        vec![blackhole_path(rtbh_prefix(), 2, 300, 1_100)],
+        vec![],
+    )
+    .await;
+    assert_eq!(
+        wire,
+        BTreeMap::from([(1, 0), (2, 1)]),
+        "ordinary at #1, RTBH at #2"
+    );
+    assert_eq!(
+        pass.withdraw,
+        [(Prefix::V4(rtbh_prefix()), 2)],
+        "only the rejected RTBH row's key leaves"
+    );
+    assert_eq!(pass.announce.len(), 0, "the ordinary path stays as sent");
 }

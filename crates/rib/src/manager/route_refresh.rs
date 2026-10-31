@@ -2109,6 +2109,7 @@ impl RibManager {
                     unicast_otc_prechecked,
                     announce_source_exclusion,
                     shared_group_encode,
+                    exact_export_snapshot: unicast.exact_export_snapshot,
                     withdraw: unicast.withdraw,
                     end_of_rib,
                     refresh_markers,
