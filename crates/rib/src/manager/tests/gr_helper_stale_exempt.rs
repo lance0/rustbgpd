@@ -2435,3 +2435,70 @@ fn carried_keys_sort_ipv4_before_ipv6() {
         [FAMILY, V6]
     );
 }
+
+/// A grace window ends while a selection gate can still hold every peer's
+/// End-of-RIB: the request it makes is consumed by the early return, and
+/// the carry and ledgers stay. The later selection release retires them.
+/// Red proof: without a request at the selection transition they outlive
+/// every hold.
+#[test]
+fn grace_end_under_a_selection_gate_defers_retirement_to_its_release() {
+    let (_tx, rx) = mpsc::channel(16);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(600),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![FAMILY],
+            }],
+        })
+        .with_eor_grace(crate::EorGraceConfig {
+            peers: vec![crate::EorGracePeerConfig {
+                peer: peer_v4(OBSERVER).into(),
+                deadline,
+                families: vec![FAMILY],
+            }],
+            replay_owners: vec![],
+        });
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let (_other_tx, mut other_rx, _) = register_peer(
+        &mut manager,
+        Ipv4Addr::new(192, 0, 2, 85),
+        85,
+        false,
+        false,
+        false,
+    );
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let other = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 9), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, other);
+    delete(&mut manager, other);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    while other_rx.try_recv().is_ok() {}
+    clean_end(&mut manager, 82);
+    assert!(manager.helper_stale_exempt.contains_key(&observer));
+    assert!(peer_ledgers(&manager) > 0);
+    manager.expire_eor_grace(deadline);
+    assert!(
+        manager.helper_stale_exempt.contains_key(&observer) && peer_ledgers(&manager) > 0,
+        "the selection gate can still hold: nothing retires at grace end"
+    );
+    manager.expire_selection_deferral();
+    assert!(
+        !manager
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::super::selection_deferral::SelectionDeferral::may_hold),
+        "every family is released"
+    );
+    assert!(
+        manager.helper_stale_exempt.is_empty(),
+        "the carry retires at release"
+    );
+    assert!(manager.hold_exempt_withdrawn.is_empty(), "and every ledger");
+}

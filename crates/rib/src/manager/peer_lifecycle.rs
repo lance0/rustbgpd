@@ -1297,7 +1297,10 @@ impl RibManager {
     }
 
     /// [`Self::retire_helper_stale_exempt`]'s walk, under a readiness owner,
-    /// checkpointing every owner it inspects or drops.
+    /// checkpointing every owner it inspects or drops. A walk driven by a
+    /// timer (grace or selection expiry) or a command (replay complete)
+    /// reports as `peer_teardown` readiness too: it is the same teardown
+    /// state, and a separate owner kind would add a metric label for it.
     fn retire_helper_stale_exempt_owned(&mut self, any: bool) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || {
