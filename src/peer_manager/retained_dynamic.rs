@@ -194,7 +194,7 @@ impl PeerManager {
         }
         let previous_asn = retained.remote_asn;
         let handle = retained.slot.get();
-        self.retained_dynamic.remove(peer);
+        self.remove_retained_dynamic(peer);
         let Some(handle) = handle else {
             return;
         };
@@ -363,7 +363,7 @@ impl PeerManager {
             return false;
         };
         if end.established {
-            self.retained_dynamic.remove(peer);
+            self.remove_retained_dynamic(peer);
             return false;
         }
         if let Some(live) = self.neighbor_counters.get(peer) {
@@ -381,19 +381,30 @@ impl PeerManager {
     /// (`live`) and a candidate's are queued: either session may still
     /// resolve a handle for itself, from another AS, until it has stopped.
     pub(super) fn take_dormant_retained_dynamic(&mut self, peer: &PeerKey, live: RibPeerSlot) {
-        let Some(retained) = self.retained_dynamic.remove(peer) else {
+        let Some(retained) = self.remove_retained_dynamic(peer) else {
             return;
         };
-        let keep = retained.slot.get();
-        let candidate = retained.candidate.map(|candidate| candidate.slot);
-        for slot in std::iter::once(live).chain(candidate) {
+        self.retention.orphaned.push(OrphanSlot {
+            peer: peer.clone(),
+            slot: live,
+            keep: retained.slot.get(),
+        });
+        self.rib_peers.insert(peer.clone(), retained.slot);
+    }
+
+    /// Remove a retention. Its collision candidate's slot is queued, since
+    /// once the retention is gone nothing else would release a handle the
+    /// candidate resolved for itself.
+    fn remove_retained_dynamic(&mut self, peer: &PeerKey) -> Option<RetainedDynamicPeer> {
+        let mut retained = self.retained_dynamic.remove(peer)?;
+        if let Some(candidate) = retained.candidate.take() {
             self.retention.orphaned.push(OrphanSlot {
                 peer: peer.clone(),
-                slot,
-                keep,
+                slot: candidate.slot,
+                keep: retained.slot.get(),
             });
         }
-        self.rib_peers.insert(peer.clone(), retained.slot);
+        Some(retained)
     }
 
     pub(super) fn next_retained_dynamic_check(&self) -> Option<Instant> {
@@ -592,7 +603,7 @@ impl PeerManager {
         {
             return;
         }
-        self.retained_dynamic.remove(peer);
+        self.remove_retained_dynamic(peer);
         self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
         self.refresh_dynamic_neighbor_capacity_metrics();
         self.reap_deleted_peer_metric_series_for_key(peer).await;

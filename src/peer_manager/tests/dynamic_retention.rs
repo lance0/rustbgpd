@@ -1296,3 +1296,155 @@ async fn rollback_releases_a_handle_resolved_while_the_reap_stops_the_reconnect(
     drop(client);
     rib_task.abort();
 }
+
+/// A retained reconnect's primary OPEN is handled while a candidate's OPEN
+/// is queued. Promotion sync resolves the candidate's own handle, but the
+/// primary establishes before its dump, so the candidate loses. When the
+/// primary's OPEN comes from another AS, its handoff removes the retention
+/// before the run loop reconciles the candidate, and the candidate's handle
+/// must still be released.
+#[tokio::test]
+async fn another_as_primary_handoff_releases_losing_candidate_identity() {
+    primary_handoff_releases_losing_candidate(65099).await;
+}
+
+#[tokio::test]
+async fn same_as_primary_handoff_releases_losing_candidate_identity() {
+    primary_handoff_releases_losing_candidate(MEMBER_ASN).await;
+}
+
+async fn primary_handoff_releases_losing_candidate(primary_asn: u32) {
+    use super::collision::{read_bgp_message, send_bgp_message};
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let retained = retained_member(&mut mgr, &rib_tx, OURS).await;
+    let _primary_socket = accept(&mut mgr).await;
+    let primary_session = mgr.peers[&key(MEMBER)].session_id();
+    // Both accept before either OPEN, so both legitimately copy the wildcard ASN.
+    let mut candidate = accept_at(&mut mgr, MEMBER).await;
+    let candidate_session = mgr.peers[&key(MEMBER)]
+        .pending_inbound
+        .as_ref()
+        .unwrap()
+        .session_id;
+    let slot = mgr.retained_dynamic[&key(MEMBER)]
+        .candidate
+        .as_ref()
+        .unwrap()
+        .slot
+        .clone();
+
+    // Existing collision-race fixture: primary answers OpenConfirm to the
+    // first query, but rejects retirement because its KEEPALIVE arrived.
+    let counters = Arc::new(FakePeerCounters::default());
+    counters
+        .established_before_dump
+        .store(true, Ordering::SeqCst);
+    let fake = fake_peer_handle(
+        MEMBER,
+        SessionState::OpenConfirm,
+        Some(Ipv4Addr::new(10, 0, 0, 2)),
+        counters.clone(),
+    );
+    let (original, _) = mgr
+        .peers
+        .replace_handle(&key(MEMBER), fake, primary_session)
+        .unwrap();
+    original.abort_for_transport_safety_and_wait().await;
+    // The primary represented by the fake has established, so its own slot
+    // must already have resolved, just as SessionUp does in production.
+    let primary_peer = mgr.peers[&key(MEMBER)]
+        .transport_config
+        .rib_peer
+        .resolve(|| PeerEndpoint::new(MEMBER, None), primary_asn);
+    // The canceled socket never validated OPEN, so no notification precedes ours.
+    while mgr.session_notify_rx.try_recv().is_ok() {}
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(&mut candidate, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(&mut candidate, &Message::Open(helper_open(65099))).await;
+    let notice = tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(notice, SessionNotification::OpenReceived { session_id, .. } if session_id == candidate_session)
+    );
+    // Put the candidate's later OPEN behind the primary's handler, exactly as
+    // the shared lossless notification channel can order the two producers.
+    mgr.session_notify_tx.send(notice).unwrap();
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id: primary_session,
+        role: SessionRole::Primary,
+        peer_addr: MEMBER,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: primary_asn,
+    })
+    .await;
+
+    let candidate_peer = slot
+        .get()
+        .expect("the real promotion export-policy sync resolved the candidate");
+    assert_ne!(candidate_peer, retained);
+    assert!(mgr.peers[&key(MEMBER)].pending_inbound.is_none());
+    assert_eq!(mgr.peers[&key(MEMBER)].session_id(), primary_session);
+    assert_eq!(mgr.retained_dynamic.is_empty(), primary_asn != MEMBER_ASN);
+    mgr.reconcile_retained_dynamic_candidates();
+    mgr.release_orphaned_retained_handles().await;
+    assert_eq!(loc_rib_count(&rib_tx).await, 0);
+    assert!(
+        !candidate_peer.is_live(),
+        "the losing candidate's identity is released after the handoff"
+    );
+    assert_eq!(retained.is_live(), primary_asn == MEMBER_ASN);
+
+    // Final dynamic auto-removal sees only the winning primary's slot.
+    idle(&mut mgr, HARD_RESET).await;
+    mgr.reconcile_retained_dynamic_candidates();
+    mgr.release_orphaned_retained_handles().await;
+    assert_eq!(loc_rib_count(&rib_tx).await, 0);
+    assert!(!primary_peer.is_live(), "the primary is deleted normally");
+    assert!(mgr.retained_dynamic.is_empty());
+    rib_task.abort();
+}
+
+/// A collision candidate that resolved its own handle is still attached to
+/// the retention when the reconnect, which reached Established, goes idle.
+/// The idle handler stops the candidate and drops the retention before the
+/// run loop reconciles candidates, so the drop itself must queue the
+/// candidate's handle for release.
+#[tokio::test]
+async fn established_reconnect_idle_releases_attached_candidate_identity() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let retained = retained_member(&mut mgr, &rib_tx, OURS).await;
+    let _primary_socket = accept(&mut mgr).await;
+    let _candidate_socket = accept_at(&mut mgr, MEMBER).await;
+    assert!(mgr.peers[&key(MEMBER)].pending_inbound.is_some());
+    // The reconnect resumed the retained identity, as SessionUp does.
+    let primary_peer = mgr.peers[&key(MEMBER)]
+        .transport_config
+        .rib_peer
+        .resolve(|| PeerEndpoint::new(MEMBER, None), MEMBER_ASN);
+    assert_eq!(primary_peer, retained);
+    // The candidate's OPEN came from another AS: its own, distinct handle.
+    let candidate_peer = mgr.retained_dynamic[&key(MEMBER)]
+        .candidate
+        .as_ref()
+        .unwrap()
+        .slot
+        .resolve(|| PeerEndpoint::new(MEMBER, None), 65099);
+    assert_ne!(candidate_peer, retained);
+    assert!(candidate_peer.is_live());
+
+    idle(&mut mgr, HARD_RESET).await;
+    assert!(mgr.retained_dynamic.is_empty());
+    mgr.reconcile_retained_dynamic_candidates();
+    mgr.release_orphaned_retained_handles().await;
+    assert_eq!(loc_rib_count(&rib_tx).await, 0);
+    assert!(
+        !candidate_peer.is_live(),
+        "the attached candidate's identity is released with the retention"
+    );
+    rib_task.abort();
+}
