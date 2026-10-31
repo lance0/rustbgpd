@@ -1408,3 +1408,43 @@ async fn primary_handoff_releases_losing_candidate(primary_asn: u32) {
     assert!(mgr.retained_dynamic.is_empty());
     rib_task.abort();
 }
+
+/// A collision candidate that resolved its own handle is still attached to
+/// the retention when the reconnect, which reached Established, goes idle.
+/// The idle handler stops the candidate and drops the retention before the
+/// run loop reconciles candidates, so the drop itself must queue the
+/// candidate's handle for release.
+#[tokio::test]
+async fn established_reconnect_idle_releases_attached_candidate_identity() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let retained = retained_member(&mut mgr, &rib_tx, OURS).await;
+    let _primary_socket = accept(&mut mgr).await;
+    let _candidate_socket = accept_at(&mut mgr, MEMBER).await;
+    assert!(mgr.peers[&key(MEMBER)].pending_inbound.is_some());
+    // The reconnect resumed the retained identity, as SessionUp does.
+    let primary_peer = mgr.peers[&key(MEMBER)]
+        .transport_config
+        .rib_peer
+        .resolve(|| PeerEndpoint::new(MEMBER, None), MEMBER_ASN);
+    assert_eq!(primary_peer, retained);
+    // The candidate's OPEN came from another AS: its own, distinct handle.
+    let candidate_peer = mgr.retained_dynamic[&key(MEMBER)]
+        .candidate
+        .as_ref()
+        .unwrap()
+        .slot
+        .resolve(|| PeerEndpoint::new(MEMBER, None), 65099);
+    assert_ne!(candidate_peer, retained);
+    assert!(candidate_peer.is_live());
+
+    idle(&mut mgr, HARD_RESET).await;
+    assert!(mgr.retained_dynamic.is_empty());
+    mgr.reconcile_retained_dynamic_candidates();
+    mgr.release_orphaned_retained_handles().await;
+    assert_eq!(loc_rib_count(&rib_tx).await, 0);
+    assert!(
+        !candidate_peer.is_live(),
+        "the attached candidate's identity is released with the retention"
+    );
+    rib_task.abort();
+}
