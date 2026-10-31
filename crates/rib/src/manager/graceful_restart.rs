@@ -1483,14 +1483,15 @@ impl RibManager {
         super::retire_hash_set(&mut rtc_affected, &mut checkpoint);
     }
 
-    /// Sweep every (peer, AFI, SAFI) whose LLGR stale deadline has expired,
-    /// grouped per peer. Called from the manager run loop's LLGR timer arm.
-    pub(super) fn sweep_expired_llgr_stale(&mut self) {
-        let now = tokio::time::Instant::now();
+    /// Sweep every (peer, AFI, SAFI) whose LLGR stale deadline is at or
+    /// before `due`, grouped per peer. The run loop passes the time the LLGR
+    /// timer's cutoff was captured, whose drained backlog covers every
+    /// deadline at or before it; a later deadline waits for its own cutoff.
+    pub(super) fn sweep_expired_llgr_stale(&mut self, due: tokio::time::Instant) {
         let mut expired: std::collections::HashMap<PeerId, Vec<(Afi, Safi)>> =
             std::collections::HashMap::new();
         for (&(peer, afi, safi), &deadline) in &self.llgr_stale_deadlines {
-            if deadline <= now {
+            if deadline <= due {
                 expired.entry(peer).or_default().push((afi, safi));
             }
         }
@@ -1787,14 +1788,15 @@ impl RibManager {
         self.refresh_deadlines.min()
     }
 
-    /// Sweep any inbound enhanced route refresh windows whose deadline has
-    /// expired.
-    pub(super) fn expire_refresh_windows(&mut self) {
-        let now = tokio::time::Instant::now();
+    /// Sweep any inbound enhanced route refresh windows whose deadline is at
+    /// or before `due`. The run loop passes the time the timer's cutoff was
+    /// captured, whose drained backlog covers every window due by then; a
+    /// later window waits for its own cutoff.
+    pub(super) fn expire_refresh_windows(&mut self, due: tokio::time::Instant) {
         let expired: Vec<(PeerId, Afi, Safi)> = self
             .refresh_deadlines
             .iter()
-            .filter(|&(_, &deadline)| deadline <= now)
+            .filter(|&(_, &deadline)| deadline <= due)
             .map(|(&(peer, afi, safi), _)| (peer, afi, safi))
             .collect();
         for (peer, afi, safi) in expired {

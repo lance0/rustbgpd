@@ -1355,6 +1355,7 @@ impl RibManager {
             let mut rank_memo = super::ExportMemo::default();
             let mut selected_rank = None;
             let mut permitted = Vec::new();
+            let mut source_permitted = false;
             for candidate in ranked {
                 let candidate_aspath = if needs_as_path_string {
                     candidate
@@ -1396,16 +1397,37 @@ impl RibManager {
                 if candidate_result.action != PolicyAction::Permit {
                     continue;
                 }
-                let (candidate_modified, _) =
+                let (candidate_modified, candidate_action) =
                     rank_memo.apply(candidate, &candidate_result.modifications);
                 if super::no_advertise_export_suppressed(candidate_modified.communities()) {
                     continue;
                 }
-                if add_path_keys.is_some() {
-                    permitted.push((
-                        candidate,
-                        blackholing(candidate, &candidate_modified, target_local_role),
-                    ));
+                if let Some(keys) = add_path_keys.as_ref() {
+                    // Only the staged set is planned, so only it is probed;
+                    // the walk goes on until the source's rank is known.
+                    let limit = add_path_send_max as usize;
+                    let class = if permitted.len() < limit {
+                        keys.plan_class(
+                            blackholing(candidate, &candidate_modified, target_local_role),
+                            || {
+                                exact_exportable(
+                                    snapshot,
+                                    candidate,
+                                    &candidate_modified,
+                                    rs_control_asn.zip(target_peer_asn),
+                                    candidate_action.as_ref(),
+                                )
+                            },
+                        )
+                    } else {
+                        Some(false)
+                    };
+                    permitted.push((candidate, class));
+                    source_permitted |=
+                        candidate.peer == source.peer && candidate.path_id == source.path_id;
+                    if permitted.len() >= limit && source_permitted {
+                        break;
+                    }
                     continue;
                 }
                 if candidate.peer == source.peer && candidate.path_id == source.path_id {
@@ -2093,6 +2115,7 @@ impl RibManager {
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
         wire: &AdjRibOut,
+        exact_export: Option<&dyn crate::update::ExactExportEncoder>,
         local_role: Option<rustbgpd_wire::BgpRole>,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
@@ -2299,8 +2322,24 @@ impl RibManager {
             // A path that keeps its key stages now; the others wait until
             // every staged path has claimed what it keeps.
             match keys.as_mut().map(|keys| {
-                let blackholing = blackholing(candidate, &modified, local_role);
-                (blackholing, keys.keep(candidate, blackholing))
+                // The commit probes with this same snapshot (see
+                // `UnicastDistributionResult::exact_export_snapshot`), so a
+                // profile published mid-pass cannot split the verdicts. Route
+                // server control egress is already applied to `modified`.
+                let class = keys.plan_class(blackholing(candidate, &modified, local_role), || {
+                    if out.exact_export_snapshot.is_none() {
+                        out.exact_export_snapshot =
+                            exact_export.map(crate::update::ExactExportEncoder::snapshot);
+                    }
+                    exact_exportable(
+                        out.exact_export_snapshot.as_deref(),
+                        candidate,
+                        &modified,
+                        None,
+                        nh_action.as_ref(),
+                    )
+                });
+                keys.keep_class(candidate, class)
             }) {
                 Some((_, Ok(key))) => modified.path_id = key,
                 Some((blackholing, Err(own))) => {
@@ -3411,6 +3450,13 @@ pub(in crate::manager) fn lease_rejection(
 /// - any other new path takes a freed key, lowest first, then the lowest
 ///   unused key.
 ///
+/// A path blackholes for the plan only if the commit will send it. The RFC
+/// 9234 OTC gate's drops never count. Nor, while the wire holds a blackhole
+/// row, does a path the session's exact encoder rejects (an UPDATE over the
+/// receiver's message ceiling, say): the commit drops it and owes its key's
+/// previous row a withdrawal, which the transport sends before the sendable
+/// replacement's announcement.
+///
 /// During a selection hold the candidate set holds only exempt local paths,
 /// and a frozen row (received, or an ordinary injection still present) keeps
 /// its key: the hold preserves what each session already admitted, and an
@@ -3451,6 +3497,9 @@ pub(in crate::manager) struct AddPathKeys {
     blackhole_keys: smallvec::SmallVec<[u32; 4]>,
     /// Some staged path blackholes; for the invariant check.
     any_blackholing: bool,
+    /// The wire holds a blackholing row, so a key handover can unblackhole
+    /// the prefix; only then do staged paths need an exact-export probe.
+    wire_blackholes: bool,
     /// Wire rows a staged path kept; when every wire row is kept nothing is
     /// withdrawn.
     kept: usize,
@@ -3507,6 +3556,7 @@ impl AddPathKeys {
             assigned: smallvec::SmallVec::new(),
             blackhole_keys: smallvec::SmallVec::new(),
             any_blackholing: false,
+            wire_blackholes: false,
             kept: 0,
             hold,
         };
@@ -3526,9 +3576,10 @@ impl AddPathKeys {
             let carries_blackhole = route
                 .communities()
                 .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE);
-            if cfg!(debug_assertions)
-                && (carries_blackhole || source.is_some_and(|source| source.deferral_exempt))
-            {
+            let blackholes =
+                carries_blackhole || source.is_some_and(|source| source.deferral_exempt);
+            keys.wire_blackholes |= blackholes;
+            if cfg!(debug_assertions) && blackholes {
                 keys.blackhole_keys.push(path_id);
             }
             if let Some(source) = source {
@@ -3617,11 +3668,11 @@ impl AddPathKeys {
         }
     }
 
-    /// Keys for the staged candidates, in rank order, each with whether it
-    /// blackholes after export policy; see the type's plan.
+    /// Keys for the staged candidates, in rank order, each with its
+    /// [`Self::plan_class`]; see the type's plan.
     pub(in crate::manager) fn assign_all(
         &mut self,
-        staged: &[(&crate::route::Route, bool)],
+        staged: &[(&crate::route::Route, Option<bool>)],
         limit: usize,
         checkpoint: &mut impl FnMut(),
     ) -> smallvec::SmallVec<[u32; 8]> {
@@ -3629,9 +3680,10 @@ impl AddPathKeys {
         let mut keys: smallvec::SmallVec<[u32; 8]> = smallvec::smallvec![0; staged.len()];
         let mut changing: smallvec::SmallVec<[(bool, Option<u32>); 4]> = smallvec::SmallVec::new();
         let mut changing_at: smallvec::SmallVec<[usize; 4]> = smallvec::SmallVec::new();
-        for (index, &(route, blackholing)) in staged.iter().enumerate() {
+        for (index, &(route, class)) in staged.iter().enumerate() {
             checkpoint();
-            match self.keep(route, blackholing) {
+            let (blackholing, kept) = self.keep_class(route, class);
+            match kept {
                 Ok(key) => keys[index] = key,
                 Err(own) => {
                     changing.push((blackholing, own));
@@ -3769,6 +3821,34 @@ impl AddPathKeys {
         self.kept == self.occupied.len()
     }
 
+    /// A staged path's class for the plan: `Some(blackholing)`, or `None`
+    /// for a blackholing path the session's exact encoder rejects while the
+    /// wire holds a blackhole row (see the type's plan). `sendable` probes
+    /// that path and runs only then, so a prefix with no blackhole row on
+    /// the wire does no exact-export work here.
+    pub(in crate::manager) fn plan_class(
+        &self,
+        blackholing: bool,
+        sendable: impl FnOnce() -> bool,
+    ) -> Option<bool> {
+        (!(blackholing && self.wire_blackholes) || sendable()).then_some(blackholing)
+    }
+
+    /// [`Self::keep`] for a path of class `class`: a rejected path (`None`)
+    /// never announces, so it holds no row, neither its own nor a same-peer
+    /// sibling's, and is planned as a new ordinary path, taking only keys
+    /// whose rows are leaving or are new.
+    pub(in crate::manager) fn keep_class(
+        &mut self,
+        route: &crate::route::Route,
+        class: Option<bool>,
+    ) -> (bool, Result<u32, Option<u32>>) {
+        match class {
+            Some(blackholing) => (blackholing, self.keep(route, blackholing)),
+            None => (false, Err(None)),
+        }
+    }
+
     /// The withdraw phase goes first, so a plan that withdrew every
     /// blackholing row on the wire while it still sent one would leave the
     /// prefix unblackholed until the announcement. The class handoff keeps
@@ -3850,6 +3930,43 @@ impl AddPathKeys {
     }
 }
 
+/// Whether the session's exact encoder sends `modified` (the post-policy
+/// form of `candidate`) as live staging stages it, after RFC 7947 route
+/// server control egress when `rs_control` is `(rs_asn, peer_asn)`; live
+/// staging passes `None` since it has already applied the egress. Without a
+/// snapshot the commit refuses the whole envelope, so nothing is known to be
+/// rejected.
+pub(in crate::manager) fn exact_exportable(
+    snapshot: Option<&dyn crate::update::ExactExportSnapshot>,
+    candidate: &crate::route::Route,
+    modified: &crate::route::Route,
+    rs_control: Option<(u32, u32)>,
+    next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
+) -> bool {
+    let Some(snapshot) = snapshot else {
+        return true;
+    };
+    let probe = |route: &crate::route::Route| {
+        snapshot
+            .probe_announcement(crate::update::ExactExportCandidate::Unicast {
+                route,
+                next_hop_override,
+            })
+            .is_ok()
+    };
+    if rs_control.is_some() {
+        let mut egress = modified.clone();
+        super::rs_control::rs_control_route_rewrite(
+            &mut egress,
+            candidate.large_communities(),
+            rs_control,
+        );
+        probe(&egress)
+    } else {
+        probe(modified)
+    }
+}
+
 /// Whether a staged path blackholes its prefix: deferral-exempt, or
 /// carrying BLACKHOLE after export policy, and not blocked by the RFC 9234
 /// OTC egress gate, which drops it after planning. A blocked row taking a
@@ -3902,5 +4019,97 @@ fn stage_multipath_row(
         out.record_local_source(candidate, modified.path_id);
         out.next_hop_override.push(nh_action);
         out.announce.push(modified);
+    }
+}
+
+#[cfg(test)]
+mod plan_class_tests {
+    use super::*;
+    use crate::update::{
+        ExactExportCandidate, ExactExportError, ExactExportErrorCode, ExactExportResult,
+        ExactExportSnapshot,
+    };
+
+    struct Verdict(bool);
+
+    impl ExactExportSnapshot for Verdict {
+        fn owner_id(&self) -> u64 {
+            0
+        }
+
+        fn generation(&self) -> u64 {
+            0
+        }
+
+        fn probe_announcement(
+            &self,
+            _candidate: ExactExportCandidate<'_>,
+        ) -> Result<ExactExportResult, ExactExportError> {
+            if self.0 {
+                Ok(ExactExportResult {
+                    encoded_len: 64,
+                    max_len: 4_096,
+                    generation: 0,
+                })
+            } else {
+                Err(ExactExportError::new(
+                    ExactExportErrorCode::MessageTooLong,
+                    "over the ceiling",
+                ))
+            }
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn keys_over(blackhole_row: bool) -> (AddPathKeys, crate::route::Route) {
+        let prefix = Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            Ipv4Addr::new(203, 0, 113, 7),
+            32,
+        ));
+        let mut row = crate::test_support::make_route_with_path_id(prefix, 1);
+        if blackhole_row {
+            row.attributes =
+                crate::attr_set::AttrSet::new(vec![rustbgpd_wire::PathAttribute::Communities(
+                    vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+                )]);
+        }
+        let mut wire = AdjRibOut::new(row.peer);
+        wire.insert(row.clone());
+        let keys = AddPathKeys::new(&wire, &prefix, false, &HashMap::new(), &mut || {});
+        (keys, row)
+    }
+
+    /// Only a blackholing path at a prefix whose wire holds a blackhole row
+    /// is probed, and only a rejected one stops counting as blackholing.
+    #[test]
+    fn only_a_wire_blackhole_makes_a_blackholing_path_probe() {
+        let (keys, _) = keys_over(false);
+        for blackholing in [false, true] {
+            assert_eq!(
+                keys.plan_class(blackholing, || unreachable!(
+                    "no probe without a blackhole row on the wire"
+                )),
+                Some(blackholing)
+            );
+        }
+        let (keys, route) = keys_over(true);
+        assert_eq!(
+            keys.plan_class(false, || unreachable!("an ordinary path needs no probe")),
+            Some(false)
+        );
+        let probe = |verdict: Option<&dyn ExactExportSnapshot>| {
+            exact_exportable(verdict, &route, &route, None, None)
+        };
+        assert_eq!(
+            keys.plan_class(true, || probe(Some(&Verdict(true)))),
+            Some(true)
+        );
+        assert_eq!(keys.plan_class(true, || probe(Some(&Verdict(false)))), None);
+        // No snapshot: the commit refuses the envelope, so nothing is known
+        // to be rejected.
+        assert_eq!(keys.plan_class(true, || probe(None)), Some(true));
     }
 }

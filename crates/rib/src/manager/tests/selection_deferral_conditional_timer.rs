@@ -102,7 +102,7 @@ fn announcements(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<(Pre
 
 async fn fire_and_resync(manager: &mut RibManager, elapsed: Duration) {
     advance(elapsed).await;
-    let _ = manager.fire_conditional_advertisement_timers();
+    let _ = manager.fire_conditional_advertisement_timers(tokio::time::Instant::now());
     while manager.resync_dirty_peers_bounded() {}
 }
 

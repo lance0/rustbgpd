@@ -1786,3 +1786,290 @@ fn grouped_closed_receiver_keeps_explain_and_listing_on_admitted_state() {
         "closed members read a retained admission baseline or refuse"
     );
 }
+
+/// An exact-export stand-in that sends a unicast route only while it carries
+/// at most `.0` standard communities: size-like, so a route-server control
+/// scrub can bring a path under the ceiling.
+struct CommunityCeiling(usize);
+
+impl crate::update::ExactExportSnapshot for CommunityCeiling {
+    fn owner_id(&self) -> u64 {
+        7
+    }
+
+    fn generation(&self) -> u64 {
+        0
+    }
+
+    fn probe_announcement(
+        &self,
+        candidate: crate::update::ExactExportCandidate<'_>,
+    ) -> Result<crate::update::ExactExportResult, crate::update::ExactExportError> {
+        let crate::update::ExactExportCandidate::Unicast { route, .. } = candidate else {
+            unreachable!("unicast only")
+        };
+        if route.communities().len() > self.0 {
+            return Err(crate::update::ExactExportError::new(
+                crate::update::ExactExportErrorCode::MessageTooLong,
+                "over the community ceiling",
+            ));
+        }
+        Ok(crate::update::ExactExportResult {
+            encoded_len: 64,
+            max_len: 4_096,
+            generation: 0,
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl crate::update::ExactExportEncoder for CommunityCeiling {
+    fn owner_id(&self) -> u64 {
+        7
+    }
+
+    fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+        Arc::new(Self(self.0))
+    }
+}
+
+/// Live Add-Path staging probes a blackholing path after route-server
+/// control egress, which scrubs `0:X` control communities; the explain and
+/// `ExplainBestPath` mirrors must probe the same form. Here the higher-ranked
+/// RTBH path fits the ceiling only once scrubbed. Probed before the scrub it
+/// would be rejected, give up its row, and let its same-peer sibling take
+/// key 1 in the mirrors while the wire carries it at key 2.
+#[test]
+fn add_path_mirrors_probe_after_route_server_control_egress() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let receiver = peer_v4(Ipv4Addr::new(192, 0, 2, 4));
+    let (outbound_tx, mut outbound) = mpsc::channel(16);
+    // Session context is consumed at registration.
+    manager.handle_update(RibUpdate::SetPeerRsControl {
+        peer: receiver,
+        session_id: 0,
+        rs_control_asn: Some(64_512),
+    });
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: receiver,
+        session_id: 0,
+        peer_asn: 65_004,
+        peer_router_id: Ipv4Addr::new(192, 0, 2, 4),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        add_path_send_max: 2,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    manager
+        .peer_export_encoders
+        .insert(receiver, Arc::new(CommunityCeiling(2)));
+    while outbound.try_recv().is_ok() {}
+
+    let source = Ipv4Addr::new(10, 0, 0, 9);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 7), 32);
+    let path = |path_id: u32, local_pref: u32, communities: Vec<u32>| {
+        let mut route = make_route_with_lp(prefix, source, local_pref);
+        route.path_id = path_id;
+        AttrSet::edit(&mut route.attributes, |attributes| {
+            attributes.push(PathAttribute::Communities(communities));
+        });
+        route
+    };
+    let blackhole = rustbgpd_wire::COMMUNITY_BLACKHOLE;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: PeerId::from_addr(IpAddr::V4(source)),
+        session_id: 0,
+        // `0:X` asks the route server not to announce to AS X (not this
+        // receiver), and egress scrubs it.
+        announced: vec![
+            path(1, 300, vec![blackhole, 65_100, 65_101]),
+            path(2, 200, vec![blackhole]),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    let mut wire = BTreeMap::new();
+    while let Ok(update) = outbound.try_recv() {
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, route.local_pref());
+        }
+    }
+    assert_eq!(wire, BTreeMap::from([(1, 300), (2, 200)]), "the live wire");
+
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainBestPath {
+        prefix: Prefix::V4(prefix),
+        peer: Some(receiver),
+        reply,
+    });
+    let explanation = result.try_recv().unwrap().expect("known prefix");
+    let advertised: BTreeMap<u32, u32> = explanation
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.route.path_id, candidate.advertised_path_id))
+        .collect();
+    assert_eq!(
+        advertised,
+        BTreeMap::from([(2, 2)]),
+        "ExplainBestPath names the live key: {explanation:?}"
+    );
+    for (path_id, key) in [(1, 1), (2, 2)] {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+            peer: receiver,
+            prefix: Prefix::V4(prefix),
+            rd: None,
+            labeled: false,
+            source: Some(crate::update::RouteSourceIdentity {
+                peer: PeerId::from_addr(IpAddr::V4(source)),
+                path_id,
+            }),
+            reply,
+        });
+        let explain = response.try_recv().unwrap().expect("explain");
+        assert_eq!(
+            explain.path_id, key,
+            "explain of path {path_id}: {explain:?}"
+        );
+    }
+}
+
+/// An encoder whose session publishes a stricter profile right after the
+/// first snapshot taken once `armed`: every later snapshot rejects a route
+/// carrying more than two communities.
+#[derive(Default)]
+struct PublishingMidPass {
+    armed: std::sync::atomic::AtomicBool,
+    taken: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::update::ExactExportEncoder for PublishingMidPass {
+    fn owner_id(&self) -> u64 {
+        7
+    }
+
+    fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+        use std::sync::atomic::Ordering;
+        let lenient =
+            !self.armed.load(Ordering::SeqCst) || self.taken.fetch_add(1, Ordering::SeqCst) == 0;
+        Arc::new(CommunityCeiling(if lenient { usize::MAX } else { 2 }))
+    }
+}
+
+/// Add-Path key planning and the commit probe with one snapshot: a profile
+/// the session publishes between them must not reject the blackholing path
+/// planning handed the departing RTBH key, or the commit withdraws that key
+/// ahead of the replacement's announcement.
+#[test]
+fn add_path_commit_probes_with_the_planning_snapshot() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let receiver = peer_v4(Ipv4Addr::new(192, 0, 2, 4));
+    let (outbound_tx, mut outbound) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: receiver,
+        session_id: 0,
+        peer_asn: 65_004,
+        peer_router_id: Ipv4Addr::new(192, 0, 2, 4),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        add_path_send_max: 2,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    let encoder = Arc::new(PublishingMidPass::default());
+    manager
+        .peer_export_encoders
+        .insert(receiver, encoder.clone());
+    while outbound.try_recv().is_ok() {}
+
+    let source = Ipv4Addr::new(10, 0, 0, 9);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 7), 32);
+    let path = |path_id: u32, local_pref: u32, communities: Vec<u32>| {
+        let mut route = make_route_with_lp(prefix, source, local_pref);
+        route.path_id = path_id;
+        AttrSet::edit(&mut route.attributes, |attributes| {
+            attributes.push(PathAttribute::Communities(communities));
+        });
+        route
+    };
+    let blackhole = rustbgpd_wire::COMMUNITY_BLACKHOLE;
+    let mut receive = |announced, withdrawn| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: PeerId::from_addr(IpAddr::V4(source)),
+            session_id: 0,
+            announced,
+            withdrawn,
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    };
+    receive(vec![path(1, 100, vec![blackhole])], vec![]);
+    let mut wire = BTreeMap::new();
+    while let Ok(update) = outbound.try_recv() {
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, route.local_pref());
+        }
+    }
+    assert_eq!(wire, BTreeMap::from([(1, 100)]), "the RTBH row");
+
+    encoder
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    receive(
+        vec![
+            path(2, 300, vec![blackhole, 0xFDE8_0001, 0xFDE8_0002]),
+            path(3, 200, vec![blackhole]),
+        ],
+        vec![(Prefix::V4(prefix), 1)],
+    );
+    let mut passes = 0;
+    while let Ok(update) = outbound.try_recv() {
+        passes += 1;
+        for (_, path_id) in &update.withdraw {
+            wire.remove(path_id);
+        }
+        assert!(
+            !wire.is_empty(),
+            "the withdraw phase left the prefix without a blackhole: withdraw {:?}",
+            update.withdraw
+        );
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, route.local_pref());
+        }
+    }
+    assert_eq!(passes, 1);
+    assert_eq!(
+        wire,
+        BTreeMap::from([(1, 300), (2, 200)]),
+        "both blackholing paths sent, the higher-ranked one in place"
+    );
+}

@@ -206,7 +206,7 @@ fn resync(manager: &mut RibManager) {
 /// dirty), and run the resync tick.
 async fn elapse(manager: &mut RibManager, by: Duration) {
     advance(by).await;
-    let _ = manager.fire_conditional_advertisement_timers();
+    let _ = manager.fire_conditional_advertisement_timers(tokio::time::Instant::now());
     resync(manager);
 }
 

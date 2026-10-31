@@ -1343,11 +1343,16 @@ impl ExpiryTimer {
 }
 
 /// One admission cutoff per [`ExpiryTimer`]: `None` while the timer is not
-/// due, else the primary updates still admitted before it fires. An
-/// admission is charged to every captured cutoff, so several timers due at
-/// once each fire within the backlog present when they fell due.
+/// due, else the loop-top time `T` it was captured at and the primary
+/// updates still admitted before it fires. The backlog is everything queued
+/// before `T`, so once it drains every deadline at or before `T` fires
+/// together, and an admission is charged to every captured cutoff, so
+/// several timers due at once each fire within the backlog present when
+/// they fell due. A deadline after `T` captures its own backlog when it
+/// becomes the timer's earliest; one at or before `T` (after an earlier
+/// deadline's owner went away mid-drain) keeps the remaining count.
 #[derive(Debug, Default)]
-struct ExpiryCutoffs([Option<usize>; ExpiryTimer::COUNT]);
+struct ExpiryCutoffs([Option<(tokio::time::Instant, usize)>; ExpiryTimer::COUNT]);
 
 /// Wall-clock bound on one run of primary updates the run loop applies
 /// back to back without yielding.
@@ -1390,19 +1395,34 @@ impl PrimaryRunBudget {
 }
 
 impl ExpiryCutoffs {
-    /// Capture `backlog` the first time `timer` is seen due; forget it once
-    /// the timer is no longer due.
-    fn observe(&mut self, timer: ExpiryTimer, due: bool, backlog: usize) {
+    /// Capture `backlog` at loop-top `now` the first time `timer`'s earliest
+    /// deadline `due` is seen due, and again when its earliest deadline is
+    /// later than the capture; forget it once the timer is no longer due.
+    fn observe(
+        &mut self,
+        timer: ExpiryTimer,
+        due: Option<tokio::time::Instant>,
+        now: tokio::time::Instant,
+        backlog: usize,
+    ) {
         let cutoff = &mut self.0[timer as usize];
-        if !due {
-            *cutoff = None;
-        } else if cutoff.is_none() {
-            *cutoff = Some(backlog);
+        match due {
+            None => *cutoff = None,
+            Some(deadline) if cutoff.is_none_or(|(captured_at, _)| deadline > captured_at) => {
+                *cutoff = Some((now, backlog));
+            }
+            Some(_) => {}
         }
     }
 
+    /// The time `timer`'s cutoff was captured at: every deadline at or
+    /// before it fires once the cutoff drains.
+    fn captured_at(&self, timer: ExpiryTimer) -> Option<tokio::time::Instant> {
+        self.0[timer as usize].map(|(captured_at, _)| captured_at)
+    }
+
     fn remaining(&self, timer: ExpiryTimer) -> usize {
-        self.0[timer as usize].unwrap_or(0)
+        self.0[timer as usize].map_or(0, |(_, remaining)| remaining)
     }
 
     fn clear(&mut self, timer: ExpiryTimer) {
@@ -1411,13 +1431,16 @@ impl ExpiryCutoffs {
 
     /// Charge one primary admission to every due timer.
     fn charge(&mut self) {
-        for cutoff in self.0.iter_mut().flatten() {
-            *cutoff = cutoff.saturating_sub(1);
+        for (_, remaining) in self.0.iter_mut().flatten() {
+            *remaining = remaining.saturating_sub(1);
         }
     }
 
     fn any_exhausted(&self) -> bool {
-        self.0.contains(&Some(0))
+        self.0
+            .iter()
+            .flatten()
+            .any(|&(_, remaining)| remaining == 0)
     }
 
     /// Whether due `timer` must wait for another due timer whose cutoff is
@@ -3461,11 +3484,12 @@ impl RibManager {
         .min()
     }
 
-    /// Expire the holds behind the shared timer that fell due at `due`. Grace
-    /// windows, RFC 4684 §6 caps and ORF caps release only up to `due`: a
-    /// later deadline waits for its own turn, so the work queued before it
-    /// (such as the peer's RT-Constrain End-of-RIB or ROUTE-REFRESH) drains
-    /// first.
+    /// Expire the holds behind the shared timer whose deadline is at or
+    /// before `due`, the time its cutoff was captured. The run loop drained
+    /// the work queued before that time, which covers every hold due by then.
+    /// Grace windows, RFC 4684 §6 caps and ORF caps after it wait for their
+    /// own cutoff, so the work queued before them (such as the peer's
+    /// RT-Constrain End-of-RIB or ROUTE-REFRESH) drains first.
     fn expire_eor_holds(&mut self, due: tokio::time::Instant) {
         self.expire_eor_grace(due);
         let expired: Vec<PeerId> = self
@@ -4221,6 +4245,18 @@ impl RibManager {
     /// not admit further primary updates ahead of its expiry.
     fn expiry_cutoff_reached(&self) -> bool {
         self.expiry_cutoffs.any_exhausted()
+    }
+
+    /// The latest deadline a due `timer` may expire once its cutoff drains:
+    /// the time the cutoff was captured, whose backlog holds all work queued
+    /// before any deadline at or before it. `earliest` (the timer's earliest
+    /// deadline) stands in when no cutoff was captured.
+    fn expiry_bound(
+        &self,
+        timer: ExpiryTimer,
+        earliest: tokio::time::Instant,
+    ) -> tokio::time::Instant {
+        self.expiry_cutoffs.captured_at(timer).unwrap_or(earliest)
     }
 
     /// Drain-first expiry for a due `timer`: run one admitted route chunk,
@@ -7021,16 +7057,33 @@ impl RibManager {
             // has room yields (its branch is skipped) until the exhausted
             // one has fired, so no branch admits post-deadline work ahead
             // of another timer's expiry.
+            // Each branch below then expires the deadlines at or before the
+            // time its cutoff was captured, all of whose pre-deadline work
+            // that backlog covers, never a later one that passed during the
+            // drain: that one captures its own cutoff on a later turn.
             let backlog = self.primary_backlog();
-            for (timer, due) in [
-                (ExpiryTimer::RtcEor, rtc_eor_due),
-                (ExpiryTimer::Conditional, conditional_due),
-                (ExpiryTimer::GrStale, gr_due),
-                (ExpiryTimer::LlgrStale, llgr_due),
-                (ExpiryTimer::RefreshWindow, refresh_due),
-                (ExpiryTimer::SelectionDeferral, selection_due),
+            for (timer, due, deadline) in [
+                (ExpiryTimer::RtcEor, rtc_eor_due, rtc_eor_sleep.deadline()),
+                (
+                    ExpiryTimer::Conditional,
+                    conditional_due,
+                    conditional_sleep.deadline(),
+                ),
+                (ExpiryTimer::GrStale, gr_due, gr_sleep.deadline()),
+                (ExpiryTimer::LlgrStale, llgr_due, llgr_sleep.deadline()),
+                (
+                    ExpiryTimer::RefreshWindow,
+                    refresh_due,
+                    refresh_sleep.deadline(),
+                ),
+                (
+                    ExpiryTimer::SelectionDeferral,
+                    selection_due,
+                    selection_sleep.deadline(),
+                ),
             ] {
-                self.expiry_cutoffs.observe(timer, due, backlog);
+                self.expiry_cutoffs
+                    .observe(timer, due.then_some(deadline), now, backlog);
             }
             let cutoffs = &self.expiry_cutoffs;
             let rtc_eor_due = rtc_eor_due && !cutoffs.yields(ExpiryTimer::RtcEor);
@@ -7047,10 +7100,12 @@ impl RibManager {
                 // the cap lands behind the released EoR. The planned-restart
                 // grace window shares this timer for the same reason: an
                 // injection queued before its deadline precedes the marker.
+                // Read before the drain clears the cutoff.
+                let bound = self.expiry_bound(ExpiryTimer::RtcEor, rtc_eor_sleep.deadline());
                 if self.drain_before_expiry(ExpiryTimer::RtcEor).await {
                     continue;
                 }
-                self.expire_eor_holds(rtc_eor_sleep.deadline());
+                self.expire_eor_holds(bound);
                 continue;
             }
             if has_attr_gc_timer && attr_gc_sleep.deadline() <= now {
@@ -7085,20 +7140,23 @@ impl RibManager {
                 // batch. An open route batch, and the primary updates already
                 // queued when expiry was first seen, run first so their
                 // observation flush precedes it.
+                let bound =
+                    self.expiry_bound(ExpiryTimer::Conditional, conditional_sleep.deadline());
                 if self.drain_before_expiry(ExpiryTimer::Conditional).await {
                     continue;
                 }
-                let _ = self.fire_conditional_advertisement_timers();
+                let _ = self.fire_conditional_advertisement_timers(bound);
                 continue;
             }
             if gr_due {
+                let bound = self.expiry_bound(ExpiryTimer::GrStale, gr_sleep.deadline());
                 if self.drain_before_expiry(ExpiryTimer::GrStale).await {
                     continue;
                 }
                 let expired: Vec<PeerId> = self
                     .gr_stale_deadlines
                     .iter()
-                    .filter(|&(_, &deadline)| deadline <= now)
+                    .filter(|&(_, &deadline)| deadline <= bound)
                     .map(|(&peer, _)| peer)
                     .collect();
                 for peer in expired {
@@ -7107,17 +7165,19 @@ impl RibManager {
                 continue;
             }
             if llgr_due {
+                let bound = self.expiry_bound(ExpiryTimer::LlgrStale, llgr_sleep.deadline());
                 if self.drain_before_expiry(ExpiryTimer::LlgrStale).await {
                     continue;
                 }
-                self.sweep_expired_llgr_stale();
+                self.sweep_expired_llgr_stale(bound);
                 continue;
             }
             if refresh_due {
+                let bound = self.expiry_bound(ExpiryTimer::RefreshWindow, refresh_sleep.deadline());
                 if self.drain_before_expiry(ExpiryTimer::RefreshWindow).await {
                     continue;
                 }
-                self.expire_refresh_windows();
+                self.expire_refresh_windows(bound);
                 continue;
             }
             if selection_due {
