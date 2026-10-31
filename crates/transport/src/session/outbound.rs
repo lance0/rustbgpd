@@ -144,6 +144,31 @@ fn own_if_last<T>(owned: &mut std::vec::IntoIter<T>, shared: &mut Arc<Vec<T>>) {
 }
 
 impl PendingOutbound {
+    fn new(
+        mut update: OutboundRouteUpdate,
+        shared: Option<(Arc<super::shared_group::ProgressiveGroupEncode>, usize)>,
+        requests: Vec<(Afi, Safi)>,
+    ) -> Self {
+        let evpn_announce = take_private_announcements(&mut update.evpn_announce, shared.is_some());
+        let vpn_announce = take_private_announcements(&mut update.vpn_announce, shared.is_some());
+        Self {
+            evpn_announce,
+            vpn_announce,
+            labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
+            announce: Vec::new().into_iter(),
+            update,
+            shared,
+            requests,
+            phase: 0,
+            offset: 0,
+            capacity_blocked: false,
+            slice_routes: super::shared_group::PROGRESSIVE_SLICE_ROUTES,
+            dropped_ipv6_next_hops: DroppedIpv6NextHops::default(),
+            #[cfg(test)]
+            test_slice_cost: None,
+        }
+    }
+
     /// Keep a completed or abandoned envelope only while its inventory is
     /// released in bounded steps; nothing more is sent from it. A replay
     /// envelope carries no announcement inventory and is dropped as before.
@@ -444,24 +469,7 @@ impl PeerSession {
                 self.record_otc_egress_block(&route);
             }
         }
-        let evpn_announce = take_private_announcements(&mut update.evpn_announce, shared.is_some());
-        let vpn_announce = take_private_announcements(&mut update.vpn_announce, shared.is_some());
-        self.pending_outbound = Some(PendingOutbound {
-            evpn_announce,
-            vpn_announce,
-            labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
-            announce: Vec::new().into_iter(),
-            update,
-            shared,
-            requests,
-            phase: 0,
-            offset: 0,
-            capacity_blocked: false,
-            slice_routes: super::shared_group::PROGRESSIVE_SLICE_ROUTES,
-            dropped_ipv6_next_hops: DroppedIpv6NextHops::default(),
-            #[cfg(test)]
-            test_slice_cost: None,
-        });
+        self.pending_outbound = Some(PendingOutbound::new(update, shared, requests));
         self.advance_pending_outbound();
     }
 
@@ -562,16 +570,46 @@ impl PeerSession {
     /// still retiring with it, in one turn. Hand that remainder to its own
     /// task, which releases one slice per yield; the exit never waits on it.
     pub(super) fn hand_off_retirement(&mut self) {
-        let Some(mut pending) = self
+        let pending = self
             .pending_outbound
             .take()
-            .and_then(PendingOutbound::into_retiring)
-        else {
+            .and_then(PendingOutbound::into_retiring);
+        self.retire_off_turn(pending);
+    }
+
+    /// Discard the envelopes still queued for a dying session unsent. One
+    /// can hold the last reference to a shared inventory once the RIB and
+    /// faster members have released theirs, so they retire on the same
+    /// paced task as `pending`, one slice per yield, never in this turn.
+    pub(super) fn retire_off_turn(&mut self, pending: Option<PendingOutbound>) {
+        // Closing first keeps a racing send from landing after the drain.
+        self.outbound_rx.close();
+        let mut queued = Vec::new();
+        while let Ok(update) = self.outbound_rx.try_recv() {
+            queued.push(update);
+        }
+        if pending.is_none() && queued.is_empty() {
             return;
-        };
+        }
         tokio::spawn(async move {
-            while pending.retire_step() {
+            if let Some(mut pending) = pending {
+                while pending.retire_step() {
+                    tokio::task::yield_now().await;
+                }
+            }
+            for update in queued {
                 tokio::task::yield_now().await;
+                let Some(mut pending) =
+                    PendingOutbound::new(update, None, Vec::new()).into_retiring()
+                else {
+                    continue;
+                };
+                loop {
+                    tokio::task::yield_now().await;
+                    if !pending.retire_step() {
+                        break;
+                    }
+                }
             }
         });
     }

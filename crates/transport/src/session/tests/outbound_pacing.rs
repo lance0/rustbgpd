@@ -262,6 +262,82 @@ async fn outbound_pacing_resource_deadline_is_finite_with_send_hold_disabled() {
     actor.await.unwrap();
 }
 
+/// A second full-table envelope remains in the RIB-to-session queue when
+/// the active envelope cannot make progress within the close-drain budget.
+/// Session teardown discards that queue unsent, and it may hold the last
+/// reference to its inventory: the release is paced like the active
+/// envelope's, never one synchronous drop.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_down_paces_queued_inventory_release() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let (mut session, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    session.writer_join.take().unwrap().abort();
+    let (bulk, _held) = mpsc::channel(1);
+    bulk.try_send(Bytes::from_static(b"held")).unwrap();
+    session.writer_bulk_tx = Some(bulk);
+    session
+        .handle_outbound_route_update(pacing_update(&session, pacing_routes(5_000, true)))
+        .await;
+
+    let held = make_route(100).attributes;
+    let base = Arc::strong_count(&held);
+    let live = || Arc::strong_count(&held) - base;
+    let total = 5 * SLICE;
+    let routes = (0..u32::try_from(total).unwrap())
+        .map(|index| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32)),
+            attributes: Arc::clone(&held),
+            ..make_route(100)
+        })
+        .collect();
+    session
+        .outbound_tx
+        .try_send(pacing_update(&session, routes))
+        .unwrap();
+    assert_eq!(live(), total);
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    {
+        let mut run = std::pin::pin!(session.run());
+        loop {
+            let before = live();
+            let polled =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+            released.push(before - live());
+            if let std::task::Poll::Ready(result) = polled {
+                result.unwrap();
+                break;
+            }
+            let before = live();
+            tokio::time::advance(std::time::Duration::from_millis(1)).await;
+            released.push(before - live());
+        }
+    }
+    let before = live();
+    drop(session);
+    released.push(before - live());
+    for _ in 0..2 * total / SLICE {
+        let before = live();
+        tokio::task::yield_now().await;
+        released.push(before - live());
+    }
+    assert_eq!(live(), 0, "queued routes are all released: {released:?}");
+    let nonzero: Vec<_> = released
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, batch)| *batch > 0)
+        .collect();
+    assert!(
+        released.iter().all(|&batch| batch <= SLICE),
+        "one session step released more than {SLICE} queued routes; nonzero steps: {nonzero:?}"
+    );
+}
+
 #[tokio::test]
 async fn outbound_pacing_samples_backlog_before_envelope_completion() {
     let (mut session, _commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);
