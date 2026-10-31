@@ -1290,16 +1290,48 @@ impl RetainedConnectionState {
     }
 }
 
+/// What Graceful Restart may still hold after a session's Established
+/// period ended, as the session decided when it left Established.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionEndRetention {
+    /// The session handed the peer's routes to the RIB for GR or LLGR
+    /// retention.
+    pub theirs: bool,
+    /// How long the peer, as our helper, may hold our routes stale: our
+    /// restart time, plus our LLGR stale time when both sides advertised
+    /// LLGR. `None` when the peer is not our helper, or after a Hard Reset or
+    /// a NOTIFICATION without the RFC 8538 N bit, which make it flush them.
+    pub ours_for: Option<Duration>,
+}
+
 /// Whether one session actor's FSM is Established, published by the actor so
 /// the peer manager can count Established peers without a `QueryState` round
 /// trip to every session. The actor publishes after every FSM event and
-/// clears it when it ends, however it ends.
+/// clears it when it ends, however it ends. It also publishes what its last
+/// Established period left retained, readable after the actor ends.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct EstablishedPublication(Arc<AtomicBool>);
+pub(crate) struct EstablishedPublication {
+    established: Arc<AtomicBool>,
+    end_retention: Arc<Mutex<SessionEndRetention>>,
+}
 
 impl EstablishedPublication {
     fn get(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.established.load(Ordering::Acquire)
+    }
+
+    fn end_retention(&self) -> SessionEndRetention {
+        *self
+            .end_retention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set_end_retention(&self, retention: SessionEndRetention) {
+        *self
+            .end_retention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = retention;
     }
 }
 
@@ -1309,7 +1341,16 @@ pub(crate) struct EstablishedPublisher(EstablishedPublication);
 
 impl EstablishedPublisher {
     pub(crate) fn publish(&self, established: bool) {
-        self.0.0.store(established, Ordering::Release);
+        self.0.established.store(established, Ordering::Release);
+    }
+
+    pub(crate) fn publish_end_retention(&self, retention: SessionEndRetention) {
+        self.0.set_end_retention(retention);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn end_retention(&self) -> SessionEndRetention {
+        self.0.end_retention()
     }
 }
 
@@ -2909,6 +2950,22 @@ impl PeerHandle {
     #[must_use]
     pub fn is_established(&self) -> bool {
         self.established.get()
+    }
+
+    /// What Graceful Restart may still hold after this session's last
+    /// Established period, as the session decided when it left Established.
+    /// Final once the session reported `BackToIdle`. Fixture handles built
+    /// with [`Self::from_parts`] always read the default: nothing held.
+    #[must_use]
+    pub fn session_end_retention(&self) -> SessionEndRetention {
+        self.established.end_retention()
+    }
+
+    /// Record how this session's Established period ended, as the session
+    /// would: a seam for peer-manager tests whose sessions never establish.
+    #[doc(hidden)]
+    pub fn publish_session_end_retention(&self, retention: SessionEndRetention) {
+        self.established.set_end_retention(retention);
     }
 }
 

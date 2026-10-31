@@ -703,13 +703,16 @@ impl Eq for NeighborCounters {}
 /// The peer manager assigns a configured neighbor its allocated handle
 /// before any session starts. A dynamic neighbor's slot starts empty and its
 /// session allocates the handle the first time it talks to the RIB, which is
-/// only after its OPEN validates. A standalone session (tests, benches) that
-/// nobody assigned uses the pinned handle of its address.
+/// only after its OPEN validates; a slot that resumes a retained handle
+/// takes that handle at the same point instead, when the OPEN comes from the
+/// same AS. A standalone session (tests,
+/// benches) that nobody assigned uses the pinned handle of its address.
 /// It is runtime state, not configuration: two configs compare equal on it.
 #[derive(Clone, Debug, Default)]
 pub struct RibPeerSlot {
     cell: Arc<std::sync::OnceLock<rustbgpd_rib::PeerId>>,
     allocate: bool,
+    resume: Option<(rustbgpd_rib::PeerId, u32)>,
 }
 
 impl RibPeerSlot {
@@ -719,6 +722,7 @@ impl RibPeerSlot {
         Self {
             cell: Arc::new(std::sync::OnceLock::from(peer)),
             allocate: false,
+            resume: None,
         }
     }
 
@@ -728,6 +732,21 @@ impl RibPeerSlot {
         Self {
             cell: Arc::default(),
             allocate: true,
+            resume: None,
+        }
+    }
+
+    /// An empty slot whose session takes `peer`, a retained dynamic
+    /// neighbor's handle, on first use when its OPEN comes from `peer_asn`;
+    /// an OPEN from another AS is another speaker and gets a new handle.
+    /// Until its OPEN validates the session names no RIB peer, as with
+    /// [`Self::allocate_after_open`].
+    #[must_use]
+    pub fn resume_after_open(peer: rustbgpd_rib::PeerId, peer_asn: u32) -> Self {
+        Self {
+            cell: Arc::default(),
+            allocate: true,
+            resume: Some((peer, peer_asn)),
         }
     }
 
@@ -752,14 +771,20 @@ impl RibPeerSlot {
     }
 
     /// The handle, allocating (or, for an unassigned standalone slot,
-    /// pinning) it for `endpoint` on first use.
-    pub(crate) fn resolve(
+    /// pinning, or for a resuming slot whose AS is `peer_asn`, taking its
+    /// retained handle) it for `endpoint` on first use. The session calls
+    /// this once its OPEN from `peer_asn` validates.
+    #[doc(hidden)]
+    pub fn resolve(
         &self,
         endpoint: impl FnOnce() -> rustbgpd_rib::PeerEndpoint,
+        peer_asn: u32,
     ) -> rustbgpd_rib::PeerId {
         *self.cell.get_or_init(|| {
             let endpoint = endpoint();
-            if self.allocate {
+            if let Some((peer, _)) = self.resume.filter(|&(_, asn)| asn == peer_asn) {
+                peer
+            } else if self.allocate {
                 rustbgpd_rib::PeerId::allocate(endpoint)
             } else {
                 rustbgpd_rib::PeerId::from_addr(endpoint.addr)

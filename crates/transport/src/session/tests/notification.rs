@@ -1757,3 +1757,102 @@ fn notification_descriptions_preserve_registered_and_numeric_inner_causes() {
         );
     }
 }
+
+/// What the peer, as our helper, may hold of ours once the session leaves
+/// Established: our restart time, plus our LLGR stale time only when both
+/// sides advertised LLGR, and nothing after a Hard Reset, a NOTIFICATION
+/// without the N bit (RFC 8538 §3), or from a peer that advertised neither
+/// capability. Red proof: dropping any guard changes its row.
+#[tokio::test]
+async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
+    #[derive(Clone, Copy)]
+    #[expect(
+        clippy::struct_excessive_bools,
+        reason = "one row per independent session-end input in a table test"
+    )]
+    struct Case {
+        name: &'static str,
+        peer_gr: bool,
+        peer_llgr: bool,
+        local_llgr: u32,
+        notification: bool,
+        n_bit: bool,
+        hard_reset: bool,
+        expect: Option<u64>,
+    }
+    let base = Case {
+        name: "transport loss",
+        peer_gr: true,
+        peer_llgr: false,
+        local_llgr: 0,
+        notification: false,
+        n_bit: false,
+        hard_reset: false,
+        expect: Some(90),
+    };
+    for case in [
+        base,
+        Case {
+            name: "both advertised LLGR",
+            peer_llgr: true,
+            local_llgr: 600,
+            expect: Some(690),
+            ..base
+        },
+        Case {
+            name: "only the peer advertised LLGR",
+            peer_llgr: true,
+            ..base
+        },
+        Case {
+            name: "only we advertised LLGR",
+            local_llgr: 600,
+            ..base
+        },
+        Case {
+            name: "NOTIFICATION without the N bit",
+            notification: true,
+            expect: None,
+            ..base
+        },
+        Case {
+            name: "NOTIFICATION with the N bit",
+            notification: true,
+            n_bit: true,
+            ..base
+        },
+        Case {
+            name: "Hard Reset",
+            notification: true,
+            n_bit: true,
+            hard_reset: true,
+            expect: None,
+            ..base
+        },
+        Case {
+            name: "peer advertised neither",
+            peer_gr: false,
+            expect: None,
+            ..base
+        },
+    ] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut neg = negotiated_session(65002, false);
+        neg.peer_gr_capable = case.peer_gr;
+        neg.peer_llgr_capable = case.peer_llgr;
+        neg.peer_notification_gr = case.n_bit;
+        session.config.peer.graceful_restart = true;
+        session.config.peer.gr_restart_time = 90;
+        session.config.llgr_stale_time = case.local_llgr;
+        session.negotiated = Some(Arc::new(neg));
+        session.notification_teardown = case.notification;
+        session.received_hard_reset = case.hard_reset;
+        session.execute_actions(vec![Action::SessionDown]).await;
+        assert_eq!(
+            session.established.end_retention().ours_for,
+            case.expect.map(std::time::Duration::from_secs),
+            "{}",
+            case.name
+        );
+    }
+}

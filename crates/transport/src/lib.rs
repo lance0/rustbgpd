@@ -66,10 +66,11 @@ pub use handle::PeerRuntimeConfigUpdate;
 pub use handle::{
     CommandTicket, ImportPolicyTermHits, ImportRevalidation, NegotiatedGracefulRestartState,
     NegotiatedSessionState, PeerCommand, PeerCommandError, PeerHandle, PeerSessionState,
-    PeerShutdownError, PolicyRejectCounts, SessionIdentity, SessionLifecycleNotification,
-    SessionNotification, SessionNotificationDirection, SessionNotificationEvent,
-    SessionNotificationReceiver, SessionNotificationSender, SessionQueryOutcome, SessionRole,
-    StateQueryOutcome, ValidationDelta, WarmCheckpointSessionState, session_notification_channel,
+    PeerShutdownError, PolicyRejectCounts, SessionEndRetention, SessionIdentity,
+    SessionLifecycleNotification, SessionNotification, SessionNotificationDirection,
+    SessionNotificationEvent, SessionNotificationReceiver, SessionNotificationSender,
+    SessionQueryOutcome, SessionRole, StateQueryOutcome, ValidationDelta,
+    WarmCheckpointSessionState, session_notification_channel,
 };
 pub use link::{InterfaceAddress, LinkDown, LinkDownCause, LinkSnapshot, LinkState, LinkStateFeed};
 pub use listener::{

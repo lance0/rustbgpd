@@ -1407,6 +1407,37 @@ impl PeerSession {
                             None
                         }
                     });
+                    // The peer, as our helper, holds our routes for the restart
+                    // time we advertised, then our LLGR stale time when both
+                    // sides advertised LLGR (RFC 4724 §4.2, RFC 9494 §4.2); a
+                    // Hard Reset or a NOTIFICATION without the N bit makes it
+                    // flush them (RFC 8538 §3).
+                    let ours_for = self.negotiated.as_ref().and_then(|neg| {
+                        let llgr = neg.peer_llgr_capable && self.config.llgr_stale_time > 0;
+                        ((neg.peer_gr_capable || llgr)
+                            && self.config.peer.graceful_restart
+                            && (!self.notification_teardown || neg.peer_notification_gr)
+                            && !self.received_hard_reset
+                            && !self.sent_hard_reset)
+                            .then(|| {
+                                let restart = if neg.peer_gr_capable {
+                                    u64::from(self.config.peer.gr_restart_time)
+                                } else {
+                                    0
+                                };
+                                let stale = if llgr {
+                                    u64::from(self.config.llgr_stale_time)
+                                } else {
+                                    0
+                                };
+                                std::time::Duration::from_secs(restart + stale)
+                            })
+                    });
+                    self.established
+                        .publish_end_retention(crate::handle::SessionEndRetention {
+                            theirs: gr_update.is_some(),
+                            ours_for,
+                        });
                     // Remember which connection the retained routes came
                     // from, so a confirmed interface-down that arrives after
                     // this transport loss can still purge them.
