@@ -1425,10 +1425,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   GR-restarter peers and peers that may still hold our routes stale, for at
   most 60 seconds when the peer's previous session advertised Graceful
   Restart, as every restarter's did (the premature-sweep fix); the
-  conformance-purist
-  alternative — defer EoR for every ORF peer, with a timeout backstop so a
-  client that never sends its ROUTE-REFRESH still converges — stays deferred
-  until interop evidence shows a non-GR receiver misreading the early EoR.
+  conformance-purist alternative — defer EoR for every ORF peer, with a
+  timeout backstop so a client that never sends its ROUTE-REFRESH still
+  converges — stays deferred until interop evidence shows a non-GR receiver
+  misreading the early EoR.
 - **Out-of-niche address families.** L3VPN (VPNv4/v6, RFC 4364 / RFC 4659),
   labeled-unicast (RFC 8277), Route Target Constraints (RFC 4684), and BGP-LS
   (RFC 9552, obsoleting RFC 7752 / RFC 9029) shipped as the ADR-0077

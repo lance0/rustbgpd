@@ -1391,6 +1391,7 @@ impl RibManager {
         // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
         self.gr_deferred_eor.remove(&peer);
         self.orf_eor_hold.remove(&peer);
+        self.orf_eor_cap_passed.remove(&peer);
         // So is the RFC 4684 §6 hold: its EoRs leave with `pending_eor`, and
         // `PeerUp` arms a fresh cap for the new session.
         self.rtc_eor_hold.remove(&peer);
@@ -1750,6 +1751,7 @@ impl RibManager {
         // families' initial `EoR` (RFC 4724 §4.2), so that `EoR` follows the
         // gated table, bounded by the cap for a peer that never refreshes.
         let may_hold_stale = self.peer_may_hold_stale.remove(&peer);
+        self.orf_eor_cap_passed.remove(&peer);
         if may_hold_stale && !negotiated_orf_recv.is_empty() {
             self.orf_eor_hold
                 .insert(peer, tokio::time::Instant::now() + super::ORF_EOR_HOLD_CAP);
