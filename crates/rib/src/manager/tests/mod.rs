@@ -1523,6 +1523,7 @@ mod multipath_fib;
 mod no_export;
 mod non_unicast_pushdown;
 mod orf;
+mod orf_helper_initial_eor;
 mod orr;
 mod outbound_commit_accounting;
 mod outbound_limit_install;

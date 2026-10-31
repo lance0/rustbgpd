@@ -901,20 +901,15 @@ impl RibManager {
 
     /// RFC 4724 §4.2: a peer whose OPEN carried a Graceful Restart
     /// capability keeps our routes stale after a clean session end and
-    /// drops them only at our End-of-RIB. Record the exempt keys the ending
-    /// session may hold, so the next session can withdraw deleted ones
-    /// while a selection hold defers that End-of-RIB.
+    /// drops them only at our End-of-RIB. Mark the peer for its next
+    /// session's End-of-RIB, and record the exempt keys the ending session
+    /// may hold, so the next session can withdraw deleted ones while a
+    /// selection hold defers that End-of-RIB. The RIB does not see how the
+    /// session ended, so a NOTIFICATION end counts too.
     fn carry_helper_stale_exempt(&mut self, peer: PeerId, session_id: u64) {
         let queued = self
             .hold_exempt_withdrawn
             .remove(&super::HoldWithdrawOwner::Peer(peer));
-        if !self
-            .selection_deferral
-            .as_ref()
-            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
-        {
-            return;
-        }
         let helper = self
             .live_sessions
             .get(&peer)
@@ -925,7 +920,17 @@ impl RibManager {
             })
             .and_then(|record| record.gr_context.as_ref())
             .is_some_and(|context| context.peer_gr_helper);
-        if !helper {
+        if helper {
+            self.peer_may_hold_stale.insert(peer);
+        } else {
+            self.peer_may_hold_stale.remove(&peer);
+            return;
+        }
+        if !self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
+        {
             return;
         }
         self.with_peer_teardown_readiness(|manager| {
@@ -1007,6 +1012,7 @@ impl RibManager {
 
     /// A deleted or rebound neighbor's next session is a different peer's.
     fn forget_helper_stale_exempt(&mut self, peer: PeerId) {
+        self.peer_may_hold_stale.remove(&peer);
         self.helper_stale_exempt.remove(&peer);
         self.hold_exempt_withdrawn
             .remove(&super::HoldWithdrawOwner::Peer(peer));
@@ -1384,6 +1390,7 @@ impl RibManager {
         // The GR-deferred EoR is per-session too: the deferral pairs with
         // THIS session's §6 gate; a new session re-derives it on `PeerUp`.
         self.gr_deferred_eor.remove(&peer);
+        self.orf_eor_hold.remove(&peer);
         // So is the RFC 4684 §6 hold: its EoRs leave with `pending_eor`, and
         // `PeerUp` arms a fresh cap for the new session.
         self.rtc_eor_hold.remove(&peer);
@@ -1510,8 +1517,10 @@ impl RibManager {
             self.metrics
                 .record_rib_outbound_registration_replaced(&peer.label());
             // The replaced session may have ended cleanly at a GR helper; its
-            // own teardown arrives later and is discarded as superseded.
-            if let Some(previous_session_id) = self.outbound_session_ids.get(&peer).copied() {
+            // own teardown arrives later and is discarded as superseded. It
+            // may still wait in `pending_initial_registrations`, before any
+            // outbound session id is installed.
+            if let Some(previous_session_id) = self.current_session_id(peer) {
                 self.carry_helper_stale_exempt(peer, previous_session_id);
             }
             if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
@@ -1735,6 +1744,17 @@ impl RibManager {
             self.peer_interpret_rfc1997.insert(peer);
         } else {
             self.peer_interpret_rfc1997.remove(&peer);
+        }
+
+        // A peer that may hold our routes stale deletes them at the gated
+        // families' initial `EoR` (RFC 4724 §4.2), so that `EoR` follows the
+        // gated table, bounded by the cap for a peer that never refreshes.
+        let may_hold_stale = self.peer_may_hold_stale.remove(&peer);
+        if may_hold_stale && !negotiated_orf_recv.is_empty() {
+            self.orf_eor_hold
+                .insert(peer, tokio::time::Instant::now() + super::ORF_EOR_HOLD_CAP);
+        } else {
+            self.orf_eor_hold.remove(&peer);
         }
 
         // RFC 5291 §6: gate the initial advertisement for ORF-receive families
@@ -3462,12 +3482,15 @@ impl RibManager {
         // sweeping everything we are about to re-announce, a self-inflicted
         // blackhole window. Withhold those families' EoR; it is emitted once
         // the gate lifts and the gated flood is sent
-        // (`send_route_refresh_response` / `handle_peer_orf_update`). Non-GR
-        // ORF peers keep the immediate EoR — a client that never sends
-        // ROUTE-REFRESH must still see EoR. This runs after `handle_peer_up`'s
-        // LLGR arm has moved a peer re-establishing during LLGR back into
-        // `gr_peers`, so that restarter is covered too.
-        if !orf_gated.is_empty() && self.gr_peers.contains_key(&peer) {
+        // (`send_route_refresh_response` / `handle_peer_orf_update`). A GR
+        // helper still holding our routes stale from the previous session
+        // sweeps them at this EoR the same way (RFC 4724 §4.2), so its EoR
+        // waits too, up to `ORF_EOR_HOLD_CAP`. Other ORF peers keep the
+        // immediate EoR — a client that never sends ROUTE-REFRESH must still
+        // see EoR. This runs after `handle_peer_up`'s LLGR arm has moved a
+        // peer re-establishing during LLGR back into `gr_peers`, so that
+        // restarter is covered too.
+        if !orf_gated.is_empty() && self.orf_initial_eor_follows_table(peer) {
             let deferred: HashSet<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)> = eor_families
                 .iter()
                 .copied()

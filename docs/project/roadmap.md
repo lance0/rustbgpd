@@ -1422,7 +1422,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   Send-side ORF (rustbgpd pushing filters to upstreams) and advertising legacy
   Cisco type 128 stay deferred pending operator demand; type 128 is accepted on
   decode only today. End-of-RIB for ORF-gated families is deferred only for
-  GR-restarter peers (the premature-sweep fix); the conformance-purist
+  GR-restarter peers and peers that may still hold our routes stale, for at
+  most 60 seconds when the peer's previous session advertised Graceful
+  Restart, as every restarter's did (the premature-sweep fix); the
+  conformance-purist
   alternative — defer EoR for every ORF peer, with a timeout backstop so a
   client that never sends its ROUTE-REFRESH still converges — stays deferred
   until interop evidence shows a non-GR receiver misreading the early EoR.
