@@ -3597,13 +3597,23 @@ impl RibManager {
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         // A withdrawal the group queued to this member may not have
         // reached it; the member's own hold ledger keeps it for a flap after
-        // the move.
-        if let Some(group_ledger) = self
-            .hold_exempt_withdrawn
-            .get(&super::HoldWithdrawOwner::Group(gid))
+        // the move. A session teardown has already deregistered the peer and
+        // carried what it needs, so it skips the copy.
+        if self.outbound_peers.contains_key(&peer)
+            && let Some(group_ledger) = self
+                .hold_exempt_withdrawn
+                .get(&super::HoldWithdrawOwner::Group(gid))
         {
-            let keys: Vec<_> = group_ledger.iter().copied().collect();
-            self.record_hold_exempt_withdrawn(super::HoldWithdrawOwner::Peer(peer), keys);
+            let keys: Vec<_> = group_ledger
+                .iter()
+                .inspect(|_| checkpoint())
+                .copied()
+                .collect();
+            self.record_hold_exempt_withdrawn(
+                super::HoldWithdrawOwner::Peer(peer),
+                keys,
+                "group_leave",
+            );
         }
         let Some(group) = self.group_ribs.get_mut(&gid) else {
             return;

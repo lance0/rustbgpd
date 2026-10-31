@@ -481,6 +481,7 @@ impl RibManager {
             self.record_hold_exempt_withdrawn(
                 super::super::HoldWithdrawOwner::Group(gid),
                 withdrawn,
+                "group_commit",
             );
         }
         let readiness = &self.replacement_readiness;

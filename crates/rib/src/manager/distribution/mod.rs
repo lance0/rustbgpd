@@ -5047,6 +5047,7 @@ impl RibManager {
                 self.record_hold_exempt_withdrawn(
                     super::HoldWithdrawOwner::Peer(peer),
                     queued_exempt_withdrawals,
+                    "family_commit",
                 );
             }
             let rib_out = self
