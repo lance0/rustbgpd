@@ -282,7 +282,7 @@ impl RibManager {
         }
         // One retirement for the whole batch: a carry kept for these windows
         // retires once nothing else can hold its peer's End-of-RIB.
-        self.retire_helper_stale_exempt();
+        self.request_helper_stale_retire();
         Ok(ReplayComplete::Released)
     }
 
@@ -298,6 +298,7 @@ impl RibManager {
         let Some(grace) = self.eor_grace.remove(target) else {
             return (false, String::new());
         };
+        self.helper_stale_hold_ends = self.helper_stale_hold_ends.saturating_add(1);
         let mut held: Vec<&str> = grace
             .peer
             .and_then(|peer| self.pending_eor.get(&peer))
@@ -379,14 +380,14 @@ impl RibManager {
         }
         self.eor_grace.remove(&target);
         self.eor_grace_deadlines.remove(&target);
-        self.retire_helper_stale_exempt();
+        self.request_helper_stale_retire();
     }
 
     pub(super) fn retire_eor_grace_interface(&mut self, interface: Arc<str>) {
         let target = EorGraceTarget::Interface(interface);
         self.eor_grace.remove(&target);
         self.eor_grace_deadlines.remove(&target);
-        self.retire_helper_stale_exempt();
+        self.request_helper_stale_retire();
     }
 
     pub(super) fn next_eor_grace_deadline(&mut self) -> Option<tokio::time::Instant> {
@@ -443,6 +444,6 @@ impl RibManager {
             }
         }
         // One retirement for every window this deadline released.
-        self.retire_helper_stale_exempt();
+        self.request_helper_stale_retire();
     }
 }

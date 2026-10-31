@@ -1217,6 +1217,10 @@ pub struct RibManager {
     /// [`HELPER_STALE_EXEMPT_LIMIT`]; retired once nothing can hold that
     /// End-of-RIB.
     hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, BTreeSet<(Prefix, u32)>>,
+    /// Hold sources (a selection family, a grace window) that went away
+    /// since the last retirement pass; nonzero means a carry or ledger may
+    /// have become retirable.
+    helper_stale_hold_ends: u32,
     /// Exempt unicast keys an ended session of a GR-capable peer may still
     /// hold as stale (RFC 4724 §4.2). The peer drops stale routes only at
     /// our End-of-RIB, which a selection hold or replay grace can defer, so
@@ -2811,6 +2815,7 @@ impl RibManager {
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
             hold_exempt_withdrawn: HashMap::new(),
+            helper_stale_hold_ends: 0,
             helper_stale_exempt: HashMap::new(),
             pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),

@@ -1542,7 +1542,7 @@ impl RibManager {
         });
         // A family released before it ever armed skips the completion, so
         // retire what no held End-of-RIB can still need here too.
-        self.retire_helper_stale_exempt();
+        self.request_helper_stale_retire();
     }
 
     fn complete_selection_family(
@@ -1561,7 +1561,7 @@ impl RibManager {
         // hold it. A carry stays while that End-of-RIB can be held and its
         // session has not sent it; deleted exempt keys are withdrawn while
         // it is held.
-        self.retire_helper_stale_exempt();
+        self.request_helper_stale_retire();
         tracing::info!(
             afi = ?family.0,
             safi = ?family.1,

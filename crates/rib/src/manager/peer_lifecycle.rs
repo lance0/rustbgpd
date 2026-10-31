@@ -1258,23 +1258,63 @@ impl RibManager {
             || self.eor_grace_covers(peer, Some(family))
     }
 
+    /// A hold source went away (a selection family released, or a grace
+    /// window ended or was removed): retire what it may have freed.
+    pub(super) fn request_helper_stale_retire(&mut self) {
+        self.helper_stale_hold_ends = self.helper_stale_hold_ends.saturating_add(1);
+        self.retire_helper_stale_exempt();
+    }
+
     /// Retire what no held End-of-RIB can still need: every carry and ledger
     /// once no peer's End-of-RIB can be held, else each carry and private
     /// ledger of a peer whose End-of-RIB can no longer be held. A carry
     /// whose families' End-of-RIB went out retires key by key in the flush.
+    /// Constant time unless something can retire: an owner only becomes
+    /// retirable when a hold source goes away, which requests a pass, and
+    /// none can while a selection gate is unreleased.
     pub(super) fn retire_helper_stale_exempt(&mut self) {
         if self.helper_stale_exempt.is_empty() && self.hold_exempt_withdrawn.is_empty() {
+            self.helper_stale_hold_ends = 0;
             return;
         }
-        if !self.helper_stale_may_hold_any() {
-            self.helper_stale_exempt.clear();
-            self.hold_exempt_withdrawn.clear();
+        let any = self.helper_stale_may_hold_any();
+        if any
+            && (self.helper_stale_hold_ends == 0
+                || self
+                    .selection_deferral
+                    .as_ref()
+                    .is_some_and(super::selection_deferral::SelectionDeferral::may_hold))
+        {
+            // Every peer's End-of-RIB may still be held, or nothing
+            // changed since the last pass.
+            self.helper_stale_hold_ends = 0;
             return;
         }
+        self.helper_stale_hold_ends = 0;
+        self.with_peer_teardown_readiness(|manager| {
+            manager.retire_helper_stale_exempt_owned(any);
+        });
+    }
+
+    /// [`Self::retire_helper_stale_exempt`]'s walk, under a readiness owner,
+    /// checkpointing every owner it inspects or drops.
+    fn retire_helper_stale_exempt_owned(&mut self, any: bool) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || {
             super::replacement_readiness_checkpoint_at(&readiness, "helper_stale_retire", false);
         };
+        if !any {
+            for (_, carried) in self.helper_stale_exempt.drain() {
+                checkpoint();
+                drop(carried);
+            }
+            for (_, ledger) in self.hold_exempt_withdrawn.drain() {
+                checkpoint();
+                drop(ledger);
+            }
+            checkpoint();
+            return;
+        }
         let peers: Vec<PeerId> = self
             .helper_stale_exempt
             .keys()
@@ -1283,6 +1323,7 @@ impl RibManager {
             .filter(|&peer| !self.helper_stale_may_hold(peer))
             .collect();
         for peer in peers {
+            checkpoint();
             self.helper_stale_exempt.remove(&peer);
         }
         let ledgers: Vec<super::HoldWithdrawOwner> = self
@@ -1296,6 +1337,7 @@ impl RibManager {
             })
             .collect();
         for owner in ledgers {
+            checkpoint();
             self.hold_exempt_withdrawn.remove(&owner);
         }
     }

@@ -2237,19 +2237,24 @@ fn settled_carry_retires_its_family_once_its_end_of_rib_goes_out() {
     );
 }
 
-/// Releasing many grace windows at one deadline retires carries and
-/// ledgers once for the batch, so the work grows with windows plus owners.
-/// Red proof: a retirement per released window rescans every remaining
-/// owner, a windows x owners term.
-fn grace_batch_release(size: usize) -> super::work_scaling::Work {
+/// `size` private receivers, each with its own grace window and its own
+/// recorded ledger, plus a later window that keeps grace open past their
+/// deadline when `keep_open`. Returns the manager, that deadline and the
+/// receivers that must stay open.
+fn grace_ledgers(
+    size: usize,
+    keep_open: bool,
+) -> (
+    RibManager,
+    tokio::time::Instant,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
     let (_tx, rx) = mpsc::channel(16);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     let address = |index: usize| {
         let [high, low] = u16::try_from(index).unwrap().to_be_bytes();
         Ipv4Addr::new(192, 0, 3 + high, low)
     };
-    // A later window keeps grace open past the batch, so the batch's
-    // retirement walks the owners.
     let mut peers: Vec<_> = (0..size)
         .map(|index| crate::EorGracePeerConfig {
             peer: peer_v4(address(index)).into(),
@@ -2257,17 +2262,19 @@ fn grace_batch_release(size: usize) -> super::work_scaling::Work {
             families: vec![FAMILY],
         })
         .collect();
-    peers.push(crate::EorGracePeerConfig {
-        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 99)).into(),
-        deadline: deadline + Duration::from_secs(1),
-        families: vec![FAMILY],
-    });
+    if keep_open {
+        peers.push(crate::EorGracePeerConfig {
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 99)).into(),
+            deadline: deadline + Duration::from_secs(1),
+            families: vec![FAMILY],
+        });
+    }
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_eor_grace(crate::EorGraceConfig {
             peers,
             replay_owners: vec![],
         });
-    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let source = connect(&mut manager, SOURCE, 64, false, false);
     let mut receivers: Vec<_> = (0..size)
         .map(|index| {
             let (_tx, rx, _) = register_peer(
@@ -2288,14 +2295,25 @@ fn grace_batch_release(size: usize) -> super::work_scaling::Work {
     for rx in &mut receivers {
         while rx.try_recv().is_ok() {}
     }
-    let peer_ledgers = |manager: &RibManager| {
-        manager
-            .hold_exempt_withdrawn
-            .keys()
-            .filter(|owner| matches!(owner, super::super::HoldWithdrawOwner::Peer(_)))
-            .count()
-    };
     assert_eq!(peer_ledgers(&manager), size, "setup, size {size}");
+    receivers.push(source);
+    (manager, deadline, receivers)
+}
+
+fn peer_ledgers(manager: &RibManager) -> usize {
+    manager
+        .hold_exempt_withdrawn
+        .keys()
+        .filter(|owner| matches!(owner, super::super::HoldWithdrawOwner::Peer(_)))
+        .count()
+}
+
+/// Releasing many grace windows at one deadline retires carries and
+/// ledgers once for the batch, so the work grows with windows plus owners.
+/// Red proof: a retirement per released window rescans every remaining
+/// owner, a windows x owners term.
+fn grace_batch_release(size: usize) -> super::work_scaling::Work {
+    let (mut manager, deadline, _receivers) = grace_ledgers(size, true);
     let work = super::work_scaling::checkpoints_in(|| manager.expire_eor_grace(deadline));
     assert_eq!(
         peer_ledgers(&manager),
@@ -2311,6 +2329,90 @@ fn grace_batch_release_retires_linearly() {
         "grace batch release",
         &["helper_stale_retire"],
         grace_batch_release,
+    );
+}
+
+/// Retirement after grace runs under a readiness owner and checkpoints
+/// every owner it inspects or drops: the walk when grace stays open, the
+/// final clear when it does not. Red proof: retiring without an owner
+/// services no readiness query, and a clear without per-owner checkpoints
+/// drops every ledger in one step.
+#[test]
+fn grace_retirement_checkpoints_under_a_readiness_owner() {
+    const SIZE: usize = 16;
+    for keep_open in [true, false] {
+        let (mut manager, deadline, _receivers) = grace_ledgers(SIZE, keep_open);
+        let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        manager.replacement_readiness_test_hook = Some(Arc::new({
+            let visits = visits.clone();
+            move |seam| {
+                if seam == "helper_stale_retire" {
+                    visits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }));
+        manager.expire_eor_grace(deadline);
+        assert_eq!(peer_ledgers(&manager), 0);
+        let visits = visits.load(std::sync::atomic::Ordering::SeqCst);
+        // The walk inspects and then drops every peer ledger; the clear
+        // drops each owner.
+        let floor = if keep_open { 2 * SIZE } else { SIZE };
+        assert!(
+            visits >= floor,
+            "keep_open={keep_open}: {visits} serviced checkpoints, at least {floor}"
+        );
+    }
+}
+
+/// Under an unreleased selection gate every peer's End-of-RIB may be held,
+/// so nothing can retire: unrelated updates with a carry and many ledgers
+/// in place do no retirement walk at all. Red proof: walking the owners on
+/// every distribution pass is an updates x owners term.
+#[test]
+fn unrelated_updates_do_not_walk_the_owners_under_a_hold() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut receivers: Vec<_> = (0..16_u8)
+        .map(|index| {
+            let (_tx, rx, _) = register_peer(
+                &mut manager,
+                Ipv4Addr::new(192, 0, 4, index),
+                u64::from(index) + 200,
+                false,
+                false,
+                false,
+            );
+            rx
+        })
+        .collect();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let other = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, other);
+    delete(&mut manager, other);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    for rx in &mut receivers {
+        while rx.try_recv().is_ok() {}
+    }
+    assert!(
+        peer_ledgers(&manager) >= 16,
+        "every receiver records a ledger"
+    );
+    // The helper's session ends and does not return: its carry stays.
+    clean_end(&mut manager, 82);
+    assert!(manager.helper_stale_exempt.contains_key(&observer));
+    let work = super::work_scaling::checkpoints_in(|| {
+        for index in 0..32 {
+            announce(&mut manager, [host(5, index)]);
+        }
+    });
+    assert_eq!(
+        work.get("helper_stale_retire"),
+        None,
+        "no retirement walk: {work:?}"
     );
 }
 
