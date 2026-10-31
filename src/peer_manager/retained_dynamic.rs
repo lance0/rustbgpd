@@ -88,7 +88,8 @@ impl PeerManager {
     /// Keep an idle dynamic neighbor's identity when its session's end left
     /// routes retained on either side (`end`). `false` when there is nothing
     /// to keep: nothing retained, its OPEN never validated, or no current
-    /// range admits it.
+    /// range admits it. Ranges a staged transaction provides do not reject
+    /// it: the commit or rollback decides.
     pub(super) fn retain_dynamic_identity(
         &mut self,
         peer: &PeerKey,
@@ -100,9 +101,15 @@ impl PeerManager {
         };
         if !(end.theirs || end.ours_for.is_some())
             || managed.transport_config.rib_peer.get().is_none()
-            || !self.dynamic_range_admits(&accepted, managed.remote_asn)
         {
             return false;
+        }
+        if !self.dynamic_range_admits(&accepted, managed.remote_asn) {
+            if !self.config_snapshot_staged {
+                return false;
+            }
+            // The staged transaction's commit or rollback decides.
+            self.retention.admission_dirty = true;
         }
         let now = Instant::now();
         let hold = Duration::from_secs(u64::from(managed.transport_config.peer.hold_time));

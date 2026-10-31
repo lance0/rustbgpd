@@ -815,26 +815,7 @@ async fn establish_from(mgr: &mut PeerManager, client: &mut TcpStream, asn: u32)
         read_bgp_message(client, &mut buf).await,
         Message::Open(_)
     ));
-    let open = OpenMessage {
-        version: 4,
-        my_as: u16::try_from(asn).unwrap(),
-        hold_time: 90,
-        bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
-        capabilities: vec![
-            Capability::MultiProtocol {
-                afi: Afi::Ipv4,
-                safi: Safi::Unicast,
-            },
-            Capability::FourOctetAs { asn },
-            Capability::GracefulRestart {
-                restart_state: false,
-                notification: false,
-                restart_time: 120,
-                families: vec![],
-            },
-        ],
-    };
-    send_bgp_message(client, &Message::Open(open)).await;
+    send_bgp_message(client, &Message::Open(helper_open(asn))).await;
     assert!(matches!(
         read_bgp_message(client, &mut buf).await,
         Message::Keepalive
@@ -983,5 +964,144 @@ async fn reconnect_reset_before_its_open_leaves_the_retention() {
     assert_eq!(mgr.rib_peer_of(&key(MEMBER)), peer, "it keeps its owner");
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
     assert!(peer.is_live());
+    rib_task.abort();
+}
+
+/// An OPEN from `asn`, router ID 10.0.0.2, whose GR capability lists no
+/// family: a helper only, FRR's default.
+fn helper_open(asn: u32) -> OpenMessage {
+    OpenMessage {
+        version: 4,
+        my_as: u16::try_from(asn).unwrap(),
+        hold_time: 90,
+        bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+        capabilities: vec![
+            Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            Capability::FourOctetAs { asn },
+            Capability::GracefulRestart {
+                restart_state: false,
+                notification: false,
+                restart_time: 120,
+                families: vec![],
+            },
+        ],
+    }
+}
+
+/// A retained member reconnects, and before that session's OPEN a second
+/// connection from the address arrives and sends its OPEN from `asn`. Its
+/// router ID is higher, so it wins the collision and is promoted. Returns the
+/// retained handle and the winner's client end.
+async fn collision_winner_from(mgr: &mut PeerManager, asn: u32) -> (PeerId, TcpStream, TcpStream) {
+    use super::collision::{read_bgp_message, send_bgp_message};
+    let mut client = accept(mgr).await;
+    establish_from(mgr, &mut client, MEMBER_ASN).await;
+    let peer = mgr.peers[&key(MEMBER)]
+        .transport_config
+        .rib_peer
+        .get()
+        .unwrap();
+    drop_until_idle(mgr, client).await;
+    assert!(mgr.retained_dynamic.contains_key(&key(MEMBER)));
+
+    let primary = accept(mgr).await;
+    let mut winner = accept_at(mgr, MEMBER).await;
+    assert!(
+        mgr.peers[&key(MEMBER)].pending_inbound.is_some(),
+        "the second connection is a collision candidate"
+    );
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(&mut winner, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(&mut winner, &Message::Open(helper_open(asn))).await;
+    while mgr.peers[&key(MEMBER)].pending_inbound.is_some() {
+        let notification =
+            tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+                .await
+                .expect("the candidate reports its OPEN")
+                .unwrap();
+        mgr.handle_session_notification(notification).await;
+    }
+    (peer, primary, winner)
+}
+
+/// A collision winner from the same AS is the retained neighbor: it resumes
+/// the handle and continues the counters. Red proof: handing off only to a
+/// session that was already the primary at its OPEN loses the counts.
+#[tokio::test]
+async fn same_as_collision_winner_continues_the_retained_neighbor() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let (peer, _primary, _winner) = collision_winner_from(&mut mgr, MEMBER_ASN).await;
+    let live = &mgr.peers[&key(MEMBER)].transport_config;
+    assert_eq!(live.rib_peer.get(), Some(peer));
+    assert_eq!(live.neighbor_counters.flaps(), 1, "the counters continue");
+    assert_eq!(mgr.neighbor_counters[&key(MEMBER)].flaps(), 1);
+    loc_rib_count(&rib_tx).await;
+    rib_task.abort();
+}
+
+/// A collision winner from another AS is another speaker: the old identity is
+/// released, with what was retained for it, and the winner counts afresh.
+/// Red proof: without the handoff on promotion the old identity stays live
+/// and owns nothing.
+#[tokio::test]
+async fn other_as_collision_winner_releases_the_retained_identity() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let (peer, _primary, _winner) = collision_winner_from(&mut mgr, 65099).await;
+    assert!(mgr.retained_dynamic.is_empty());
+    let live = &mgr.peers[&key(MEMBER)].transport_config;
+    assert_ne!(
+        live.rib_peer.get(),
+        Some(peer),
+        "the winner has its own handle"
+    );
+    assert_eq!(live.neighbor_counters.flaps(), 0);
+    loc_rib_count(&rib_tx).await;
+    assert!(!peer.is_live(), "the old identity is released");
+    rib_task.abort();
+}
+
+/// An Established member goes idle while a staged transaction's ranges no
+/// longer admit it: the provisional ranges do not reject the retention, so a
+/// rollback finds it intact. Red proof: rejecting against the staged ranges
+/// deletes the identity and its routes before the commit.
+#[tokio::test]
+async fn staged_ranges_do_not_reject_a_retention_at_idle() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let _client = accept(&mut mgr).await;
+    let peer = open_validated(&mut mgr).await;
+    let (tx, _rx) = mpsc::channel(16);
+    send_all(
+        &rib_tx,
+        session(peer, 1, MEMBER_ASN, false, false, false, tx),
+    )
+    .await;
+    send_all(
+        &rib_tx,
+        [announce(peer, 1, [1, 2, 3]), graceful_end(peer, 1)],
+    )
+    .await;
+    let ranges = std::mem::take(&mut mgr.dynamic_ranges);
+    mgr.config_snapshot_staged = true;
+    idle(&mut mgr, THEIRS).await;
+    assert!(
+        mgr.retained_dynamic.contains_key(&key(MEMBER)),
+        "kept while staged"
+    );
+    assert!(mgr.retention.admission_dirty);
+    assert_eq!(mgr.dynamic_peer_count, 1);
+
+    // Rollback restores the range; the re-check keeps the member.
+    mgr.dynamic_ranges = ranges;
+    mgr.config_snapshot_staged = false;
+    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 0);
+    settle(&mut mgr).await;
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
     rib_task.abort();
 }

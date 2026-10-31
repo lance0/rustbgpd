@@ -231,17 +231,20 @@ impl PeerManager {
                 if self
                     .peers
                     .get(&peer_key)
-                    .is_some_and(|m| m.session_id() == session_id)
+                    .is_some_and(|m| m.pending_inbound.is_some())
                 {
-                    self.retained_dynamic_open_from(&peer_key, peer_asn).await;
+                    self.resolve_collision(peer_key.clone(), remote_router_id, peer_asn)
+                        .await;
                 }
+                // The session whose OPEN this is, if it is the primary now: a
+                // collision winner promoted just above takes the retention
+                // handoff too; a loser never does.
                 if self
                     .peers
                     .get(&peer_key)
-                    .is_some_and(|m| m.pending_inbound.is_some())
+                    .is_some_and(|m| m.session_id() == session_id)
                 {
-                    self.resolve_collision(peer_key, remote_router_id, peer_asn)
-                        .await;
+                    self.retained_dynamic_open_from(&peer_key, peer_asn).await;
                 }
             }
             SessionNotification::BackToIdle {
