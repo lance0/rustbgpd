@@ -303,7 +303,15 @@ peers.
 
 `dynamic_neighbor_limit` caps the number of active peers auto-created from
 `[[dynamic_neighbors]]` ranges. When omitted, rustbgpd allows up to 100 dynamic
-peers at a time.
+peers at a time. An idle peer kept while graceful restart retention may still
+hold routes counts until it is deleted. One whose routes the RIB retains
+holds its slot for as long as that retention lasts: the restart time it
+advertised (capped by `gr_peer_restart_time_max`), plus, under LLGR, up to
+the stale time both sides advertised, which can be hours or days. One kept
+only while it may hold our routes (our restart time, plus our
+`llgr_stale_time` when LLGR was negotiated, plus the hold time) gives its
+slot to a new address at the limit, oldest first. Size the limit for the
+members a restart event can leave idle at once.
 
 ### `apply_bum_enforcement` — top-level (document-root) key
 

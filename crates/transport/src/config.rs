@@ -582,6 +582,36 @@ struct NeighborCounterBlock {
 }
 
 impl NeighborCounters {
+    /// Add `other`'s counts to this block: a reconnect found to be the same
+    /// neighbor continues the counters it was given fresh.
+    pub fn absorb(&self, other: &Self) {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return;
+        }
+        for (into, from) in [
+            (&self.0.flaps, &other.0.flaps),
+            (
+                &self.0.notifications_received,
+                &other.0.notifications_received,
+            ),
+            (&self.0.notifications_sent, &other.0.notifications_sent),
+            (&self.0.updates_received, &other.0.updates_received),
+            (&self.0.updates_sent, &other.0.updates_sent),
+            (&self.0.otc_routes_blocked, &other.0.otc_routes_blocked),
+            (
+                &self.0.import_policy_routes_permitted,
+                &other.0.import_policy_routes_permitted,
+            ),
+            (
+                &self.0.import_policy_routes_denied,
+                &other.0.import_policy_routes_denied,
+            ),
+        ] {
+            into.fetch_add(from.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+        self.0.export_policy.add(other.0.export_policy.snapshot());
+    }
+
     /// Transitions out of Established.
     #[must_use]
     pub fn flaps(&self) -> u64 {
@@ -703,13 +733,16 @@ impl Eq for NeighborCounters {}
 /// The peer manager assigns a configured neighbor its allocated handle
 /// before any session starts. A dynamic neighbor's slot starts empty and its
 /// session allocates the handle the first time it talks to the RIB, which is
-/// only after its OPEN validates. A standalone session (tests, benches) that
-/// nobody assigned uses the pinned handle of its address.
+/// only after its OPEN validates; a slot that resumes a retained handle
+/// takes that handle at the same point instead, when the OPEN comes from the
+/// same AS. A standalone session (tests,
+/// benches) that nobody assigned uses the pinned handle of its address.
 /// It is runtime state, not configuration: two configs compare equal on it.
 #[derive(Clone, Debug, Default)]
 pub struct RibPeerSlot {
     cell: Arc<std::sync::OnceLock<rustbgpd_rib::PeerId>>,
     allocate: bool,
+    resume: Option<(rustbgpd_rib::PeerId, u32)>,
 }
 
 impl RibPeerSlot {
@@ -719,6 +752,7 @@ impl RibPeerSlot {
         Self {
             cell: Arc::new(std::sync::OnceLock::from(peer)),
             allocate: false,
+            resume: None,
         }
     }
 
@@ -728,6 +762,21 @@ impl RibPeerSlot {
         Self {
             cell: Arc::default(),
             allocate: true,
+            resume: None,
+        }
+    }
+
+    /// An empty slot whose session takes `peer`, a retained dynamic
+    /// neighbor's handle, on first use when its OPEN comes from `peer_asn`;
+    /// an OPEN from another AS is another speaker and gets a new handle.
+    /// Until its OPEN validates the session names no RIB peer, as with
+    /// [`Self::allocate_after_open`].
+    #[must_use]
+    pub fn resume_after_open(peer: rustbgpd_rib::PeerId, peer_asn: u32) -> Self {
+        Self {
+            cell: Arc::default(),
+            allocate: true,
+            resume: Some((peer, peer_asn)),
         }
     }
 
@@ -752,14 +801,20 @@ impl RibPeerSlot {
     }
 
     /// The handle, allocating (or, for an unassigned standalone slot,
-    /// pinning) it for `endpoint` on first use.
-    pub(crate) fn resolve(
+    /// pinning, or for a resuming slot whose AS is `peer_asn`, taking its
+    /// retained handle) it for `endpoint` on first use. The session calls
+    /// this once its OPEN from `peer_asn` validates.
+    #[doc(hidden)]
+    pub fn resolve(
         &self,
         endpoint: impl FnOnce() -> rustbgpd_rib::PeerEndpoint,
+        peer_asn: u32,
     ) -> rustbgpd_rib::PeerId {
         *self.cell.get_or_init(|| {
             let endpoint = endpoint();
-            if self.allocate {
+            if let Some((peer, _)) = self.resume.filter(|&(_, asn)| asn == peer_asn) {
+                peer
+            } else if self.allocate {
                 rustbgpd_rib::PeerId::allocate(endpoint)
             } else {
                 rustbgpd_rib::PeerId::from_addr(endpoint.addr)

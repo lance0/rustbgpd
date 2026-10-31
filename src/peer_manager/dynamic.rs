@@ -378,6 +378,8 @@ impl PeerManager {
             parse_dynamic_prefix(&dn.prefix)
                 .map_or(true, |(a, l)| crate::config::effective_prefix(a, l) != key)
         });
+        // A retained idle neighbor of the range goes, as an idle one would.
+        self.retention.admission_dirty = true;
         let affected: Vec<PeerKey> = self
             .peers
             .iter()
@@ -402,9 +404,17 @@ impl PeerManager {
         &self,
         managed: &ManagedPeerState,
     ) -> bool {
-        let Some(accepted) = managed.accepted_dynamic_range.as_ref() else {
-            return false;
-        };
+        managed
+            .accepted_dynamic_range
+            .as_ref()
+            .is_some_and(|accepted| self.dynamic_range_admits(accepted, managed.remote_asn))
+    }
+
+    pub(super) fn dynamic_range_admits(
+        &self,
+        accepted: &AcceptedDynamicRange,
+        remote_asn: u32,
+    ) -> bool {
         self.dynamic_ranges.iter().any(|range| {
             // `accepted` is masked via `effective_prefix` (see
             // `accepted_attribution`), but `DynamicRange` keeps the raw
@@ -417,7 +427,7 @@ impl PeerManager {
             range_addr == accepted.addr
                 && range_len == accepted.prefix_len
                 && range.peer_group == accepted.peer_group
-                && (range.remote_asn == 0 || range.remote_asn == managed.remote_asn)
+                && (range.remote_asn == 0 || range.remote_asn == remote_asn)
         })
     }
 
@@ -494,6 +504,12 @@ impl PeerManager {
                 continue;
             };
             let (handle, session_id, mut managed) = managed.into_parts();
+            // A reconnect of a retained neighbor: the live peer's deletion
+            // releases the retained identity too.
+            self.take_dormant_retained_dynamic(
+                &peer_key,
+                managed.transport_config.rib_peer.clone(),
+            );
             self.remove_max_prefix_latch(&peer_key);
             self.unregister_session(session_id);
             if let Some(pending) = managed.pending_inbound.take() {
@@ -519,7 +535,7 @@ impl PeerManager {
                 "config rollback: removed dynamic peer whose accepting range is no longer present"
             );
         }
-        removed
+        removed + self.release_unadmitted_retained_dynamic().await
     }
 
     /// Snapshot any unfired hot-apply / Route Refresh intent for a peer

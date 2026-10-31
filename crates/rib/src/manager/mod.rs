@@ -4532,11 +4532,7 @@ impl RibManager {
             RibUpdate::RetireEorGraceInterface { interface } => {
                 self.retire_eor_grace_interface(interface);
             }
-            RibUpdate::ReleasePeer { peer } => {
-                if !peer.release() {
-                    debug!(%peer, "release of a handle that was not live");
-                }
-            }
+            RibUpdate::ReleasePeer { peer } => self.handle_release_peer(peer),
             RibUpdate::RebindPeer { peer, endpoint } => self.handle_rebind_peer(peer, endpoint),
             RibUpdate::PeerUp {
                 peer,
@@ -5023,7 +5019,15 @@ impl RibManager {
                 self.handle_query_peer_retained_stale(peer, reply);
             }
             RibUpdate::QueryPeerRetention { peer, reply } => {
-                self.handle_query_peer_retention(peer, reply);
+                let _ = reply.send(self.peer_retention(peer));
+            }
+            RibUpdate::QueryPeerRetentions { peers, reply } => {
+                let _ = reply.send(
+                    peers
+                        .into_iter()
+                        .map(|peer| self.peer_retention(peer))
+                        .collect(),
+                );
             }
             RibUpdate::QueryNeighborPolicyStats { peer, reply } => {
                 self.handle_query_neighbor_policy_stats(peer, reply);

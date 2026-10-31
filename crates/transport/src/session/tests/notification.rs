@@ -1757,3 +1757,243 @@ fn notification_descriptions_preserve_registered_and_numeric_inner_causes() {
         );
     }
 }
+
+/// What the peer, as our helper, may hold of ours once the session leaves
+/// Established: our restart time whenever it advertised any GR capability,
+/// families or not (RFC 4724 §3), plus our LLGR stale time only when both
+/// sides advertised LLGR; nothing after a Hard Reset either way, a
+/// NOTIFICATION without the N bit (RFC 8538 §3), with local GR off, or from
+/// a peer with no GR capability. Red proof: dropping any guard, or keying on
+/// listed families, changes its row.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a table test: one row per session-end input, then one shared check"
+)]
+async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
+    #[derive(Clone, Copy)]
+    #[expect(
+        clippy::struct_excessive_bools,
+        reason = "one row per independent session-end input in a table test"
+    )]
+    struct Case {
+        name: &'static str,
+        peer_gr: bool,
+        families: bool,
+        peer_llgr: bool,
+        local_gr: bool,
+        local_llgr: u32,
+        notification: bool,
+        n_bit: bool,
+        received_hard_reset: bool,
+        sent_hard_reset: bool,
+        expect: Option<u64>,
+    }
+    let base = Case {
+        name: "transport loss",
+        peer_gr: true,
+        families: true,
+        peer_llgr: false,
+        local_gr: true,
+        local_llgr: 0,
+        notification: false,
+        n_bit: false,
+        received_hard_reset: false,
+        sent_hard_reset: false,
+        expect: Some(90),
+    };
+    for case in [
+        base,
+        Case {
+            name: "helper-only GR capability",
+            families: false,
+            ..base
+        },
+        Case {
+            name: "helper-only GR capability with LLGR",
+            families: false,
+            peer_llgr: true,
+            local_llgr: 600,
+            expect: Some(690),
+            ..base
+        },
+        Case {
+            name: "both advertised LLGR",
+            peer_llgr: true,
+            local_llgr: 600,
+            expect: Some(690),
+            ..base
+        },
+        Case {
+            name: "only the peer advertised LLGR",
+            peer_llgr: true,
+            ..base
+        },
+        Case {
+            name: "only we advertised LLGR",
+            local_llgr: 600,
+            ..base
+        },
+        Case {
+            name: "local GR off",
+            local_gr: false,
+            expect: None,
+            ..base
+        },
+        Case {
+            name: "NOTIFICATION without the N bit",
+            notification: true,
+            expect: None,
+            ..base
+        },
+        Case {
+            name: "NOTIFICATION with the N bit",
+            notification: true,
+            n_bit: true,
+            ..base
+        },
+        Case {
+            name: "Hard Reset received",
+            notification: true,
+            n_bit: true,
+            received_hard_reset: true,
+            expect: None,
+            ..base
+        },
+        Case {
+            name: "Hard Reset sent",
+            notification: true,
+            n_bit: true,
+            sent_hard_reset: true,
+            expect: None,
+            ..base
+        },
+        Case {
+            name: "no GR capability",
+            peer_gr: false,
+            expect: None,
+            ..base
+        },
+    ] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut neg = negotiated_session(65002, false);
+        let gr_families = if case.families {
+            vec![rustbgpd_wire::GracefulRestartFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+            }]
+        } else {
+            vec![]
+        };
+        if case.peer_gr {
+            neg.peer_capabilities
+                .push(rustbgpd_wire::Capability::GracefulRestart {
+                    restart_state: false,
+                    notification: case.n_bit,
+                    restart_time: 120,
+                    families: gr_families.clone(),
+                });
+        }
+        // As negotiation derives them: listed families make it GR-capable.
+        neg.peer_gr_capable = case.peer_gr && case.families;
+        neg.peer_gr_families = gr_families;
+        if case.peer_llgr {
+            neg.peer_capabilities
+                .push(rustbgpd_wire::Capability::LongLivedGracefulRestart(vec![
+                    rustbgpd_wire::LlgrFamily {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        forwarding_preserved: false,
+                        stale_time: 3600,
+                    },
+                ]));
+        }
+        neg.peer_llgr_capable = case.peer_llgr;
+        neg.peer_notification_gr = case.n_bit;
+        session.config.peer.graceful_restart = case.local_gr;
+        session.config.peer.gr_restart_time = 90;
+        session.config.llgr_stale_time = case.local_llgr;
+        session.negotiated = Some(Arc::new(neg));
+        session.notification_teardown = case.notification;
+        session.received_hard_reset = case.received_hard_reset;
+        session.sent_hard_reset = case.sent_hard_reset;
+        session.execute_actions(vec![Action::SessionDown]).await;
+        let end = session.established.end_retention();
+        assert!(end.established, "{}", case.name);
+        assert_eq!(
+            end.ours_for,
+            case.expect.map(std::time::Duration::from_secs),
+            "{}",
+            case.name
+        );
+    }
+
+    // Down before Established, as by a reset in OpenSent: nothing negotiated,
+    // nothing held, and not reported as an Established period.
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.graceful_restart = true;
+    session.negotiated = None;
+    session.execute_actions(vec![Action::SessionDown]).await;
+    assert_eq!(
+        session.established.end_retention(),
+        crate::handle::SessionEndRetention::default()
+    );
+}
+
+/// The window negotiated from a real OPEN: a helper-only GR capability with
+/// an LLGR capability whose stale times are all zero, FRR's default, leaves
+/// `peer_llgr_capable` clear, yet the LLGR capability was exchanged, so the
+/// peer keeps our routes for the Long-Lived Stale Time we advertised (RFC
+/// 9494 §4.2). Without the LLGR capability it keeps them for our restart
+/// time only. Red proof: keying the LLGR window on `peer_llgr_capable`
+/// drops our stale time.
+#[tokio::test]
+async fn negotiated_window_counts_our_llgr_time_whatever_the_peers_stale_times() {
+    for (llgr_capability, expect) in [(true, 90 + 600), (false, 90)] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.config.peer.graceful_restart = true;
+        session.config.peer.gr_restart_time = 90;
+        session.config.llgr_stale_time = 600;
+        let mut capabilities = vec![
+            rustbgpd_wire::Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            rustbgpd_wire::Capability::FourOctetAs { asn: 65002 },
+            rustbgpd_wire::Capability::GracefulRestart {
+                restart_state: false,
+                notification: false,
+                restart_time: 120,
+                families: vec![],
+            },
+        ];
+        if llgr_capability {
+            capabilities.push(rustbgpd_wire::Capability::LongLivedGracefulRestart(vec![
+                rustbgpd_wire::LlgrFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: false,
+                    stale_time: 0,
+                },
+            ]));
+        }
+        let open = rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities,
+        };
+        let neg = rustbgpd_fsm::negotiation::validate_open(&open, &session.config.peer)
+            .expect("the OPEN validates");
+        assert!(!neg.peer_gr_capable && !neg.peer_llgr_capable);
+        session.negotiated = Some(Arc::new(neg));
+        session.execute_actions(vec![Action::SessionDown]).await;
+        assert_eq!(
+            session.established.end_retention().ours_for,
+            Some(std::time::Duration::from_secs(expect)),
+            "LLGR capability {llgr_capability}"
+        );
+    }
+}

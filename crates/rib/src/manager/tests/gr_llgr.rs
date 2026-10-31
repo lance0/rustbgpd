@@ -2554,9 +2554,7 @@ async fn partial_gr_retains_llgr_only_family_and_promotes_gr_family_later() {
 #[tokio::test(start_paused = true)]
 async fn retention_query_follows_gr_then_llgr_to_the_sweep() {
     fn retention(manager: &mut RibManager, peer: PeerId) -> crate::update::PeerRetention {
-        let (reply, mut rx) = tokio::sync::oneshot::channel();
-        manager.handle_query_peer_retention(peer, reply);
-        rx.try_recv().unwrap()
+        manager.peer_retention(peer)
     }
     let (_tx, mut manager) = direct_manager(None);
     let source = retention_source();

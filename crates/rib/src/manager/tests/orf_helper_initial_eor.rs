@@ -149,10 +149,14 @@ fn permit_all_orf(manager: &mut RibManager, session_id: u64) {
 }
 
 fn permit_all_orf_of(manager: &mut RibManager, address: Ipv4Addr, session_id: u64) {
+    permit_all_orf_to(manager, peer_v4(address), session_id);
+}
+
+fn permit_all_orf_to(manager: &mut RibManager, peer: PeerId, session_id: u64) {
     use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfMatch, WhenToRefresh};
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::PeerOrfUpdate {
-        peer: peer_v4(address),
+        peer,
         session_id,
         afi: FAMILY.0,
         safi: FAMILY.1,
@@ -387,6 +391,64 @@ async fn session_end_and_delete_drop_the_held_eor() {
     assert!(!manager.peer_may_hold_stale.contains(&peer));
     let mut rx = register(&mut manager, 282, Open::HelperOnly);
     assert_eq!(apply(&mut rx, &mut PeerRib::new()), vec!["eor"]);
+}
+
+/// An interface-only neighbor's retired binding keeps its handle
+/// (`keep_series`), and a rebind to the same endpoint is the same speaker,
+/// which may still hold our routes stale: its reconnect's ORF-gated
+/// End-of-RIB still waits for the table. Red proof: forgetting the
+/// stale-holder state on every deletion sends the End-of-RIB first, and the
+/// peer drops the host route.
+#[test]
+fn retired_binding_rebound_to_its_endpoint_keeps_the_held_eor() {
+    let endpoint = || crate::PeerEndpoint::new(IpAddr::V4(OBSERVER), None);
+    let peer = PeerId::allocate(endpoint());
+    let on = |mut update: RibUpdate| {
+        match &mut update {
+            RibUpdate::SetPeerGracefulRestartContext { peer: target, .. }
+            | RibUpdate::PeerUp { peer: target, .. } => *target = peer,
+            _ => unreachable!("a session update"),
+        }
+        update
+    };
+    let mut manager = manager();
+    let (old_tx, mut old_rx) = mpsc::channel(64);
+    manager.handle_update(on(context(82, Open::HelperOnly)));
+    manager.handle_update(on(peer_up(82, old_tx)));
+    permit_all_orf_to(&mut manager, peer, 82);
+    inject_host(&mut manager);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib);
+    assert_eq!(rib.get(&host().1), Some(&false));
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 82,
+    });
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer,
+        label: None,
+        keep_series: true,
+    });
+    manager.handle_update(RibUpdate::RebindPeer {
+        peer,
+        endpoint: endpoint(),
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+    manager.handle_update(on(context(182, Open::HelperOnly)));
+    manager.handle_update(on(peer_up(182, tx)));
+    assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
+    permit_all_orf_to(&mut manager, peer, 182);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert_eq!(apply(&mut rx, &mut rib), vec!["table", "eor"]);
+    assert_eq!(
+        rib.get(&host().1),
+        Some(&false),
+        "re-announced, never swept"
+    );
 }
 
 /// Inside our startup selection hold the peer's refresh is deferred, and

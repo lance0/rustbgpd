@@ -54,6 +54,7 @@ mod policy;
 mod queries;
 mod reconcile;
 mod recovery;
+mod retained_dynamic;
 mod rotation;
 pub(crate) use rotation::TCP_AO_AWAITING_PEER_PREFIX;
 mod snapshot;
@@ -754,6 +755,12 @@ pub struct PeerManager {
     /// neighbor is deleted, so a reconfigure keeps the neighbor's `PeerId`;
     /// a deletion releases it, so a re-added neighbor gets a new one.
     rib_peers: BTreeMap<PeerKey, rustbgpd_transport::RibPeerSlot>,
+    /// Idle dynamic neighbors kept, with their `rib_peers` slot, while
+    /// graceful restart may still hold routes on either side. Each still
+    /// counts in `dynamic_peer_count`.
+    retained_dynamic: BTreeMap<PeerKey, retained_dynamic::RetainedDynamicPeer>,
+    /// The checks that end each retention.
+    retention: retained_dynamic::RetentionChecks,
     /// Maximum dynamic peers allowed. Default 100.
     dynamic_neighbor_limit: u32,
     /// ADR-0120 per-source accept-rate limiter. `None` when
@@ -1447,6 +1454,8 @@ impl PeerManager {
             dynamic_peer_count: 0,
             neighbor_counters: BTreeMap::new(),
             rib_peers: BTreeMap::new(),
+            retained_dynamic: BTreeMap::new(),
+            retention: retained_dynamic::RetentionChecks::default(),
             dynamic_neighbor_limit: current_config.effective_dynamic_neighbor_limit(),
             inbound_admission: admission::InboundAdmission::from_config(
                 &current_config.inbound_admission,
@@ -2963,6 +2972,14 @@ impl PeerManager {
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             let unnumbered_retry_at = self.unnumbered_retry_at();
+            if self.retention.admission_dirty && !self.config_snapshot_staged {
+                self.release_unadmitted_retained_dynamic().await;
+            }
+            self.reconcile_retained_dynamic_candidates();
+            if !self.retention.orphaned.is_empty() {
+                self.release_orphaned_retained_handles().await;
+            }
+            let retained_dynamic_check_at = self.next_retained_dynamic_check();
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
@@ -3013,6 +3030,7 @@ impl PeerManager {
                         // reflects any accepted runtime CRUD, so a plain re-parse is
                         // correct — no merge/provenance needed.
                         self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
+                        self.retention.admission_dirty = true;
                         self.reconcile_stale_dynamic_max_prefix_restarts();
                         self.dynamic_neighbor_limit =
                             self.current_config.effective_dynamic_neighbor_limit();
@@ -3128,6 +3146,7 @@ impl PeerManager {
                                     );
                                     self.dynamic_ranges =
                                         Self::parse_dynamic_ranges(&self.current_config);
+                                    self.retention.admission_dirty = true;
                                     self.reconcile_stale_dynamic_max_prefix_restarts();
                                     self.config_snapshot_staged = true;
                                     self.staged_policy_routes_prior = Some(policy_routes_prior);
@@ -3145,6 +3164,7 @@ impl PeerManager {
                         }) => {
                             self.replace_current_config(*rollback.previous);
                             self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
+                            self.retention.admission_dirty = true;
                             self.reconcile_stale_dynamic_max_prefix_restarts();
                             self.dynamic_neighbor_limit =
                                 self.current_config.effective_dynamic_neighbor_limit();
@@ -3239,6 +3259,15 @@ impl PeerManager {
                         None => std::future::pending::<()>().await,
                     }
                 } => self.unnumbered_retry_due(),
+                () = async {
+                    match retained_dynamic_check_at {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => self.check_due_retained_dynamic().await,
+                answer = Self::receive_retention_pass(&mut self.retention.pass) => {
+                    self.finish_retention_pass(answer).await;
+                }
                 () = async {
                     if let Some(interval) = bmp_stats_interval.as_mut() {
                         interval.tick().await;

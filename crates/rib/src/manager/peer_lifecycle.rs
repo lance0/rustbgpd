@@ -847,7 +847,12 @@ impl RibManager {
         keep_series: bool,
     ) {
         self.peer_down_teardown(peer);
-        self.forget_helper_stale_exempt(peer);
+        // An interface-only neighbor's retired endpoint keeps its handle
+        // (`keep_series`): a rebind to a new endpoint forgets the carry,
+        // and a return to the same endpoint is the same speaker's.
+        if !keep_series {
+            self.forget_helper_stale_exempt(peer);
+        }
         self.eor_grace_peer_deleted(peer, keep_series);
         self.pending_peer_export_context
             .retain(|(context_peer, _), _| *context_peer != peer);
@@ -1018,6 +1023,16 @@ impl RibManager {
         });
         if ledger.is_empty() {
             self.hold_exempt_withdrawn.remove(&owner);
+        }
+    }
+
+    /// A released handle names no neighbor: what its last session may hold
+    /// of ours is forgotten with it. A deletion has done so already unless
+    /// it kept the series for a neighbor living on under another handle.
+    pub(super) fn handle_release_peer(&mut self, peer: PeerId) {
+        self.forget_helper_stale_exempt(peer);
+        if !peer.release() {
+            debug!(%peer, "release of a handle that was not live");
         }
     }
 

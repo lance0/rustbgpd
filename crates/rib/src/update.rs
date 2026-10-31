@@ -3420,6 +3420,16 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<PeerRetention>,
     },
+    /// Query: [`Self::QueryPeerRetention`] for several peers in one turn,
+    /// answered in the order asked. The peer manager keeps an idle dynamic
+    /// neighbor's identity until its retention ends, and checks every due
+    /// neighbor with one query.
+    QueryPeerRetentions {
+        /// The target peers.
+        peers: Vec<PeerId>,
+        /// Response channel: one retention per peer, in order.
+        reply: oneshot::Sender<Vec<PeerRetention>>,
+    },
     /// Query: return aggregate route-policy counters for a specific peer.
     QueryNeighborPolicyStats {
         /// The target peer.
@@ -4331,6 +4341,7 @@ impl RibUpdate {
             | Self::QueryAdvertisedCount { .. }
             | Self::QueryPeerRetainedStale { .. }
             | Self::QueryPeerRetention { .. }
+            | Self::QueryPeerRetentions { .. }
             | Self::QueryNeighborPolicyStats { .. }
             | Self::QueryPeerUpdateGroup { .. }
             | Self::QueryPeerOutboundState { .. }

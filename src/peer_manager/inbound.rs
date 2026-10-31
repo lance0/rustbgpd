@@ -213,6 +213,12 @@ impl PeerManager {
             return false;
         };
         let mut transport_config = managed.transport_config.clone();
+        // Beside a retained reconnect, a candidate is judged by its own OPEN.
+        let candidate_identity = self.retained_dynamic_candidate_identity(&peer_key);
+        if let Some((slot, counters)) = candidate_identity.as_ref() {
+            transport_config.rib_peer = slot.clone();
+            transport_config.neighbor_counters = counters.clone();
+        }
         let is_dynamic = managed.is_dynamic;
         let import_policy = managed.import_policy.clone();
         let export_policy = managed.export_policy.clone();
@@ -281,6 +287,9 @@ impl PeerManager {
             session_id,
         });
         self.register_session(session_id, &peer_key);
+        if let Some((slot, counters)) = candidate_identity {
+            self.note_retained_dynamic_candidate(&peer_key, session_id, slot, counters);
+        }
         true
     }
 
@@ -430,9 +439,16 @@ impl PeerManager {
                 }
                 return;
             }
+            // Check dynamic peer limit; a retained identity already counts,
+            // and one kept only while it may hold our routes gives way once
+            // the accept passes its other checks.
+            let retained = self
+                .retained_dynamic
+                .contains_key(&PeerKey::new(peer_ip, None));
+            let at_limit =
+                !retained && self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize;
             if let Some(range) = self.match_dynamic_range(peer_ip) {
-                // Check dynamic peer limit
-                if self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
+                if at_limit && !self.has_evictable_retained_dynamic() {
                     self.metrics.record_dynamic_neighbor_limit_rejection();
                     self.metrics
                         .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
@@ -490,10 +506,19 @@ impl PeerManager {
                 let rfc8212_external = resolved.rfc8212_external;
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
                 let mut transport = self.build_transport_config(&cfg);
-                transport.neighbor_counters = self.neighbor_counters_for(&dynamic_peer_key);
+                // A reconnect to a retained neighbor counts afresh until its
+                // OPEN shows the same AS.
+                transport.neighbor_counters = if retained {
+                    rustbgpd_transport::NeighborCounters::default()
+                } else {
+                    self.neighbor_counters_for(&dynamic_peer_key)
+                };
                 // A dynamic neighbor gets its RIB identity only once its
-                // OPEN validates: the session allocates it on first use.
-                transport.rib_peer = rustbgpd_transport::RibPeerSlot::allocate_after_open();
+                // OPEN validates: the session allocates it on first use. A
+                // retained identity resumes, with what the RIB holds for it.
+                transport.rib_peer = self
+                    .retained_dynamic_reconnect_slot(&dynamic_peer_key)
+                    .unwrap_or_else(rustbgpd_transport::RibPeerSlot::allocate_after_open);
                 transport.accepted_dynamic_range = Some(accepted_dynamic_range.clone());
                 transport.dampening_admission = match self
                     .configured_owner_admission_for_dynamic(&accepted_dynamic_range, remote_asn)
@@ -574,6 +599,12 @@ impl PeerManager {
                         self.local_forwarding_state.clone(),
                     ));
 
+                if at_limit && !self.evict_retained_dynamic_for_slot().await {
+                    self.metrics.record_dynamic_neighbor_limit_rejection();
+                    self.metrics
+                        .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
+                    return;
+                }
                 let session_id = self.allocate_session_id();
                 let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
                     transport.clone(),
@@ -649,13 +680,20 @@ impl PeerManager {
                 self.register_session(session_id, &peer_key);
                 self.sync_owned_session_metrics(&peer_key).await;
                 self.publish_peer_info_metric(&peer_key);
-                self.dynamic_peer_count += 1;
-                self.refresh_dynamic_neighbor_capacity_metrics();
+                // A retained neighbor never left the managed set: it keeps its
+                // slot and announces no second addition.
+                let resumed = self.retained_dynamic_reconnected(&peer_key);
+                if !resumed {
+                    self.dynamic_peer_count += 1;
+                    self.refresh_dynamic_neighbor_capacity_metrics();
+                }
                 // ADR-0112: the accepted child carries the range's pinned
                 // external classification and its resolved chains.
                 self.refresh_rfc8212_policy_metrics(&peer_key);
 
-                self.publish_peer_added_event(&peer_key);
+                if !resumed {
+                    self.publish_peer_added_event(&peer_key);
+                }
 
                 // Restore any dead-lettered hot-apply / Route Refresh
                 // intent left behind by a prior dynamic-peer auto-
@@ -1142,6 +1180,7 @@ impl PeerManager {
             *slot = pending.recovery_reset;
         }
         self.register_session(new_session_id, peer_key);
+        self.promote_retained_dynamic_candidate(peer_key, new_session_id);
         Some((old_handle, old_session_id, new_session_id))
     }
 

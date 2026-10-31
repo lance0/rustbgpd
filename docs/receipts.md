@@ -79,7 +79,7 @@ from the re-pin tree. Older dated receipts retain their original peer versions.
 | M25 | TCP MD5 + GTSM/TTL security, including IPv6 dynamic accepted sockets | FRR 10.7.1 ×3 |
 | M26 | Max-prefix teardown latch + explicit recovery (Cease/1 without Notification GR); `block` recovery by one ROUTE-REFRESH replay with no session reset; `warning` accepts past the bound with one warning-counter increment and one session event | FRR 10.7.1 ×3 |
 | M27 / M59 | ASPA via RTR v2: validation states, best-path preference, role-aware downstream verification | FRR + RTR v2 mock |
-| M28 | Dynamic prefix-based neighbors: auto-accept, auto-remove | FRR 10.7.1 |
+| M28 | Dynamic prefix-based neighbors: auto-accept, leave the neighbor list on disconnect | FRR 10.7.1 |
 | M29 | EVPN RR capability sanity (RFC 7432) + `ListEvpnRoutes` | FRR 10.7.1 |
 | M30 | EVPN Type 2 MAC reflection end-to-end with kernel VXLAN VTEPs | FRR 10.7.1 ×2 |
 | M34 | SIGHUP policy soft-reset auto-fire | FRR 10.7.1 |

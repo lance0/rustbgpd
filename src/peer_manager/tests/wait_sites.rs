@@ -2231,6 +2231,13 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
          serves any readiness query",
     ),
     (
+        "retained_dynamic.rs::check_due_retained_dynamic",
+        1,
+        "never awaited by the actor: the batched retention query and its reply run in a \
+         spawned task, bounded by RETENTION_QUERY_TIMEOUT (5 s), whose answer the run loop \
+         handles as its own event",
+    ),
+    (
         "snapshot.rs::query_bmp_peer_stats",
         1,
         "admission and reply share one PEER_QUERY_TIMEOUT (100 ms) deadline, joined with the \
