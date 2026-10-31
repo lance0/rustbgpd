@@ -421,6 +421,30 @@ async fn outbound_pacing_exit_without_session_down_paces_queued_inventory_releas
     finish_queued_release(session, &inventory, released).await;
 }
 
+/// A sender that reserved its permit before the teardown (the RIB reserves
+/// before it commits) still delivers after the queue is closed. That
+/// envelope is paced as well, not stranded in the old channel and freed
+/// whole by whichever handle to it drops last.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_permit_reserved_before_teardown_is_paced() {
+    let (mut session, commands, rib_rx, _writer, envelope, inventory) =
+        queued_last_owner_session().await;
+    let permit = session.outbound_tx.clone().try_reserve_owned().unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    let sender = permit.send(envelope);
+    assert!(sender.is_closed(), "the old queue is closed");
+    assert_eq!(inventory.live(), QUEUED_ROUTES);
+    // The RIB still holds senders to the old queue (its registration is
+    // buffered in `rib_rx`); dropping them is its PeerDown turn.
+    let before = inventory.live();
+    drop(rib_rx);
+    drop(sender);
+    released.push(before - inventory.live());
+    finish_queued_release(session, &inventory, released).await;
+}
+
 #[tokio::test]
 async fn outbound_pacing_samples_backlog_before_envelope_completion() {
     let (mut session, _commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);

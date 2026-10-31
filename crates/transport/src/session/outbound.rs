@@ -577,18 +577,20 @@ impl PeerSession {
         self.retire_off_turn(pending);
     }
 
-    /// Discard the envelopes still queued for a dying session unsent. One
-    /// can hold the last reference to a shared inventory once the RIB and
-    /// faster members have released theirs, so they retire on the same
-    /// paced task as `pending`, one slice per yield, never in this turn.
+    /// Replace the outbound channel, discarding the envelopes still queued
+    /// for a dying session unsent. One can hold the last reference to a
+    /// shared inventory once the RIB and faster members have released
+    /// theirs, so they retire on the same paced task as `pending`, one slice
+    /// per yield, never in this turn.
     pub(super) fn retire_off_turn(&mut self, pending: Option<PendingOutbound>) {
-        // Closing first keeps a racing send from landing after the drain.
-        self.outbound_rx.close();
-        let mut queued = Vec::new();
-        while let Ok(update) = self.outbound_rx.try_recv() {
-            queued.push(update);
-        }
-        if pending.is_none() && queued.is_empty() {
+        let (tx, rx) = tokio::sync::mpsc::channel(super::OUTBOUND_BUFFER);
+        self.outbound_tx = tx;
+        let mut queued = std::mem::replace(&mut self.outbound_rx, rx);
+        // A permit reserved before the close still delivers after it, so
+        // the task keeps the receiver until `recv` returns `None`, which it
+        // does only once the queue is empty and no permit is outstanding.
+        queued.close();
+        if pending.is_none() && queued.capacity() == queued.max_capacity() {
             return;
         }
         tokio::spawn(async move {
@@ -597,7 +599,7 @@ impl PeerSession {
                     tokio::task::yield_now().await;
                 }
             }
-            for update in queued {
+            while let Some(update) = queued.recv().await {
                 tokio::task::yield_now().await;
                 let Some(mut pending) =
                     PendingOutbound::new(update, None, Vec::new()).into_retiring()
