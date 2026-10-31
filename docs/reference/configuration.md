@@ -2431,9 +2431,16 @@ policy denies it. The helper keeps that RTBH until an ordinary route for the
 prefix is advertised to it at the same key, or until End-of-RIB, whichever
 comes first. An RTBH controller that replaces a blackhole with an ordinary
 route at the same prefix should expect the RTBH to stay while that
-replacement is export-denied, held by selection deferral, or advertised to
-an Add-Path receiver under a different path ID, and should keep
-`gr_eor_grace_time` short. See
+replacement is export-denied, held by selection deferral or an ORF gate, or
+advertised to an Add-Path receiver under a different path ID, and should keep
+`gr_eor_grace_time` short. End-of-RIB is released only when every hold on
+it has ended, and this window and selection deferral are not the only ones:
+for a family the new session negotiated Outbound Route Filtering for, the
+initial End-of-RIB also waits for the table the peer's first ROUTE-REFRESH
+unlocks, for up to 60 seconds after the session comes up, which can
+outlast both. Once released, the marker is still queued behind earlier
+updates to the peer. The end of this window is therefore not a withdrawal
+deadline, and prompt revocation of such an RTBH is not guaranteed. See
 [Known Issues](known-issues.md#open-issues) for the full scope.
 
 **Restart Time and helper limits.** `--check` rejects a window longer than
