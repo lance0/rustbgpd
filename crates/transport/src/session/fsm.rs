@@ -1408,11 +1408,13 @@ impl PeerSession {
                         }
                     });
                     // The peer, as our helper, holds our routes for the restart
-                    // time we advertised, then our LLGR stale time when both
-                    // sides advertised LLGR (RFC 4724 §4.2, RFC 9494 §4.2): any
-                    // GR capability makes it a helper, listed families or not
-                    // (RFC 4724 §3). A Hard Reset or a NOTIFICATION without the
-                    // N bit makes it flush them (RFC 8538 §3).
+                    // time we advertised, then the Long-Lived Stale Time we
+                    // advertised when the LLGR capability was exchanged (RFC
+                    // 4724 §4.2, RFC 9494 §4.2): its own stale times bound its
+                    // retention of nothing of ours. Any GR capability makes it
+                    // a helper, listed families or not (RFC 4724 §3). A Hard
+                    // Reset or a NOTIFICATION without the N bit makes it flush
+                    // them (RFC 8538 §3).
                     let ours_for = self.negotiated.as_ref().and_then(|neg| {
                         let helper = neg.peer_capabilities.iter().any(|capability| {
                             matches!(
@@ -1426,7 +1428,13 @@ impl PeerSession {
                             && !self.received_hard_reset
                             && !self.sent_hard_reset)
                             .then(|| {
-                                let stale = if neg.peer_llgr_capable {
+                                let llgr = neg.peer_capabilities.iter().any(|capability| {
+                                    matches!(
+                                        capability,
+                                        rustbgpd_wire::Capability::LongLivedGracefulRestart(_)
+                                    )
+                                });
+                                let stale = if llgr {
                                     u64::from(self.config.llgr_stale_time)
                                 } else {
                                     0

@@ -1898,6 +1898,17 @@ async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
         // As negotiation derives them: listed families make it GR-capable.
         neg.peer_gr_capable = case.peer_gr && case.families;
         neg.peer_gr_families = gr_families;
+        if case.peer_llgr {
+            neg.peer_capabilities
+                .push(rustbgpd_wire::Capability::LongLivedGracefulRestart(vec![
+                    rustbgpd_wire::LlgrFamily {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        forwarding_preserved: false,
+                        stale_time: 3600,
+                    },
+                ]));
+        }
         neg.peer_llgr_capable = case.peer_llgr;
         neg.peer_notification_gr = case.n_bit;
         session.config.peer.graceful_restart = case.local_gr;
@@ -1928,4 +1939,61 @@ async fn session_end_reports_how_long_the_peer_may_hold_our_routes() {
         session.established.end_retention(),
         crate::handle::SessionEndRetention::default()
     );
+}
+
+/// The window negotiated from a real OPEN: a helper-only GR capability with
+/// an LLGR capability whose stale times are all zero, FRR's default, leaves
+/// `peer_llgr_capable` clear, yet the LLGR capability was exchanged, so the
+/// peer keeps our routes for the Long-Lived Stale Time we advertised (RFC
+/// 9494 §4.2). Without the LLGR capability it keeps them for our restart
+/// time only. Red proof: keying the LLGR window on `peer_llgr_capable`
+/// drops our stale time.
+#[tokio::test]
+async fn negotiated_window_counts_our_llgr_time_whatever_the_peers_stale_times() {
+    for (llgr_capability, expect) in [(true, 90 + 600), (false, 90)] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.config.peer.graceful_restart = true;
+        session.config.peer.gr_restart_time = 90;
+        session.config.llgr_stale_time = 600;
+        let mut capabilities = vec![
+            rustbgpd_wire::Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            rustbgpd_wire::Capability::FourOctetAs { asn: 65002 },
+            rustbgpd_wire::Capability::GracefulRestart {
+                restart_state: false,
+                notification: false,
+                restart_time: 120,
+                families: vec![],
+            },
+        ];
+        if llgr_capability {
+            capabilities.push(rustbgpd_wire::Capability::LongLivedGracefulRestart(vec![
+                rustbgpd_wire::LlgrFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: false,
+                    stale_time: 0,
+                },
+            ]));
+        }
+        let open = rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities,
+        };
+        let neg = rustbgpd_fsm::negotiation::validate_open(&open, &session.config.peer)
+            .expect("the OPEN validates");
+        assert!(!neg.peer_gr_capable && !neg.peer_llgr_capable);
+        session.negotiated = Some(Arc::new(neg));
+        session.execute_actions(vec![Action::SessionDown]).await;
+        assert_eq!(
+            session.established.end_retention().ours_for,
+            Some(std::time::Duration::from_secs(expect)),
+            "LLGR capability {llgr_capability}"
+        );
+    }
 }
