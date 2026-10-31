@@ -128,8 +128,8 @@ deterministic growth checks.
 - **Selection deferral** — RFC 4724 restarting-speaker startup gates that
   defer per-family selection until the frozen waiter roster completes or the
   configured timeout expires
-- **Multi-path** — Add-Path multi-candidate distribution with
-  rank-based path ID assignment
+- **Multi-path** — Add-Path multi-candidate distribution; unicast path IDs
+  stay with a path while it is sent
 - **Graceful Restart** — stale route preservation, per-family EoR
   tracking, timer-based sweep, LLGR two-phase promotion
 

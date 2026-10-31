@@ -90,7 +90,7 @@ eligibility. `--json` returns the same as `best_reason`,
 
 Scope the explanation to one peer with `--explain-peer <addr>`. For an
 Add-Path sender, candidates the peer would actually receive get their
-advertised rank and filtered candidates remain at rank 0. For a peer with a
+outbound path ID and filtered candidates remain at 0. For a peer with a
 resolved RFC 9107 ORR vantage, the command instead selects and compares the
 best route from that client's vantage and prints the effective `ORR vantage`:
 

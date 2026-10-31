@@ -2174,24 +2174,24 @@ fn injected_unicast_is_exported_during_selection_deferral() {
                 .iter()
                 .flat_map(|update| update.announce.iter())
                 .collect();
-            assert_eq!(announced.len(), 1);
-            assert_eq!(
-                (announced[0].prefix, announced[0].peer),
-                (hosts[0], LOCAL_PEER)
-            );
-            assert_eq!(announced[0].local_pref(), 100);
-            let expected = if matches!(mode, DeferredUnicastMode::AddPath) {
-                vec![(hosts[0], 2)]
+            let withdrawn: Vec<_> = updates
+                .iter()
+                .flat_map(|update| update.withdraw.iter().copied())
+                .collect();
+            if matches!(mode, DeferredUnicastMode::AddPath) {
+                // During the hold path 23 keeps its key: only the removed
+                // path's key leaves, and nothing moves.
+                assert!(announced.is_empty(), "{mode:?}");
+                assert_eq!(withdrawn, [(hosts[0], 1)], "{mode:?}");
             } else {
-                vec![]
-            };
-            assert_eq!(
-                updates
-                    .iter()
-                    .flat_map(|update| update.withdraw.iter().copied())
-                    .collect::<Vec<_>>(),
-                expected
-            );
+                assert_eq!(announced.len(), 1);
+                assert_eq!(
+                    (announced[0].prefix, announced[0].peer),
+                    (hosts[0], LOCAL_PEER)
+                );
+                assert_eq!(announced[0].local_pref(), 100);
+                assert_eq!(withdrawn, []);
+            }
         }
 
         // An ordinary untagged aggregate waits alongside received routes.
@@ -2692,14 +2692,23 @@ fn arming_selection_promotes_rtbh_over_a_preselected_ordinary_local_path() {
                 71,
                 "{mode:?}: a newly armed hold must reclassify existing local paths"
             );
-            assert_eq!(
-                row(
-                    &query(&mut manager, prefix, 23, None, 10).unwrap(),
-                    observer
-                )
-                .reason,
-                "selection_deferred"
-            );
+            // Add-Path keeps the ordinary row frozen at its admitted key 2
+            // beside the RTBH path, which kept key 1 from its own
+            // announcement; single-best replaces it with the RTBH.
+            let ordinary = row(
+                &query(&mut manager, prefix, 23, None, 10).unwrap(),
+                observer,
+            )
+            .clone();
+            if matches!(mode, DeferredUnicastMode::AddPath) {
+                assert_eq!(
+                    (ordinary.disposition, ordinary.advertised_path_id),
+                    (RouteExportDisposition::Committed, 2),
+                    "{mode:?}"
+                );
+            } else {
+                assert_eq!(ordinary.reason, "selection_deferred", "{mode:?}");
+            }
             assert_eq!(
                 row(
                     &query(&mut manager, prefix, 71, None, 10).unwrap(),
@@ -4089,4 +4098,125 @@ fn exempt_admitted_row_awaiting_withdrawal_is_not_reported_frozen() {
             "{mode:?}: the hold sends the withdrawal: {withdrawn:?}"
         );
     }
+}
+
+/// At hold start an Add-Path receiver already holds an ordinary path at
+/// `#1` and an exempt RTBH path at `#2` on one prefix. The hold changes
+/// neither: moving the RTBH path to `#1` would send its withdraw-phase
+/// UPDATE first and leave the prefix unblackholed until the announce, and
+/// the frozen ordinary row must stay as admitted until release.
+#[test]
+fn hold_start_keeps_add_path_keys_of_frozen_and_exempt_rows() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let mut manager = restart_unicast_manager(false);
+    let observer = PeerId::from_addr(v4(4));
+    let mut rx = deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::AddPath, false);
+    let _ = deferred_unicast_drain(&mut rx);
+    let mut ordinary = local_route(prefix, 23);
+    AttrSet::edit(&mut ordinary.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(300));
+    });
+    inject(&mut manager, ordinary);
+    inject(&mut manager, deferred_unicast_local(prefix, 17, 50));
+    let mut wire = BTreeMap::new();
+    for update in deferred_unicast_drain(&mut rx) {
+        for key in &update.withdraw {
+            wire.remove(key);
+        }
+        for route in update.announce.iter() {
+            wire.insert((route.prefix, route.path_id), route.local_pref());
+        }
+    }
+    assert_eq!(
+        wire,
+        BTreeMap::from([((prefix, 1), 300), ((prefix, 2), 50)]),
+        "before the hold: ordinary at #1, RTBH at #2"
+    );
+
+    let _waiter_rx = connect_restart_waiter(&mut manager);
+    assert!(manager.selection_deferred(prefix_family(&prefix)));
+    for update in deferred_unicast_drain(&mut rx) {
+        // The transport sends the withdraw phase before the announce phase.
+        for key in &update.withdraw {
+            wire.remove(key);
+        }
+        assert!(
+            wire.values().any(|&preference| preference == 50),
+            "the RTBH path left the wire between UPDATEs: {wire:?}"
+        );
+        for route in update.announce.iter() {
+            wire.insert((route.prefix, route.path_id), route.local_pref());
+        }
+    }
+    assert_eq!(
+        wire,
+        BTreeMap::from([((prefix, 1), 300), ((prefix, 2), 50)]),
+        "the hold keeps both admitted rows at their keys"
+    );
+    for (path_id, outbound) in [(23, 1), (17, 2)] {
+        let page = query(&mut manager, prefix, path_id, None, 10).unwrap();
+        let export = row(&page, observer);
+        assert_eq!(
+            (export.disposition, export.advertised_path_id),
+            (RouteExportDisposition::Committed, outbound),
+            "path {path_id}: {export:?}"
+        );
+    }
+}
+
+/// Peer-scoped `ExplainBestPath` during a hold reports the keys live staging
+/// keeps: a frozen ordinary row at `#1` and RTBH rows at `#2` and `#3` stay
+/// put, so the runner-up RTBH path is advertised at `#3`, not at rank 2.
+#[test]
+fn hold_explain_best_path_reports_kept_add_path_keys() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let mut manager = restart_unicast_manager(false);
+    let observer = PeerId::from_addr(v4(4));
+    let mut rx = deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::AddPath, false);
+    let _ = deferred_unicast_drain(&mut rx);
+    let mut ordinary = local_route(prefix, 23);
+    AttrSet::edit(&mut ordinary.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(300));
+    });
+    inject(&mut manager, ordinary);
+    inject(&mut manager, deferred_unicast_local(prefix, 17, 50));
+    inject(&mut manager, deferred_unicast_local(prefix, 19, 40));
+    let mut wire = BTreeMap::new();
+    for update in deferred_unicast_drain(&mut rx) {
+        for key in &update.withdraw {
+            wire.remove(key);
+        }
+        for route in update.announce.iter() {
+            wire.insert((route.prefix, route.path_id), route.local_pref());
+        }
+    }
+    let before = BTreeMap::from([((prefix, 1), 300), ((prefix, 2), 50), ((prefix, 3), 40)]);
+    assert_eq!(wire, before, "before the hold");
+
+    let _waiter_rx = connect_restart_waiter(&mut manager);
+    assert!(manager.selection_deferred(prefix_family(&prefix)));
+    for update in deferred_unicast_drain(&mut rx) {
+        for key in &update.withdraw {
+            wire.remove(key);
+        }
+        for route in update.announce.iter() {
+            wire.insert((route.prefix, route.path_id), route.local_pref());
+        }
+    }
+    assert_eq!(wire, before, "the hold keeps every admitted row at its key");
+
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainBestPath {
+        prefix,
+        peer: Some(observer),
+        reply,
+    });
+    let explanation = result.try_recv().unwrap().expect("known prefix");
+    assert_eq!(explanation.best.as_ref().map(|best| best.path_id), Some(17));
+    let advertised: BTreeMap<u32, u32> = explanation
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.route.path_id, candidate.advertised_path_id))
+        .collect();
+    assert_eq!(advertised, BTreeMap::from([(19, 3)]), "{explanation:?}");
 }

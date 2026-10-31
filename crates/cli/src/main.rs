@@ -398,7 +398,7 @@ enum Command {
         /// Scope --explain to a specific peer's Add-Path send view.
         /// When set, candidates are filtered by the peer's export
         /// policy + sendable families, and the paths within the peer's
-        /// Add-Path send limit are tagged with their advertised rank.
+        /// Add-Path send limit are tagged with their outbound path ID.
         /// Omit for the global Loc-RIB view.
         #[arg(long, requires = "explain")]
         explain_peer: Option<String>,

@@ -2060,11 +2060,12 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 The echoed `source.path_id` remains the inbound Add-Path identity. The
-top-level response `path_id` is the independent, compact outbound rank
-rustbgpd would assign after eligibility and export policy. That outbound rank
-is 0 for a pre-selection/policy denial or a candidate
-beyond `add_path_send_max`. A later OTC or exact-wire denial retains the
-attempted non-zero rank, and the `adj_rib_out` rung compares that exact rank.
+top-level response `path_id` is the independent outbound path ID rustbgpd
+would use after eligibility and export policy: a path keeps its ID while it
+is sent, and a new path takes the lowest free one. It is 0 for a
+pre-selection/policy denial or a candidate beyond `add_path_send_max`. A
+later OTC or exact-wire denial retains the attempted non-zero ID, and the
+`adj_rib_out` rung compares the row at that exact ID.
 Inbound ID 0 remains selectable because message presence, not a sentinel,
 distinguishes selection from the legacy winner-oriented query. Unknown source
 identity returns `NOT_FOUND`; a source selector without negotiated unicast

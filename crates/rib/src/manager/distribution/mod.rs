@@ -56,7 +56,7 @@ mod unicast;
 mod vpn;
 
 pub(in crate::manager) use export_memo::ExportMemo;
-pub(in crate::manager) use unicast::lease_rejection;
+pub(in crate::manager) use unicast::{AddPathKeys, blackholing, lease_rejection};
 
 /// Bounds on one cross-message distribution window. Each bound caps a
 /// different cost: queued input messages and ingested routes cap the ingest
@@ -1171,12 +1171,154 @@ fn reconcile_exact_export_overlay(
     decision
 }
 
+/// Stable-partition `announce`, with its index-aligned `next_hop_override`,
+/// so the rows `exempt` selects come first; returns how many there are.
+fn exempt_first(
+    announce: &mut Arc<Vec<crate::route::Route>>,
+    next_hop_override: &mut Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
+    exempt: impl Fn(&crate::route::Route) -> bool,
+    checkpoint: &mut impl FnMut(),
+) -> usize {
+    #[cfg(debug_assertions)]
+    {
+        let mut keys = HashSet::with_capacity(announce.len());
+        for route in announce.iter() {
+            debug_assert!(
+                keys.insert((route.prefix, route.path_id)),
+                "an envelope announces {} path {} twice",
+                route.prefix,
+                route.path_id
+            );
+        }
+    }
+    // One scan, allocating nothing, decides whether any blackholing row
+    // follows an ordinary one; usually none does.
+    let (mut count, mut ordinary_seen, mut out_of_order) = (0, false, false);
+    for route in announce.iter() {
+        checkpoint();
+        if exempt(route) {
+            count += 1;
+            out_of_order |= ordinary_seen;
+        } else {
+            ordinary_seen = true;
+        }
+    }
+    if !out_of_order {
+        return count;
+    }
+    let flags: Vec<bool> = announce
+        .iter()
+        .map(|route| {
+            checkpoint();
+            exempt(route)
+        })
+        .collect();
+    let aligned = next_hop_override.len() == announce.len();
+    if !aligned && !next_hop_override.is_empty() {
+        // Overrides are index-aligned with the routes or absent; never
+        // reorder routes away from their overrides.
+        return 0;
+    }
+    // In place: lift the blackholing rows out, in order, and splice them
+    // back at the front, so the extra memory is theirs alone.
+    move_to_front(Arc::make_mut(announce), &flags, checkpoint);
+    if aligned {
+        move_to_front(Arc::make_mut(next_hop_override), &flags, checkpoint);
+    }
+    count
+}
+
+/// Move the items `flags` marks to the front, keeping both groups' order.
+fn move_to_front<T>(items: &mut Vec<T>, flags: &[bool], checkpoint: &mut impl FnMut()) {
+    let mut at = 0;
+    let lead: Vec<T> = items
+        .extract_if(.., |_| {
+            checkpoint();
+            let flag = flags[at];
+            at += 1;
+            flag
+        })
+        .collect();
+    items.splice(0..0, lead);
+}
+
 #[inline(never)]
 fn enqueue_outbound_update(
     permit: tokio::sync::mpsc::Permit<'_, OutboundRouteUpdate>,
     update: OutboundRouteUpdate,
 ) {
     permit.send(update);
+}
+
+#[cfg(test)]
+mod exempt_first_tests {
+    use super::*;
+
+    /// The selected rows move to the front in their own order, the rest
+    /// keep theirs, and each next-hop override moves with its route.
+    #[test]
+    fn exempt_rows_lead_with_their_next_hop_overrides() {
+        let prefix = |n| {
+            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                Ipv4Addr::new(198, 51, 100, n),
+                32,
+            ))
+        };
+        let mut announce = Arc::new(
+            (1..=5)
+                .map(|n| crate::test_support::make_route_with_path_id(prefix(n), u32::from(n)))
+                .collect::<Vec<_>>(),
+        );
+        let action = |n: u8| {
+            Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(
+                Ipv4Addr::new(192, 0, 2, n),
+            )))
+        };
+        let mut overrides = Arc::new((1..=5).map(action).collect::<Vec<_>>());
+        let buffer = announce.as_ptr();
+        let count = exempt_first(
+            &mut announce,
+            &mut overrides,
+            |route| route.path_id % 2 == 0,
+            &mut || {},
+        );
+        assert_eq!(count, 2);
+        assert_eq!(announce.as_ptr(), buffer, "reordered in place");
+        let order: Vec<u32> = announce.iter().map(|route| route.path_id).collect();
+        assert_eq!(order, [2, 4, 1, 3, 5]);
+        let moved: Vec<_> = order
+            .iter()
+            .map(|&path_id| action(u8::try_from(path_id).unwrap()))
+            .collect();
+        assert_eq!(*overrides, moved);
+    }
+
+    /// Overrides that do not line up with the routes leave both untouched.
+    #[test]
+    fn misaligned_overrides_keep_the_envelope_order() {
+        let prefix = |n| {
+            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                Ipv4Addr::new(198, 51, 100, n),
+                32,
+            ))
+        };
+        let mut announce = Arc::new(
+            (1..=3)
+                .map(|n| crate::test_support::make_route_with_path_id(prefix(n), u32::from(n)))
+                .collect::<Vec<_>>(),
+        );
+        let mut overrides = Arc::new(vec![None]);
+        let count = exempt_first(
+            &mut announce,
+            &mut overrides,
+            |route| route.path_id == 3,
+            &mut || {},
+        );
+        assert_eq!(count, 0);
+        let order: Vec<u32> = announce.iter().map(|route| route.path_id).collect();
+        assert_eq!(order, [1, 2, 3]);
+        assert_eq!(overrides.len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -5238,6 +5380,32 @@ impl RibManager {
             // Continue its existing resync; marker-only refusals never enter here.
             self.mark_outbound_dirty_inner(peer, false);
         }
+        // An Add-Path receiver may still hold an RTBH path at a key another
+        // row now takes (a reconnect, a GR helper's stale rows): send every
+        // blackholing row before any ordinary one.
+        let exempt_announce = if announce_source_exclusion.is_none()
+            && shared_group_encode.is_none()
+            && self.grouped_member_of(peer).is_none()
+            && announce.iter().any(|route| route.path_id != 0)
+        {
+            exempt_first(
+                &mut announce,
+                &mut next_hop_override,
+                |route| {
+                    route
+                        .communities()
+                        .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+                        || (route.peer == crate::manager::helpers::LOCAL_PEER
+                            && (crate::manager::helpers::unicast_deferral_exempt(route)
+                                || local_sources
+                                    .get(&(route.prefix, route.path_id))
+                                    .is_some_and(|source| source.deferral_exempt)))
+                },
+                &mut || checkpoint(),
+            )
+        } else {
+            0
+        };
         enqueue_outbound_update(
             permit,
             OutboundRouteUpdate {
@@ -5264,6 +5432,7 @@ impl RibManager {
                 otc_blocked,
                 request_refresh_all_negotiated: false,
                 shared_group_encode,
+                exempt_announce,
             },
         );
         if let Some(count) = staged_evpn_count {
@@ -9517,6 +9686,8 @@ impl RibManager {
                                 &self.ribs,
                                 &self.unicast_prefix_peers,
                                 rib_out,
+                                rib_out,
+                                self.peer_local_roles.get(&peer).copied().flatten(),
                                 &self.peer_is_rr_client,
                                 prefix,
                                 self.selection_deferral.as_ref().is_some_and(|deferral| {
@@ -9571,6 +9742,8 @@ impl RibManager {
                                 &self.ribs,
                                 &self.unicast_prefix_peers,
                                 rib_out,
+                                rib_out,
+                                self.peer_local_roles.get(&peer).copied().flatten(),
                                 &self.peer_is_rr_client,
                                 prefix,
                                 self.selection_deferral.as_ref().is_some_and(|deferral| {

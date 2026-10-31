@@ -147,8 +147,8 @@ resolved.
 - **Add-Path export explain covers exact candidates (resolved).** For
   negotiated IPv4/IPv6 unicast Add-Path send, `ExplainAdvertisedRoute` and
   `rbgp rib advertised --explain` accept a presence-bearing Adj-RIB-In source
-  peer/path ID (including ID 0), then report its independent compact outbound
-  rank and rank-specific Adj-RIB-Out state. Legacy winner, VPN, labeled, ORR,
+  peer/path ID (including ID 0), then report its independent outbound path
+  ID and the Adj-RIB-Out state at that ID. Legacy winner, VPN, labeled, ORR,
   and `ExplainBestPath` behavior is unchanged when the selector is absent.
 
 - **Large community duplicates normalized (resolved).** Per RFC 8092,

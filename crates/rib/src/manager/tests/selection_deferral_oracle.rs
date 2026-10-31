@@ -12,25 +12,32 @@
 //! community, so a wire row names the exact injection it came from.
 //!
 //! Invariants:
-//! - I1, never unblackhole: after every UPDATE in the hold, a prefix whose
-//!   fresh export carries an exempt path and that had an exempt row on the
-//!   wire keeps one; after a drain with a free writer, admitted proof and no
-//!   ORF gate, every such prefix carries a live exempt row.
+//! - I1, never unblackhole: after every UPDATE, in the hold or outside it, a
+//!   prefix whose fresh export carries an exempt path and that had an exempt
+//!   row on the wire keeps one; after a drain in the hold with a free writer,
+//!   admitted proof and no ORF gate, every such prefix carries a live exempt
+//!   row.
 //! - I2, exact convergence: after release and drain, the wire equals a fresh
-//!   session's full dump, computed from the final intent alone.
+//!   session's full dump, computed from the final intent alone. Add-Path
+//!   path IDs are opaque, so each prefix's paths are compared, not its keys.
 //! - I3: `actual_unicast_advertised_count` equals the wire key count.
 //! - I4, no resurrection: a deleted or replaced exempt path is never
 //!   announced again.
 //! - I5, prompt removal: after a drain with a free writer in the hold, an
 //!   exempt row the operator deleted has left the wire, unless it is the
 //!   prefix's last exempt row while an exempt export is still intended.
+//! - I6, send limit: after every UPDATE, no prefix carries more paths from
+//!   the current session than the receiver's Add-Path `send_max`, or more
+//!   than one without Add-Path.
 //!
 //! Each case fixes one receiver configuration (private or grouped,
 //! single-best or Add-Path, per-client-best, ORF, prefix limit, and whether
 //! its first session arrives inside the hold), builds a pre-hold table,
-//! starts the hold, runs the operations, then releases and drains. Received routes stay on their own prefixes, so the model never
-//! ranks a received path against a local one. Not modelled: IPv6, LLGR,
-//! leases, export policy edits, a second hold, more than one receiver.
+//! starts the hold, runs the operations, then releases and drains. The
+//! receiver's session may flap before and during the hold. The source peer
+//! sends several Add-Path paths per prefix, on prefixes that also carry
+//! local paths. Not modelled: IPv6, LLGR, leases, export policy edits, a
+//! second hold, more than one receiver.
 //!
 //! Known open defects are allowed only by their exact signature, each
 //! naming its ticket (`allowed`). `ORACLE_STRICT=1` disables every
@@ -117,16 +124,36 @@ enum Op {
         prefix: usize,
         path: usize,
     },
+    /// Receive or replace one of the source peer's Add-Path paths on any
+    /// prefix, beside local paths; preference picks its rank, and
+    /// `blackhole` tags it with BLACKHOLE.
     Receive {
         prefix: usize,
+        path: usize,
+        preference: u32,
+        blackhole: bool,
     },
     ReceiveWithdraw {
         prefix: usize,
+        path: usize,
     },
     /// Replace the receiver's ORF with one denying the masked prefixes.
     Orf {
         deny: u8,
     },
+    /// Toggle an export-policy BLACKHOLE tag on the current local (or
+    /// received) path at `(prefix, path)`, matched by prefix and
+    /// `LOCAL_PREF`; `exclusive` instead makes it the prefix's only tagged
+    /// path, in one policy replacement. Private receivers only.
+    Tag {
+        prefix: usize,
+        path: usize,
+        received: bool,
+        exclusive: bool,
+    },
+    /// Free the writer and run the receiver's dirty resync now, so every
+    /// change held behind backpressure lands in one pass.
+    Resync,
     Backpressure(bool),
     /// Free the writer; the receiver's dirty retry then fails its
     /// admission-proof allocation.
@@ -239,9 +266,49 @@ fn intent_strategy() -> impl Strategy<Value = Op> {
         ),
         2 => (0..LOCAL_PREFIXES, 0..PATH_IDS.len())
             .prop_map(|(prefix, path)| Op::Delete { prefix, path }),
-        1 => (LOCAL_PREFIXES..PREFIXES).prop_map(|prefix| Op::Receive { prefix }),
-        1 => (LOCAL_PREFIXES..PREFIXES).prop_map(|prefix| Op::ReceiveWithdraw { prefix }),
+        2 => (0..PREFIXES, 0..PATH_IDS.len(), 0u32..3, any::<bool>()).prop_map(
+            |(prefix, path, preference, blackhole)| Op::Receive {
+                prefix,
+                path,
+                preference,
+                blackhole,
+            }
+        ),
+        1 => (0..PREFIXES, 0..PATH_IDS.len())
+            .prop_map(|(prefix, path)| Op::ReceiveWithdraw { prefix, path }),
         1 => (0u8..1 << PREFIXES).prop_map(|deny| Op::Orf { deny }),
+        1 => (0..PREFIXES, 0..PATH_IDS.len(), any::<bool>(), any::<bool>()).prop_map(
+            |(prefix, path, received, exclusive)| Op::Tag {
+                prefix,
+                path,
+                received,
+                exclusive,
+            }
+        ),
+    ]
+}
+
+fn reconnect_strategy() -> impl Strategy<Value = Op> {
+    (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+        |(notification, helper, gr_families, writer_full)| Op::Reconnect {
+            notification,
+            // Families come only inside a GR capability.
+            helper: helper || gr_families,
+            gr_families,
+            writer_full,
+        },
+    )
+}
+
+/// Before the hold: intent, backpressure that coalesces several changes
+/// into one pass, and session flaps whose GR helper keeps our rows as stale
+/// across the reconnect.
+fn setup_strategy() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        6 => intent_strategy(),
+        1 => any::<bool>().prop_map(Op::Backpressure),
+        1 => Just(Op::Resync),
+        1 => reconnect_strategy(),
     ]
 }
 
@@ -251,6 +318,7 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
         2 => any::<bool>().prop_map(Op::Backpressure),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
+        1 => Just(Op::Resync),
         2 => (
             prop_oneof![
                 Just(RegroupKind::Slow),
@@ -260,22 +328,20 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
             any::<bool>()
         )
             .prop_map(|(kind, on)| Op::Regroup { kind, on }),
-        2 => (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
-            |(notification, helper, gr_families, writer_full)| Op::Reconnect {
-                notification,
-                // Families come only inside a GR capability.
-                helper: helper || gr_families,
-                gr_families,
-                writer_full,
-            }
-        ),
+        2 => reconnect_strategy(),
     ]
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one independent property of the modelled path"
+)]
 struct Injection {
     prefix: usize,
     preference: u32,
     exempt: bool,
+    /// Injected or received carrying BLACKHOLE, before export policy.
+    community: bool,
     live: bool,
     /// The operator deleted it (a replacement only retires it).
     deleted: bool,
@@ -297,14 +363,10 @@ struct Harness {
     wire: HashMap<(Prefix, u32), usize>,
     injections: Vec<Injection>,
     local: BTreeMap<(usize, usize), usize>,
-    received: BTreeMap<usize, usize>,
+    received: BTreeMap<(usize, usize), usize>,
     deny: u8,
     orf_gated: bool,
     held: bool,
-    /// The receiver is taking the hold's first distribution.
-    hold_starting: bool,
-    /// Exempt injections the envelope between its phases re-announces.
-    reannounced: Option<BTreeSet<usize>>,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
     /// The receiver's current transport session.
@@ -319,9 +381,16 @@ struct Harness {
     gr_families: bool,
     /// The receiver has an established session.
     registered: bool,
+    /// I1 per UPDATE; the checker's own tests clear it for a control that
+    /// checks only after the channel.
+    per_update_i1: bool,
     /// The receiver's configured export policy has peer context; a new
     /// session registers with it.
     peer_policy: bool,
+    /// Export-policy BLACKHOLE tags, by prefix and `LOCAL_PREF`.
+    tags: BTreeSet<(usize, u32)>,
+    /// Whether each key's row, as last announced, carried BLACKHOLE.
+    wire_tag: HashMap<(Prefix, u32), bool>,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -357,15 +426,16 @@ impl Harness {
             deny: 0,
             orf_gated: config.orf,
             held: false,
-            hold_starting: false,
-            reannounced: None,
             blackholed: BTreeMap::new(),
             session: OBSERVER_SESSION,
             stale: HashSet::new(),
             helper: true,
             gr_families: true,
             registered: false,
+            per_update_i1: true,
             peer_policy: false,
+            tags: BTreeSet::new(),
+            wire_tag: HashMap::new(),
         };
         if !config.late {
             harness.establish();
@@ -524,9 +594,7 @@ impl Harness {
         {
             *sendable_families = vec![FAMILY];
             *per_client_best = self.config.per_client_best;
-            if !self.config.grouped || self.peer_policy {
-                *export_policy = Some(private_policy(None));
-            }
+            *export_policy = self.export_policy();
             if self.config.add_path {
                 *add_path_send_families = vec![FAMILY];
                 *add_path_send_max = u32::try_from(ADD_PATH_MAX).unwrap();
@@ -595,11 +663,18 @@ impl Harness {
             .expect("every modelled route carries its identity")
     }
 
-    fn new_injection(&mut self, prefix: usize, preference: u32, exempt: bool) -> usize {
+    fn new_injection(
+        &mut self,
+        prefix: usize,
+        preference: u32,
+        exempt: bool,
+        community: bool,
+    ) -> usize {
         self.injections.push(Injection {
             prefix,
             preference,
             exempt,
+            community,
             live: true,
             deleted: false,
         });
@@ -624,10 +699,11 @@ impl Harness {
                 preference,
                 blackhole,
             } => {
-                // Unique per path and variant, so ranks never tie.
-                let preference = 100 + u32::try_from(path).unwrap() + 3 * preference;
+                // Unique per path and variant, and even, so ranks never tie
+                // with each other or with a received path.
+                let preference = 100 + 2 * (u32::try_from(path).unwrap() + 3 * preference);
                 let exempt = index < 2 || blackhole;
-                let injection = self.new_injection(index, preference, exempt);
+                let injection = self.new_injection(index, preference, exempt, blackhole);
                 let Prefix::V4(v4) = prefix(index) else {
                     unreachable!()
                 };
@@ -673,24 +749,38 @@ impl Harness {
                 }
                 self.retire(old);
             }
-            Op::Receive { prefix: index } => {
-                let injection = self.new_injection(index, 100, false);
+            Op::Receive {
+                prefix: index,
+                path,
+                preference,
+                blackhole,
+            } => {
+                // Odd, so a received path never ties a local one.
+                let preference = 101 + 2 * (u32::try_from(path).unwrap() + 3 * preference);
+                let injection = self.new_injection(index, preference, false, blackhole);
                 let Prefix::V4(v4) = prefix(index) else {
                     unreachable!()
                 };
-                let mut route = make_route_with_lp(v4, SOURCE, 100);
+                let mut route = make_route_with_lp(v4, SOURCE, preference);
+                route.path_id = PATH_IDS[path];
+                let mut communities =
+                    vec![(IDENTITY_ASN << 16) | u32::try_from(injection).unwrap()];
+                if blackhole {
+                    communities.push(rustbgpd_wire::COMMUNITY_BLACKHOLE);
+                }
                 AttrSet::edit(&mut route.attributes, |attributes| {
-                    attributes.push(PathAttribute::Communities(vec![
-                        (IDENTITY_ASN << 16) | u32::try_from(injection).unwrap(),
-                    ]));
+                    attributes.push(PathAttribute::Communities(communities));
                 });
                 self.receive(vec![route], vec![]);
-                let old = self.received.insert(index, injection);
+                let old = self.received.insert((index, path), injection);
                 self.retire(old);
             }
-            Op::ReceiveWithdraw { prefix: index } => {
-                self.receive(vec![], vec![(prefix(index), 0)]);
-                let old = self.received.remove(&index);
+            Op::ReceiveWithdraw {
+                prefix: index,
+                path,
+            } => {
+                self.receive(vec![], vec![(prefix(index), PATH_IDS[path])]);
+                let old = self.received.remove(&(index, path));
                 self.retire(old);
             }
             Op::Orf { deny } => {
@@ -721,10 +811,87 @@ impl Harness {
                     .pending_group_admitted
                     .disarm_allocation_failure_for_test();
             }
-            Op::Drain => {}
-            Op::Reconnect { .. } => self.reconnect(op),
+            Op::Tag {
+                prefix: index,
+                path,
+                received,
+                exclusive,
+            } => self.tag(index, path, received, exclusive),
+            Op::Resync => {
+                self.occupied.clear();
+                self.manager.distribute_changes_to_targets(
+                    &HashSet::new(),
+                    &HashSet::from([peer_v4(OBSERVER)]),
+                );
+            }
+            Op::Reconnect { .. } if self.registered => self.reconnect(op),
+            // A receiver whose first session is still to come has none to
+            // flap.
+            Op::Drain | Op::Reconnect { .. } => {}
             Op::Regroup { kind, on } => self.regroup(kind, on),
         }
+    }
+
+    /// Tag the current path at `(index, path)` with BLACKHOLE through the
+    /// receiver's export policy; a grouped receiver keeps its group policy.
+    fn tag(&mut self, index: usize, path: usize, received: bool, exclusive: bool) {
+        if self.config.grouped || !self.registered {
+            return;
+        }
+        let paths = if received {
+            &self.received
+        } else {
+            &self.local
+        };
+        let Some(&injection) = paths.get(&(index, path)) else {
+            return;
+        };
+        let tag = (index, self.injections[injection].preference);
+        if exclusive {
+            self.tags.retain(|&(tagged, _)| tagged != index);
+            self.tags.insert(tag);
+        } else if !self.tags.remove(&tag) {
+            self.tags.insert(tag);
+        }
+        let export_policy = self.export_policy();
+        let (reply, mut response) = oneshot::channel();
+        self.manager
+            .handle_update(RibUpdate::ReplacePeerExportPolicy {
+                peer: peer_v4(OBSERVER),
+                export_policy,
+                reply,
+            });
+        response.try_recv().unwrap().unwrap();
+    }
+
+    /// The receiver's export policy: peer context keeps a private receiver
+    /// out of update groups, and each tag adds BLACKHOLE to its path.
+    fn export_policy(&self) -> Option<rustbgpd_policy::PolicyChain> {
+        if self.config.grouped && !self.peer_policy {
+            return None;
+        }
+        let mut chain =
+            deny_prefixes_chain(&[Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))]);
+        let template = chain.policies[0].policy.entries[0].clone();
+        let mut private = template.clone();
+        private.prefix = None;
+        private.match_neighbor_set = Some(rustbgpd_policy::NeighborSetMatch {
+            addresses: vec![],
+            remote_asns: vec![u32::MAX],
+            peer_groups: vec![],
+        });
+        let mut entries = vec![private];
+        for &(index, local_pref) in &self.tags {
+            let mut tag = template.clone();
+            tag.prefix = Some(prefix(index));
+            tag.match_local_pref_ge = Some(local_pref);
+            tag.match_local_pref_le = Some(local_pref);
+            tag.action = rustbgpd_policy::PolicyAction::Permit;
+            tag.modifications.communities_add = vec![rustbgpd_wire::COMMUNITY_BLACKHOLE];
+            entries.push(tag);
+        }
+        chain.policies[0].policy.entries = entries;
+        Some(rustbgpd_policy::PolicyChain::from_named(chain.policies))
     }
 
     /// Only a grouped receiver has a group to leave; a private one already
@@ -746,7 +913,7 @@ impl Harness {
                 self.manager
                     .handle_update(RibUpdate::ReplacePeerExportPolicy {
                         peer: observer,
-                        export_policy: on.then(|| private_policy(None)),
+                        export_policy: self.export_policy(),
                         reply,
                     });
                 response.try_recv().unwrap().unwrap();
@@ -839,29 +1006,21 @@ impl Harness {
                 self.stale.remove(key);
             }
             // The transport sends an envelope's withdrawals as their own
-            // UPDATEs before its announcements, and splits announcements with
-            // different attributes into separate UPDATEs. Check the peer's
-            // state after the withdrawals and after every announcement: one
-            // UPDATE per announcement is stricter than the wire, and exempt
-            // and ordinary rows never share attributes.
-            self.reannounced = self.held.then(|| {
-                update
-                    .announce
-                    .iter()
-                    .map(Self::identity)
-                    .filter(|&injection| self.injections[injection].exempt)
-                    .collect()
-            });
-            let observed = self.apply_announcements(&update);
-            self.reannounced = None;
-            observed?;
+            // UPDATEs before its announcements, then the leading blackholing
+            // rows (`exempt_announce`) in slices of their own, then the rest.
+            // Within each part it groups rows by attributes, slices them by
+            // an adaptive budget, and sends body NLRI before MP_REACH, so any
+            // order is possible: apply each part's ordinary rows before its
+            // blackholing ones, the worst order, and check the peer's state
+            // after the withdrawals and after every announcement.
+            self.apply_announcements(&update)?;
             // Our End-of-RIB ends a GR helper's retention: it purges every
             // stale row this session did not re-announce.
             if update.end_of_rib.contains(&FAMILY) && !self.stale.is_empty() {
                 for key in std::mem::take(&mut self.stale) {
                     self.wire.remove(&key);
                 }
-                if self.held {
+                if self.per_update_i1 {
                     self.check_blackholed()?;
                 }
             }
@@ -869,13 +1028,27 @@ impl Harness {
         Ok(updates)
     }
 
-    /// I4 for every announcement; I1 after the withdrawals and after each
-    /// announcement while the hold lasts.
+    /// I4 for every announcement; I1 and I6 after the withdrawals and after
+    /// each announcement, in the worst order the transport may send them.
     fn apply_announcements(&mut self, update: &OutboundRouteUpdate) -> Checked {
-        if self.held {
+        /// One part's rows, ordinary before blackholing.
+        fn worst(part: &[Route]) -> Vec<&Route> {
+            let (exempt, ordinary): (Vec<&Route>, Vec<&Route>) = part.iter().partition(|route| {
+                route
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+                    || crate::manager::helpers::unicast_deferral_exempt(route)
+            });
+            ordinary.into_iter().chain(exempt).collect()
+        }
+        self.check_send_limit()?;
+        if self.per_update_i1 {
             self.check_blackholed()?;
         }
-        for route in update.announce.iter() {
+        let (lead, rest) = update
+            .announce
+            .split_at(update.exempt_announce.min(update.announce.len()));
+        for route in worst(lead).into_iter().chain(worst(rest)) {
             let injection = Self::identity(route);
             let resurrected = self.injections[injection].exempt && !self.injections[injection].live;
             prop_assert!(
@@ -885,10 +1058,40 @@ impl Harness {
             );
             let key = (route.prefix, route.path_id);
             self.wire.insert(key, injection);
+            self.wire_tag.insert(
+                key,
+                route
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE),
+            );
             self.stale.remove(&key);
-            if self.held {
+            self.check_send_limit()?;
+            if self.per_update_i1 {
                 self.check_blackholed()?;
             }
+        }
+        Ok(())
+    }
+
+    /// I6: no prefix carries more of this session's paths than the
+    /// receiver may be sent. A GR helper's stale rows from an earlier
+    /// session are not this session's.
+    fn check_send_limit(&self) -> Checked {
+        let limit = if self.config.add_path {
+            ADD_PATH_MAX
+        } else {
+            1
+        };
+        let mut paths = BTreeMap::<Prefix, usize>::new();
+        for key in self.wire.keys().filter(|key| !self.stale.contains(*key)) {
+            *paths.entry(key.0).or_default() += 1;
+        }
+        for (prefix, count) in paths {
+            prop_assert!(
+                count <= limit,
+                "I6: {prefix} carries {count} paths, over the send limit {limit}; wire {}",
+                show(&self.wire)
+            );
         }
         Ok(())
     }
@@ -915,7 +1118,11 @@ impl Harness {
                 .local
                 .range((index, 0)..(index + 1, 0))
                 .map(|(_, &injection)| injection)
-                .chain(self.received.get(&index).copied())
+                .chain(
+                    self.received
+                        .range((index, 0)..(index + 1, 0))
+                        .map(|(_, &injection)| injection),
+                )
                 .collect();
             paths
                 .sort_by_key(|&injection| std::cmp::Reverse(self.injections[injection].preference));
@@ -930,12 +1137,13 @@ impl Harness {
         expected
     }
 
-    /// Prefix to the exempt injections its wire rows carry.
+    /// Prefix to the injections its blackholing wire rows carry: exempt,
+    /// or carrying BLACKHOLE as sent, after export policy.
     fn exempt_rows(&self) -> BTreeMap<usize, BTreeSet<usize>> {
         let mut rows = BTreeMap::<_, BTreeSet<_>>::new();
-        for &injection in self.wire.values() {
+        for (key, &injection) in &self.wire {
             let row = &self.injections[injection];
-            if row.exempt {
+            if row.exempt || self.wire_tag.get(key).copied().unwrap_or(false) {
                 rows.entry(row.prefix).or_default().insert(injection);
             }
         }
@@ -954,32 +1162,40 @@ impl Harness {
         if self.config.add_path && fallback && removed {
             return allowed("LAN-2692");
         }
-        // LAN-2698: at the hold's start an Add-Path receiver re-ranks an
-        // exempt path above a frozen ordinary one, withdrawing its old key
-        // in the envelope's withdraw phase before announcing the new one.
-        let restored = self.reannounced.as_ref().is_some_and(|reannounced| {
-            self.blackholed[&index]
-                .iter()
-                .all(|injection| reannounced.contains(injection))
-        });
-        if self.config.add_path && self.hold_starting && restored {
-            return allowed("LAN-2698");
-        }
         None
     }
 
-    /// Prefixes whose fresh export carries an exempt path.
+    /// Prefixes whose export carries an exempt path: during the hold, which
+    /// exports exempt local paths alone, every prefix with a live one
+    /// however received paths rank; otherwise a fresh dump's.
     fn wanted_blackholes(&self) -> BTreeSet<usize> {
+        if self.held {
+            return self
+                .local
+                .iter()
+                .filter(|&(&(index, _), &injection)| {
+                    self.injections[injection].exempt
+                        && !(self.config.orf && self.deny & (1 << index) != 0)
+                })
+                .map(|(&(index, _), _)| index)
+                .collect();
+        }
         self.expected()
             .values()
             .map(|&injection| &self.injections[injection])
-            .filter(|injection| injection.exempt)
+            .filter(|injection| {
+                injection.exempt
+                    || injection.community
+                    || self
+                        .tags
+                        .contains(&(injection.prefix, injection.preference))
+            })
             .map(|injection| injection.prefix)
             .collect()
     }
 
-    /// I1's safety half, after every UPDATE in the hold: a prefix that
-    /// should be blackholed keeps an exempt row once it had one.
+    /// I1's safety half, after every UPDATE: a prefix that should be
+    /// blackholed keeps an exempt row once it had one.
     fn check_blackholed(&mut self) -> Checked {
         let wanted = self.wanted_blackholes();
         let blackholed = self.exempt_rows();
@@ -995,8 +1211,13 @@ impl Harness {
             prop_assert!(
                 blackholed.contains_key(&index)
                     || self.known_unblackhole(index, fallback).is_some(),
-                "I1: {} lost its exempt row during the hold; wire {}",
+                "I1: {} lost its exempt row {}; wire {}",
                 prefix(index),
+                if self.held {
+                    "during the hold"
+                } else {
+                    "outside the hold"
+                },
                 show(&self.wire)
             );
         }
@@ -1018,7 +1239,11 @@ impl Harness {
                     .range((index, 0)..(index + 1, 0))
                     .next()
                     .is_some()
-                    || self.received.contains_key(&index)
+                    || self
+                        .received
+                        .range((index, 0)..(index + 1, 0))
+                        .next()
+                        .is_some()
             });
         if self.stale.contains(&key) && candidate {
             return allowed("LAN-2727");
@@ -1101,28 +1326,101 @@ impl Harness {
         self.held = false;
         self.observe()?;
         self.drain()?;
+        self.resync_ticks()?;
         if self.orf_gated {
             // The peer's refresh opens the re-armed gate.
             self.push_orf(self.deny);
+            self.observe()?;
+            self.drain()?;
+            self.resync_ticks()?;
+        }
+        // Production re-arms the timer while work stays runnable, so work
+        // the ticks never clear would spin it forever.
+        prop_assert!(
+            !self.manager.resync_tick_pending(),
+            "resync work still runnable after {DRAIN_ROUNDS} release ticks"
+        );
+        Ok(())
+    }
+
+    /// The actor arms its resync timer while `resync_tick_pending` reports
+    /// runnable work, such as an End-of-RIB held back at release, so that
+    /// work lands within a tick of the release.
+    fn resync_ticks(&mut self) -> Checked {
+        for _ in 0..DRAIN_ROUNDS {
+            if !self.manager.resync_tick_pending() {
+                break;
+            }
+            self.manager.resync_dirty_peers_bounded();
             self.observe()?;
             self.drain()?;
         }
         Ok(())
     }
 
+    /// `rows` with each prefix's Add-Path keys renumbered 1.. in a fixed
+    /// path order, repeated paths last. RFC 7911 path IDs are opaque and the
+    /// daemon keeps a path's key for as long as it is sent, so a long-lived
+    /// session's keys need not match a fresh dump's.
+    fn renumbered(
+        &self,
+        rows: impl IntoIterator<Item = ((Prefix, u32), usize)>,
+    ) -> BTreeMap<(Prefix, u32), usize> {
+        if !self.config.add_path {
+            return rows.into_iter().collect();
+        }
+        let mut paths = BTreeMap::<Prefix, Vec<usize>>::new();
+        for ((prefix, _), injection) in rows {
+            paths.entry(prefix).or_default().push(injection);
+        }
+        let mut renumbered = BTreeMap::new();
+        for (prefix, mut injections) in paths {
+            injections.sort_unstable();
+            let mut repeated = Vec::new();
+            injections.dedup_by(|next, kept| {
+                let same = next == kept;
+                if same {
+                    repeated.push(*next);
+                }
+                same
+            });
+            injections.sort_by_key(|&injection| {
+                (
+                    std::cmp::Reverse(self.injections[injection].preference),
+                    injection,
+                )
+            });
+            for (key, injection) in (1..).zip(injections.into_iter().chain(repeated)) {
+                renumbered.insert((prefix, key), injection);
+            }
+        }
+        renumbered
+    }
+
     fn check_converged(&mut self) -> Checked {
-        let expected = self.expected();
-        let wire: BTreeMap<_, _> = self
-            .wire
-            .iter()
-            .map(|(&key, &value)| (key, value))
-            .collect();
+        let expected = self.renumbered(self.expected());
+        let wire = self.renumbered(self.wire.iter().map(|(&key, &value)| (key, value)));
         prop_assert!(
             wire == expected,
             "I2: released wire {} differs from a fresh dump {}",
             show(&wire),
             show(&expected)
         );
+        // The paths match; each must also carry BLACKHOLE exactly as its
+        // current export intends, so a policy retag that announced nothing
+        // cannot pass on the old rows.
+        for (key, &injection) in &self.wire {
+            let row = &self.injections[injection];
+            let intended = row.community || self.tags.contains(&(row.prefix, row.preference));
+            let sent = self.wire_tag.get(key).copied().unwrap_or(false);
+            prop_assert!(
+                sent == intended,
+                "I2: {}#{} carries BLACKHOLE {sent}, but its export intends {intended}; wire {}",
+                key.0,
+                key.1,
+                show(&self.wire)
+            );
+        }
         let actual = self
             .manager
             .actual_unicast_advertised_count(peer_v4(OBSERVER));
@@ -1156,9 +1454,7 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     harness.waiter = Some(connect(&mut harness.manager, WAITER, 64, true, false));
     harness.held = true;
     prop_assert!(harness.manager.selection_deferred(FAMILY));
-    harness.hold_starting = true;
     harness.observe()?;
-    harness.hold_starting = false;
     if config.late {
         // The receiver's first session establishes inside the hold.
         harness.establish();
@@ -1272,7 +1568,7 @@ fn gr_hold_matches_a_fresh_session_model() {
     });
     let strategy = (
         config_strategy(),
-        proptest::collection::vec(intent_strategy(), 0..6),
+        proptest::collection::vec(setup_strategy(), 0..8),
         proptest::collection::vec(hold_strategy(), 1..40),
     );
     let Err(error) = runner.run(&strategy, |(config, setup, hold)| {
@@ -1303,7 +1599,7 @@ fn i1_catches_a_transient_unblackhole_between_updates() {
         limit: false,
         late: false,
     };
-    let transient = |held: bool| {
+    let transient = |per_update: bool| {
         let mut harness = Harness::new(config);
         harness.apply(&Op::Inject {
             prefix: 0,
@@ -1333,7 +1629,8 @@ fn i1_catches_a_transient_unblackhole_between_updates() {
                 ..OutboundRouteUpdate::default()
             })
             .unwrap();
-        harness.held = held;
+        harness.held = true;
+        harness.per_update_i1 = per_update;
         let observed = harness.observe().map(|_| ());
         if observed.is_ok() {
             assert_eq!(
@@ -1369,7 +1666,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
         limit: false,
         late: false,
     };
-    let replaced = |held: bool, between_phases: bool| {
+    let replaced = |between_phases: bool| {
         let mut harness = Harness::new(config);
         harness.apply(&Op::Inject {
             prefix: 0,
@@ -1401,19 +1698,19 @@ fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
                 ..OutboundRouteUpdate::default()
             })
             .unwrap();
-        harness.held = held && between_phases;
+        harness.held = true;
+        harness.per_update_i1 = between_phases;
         let observed = harness.observe().map(|_| ());
-        harness.held = held;
         observed.and_then(|()| harness.check_blackholed())
     };
-    let error = replaced(true, true).expect_err("the phase gap unblackholes the peer");
+    let error = replaced(true).expect_err("the phase gap unblackholes the peer");
     assert!(
         error
             .to_string()
             .contains("I1: 198.51.100.1/32 lost its exempt row")
     );
     assert!(
-        replaced(true, false).is_ok(),
+        replaced(false).is_ok(),
         "a check after the whole envelope cannot see it"
     );
 }
@@ -1444,7 +1741,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
         assert_eq!(harness.wire.get(&(aggregate, 1)), Some(&0));
         harness.blackholed = harness.exempt_rows();
         // A live ordinary row the seeded envelope moves onto key 1.
-        let ordinary = harness.new_injection(2, 120, false);
+        let ordinary = harness.new_injection(2, 120, false, false);
         let Prefix::V4(v4) = aggregate else {
             unreachable!()
         };
@@ -1463,9 +1760,9 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
                 ..OutboundRouteUpdate::default()
             })
             .unwrap();
-        harness.held = per_announcement;
-        let observed = harness.observe().map(|_| ());
         harness.held = true;
+        harness.per_update_i1 = per_announcement;
+        let observed = harness.observe().map(|_| ());
         observed.and_then(|()| harness.check_blackholed())
     };
     let error = swapped(true).expect_err("the gap between announcements unblackholes the peer");
@@ -1500,7 +1797,12 @@ fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
             preference: 0,
             blackhole: false,
         },
-        Op::Receive { prefix: 3 },
+        Op::Receive {
+            prefix: 3,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
     ];
     let delete = Op::Delete { prefix: 0, path: 0 };
     let plain = vec![
@@ -1615,12 +1917,12 @@ fn i5_flags_obsolete_rtbh_rows_beyond_the_last() {
         late: false,
     });
     for path in [1, 2] {
-        let obsolete = harness.new_injection(0, 0, true);
+        let obsolete = harness.new_injection(0, 0, true, false);
         harness.injections[obsolete].live = false;
         harness.injections[obsolete].deleted = true;
         harness.wire.insert((prefix(0), path), obsolete);
     }
-    let pending = harness.new_injection(0, 1, true);
+    let pending = harness.new_injection(0, 1, true, false);
     harness.local.insert((0, 2), pending);
     assert!(harness.check_deleted_blackholes().is_err());
     harness.wire.remove(&(prefix(0), 2));
@@ -1709,7 +2011,12 @@ fn partially_caught_up_reconnect_withdraws_a_stale_rtbh() {
         limit: false,
         late: false,
     };
-    let setup = [Op::Receive { prefix: 3 }];
+    let setup = [Op::Receive {
+        prefix: 3,
+        path: 0,
+        preference: 0,
+        blackhole: false,
+    }];
     let hold = [
         Op::Inject {
             prefix: 0,
@@ -2044,4 +2351,721 @@ fn refused_retry_admitted_rtbh_leaves_the_wire_inside_the_hold() {
         })
         .collect();
     assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The minimized hold-start case, checked between each envelope's phases
+/// with every allowance off: a frozen ordinary path at `#1` and an exempt
+/// RTBH path at `#2` keep their keys when the hold starts, so the prefix
+/// never loses its blackhole.
+#[test]
+fn hold_start_keeps_add_path_rtbh_key_between_phases() {
+    for (per_client_best, limit) in [(false, false), (true, false), (false, true), (true, true)] {
+        let config = Config {
+            grouped: false,
+            add_path: true,
+            per_client_best,
+            orf: false,
+            limit,
+            late: false,
+        };
+        let setup = [
+            Op::Inject {
+                prefix: 2,
+                path: 1,
+                preference: 2,
+                blackhole: false,
+            },
+            Op::Inject {
+                prefix: 2,
+                path: 0,
+                preference: 0,
+                blackhole: true,
+            },
+        ];
+        if let Some(reason) = failure(config, &setup, &[]) {
+            panic!("{config:?}: {reason}");
+        }
+    }
+    // A source promoted to RTBH while a demoted one leaves, in one
+    // backpressured pass, takes over the leaving RTBH row's key, so the swap
+    // is one in-place replacement.
+    let config = Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: true,
+        limit: false,
+        late: false,
+    };
+    let inject = |prefix, path, preference, blackhole| Op::Inject {
+        prefix,
+        path,
+        preference,
+        blackhole,
+    };
+    let hold = [
+        inject(2, 1, 0, true),
+        Op::Backpressure(true),
+        inject(2, 0, 0, true),
+        inject(2, 1, 0, false),
+        Op::Backpressure(false),
+        Op::Drain,
+        Op::Orf { deny: 8 },
+    ];
+    if let Some(reason) = failure(config, &[inject(2, 0, 0, false)], &hold) {
+        panic!("rtbh swap: {reason}");
+    }
+}
+
+/// I6 shapes: a hold never puts more than `send_max` paths on a prefix.
+/// 1. In one pass, an ordinary source at `#1` is promoted to RTBH and takes
+///    over the deleted RTBH row's `#2`; the freeze backstop keeps its old
+///    `#1`, which must count against the limit when a new RTBH path arrives.
+/// 2. In one pass, a frozen row holds `#1`, an ordinary source at `#2` is
+///    promoted and a higher-ranked RTBH path arrives: the promoted source's
+///    own `#2` is reserved before a new key is allocated.
+#[test]
+fn hold_keeps_add_path_rows_within_send_max() {
+    let config = Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let inject = |path, preference, blackhole| Op::Inject {
+        prefix: 2,
+        path,
+        preference,
+        blackhole,
+    };
+    let cases = [
+        (
+            "retained own row",
+            vec![inject(0, 2, false), inject(1, 1, true)],
+            vec![
+                Op::Backpressure(true),
+                inject(0, 2, true),
+                Op::Delete { prefix: 2, path: 1 },
+                Op::Backpressure(false),
+                Op::Drain,
+                inject(2, 0, true),
+            ],
+        ),
+        (
+            "reserved own key",
+            vec![inject(0, 2, false), inject(1, 1, false)],
+            vec![
+                Op::Backpressure(true),
+                inject(1, 1, true),
+                inject(2, 3, true),
+                Op::Backpressure(false),
+                Op::Drain,
+            ],
+        ),
+    ];
+    let failures: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(name, setup, hold)| {
+            failure(config, &setup, &hold).map(|reason| format!("{name}: {reason}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Outside a hold, an ordinary path that outranks an announced RTBH path
+/// takes a new key: the RTBH row keeps its key, so no UPDATE leaves the
+/// prefix without its blackhole. Rank-ordered keys re-announced `#1` with
+/// the ordinary path before the RTBH path reached `#2`.
+#[test]
+fn add_path_rtbh_keeps_its_key_when_an_ordinary_path_outranks_it() {
+    for per_client_best in [false, true] {
+        let config = Config {
+            grouped: false,
+            add_path: true,
+            per_client_best,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        let setup = [
+            Op::Inject {
+                prefix: 2,
+                path: 0,
+                preference: 0,
+                blackhole: true,
+            },
+            Op::Inject {
+                prefix: 2,
+                path: 1,
+                preference: 2,
+                blackhole: false,
+            },
+        ];
+        if let Some(reason) = failure(config, &setup, &[]) {
+            panic!("{config:?}: {reason}");
+        }
+    }
+}
+
+/// Outside a hold, deleting the ordinary path ranked above an RTBH path
+/// withdraws only the deleted path's key. Rank-ordered keys withdrew the
+/// RTBH path's `#2` before re-announcing it at `#1`.
+#[test]
+fn add_path_rtbh_keeps_its_key_when_the_path_above_it_is_deleted() {
+    for per_client_best in [false, true] {
+        let config = Config {
+            grouped: false,
+            add_path: true,
+            per_client_best,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        let setup = [
+            Op::Inject {
+                prefix: 2,
+                path: 0,
+                preference: 2,
+                blackhole: false,
+            },
+            Op::Inject {
+                prefix: 2,
+                path: 1,
+                preference: 0,
+                blackhole: true,
+            },
+            Op::Delete { prefix: 2, path: 0 },
+        ];
+        if let Some(reason) = failure(config, &setup, &[]) {
+            panic!("{config:?}: {reason}");
+        }
+    }
+}
+
+/// One pass that demotes an RTBH source to an ordinary path and adds a new
+/// RTBH path (here a hold's backpressured release) hands the demoted path's
+/// key to the new RTBH path in place; the demoted path takes another key.
+/// Keeping the demoted path on its key replaced the last blackhole with an
+/// ordinary row before the new RTBH path reached its own key.
+#[test]
+fn add_path_new_rtbh_takes_over_a_demoted_rtbh_key() {
+    for per_client_best in [false, true] {
+        let config = Config {
+            grouped: false,
+            add_path: true,
+            per_client_best,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        let setup = [Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: true,
+        }];
+        let hold = [
+            Op::Backpressure(true),
+            Op::Inject {
+                prefix: 2,
+                path: 1,
+                preference: 0,
+                blackhole: false,
+            },
+            Op::Inject {
+                prefix: 2,
+                path: 0,
+                preference: 0,
+                blackhole: true,
+            },
+        ];
+        if let Some(reason) = failure(config, &setup, &hold) {
+            panic!("{config:?}: {reason}");
+        }
+    }
+}
+
+fn add_path_config() -> Config {
+    Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    }
+}
+
+/// A GR helper keeps `#1` (ordinary) and `#2` (RTBH) as stale across a
+/// reconnect outside the hold. The new session's dump plans keys on an
+/// empty table and puts the RTBH path at `#1`, the ordinary one at `#2`:
+/// if the ordinary row went first, `#2` would replace the stale RTBH row
+/// while `#1` still held the stale ordinary row, so the dump sends every
+/// blackholing row before any ordinary one.
+#[test]
+fn gr_reconnect_dump_sends_rtbh_rows_first() {
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: false,
+        },
+        Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: true,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: true,
+            gr_families: true,
+            writer_full: false,
+        },
+    ];
+    if let Some(reason) = failure(add_path_config(), &setup, &[]) {
+        panic!("{reason}");
+    }
+}
+
+/// An RTBH path added during the hold takes a fresh key beside the frozen
+/// ordinary row and keeps it at release, though it now ranks first:
+/// renumbering by rank would swap the two rows' keys at release.
+#[test]
+fn hold_added_rtbh_keeps_its_key_at_release() {
+    let setup = [Op::Inject {
+        prefix: 2,
+        path: 0,
+        preference: 0,
+        blackhole: false,
+    }];
+    let hold = [Op::Inject {
+        prefix: 2,
+        path: 1,
+        preference: 2,
+        blackhole: true,
+    }];
+    if let Some(reason) = failure(add_path_config(), &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// Two received paths of one peer fill the send limit before the hold; an
+/// RTBH path added during it replaces a frozen received row in place.
+#[test]
+fn hold_rtbh_displaces_a_frozen_received_row_at_the_limit() {
+    let receive = |path| Op::Receive {
+        prefix: 2,
+        path,
+        preference: 0,
+        blackhole: false,
+    };
+    let setup = [receive(0), receive(1)];
+    let hold = [Op::Inject {
+        prefix: 2,
+        path: 0,
+        preference: 2,
+        blackhole: true,
+    }];
+    if let Some(reason) = failure(add_path_config(), &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// Outside a hold, one pass deletes a local RTBH path at `#1` while the
+/// received path at `#2` gains BLACKHOLE. The received path must take over
+/// `#1` in place, its old `#2` leaving, rather than keep `#2` while the
+/// withdraw phase removes `#1`, the prefix's last blackhole, before the new
+/// blackhole is announced.
+#[test]
+fn received_path_gaining_blackhole_takes_over_a_deleted_rtbh_key() {
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: true,
+        },
+        Op::Receive {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Backpressure(true),
+        Op::Delete { prefix: 2, path: 0 },
+        Op::Receive {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: true,
+        },
+        Op::Backpressure(false),
+        Op::Drain,
+    ];
+    if let Some(reason) = failure(add_path_config(), &setup, &[]) {
+        panic!("{reason}");
+    }
+}
+
+/// One pass (a dirty resync after backpressure) deletes a local RTBH path at
+/// `#1` while export policy starts tagging the local ordinary path at `#2`
+/// with BLACKHOLE: the tagged path takes over `#1` in place.
+#[test]
+fn policy_tagged_path_takes_over_a_deleted_rtbh_key() {
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: true,
+        },
+        Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Backpressure(true),
+        Op::Delete { prefix: 2, path: 0 },
+        Op::Tag {
+            prefix: 2,
+            path: 1,
+            received: false,
+            exclusive: false,
+        },
+        Op::Resync,
+    ];
+    if let Some(reason) = failure(add_path_config(), &setup, &[]) {
+        panic!("{reason}");
+    }
+}
+
+/// One export-policy replacement drops the BLACKHOLE tag of the path at
+/// `#1` and tags the path at `#2`: the newly tagged path takes over `#1` in
+/// place, so the untagged path never replaces the prefix's last blackhole
+/// first.
+#[test]
+fn policy_retag_moves_the_blackhole_key_in_place() {
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: false,
+        },
+        Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Tag {
+            prefix: 2,
+            path: 0,
+            received: false,
+            exclusive: false,
+        },
+        Op::Tag {
+            prefix: 2,
+            path: 1,
+            received: false,
+            exclusive: true,
+        },
+    ];
+    if let Some(reason) = failure(add_path_config(), &setup, &[]) {
+        panic!("{reason}");
+    }
+}
+
+/// One distribution window: peer P1 withdraws its BLACKHOLE path at `#1`
+/// while peer P2's path at `#2` gains BLACKHOLE. After the withdraw phase
+/// the receiver must still hold a blackhole for the prefix.
+#[test]
+fn received_blackhole_moves_between_peers_in_one_window() {
+    let (updates, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    super::distribution_window::untimed_window(&mut manager);
+    let (first, second) = (Ipv4Addr::new(192, 0, 2, 91), Ipv4Addr::new(192, 0, 2, 92));
+    let _first = connect(&mut manager, first, 64, false, false);
+    let _second = connect(&mut manager, second, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut up = super::lifecycle::test_peer_up(observer, OBSERVER_SESSION, tx);
+    if let RibUpdate::PeerUp {
+        export_policy,
+        add_path_send_families,
+        add_path_send_max,
+        sendable_families,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![FAMILY];
+        *export_policy = Some(private_policy(None));
+        *add_path_send_families = vec![FAMILY];
+        *add_path_send_max = u32::try_from(ADD_PATH_MAX).unwrap();
+    }
+    manager.handle_update(up);
+    let Prefix::V4(v4) = prefix(2) else {
+        unreachable!()
+    };
+    let path = |from: Ipv4Addr, preference: u32, blackhole: bool| {
+        let mut route = make_route_with_lp(v4, from, preference);
+        if blackhole {
+            AttrSet::edit(&mut route.attributes, |attributes| {
+                attributes.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_BLACKHOLE,
+                ]));
+            });
+        }
+        route
+    };
+    let received = |from: Ipv4Addr, announced: Vec<Route>, withdrawn| RibUpdate::RoutesReceived {
+        peer: peer_v4(from),
+        session_id: u64::from(from.octets()[3]),
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    let blackhole = |route: &Route| {
+        route
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+    };
+    let mut wire = HashMap::new();
+    manager.handle_update(received(first, vec![path(first, 200, true)], vec![]));
+    drain_route_chunks(&mut manager);
+    manager.handle_update(received(second, vec![path(second, 100, false)], vec![]));
+    drain_route_chunks(&mut manager);
+    while let Ok(update) = rx.try_recv() {
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, blackhole(route));
+        }
+    }
+    assert_eq!(wire, HashMap::from([(1, true), (2, false)]));
+    // The second update is already queued when the first settles, so the
+    // distribution window admits it and both land in one pass.
+    updates
+        .try_send(received(second, vec![path(second, 100, true)], vec![]))
+        .unwrap();
+    manager.handle_update(received(first, vec![], vec![(prefix(2), 0)]));
+    drain_route_chunks(&mut manager);
+    assert!(
+        updates.capacity() == updates.max_capacity(),
+        "the window took the queued update"
+    );
+    while let Ok(update) = rx.try_recv() {
+        for key in &update.withdraw {
+            wire.remove(&key.1);
+        }
+        assert!(
+            wire.values().any(|&blackholed| blackholed),
+            "the withdraw phase left the prefix without a blackhole: {wire:?}"
+        );
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, blackhole(route));
+        }
+    }
+    assert_eq!(wire, HashMap::from([(1, true)]));
+}
+
+/// One pass replaces an ordinary path at `#1` and an RTBH path at `#2` with
+/// two new BLACKHOLE paths, the higher-ranked one carrying OTC toward an
+/// RFC 9234 peer. The OTC gate drops that one after planning, so it must not
+/// take over the departing RTBH key: the sendable RTBH path replaces `#2` in
+/// place, and the withdraw phase only removes `#1`.
+#[test]
+fn otc_blocked_path_never_takes_the_departing_rtbh_key() {
+    let mut manager = manager_with_dormant_waiter();
+    let observer = peer_v4(OBSERVER);
+    manager.handle_update(RibUpdate::SetPeerExportContext {
+        peer: observer,
+        session_id: OBSERVER_SESSION,
+        local_role: Some(rustbgpd_wire::BgpRole::Peer),
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut up = super::lifecycle::test_peer_up(observer, OBSERVER_SESSION, tx);
+    if let RibUpdate::PeerUp {
+        export_policy,
+        add_path_send_families,
+        add_path_send_max,
+        sendable_families,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![FAMILY];
+        *export_policy = Some(private_policy(None));
+        *add_path_send_families = vec![FAMILY];
+        *add_path_send_max = u32::try_from(ADD_PATH_MAX).unwrap();
+    }
+    manager.handle_update(up);
+    let Prefix::V4(v4) = prefix(2) else {
+        unreachable!()
+    };
+    let local = |path_id: u32, preference: u32, blackhole: bool, otc: bool| {
+        let mut route = make_route_with_lp(v4, SOURCE, preference);
+        set_peer(&mut route, crate::PeerId::LOCAL);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        route.path_id = path_id;
+        AttrSet::edit(&mut route.attributes, |attributes| {
+            if blackhole {
+                attributes.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_BLACKHOLE,
+                ]));
+            }
+            if otc {
+                attributes.push(PathAttribute::OnlyToCustomer(65_001));
+            }
+        });
+        route
+    };
+    let inject = |manager: &mut RibManager, route| {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route, reply });
+        result.try_recv().unwrap().unwrap();
+    };
+    let delete = |manager: &mut RibManager, path_id| {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix: prefix(2),
+            path_id,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(result.try_recv().unwrap().unwrap().removed);
+    };
+    let blackhole = |route: &Route| {
+        route
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+    };
+    let mut wire = HashMap::new();
+    inject(&mut manager, local(17, 300, false, false));
+    inject(&mut manager, local(23, 100, true, false));
+    while let Ok(update) = rx.try_recv() {
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, blackhole(route));
+        }
+    }
+    assert_eq!(wire, HashMap::from([(1, false), (2, true)]));
+    // A full writer holds every change for one dirty resync.
+    let writer = manager.outbound_peers[&observer].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    delete(&mut manager, 17);
+    delete(&mut manager, 23);
+    inject(&mut manager, local(29, 500, true, true));
+    inject(&mut manager, local(31, 400, true, false));
+    drop(occupied);
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    let mut announced = 0;
+    while let Ok(update) = rx.try_recv() {
+        for key in &update.withdraw {
+            wire.remove(&key.1);
+        }
+        assert!(
+            wire.values().any(|&blackholed| blackholed),
+            "the withdraw phase left the prefix without a blackhole: {wire:?}"
+        );
+        for route in update.announce.iter() {
+            assert_eq!(route.path_id, 2, "only the sendable RTBH path is announced");
+            announced += 1;
+            wire.insert(route.path_id, blackhole(route));
+        }
+    }
+    assert_eq!(announced, 1);
+    assert_eq!(wire, HashMap::from([(2, true)]));
+}
+
+/// I2 compares the exported BLACKHOLE state, not only path identities: a
+/// row still carrying a tag its export no longer intends (a policy retag
+/// that announced nothing) fails, and the converged wire passes.
+#[test]
+fn i2_catches_a_stale_blackhole_tag() {
+    let tagged = |stale: bool| {
+        let mut harness = Harness::new(add_path_config());
+        harness.apply(&Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: false,
+        });
+        harness.apply(&Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: false,
+        });
+        harness.drain().unwrap();
+        harness.apply(&Op::Tag {
+            prefix: 2,
+            path: 0,
+            received: false,
+            exclusive: false,
+        });
+        harness.drain().unwrap();
+        harness.apply(&Op::Tag {
+            prefix: 2,
+            path: 1,
+            received: false,
+            exclusive: true,
+        });
+        harness.drain().unwrap();
+        if stale {
+            // Seed the old placement: the first path still tagged on the
+            // wire, the second not.
+            for (key, &injection) in &harness.wire {
+                let first = harness.injections[injection].preference
+                    == harness.injections[harness.local[&(2, 0)]].preference;
+                harness.wire_tag.insert(*key, first);
+            }
+        }
+        harness.check_converged()
+    };
+    assert!(tagged(false).is_ok(), "the retag converges");
+    let error = tagged(true).expect_err("a stale tag placement fails I2");
+    assert!(error.to_string().contains("I2:"), "{error}");
+}
+
+/// A GR-helper flap before the hold leaves our host route stale while the
+/// new session waits behind a full writer, and the route is deleted before
+/// the hold. Release frees the writer but leaves the End-of-RIB pending;
+/// the resync timer the actor arms for it sends that End-of-RIB, so the
+/// helper purges the stale row.
+#[test]
+fn release_tick_sends_the_end_of_rib_that_purges_a_stale_row() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = [
+        Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: true,
+        },
+        Op::Delete { prefix: 0, path: 0 },
+    ];
+    if let Some(reason) = failure(config, &setup, &[]) {
+        panic!("{reason}");
+    }
 }

@@ -86,19 +86,20 @@ fn with_partial_otc(mut route: Route, asn: u32) -> Route {
     route
 }
 
-fn drain_unicast_state(
+/// Apply every queued update to the receiver's wire, withdrawals first as
+/// the transport sends them.
+fn apply_unicast_updates(
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
-) -> HashMap<(Prefix, u32), Route> {
-    let mut state = HashMap::new();
+    state: &mut HashMap<(Prefix, u32), Route>,
+) {
     while let Ok(update) = rx.try_recv() {
-        for route in update.announce.iter() {
-            state.insert((route.prefix, route.path_id), route.clone());
-        }
         for withdrawn in update.withdraw {
             state.remove(&withdrawn);
         }
+        for route in update.announce.iter() {
+            state.insert((route.prefix, route.path_id), route.clone());
+        }
     }
-    state
 }
 
 #[tokio::test]
@@ -1737,7 +1738,7 @@ fn paths_limit_survives_collision_failback() {
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "one end-to-end dual-stack scenario covers initial dump, churn, withdrawal re-ranking, and refresh replay"
+    reason = "one end-to-end dual-stack scenario covers initial dump, churn, withdrawal, and refresh replay"
 )]
 async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
     let (tx, rx) = mpsc::channel(64);
@@ -1823,16 +1824,13 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
         .await
         .unwrap();
     let _ = sync_rx.await.unwrap();
-    let initial = drain_unicast_state(&mut out_rx);
-    assert_eq!(
-        initial.keys().filter(|(p, _)| *p == Prefix::V4(v4)).count(),
-        1
-    );
-    assert_eq!(
-        initial.keys().filter(|(p, _)| *p == Prefix::V6(v6)).count(),
-        2
-    );
+    let mut wire = HashMap::new();
+    apply_unicast_updates(&mut out_rx, &mut wire);
+    assert_eq!(wire.keys().filter(|(p, _)| *p == Prefix::V4(v4)).count(), 1);
+    assert_eq!(wire.keys().filter(|(p, _)| *p == Prefix::V6(v6)).count(), 2);
+    let initial = wire.clone();
 
+    let withdrawn_v6_peer = v6_routes[0].peer;
     for route in [v4_routes.remove(0), v6_routes.remove(0)] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
@@ -1853,22 +1851,26 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
         .await
         .unwrap();
     let _ = sync_rx.await.unwrap();
-    let reranked = drain_unicast_state(&mut out_rx);
-    assert_eq!(
-        reranked
-            .keys()
-            .filter(|(p, _)| *p == Prefix::V4(v4))
-            .count(),
-        1
-    );
-    assert_eq!(
-        reranked
-            .keys()
-            .filter(|(p, _)| *p == Prefix::V6(v6))
-            .count(),
-        2
-    );
+    apply_unicast_updates(&mut out_rx, &mut wire);
+    assert_eq!(wire.keys().filter(|(p, _)| *p == Prefix::V4(v4)).count(), 1);
+    assert_eq!(wire.keys().filter(|(p, _)| *p == Prefix::V6(v6)).count(), 2);
+    // Every surviving IPv6 path keeps its path ID; only the withdrawn
+    // path's key changes hands.
+    let survivors = initial
+        .iter()
+        .filter(|(key, route)| key.0 == Prefix::V6(v6) && route.peer != withdrawn_v6_peer)
+        .collect::<Vec<_>>();
+    assert!(!survivors.is_empty());
+    for (key, route) in survivors {
+        assert_eq!(wire.get(key).map(|route| route.peer), Some(route.peer));
+    }
 
+    let sources = |wire: &HashMap<(Prefix, u32), Route>| {
+        wire.iter()
+            .map(|(key, route)| (*key, route.peer))
+            .collect::<HashMap<_, _>>()
+    };
+    let before_refresh = sources(&wire);
     for (afi, safi) in [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)] {
         tx.send(RibUpdate::RouteRefreshRequest {
             queued: Arc::default(),
@@ -1885,21 +1887,12 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
         .await
         .unwrap();
     let _ = sync_rx.await.unwrap();
-    let refreshed = drain_unicast_state(&mut out_rx);
-    assert_eq!(
-        refreshed
-            .keys()
-            .filter(|(p, _)| *p == Prefix::V4(v4))
-            .count(),
-        1
-    );
-    assert_eq!(
-        refreshed
-            .keys()
-            .filter(|(p, _)| *p == Prefix::V6(v6))
-            .count(),
-        2
-    );
+    apply_unicast_updates(&mut out_rx, &mut wire);
+    assert_eq!(wire.keys().filter(|(p, _)| *p == Prefix::V4(v4)).count(), 1);
+    assert_eq!(wire.keys().filter(|(p, _)| *p == Prefix::V6(v6)).count(), 2);
+    // ROUTE-REFRESH re-sends each path at the path ID the peer holds, not
+    // at its rank.
+    assert_eq!(sources(&wire), before_refresh);
 
     drop(tx);
     handle.await.unwrap();

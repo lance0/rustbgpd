@@ -4124,7 +4124,7 @@ rbgp rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
 rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain
 
 # Negotiated unicast Add-Path: select one exact Adj-RIB-In candidate.
-# The inbound ID may be zero; the response reports its independent outbound rank.
+# The inbound ID may be zero; the response reports its independent outbound path ID.
 rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain \
   --source-peer 198.51.100.7 --source-path-id 0
 
@@ -4223,9 +4223,9 @@ non-decisive; it does not replace the winner's decisive interior-cost reason.
 `rbgp orr` always prints a `Topology inputs:` aggregate line; JSON and
 `ListOrrStatus` expose the same five counters. For negotiated IPv4/IPv6
 unicast Add-Path send, `--source-peer` plus `--source-path-id` makes export
-explain follow one exact Adj-RIB-In path through eligibility, policy, compact
-outbound ranking, OTC/exact-wire checks, and the rank-specific Adj-RIB-Out
-diff. The source flags are paired, require `--explain`, and conflict with
+explain follow one exact Adj-RIB-In path through eligibility, policy, the
+`add_path_send_max` cut and its outbound path ID, OTC/exact-wire checks, and
+the Adj-RIB-Out diff at that path ID. The source flags are paired, require `--explain`, and conflict with
 `--rd`/`--labeled`; an unknown source fails rather than falling back to the
 winner. The returned outbound Path ID is independently assigned per RFC 7911:
 rank 0 means the candidate was filtered, denied, or beyond `send_max`, while a
