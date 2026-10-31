@@ -1196,20 +1196,25 @@ impl RibManager {
     }
 
     /// Whether a hold is armed, so carried keys can be flushed. Otherwise
-    /// retire what no hold can still need: every carry once no family can
-    /// be held, else each carry whose next session is synced. Before any
-    /// hold arms, a session that has sent its table has sent its
+    /// retire what no hold can still need: every carry and ledger once no
+    /// family can be held, else each carry whose next session is synced.
+    /// Before any hold arms, a synced session has sent its unicast
     /// End-of-RIB, which purges the rows the helper kept.
     pub(super) fn helper_stale_exempt_in_hold(&mut self) -> bool {
-        let Some(selection) = self.selection_deferral.as_ref() else {
+        if !self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::selection_deferral::SelectionDeferral::may_hold)
+        {
             self.helper_stale_exempt.clear();
-            return false;
-        };
-        if !selection.may_hold() {
-            self.helper_stale_exempt.clear();
+            self.hold_exempt_withdrawn.clear();
             return false;
         }
-        if selection.has_active_gates() {
+        if self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
+        {
             return true;
         }
         let synced: Vec<PeerId> = self
@@ -1224,8 +1229,11 @@ impl RibManager {
         false
     }
 
-    /// A later session has sent its whole table, End-of-RIB included: it is
-    /// registered, clean, and no ORF gate holds a family's initial table.
+    /// A later session has sent its whole table and its unicast
+    /// End-of-RIB: it is registered and clean, no ORF gate holds a family's
+    /// initial table, and no unicast End-of-RIB is still queued (held by a
+    /// gate or replay grace, deferred behind an ORF table, or not yet
+    /// admitted by a full writer).
     pub(super) fn helper_stale_exempt_synced(&self, peer: PeerId) -> bool {
         self.outbound_peers.get(&peer).is_some_and(|current| {
             self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
@@ -1237,6 +1245,11 @@ impl RibManager {
         }) && !self.dirty_peers.contains(&peer)
             && !self.pending_initial_registrations.contains(&peer)
             && !self.peer_orf_pending.contains_key(&peer)
+            && !self
+                .pending_eor
+                .get(&peer)
+                .is_some_and(|families| families.iter().any(|&(_, safi)| safi == Safi::Unicast))
+            && !self.gr_deferred_eor.contains_key(&peer)
     }
 
     /// A settled set must be walked again: an ORF gate one of its keys

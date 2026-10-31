@@ -130,7 +130,10 @@ fn register_with(
         }
     }
     manager.handle_update(up);
-    assert_eq!(manager.grouped_member_of(observer).is_some(), grouped);
+    // A deferred registration joins its group when the run loop completes it.
+    if !manager.pending_initial_registrations.contains(&observer) {
+        assert_eq!(manager.grouped_member_of(observer).is_some(), grouped);
+    }
     (tx, rx, occupied)
 }
 
@@ -1268,5 +1271,232 @@ fn helper_teardown_without_selection_deferral_carries_nothing() {
     );
     apply(&mut old_rx, &mut rib, None);
     clean_end(&mut manager, 82);
+    assert!(manager.helper_stale_exempt.is_empty());
+}
+
+/// The receiver's End-of-RIB waits for its replay grace window, so its
+/// session is clean but the helper still holds our rows stale. The carry
+/// from a flap before the hold must survive until a hold arms. Red proof:
+/// counting a clean session as synced while its unicast End-of-RIB is still
+/// queued retires the carry, and the deleted RTBH stays.
+#[test]
+fn replay_grace_keeps_a_pre_hold_carry_until_end_of_rib() {
+    let (_tx, rx) = mpsc::channel(16);
+    let start = tokio::time::Instant::now();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![FAMILY],
+            }],
+        })
+        .with_eor_grace(crate::EorGraceConfig {
+            peers: vec![crate::EorGracePeerConfig {
+                peer: peer_v4(OBSERVER).into(),
+                deadline: start + Duration::from_secs(300),
+                families: vec![FAMILY],
+            }],
+            replay_owners: vec![],
+        });
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    assert!(rib.contains_key(&(Prefix::V4(rtbh), 0)));
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    // Deleted while the session is down.
+    delete(&mut manager, rtbh);
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, false, false);
+    let markers = apply(&mut new_rx, &mut rib, Some((Prefix::V4(kept), 0)));
+    assert_eq!(markers, 0, "the grace window holds the End-of-RIB");
+    for _ in 0..4 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(
+        manager.helper_stale_exempt.contains_key(&observer),
+        "the carry waits for the End-of-RIB"
+    );
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
+}
+
+/// When the RTBH is deleted around a flap before the hold arms.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreHoldDelete {
+    /// Inside the hold, after the flap.
+    InHold,
+    /// Before the flap: the withdrawal is queued and the session end drops
+    /// it.
+    Queued,
+    /// Before the flap, after the transport closed the channel: the send
+    /// fails and only the hold ledger names the row.
+    ClosedChannel,
+}
+
+/// A helper flaps before any hold arms and its next registration defers
+/// behind queued actor work, the production path for a session whose
+/// table is not yet sent when a waiter arms the hold. The deferred dump in
+/// the hold re-sends only exempt rows, so the stale RTBH must be withdrawn
+/// from the carry.
+fn pre_hold_flap_into_deferred_registration(grouped: bool, deleted: PreHoldDelete) {
+    let (tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![FAMILY],
+            }],
+        });
+    let observer = peer_v4(OBSERVER);
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, grouped, false);
+    let mut rib = PeerRib::new();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    match deleted {
+        PreHoldDelete::InHold => {}
+        PreHoldDelete::Queued => delete(&mut manager, rtbh),
+        PreHoldDelete::ClosedChannel => {
+            old_rx.close();
+            delete(&mut manager, rtbh);
+        }
+    }
+    assert!(!manager.selection_deferred(FAMILY), "no hold has armed");
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    // Queued actor work defers an expensive initial dump to the run loop.
+    manager.initial_dump_defer_min_routes = 0;
+    let (reply, _queued) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, grouped, false);
+    assert!(manager.pending_initial_registrations.contains(&observer));
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(
+        manager.selection_deferred(FAMILY),
+        "the waiter arms the hold"
+    );
+    if deleted == PreHoldDelete::InHold {
+        delete(&mut manager, rtbh);
+    }
+    for _ in 0..4 {
+        if manager.pending_initial_registrations.is_empty() {
+            break;
+        }
+        manager.advance_pending_initial_registration();
+    }
+    assert!(manager.pending_initial_registrations.is_empty());
+    assert_eq!(manager.grouped_member_of(observer).is_some(), grouped);
+    assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
+}
+
+/// Red proof: carrying only inside a hold leaves the RTBH stale.
+#[test]
+fn deferred_registration_into_the_hold_withdraws_a_pre_hold_stale_rtbh() {
+    for grouped in [false, true] {
+        pre_hold_flap_into_deferred_registration(grouped, PreHoldDelete::InHold);
+    }
+}
+
+/// Red proof: recording queued exempt withdrawals only inside a hold drops
+/// this one, and the RTBH stays stale.
+#[test]
+fn pre_hold_queued_rtbh_withdrawal_dropped_at_session_end_is_resent() {
+    for grouped in [false, true] {
+        pre_hold_flap_into_deferred_registration(grouped, PreHoldDelete::Queued);
+    }
+}
+
+/// Red proof: recording a group's exempt withdrawals only inside a hold
+/// drops one that failed on a closed channel before the hold armed.
+#[test]
+fn pre_hold_grouped_rtbh_withdrawn_in_the_closed_channel_window_is_resent() {
+    pre_hold_flap_into_deferred_registration(true, PreHoldDelete::ClosedChannel);
+}
+
+/// A peer that never returns leaves its carry behind; when the deadline
+/// releases families that never armed, no completion runs. Red proof:
+/// without retiring after the timer's transitions, the carry stays.
+#[test]
+fn deadline_release_retires_a_carry_whose_peer_never_returns() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    inject_rtbh(
+        &mut manager,
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
+    );
+    apply(&mut old_rx, &mut rib, None);
+    clean_end(&mut manager, 82);
+    assert!(manager.helper_stale_exempt.contains_key(&observer));
+    manager.expire_selection_deferral();
+    assert!(
+        !manager
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::super::selection_deferral::SelectionDeferral::may_hold),
+        "every family is released"
+    );
+    assert!(manager.helper_stale_exempt.is_empty(), "the carry retires");
+    assert!(manager.hold_exempt_withdrawn.is_empty(), "and every ledger");
+}
+
+/// Once every family is released no hold can defer our End-of-RIB again,
+/// so a helper teardown carries nothing and never enters the carry
+/// collection. Red proof: carrying regardless of the deferral state walks
+/// the table and keeps a carry.
+#[test]
+fn helper_teardown_after_release_carries_nothing() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    inject_rtbh(
+        &mut manager,
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
+    );
+    apply(&mut old_rx, &mut rib, None);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: u64::from(WAITER.octets()[3]),
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    assert!(
+        !manager
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::super::selection_deferral::SelectionDeferral::may_hold),
+        "every family is released"
+    );
+    let work = super::work_scaling::checkpoints_in(|| clean_end(&mut manager, 82));
+    assert_eq!(
+        work.get("helper_stale_carry"),
+        None,
+        "no carry collection: {work:?}"
+    );
     assert!(manager.helper_stale_exempt.is_empty());
 }

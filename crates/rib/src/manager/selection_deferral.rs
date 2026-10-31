@@ -1535,6 +1535,9 @@ impl RibManager {
             }
         }
         });
+        // A family released before it ever armed skips the completion, so
+        // retire what no hold can still need here too.
+        self.helper_stale_exempt_in_hold();
     }
 
     fn complete_selection_family(
@@ -1548,19 +1551,10 @@ impl RibManager {
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
         checkpoint();
         self.wake_selection_partial_recovery(family);
-        if !self
-            .selection_deferral
-            .as_ref()
-            .is_some_and(SelectionDeferral::has_active_gates)
-        {
-            // The hold no longer defers our End-of-RIB, which purges the
-            // stale rows a GR helper keeps once it is sent. A planned-restart
-            // grace window can still hold it queued; the carry is not kept
-            // for that window, and one waits only while a family can still
-            // be held.
-            self.hold_exempt_withdrawn.clear();
-            self.helper_stale_exempt_in_hold();
-        }
+        // A released family's End-of-RIB purges the stale rows a GR helper
+        // keeps once it is sent. Carries and ledgers wait only while a
+        // family can still be held, or for a session not yet synced.
+        self.helper_stale_exempt_in_hold();
         tracing::info!(
             afi = ?family.0,
             safi = ?family.1,
