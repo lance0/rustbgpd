@@ -1758,16 +1758,18 @@ fn register_dual_stack(
     mpsc::Sender<OutboundRouteUpdate>,
     mpsc::Receiver<OutboundRouteUpdate>,
 ) {
-    register_dual_stack_with(manager, session_id, capacity, false)
+    register_dual_stack_with(manager, session_id, capacity, false, None)
 }
 
 /// [`register_dual_stack`]; `orf_v4` negotiates Address Prefix ORF receive
-/// for IPv4, which holds its initial table until the peer's ORF.
+/// for IPv4, which holds its initial table until the peer's ORF, and
+/// `export_policy` replaces the private permit-all policy.
 fn register_dual_stack_with(
     manager: &mut RibManager,
     session_id: u64,
     capacity: usize,
     orf_v4: bool,
+    export: Option<rustbgpd_policy::PolicyChain>,
 ) -> (
     mpsc::Sender<OutboundRouteUpdate>,
     mpsc::Receiver<OutboundRouteUpdate>,
@@ -1794,7 +1796,7 @@ fn register_dual_stack_with(
     } = &mut up
     {
         *sendable_families = vec![FAMILY, V6];
-        *export_policy = Some(private_policy(None));
+        *export_policy = Some(export.unwrap_or_else(|| private_policy(None)));
         if orf_v4 {
             *negotiated_orf_recv = vec![FAMILY];
         }
@@ -2042,7 +2044,7 @@ fn orf_gated_family_waits_then_withdraws_once_its_hold_arms() {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
-    let (_old_tx, mut old_rx) = register_dual_stack_with(&mut manager, 82, 64, true);
+    let (_old_tx, mut old_rx) = register_dual_stack_with(&mut manager, 82, 64, true, None);
     permit_all_orf(&mut manager, 82);
     let mut rib = PeerRib::new();
     let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
@@ -2058,7 +2060,7 @@ fn orf_gated_family_waits_then_withdraws_once_its_hold_arms() {
         *stale = true;
     }
     delete(&mut manager, rtbh);
-    let (_new_tx, mut new_rx) = register_dual_stack_with(&mut manager, 182, 64, true);
+    let (_new_tx, mut new_rx) = register_dual_stack_with(&mut manager, 182, 64, true, None);
     run_timer(&mut manager, &mut new_rx, &mut rib, None);
     let waiting = |manager: &RibManager| {
         manager
@@ -2140,4 +2142,174 @@ fn queued_unheld_end_of_rib_keeps_the_carry_for_the_hold() {
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
     assert!(manager.selection_deferred(FAMILY));
     assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
+}
+
+/// A carried IPv4 key waits under replay grace because its prefix still has
+/// a candidate route, one this receiver's export policy denies, while an
+/// unrelated IPv6 selection gate stays dormant. Grace then ends and our
+/// IPv4 End-of-RIB goes out, purging the helper's stale row. The settled
+/// carry must retire that key then, without a withdrawal. Red proof:
+/// without re-walking a set whose family retired, the obsolete key stays
+/// in the bounded carry until the IPv6 gate releases.
+#[test]
+fn settled_carry_retires_its_family_once_its_end_of_rib_goes_out() {
+    const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+    const V6_WAITER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 86);
+    let (_tx, rx) = mpsc::channel(16);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(600),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(V6_WAITER),
+                families: vec![V6],
+            }],
+        })
+        .with_eor_grace(crate::EorGraceConfig {
+            peers: vec![crate::EorGracePeerConfig {
+                peer: peer_v4(OBSERVER).into(),
+                deadline,
+                families: vec![FAMILY],
+            }],
+            replay_owners: vec![],
+        });
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let key = (Prefix::V4(rtbh), 0);
+    // The receiver never gets the eBGP route at the RTBH's prefix.
+    let mut deny_external = deny_prefixes_chain(&[Prefix::V4(rtbh)]);
+    deny_external.policies[0].policy.entries[0].match_route_type =
+        Some(rustbgpd_policy::RouteType::External);
+    let (_old_tx, mut old_rx) =
+        register_dual_stack_with(&mut manager, 82, 64, false, Some(deny_external.clone()));
+    announce(&mut manager, [rtbh]);
+    inject_rtbh(&mut manager, rtbh);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    assert!(rib.contains_key(&key));
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    let (_new_tx, mut new_rx) =
+        register_dual_stack_with(&mut manager, 182, 64, false, Some(deny_external));
+    assert_eq!(run_timer(&mut manager, &mut new_rx, &mut rib, None), 0);
+    assert!(
+        manager
+            .helper_stale_exempt
+            .get(&observer)
+            .is_some_and(|carried| carried.settled && carried.keys.contains(&key)),
+        "the key waits in a settled set: its prefix still has a candidate"
+    );
+    manager.expire_eor_grace(deadline);
+    let mut markers = 0;
+    for _ in 0..8 {
+        while let Ok(update) = new_rx.try_recv() {
+            assert!(!update.withdraw.contains(&key), "nothing is withdrawn");
+            if update.end_of_rib.contains(&FAMILY) {
+                markers += 1;
+                rib.retain(|_, stale| !*stale);
+            }
+        }
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+    }
+    assert_eq!(markers, 1, "grace end sends the IPv4 End-of-RIB");
+    assert!(!rib.contains_key(&key), "which purges the stale row");
+    assert!(
+        manager
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::super::selection_deferral::SelectionDeferral::may_hold),
+        "the IPv6 gate can still hold"
+    );
+    assert!(
+        !manager
+            .helper_stale_exempt
+            .get(&observer)
+            .is_some_and(|carried| carried.keys.contains(&key)),
+        "the obsolete IPv4 key retires"
+    );
+}
+
+/// Releasing many grace windows at one deadline retires carries and
+/// ledgers once for the batch, so the work grows with windows plus owners.
+/// Red proof: a retirement per released window rescans every remaining
+/// owner, a windows x owners term.
+fn grace_batch_release(size: usize) -> super::work_scaling::Work {
+    let (_tx, rx) = mpsc::channel(16);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let address = |index: usize| {
+        let [high, low] = u16::try_from(index).unwrap().to_be_bytes();
+        Ipv4Addr::new(192, 0, 3 + high, low)
+    };
+    // A later window keeps grace open past the batch, so the batch's
+    // retirement walks the owners.
+    let mut peers: Vec<_> = (0..size)
+        .map(|index| crate::EorGracePeerConfig {
+            peer: peer_v4(address(index)).into(),
+            deadline,
+            families: vec![FAMILY],
+        })
+        .collect();
+    peers.push(crate::EorGracePeerConfig {
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 99)).into(),
+        deadline: deadline + Duration::from_secs(1),
+        families: vec![FAMILY],
+    });
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_eor_grace(crate::EorGraceConfig {
+            peers,
+            replay_owners: vec![],
+        });
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let mut receivers: Vec<_> = (0..size)
+        .map(|index| {
+            let (_tx, rx, _) = register_peer(
+                &mut manager,
+                address(index),
+                u64::try_from(index).unwrap() + 1,
+                false,
+                false,
+                false,
+            );
+            rx
+        })
+        .collect();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    inject_rtbh(&mut manager, rtbh);
+    // Each receiver's queued withdrawal is recorded in its own ledger.
+    delete(&mut manager, rtbh);
+    for rx in &mut receivers {
+        while rx.try_recv().is_ok() {}
+    }
+    let peer_ledgers = |manager: &RibManager| {
+        manager
+            .hold_exempt_withdrawn
+            .keys()
+            .filter(|owner| matches!(owner, super::super::HoldWithdrawOwner::Peer(_)))
+            .count()
+    };
+    assert_eq!(peer_ledgers(&manager), size, "setup, size {size}");
+    let work = super::work_scaling::checkpoints_in(|| manager.expire_eor_grace(deadline));
+    assert_eq!(
+        peer_ledgers(&manager),
+        0,
+        "every released peer's ledger retires"
+    );
+    work
+}
+
+#[test]
+fn grace_batch_release_retires_linearly() {
+    super::work_scaling::assert_linear(
+        "grace batch release",
+        &["helper_stale_retire"],
+        grace_batch_release,
+    );
 }

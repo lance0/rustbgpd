@@ -1255,10 +1255,15 @@ impl RibManager {
             self.hold_exempt_withdrawn.clear();
             return;
         }
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "helper_stale_retire", false);
+        };
         let peers: Vec<PeerId> = self
             .helper_stale_exempt
             .keys()
             .copied()
+            .inspect(|_| checkpoint())
             .filter(|&peer| !self.helper_stale_may_hold(peer))
             .collect();
         for peer in peers {
@@ -1268,6 +1273,7 @@ impl RibManager {
             .hold_exempt_withdrawn
             .keys()
             .copied()
+            .inspect(|_| checkpoint())
             .filter(|owner| match *owner {
                 super::HoldWithdrawOwner::Peer(peer) => !self.helper_stale_may_hold(peer),
                 super::HoldWithdrawOwner::Group(_) => false,
@@ -1310,6 +1316,15 @@ impl RibManager {
             || carried.gate_blocked.iter().any(|&family| {
                 self.eor_held(peer, family) || self.helper_stale_family_retired(peer, family)
             })
+            // A family whose End-of-RIB went out retires its keys, waiting
+            // ones included; the first and last keys name every family
+            // present.
+            || carried
+                .keys
+                .first()
+                .into_iter()
+                .chain(carried.keys.last())
+                .any(|&(prefix, _)| self.helper_stale_family_retired(peer, prefix_family(&prefix)))
     }
 
     /// No held End-of-RIB can need `family`'s carried keys at `peer` any

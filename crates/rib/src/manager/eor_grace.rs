@@ -280,6 +280,9 @@ impl RibManager {
                 "every listed controller signalled replay complete; releasing held End-of-RIB"
             );
         }
+        // One retirement for the whole batch: a carry kept for these windows
+        // retires once nothing else can hold its peer's End-of-RIB.
+        self.retire_helper_stale_exempt();
         Ok(ReplayComplete::Released)
     }
 
@@ -312,9 +315,6 @@ impl RibManager {
         {
             self.flush_pending_eor(peer);
         }
-        // A carry kept for this window retires once nothing else can hold
-        // the peer's End-of-RIB.
-        self.retire_helper_stale_exempt();
         (grace.helper_session, held)
     }
 
@@ -442,5 +442,7 @@ impl RibManager {
                 );
             }
         }
+        // One retirement for every window this deadline released.
+        self.retire_helper_stale_exempt();
     }
 }
