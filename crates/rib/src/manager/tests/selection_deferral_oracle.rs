@@ -374,8 +374,6 @@ struct Harness {
     /// Keys a GR helper retains as stale from a previous session until our
     /// End-of-RIB on the current one.
     stale: HashSet<(Prefix, u32)>,
-    /// The flap that left `stale` came before the hold armed.
-    stale_before_hold: bool,
     /// The current session's peer OPEN carried a GR capability: it keeps
     /// our routes as stale when the session ends cleanly.
     helper: bool,
@@ -386,15 +384,6 @@ struct Harness {
     /// I1 per UPDATE; the checker's own tests clear it for a control that
     /// checks only after the channel.
     per_update_i1: bool,
-    /// The check runs right after the current session's first End-of-RIB
-    /// purged a GR helper's stale rows before the session announced any
-    /// unicast route.
-    early_eor_purge: bool,
-    /// The current session kept our rows stale across a flap and has not
-    /// sent its first End-of-RIB yet.
-    awaiting_first_eor: bool,
-    /// The current session has announced a unicast route.
-    session_announced: bool,
     /// The receiver's configured export policy has peer context; a new
     /// session registers with it.
     peer_policy: bool,
@@ -440,14 +429,10 @@ impl Harness {
             blackholed: BTreeMap::new(),
             session: OBSERVER_SESSION,
             stale: HashSet::new(),
-            stale_before_hold: false,
             helper: true,
             gr_families: true,
             registered: false,
             per_update_i1: true,
-            early_eor_purge: false,
-            awaiting_first_eor: false,
-            session_announced: false,
             peer_policy: false,
             tags: BTreeSet::new(),
             wire_tag: HashMap::new(),
@@ -572,18 +557,14 @@ impl Harness {
                 self.wire.remove(&key);
             }
             self.stale = self.wire.keys().copied().collect();
-            self.stale_before_hold = !self.held;
             self.blackholed = self.exempt_rows();
-            self.awaiting_first_eor = true;
         } else {
             // A NOTIFICATION, or a peer without GR, drops our routes: no
             // blackhole survives the reset.
             self.wire.clear();
             self.stale.clear();
             self.blackholed.clear();
-            self.awaiting_first_eor = false;
         }
-        self.session_announced = false;
         self.helper = helper;
         self.gr_families = gr_families;
         let (tx, rx) = mpsc::channel(4);
@@ -1035,17 +1016,12 @@ impl Harness {
             self.apply_announcements(&update)?;
             // Our End-of-RIB ends a GR helper's retention: it purges every
             // stale row this session did not re-announce.
-            let first_eor =
-                update.end_of_rib.contains(&FAMILY) && std::mem::take(&mut self.awaiting_first_eor);
             if update.end_of_rib.contains(&FAMILY) && !self.stale.is_empty() {
                 for key in std::mem::take(&mut self.stale) {
                     self.wire.remove(&key);
                 }
                 if self.per_update_i1 {
-                    self.early_eor_purge = first_eor && !self.session_announced;
-                    let checked = self.check_blackholed();
-                    self.early_eor_purge = false;
-                    checked?;
+                    self.check_blackholed()?;
                 }
             }
         }
@@ -1069,7 +1045,6 @@ impl Harness {
         if self.per_update_i1 {
             self.check_blackholed()?;
         }
-        self.session_announced |= !update.announce.is_empty();
         let (lead, rest) = update
             .announce
             .split_at(update.exempt_announce.min(update.announce.len()));
@@ -1187,13 +1162,6 @@ impl Harness {
         if self.config.add_path && fallback && removed {
             return allowed("LAN-2692");
         }
-        // LAN-2724: outside the hold, an ORF-gated session sends its first
-        // End-of-RIB ahead of the gated table, before announcing anything,
-        // so a GR helper purges the stale rows it kept across the flap
-        // before they are re-sent.
-        if self.config.orf && self.early_eor_purge && !self.held {
-            return allowed("LAN-2724");
-        }
         None
     }
 
@@ -1279,12 +1247,6 @@ impl Harness {
             });
         if self.stale.contains(&key) && candidate {
             return allowed("LAN-2727");
-        }
-        // LAN-2740: the stale-RTBH carry is built only inside the hold, so
-        // a row a GR helper kept from a flap before the hold armed, and the
-        // new session never re-sent, stays stale until release.
-        if self.stale.contains(&key) && self.stale_before_hold {
-            return allowed("LAN-2740");
         }
         None
     }
