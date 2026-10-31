@@ -53,11 +53,11 @@ resolved.
   [replay grace window](configuration.md#planned-restart-end-of-rib-grace-window).
   RFC 4724 §4.2 has the helper keep the ended session's routes stale until
   our End-of-RIB. rustbgpd carries the ended session's RTBH and host
-  (deferral-exempt) keys to the next session and, while a selection-deferral
-  hold is armed, withdraws each one that was deleted and whose prefix has no
-  other route. It deliberately does not withdraw a deleted RTBH whose prefix
-  still has another candidate: a local route, or one received from another
-  peer. Queued updates are discarded when a session ends, so the RIB cannot
+  (deferral-exempt) keys to the next session and, while End-of-RIB toward
+  the helper is held by selection deferral or the replay grace window,
+  withdraws each one that was deleted and whose prefix has no other route.
+  It deliberately does not withdraw a deleted RTBH whose prefix still has
+  another candidate: a local route, or one received from another peer. Queued updates are discarded when a session ends, so the RIB cannot
   tell whether the helper holds the stale RTBH at that key or an ordinary
   route that was never replaced; withdrawing it could remove a route the
   helper rightly keeps. The candidate counts even when this peer's export
@@ -65,11 +65,7 @@ resolved.
   is sent, at selection release or at the end of the grace window,
   whichever is later. The grace window is at most `gr_eor_grace_time`
   (`--check` warns above 240 seconds; the schema maximum is 4095), and the
-  helper's own stale-route timer can end it sooner. The withdrawal runs only
-  while a selection-deferral gate is armed: when the flap happens after
-  selection has been released, or when no selection hold arms, the grace
-  window holds End-of-RIB and the helper keeps every deleted RTBH from the
-  ended session until that window ends.
+  helper's own stale-route timer can end it sooner.
   Mitigations: keep `gr_eor_grace_time` short; an RTBH controller that
   replaces a blackhole with an ordinary route at the same prefix should
   expect the old RTBH to stay at a flapped helper until End-of-RIB.
