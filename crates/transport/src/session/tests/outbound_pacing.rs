@@ -262,21 +262,41 @@ async fn outbound_pacing_resource_deadline_is_finite_with_send_hold_disabled() {
     actor.await.unwrap();
 }
 
-/// A second full-table envelope remains in the RIB-to-session queue when
-/// the active envelope cannot make progress within the close-drain budget.
-/// Session teardown discards that queue unsent, and it may hold the last
-/// reference to its inventory: the release is paced like the active
-/// envelope's, never one synchronous drop.
-#[tokio::test(start_paused = true)]
-async fn outbound_pacing_session_down_paces_queued_inventory_release() {
-    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
-    let (mut session, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+const QUEUE_SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+const QUEUED_ROUTES: usize = 5 * QUEUE_SLICE;
+
+/// Counts the live routes of one queued full-table envelope by their shared
+/// attribute set.
+struct QueuedInventory {
+    held: Arc<AttrSet>,
+    base: usize,
+}
+
+impl QueuedInventory {
+    fn live(&self) -> usize {
+        Arc::strong_count(&self.held) - self.base
+    }
+}
+
+/// An Established session whose active envelope waits on a full writer
+/// queue, so it cannot finish within the close-drain budget, and a second
+/// full-table envelope, not yet queued, that is the last owner of its
+/// routes. The returned writer receiver keeps that queue full.
+async fn queued_last_owner_session() -> (
+    PeerSession,
+    mpsc::Sender<PeerCommand>,
+    mpsc::Receiver<RibUpdate>,
+    mpsc::Receiver<Bytes>,
+    OutboundRouteUpdate,
+    QueuedInventory,
+) {
+    let (mut session, commands, rib_rx) = make_test_session_with_channels(65001, 65002, 64);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     session.timers.hold = None;
     session.writer_join.take().unwrap().abort();
-    let (bulk, _held) = mpsc::channel(1);
+    let (bulk, writer) = mpsc::channel(1);
     bulk.try_send(Bytes::from_static(b"held")).unwrap();
     session.writer_bulk_tx = Some(bulk);
     session
@@ -285,57 +305,120 @@ async fn outbound_pacing_session_down_paces_queued_inventory_release() {
 
     let held = make_route(100).attributes;
     let base = Arc::strong_count(&held);
-    let live = || Arc::strong_count(&held) - base;
-    let total = 5 * SLICE;
-    let routes = (0..u32::try_from(total).unwrap())
+    let routes = (0..u32::try_from(QUEUED_ROUTES).unwrap())
         .map(|index| Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32)),
             attributes: Arc::clone(&held),
             ..make_route(100)
         })
         .collect();
-    session
-        .outbound_tx
-        .try_send(pacing_update(&session, routes))
-        .unwrap();
-    assert_eq!(live(), total);
-    commands.send(PeerCommand::Shutdown).await.unwrap();
-    let mut released = Vec::new();
-    {
-        let mut run = std::pin::pin!(session.run());
-        loop {
-            let before = live();
-            let polled =
-                std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
-            released.push(before - live());
-            if let std::task::Poll::Ready(result) = polled {
-                result.unwrap();
-                break;
-            }
-            let before = live();
-            tokio::time::advance(std::time::Duration::from_millis(1)).await;
-            released.push(before - live());
+    let envelope = pacing_update(&session, routes);
+    let inventory = QueuedInventory { held, base };
+    assert_eq!(inventory.live(), QUEUED_ROUTES);
+    (session, commands, rib_rx, writer, envelope, inventory)
+}
+
+/// Poll the session task by hand, so each recorded release is one
+/// synchronous step: a single poll of the session, or one clock advance
+/// (paused time) in which any other task (the paced release) runs once.
+/// Returns the time `run()` took to exit.
+async fn run_by_step(
+    session: &mut PeerSession,
+    inventory: &QueuedInventory,
+    released: &mut Vec<usize>,
+) -> std::time::Duration {
+    let started = tokio::time::Instant::now();
+    let mut run = std::pin::pin!(session.run());
+    loop {
+        let before = inventory.live();
+        let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+        released.push(before - inventory.live());
+        if let std::task::Poll::Ready(result) = polled {
+            result.unwrap();
+            return started.elapsed();
         }
+        let before = inventory.live();
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        released.push(before - inventory.live());
     }
-    let before = live();
+}
+
+/// Drop the session, then give the paced release room to finish, recording
+/// each step; every queued route must be freed, no step above one slice.
+async fn finish_queued_release(
+    session: PeerSession,
+    inventory: &QueuedInventory,
+    mut released: Vec<usize>,
+) {
+    let before = inventory.live();
     drop(session);
-    released.push(before - live());
-    for _ in 0..2 * total / SLICE {
-        let before = live();
+    released.push(before - inventory.live());
+    for _ in 0..2 * QUEUED_ROUTES / QUEUE_SLICE {
+        let before = inventory.live();
         tokio::task::yield_now().await;
-        released.push(before - live());
+        released.push(before - inventory.live());
     }
-    assert_eq!(live(), 0, "queued routes are all released: {released:?}");
     let nonzero: Vec<_> = released
         .iter()
         .copied()
         .enumerate()
         .filter(|(_, batch)| *batch > 0)
         .collect();
-    assert!(
-        released.iter().all(|&batch| batch <= SLICE),
-        "one session step released more than {SLICE} queued routes; nonzero steps: {nonzero:?}"
+    assert_eq!(
+        inventory.live(),
+        0,
+        "queued routes are all released: {nonzero:?}"
     );
+    assert!(
+        released.iter().all(|&batch| batch <= QUEUE_SLICE),
+        "one step released more than {QUEUE_SLICE} queued routes; nonzero steps: {nonzero:?}"
+    );
+}
+
+/// Session teardown discards the RIB-to-session queue unsent, and a queued
+/// envelope may hold the last reference to its inventory: the release is
+/// paced like the active envelope's, never one synchronous drop, and the
+/// teardown neither waits for it nor runs past the close-drain budget.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_down_paces_queued_inventory_release() {
+    let (mut session, commands, _rib_rx, _writer, envelope, inventory) =
+        queued_last_owner_session().await;
+    session.outbound_tx.try_send(envelope).unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    let elapsed = run_by_step(&mut session, &inventory, &mut released).await;
+    assert!(
+        elapsed <= 2 * super::writer::CLOSE_FLUSH_BUDGET,
+        "the session task exits on its close budget, not after the release"
+    );
+    assert!(
+        inventory.live() > 0,
+        "the teardown does not wait for the release"
+    );
+    finish_queued_release(session, &inventory, released).await;
+}
+
+/// A session task can exit while Established, without the teardown that
+/// discards the queue (here every command sender is gone). The queue still
+/// drops with the session, so the exit hands it to the paced release too.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_exit_without_session_down_paces_queued_inventory_release() {
+    let (mut session, commands, _rib_rx, _writer, envelope, inventory) =
+        queued_last_owner_session().await;
+    session.outbound_tx.try_send(envelope).unwrap();
+    drop(commands);
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "this exit never tore the session down"
+    );
+    assert!(
+        inventory.live() > 0,
+        "the exit does not wait for the release"
+    );
+    finish_queued_release(session, &inventory, released).await;
 }
 
 #[tokio::test]

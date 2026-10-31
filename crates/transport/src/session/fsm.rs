@@ -1520,10 +1520,10 @@ impl PeerSession {
                     }
 
                     // Recreate outbound channel to discard stale updates
-                    // from the dying session. The old sender held by RIB
-                    // manager is already invalidated by PeerDown/PeerGR.
-                    // Envelopes still queued are discarded unsent, and
-                    // their inventory is released off this turn.
+                    // from the dying session. The RIB manager's sender to
+                    // the old channel is invalidated by the PeerDown/PeerGR
+                    // sent below. Envelopes still queued are discarded
+                    // unsent, and their inventory is released off this turn.
                     self.retire_off_turn(None);
                     let (new_tx, new_rx) = mpsc::channel(OUTBOUND_BUFFER);
                     self.outbound_tx = new_tx;
