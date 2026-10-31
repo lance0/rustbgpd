@@ -726,7 +726,8 @@ async fn selection_held_marker_after_the_cap_goes_out_at_release() {
     assert_eq!(apply(&mut rx, &mut rib), vec!["eor"]);
 }
 
-/// A gated family unlocked after the cap while our selection hold still
+/// A gated family the session withheld at registration (as the transport
+/// stages it) and unlocks after the cap, while our selection hold still
 /// holds its marker: the marker is not recorded for a table, so it goes out
 /// when the hold ends. Red proof: the unlock's held branch recording it into
 /// `gr_deferred_eor` regardless of the cap leaves it with no timer.
@@ -741,12 +742,21 @@ async fn unlock_after_the_cap_under_a_hold_goes_out_at_release() {
     });
     let (tx, mut rx) = mpsc::channel(16);
     manager.handle_update(context(182, Open::HelperOnly));
+    manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
+        peer,
+        session_id: 182,
+        families: vec![(
+            FAMILY,
+            crate::update::ExactExportErrorCode::Ipv4RequiresExtendedNextHop,
+        )],
+    });
+    // The transport's `PeerUp` lists only the families it can export.
     let mut up = peer_up(182, tx);
     if let RibUpdate::PeerUp {
         sendable_families, ..
     } = &mut up
     {
-        sendable_families.clear();
+        sendable_families.retain(|family| *family != FAMILY);
     }
     manager.handle_update(up);
     tokio::time::advance(ORF_EOR_HOLD_CAP).await;
