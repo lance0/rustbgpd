@@ -2209,6 +2209,7 @@ async fn direct_action_fallback_rebuilds_fresh_arc_and_add_path_projection() {
     );
 }
 
+mod add_path_rejected_blackhole;
 mod authenticated_dial;
 mod bmp;
 mod collision_hold;
