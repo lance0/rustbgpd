@@ -280,6 +280,10 @@ impl RibManager {
                 "every listed controller signalled replay complete; releasing held End-of-RIB"
             );
         }
+        // One retirement for the whole batch: a carry kept for these windows
+        // retires once nothing else can hold its peer's End-of-RIB. Each
+        // released window already counted as a hold source ending.
+        self.retire_helper_stale_exempt();
         Ok(ReplayComplete::Released)
     }
 
@@ -295,6 +299,7 @@ impl RibManager {
         let Some(grace) = self.eor_grace.remove(target) else {
             return (false, String::new());
         };
+        self.helper_stale_hold_ends = self.helper_stale_hold_ends.saturating_add(1);
         let mut held: Vec<&str> = grace
             .peer
             .and_then(|peer| self.pending_eor.get(&peer))
@@ -324,6 +329,22 @@ impl RibManager {
             .map(EorGraceTarget::Interface)
             .filter(|target| self.eor_grace.contains_key(target))
             .unwrap_or(addressed)
+    }
+
+    /// Whether a grace window is still open for `peer`, covering `family`
+    /// when one is given: our End-of-RIB toward it may be held by grace.
+    pub(super) fn eor_grace_covers(&self, peer: PeerId, family: Option<(Afi, Safi)>) -> bool {
+        if self.eor_grace.is_empty() {
+            return false;
+        }
+        self.eor_grace
+            .get(&self.eor_grace_target(peer))
+            .is_some_and(|grace| family.is_none_or(|family| grace.families.contains(&family)))
+    }
+
+    /// Whether any grace window is still open.
+    pub(super) fn eor_grace_open(&self) -> bool {
+        !self.eor_grace.is_empty()
     }
 
     /// Whether the grace window holds `family`'s End-of-RIB toward `peer`.
@@ -358,14 +379,18 @@ impl RibManager {
             }
             return;
         }
-        self.eor_grace.remove(&target);
         self.eor_grace_deadlines.remove(&target);
+        if self.eor_grace.remove(&target).is_some() {
+            self.request_helper_stale_retire();
+        }
     }
 
     pub(super) fn retire_eor_grace_interface(&mut self, interface: Arc<str>) {
         let target = EorGraceTarget::Interface(interface);
-        self.eor_grace.remove(&target);
         self.eor_grace_deadlines.remove(&target);
+        if self.eor_grace.remove(&target).is_some() {
+            self.request_helper_stale_retire();
+        }
     }
 
     pub(super) fn next_eor_grace_deadline(&mut self) -> Option<tokio::time::Instant> {
@@ -421,5 +446,9 @@ impl RibManager {
                 );
             }
         }
+        // One retirement for every window this deadline released; each
+        // counted as a hold source ending, so a shared-timer deadline that
+        // released none (an RTC or ORF hold) costs nothing here.
+        self.retire_helper_stale_exempt();
     }
 }
