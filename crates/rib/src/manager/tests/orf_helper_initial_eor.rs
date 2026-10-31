@@ -42,9 +42,14 @@ fn manager() -> RibManager {
     RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
 }
 
-/// A manager inside a startup selection hold on the family, with its waiter.
-fn held_manager() -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
-    let (_tx, rx) = mpsc::channel(16);
+/// A manager inside a startup selection hold on the family, with its waiter
+/// and the sender of its primary queue.
+fn held_manager() -> (
+    RibManager,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    mpsc::Sender<RibUpdate>,
+) {
+    let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(600),
@@ -56,7 +61,7 @@ fn held_manager() -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
     let waiter =
         super::selection_deferral_dirty_rtbh::connect(&mut manager, WAITER, 64, true, false);
     assert!(manager.selection_convergence_held(FAMILY));
-    (manager, waiter)
+    (manager, waiter, tx)
 }
 
 fn context(session_id: u64, open: Open) -> RibUpdate {
@@ -389,7 +394,7 @@ async fn session_end_and_delete_drop_the_held_eor() {
 /// the cap, release sends the table before the End-of-RIB, so the peer
 /// never drops the stale host route.
 async fn assert_held_refresh_keeps_table_first(old: Open, refresh_before_cap: bool) {
-    let (mut manager, _waiter) = held_manager();
+    let (mut manager, _waiter, _tx) = held_manager();
     let (mut rx, mut rib) = flapped(&mut manager, old);
     let peer = peer_v4(OBSERVER);
     assert!(manager.gr_deferred_eor[&peer].contains(&FAMILY));
@@ -506,8 +511,9 @@ fn queued(map: &HashMap<PeerId, HashSet<(Afi, Safi)>>, peer: PeerId) -> bool {
 
 /// The refresh's response is refused by a full writer after it lifted the
 /// gate, then the cap passes: the dirty resync's retry sends the table and
-/// one End-of-RIB after it. Red proof: releasing a gate-lifted family at
-/// the cap sends `["table", "eor", "table", "eor"]`.
+/// one End-of-RIB after it. Red proof: dropping both the `pending_refresh`
+/// and the gate-lifted clause from the cap's partition sends
+/// `["table", "eor", "table", "eor"]`; either clause alone keeps one.
 #[tokio::test(start_paused = true)]
 async fn refused_refresh_across_the_cap_sends_one_eor_after_the_table() {
     let mut manager = manager();
@@ -537,7 +543,7 @@ async fn refused_refresh_across_the_cap_sends_one_eor_after_the_table() {
 /// `["eor", "table", "eor"]`.
 #[tokio::test(start_paused = true)]
 async fn dirty_at_release_then_cap_keeps_table_first() {
-    let (mut manager, _waiter) = held_manager();
+    let (mut manager, _waiter, _tx) = held_manager();
     let peer = peer_v4(OBSERVER);
     let (tx, mut rx, mut rib) = flapped_of(&mut manager, OBSERVER, Open::HelperOnly, 4);
     assert!(queued(&manager.gr_deferred_eor, peer));
@@ -646,4 +652,114 @@ async fn registration_deferred_past_the_cap_sends_the_eor() {
         manager.advance_pending_initial_registration();
     }
     assert_eq!(apply(&mut new_rx, &mut rib), vec!["eor"]);
+}
+
+/// Releases the startup selection hold through its waiter's End-of-RIB.
+fn release_hold(manager: &mut RibManager) {
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: WAITER_SESSION,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    assert!(!manager.selection_convergence_held(FAMILY));
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+}
+
+/// An ORF peer with no stale retention whose initial dump falls inside our
+/// startup selection hold: its marker waits for the gated table, bounded by
+/// the cap, so a peer that never refreshes still gets it when the hold
+/// ends. Red proof: recording that marker without arming the cap leaves it
+/// waiting for a refresh that never comes.
+#[tokio::test(start_paused = true)]
+async fn held_marker_of_a_non_retaining_peer_has_the_cap() {
+    let (mut manager, _waiter, _tx) = held_manager();
+    inject_host(&mut manager);
+    let mut rx = register(&mut manager, 182, Open::NoGr);
+    let mut rib = PeerRib::new();
+    assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
+    tokio::time::advance(ORF_EOR_HOLD_CAP).await;
+    manager.expire_eor_holds(tokio::time::Instant::now());
+    assert_eq!(
+        apply(&mut rx, &mut rib),
+        Vec::<&str>::new(),
+        "the selection hold still holds it"
+    );
+    release_hold(&mut manager);
+    assert_eq!(apply(&mut rx, &mut rib), vec!["eor"]);
+}
+
+/// A stale-holding peer's registration waits past its cap and then dumps
+/// inside our selection hold: the selection-held marker is not recorded for
+/// a table after the cap, so it goes out when the hold ends. Red proof:
+/// recording it into `gr_deferred_eor` regardless of the cap leaves it with
+/// no timer.
+#[tokio::test(start_paused = true)]
+async fn selection_held_marker_after_the_cap_goes_out_at_release() {
+    let (mut manager, _waiter, tx) = held_manager();
+    let peer = peer_v4(OBSERVER);
+    let _old_rx = register(&mut manager, 82, Open::HelperOnly);
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 82,
+    });
+    manager.initial_dump_defer_min_routes = 0;
+    let (new_tx, mut rx) = mpsc::channel(16);
+    for update in [
+        context(182, Open::HelperOnly),
+        peer_up(182, new_tx),
+        // Queued work behind the PeerUp defers its registration.
+        context(999, Open::NoGr),
+    ] {
+        tx.try_send(update).unwrap();
+    }
+    while manager.drain_ready_updates().await {}
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    tokio::time::advance(ORF_EOR_HOLD_CAP).await;
+    manager.expire_eor_holds(tokio::time::Instant::now());
+    while !manager.pending_initial_registrations.is_empty() {
+        manager.advance_pending_initial_registration();
+    }
+    let mut rib = PeerRib::new();
+    assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
+    release_hold(&mut manager);
+    assert_eq!(apply(&mut rx, &mut rib), vec!["eor"]);
+}
+
+/// A gated family unlocked after the cap while our selection hold still
+/// holds its marker: the marker is not recorded for a table, so it goes out
+/// when the hold ends. Red proof: the unlock's held branch recording it into
+/// `gr_deferred_eor` regardless of the cap leaves it with no timer.
+#[tokio::test(start_paused = true)]
+async fn unlock_after_the_cap_under_a_hold_goes_out_at_release() {
+    let (mut manager, _waiter, _tx) = held_manager();
+    let peer = peer_v4(OBSERVER);
+    let _old_rx = register(&mut manager, 82, Open::HelperOnly);
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 82,
+    });
+    let (tx, mut rx) = mpsc::channel(16);
+    manager.handle_update(context(182, Open::HelperOnly));
+    let mut up = peer_up(182, tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    {
+        sendable_families.clear();
+    }
+    manager.handle_update(up);
+    tokio::time::advance(ORF_EOR_HOLD_CAP).await;
+    manager.expire_eor_holds(tokio::time::Instant::now());
+    assert!(manager.orf_eor_cap_passed.contains(&peer));
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 182,
+        family: FAMILY,
+        add_path_send_limit: None,
+    });
+    let mut rib = PeerRib::new();
+    assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
+    release_hold(&mut manager);
+    assert_eq!(apply(&mut rx, &mut rib), vec!["eor"]);
 }

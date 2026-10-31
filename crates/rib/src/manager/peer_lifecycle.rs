@@ -1750,9 +1750,8 @@ impl RibManager {
         // A peer that may hold our routes stale deletes them at the gated
         // families' initial `EoR` (RFC 4724 §4.2), so that `EoR` follows the
         // gated table, bounded by the cap for a peer that never refreshes.
-        let may_hold_stale = self.peer_may_hold_stale.remove(&peer);
         self.orf_eor_cap_passed.remove(&peer);
-        if may_hold_stale && !negotiated_orf_recv.is_empty() {
+        if self.peer_may_hold_stale.contains(&peer) && !negotiated_orf_recv.is_empty() {
             self.orf_eor_hold
                 .insert(peer, tokio::time::Instant::now() + super::ORF_EOR_HOLD_CAP);
         } else {
@@ -3398,7 +3397,7 @@ impl RibManager {
             if self.selection_convergence_held(family) {
                 self.pending_eor.entry(peer).or_default().insert(family);
                 if orf_gated.contains(&family) {
-                    self.gr_deferred_eor.entry(peer).or_default().insert(family);
+                    self.defer_orf_initial_eor(peer, family);
                 }
             }
         }
@@ -3500,10 +3499,9 @@ impl RibManager {
                 .collect();
             if !deferred.is_empty() {
                 eor_families.retain(|family| !deferred.contains(family));
-                self.gr_deferred_eor
-                    .entry(peer)
-                    .or_default()
-                    .extend(deferred);
+                for family in deferred {
+                    self.defer_orf_initial_eor(peer, family);
+                }
             }
         }
 

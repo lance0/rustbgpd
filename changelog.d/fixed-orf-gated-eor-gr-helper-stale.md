@@ -9,6 +9,8 @@
   ROUTE-REFRESH within 60 seconds gets the End-of-RIB then. Peers whose
   previous session had no Graceful Restart capability keep the immediate
   End-of-RIB.
-  **Operator-visible:** a GR restarter's held End-of-RIB for an ORF-gated
-  family, which previously waited for its ROUTE-REFRESH without limit, now
-  also goes out after 60 seconds without one.
+  **Operator-visible:** every End-of-RIB held for an ORF-gated table now has
+  the same 60-second bound. A GR restarter's, and that of any ORF peer whose
+  initial table falls inside a startup selection deferral, previously waited
+  for the peer's ROUTE-REFRESH without limit; it now goes out after 60
+  seconds without one, or when the selection deferral ends if that is later.

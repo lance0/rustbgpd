@@ -628,7 +628,9 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
     for replay_complete in [false, true] {
         let source = peer_v4(SOURCE_ADDR);
         let target = peer_v4(TARGET_ADDR);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        // Shorter than the ORF cap the unlock arms, so the grace release
+        // alone is under test.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let (_tx, rx) = mpsc::channel(8);
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
             .with_eor_grace(crate::EorGraceConfig {
@@ -671,7 +673,7 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
                 Ok(crate::ReplayComplete::Released)
             );
         } else {
-            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::time::advance(Duration::from_secs(30)).await;
             manager.expire_eor_holds(deadline);
         }
         assert!(!manager.eor_grace_held(target, V6));

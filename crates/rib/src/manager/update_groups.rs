@@ -3774,7 +3774,7 @@ impl RibManager {
         if !orf_gated {
             self.pending_eor.entry(peer).or_default().insert(family);
         } else if self.orf_initial_eor_follows_table(peer) || self.eor_held(peer, family) {
-            self.gr_deferred_eor.entry(peer).or_default().insert(family);
+            self.defer_orf_initial_eor(peer, family);
         }
         // The regroup can build a destination table from the whole Loc-RIB;
         // keep readiness served across it as other full-table paths do.

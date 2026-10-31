@@ -1505,7 +1505,9 @@ separate from control-plane-only families advertising F=1.
 - A non-GR peer gets an empty End-of-RIB for a gated family at once, and a
   withheld family's empty End-of-RIB is never held for the peer's refresh. A
   marker held by GR, selection deferral or replay grace waits for the gated
-  table instead.
+  table instead, for at most 60 seconds from when it was first held; after
+  that it goes out once the hold ends, unless the peer's refresh is already
+  queued.
 - A configured neighbor whose previous session advertised Graceful Restart
   may still hold our routes stale and deletes them at our End-of-RIB (RFC
   4724 §4.2). Its gated families' initial End-of-RIB follows the gated table

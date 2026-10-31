@@ -1669,10 +1669,7 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_stale_holder() {
     let mut outbound = register_direct_peer(&mut manager, peer);
     assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
     let ipv6 = (Afi::Ipv6, Safi::Unicast);
-    manager.orf_eor_hold.insert(
-        peer,
-        tokio::time::Instant::now() + crate::manager::ORF_EOR_HOLD_CAP,
-    );
+    manager.peer_may_hold_stale.insert(peer);
     manager
         .peer_orf_pending
         .insert(peer, std::iter::once(ipv6).collect());
