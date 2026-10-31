@@ -628,7 +628,9 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
     for replay_complete in [false, true] {
         let source = peer_v4(SOURCE_ADDR);
         let target = peer_v4(TARGET_ADDR);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        // Shorter than the ORF cap the unlock arms, so the grace release
+        // alone is under test.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let (_tx, rx) = mpsc::channel(8);
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
             .with_eor_grace(crate::EorGraceConfig {
@@ -671,7 +673,7 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
                 Ok(crate::ReplayComplete::Released)
             );
         } else {
-            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::time::advance(Duration::from_secs(30)).await;
             manager.expire_eor_holds(deadline);
         }
         assert!(!manager.eor_grace_held(target, V6));
@@ -890,4 +892,87 @@ fn deferred_orf_update_keeps_the_initial_gate_through_selection_release() {
     assert_eq!(seen, BTreeSet::from([ordinary_v4(), ordinary_v6(0x100)]));
     assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
     assert_completed(&mut manager, &mut target_rx);
+}
+
+/// An ORF peer with no stale retention whose IPv4 marker our selection hold
+/// records, arming the cap: its other gated family, IPv6, which no hold
+/// covers, keeps the immediate honest-empty End-of-RIB. Red proof: keying
+/// the table-first predicate on an armed cap defers IPv6 too.
+#[test]
+fn unflagged_cap_does_not_defer_another_gated_family() {
+    let (manager, _source_rx, mut target_rx) = setup(&[V4, V6], 64, false);
+    let target = peer_v4(TARGET_ADDR);
+    assert!(!manager.peer_may_hold_stale.contains(&target));
+    assert!(
+        manager.orf_eor_hold.contains_key(&target),
+        "IPv4's held marker armed the cap"
+    );
+    let eors: Vec<_> = std::iter::from_fn(|| target_rx.try_recv().ok())
+        .flat_map(|update| update.end_of_rib)
+        .collect();
+    assert_eq!(
+        eors,
+        vec![V6],
+        "IPv6's honest-empty End-of-RIB is immediate"
+    );
+    assert_eq!(
+        manager.gr_deferred_eor.get(&target),
+        Some(&HashSet::from([V4]))
+    );
+}
+
+/// A replay grace window longer than the ORF cap: the cap releases the
+/// unlocked family's marker into the grace hold, a refresh after the cap
+/// but inside the window sends the table at once, and the End-of-RIB
+/// follows at the window's end.
+#[tokio::test(start_paused = true)]
+async fn refresh_after_the_cap_inside_a_longer_grace_keeps_table_first() {
+    let source = peer_v4(SOURCE_ADDR);
+    let target = peer_v4(TARGET_ADDR);
+    let grace_end = tokio::time::Instant::now() + Duration::from_secs(120);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_eor_grace(crate::EorGraceConfig {
+            peers: vec![crate::EorGracePeerConfig {
+                peer: target.into(),
+                deadline: grace_end,
+                families: vec![V4, V6],
+            }],
+            replay_owners: vec!["controller".into()],
+        });
+    let _source_rx = connect(&mut manager, source, SOURCE_SESSION, false, &[], 64);
+    receive(&mut manager, &[ordinary_v4(), ordinary_v6(0x100)]);
+    let mut target_rx = connect_withheld_v6(&mut manager, true, 64);
+    let mut seen = BTreeSet::new();
+    let mut eors = HashMap::new();
+    observe(&mut target_rx, true, &mut seen, &mut eors);
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer: target,
+        session_id: TARGET_SESSION,
+        family: V6,
+        add_path_send_limit: None,
+    });
+    let cap = manager
+        .next_eor_hold_deadline()
+        .expect("the unlock armed the cap");
+    assert!(cap < grace_end);
+    tokio::time::advance(Duration::from_secs(60)).await;
+    manager.expire_eor_holds(cap);
+    assert!(manager.orf_eor_cap_passed.contains(&target));
+    assert!(manager.pending_eor[&target].contains(&V6));
+    observe(&mut target_rx, true, &mut seen, &mut eors);
+    assert_eq!(eors, HashMap::new(), "grace still holds every marker");
+    tokio::time::advance(Duration::from_secs(30)).await;
+    refresh(&mut manager, V6);
+    observe(&mut target_rx, true, &mut seen, &mut eors);
+    assert!(
+        seen.contains(&ordinary_v6(0x100)),
+        "the table goes out at once"
+    );
+    assert_eq!(eors, HashMap::new(), "its End-of-RIB waits for the window");
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert_eq!(manager.next_eor_hold_deadline(), Some(grace_end));
+    manager.expire_eor_holds(grace_end);
+    observe(&mut target_rx, true, &mut seen, &mut eors);
+    assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
 }

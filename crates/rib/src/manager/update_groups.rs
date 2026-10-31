@@ -3761,19 +3761,20 @@ impl RibManager {
             }
         }
         // An ORF-gated family's table waits for the peer's own refresh.
-        // A GR restarter's marker, or one a selection, RTC or replay-grace
-        // gate still holds, waits for that table. Otherwise the family's
-        // honest-empty marker was already sent or queued at `PeerUp`
-        // (whatever the writer's capacity), so a second marker before any
-        // table would only duplicate it; the refresh supplies the table.
+        // A GR restarter's marker, a stale-holding helper's within its cap,
+        // or one a selection, RTC or replay-grace gate still holds, waits
+        // for that table. Otherwise the family's honest-empty marker was
+        // already sent or queued at `PeerUp` (whatever the writer's
+        // capacity), so a second marker before any table would only
+        // duplicate it; the refresh supplies the table.
         let orf_gated = self
             .peer_orf_pending
             .get(&peer)
             .is_some_and(|gated| gated.contains(&family));
         if !orf_gated {
             self.pending_eor.entry(peer).or_default().insert(family);
-        } else if self.gr_peers.contains_key(&peer) || self.eor_held(peer, family) {
-            self.gr_deferred_eor.entry(peer).or_default().insert(family);
+        } else if self.orf_initial_eor_follows_table(peer) || self.eor_held(peer, family) {
+            self.defer_orf_initial_eor(peer, family);
         }
         // The regroup can build a destination table from the whole Loc-RIB;
         // keep readiness served across it as other full-table paths do.

@@ -938,17 +938,38 @@ pub struct RibManager {
     /// (`lift_orf_gate`), so key presence means "at least one family gated".
     peer_orf_pending: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Families whose initial-table `EoR` is withheld because the peer came
-    /// back as a graceful-restart RESTARTER (RFC 4724) while the family was
-    /// still behind the RFC 5291 §6 ORF initial-advertisement gate. An
-    /// immediate `EoR` would tell the restarter our initial update is
-    /// complete and trigger its stale-route sweep BEFORE the gated flood
-    /// arrives — a self-inflicted blackhole window. The `EoR` is emitted
-    /// after the gate lifts and the gated flood is sent. A marker held by
+    /// back as a graceful-restart RESTARTER (RFC 4724), or may still hold
+    /// our routes stale (`orf_eor_hold`), while the family was still behind
+    /// the RFC 5291 §6 ORF initial-advertisement gate. An immediate `EoR`
+    /// would tell the peer our initial update is complete and trigger its
+    /// stale-route sweep BEFORE the gated flood arrives — a self-inflicted
+    /// blackhole window. The `EoR` is emitted after the gate lifts and the
+    /// gated flood is sent, or at the `orf_eor_hold` cap. A marker held by
     /// selection deferral or replay grace records the same obligation at
-    /// `PeerUp` or family unlock. Other non-GR ORF peers keep the immediate
-    /// `EoR`, including a pending marker whose initial honest-empty send
+    /// `PeerUp` or family unlock. Other ORF peers keep the immediate `EoR`,
+    /// including a pending marker whose initial honest-empty send
     /// encountered backpressure, and a family withheld at selection release.
+    /// A still-pending marker of any ORF peer joins this set when the peer's
+    /// first refresh is deferred behind selection, so it follows that
+    /// refresh's table.
     gr_deferred_eor: HashMap<PeerId, HashSet<(Afi, Safi)>>,
+    /// Peers whose last ended session's OPEN carried a Graceful Restart
+    /// capability: they may still hold our routes stale and delete them at
+    /// our next End-of-RIB (RFC 4724 §4.2). Set or cleared each time a
+    /// session ends, and read by the next session, whose ORF-gated families
+    /// then keep their initial `EoR` behind the gated table.
+    peer_may_hold_stale: HashSet<PeerId>,
+    /// The [`ORF_EOR_HOLD_CAP`] deadline of a session whose ORF-gated
+    /// initial `EoR` waits for the peer's refresh: armed at registration for
+    /// a peer that may hold our routes stale, otherwise when the first such
+    /// marker enters `gr_deferred_eor`. Per session.
+    orf_eor_hold: graceful_restart::DeadlineMap<PeerId>,
+    /// Sessions whose `orf_eor_hold` cap has passed. A later initial dump or
+    /// family unlock holds an ORF-gated marker for the table only when that
+    /// family's refresh is already queued; any other marker goes out as it
+    /// would without ORF, once the selection, RTC or grace hold that may
+    /// still hold it ends. Per session.
+    orf_eor_cap_passed: HashSet<PeerId>,
     /// Peers whose RT-Constrain-filtered families (VPN, EVPN) keep their
     /// initial-table `EoR` in `pending_eor` until the peer's RT-Constrain
     /// `EoR` arrives or the [`RTC_EOR_HOLD_CAP`] deadline passes (RFC 4684
@@ -1406,6 +1427,13 @@ impl ExpiryCutoffs {
 /// advertisement until that marker "MUST limit that delay to an upper bound.
 /// By default, a 60 second value should be used."
 const RTC_EOR_HOLD_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Upper bound on holding an ORF-gated family's initial End-of-RIB behind
+/// the table the peer's first ROUTE-REFRESH unlocks (RFC 5291 §6), toward a
+/// peer that may hold our routes stale. The same filter-wait default as
+/// [`RTC_EOR_HOLD_CAP`]: a peer that never refreshes then deletes its stale
+/// routes, as it would at an immediate End-of-RIB.
+const ORF_EOR_HOLD_CAP: std::time::Duration = RTC_EOR_HOLD_CAP;
 
 /// Actor work units accounted between a transition's terminal commit poll and
 /// the first general or summary query dispatched afterwards.
@@ -1969,6 +1997,10 @@ struct HelperStaleExempt {
     settled: bool,
     /// Families whose waiting keys an ORF gate held at the last flush.
     orf_blocked: Vec<(Afi, Safi)>,
+    /// Families whose waiting keys a gate that may still arm held at the
+    /// last flush: their End-of-RIB is not yet sent, so their keys wait
+    /// for that gate to arm or for the End-of-RIB.
+    gate_blocked: Vec<(Afi, Safi)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2754,6 +2786,9 @@ impl RibManager {
             peer_rt_membership: HashMap::new(),
             peer_orf_pending: HashMap::new(),
             gr_deferred_eor: HashMap::new(),
+            peer_may_hold_stale: HashSet::new(),
+            orf_eor_hold: graceful_restart::DeadlineMap::default(),
+            orf_eor_cap_passed: HashSet::new(),
             rtc_eor_hold: graceful_restart::DeadlineMap::default(),
             rtc_eor_hold_ready: HashSet::new(),
             eor_grace: HashMap::new(),
@@ -3284,6 +3319,88 @@ impl RibManager {
             || self.eor_grace_held(peer, family)
     }
 
+    /// Whether an ORF-gated family's initial `EoR` toward `peer` waits for
+    /// its gated table: the peer is a GR restarter, or it may still hold our
+    /// routes stale, and the [`ORF_EOR_HOLD_CAP`] has not passed (a
+    /// registration deferred past the cap dumps with no hold). A restarter
+    /// completes its route selection at that `EoR` (RFC 4724 §4.1); a helper
+    /// deletes the routes it still holds stale from us (§4.2).
+    pub(super) fn orf_initial_eor_follows_table(&self, peer: PeerId) -> bool {
+        !self.orf_eor_cap_passed.contains(&peer)
+            && (self.gr_peers.contains_key(&peer) || self.peer_may_hold_stale.contains(&peer))
+    }
+
+    /// Whether `family`'s ROUTE-REFRESH from `peer` is already queued: the
+    /// convergence hold deferred it, or it waits for a dirty peer's resync.
+    fn orf_refresh_queued(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
+        self.selection_deferred_refresh
+            .get(&peer)
+            .is_some_and(|queued| queued.contains(&family))
+            || self
+                .pending_refresh
+                .get(&peer)
+                .is_some_and(|queued| queued.contains(&family))
+    }
+
+    /// Hold `family`'s initial `EoR` toward `peer` for the table the peer's
+    /// first refresh unlocks (`gr_deferred_eor`), arming the session's ORF
+    /// cap if none is armed, so a peer that never refreshes still gets it.
+    /// After the cap only a family whose refresh is already queued waits for
+    /// its table; any other marker takes the ordinary `pending_eor` path,
+    /// where only the selection, RTC or grace hold can still keep it.
+    pub(super) fn defer_orf_initial_eor(&mut self, peer: PeerId, family: (Afi, Safi)) {
+        if self.orf_eor_cap_passed.contains(&peer) {
+            if !self.orf_refresh_queued(peer, family) {
+                self.pending_eor.entry(peer).or_default().insert(family);
+                return;
+            }
+        } else if !self.orf_eor_hold.contains_key(&peer) {
+            self.orf_eor_hold
+                .insert(peer, tokio::time::Instant::now() + ORF_EOR_HOLD_CAP);
+        }
+        self.gr_deferred_eor.entry(peer).or_default().insert(family);
+    }
+
+    /// End `peer`'s ORF `EoR` hold at its cap: the markers of families the
+    /// peer has not refreshed are released to `pending_eor`, without the
+    /// table it never asked for. A family whose refresh already arrived
+    /// keeps its marker for that response's table: one the convergence hold
+    /// deferred, one queued for a dirty peer's resync, or one whose refused
+    /// response waits for a retry (gate lifted).
+    /// A selection or grace hold, or a dirty peer's resync, may still hold a
+    /// released marker, as for other pending markers.
+    fn release_orf_eor_hold(&mut self, peer: PeerId) {
+        self.orf_eor_hold.remove(&peer);
+        self.orf_eor_cap_passed.insert(peer);
+        let Some(families) = self.gr_deferred_eor.remove(&peer) else {
+            return;
+        };
+        let (refreshed, released): (HashSet<_>, HashSet<_>) =
+            families.into_iter().partition(|&family| {
+                self.orf_refresh_queued(peer, family)
+                    || !self
+                        .peer_orf_pending
+                        .get(&peer)
+                        .is_some_and(|gated| gated.contains(&family))
+            });
+        if !refreshed.is_empty() {
+            self.gr_deferred_eor.insert(peer, refreshed);
+        }
+        if released.is_empty() {
+            return;
+        }
+        info!(
+            %peer,
+            families = ?released,
+            cap_secs = ORF_EOR_HOLD_CAP.as_secs(),
+            "no ROUTE-REFRESH from peer within the cap — releasing its held ORF-gated End-of-RIB"
+        );
+        self.pending_eor.entry(peer).or_default().extend(released);
+        if !self.dirty_peers.contains(&peer) {
+            self.flush_pending_eor(peer);
+        }
+    }
+
     /// The families the RFC 4684 outbound membership gate filters.
     pub(super) fn rtc_gated_family(family: (Afi, Safi)) -> bool {
         family.1 == Safi::MplsVpn || family == (Afi::L2Vpn, Safi::Evpn)
@@ -3323,24 +3440,30 @@ impl RibManager {
         }
     }
 
-    /// The nearest `EoR` hold deadline: an RFC 4684 §6 cap or a grace window.
+    /// The nearest `EoR` hold deadline: an RFC 4684 §6 or ORF cap, or a grace
+    /// window.
     fn next_eor_hold_deadline(&mut self) -> Option<tokio::time::Instant> {
-        match (self.rtc_eor_hold.min(), self.next_eor_grace_deadline()) {
-            (Some(rtc), Some(grace)) => Some(rtc.min(grace)),
-            (rtc, grace) => rtc.or(grace),
-        }
+        [
+            self.rtc_eor_hold.min(),
+            self.orf_eor_hold.min(),
+            self.next_eor_grace_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Expire the holds behind the shared timer that fell due at `due`. Grace
-    /// windows release only up to `due`: a later window waits for its own
-    /// turn, so the work queued before its deadline drains first.
+    /// windows, RFC 4684 §6 caps and ORF caps release only up to `due`: a
+    /// later deadline waits for its own turn, so the work queued before it
+    /// (such as the peer's RT-Constrain End-of-RIB or ROUTE-REFRESH) drains
+    /// first.
     fn expire_eor_holds(&mut self, due: tokio::time::Instant) {
         self.expire_eor_grace(due);
-        let now = tokio::time::Instant::now();
         let expired: Vec<PeerId> = self
             .rtc_eor_hold
             .iter()
-            .filter(|&(_, &deadline)| deadline <= now)
+            .filter(|&(_, &deadline)| deadline <= due)
             .map(|(&peer, _)| peer)
             .collect();
         for peer in expired {
@@ -3350,6 +3473,15 @@ impl RibManager {
                 "no RT-Constrain End-of-RIB from peer within the cap — sending held VPN/EVPN End-of-RIB"
             );
             self.release_rtc_eor_hold(peer);
+        }
+        let expired: Vec<PeerId> = self
+            .orf_eor_hold
+            .iter()
+            .filter(|&(_, &deadline)| deadline <= due)
+            .map(|(&peer, _)| peer)
+            .collect();
+        for peer in expired {
+            self.release_orf_eor_hold(peer);
         }
     }
 
@@ -3822,8 +3954,17 @@ impl RibManager {
         }) || !self.pending_inbound_refresh.is_empty()
             || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
-                self.helper_stale_needs_rescan(peer, carried)
-                    && self.helper_stale_exempt_runnable(peer)
+                // Outside a hold the next tick retires a synced session's.
+                if self
+                    .selection_deferral
+                    .as_ref()
+                    .is_some_and(selection_deferral::SelectionDeferral::has_active_gates)
+                {
+                    self.helper_stale_needs_rescan(peer, carried)
+                        && self.helper_stale_exempt_runnable(peer)
+                } else {
+                    self.helper_stale_exempt_synced(peer)
+                }
             })
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {

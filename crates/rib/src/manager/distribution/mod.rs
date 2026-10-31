@@ -5040,7 +5040,7 @@ impl RibManager {
             let hold_active = self
                 .selection_deferral
                 .as_ref()
-                .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates);
+                .is_some_and(super::selection_deferral::SelectionDeferral::may_hold);
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)

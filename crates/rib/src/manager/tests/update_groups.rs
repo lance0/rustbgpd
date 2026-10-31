@@ -1659,6 +1659,36 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_restarter() {
     assert!(manager.gr_deferred_eor[&peer].contains(&ipv6));
 }
 
+/// The same for a helper that may hold our routes stale, within its ORF
+/// `EoR` hold: the unlocked family's marker waits for its gated table.
+#[test]
+fn family_made_sendable_defers_eor_for_an_orf_gated_stale_holder() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 10));
+    let mut outbound = register_direct_peer(&mut manager, peer);
+    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    manager.peer_may_hold_stale.insert(peer);
+    manager
+        .peer_orf_pending
+        .insert(peer, std::iter::once(ipv6).collect());
+
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 0,
+        family: ipv6,
+        add_path_send_limit: None,
+    });
+    while manager.process_next_route_chunk() {}
+
+    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok())
+        .flat_map(|u| u.end_of_rib)
+        .collect();
+    assert_eq!(eor, vec![], "no EoR ahead of the gated flood");
+    assert!(manager.gr_deferred_eor[&peer].contains(&ipv6));
+}
+
 /// RFC 4271 §6.8 collision: `PeerUp(A)`, `PeerUp(B)`, then A's unlock, then
 /// `PeerDown(B)`. The unlock lands while B owns the registration, so it must
 /// be kept on A's retained record: transport has already cleared its
