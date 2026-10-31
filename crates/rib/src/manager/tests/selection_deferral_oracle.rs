@@ -1364,9 +1364,26 @@ impl Harness {
         self.held = false;
         self.observe()?;
         self.drain()?;
+        self.resync_ticks()?;
         if self.orf_gated {
             // The peer's refresh opens the re-armed gate.
             self.push_orf(self.deny);
+            self.observe()?;
+            self.drain()?;
+            self.resync_ticks()?;
+        }
+        Ok(())
+    }
+
+    /// The actor arms its resync timer while `resync_tick_pending` reports
+    /// runnable work, such as an End-of-RIB held back at release, so that
+    /// work lands within a tick of the release.
+    fn resync_ticks(&mut self) -> Checked {
+        for _ in 0..DRAIN_ROUNDS {
+            if !self.manager.resync_tick_pending() {
+                break;
+            }
+            self.manager.resync_dirty_peers_bounded();
             self.observe()?;
             self.drain()?;
         }
@@ -3042,6 +3059,41 @@ fn pre_hold_flap_leaves_a_deleted_rtbh_stale() {
         Op::Drain,
     ];
     if let Some(reason) = failure(config, &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// A GR-helper flap before the hold leaves our host route stale while the
+/// new session waits behind a full writer, and the route is deleted before
+/// the hold. Release frees the writer but leaves the End-of-RIB pending;
+/// the resync timer the actor arms for it sends that End-of-RIB, so the
+/// helper purges the stale row.
+#[test]
+fn release_tick_sends_the_end_of_rib_that_purges_a_stale_row() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = [
+        Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: true,
+        },
+        Op::Delete { prefix: 0, path: 0 },
+    ];
+    if let Some(reason) = failure(config, &setup, &[]) {
         panic!("{reason}");
     }
 }
