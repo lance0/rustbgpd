@@ -926,10 +926,12 @@ impl RibManager {
             self.peer_may_hold_stale.remove(&peer);
             return;
         }
+        // A hold that arms before the next session's End-of-RIB defers it,
+        // so a teardown before the hold arms carries too.
         if !self
             .selection_deferral
             .as_ref()
-            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
+            .is_some_and(super::selection_deferral::SelectionDeferral::may_hold)
         {
             return;
         }
@@ -1069,15 +1071,7 @@ impl RibManager {
     /// the withdrawal a no-op. End-of-RIB is never brought forward. Once
     /// the hold releases, that End-of-RIB purges the rest.
     pub(super) fn flush_helper_stale_exempt(&mut self, changed: &HashSet<Prefix>) {
-        if self.helper_stale_exempt.is_empty() {
-            return;
-        }
-        if !self
-            .selection_deferral
-            .as_ref()
-            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
-        {
-            self.helper_stale_exempt.clear();
+        if self.helper_stale_exempt.is_empty() || !self.helper_stale_exempt_in_hold() {
             return;
         }
         for peer in self.helper_stale_exempt_ready(changed) {
@@ -1199,6 +1193,50 @@ impl RibManager {
             }
         }
         ready
+    }
+
+    /// Whether a hold is armed, so carried keys can be flushed. Otherwise
+    /// retire what no hold can still need: every carry once no family can
+    /// be held, else each carry whose next session is synced. Before any
+    /// hold arms, a session that has sent its table has sent its
+    /// End-of-RIB, which purges the rows the helper kept.
+    pub(super) fn helper_stale_exempt_in_hold(&mut self) -> bool {
+        let Some(selection) = self.selection_deferral.as_ref() else {
+            self.helper_stale_exempt.clear();
+            return false;
+        };
+        if !selection.may_hold() {
+            self.helper_stale_exempt.clear();
+            return false;
+        }
+        if selection.has_active_gates() {
+            return true;
+        }
+        let synced: Vec<PeerId> = self
+            .helper_stale_exempt
+            .keys()
+            .copied()
+            .filter(|&peer| self.helper_stale_exempt_synced(peer))
+            .collect();
+        for peer in synced {
+            self.helper_stale_exempt.remove(&peer);
+        }
+        false
+    }
+
+    /// A later session has sent its whole table, End-of-RIB included: it is
+    /// registered, clean, and no ORF gate holds a family's initial table.
+    pub(super) fn helper_stale_exempt_synced(&self, peer: PeerId) -> bool {
+        self.outbound_peers.get(&peer).is_some_and(|current| {
+            self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
+                !carried
+                    .ended
+                    .upgrade()
+                    .is_some_and(|ended| ended.same_channel(current))
+            })
+        }) && !self.dirty_peers.contains(&peer)
+            && !self.pending_initial_registrations.contains(&peer)
+            && !self.peer_orf_pending.contains_key(&peer)
     }
 
     /// A settled set must be walked again: an ORF gate one of its keys

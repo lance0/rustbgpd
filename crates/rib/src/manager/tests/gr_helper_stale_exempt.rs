@@ -1213,3 +1213,60 @@ fn staged_selection_still_withdraws_a_carried_rtbh() {
     drop(occupied);
     assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
 }
+
+/// Before any hold arms, a helper teardown carries its exempt keys, and the
+/// carry retires once the next session has sent its table, End-of-RIB
+/// included, still outside a hold. Red proof: without retiring a synced
+/// session's carry outside the hold it outlives the session's End-of-RIB.
+#[test]
+fn pre_hold_carry_retires_once_the_next_session_is_synced() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    inject_rtbh(&mut manager, rtbh);
+    apply(&mut old_rx, &mut rib, None);
+    assert!(!manager.selection_deferred(FAMILY), "no hold has armed");
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    assert!(
+        manager.helper_stale_exempt.contains_key(&observer),
+        "a helper teardown before the hold carries its exempt keys"
+    );
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, false, false);
+    let markers = apply(&mut new_rx, &mut rib, Some((Prefix::V4(rtbh), 0)));
+    assert_eq!(markers, 1, "the new session's End-of-RIB is sent");
+    // The resync timer, armed while it reports work.
+    for _ in 0..4 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(!manager.resync_tick_pending(), "no work is left to spin on");
+    assert!(
+        !manager.helper_stale_exempt.contains_key(&observer),
+        "the carry retires once the new session is synced"
+    );
+}
+
+/// Without selection deferral no hold can defer our End-of-RIB, so a
+/// helper teardown builds no carry.
+#[test]
+fn helper_teardown_without_selection_deferral_carries_nothing() {
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    inject_rtbh(
+        &mut manager,
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
+    );
+    apply(&mut old_rx, &mut rib, None);
+    clean_end(&mut manager, 82);
+    assert!(manager.helper_stale_exempt.is_empty());
+}

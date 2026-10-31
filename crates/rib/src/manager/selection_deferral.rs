@@ -510,6 +510,12 @@ impl SelectionDeferral {
         self.active.values().any(|gate| gate.armed)
     }
 
+    /// Whether a family is still unreleased: its gate is armed, or a waiter
+    /// can still arm it before the deadline.
+    pub(super) fn may_hold(&self) -> bool {
+        !self.active.is_empty()
+    }
+
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.active
             .get(&family)
@@ -1550,9 +1556,10 @@ impl RibManager {
             // The hold no longer defers our End-of-RIB, which purges the
             // stale rows a GR helper keeps once it is sent. A planned-restart
             // grace window can still hold it queued; the carry is not kept
-            // for that window.
+            // for that window, and one waits only while a family can still
+            // be held.
             self.hold_exempt_withdrawn.clear();
-            self.helper_stale_exempt.clear();
+            self.helper_stale_exempt_in_hold();
         }
         tracing::info!(
             afi = ?family.0,

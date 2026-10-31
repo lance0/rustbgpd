@@ -1780,6 +1780,45 @@ fn stale_ordinary_row_survives_an_over_carried_rtbh_key() {
     }
 }
 
+/// I5 across a flap before the hold arms: the GR helper keeps our RTBH
+/// stale, the new session's table waits behind a full writer, a waiter then
+/// arms the hold and the RTBH is deleted. The helper must not keep the
+/// deleted RTBH until release. Red proof: without carrying the exempt keys
+/// of a helper teardown outside a hold, it does.
+#[test]
+fn pre_hold_flap_leaves_a_deleted_rtbh_stale() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = [
+        Op::Inject {
+            prefix: 1,
+            path: 2,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: true,
+        },
+    ];
+    let hold = [
+        Op::Delete { prefix: 1, path: 2 },
+        Op::Backpressure(false),
+        Op::Drain,
+    ];
+    if let Some(reason) = failure(config, &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
 /// A carried RTBH key whose prefix still has another route waits; once
 /// that route is deleted too, the next flush withdraws the stale RTBH
 /// inside the hold. Red proof: dropping the waiting keys after the first
