@@ -780,11 +780,13 @@ async fn later_gr_deadline_waits_for_its_own_backlog() {
 
 /// The earliest ORF End-of-RIB cap (peer A's) falls due with a long batch
 /// queued, and A's session ends inside that drain, retiring A's cap. Peer
-/// B's cap, later than that capture and past by now, must capture its own
-/// backlog, so B's ROUTE-REFRESH queued before B's cap sends the table
-/// before the End-of-RIB. Red proof: a count-only cutoff that outlives A's
-/// cap hands B A's exhausted count, and B's End-of-RIB goes out ahead of its
-/// table.
+/// B's cap, later than that capture and past by now, must not expire on
+/// A's cutoff, so B's ROUTE-REFRESH queued before B's cap sends the table
+/// before the End-of-RIB. Red proof: bounding the expiry by the earliest
+/// deadline alone, with the cutoff kept by count only, fires B's cap on A's
+/// exhausted count, and B's End-of-RIB goes out ahead of its table. The
+/// recapture itself is pinned by
+/// `retired_earliest_gr_deadline_recaptures_for_the_next`.
 #[tokio::test(start_paused = true)]
 async fn retired_earliest_orf_cap_does_not_lend_its_cutoff() {
     let a = Ipv4Addr::new(10, 0, 0, 11);
@@ -1435,5 +1437,116 @@ async fn conditional_settle_passed_at_capture_applies_before_a_later_flip() {
         (transitions("y") - 2.0).abs() < f64::EPSILON,
         "Y's settled condition applies before its later withdrawal; transitions={}",
         transitions("y")
+    );
+}
+
+/// RFC 4724 §4.2 when the earliest deadline's owner goes away mid-drain. A's
+/// restart deadline is captured with A's re-establishment and four queries
+/// queued; B's later restart deadline passes after that capture; A's
+/// `PeerUp` then retires A's deadline mid-drain. B's deadline is later than
+/// the capture, so it captures its own backlog at once and is swept before
+/// B's late re-establishment, queued while old queries remain, is admitted.
+/// Red proof: a count-only cutoff keeps A's capture, fires with a bound that
+/// cannot cover B's deadline, and recaptures only after the old queries
+/// drain, so B's late `PeerUp` replaces its restart deadline and B keeps its
+/// stale routes.
+#[tokio::test(start_paused = true)]
+async fn retired_earliest_gr_deadline_recaptures_for_the_next() {
+    let a = Ipv4Addr::new(10, 0, 0, 61);
+    let b = Ipv4Addr::new(10, 0, 0, 62);
+    let observer = Ipv4Addr::new(10, 0, 0, 64);
+    let (tx, rx) = mpsc::channel(16);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let _a_rx = connect_peer(&mut manager, a, 1, false, false);
+    let _b_rx = connect_peer(&mut manager, b, 1, false, false);
+    let mut out_rx = connect_peer(&mut manager, observer, 1, false, false);
+    let a_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    manager.handle_update(received(a, 1, vec![make_route(a_prefix, a)]));
+    manager.handle_update(received(b, 1, vec![make_route(followed(), b)]));
+    while manager.process_next_route_chunk() {}
+    manager.handle_update(restart(a, 1, 2, 360));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    manager.handle_update(restart(b, 1, 2, 360));
+    while out_rx.try_recv().is_ok() {}
+    // Deadlines: A at t0 + 2 s, B at t0 + 3 s; the clock reads t0 + 1 s.
+
+    let context = |peer| RibUpdate::SetPeerGracefulRestartContext {
+        peer,
+        session_id: 2,
+        peer_restart_state: true,
+        peer_gr_helper: true,
+        peer_gr_families: ipv4_sendable(),
+        peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
+    };
+    let (new_a_tx, _new_a_rx) = mpsc::channel(16384);
+    tx.try_send(context(peer_v4(a))).unwrap();
+    tx.try_send(super::lifecycle::test_peer_up(peer_v4(a), 2, new_a_tx))
+        .unwrap();
+    let mut queries = Vec::new();
+    for _ in 0..4 {
+        let (reply, response) = oneshot::channel();
+        tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+        queries.push(response);
+    }
+    let mut actor = Box::pin(manager.run());
+    let mut poll = || {
+        assert!(
+            actor
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    };
+    // t0 + 2.5 s: A's deadline is due, B's is not. The cutoff captures, and
+    // A's context is admitted.
+    tokio::time::advance(Duration::from_millis(1500)).await;
+    poll();
+    // t0 + 3.5 s: B's deadline passes after the capture.
+    tokio::time::advance(Duration::from_secs(1)).await;
+    // A's `PeerUp` is admitted, retiring A's restart deadline; then B's
+    // deadline is the earliest.
+    poll();
+    poll();
+    // B returns after its restart time, while old queries remain queued.
+    let (new_b_tx, _new_b_rx) = mpsc::channel(16384);
+    tx.try_send(context(peer_v4(b))).unwrap();
+    tx.try_send(super::lifecycle::test_peer_up(peer_v4(b), 2, new_b_tx))
+        .unwrap();
+    tx.try_send(received(b, 2, vec![make_route(followed(), b)]))
+        .unwrap();
+    tx.try_send(RibUpdate::EndOfRib {
+        peer: peer_v4(b),
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .unwrap();
+    let (reply, mut barrier) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    run_until(&mut actor, &mut barrier);
+
+    assert!(
+        queries.iter_mut().all(|query| query.try_recv().is_ok()),
+        "every old query was answered"
+    );
+    let expired = |address: Ipv4Addr| {
+        counter_metric_value(
+            &metrics,
+            "bgp_gr_timer_expired_total",
+            &[("peer", address.to_string().as_str())],
+        )
+    };
+    assert!(expired(a) < 0.5, "A re-established within its restart time");
+    assert!(
+        (expired(b) - 1.0).abs() < f64::EPSILON,
+        "B missed its restart time, so its stale routes are swept"
+    );
+    assert_eq!(
+        followed_trace(&mut out_rx),
+        vec!["withdraw", "announce"],
+        "B's stale route goes, and the new session announces it again"
     );
 }

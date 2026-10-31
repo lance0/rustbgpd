@@ -3484,11 +3484,12 @@ impl RibManager {
         .min()
     }
 
-    /// Expire the holds behind the shared timer that fell due at `due`. Grace
-    /// windows, RFC 4684 §6 caps and ORF caps release only up to `due`: a
-    /// later deadline waits for its own turn, so the work queued before it
-    /// (such as the peer's RT-Constrain End-of-RIB or ROUTE-REFRESH) drains
-    /// first.
+    /// Expire the holds behind the shared timer whose deadline is at or
+    /// before `due`, the time its cutoff was captured. The run loop drained
+    /// the work queued before that time, which covers every hold due by then.
+    /// Grace windows, RFC 4684 §6 caps and ORF caps after it wait for their
+    /// own cutoff, so the work queued before them (such as the peer's
+    /// RT-Constrain End-of-RIB or ROUTE-REFRESH) drains first.
     fn expire_eor_holds(&mut self, due: tokio::time::Instant) {
         self.expire_eor_grace(due);
         let expired: Vec<PeerId> = self

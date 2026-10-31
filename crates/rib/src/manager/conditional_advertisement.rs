@@ -843,9 +843,10 @@ impl RibManager {
     }
 
     /// Apply every definition whose settle deadline is at or before `due`,
-    /// the deadline the run loop's timer fired for, marking the attached
-    /// peers of each applied transition dirty. A later deadline waits for its
-    /// own turn. Returns the names whose applied state changed.
+    /// marking the attached peers of each applied transition dirty. The run
+    /// loop passes the time the timer's cutoff was captured, whose drained
+    /// backlog covers every deadline at or before it; a later deadline waits
+    /// for its own cutoff. Returns the names whose applied state changed.
     pub(super) fn fire_conditional_advertisement_timers(&mut self, due: Instant) -> Vec<Arc<str>> {
         self.with_replacement_readiness(|manager| {
             let fired: Vec<_> = manager

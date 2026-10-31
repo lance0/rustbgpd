@@ -1484,8 +1484,9 @@ impl RibManager {
     }
 
     /// Sweep every (peer, AFI, SAFI) whose LLGR stale deadline is at or
-    /// before `due`, the deadline the run loop's LLGR timer fired for,
-    /// grouped per peer. A later deadline waits for its own turn.
+    /// before `due`, grouped per peer. The run loop passes the time the LLGR
+    /// timer's cutoff was captured, whose drained backlog covers every
+    /// deadline at or before it; a later deadline waits for its own cutoff.
     pub(super) fn sweep_expired_llgr_stale(&mut self, due: tokio::time::Instant) {
         let mut expired: std::collections::HashMap<PeerId, Vec<(Afi, Safi)>> =
             std::collections::HashMap::new();
@@ -1788,8 +1789,9 @@ impl RibManager {
     }
 
     /// Sweep any inbound enhanced route refresh windows whose deadline is at
-    /// or before `due`, the deadline the run loop's timer fired for. A later
-    /// window waits for its own turn.
+    /// or before `due`. The run loop passes the time the timer's cutoff was
+    /// captured, whose drained backlog covers every window due by then; a
+    /// later window waits for its own cutoff.
     pub(super) fn expire_refresh_windows(&mut self, due: tokio::time::Instant) {
         let expired: Vec<(PeerId, Afi, Safi)> = self
             .refresh_deadlines
