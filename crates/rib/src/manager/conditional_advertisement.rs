@@ -842,24 +842,24 @@ impl RibManager {
             .min()
     }
 
-    /// Apply every definition whose settle deadline has passed, marking the
-    /// attached peers of each applied transition dirty. Returns the names
-    /// whose applied state changed.
-    pub(super) fn fire_conditional_advertisement_timers(&mut self) -> Vec<Arc<str>> {
+    /// Apply every definition whose settle deadline is at or before `due`,
+    /// the deadline the run loop's timer fired for, marking the attached
+    /// peers of each applied transition dirty. A later deadline waits for its
+    /// own turn. Returns the names whose applied state changed.
+    pub(super) fn fire_conditional_advertisement_timers(&mut self, due: Instant) -> Vec<Arc<str>> {
         self.with_replacement_readiness(|manager| {
-            let now = Instant::now();
-            let due: Vec<_> = manager
+            let fired: Vec<_> = manager
                 .conditional_advertisements
                 .definitions
                 .iter()
                 .inspect(|_| {
                     manager.replacement_checkpoint_at("conditional_timer_definition", false);
                 })
-                .filter(|(_, state)| state.deadline.is_some_and(|deadline| deadline <= now))
+                .filter(|(_, state)| state.deadline.is_some_and(|deadline| deadline <= due))
                 .map(|(name, _)| Arc::clone(name))
                 .collect();
             let mut transitions = Vec::new();
-            for name in due {
+            for name in fired {
                 let Some(mut state) = manager.conditional_advertisements.definitions.remove(&name)
                 else {
                     continue;

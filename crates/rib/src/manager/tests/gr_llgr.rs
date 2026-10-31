@@ -2497,7 +2497,7 @@ async fn llgr_only_peer_retains_routes_as_llgr_stale_until_llst_expiry() {
     );
 
     tokio::time::advance(Duration::from_secs(31)).await;
-    manager.sweep_expired_llgr_stale();
+    manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
     assert!(
         adj_route(&manager, source, retention_v4_prefix()).is_none(),
         "the Long-Lived Stale Time bounds retention"
@@ -2583,7 +2583,7 @@ async fn retention_query_follows_gr_then_llgr_to_the_sweep() {
     assert_eq!(llgr.next_deadline, Some(start + Duration::from_secs(70)));
 
     tokio::time::advance(Duration::from_secs(61)).await;
-    manager.sweep_expired_llgr_stale();
+    manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
     assert_eq!(
         retention(&mut manager, source),
         crate::update::PeerRetention {
@@ -2759,7 +2759,7 @@ async fn llgr_only_peer_reports_retained_routes_until_llst_sweep() {
     assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
 
     tokio::time::advance(Duration::from_secs(31)).await;
-    manager.sweep_expired_llgr_stale();
+    manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
     assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
 }
 
@@ -3098,7 +3098,7 @@ async fn partial_gr_llst_sweep_keeps_counting_gr_phase_routes() {
     ));
 
     tokio::time::advance(Duration::from_secs(6)).await;
-    manager.sweep_expired_llgr_stale();
+    manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
     assert!(adj_route(&manager, source, retention_v6_prefix()).is_none());
     assert!(adj_route(&manager, source, retention_v4_prefix()).is_some_and(|r| r.is_stale));
     assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));

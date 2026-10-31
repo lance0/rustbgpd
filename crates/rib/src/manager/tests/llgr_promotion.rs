@@ -1050,11 +1050,10 @@ fn run_llgr_expiry_case_with_fresh(
 
     // Growth recorded during setup is not the expiry's.
     crate::orr::rebuild_growth::take();
-    let (answered, observations) = run_with_readiness_observations(
-        &mut manager,
-        readiness_tx,
-        RibManager::sweep_expired_llgr_stale,
-    );
+    let (answered, observations) =
+        run_with_readiness_observations(&mut manager, readiness_tx, |manager: &mut RibManager| {
+            manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
+        });
     assert_eq!(
         retained(&manager),
         0,
@@ -1219,11 +1218,10 @@ fn llgr_expiry_rebuilds_orr_and_retires_page_cache_under_readiness() {
             assert!(manager.orr_page_topology.is_some());
         }
 
-        let answered = run_with_readiness_probe(
-            &mut manager,
-            readiness_tx,
-            RibManager::sweep_expired_llgr_stale,
-        );
+        let answered =
+            run_with_readiness_probe(&mut manager, readiness_tx, |manager: &mut RibManager| {
+                manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
+            });
         assert_eq!(manager.ribs[&peer].bgpls_len(), 0);
         if vantage {
             assert_eq!(manager.orr.resolved.get(&orr_vantage()), Some(&true));
@@ -1643,11 +1641,10 @@ fn run_add_path_expiry_case(family: (Afi, Safi), paths: u8, one_nlri: bool) -> u
     let retained = |manager: &RibManager| manager.ribs[&peer].retained_stale_count();
     assert_eq!(retained(&manager), u64::from(paths), "{family:?}");
     make_llgr_expiry_due(&mut manager, peer, family);
-    let answered = run_with_readiness_probe(
-        &mut manager,
-        readiness_tx,
-        RibManager::sweep_expired_llgr_stale,
-    );
+    let answered =
+        run_with_readiness_probe(&mut manager, readiness_tx, |manager: &mut RibManager| {
+            manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
+        });
     assert_eq!(
         retained(&manager),
         0,
@@ -1790,11 +1787,10 @@ fn run_rtc_restage_expiry_case(fresh: u16, vpn: u8) -> BTreeMap<&'static str, us
     let _second = peer_up(&mut manager);
     announce(&mut manager, &mut (1000..1000 + fresh));
     make_llgr_expiry_due(&mut manager, peer_v4(client), rtc);
-    let answered = run_with_readiness_probe(
-        &mut manager,
-        readiness_tx,
-        RibManager::sweep_expired_llgr_stale,
-    );
+    let answered =
+        run_with_readiness_probe(&mut manager, readiness_tx, |manager: &mut RibManager| {
+            manager.sweep_expired_llgr_stale(tokio::time::Instant::now());
+        });
     assert_eq!(manager.ribs[&peer_v4(client)].rtc_len(), usize::from(fresh));
     answered
 }
