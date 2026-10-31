@@ -1,0 +1,49 @@
+{
+  "schema": "rustbgpd.evpn-terminal-debt.receipt.v1",
+  "date": "2026-10-27",
+  "status": "FAIL",
+  "reason": "complete current-feed churn repeated full-inventory producer work",
+  "source": "7fab2c448152206a0de84c056e2fb07013768bf7",
+  "qualification_source": "a5da4df26898b3658511babd3cb919e130b7fc40",
+  "correctness_only": true,
+  "production_activation": false,
+  "workload": {
+    "clients": 3,
+    "routes_per_source": 10000,
+    "type2_per_source": 8000,
+    "type5_per_source": 2000,
+    "export_groups": 2,
+    "source_updates": 1,
+    "changed_nlri_identities": 4,
+    "enhanced_refresh_negotiated": false
+  },
+  "results": {
+    "private": "PASS",
+    "candidate": "FAIL",
+    "root_calls": 4,
+    "complete_producer_attempts": 6,
+    "inventory_visits": 899970,
+    "max_inventory_visits": 0,
+    "delta_visits": 24,
+    "current_complete_debt_spans_applied_churn": true,
+    "same_session_and_channel": true,
+    "kernel_receive_window_limited_delta_us": 198000,
+    "marker_admission_refusals": 0,
+    "all_three_receiver_wire_checks_pass": true,
+    "candidate_terminal_after_churn": true,
+    "full_settlement": true,
+    "all_raw_provenance_headroom_pass": true,
+    "all_five_executed_reset_causes_zero": true,
+    "readiness_requests_private": 23,
+    "readiness_requests_candidate": 34,
+    "all_readiness_and_schedule_bars_pass": true,
+    "both_driver_exits": 0,
+    "offline_analyze": "FAIL"
+  },
+  "comparative_medians": {},
+  "retained_prior_attempts": [
+    "quiet-host admission exit 75 before any daemon",
+    "source 74c20cd startup INVALID: capture directory already existed"
+  ],
+  "scope": "ordinary RR and EVPN EoR only; not ERR, RTC, full-fleet recovery, soak or production activation"
+}
