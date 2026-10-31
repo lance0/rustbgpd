@@ -57,26 +57,48 @@ resolved.
   the helper is held by selection deferral or the replay grace window,
   withdraws each one that was deleted and whose prefix has no other route.
   It deliberately does not withdraw a deleted RTBH whose prefix still has
-  another candidate: a local route, or one received from another peer. Queued updates are discarded when a session ends, so the RIB cannot
+  another candidate: a local route, or one received from another peer.
+  Queued updates are discarded when a session ends, so the RIB cannot
   tell whether the helper holds the stale RTBH at that key or an ordinary
   route that was never replaced; withdrawing it could remove a route the
   helper rightly keeps. The candidate counts even when this peer's export
   policy denies it. The helper therefore keeps that RTBH until whichever
   comes first: an ordinary route for the prefix is advertised to it at the
-  same key, implicitly replacing the stale row, or End-of-RIB is sent, at
-  the later of selection release and the end of the grace window.
+  same key, implicitly replacing the stale row, or End-of-RIB reaches it.
   Selection release distributes routes while the grace window still holds
   End-of-RIB, so an exportable replacement normally reaches the helper at
   release. The RTBH stays until End-of-RIB only while no replacement is
   advertised at its key: the candidate is denied by this peer's export
-  policy, or is still held by selection deferral, or, toward an Add-Path
-  receiver, the replacement is advertised with a different path ID and the
-  stale RTBH keeps its own. The grace window is at most `gr_eor_grace_time`
-  (`--check` warns above 240 seconds; the schema maximum is 4095), and the
-  helper's own stale-route timer can end it sooner. Tracking is limited to
-  65,536 carried keys per helper peer, and 65,536 withdrawn-in-hold keys per
-  peer or update group; keys past that limit are not recorded, so a deleted
-  RTBH among them stays at the helper until End-of-RIB.
+  policy, or is still held by selection deferral or by the ORF gate on the
+  family's table (below), or, toward an Add-Path receiver, the replacement
+  is advertised with a different path ID and the stale RTBH keeps its own.
+  The selection and grace holds on End-of-RIB end at the later of selection
+  release and the end of the grace window. A third hold can outlast both:
+  when the new session negotiated Outbound Route Filtering (RFC 5291) for
+  the family, its initial End-of-RIB also waits for the table that the
+  peer's first ROUTE-REFRESH unlocks, for up to 60 seconds after the
+  session comes up. A session that reconnects at t=10 s, with selection
+  released at t=20 s and grace ending at t=30 s, can therefore have that
+  End-of-RIB held until t=70 s. A family whose ROUTE-REFRESH has already
+  arrived keeps its End-of-RIB behind that refresh's table, even past the
+  60 seconds. No carried key of the family is withdrawn while the ORF gate
+  holds its table, or after selection and grace have both ended, so in
+  that tail a deleted RTBH not yet withdrawn stays until End-of-RIB. The end
+  of a hold is not transmission: the released End-of-RIB is queued behind
+  earlier updates to the peer, and a full outbound queue or a pending resync
+  can delay it further. Prompt revocation is therefore not guaranteed when
+  an operator deletes such an RTBH during the hold: the end of the grace
+  window is not a withdrawal deadline, and rustbgpd sets no deadline of its
+  own for the RTBH to leave the helper. It leaves when a replacement is
+  advertised at its key, when End-of-RIB reaches the helper, or when the
+  helper's own stale-route timer expires, if it runs one (RFC 4724 §4.2
+  makes that timer optional). The grace window is at most
+  `gr_eor_grace_time` (`--check` warns above 240 seconds; the schema
+  maximum is 4095). Tracking is
+  limited to 65,536 carried keys per helper peer, and 65,536
+  withdrawn-in-hold keys per peer or update group; keys past that limit are
+  not recorded, so a deleted RTBH among them stays at the helper until
+  End-of-RIB.
   Mitigations: keep `gr_eor_grace_time` short; an RTBH controller that
   replaces a blackhole with an ordinary route at the same prefix should
   expect the old RTBH to stay at a flapped helper until that replacement is
