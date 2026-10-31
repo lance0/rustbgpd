@@ -1937,9 +1937,9 @@ name it.
 | `bgp_rib_loc_prefixes{family}` | Loc-RIB size (best paths), one series per canonical family (`ipv4_unicast`, `ipv6_unicast`, `ipv4_flowspec`, `ipv6_flowspec`, `l2vpn_evpn`, `linkstate`, `linkstate_vpn`, `l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `rtc`); summing every `family` gives the whole Loc-RIB |
 | `bgp_rib_prefixes{peer,family}` | Adj-RIB-In size per peer (received) by canonical family: `ipv4_unicast`, `ipv6_unicast`, `l2vpn_evpn`, `ipv4_flowspec` and `ipv6_flowspec`, each Add-Path path counted individually. The synthetic peer `0.0.0.0` reports locally injected unicast and FlowSpec rules, including rules not selected into Loc-RIB. VPN, labeled-unicast, BGP-LS and RTC routes are not counted here |
 | `bgp_rib_adj_out_prefixes{peer,family}` | Adj-RIB-Out size per peer (advertised), one series per canonical family (the same twelve as `bgp_rib_loc_prefixes`), each initialized to 0 when the peer registers. Update-group members report their synthesized per-family view |
-| `bgp_dynamic_neighbor_slots_used` | Dynamic peers currently consuming the process-global admission limit, including retained disabled max-prefix recovery targets |
+| `bgp_dynamic_neighbor_slots_used` | Dynamic peers currently consuming the process-global admission limit, including idle GR/LLGR-retained neighbors and retained disabled max-prefix recovery targets |
 | `bgp_dynamic_neighbor_slots_limit` | Effective process-global `dynamic_neighbor_limit` |
-| `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
+| `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; at zero, a new matching address is rejected unless a retained neighbor kept only because it may hold our routes can be evicted |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
 | `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, or `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait). All four series are exported at 0 from startup |
 | `bgp_bmp_identity_conflicts_total{outcome}` | Neighbors admitted at a link-local address another BMP-monitored neighbor holds: `refused` before the session starts, or `excluded` from BMP when every collector sets `on_identity_conflict = "exclude"`. Both series are exported at 0 from startup |
@@ -2747,10 +2747,12 @@ NOTIFICATION when the RFC 8538 N bit was not negotiated, leaves the peer
 nothing of ours to hold. One `idle dynamic neighbor keeps its identity while graceful restart retention lasts`
 INFO line names what is held and for how long. A reconnect from the address
 in that window becomes the same neighbor once its OPEN validates, so its
-End-of-RIB completes the restart; a connection that never reaches
-Established leaves the retention as it was, and an OPEN from a different AS
-is a new speaker: it gets a new identity, and what was retained for the last
-one is purged. A neighbor with
+End-of-RIB completes the restart. An ordinary failed reconnect that never
+reaches Established leaves the retention as it was. An administrative reset
+or BFD Down can still purge the routes rustbgpd retains before Established
+if the reconnect has already resumed the old neighbor identity. An OPEN from
+a different AS is a new speaker: it gets a new identity, and what was retained
+for the last one is purged. A neighbor with
 nothing retained either way is deleted when it goes idle; removing its range,
 a configuration rollback without the range, or a static neighbor added at the
 address deletes it at once. A later interface-down does not purge an idle

@@ -13,11 +13,14 @@
   ORF-gated initial End-of-RIB went out before the gated table, so the peer
   dropped the routes it kept. A reconnect from the address now becomes the
   same neighbor once an OPEN from the same AS validates, without a second
-  `PEER_ADDED`; a connection that never reaches Established leaves the
-  retention unchanged; one that never returns is deleted, with `PEER_REMOVED`, once both
-  retentions lapse. Retention checks share one RIB query and never wait in
-  the peer manager. At the limit, a neighbor kept only while it may hold our
-  routes gives its slot to a new address. Removing its range, a rollback
+  `PEER_ADDED`. An ordinary failed reconnect that never reaches Established
+  leaves the retention unchanged. An administrative reset or BFD Down can
+  still purge the routes rustbgpd retains before Established if the reconnect
+  has already resumed the old neighbor identity. A neighbor that never
+  returns is deleted, with `PEER_REMOVED`, once both retentions lapse.
+  Retention checks share one RIB query and never wait in the peer manager.
+  At the limit, a neighbor kept only while it may hold our routes gives its
+  slot to a new address. Removing its range, a rollback
   without the range, or a static neighbor at the address still deletes it,
   and a staged transaction's ranges wait for its commit or rollback.
 - A reconnect to a retained dynamic neighbor whose OPEN comes from a
