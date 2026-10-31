@@ -48,12 +48,13 @@ use crate::ra_discovery::{
 };
 
 use super::PeerManager;
-use super::dynamic::RETENTION_RECHECK;
 
 /// How long reconciliation waits for a bound session, or the RIB, to answer.
 const BOUND_STATE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// How soon a reconcile is retried after a bound session did not answer.
 const RECONCILE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// How soon retained routes with no RIB timer armed are checked again.
+const RETENTION_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The discovery actor, its events, and one entry per interface-only
 /// neighbor, by interface name.
@@ -1748,7 +1749,7 @@ impl PeerManager {
     /// Retained, the next check is armed at the RIB's next timer, which
     /// sweeps them or promotes them to LLGR; no answer retries shortly.
     async fn retained_until_next_check(&mut self, name: &str, key: &PeerKey) -> bool {
-        let Some(retention) = self.peer_retention(key).await else {
+        let Some(retention) = self.bound_peer_retention(key).await else {
             self.arm_unnumbered_retry();
             return true;
         };
@@ -1763,6 +1764,28 @@ impl PeerManager {
         debug!(interface = %name, peer = %key, stale_routes = retention.stale_routes, "unnumbered: unbound neighbor keeps its address while its routes are retained");
         self.arm_unnumbered_retry_at(at);
         true
+    }
+
+    /// The RIB's GR/LLGR retention for the bound peer's identity; `None`
+    /// when the RIB did not answer in time.
+    pub(super) async fn bound_peer_retention(
+        &mut self,
+        key: &PeerKey,
+    ) -> Option<rustbgpd_rib::PeerRetention> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let request = rustbgpd_rib::RibUpdate::QueryPeerRetention {
+            peer: self.rib_peer_of(key),
+            reply,
+        };
+        let rib_tx = self.rib_tx.clone();
+        let round_trip = tokio::time::timeout(BOUND_STATE_QUERY_TIMEOUT, async move {
+            rib_tx.send(request).await.ok()?;
+            response.await.ok()
+        });
+        self.await_with_readiness(round_trip, super::OperatorReadAdmission::Served)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// End the bound peer's session and clear the binding, keeping the

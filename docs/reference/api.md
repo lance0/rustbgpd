@@ -701,8 +701,9 @@ returns one only for an address without an interface or comparison peer.
 The row disappears when retention ends. The neighbor keeps its RIB identity
 and its `dynamic_neighbor_limit` slot until then (longer when it may still
 hold our routes as our helper), so a reconnect from the address returns as an
-ordinary row for the same neighbor. `retention_only` is absent on ordinary
-rows and from older daemons, which return no row for such a peer.
+ordinary row for the same neighbor. A neighbor kept only while it may hold
+our routes has no row. `retention_only` is absent on ordinary rows and from
+older daemons, which return no row for such a peer.
 
 `outbound_resync_pending` is true while the peer missed outbound delivery and
 waits for the RIB's full export resync; `outbound_dirty_seconds` is the whole
@@ -3200,8 +3201,8 @@ Unified event types:
 | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED` | BGP FSM state changed; payload carries old/new state and session role |
 | `BGP_EVENT_TYPE_SESSION_ESTABLISHED` | FSM reached `Established` |
 | `BGP_EVENT_TYPE_SESSION_LOST` | FSM left `Established`; severity is `WARNING` |
-| `BGP_EVENT_TYPE_PEER_ADDED` | Peer entered the authoritative managed set; payload carries new state `idle` and the neighbor's exact address and interface |
-| `BGP_EVENT_TYPE_PEER_REMOVED` | Peer left the authoritative managed set after session retirement; payload carries no FSM state or role and preserves the neighbor's exact address and interface |
+| `BGP_EVENT_TYPE_PEER_ADDED` | Peer entered the authoritative managed set; payload carries new state `idle` and the neighbor's exact address and interface. An idle dynamic neighbor kept for Graceful Restart retention stays in the set, so its reconnect emits no second `PEER_ADDED` |
+| `BGP_EVENT_TYPE_PEER_REMOVED` | Peer left the authoritative managed set after session retirement; payload carries no FSM state or role and preserves the neighbor's exact address and interface. For a dynamic neighbor kept for Graceful Restart retention it arrives when the neighbor is deleted, not when its session goes idle |
 | `BGP_EVENT_TYPE_PEER_ENABLED` | Operator enabled a configured peer |
 | `BGP_EVENT_TYPE_PEER_DISABLED` | Operator disabled a configured peer |
 | `BGP_EVENT_TYPE_NOTIFICATION_SENT` | rustbgpd sent a BGP NOTIFICATION; payload carries direction, code, subcode, description, session role, and optional RFC 9003 shutdown reason |

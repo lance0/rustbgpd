@@ -3,16 +3,40 @@
 //! the RIB retains for it, and ours it may retain as our helper (RFC 4724
 //! §4.2). A reconnect at the address within that window resumes as the same
 //! RIB peer; one that never comes is deleted once both retentions lapse.
-//! Each test drives the real peer manager into a real RIB.
+//! Most tests drive the real peer manager into a real RIB.
 
 use super::inbound_admission::localhost_inbound_stream;
 use super::*;
 
+use rustbgpd_api::peer_types::SessionLifecycleEventType;
 use rustbgpd_rib::update::OutboundRouteUpdate;
 use rustbgpd_rib::{PeerEndpoint, PeerId, PeerRetention, RibManager};
+use rustbgpd_transport::{SessionEndRetention, SessionLifecycleNotification, SessionRole};
 
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const MEMBER: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9));
+const MEMBER_ASN: u32 = 65002;
+
+/// The session ended with GR retention of its routes.
+const THEIRS: SessionEndRetention = SessionEndRetention {
+    theirs: true,
+    ours_for: None,
+};
+/// The session ended with the member, as our helper, holding ours for 120 s.
+const OURS: SessionEndRetention = SessionEndRetention {
+    theirs: false,
+    ours_for: Some(Duration::from_secs(120)),
+};
+/// Both.
+const BOTH: SessionEndRetention = SessionEndRetention {
+    theirs: true,
+    ours_for: Some(Duration::from_secs(120)),
+};
+/// Nothing held, as after a Hard Reset or a session that never established.
+const NOTHING: SessionEndRetention = SessionEndRetention {
+    theirs: false,
+    ours_for: None,
+};
 
 /// A dynamic-range manager wired to a running RIB.
 fn manager_with_rib() -> (
@@ -24,7 +48,11 @@ fn manager_with_rib() -> (
     let (_query_tx, query_rx) = mpsc::channel(4);
     let rib = RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
     let rib_task = tokio::spawn(rib.run());
-    let mgr = PeerManager::new_with_config(
+    (manager_on(rib_tx.clone()), rib_tx, rib_task)
+}
+
+fn manager_on(rib_tx: mpsc::Sender<RibUpdate>) -> PeerManager {
+    PeerManager::new_with_config(
         mpsc::channel(16).1,
         mpsc::channel(1).1,
         65001,
@@ -32,69 +60,101 @@ fn manager_with_rib() -> (
         None,
         None,
         BgpMetrics::new(),
-        rib_tx.clone(),
+        rib_tx,
         None,
         None,
         make_dynamic_manager_config(),
-    );
-    (mgr, rib_tx, rib_task)
+    )
 }
 
-/// Accept the member through the real inbound path. Returns the client end,
+/// Accept `addr` through the real inbound path. Returns the client end,
 /// which must stay open.
-async fn accept(mgr: &mut PeerManager) -> TcpStream {
+async fn accept_at(mgr: &mut PeerManager, addr: IpAddr) -> TcpStream {
     let (server, client) = localhost_inbound_stream().await;
-    mgr.handle_inbound(server, sock(MEMBER), None, None).await;
+    mgr.handle_inbound(server, sock(addr), None, None).await;
+    client
+}
+
+async fn accept(mgr: &mut PeerManager) -> TcpStream {
+    let client = accept_at(mgr, MEMBER).await;
     assert!(
         mgr.peers.contains_key(&key(MEMBER)),
         "the member is accepted"
     );
-    assert!(
-        mgr.peers[&key(MEMBER)]
-            .transport_config
-            .peer
-            .graceful_restart,
-        "the range's group has graceful restart on by default"
-    );
     client
 }
 
-/// The member's RIB identity, as its session resolves it once the OPEN
-/// validates: the slot's handle, or a new one for an empty slot.
-fn open_validated(mgr: &mut PeerManager) -> PeerId {
-    let slot = &mgr.peers[&key(MEMBER)].transport_config.rib_peer;
-    if let Some(peer) = slot.get() {
-        return peer;
-    }
-    let peer = PeerId::allocate(PeerEndpoint::new(MEMBER, None));
-    let slot = rustbgpd_transport::RibPeerSlot::assigned(peer);
-    mgr.peers
-        .get_mut(&key(MEMBER))
-        .unwrap()
+/// The member's OPEN from `asn` validates: its session resolves its RIB
+/// identity and reports the OPEN. Returns the identity.
+async fn open_from(mgr: &mut PeerManager, asn: u32) -> PeerId {
+    let managed = &mgr.peers[&key(MEMBER)];
+    let peer = managed
         .transport_config
-        .rib_peer = slot.clone();
-    mgr.rib_peers.insert(key(MEMBER), slot);
+        .rib_peer
+        .resolve(|| PeerEndpoint::new(MEMBER, None), asn);
+    let session_id = managed.session_id();
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id,
+        role: SessionRole::Primary,
+        peer_addr: MEMBER,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: asn,
+    })
+    .await;
     peer
 }
 
-/// The member's session goes idle.
-async fn idle(mgr: &mut PeerManager) {
+async fn open_validated(mgr: &mut PeerManager) -> PeerId {
+    open_from(mgr, MEMBER_ASN).await
+}
+
+/// The member's session reaches Established.
+fn established(mgr: &mut PeerManager) {
     let session_id = mgr.peers[&key(MEMBER)].session_id();
+    mgr.handle_session_lifecycle_notification(&SessionLifecycleNotification::StateChanged {
+        session_id,
+        role: SessionRole::Primary,
+        peer_addr: MEMBER,
+        peer_asn: Some(MEMBER_ASN),
+        old: SessionState::OpenConfirm,
+        new: SessionState::Established,
+        teardown_cause: None,
+    });
+}
+
+/// The member's session goes idle after its session reported `end`.
+async fn idle(mgr: &mut PeerManager, end: SessionEndRetention) {
+    let managed = &mgr.peers[&key(MEMBER)];
+    managed.handle().publish_session_end_retention(end);
+    let session_id = managed.session_id();
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
-        role: rustbgpd_transport::SessionRole::Primary,
+        role: SessionRole::Primary,
         peer_addr: MEMBER,
     })
     .await;
     assert!(mgr.peers.is_empty(), "the idle member leaves the inventory");
 }
 
-/// A session of `peer` whose OPEN made it our GR helper (`helper`) and
-/// listed IPv4 unicast for its own retention (`restarting` marks the
-/// session after its restart); ORF-gated when `orf`.
+/// Run the due checks as the run loop does, through each batched query.
+async fn settle(mgr: &mut PeerManager) {
+    loop {
+        mgr.check_due_retained_dynamic().await;
+        let Some(pass) = mgr.retention.pass.as_mut() else {
+            return;
+        };
+        let answer = (&mut pass.answer).await.unwrap();
+        mgr.finish_retention_pass(answer).await;
+    }
+}
+
+/// A session of `peer` from `asn` whose OPEN made it our GR helper
+/// (`helper`) and listed IPv4 unicast for its own retention (`restarting`
+/// marks the session after its restart); ORF-gated when `orf`.
 fn session(
     peer: PeerId,
     session_id: u64,
+    asn: u32,
     helper: bool,
     restarting: bool,
     orf: bool,
@@ -116,7 +176,7 @@ fn session(
             interpret_rfc1997: true,
             session_id,
             peer,
-            peer_asn: 65002,
+            peer_asn: asn,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
             outbound_tx,
             export_policy: None,
@@ -223,38 +283,90 @@ async fn end_of_rib_sent(
     sent
 }
 
+fn presence_events(mgr: &PeerManager, event_type: SessionLifecycleEventType) -> usize {
+    mgr.session_event_history
+        .iter()
+        .filter(|event| event.event_type == event_type && event.peer == MEMBER)
+        .count()
+}
+
+/// Retain the member once: accepted, its OPEN validated, `octets` routes
+/// retained by a GR end, then idle after a session that reported `end`.
+/// Returns its handle.
+async fn retained_member(
+    mgr: &mut PeerManager,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    end: SessionEndRetention,
+) -> PeerId {
+    let _client = accept(mgr).await;
+    let peer = open_validated(mgr).await;
+    let (tx, _rx) = mpsc::channel(16);
+    send_all(
+        rib_tx,
+        session(
+            peer,
+            1,
+            MEMBER_ASN,
+            end.ours_for.is_some(),
+            false,
+            false,
+            tx,
+        ),
+    )
+    .await;
+    send_all(rib_tx, [announce(peer, 1, [1, 2, 3])]).await;
+    let last = if end.theirs {
+        graceful_end(peer, 1)
+    } else {
+        RibUpdate::PeerDown {
+            peer,
+            session_id: 1,
+        }
+    };
+    send_all(rib_tx, [last]).await;
+    idle(mgr, end).await;
+    settle(mgr).await;
+    assert_eq!(mgr.dynamic_peer_count, 1, "the member is retained");
+    peer
+}
+
 /// The ticket's shape: a GR member drops, the RIB retains its routes, and it
-/// reconnects inside the restart time. The reconnect is the same RIB peer,
-/// so its End-of-RIB ends the retention: the route it re-sent stays, the rest
-/// are swept. Red proof: deleting the member at idle, as before, purges the
-/// retained routes at once and gives the reconnect a new handle.
+/// reconnects inside the restart time. The reconnect is the same RIB peer
+/// and the same managed neighbor (no second `PEER_ADDED`), so its
+/// End-of-RIB ends the retention: the route it re-sent stays, the rest are
+/// swept; at Established the live neighbor owns the identity. Red proof:
+/// deleting the member at idle purges the retained routes at once and gives
+/// the reconnect a new handle.
 #[tokio::test]
 async fn retained_member_reconnects_as_the_same_peer_and_its_eor_ends_retention() {
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
-    let _first = accept(&mut mgr).await;
-    let peer = open_validated(&mut mgr);
-    let (tx, _rx) = mpsc::channel(16);
-    send_all(&rib_tx, session(peer, 1, false, false, false, tx)).await;
-    send_all(&rib_tx, [announce(peer, 1, 1..=3), graceful_end(peer, 1)]).await;
-
-    idle(&mut mgr).await;
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
     assert_eq!(
         retention(&rib_tx, peer).await.stale_routes,
         3,
         "the RIB still retains the member's routes"
     );
     assert_eq!(loc_rib_count(&rib_tx).await, 3);
-    assert_eq!(
-        mgr.dynamic_peer_count, 1,
-        "the retained member keeps its slot"
-    );
 
     let _second = accept(&mut mgr).await;
     assert_eq!(mgr.dynamic_peer_count, 1, "the reconnect reuses that slot");
-    let resumed = open_validated(&mut mgr);
-    assert_eq!(resumed, peer, "the reconnect resumes on the same handle");
+    assert_eq!(
+        presence_events(&mgr, SessionLifecycleEventType::PeerAdded),
+        1
+    );
+    assert_eq!(
+        open_validated(&mut mgr).await,
+        peer,
+        "it resumes the same handle"
+    );
+    established(&mut mgr);
+    assert!(mgr.retained_dynamic.is_empty(), "the live neighbor owns it");
     let (tx, _rx) = mpsc::channel(16);
-    send_all(&rib_tx, session(peer, 2, false, true, false, tx)).await;
+    send_all(
+        &rib_tx,
+        session(peer, 2, MEMBER_ASN, false, true, false, tx),
+    )
+    .await;
     send_all(
         &rib_tx,
         [
@@ -274,34 +386,39 @@ async fn retained_member_reconnects_as_the_same_peer_and_its_eor_ends_retention(
         1,
         "End-of-RIB swept what the member did not re-send"
     );
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    assert_eq!(
+        presence_events(&mgr, SessionLifecycleEventType::PeerRemoved),
+        0
+    );
     rib_task.abort();
 }
 
 /// A member that never returns is deleted once both retentions lapse: the
 /// RIB's GR timer sweeps its routes, and as our helper it may hold ours for
-/// our restart time plus a hold time; then its identity is released and
-/// its slot freed. Red proof: deleting at idle purges the routes before
-/// their restart time; keeping the member past both windows never frees it.
+/// the window its session reported plus a hold time; then its identity is
+/// released, its slot freed, and its `PEER_REMOVED` published. Red proof:
+/// deleting at idle purges the routes before their restart time; keeping the
+/// member past both windows never frees it.
 #[tokio::test(start_paused = true)]
 async fn retained_member_that_never_returns_is_deleted_after_both_retentions() {
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
     let _first = accept(&mut mgr).await;
-    let peer = open_validated(&mut mgr);
-    let config = mgr.peers[&key(MEMBER)].transport_config.peer.clone();
-    let ours = Duration::from_secs(
-        u64::from(config.gr_restart_time)
-            + u64::from(config.llgr_stale_time)
-            + u64::from(config.hold_time),
-    );
+    let peer = open_validated(&mut mgr).await;
+    let hold = u64::from(mgr.peers[&key(MEMBER)].transport_config.peer.hold_time);
     let (tx, _rx) = mpsc::channel(16);
-    send_all(&rib_tx, session(peer, 1, true, false, false, tx)).await;
+    send_all(
+        &rib_tx,
+        session(peer, 1, MEMBER_ASN, true, false, false, tx),
+    )
+    .await;
     send_all(&rib_tx, [announce(peer, 1, 1..=3), graceful_end(peer, 1)]).await;
     let ended = tokio::time::Instant::now();
 
-    idle(&mut mgr).await;
+    idle(&mut mgr, BOTH).await;
+    settle(&mut mgr).await;
     let retained = retention(&rib_tx, peer).await;
     assert_eq!(retained.stale_routes, 3);
-    assert!(retained.peer_may_retain_ours);
     assert_eq!(
         mgr.next_retained_dynamic_check(),
         retained.next_deadline,
@@ -311,18 +428,23 @@ async fn retained_member_that_never_returns_is_deleted_after_both_retentions() {
     // The GR timer sweeps the routes; the member may still hold ours.
     tokio::time::sleep_until(ended + Duration::from_secs(121)).await;
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 0);
-    mgr.settle_due_retained_dynamic().await;
+    settle(&mut mgr).await;
+    assert_eq!(mgr.dynamic_peer_count, 1, "kept while it may hold ours");
     assert_eq!(
-        mgr.dynamic_peer_count, 1,
-        "kept while the member may hold ours"
+        mgr.next_retained_dynamic_check(),
+        Some(ended + Duration::from_secs(120 + hold))
     );
     assert!(peer.is_live());
 
-    tokio::time::sleep_until(ended + ours + Duration::from_secs(1)).await;
-    mgr.settle_due_retained_dynamic().await;
+    tokio::time::sleep_until(ended + Duration::from_secs(120 + hold + 1)).await;
+    settle(&mut mgr).await;
     assert_eq!(mgr.dynamic_peer_count, 0, "deleted once both have lapsed");
     assert_eq!(mgr.next_retained_dynamic_check(), None);
     assert!(!mgr.rib_peers.contains_key(&key(MEMBER)));
+    assert_eq!(
+        presence_events(&mgr, SessionLifecycleEventType::PeerRemoved),
+        1
+    );
     loc_rib_count(&rib_tx).await;
     assert!(!peer.is_live(), "its identity is released");
     rib_task.abort();
@@ -338,9 +460,9 @@ async fn retained_member_that_never_returns_is_deleted_after_both_retentions() {
 async fn retained_helper_reconnect_keeps_its_orf_end_of_rib_hold() {
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
     let _first = accept(&mut mgr).await;
-    let peer = open_validated(&mut mgr);
+    let peer = open_validated(&mut mgr).await;
     let (tx, _rx) = mpsc::channel(16);
-    send_all(&rib_tx, session(peer, 1, true, false, true, tx)).await;
+    send_all(&rib_tx, session(peer, 1, MEMBER_ASN, true, false, true, tx)).await;
     send_all(
         &rib_tx,
         [RibUpdate::PeerDown {
@@ -350,11 +472,15 @@ async fn retained_helper_reconnect_keeps_its_orf_end_of_rib_hold() {
     )
     .await;
 
-    idle(&mut mgr).await;
+    idle(&mut mgr, OURS).await;
     let _second = accept(&mut mgr).await;
-    let resumed = open_validated(&mut mgr);
+    let resumed = open_validated(&mut mgr).await;
     let (tx, mut rx) = mpsc::channel(16);
-    send_all(&rib_tx, session(resumed, 2, true, false, true, tx)).await;
+    send_all(
+        &rib_tx,
+        session(resumed, 2, MEMBER_ASN, true, false, true, tx),
+    )
+    .await;
     assert!(
         !end_of_rib_sent(&rib_tx, &mut rx).await,
         "the ORF-gated End-of-RIB waits for the gated table"
@@ -377,15 +503,85 @@ async fn retained_helper_reconnect_keeps_its_orf_end_of_rib_hold() {
     rib_task.abort();
 }
 
-/// A member with nothing retained either way is deleted at idle, as before,
-/// and a range removal deletes a retained one at once.
+/// A connection from the retained address that never sends an OPEN resumes
+/// nothing: its slot names no RIB peer, and when it goes idle the retention
+/// stands exactly as it was, deadlines included, so a scanner cannot extend
+/// it. Red proof: reusing the resolved slot before the OPEN, or dropping the
+/// retention at the reconnect, renews the window at the second idle.
+#[tokio::test(start_paused = true)]
+async fn unvalidated_reconnect_leaves_the_retention_unchanged() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let peer = retained_member(&mut mgr, &rib_tx, BOTH).await;
+    let before = &mgr.retained_dynamic[&key(MEMBER)];
+    let (retained_at, ours_until) = (before.retained_at, before.ours_until);
+    assert!(ours_until.is_some());
+
+    tokio::time::advance(Duration::from_secs(100)).await;
+    let _probe = accept(&mut mgr).await;
+    assert_eq!(
+        mgr.peers[&key(MEMBER)].transport_config.rib_peer.get(),
+        None,
+        "no RIB peer before an OPEN validates"
+    );
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    idle(&mut mgr, NOTHING).await;
+    let after = &mgr.retained_dynamic[&key(MEMBER)];
+    assert_eq!(after.retained_at, retained_at);
+    assert_eq!(after.ours_until, ours_until, "the deadline is unchanged");
+    assert!(after.theirs);
+    assert_eq!(mgr.rib_peer_of(&key(MEMBER)), peer);
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    settle(&mut mgr).await;
+    assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
+    rib_task.abort();
+}
+
+/// A reconnect from another AS at the address, as on an accept-any range,
+/// is another speaker: its session takes a new handle, and what was
+/// retained for the last one is purged and its identity released. Red
+/// proof: resuming the handle whatever the AS hands the new speaker the old
+/// one's stale routes.
+#[tokio::test]
+async fn reconnect_from_another_as_does_not_inherit_the_retained_routes() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
+    let _second = accept(&mut mgr).await;
+    let other = open_from(&mut mgr, 65099).await;
+    assert_ne!(other, peer, "another AS gets its own handle");
+    assert!(mgr.retained_dynamic.is_empty());
+    assert_eq!(
+        mgr.dynamic_peer_count, 1,
+        "the live neighbor keeps the slot"
+    );
+    let (tx, _rx) = mpsc::channel(16);
+    send_all(&rib_tx, session(other, 2, 65099, false, true, false, tx)).await;
+    assert_eq!(retention(&rib_tx, other).await.stale_routes, 0);
+    assert_eq!(retention(&rib_tx, peer).await.stale_routes, 0);
+    assert_eq!(
+        loc_rib_count(&rib_tx).await,
+        0,
+        "the old speaker's routes are purged"
+    );
+    assert!(!peer.is_live(), "its identity is released");
+    rib_task.abort();
+}
+
+/// A member with nothing retained either way, as after a Hard Reset, is
+/// deleted at idle, as before; and a range removal deletes a retained one
+/// with no RIB query. Red proof: without the admission re-check the
+/// retained member outlives its range.
 #[tokio::test]
 async fn unretained_member_goes_at_idle_and_a_removed_range_takes_a_retained_one() {
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
     let _first = accept(&mut mgr).await;
-    let peer = open_validated(&mut mgr);
+    let peer = open_validated(&mut mgr).await;
     let (tx, _rx) = mpsc::channel(16);
-    send_all(&rib_tx, session(peer, 1, false, false, false, tx)).await;
+    send_all(
+        &rib_tx,
+        session(peer, 1, MEMBER_ASN, true, false, false, tx),
+    )
+    .await;
     send_all(
         &rib_tx,
         [RibUpdate::PeerDown {
@@ -394,36 +590,17 @@ async fn unretained_member_goes_at_idle_and_a_removed_range_takes_a_retained_one
         }],
     )
     .await;
-    idle(&mut mgr).await;
+    idle(&mut mgr, NOTHING).await;
     assert_eq!(mgr.dynamic_peer_count, 0);
-    assert_eq!(mgr.next_retained_dynamic_check(), None);
+    assert!(mgr.retained_dynamic.is_empty());
 
-    let _second = accept(&mut mgr).await;
-    let peer = open_validated(&mut mgr);
-    let (tx, _rx) = mpsc::channel(16);
-    send_all(&rib_tx, session(peer, 2, false, false, false, tx)).await;
-    send_all(&rib_tx, [announce(peer, 2, [1]), graceful_end(peer, 2)]).await;
-    idle(&mut mgr).await;
-    assert_eq!(mgr.dynamic_peer_count, 1);
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
     mgr.delete_dynamic_range("127.0.0.0/8").unwrap();
-    assert!(mgr.next_retained_dynamic_check() <= Some(tokio::time::Instant::now()));
-    mgr.settle_due_retained_dynamic().await;
+    assert!(mgr.retention.admission_dirty);
+    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 1);
     assert_eq!(mgr.dynamic_peer_count, 0);
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 0);
     rib_task.abort();
-}
-
-/// Retain the member once: accepted, its OPEN validated, its routes
-/// retained by a GR end, then idle. Returns its handle.
-async fn retained_member(mgr: &mut PeerManager, rib_tx: &mpsc::Sender<RibUpdate>) -> PeerId {
-    let _client = accept(mgr).await;
-    let peer = open_validated(mgr);
-    let (tx, _rx) = mpsc::channel(16);
-    send_all(rib_tx, session(peer, 1, false, false, false, tx)).await;
-    send_all(rib_tx, [announce(peer, 1, [1]), graceful_end(peer, 1)]).await;
-    idle(mgr).await;
-    assert_eq!(mgr.dynamic_peer_count, 1, "the member is retained");
-    peer
 }
 
 /// A configuration rollback that drops the member's range deletes a
@@ -431,7 +608,7 @@ async fn retained_member(mgr: &mut PeerManager, rib_tx: &mpsc::Sender<RibUpdate>
 #[tokio::test]
 async fn rollback_without_the_range_deletes_a_retained_member_at_once() {
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
-    let peer = retained_member(&mut mgr, &rib_tx).await;
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
     mgr.dynamic_ranges.clear();
     assert_eq!(
         mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
@@ -443,18 +620,43 @@ async fn rollback_without_the_range_deletes_a_retained_member_at_once() {
     rib_task.abort();
 }
 
+/// While a transaction snapshot is staged, its ranges do not delete a
+/// retained member: a rollback could not bring it back. Commit or rollback
+/// decides. Red proof: deleting under the staged ranges loses the member
+/// the rollback restores the range for.
+#[tokio::test]
+async fn staged_ranges_do_not_delete_a_retained_member() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let ranges = std::mem::take(&mut mgr.dynamic_ranges);
+    mgr.config_snapshot_staged = true;
+    mgr.retained_dynamic.get_mut(&key(MEMBER)).unwrap().check_at =
+        Some(tokio::time::Instant::now());
+    settle(&mut mgr).await;
+    assert_eq!(mgr.dynamic_peer_count, 1, "kept while staged");
+    assert!(mgr.retention.admission_dirty);
+
+    // Rollback restores the range; the re-check keeps the member.
+    mgr.dynamic_ranges = ranges;
+    mgr.config_snapshot_staged = false;
+    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 0);
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    rib_task.abort();
+}
+
 /// A static neighbor added at a retained member's address is a new
-/// neighbor: the member is deleted first, and the neighbor gets its own
-/// handle, not the member's retained routes.
+/// neighbor: the member is deleted once the add succeeds, and the neighbor
+/// gets its own handle and counters. Red proof: without the deletion the
+/// static neighbor runs on the member's handle and retained routes.
 #[tokio::test]
 async fn static_neighbor_at_a_retained_address_replaces_the_member() {
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
-    let peer = retained_member(&mut mgr, &rib_tx).await;
-    mgr.add_peer(make_config(MEMBER, 65002), false)
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
         .await
         .unwrap();
     assert_eq!(mgr.dynamic_peer_count, 0);
-    assert_eq!(mgr.next_retained_dynamic_check(), None);
+    assert!(mgr.retained_dynamic.is_empty());
     assert_ne!(
         mgr.rib_peer_of(&key(MEMBER)),
         peer,
@@ -464,19 +666,98 @@ async fn static_neighbor_at_a_retained_address_replaces_the_member() {
     rib_task.abort();
 }
 
-/// A retained member keeps its place under `dynamic_neighbor_limit`: at the
-/// limit another address is refused, and the member's reconnect is admitted
-/// into the place it holds.
+/// A retained member whose routes the RIB retains keeps its place under
+/// `dynamic_neighbor_limit`: at the limit another address is refused, and
+/// the member's reconnect is admitted into the place it holds. One kept
+/// only while it may hold our routes gives its place to a new address.
 #[tokio::test]
-async fn retained_member_holds_its_place_under_the_limit() {
+async fn retained_members_and_the_limit() {
+    let other = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10));
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
     mgr.dynamic_neighbor_limit = 1;
-    retained_member(&mut mgr, &rib_tx).await;
-    let other = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10));
-    let (server, _refused) = localhost_inbound_stream().await;
-    mgr.handle_inbound(server, sock(other), None, None).await;
+    retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let _refused = accept_at(&mut mgr, other).await;
     assert!(mgr.peers.is_empty(), "the limit refuses another address");
     let _client = accept(&mut mgr).await;
     assert_eq!(mgr.dynamic_peer_count, 1);
     rib_task.abort();
+
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    mgr.dynamic_neighbor_limit = 1;
+    let peer = retained_member(&mut mgr, &rib_tx, OURS).await;
+    let _admitted = accept_at(&mut mgr, other).await;
+    assert!(
+        mgr.peers.contains_key(&key(other)),
+        "the ours-only member gave way"
+    );
+    assert!(mgr.retained_dynamic.is_empty());
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    loc_rib_count(&rib_tx).await;
+    assert!(!peer.is_live());
+    rib_task.abort();
+}
+
+/// However many members are due, a check is one batched RIB query, sent
+/// without waiting in the actor; an unanswered query backs off,
+/// doubling. Here five members go idle against a RIB that does not answer.
+/// Red proof: a query per member, or a fixed retry, fails the counts.
+#[tokio::test(start_paused = true)]
+async fn due_members_share_one_query_and_an_unanswered_one_backs_off() {
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut mgr = manager_on(rib_tx);
+    let members: Vec<IpAddr> = (20..25)
+        .map(|octet| IpAddr::V4(Ipv4Addr::new(127, 0, 0, octet)))
+        .collect();
+    let mut clients = Vec::new();
+    for &member in &members {
+        clients.push(accept_at(&mut mgr, member).await);
+        let managed = &mgr.peers[&key(member)];
+        managed
+            .transport_config
+            .rib_peer
+            .resolve(|| PeerEndpoint::new(member, None), MEMBER_ASN);
+        managed.handle().publish_session_end_retention(THEIRS);
+        let session_id = managed.session_id();
+        mgr.handle_session_notification(SessionNotification::BackToIdle {
+            session_id,
+            role: SessionRole::Primary,
+            peer_addr: member,
+        })
+        .await;
+    }
+    assert_eq!(mgr.retained_dynamic.len(), 5);
+    while let Ok(update) = rib_rx.try_recv() {
+        assert!(
+            !matches!(update, RibUpdate::QueryPeerRetentions { .. }),
+            "idle never waits on the RIB"
+        );
+    }
+
+    let mut retry = Duration::from_secs(1);
+    for _ in 0..3 {
+        mgr.check_due_retained_dynamic().await;
+        let pass = mgr.retention.pass.as_mut().expect("one pass");
+        let mut held_replies = Vec::new();
+        let mut queries = 0;
+        while let Some(update) = tokio::time::timeout(Duration::from_millis(1), rib_rx.recv())
+            .await
+            .ok()
+            .flatten()
+        {
+            if let RibUpdate::QueryPeerRetentions { peers, reply } = update {
+                assert_eq!(peers.len(), 5);
+                queries += 1;
+                held_replies.push(reply);
+            }
+        }
+        assert_eq!(queries, 1, "one query for every due member");
+        let answer = (&mut pass.answer).await.unwrap();
+        let unanswered = tokio::time::Instant::now();
+        mgr.finish_retention_pass(answer).await;
+        assert_eq!(mgr.next_retained_dynamic_check(), Some(unanswered + retry));
+        tokio::time::sleep_until(unanswered + retry).await;
+        retry *= 2;
+        drop(held_replies);
+    }
+    drop(clients);
 }

@@ -4107,11 +4107,7 @@ impl RibManager {
     }
     /// ADR-0142: the peer's retained stale routes and its earliest GR or
     /// LLGR deadline. Keyed lookups only, never a route scan.
-    pub(super) fn handle_query_peer_retention(
-        &mut self,
-        peer: PeerId,
-        reply: tokio::sync::oneshot::Sender<crate::update::PeerRetention>,
-    ) {
+    pub(super) fn peer_retention(&self, peer: PeerId) -> crate::update::PeerRetention {
         let stale_routes = self.ribs.get(&peer).map_or(0, |rib| {
             usize::try_from(rib.retained_stale_count()).unwrap_or(usize::MAX)
         });
@@ -4121,11 +4117,10 @@ impl RibManager {
             .chain(self.gr_stale_deadlines.get(&peer))
             .copied()
             .min();
-        let _ = reply.send(crate::update::PeerRetention {
+        crate::update::PeerRetention {
             stale_routes,
             next_deadline,
-            peer_may_retain_ours: self.peer_may_hold_stale.contains(&peer),
-        });
+        }
     }
     pub(super) fn handle_query_bmp_peer_stats(
         &mut self,

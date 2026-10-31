@@ -816,10 +816,15 @@ impl PeerManager {
             return Err(PeerLifecycleError::Invalid(reason));
         }
 
-        // A static neighbor at an idle dynamic neighbor's address is a new
-        // neighbor: the retained identity goes first.
-        self.delete_retained_dynamic(&peer_key).await;
-        transport.neighbor_counters = self.neighbor_counters_for(&peer_key);
+        // A static neighbor at a retained dynamic neighbor's address is a new
+        // neighbor: none of the retained identity carries over, and the
+        // retained neighbor goes once the add can no longer fail.
+        let replaces_retained = self.retained_dynamic.contains_key(&peer_key);
+        transport.neighbor_counters = if replaces_retained {
+            rustbgpd_transport::NeighborCounters::default()
+        } else {
+            self.neighbor_counters_for(&peer_key)
+        };
         transport.interface_only = self.interface_only_owns(peer_key.interface.as_deref());
         transport.dampening_admission = self
             .configured_owner_admission_for_static(peer_key.clone(), config.remote_asn)
@@ -840,7 +845,7 @@ impl PeerManager {
         let max_prefixes = transport.max_prefixes;
 
         let (rib_peer, new_rib_peer) =
-            self.static_rib_peer_slot(&peer_key, transport.interface_only);
+            self.static_rib_peer_slot(&peer_key, transport.interface_only, replaces_retained);
         transport.rib_peer = rib_peer;
 
         let session_id = self.allocate_session_id();
@@ -904,6 +909,9 @@ impl PeerManager {
             }
         };
 
+        if replaces_retained {
+            self.delete_retained_dynamic(&peer_key).await;
+        }
         info!(peer = %address, %remote_asn, "peer added dynamically");
         if bmp_excluded {
             self.metrics.record_bmp_identity_conflict(true);
@@ -2184,8 +2192,9 @@ impl PeerManager {
         &self,
         peer: &PeerKey,
         interface_only: bool,
+        replaces_retained: bool,
     ) -> (rustbgpd_transport::RibPeerSlot, bool) {
-        if let Some(slot) = self.rib_peers.get(peer) {
+        if let Some(slot) = self.rib_peers.get(peer).filter(|_| !replaces_retained) {
             return (slot.clone(), false);
         }
         let endpoint = rustbgpd_rib::PeerEndpoint::new(peer.address, peer.interface.as_deref());

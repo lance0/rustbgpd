@@ -231,6 +231,13 @@ impl PeerManager {
                 if self
                     .peers
                     .get(&peer_key)
+                    .is_some_and(|m| m.session_id() == session_id)
+                {
+                    self.retained_dynamic_open_from(&peer_key, peer_asn).await;
+                }
+                if self
+                    .peers
+                    .get(&peer_key)
                     .is_some_and(|m| m.pending_inbound.is_some())
                 {
                     self.resolve_collision(peer_key, remote_router_id, peer_asn)
@@ -300,6 +307,9 @@ impl PeerManager {
                     if let Some(managed) = self.peers.remove(&peer_key) {
                         let (primary_handle, primary_session_id, mut managed) =
                             managed.into_parts();
+                        // Final: the session reported BackToIdle after leaving
+                        // Established.
+                        let end_retention = primary_handle.session_end_retention();
                         self.retiring_sessions
                             .insert(primary_session_id, peer_key.clone());
                         let mut retired_sessions = vec![primary_session_id];
@@ -381,12 +391,14 @@ impl PeerManager {
                             self.seed_peer_truth_metrics(&peer_key, false);
                             self.publish_peer_info_metric(&peer_key);
                             info!(peer = %peer_addr, "retained dynamic peer disabled after terminal block or failed RIB retirement fence");
-                        } else if self.retain_dynamic_identity(&peer_key, &managed) {
+                        } else if self.resume_retained_dynamic(&peer_key) {
+                            // A reconnect that never reached Established: the
+                            // retention it waited on stands, unchanged.
+                        } else if self.retain_dynamic_identity(&peer_key, &managed, end_retention) {
                             // Graceful restart may still hold routes on either
                             // side: the RIB's for the peer, or the peer's of
-                            // ours. Keep its identity until both lapse, so a
+                            // ours. Its identity stays until both lapse, so a
                             // reconnect resumes as the same RIB peer.
-                            self.settle_retained_dynamic(&peer_key).await;
                         } else {
                             // Producer joins and the required RIB fence found
                             // no terminal block, so auto-removal is authoritative.
@@ -655,6 +667,14 @@ impl PeerManager {
             self.learn_dynamic_remote_asn(&peer_key, peer_asn);
         }
         self.note_unnumbered_session_state(&peer_key, *old, *new);
+        if *new == rustbgpd_fsm::SessionState::Established
+            && self
+                .peers
+                .get(&peer_key)
+                .is_some_and(|managed| managed.session_id() == session_id)
+        {
+            self.retained_dynamic_established(&peer_key);
+        }
         self.publish_state_lifecycle_event(&peer_key, role, *old, *new, teardown_cause.as_deref());
     }
 

@@ -1026,6 +1026,16 @@ impl RibManager {
         }
     }
 
+    /// A released handle names no neighbor: what its last session may hold
+    /// of ours is forgotten with it. A deletion has done so already unless
+    /// it kept the series for a neighbor living on under another handle.
+    pub(super) fn handle_release_peer(&mut self, peer: PeerId) {
+        self.forget_helper_stale_exempt(peer);
+        if !peer.release() {
+            debug!(%peer, "release of a handle that was not live");
+        }
+    }
+
     /// A deleted or rebound neighbor's next session is a different peer's.
     fn forget_helper_stale_exempt(&mut self, peer: PeerId) {
         self.peer_may_hold_stale.remove(&peer);

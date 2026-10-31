@@ -430,11 +430,18 @@ impl PeerManager {
                 }
                 return;
             }
+            // Check dynamic peer limit; a retained identity already counts,
+            // and one kept only while it may hold our routes gives way.
+            let retained = self
+                .retained_dynamic
+                .contains_key(&PeerKey::new(peer_ip, None));
+            if !retained
+                && self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize
+                && self.match_dynamic_range(peer_ip).is_some()
+            {
+                self.evict_retained_dynamic_for_slot().await;
+            }
             if let Some(range) = self.match_dynamic_range(peer_ip) {
-                // Check dynamic peer limit; a retained identity already counts.
-                let retained = self
-                    .retained_dynamic
-                    .contains_key(&PeerKey::new(peer_ip, None));
                 if !retained && self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
                     self.metrics.record_dynamic_neighbor_limit_rejection();
                     self.metrics
@@ -497,10 +504,9 @@ impl PeerManager {
                 // A dynamic neighbor gets its RIB identity only once its
                 // OPEN validates: the session allocates it on first use. A
                 // retained identity resumes, with what the RIB holds for it.
-                transport.rib_peer = match self.rib_peers.get(&dynamic_peer_key) {
-                    Some(slot) if retained => slot.clone(),
-                    _ => rustbgpd_transport::RibPeerSlot::allocate_after_open(),
-                };
+                transport.rib_peer = self
+                    .retained_dynamic_reconnect_slot(&dynamic_peer_key)
+                    .unwrap_or_else(rustbgpd_transport::RibPeerSlot::allocate_after_open);
                 transport.accepted_dynamic_range = Some(accepted_dynamic_range.clone());
                 transport.dampening_admission = match self
                     .configured_owner_admission_for_dynamic(&accepted_dynamic_range, remote_asn)
@@ -656,7 +662,10 @@ impl PeerManager {
                 self.register_session(session_id, &peer_key);
                 self.sync_owned_session_metrics(&peer_key).await;
                 self.publish_peer_info_metric(&peer_key);
-                if self.retained_dynamic.remove(&peer_key).is_none() {
+                // A retained neighbor never left the managed set: it keeps its
+                // slot and announces no second addition.
+                let resumed = self.retained_dynamic_reconnected(&peer_key);
+                if !resumed {
                     self.dynamic_peer_count += 1;
                     self.refresh_dynamic_neighbor_capacity_metrics();
                 }
@@ -664,7 +673,9 @@ impl PeerManager {
                 // external classification and its resolved chains.
                 self.refresh_rfc8212_policy_metrics(&peer_key);
 
-                self.publish_peer_added_event(&peer_key);
+                if !resumed {
+                    self.publish_peer_added_event(&peer_key);
+                }
 
                 // Restore any dead-lettered hot-apply / Route Refresh
                 // intent left behind by a prior dynamic-peer auto-

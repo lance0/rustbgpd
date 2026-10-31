@@ -159,7 +159,6 @@ impl Harness {
         let retention = Arc::new(std::sync::Mutex::new(PeerRetention {
             stale_routes: 0,
             next_deadline: None,
-            peer_may_retain_ours: false,
         }));
         let (_tx, rx) = mpsc::channel(1);
         let mut rib_rx = std::mem::replace(&mut self.rib_rx, rx);
@@ -370,7 +369,6 @@ async fn an_unbound_neighbors_address_is_reserved_until_its_gr_routes_retire() {
     *retention.lock().unwrap() = PeerRetention {
         stale_routes: 3,
         next_deadline: Some(deadline),
-        peer_may_retain_ours: false,
     };
     h.mgr.note_unnumbered_session_idle(&key);
     h.reconcile().await;
@@ -398,7 +396,6 @@ async fn an_unbound_neighbors_address_is_reserved_until_its_gr_routes_retire() {
     *retention.lock().unwrap() = PeerRetention {
         stale_routes: 0,
         next_deadline: None,
-        peer_may_retain_ours: false,
     };
     h.mgr.unnumbered_retry_due();
     h.reconcile().await;
@@ -435,7 +432,6 @@ async fn retention_left_after_the_check() -> (
                     *flip.lock().unwrap() = PeerRetention {
                         stale_routes: 3,
                         next_deadline: Some(deadline),
-                        peer_may_retain_ours: false,
                     };
                     let _ = reply.send(true);
                     break;
@@ -465,7 +461,6 @@ async fn retention_left_after_the_check_keeps_the_stopped_peer_until_it_retires(
     *retention.lock().unwrap() = PeerRetention {
         stale_routes: 0,
         next_deadline: None,
-        peer_may_retain_ours: false,
     };
     h.mgr.unnumbered_retry_due();
     h.reconcile().await;
@@ -498,7 +493,6 @@ async fn an_inbound_reconnect_clears_the_stop_of_a_retained_peer() {
     *retention.lock().unwrap() = PeerRetention {
         stale_routes: 0,
         next_deadline: None,
-        peer_may_retain_ours: false,
     };
     let counters = Arc::new(FakePeerCounters::default());
     h.replace_session(
@@ -551,7 +545,6 @@ async fn a_late_release_shutdown_after_a_gr_teardown_keeps_the_retention() {
                     *flip.lock().unwrap() = PeerRetention {
                         stale_routes: 3,
                         next_deadline: Some(deadline),
-                        peer_may_retain_ours: false,
                     };
                     let _ = reply.send(true);
                     break;
@@ -580,7 +573,6 @@ async fn a_late_release_shutdown_after_a_gr_teardown_keeps_the_retention() {
     *retention.lock().unwrap() = PeerRetention {
         stale_routes: 0,
         next_deadline: None,
-        peer_may_retain_ours: false,
     };
     h.mgr.unnumbered_retry_due();
     h.reconcile().await;
@@ -642,7 +634,6 @@ async fn a_handshake_that_starts_during_the_retention_query_is_kept() {
                 let _ = reply.send(PeerRetention {
                     stale_routes: 0,
                     next_deadline: None,
-                    peer_may_retain_ours: false,
                 });
             }
         }
@@ -3069,7 +3060,6 @@ async fn an_exited_peer_whose_deferred_replacement_expired(
         *retention.lock().unwrap() = PeerRetention {
             stale_routes: 3,
             next_deadline: Some(tokio::time::Instant::now() + Duration::from_secs(120)),
-            peer_may_retain_ours: false,
         };
     }
 
@@ -3135,7 +3125,6 @@ async fn an_exited_peer_whose_deferred_replacement_expired_waits_on_its_retentio
     *retention.lock().unwrap() = PeerRetention {
         stale_routes: 0,
         next_deadline: None,
-        peer_may_retain_ours: false,
     };
     h.mgr.unnumbered_retry_due();
     h.reconcile().await;
