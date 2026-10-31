@@ -5,12 +5,16 @@
   it does not delete the routes it kept stale from that session before the
   peer's ROUTE-REFRESH brings them back. Previously the End-of-RIB went out at
   once and the peer dropped every stale route of the family, RTBH routes
-  included, until the filtered table arrived. A peer that sends no
-  ROUTE-REFRESH within 60 seconds gets the End-of-RIB then. Peers whose
-  previous session had no Graceful Restart capability keep the immediate
-  End-of-RIB.
+  included, until the filtered table arrived. Peers that are neither GR
+  restarters nor possible stale-route holders keep immediate End-of-RIB
+  unless another hold applies.
   **Operator-visible:** every End-of-RIB held for an ORF-gated table now has
-  the same 60-second bound. A GR restarter's, and that of any ORF peer whose
-  initial table falls inside a startup selection deferral, previously waited
-  for the peer's ROUTE-REFRESH without limit; it now goes out after 60
-  seconds without one, or when the selection deferral ends if that is later.
+  a 60-second ORF hold cap. At that cap, a family for which no plain
+  ROUTE-REFRESH or IMMEDIATE ORF request has arrived releases its marker to
+  the ordinary pending queue. Selection deferral or replay grace may still
+  hold it. A family whose table refresh is already queued keeps its marker
+  behind that refresh's table, even past the cap.
+  Queued updates and pending resynchronization can delay transmission after
+  every hold ends, so the cap is not a deadline for End-of-RIB delivery or
+  remote stale-route removal. See the
+  [GR-helper RTBH limitation](../docs/reference/known-issues.md#open-issues).
