@@ -349,9 +349,12 @@ impl QueuedInventory {
 /// An Established session whose active envelope waits on a full writer
 /// queue, so it cannot finish within the close-drain budget, and a second
 /// full-table envelope, not yet queued, that is the last owner of its
-/// routes. The returned writer receiver keeps that queue full.
+/// routes. The returned writer receiver keeps that queue full, and the
+/// returned peer end of the connection keeps it open, so only the close
+/// under test ends the session.
 async fn queued_last_owner_session() -> (
     PeerSession,
+    TcpStream,
     mpsc::Sender<PeerCommand>,
     mpsc::Receiver<RibUpdate>,
     mpsc::Receiver<Bytes>,
@@ -359,7 +362,7 @@ async fn queued_last_owner_session() -> (
     QueuedInventory,
 ) {
     let (mut session, commands, rib_rx) = make_test_session_with_channels(65001, 65002, 64);
-    let (client, _server) = connected_stream_pair().await;
+    let (client, peer) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     session.timers.hold = None;
@@ -387,7 +390,7 @@ async fn queued_last_owner_session() -> (
         marker: Arc::new(()),
     };
     assert_eq!(inventory.live(), QUEUED_ROUTES);
-    (session, commands, rib_rx, writer, envelope, inventory)
+    (session, peer, commands, rib_rx, writer, envelope, inventory)
 }
 
 /// Poll the session task by hand, so each recorded release is one
@@ -413,6 +416,16 @@ async fn run_by_step(
         tokio::time::advance(std::time::Duration::from_millis(1)).await;
         released.push(before - inventory.live());
     }
+}
+
+/// The Shutdown command closed the session with its Cease NOTIFICATION,
+/// not through a remote disconnect.
+fn assert_administrative_close(session: &PeerSession) {
+    assert_eq!(
+        session.config.neighbor_counters.notifications_sent(),
+        1,
+        "the administrative close, not a remote disconnect, ended the session"
+    );
 }
 
 /// Drop the session, then give the paced release room to finish, recording
@@ -453,12 +466,13 @@ async fn finish_queued_release(
 /// teardown neither waits for it nor runs past the close-drain budget.
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_session_down_paces_queued_inventory_release() {
-    let (mut session, commands, _rib_rx, _writer, envelope, inventory) =
+    let (mut session, _peer, commands, _rib_rx, _writer, envelope, inventory) =
         queued_last_owner_session().await;
     session.outbound_tx.try_send(envelope).unwrap();
     commands.send(PeerCommand::Shutdown).await.unwrap();
     let mut released = Vec::new();
     let elapsed = run_by_step(&mut session, &inventory, &mut released).await;
+    assert_administrative_close(&session);
     assert!(
         elapsed <= 2 * super::writer::CLOSE_FLUSH_BUDGET,
         "the session task exits on its close budget, not after the release"
@@ -475,7 +489,7 @@ async fn outbound_pacing_session_down_paces_queued_inventory_release() {
 /// drops with the session, so the exit hands it to the paced release too.
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_exit_without_session_down_paces_queued_inventory_release() {
-    let (mut session, commands, _rib_rx, _writer, envelope, inventory) =
+    let (mut session, _peer, commands, _rib_rx, _writer, envelope, inventory) =
         queued_last_owner_session().await;
     session.outbound_tx.try_send(envelope).unwrap();
     drop(commands);
@@ -499,12 +513,13 @@ async fn outbound_pacing_exit_without_session_down_paces_queued_inventory_releas
 /// whole by whichever handle to it drops last.
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_permit_reserved_before_teardown_is_paced() {
-    let (mut session, commands, rib_rx, _writer, envelope, inventory) =
+    let (mut session, _peer, commands, rib_rx, _writer, envelope, inventory) =
         queued_last_owner_session().await;
     let permit = session.outbound_tx.clone().try_reserve_owned().unwrap();
     commands.send(PeerCommand::Shutdown).await.unwrap();
     let mut released = Vec::new();
     run_by_step(&mut session, &inventory, &mut released).await;
+    assert_administrative_close(&session);
     let sender = permit.send(envelope);
     assert!(sender.is_closed(), "the old queue is closed");
     assert_eq!(inventory.live(), QUEUED_ROUTES);
@@ -522,7 +537,7 @@ async fn outbound_pacing_permit_reserved_before_teardown_is_paced() {
 /// retired as well, a slice per step, not dropped whole.
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_session_down_paces_queued_other_family_release() {
-    let (mut session, commands, _rib_rx, _writer, envelope, inventory) =
+    let (mut session, _peer, commands, _rib_rx, _writer, envelope, inventory) =
         queued_last_owner_session().await;
     drop(envelope);
     let mut update = pacing_update(&session, Vec::new());
@@ -531,6 +546,7 @@ async fn outbound_pacing_session_down_paces_queued_other_family_release() {
     commands.send(PeerCommand::Shutdown).await.unwrap();
     let mut released = Vec::new();
     run_by_step(&mut session, &inventory, &mut released).await;
+    assert_administrative_close(&session);
     assert!(
         inventory.live() > 0,
         "the teardown does not wait for the release"
@@ -543,13 +559,14 @@ async fn outbound_pacing_session_down_paces_queued_other_family_release() {
 /// in the same step.
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_session_down_paces_queued_mixed_family_release() {
-    let (mut session, commands, _rib_rx, _writer, mut envelope, inventory) =
+    let (mut session, _peer, commands, _rib_rx, _writer, mut envelope, inventory) =
         queued_last_owner_session().await;
     inventory.add_other_families(&mut envelope, QUEUE_SLICE / 2);
     session.outbound_tx.try_send(envelope).unwrap();
     commands.send(PeerCommand::Shutdown).await.unwrap();
     let mut released = Vec::new();
     run_by_step(&mut session, &inventory, &mut released).await;
+    assert_administrative_close(&session);
     assert!(
         inventory.live() > 0,
         "the teardown does not wait for the release"
