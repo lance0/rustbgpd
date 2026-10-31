@@ -1758,6 +1758,20 @@ fn register_dual_stack(
     mpsc::Sender<OutboundRouteUpdate>,
     mpsc::Receiver<OutboundRouteUpdate>,
 ) {
+    register_dual_stack_with(manager, session_id, capacity, false)
+}
+
+/// [`register_dual_stack`]; `orf_v4` negotiates Address Prefix ORF receive
+/// for IPv4, which holds its initial table until the peer's ORF.
+fn register_dual_stack_with(
+    manager: &mut RibManager,
+    session_id: u64,
+    capacity: usize,
+    orf_v4: bool,
+) -> (
+    mpsc::Sender<OutboundRouteUpdate>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
     const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
     let observer = peer_v4(OBSERVER);
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
@@ -1775,14 +1789,31 @@ fn register_dual_stack(
     if let RibUpdate::PeerUp {
         sendable_families,
         export_policy,
+        negotiated_orf_recv,
         ..
     } = &mut up
     {
         *sendable_families = vec![FAMILY, V6];
         *export_policy = Some(private_policy(None));
+        if orf_v4 {
+            *negotiated_orf_recv = vec![FAMILY];
+        }
     }
     manager.handle_update(up);
     (tx, rx)
+}
+
+fn inject_v6_rtbh(manager: &mut RibManager, address: &str) -> (Prefix, u32) {
+    let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 9), 32), SOURCE);
+    set_peer(&mut route, crate::PeerId::LOCAL);
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.prefix = Prefix::V6(Ipv6Prefix::new(address.parse().unwrap(), 128));
+    route.next_hop = "2001:db8::81".parse().unwrap();
+    let key = (route.prefix, 0);
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route, reply });
+    result.try_recv().unwrap().unwrap();
+    key
 }
 
 /// Establish `address` as a waiter whose OPEN lists `families`.
@@ -1997,4 +2028,116 @@ fn dormant_family_keys_retire_once_its_end_of_rib_is_sent() {
         "the IPv4 key retires"
     );
     assert!(manager.selection_deferred(V6), "still inside the IPv6 hold");
+}
+
+/// A dual-stack helper whose IPv4 is ORF-gated flaps before any hold. Its
+/// IPv6 keys let the next session run, so its IPv4 keys wait: our IPv4
+/// End-of-RIB is deferred behind the ORF table, neither held nor sent. The
+/// IPv4 waiter then arms while the ORF gate is still up, and the peer's
+/// ORF lifts it. The deleted IPv4 RTBH must leave inside the hold. Red
+/// proof: without re-walking a waiting family once a hold covers it, the
+/// ORF lift never revisits the key and the RTBH stays until release.
+#[test]
+fn orf_gated_family_waits_then_withdraws_once_its_hold_arms() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx) = register_dual_stack_with(&mut manager, 82, 64, true);
+    permit_all_orf(&mut manager, 82);
+    let mut rib = PeerRib::new();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    inject_rtbh(&mut manager, rtbh);
+    let v6_key = inject_v6_rtbh(&mut manager, "2001:db8:1::2");
+    apply(&mut old_rx, &mut rib, None);
+    let key = (Prefix::V4(rtbh), 0);
+    assert!(rib.contains_key(&key) && rib.contains_key(&v6_key));
+    assert!(!manager.selection_deferred(FAMILY), "no hold has armed");
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    let (_new_tx, mut new_rx) = register_dual_stack_with(&mut manager, 182, 64, true);
+    run_timer(&mut manager, &mut new_rx, &mut rib, None);
+    let waiting = |manager: &RibManager| {
+        manager
+            .helper_stale_exempt
+            .get(&observer)
+            .is_some_and(|carried| carried.settled && carried.keys.contains(&key))
+    };
+    assert!(
+        waiting(&manager),
+        "the IPv4 key waits in a settled set behind the ORF-deferred End-of-RIB"
+    );
+    assert!(
+        rib.contains_key(&key),
+        "nothing withdrawn while it is not held"
+    );
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    run_timer(&mut manager, &mut new_rx, &mut rib, None);
+    assert!(waiting(&manager), "arming the hold does not touch the key");
+    permit_all_orf(&mut manager, 182);
+    run_timer(&mut manager, &mut new_rx, &mut rib, None);
+    assert!(
+        manager.selection_convergence_held(FAMILY),
+        "still inside the hold"
+    );
+    assert!(
+        !rib.contains_key(&key),
+        "the deleted RTBH leaves inside the hold; peer {rib:?}"
+    );
+}
+
+/// A session that is clean and caught up while its unicast End-of-RIB is
+/// queued but not held: production reaches this for an EVPN receiver
+/// whose feed is current, where a full writer at the End-of-RIB leaves the
+/// peer clean (`send_initial_table_with_readiness`, `flush_pending_eor`).
+/// The test reaches it with a writer that fits the table but not the
+/// End-of-RIB, then clears the dirty mark the plain unicast session gets.
+/// The carried key must wait for the hold, not retire as if the End-of-RIB
+/// had gone out. Red proof: retiring regardless of a queued End-of-RIB
+/// drops it, and the RTBH stays until release.
+#[test]
+fn queued_unheld_end_of_rib_keeps_the_carry_for_the_hold() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx) = register_dual_stack(&mut manager, 82, 64);
+    let mut rib = PeerRib::new();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    // Room for the table only: the End-of-RIB queues behind it.
+    let (_new_tx, mut new_rx) = register_dual_stack(&mut manager, 182, 1);
+    assert!(
+        manager
+            .pending_eor
+            .get(&observer)
+            .is_some_and(|families| families.contains(&FAMILY)),
+        "the IPv4 End-of-RIB is queued"
+    );
+    // An EVPN receiver with a current feed stays clean here.
+    manager.dirty_peers.remove(&observer);
+    manager.flush_helper_stale_exempt(&HashSet::new());
+    let key = (Prefix::V4(rtbh), 0);
+    assert!(
+        manager
+            .helper_stale_exempt
+            .get(&observer)
+            .is_some_and(|carried| carried.keys.contains(&key)),
+        "the key waits: the End-of-RIB is queued, not sent"
+    );
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
 }

@@ -1131,6 +1131,12 @@ impl RibManager {
                 if retired || self.advertises_unicast_key(peer, prefix, path_id) {
                     done.push(key);
                 } else if !self.eor_held(peer, family) {
+                    // `eor_held` covers the selection, RTC and grace holds
+                    // only. An End-of-RIB deferred behind an ORF table
+                    // (`gr_deferred_eor`) or queued by backpressure or a
+                    // deferral is neither held nor sent: its keys wait here,
+                    // and `helper_stale_needs_rescan` re-walks them once a
+                    // hold covers the family or it retires.
                     if !gate_blocked.contains(&family) {
                         gate_blocked.push(family);
                     }

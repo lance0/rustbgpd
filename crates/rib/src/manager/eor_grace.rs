@@ -332,6 +332,9 @@ impl RibManager {
     /// Whether a grace window is still open for `peer`, covering `family`
     /// when one is given: our End-of-RIB toward it may be held by grace.
     pub(super) fn eor_grace_covers(&self, peer: PeerId, family: Option<(Afi, Safi)>) -> bool {
+        if self.eor_grace.is_empty() {
+            return false;
+        }
         self.eor_grace
             .get(&self.eor_grace_target(peer))
             .is_some_and(|grace| family.is_none_or(|family| grace.families.contains(&family)))
@@ -376,12 +379,14 @@ impl RibManager {
         }
         self.eor_grace.remove(&target);
         self.eor_grace_deadlines.remove(&target);
+        self.retire_helper_stale_exempt();
     }
 
     pub(super) fn retire_eor_grace_interface(&mut self, interface: Arc<str>) {
         let target = EorGraceTarget::Interface(interface);
         self.eor_grace.remove(&target);
         self.eor_grace_deadlines.remove(&target);
+        self.retire_helper_stale_exempt();
     }
 
     pub(super) fn next_eor_grace_deadline(&mut self) -> Option<tokio::time::Instant> {
