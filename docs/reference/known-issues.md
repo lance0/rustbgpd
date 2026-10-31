@@ -73,7 +73,10 @@ resolved.
   receiver, the replacement is advertised with a different path ID and the
   stale RTBH keeps its own. The grace window is at most `gr_eor_grace_time`
   (`--check` warns above 240 seconds; the schema maximum is 4095), and the
-  helper's own stale-route timer can end it sooner.
+  helper's own stale-route timer can end it sooner. Tracking is limited to
+  65,536 carried keys per helper peer, and 65,536 withdrawn-in-hold keys per
+  peer or update group; keys past that limit are not recorded, so a deleted
+  RTBH among them stays at the helper until End-of-RIB.
   Mitigations: keep `gr_eor_grace_time` short; an RTBH controller that
   replaces a blackhole with an ordinary route at the same prefix should
   expect the old RTBH to stay at a flapped helper until that replacement is
