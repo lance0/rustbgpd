@@ -1179,14 +1179,6 @@ fn exempt_first(
     exempt: impl Fn(&crate::route::Route) -> bool,
     checkpoint: &mut impl FnMut(),
 ) -> usize {
-    let flags: Vec<bool> = announce
-        .iter()
-        .map(|route| {
-            checkpoint();
-            exempt(route)
-        })
-        .collect();
-    let count = flags.iter().filter(|&&flag| flag).count();
     #[cfg(debug_assertions)]
     {
         let mut keys = HashSet::with_capacity(announce.len());
@@ -1199,10 +1191,28 @@ fn exempt_first(
             );
         }
     }
-    // Nothing to move when the blackholing rows already lead.
-    if flags.iter().skip(count).all(|&flag| !flag) {
+    // One scan, allocating nothing, decides whether any blackholing row
+    // follows an ordinary one; usually none does.
+    let (mut count, mut ordinary_seen, mut out_of_order) = (0, false, false);
+    for route in announce.iter() {
+        checkpoint();
+        if exempt(route) {
+            count += 1;
+            out_of_order |= ordinary_seen;
+        } else {
+            ordinary_seen = true;
+        }
+    }
+    if !out_of_order {
         return count;
     }
+    let flags: Vec<bool> = announce
+        .iter()
+        .map(|route| {
+            checkpoint();
+            exempt(route)
+        })
+        .collect();
     let aligned = next_hop_override.len() == announce.len();
     if !aligned && !next_hop_override.is_empty() {
         // Overrides are index-aligned with the routes or absent; never
@@ -5353,13 +5363,14 @@ impl RibManager {
                 &mut announce,
                 &mut next_hop_override,
                 |route| {
-                    crate::manager::helpers::unicast_deferral_exempt(route)
-                        || route
-                            .communities()
-                            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
-                        || local_sources
-                            .get(&(route.prefix, route.path_id))
-                            .is_some_and(|source| source.deferral_exempt)
+                    route
+                        .communities()
+                        .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+                        || (route.peer == crate::manager::helpers::LOCAL_PEER
+                            && (crate::manager::helpers::unicast_deferral_exempt(route)
+                                || local_sources
+                                    .get(&(route.prefix, route.path_id))
+                                    .is_some_and(|source| source.deferral_exempt)))
                 },
                 &mut || checkpoint(),
             )

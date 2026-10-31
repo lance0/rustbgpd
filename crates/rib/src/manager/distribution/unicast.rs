@@ -2203,7 +2203,7 @@ impl RibManager {
             || ConditionalGate::requires_as_path_string(conditional);
         let mut keys = (!stage_path_id_zero)
             .then(|| AddPathKeys::new(wire, prefix, local_only, ribs, checkpoint));
-        let mut staged: smallvec::SmallVec<[_; 4]> = smallvec::SmallVec::new();
+        let mut changed: smallvec::SmallVec<[_; 2]> = smallvec::SmallVec::new();
         let mut next_rank: u32 = 1;
         let limit = if send_max == u32::MAX {
             usize::MAX
@@ -2296,26 +2296,35 @@ impl RibManager {
                 );
                 super::rs_control::apply_rs_control_egress(&mut modified, rs_asn, prepend);
             }
-            if keys.is_some() {
-                staged.push((*candidate, modified, nh_action));
-            } else {
-                modified.path_id = 0;
-                stage_multipath_row(
-                    rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
-                );
+            // A path that keeps its key stages now; the others wait until
+            // every staged path has claimed what it keeps.
+            match keys.as_mut().map(|keys| {
+                let blackholing = blackholing(candidate, &modified, local_role);
+                (blackholing, keys.keep(candidate, blackholing))
+            }) {
+                Some((_, Ok(key))) => modified.path_id = key,
+                Some((blackholing, Err(own))) => {
+                    changed.push((*candidate, modified, nh_action, blackholing, own));
+                    next_rank += 1;
+                    continue;
+                }
+                None => modified.path_id = 0,
             }
+            stage_multipath_row(
+                rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
+            );
 
             next_rank += 1;
         }
         if let Some(keys) = keys.as_mut() {
-            let routes: smallvec::SmallVec<[_; 8]> = staged
+            let changing: smallvec::SmallVec<[_; 4]> = changed
                 .iter()
-                .map(|(candidate, modified, _)| {
-                    (*candidate, blackholing(candidate, modified, local_role))
-                })
+                .map(|&(_, _, _, blackholing, own)| (blackholing, own))
                 .collect();
-            let assigned = keys.assign_all(&routes, limit, checkpoint);
-            for ((candidate, mut modified, nh_action), key) in staged.into_iter().zip(assigned) {
+            let assigned = keys.assign_changed(&changing, limit, checkpoint);
+            for ((candidate, mut modified, nh_action, _, _), key) in
+                changed.into_iter().zip(assigned)
+            {
                 modified.path_id = key;
                 stage_multipath_row(
                     rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
@@ -2336,9 +2345,11 @@ impl RibManager {
                     out.withdraw.push((*prefix, path_id));
                 }
             }
-        } else if let Some(keys) = keys {
+        } else if let Some(keys) = keys.filter(|keys| !keys.all_kept()) {
             // Withdraw only keys the plan no longer uses: every key this pass
-            // assigned stays, as does a frozen row during a hold.
+            // assigned stays, as does a frozen row during a hold. `rib_out`
+            // is the wire or an empty dump view, so a plan that kept every
+            // wire row withdraws nothing.
             for path_id in rib_out.path_ids_for_prefix(prefix) {
                 checkpoint();
                 if keys.withdrawable(path_id) {
@@ -3438,6 +3449,11 @@ pub(in crate::manager) struct AddPathKeys {
     /// Keys of the wire's blackholing rows, ascending; debug builds only,
     /// for the plan's invariant check.
     blackhole_keys: smallvec::SmallVec<[u32; 4]>,
+    /// Some staged path blackholes; for the invariant check.
+    any_blackholing: bool,
+    /// Wire rows a staged path kept; when every wire row is kept nothing is
+    /// withdrawn.
+    kept: usize,
     hold: bool,
 }
 
@@ -3490,9 +3506,12 @@ impl AddPathKeys {
             next: 1,
             assigned: smallvec::SmallVec::new(),
             blackhole_keys: smallvec::SmallVec::new(),
+            any_blackholing: false,
+            kept: 0,
             hold,
         };
-        let local = ribs.get(&LOCAL_PEER);
+        // Only a hold freezes rows, by whether their injection is present.
+        let local = if hold { ribs.get(&LOCAL_PEER) } else { None };
         // One prefix-index probe; a stored row's path ID is its key, and
         // only a local row needs its provenance looked up.
         for route in rib_out.iter_prefix(prefix) {
@@ -3608,66 +3627,96 @@ impl AddPathKeys {
     ) -> smallvec::SmallVec<[u32; 8]> {
         // Planned keys start at 1, so 0 marks a path not yet keyed.
         let mut keys: smallvec::SmallVec<[u32; 8]> = smallvec::smallvec![0; staged.len()];
-        // Each changing candidate, with its own row's key if it changed
-        // class.
-        let mut changing: smallvec::SmallVec<[(usize, Option<u32>); 8]> = smallvec::SmallVec::new();
-        // Local paths keep their keys by source path ID.
+        let mut changing: smallvec::SmallVec<[(bool, Option<u32>); 4]> = smallvec::SmallVec::new();
+        let mut changing_at: smallvec::SmallVec<[usize; 4]> = smallvec::SmallVec::new();
         for (index, &(route, blackholing)) in staged.iter().enumerate() {
             checkpoint();
-            if route.peer != LOCAL_PEER {
-                continue;
-            }
-            match self.held_local(route.path_id, blackholing) {
-                Some(at) => {
-                    let held = self.local_held[at];
-                    self.local_held[at].taken = true;
-                    self.keep_or_change(
-                        index,
-                        held.key,
-                        held.blackholing,
-                        blackholing,
-                        &mut keys,
-                        &mut changing,
-                    );
+            match self.keep(route, blackholing) {
+                Ok(key) => keys[index] = key,
+                Err(own) => {
+                    changing.push((blackholing, own));
+                    changing_at.push(index);
                 }
-                None => changing.push((index, None)),
             }
         }
-        // Received paths keep their peer's keys, lowest first in rank order:
-        // a merge of the staged paths sorted by peer with the held keys.
-        let mut received: smallvec::SmallVec<[(PeerId, usize); 8]> = staged
-            .iter()
-            .enumerate()
-            .filter(|(_, (route, _))| route.peer != LOCAL_PEER)
-            .map(|(index, (route, _))| (route.peer, index))
-            .collect();
-        received.sort_by_key(|&(peer, _)| peer);
-        let mut held = 0;
-        for (peer, index) in received {
-            checkpoint();
-            while self
+        let changed = self.assign_changed(&changing, limit, checkpoint);
+        for (&index, key) in changing_at.iter().zip(changed) {
+            keys[index] = key;
+        }
+        debug_assert!(keys.iter().all(|&key| key != 0));
+        keys
+    }
+
+    /// The key a staged path keeps, called in rank order before
+    /// [`Self::assign_changed`]: a local path's row by source path ID, a
+    /// received path's peer's lowest untaken row. `Err` carries the path's
+    /// own row's key when it changed class, `None` when it holds no row; its
+    /// key is planned once every staged path has been seen.
+    pub(in crate::manager) fn keep(
+        &mut self,
+        route: &crate::route::Route,
+        blackholing: bool,
+    ) -> Result<u32, Option<u32>> {
+        self.any_blackholing |= blackholing;
+        let (key, was) = if route.peer == LOCAL_PEER {
+            let at = self.held_local(route.path_id, blackholing).ok_or(None)?;
+            self.local_held[at].taken = true;
+            (self.local_held[at].key, self.local_held[at].blackholing)
+        } else {
+            // A peer's rows are taken lowest first, so its taken rows lead
+            // its run.
+            let first = self
                 .peer_held
-                .get(held)
-                .is_some_and(|entry| entry.peer < peer)
-            {
-                held += 1;
+                .partition_point(|held| held.peer < route.peer);
+            let run = self.peer_held[first..].partition_point(|held| held.peer == route.peer);
+            let at = first + self.peer_held[first..first + run].partition_point(|held| held.taken);
+            if at == first + run {
+                return Err(None);
             }
-            match self.peer_held.get(held).copied() {
-                Some(entry) if entry.peer == peer => {
-                    self.peer_held[held].taken = true;
-                    held += 1;
-                    self.keep_or_change(
-                        index,
-                        entry.key,
-                        entry.blackholing,
-                        staged[index].1,
-                        &mut keys,
-                        &mut changing,
-                    );
-                }
-                _ => changing.push((index, None)),
+            self.peer_held[at].taken = true;
+            (self.peer_held[at].key, self.peer_held[at].blackholing)
+        };
+        if was == blackholing {
+            self.assigned.push(key);
+            self.kept += 1;
+            Ok(key)
+        } else {
+            // A path changing class may swap keys: a newly blackholing one
+            // may take over a departing blackhole key, and a demoted one's
+            // blackhole key goes to a newly blackholing path first.
+            if was {
+                self.departing_exempt.push(key);
             }
+            Err(Some(key))
         }
+    }
+
+    /// Keys for the staged paths [`Self::keep`] refused, given in rank
+    /// order as (blackholing, own key) and returned in that order; see the
+    /// type's plan. Call once, after every staged path went through `keep`.
+    pub(in crate::manager) fn assign_changed(
+        &mut self,
+        changing: &[(bool, Option<u32>)],
+        limit: usize,
+        checkpoint: &mut impl FnMut(),
+    ) -> smallvec::SmallVec<[u32; 4]> {
+        let mut keys: smallvec::SmallVec<[u32; 4]> = smallvec::smallvec![0; changing.len()];
+        // Steady state: every wire row kept by its own path, nothing new.
+        if !changing.is_empty() || self.kept < self.local_held.len() + self.peer_held.len() {
+            self.plan_changes(changing, limit, &mut keys, checkpoint);
+        }
+        self.assigned.sort_unstable();
+        self.debug_assert_keeps_a_blackhole_key();
+        keys
+    }
+
+    fn plan_changes(
+        &mut self,
+        changing: &[(bool, Option<u32>)],
+        limit: usize,
+        keys: &mut smallvec::SmallVec<[u32; 4]>,
+        checkpoint: &mut impl FnMut(),
+    ) {
         // Rows whose source is not staged this pass are leaving, unless
         // frozen.
         for held in &self.local_held {
@@ -3692,29 +3741,32 @@ impl AddPathKeys {
         self.departing_exempt.sort_unstable();
         self.departing_taken = smallvec::smallvec![false; self.departing_exempt.len()];
         self.free.sort_unstable();
-        // Blackholing candidates first, so a departing blackhole key goes to
-        // a new blackholing path before any ordinary path could take it; a
+        // Blackholing paths first, so a departing blackhole key goes to a
+        // new blackholing path before any ordinary path could take it; a
         // demoted path then reclaims its own blackhole key before any new
         // ordinary path could take it from the departing pool; rank order
         // within each class.
-        changing.sort_by_key(|&(index, own)| {
-            let blackholing = staged[index].1;
+        let mut order: smallvec::SmallVec<[usize; 4]> = (0..changing.len()).collect();
+        order.sort_by_key(|&index| {
+            let (blackholing, own) = changing[index];
             (!blackholing, blackholing || own.is_none(), index)
         });
         // A changing path's own row stays until it is planned, so it is
         // reserved against the send limit.
         let mut reserved = changing.iter().filter(|(_, own)| own.is_some()).count();
-        for (index, own) in changing {
+        for index in order {
             checkpoint();
+            let (blackholing, own) = changing[index];
             reserved -= usize::from(own.is_some());
-            let key = self.changed_key(staged[index].1, own, limit, reserved, checkpoint);
+            let key = self.changed_key(blackholing, own, limit, reserved, checkpoint);
             keys[index] = key;
             self.assigned.push(key);
         }
-        debug_assert!(keys.iter().all(|&key| key != 0));
-        self.assigned.sort_unstable();
-        self.debug_assert_keeps_a_blackhole_key(staged);
-        keys
+    }
+
+    /// Whether the plan kept every wire row, so nothing is withdrawn.
+    pub(in crate::manager) fn all_kept(&self) -> bool {
+        self.kept == self.occupied.len()
     }
 
     /// The withdraw phase goes first, so a plan that withdrew every
@@ -3723,40 +3775,16 @@ impl AddPathKeys {
     /// a blackholing key whenever the plan keeps a blackholing row; only a
     /// local row without export provenance could break that, and staging
     /// records provenance for every local row it commits.
-    fn debug_assert_keeps_a_blackhole_key(&self, staged: &[(&crate::route::Route, bool)]) {
+    fn debug_assert_keeps_a_blackhole_key(&self) {
         debug_assert!(
             self.blackhole_keys.is_empty()
-                || !staged.iter().any(|&(_, blackholing)| blackholing)
+                || !self.any_blackholing
                 || self.blackhole_keys.iter().any(|key| {
                     self.assigned.binary_search(key).is_ok() || self.frozen.contains(key)
                 }),
             "the plan withdraws every blackholing key {:?} while it keeps a blackholing row",
             self.blackhole_keys
         );
-    }
-
-    /// A held row's path keeps its key when its class is unchanged. A path
-    /// changing class may swap keys: a newly blackholing one may take over
-    /// a departing blackhole key, and a demoted one's blackhole key goes to
-    /// a newly blackholing path first.
-    fn keep_or_change(
-        &mut self,
-        index: usize,
-        key: u32,
-        was: bool,
-        now: bool,
-        keys: &mut smallvec::SmallVec<[u32; 8]>,
-        changing: &mut smallvec::SmallVec<[(usize, Option<u32>); 8]>,
-    ) {
-        if was == now {
-            keys[index] = key;
-            self.assigned.push(key);
-        } else {
-            if was {
-                self.departing_exempt.push(key);
-            }
-            changing.push((index, Some(key)));
-        }
     }
 
     /// The local row `source` holds. During a hold one source may hold two
