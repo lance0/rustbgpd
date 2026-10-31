@@ -1560,6 +1560,41 @@ fn helper_teardown_after_release_carries_nothing() {
     assert!(manager.helper_stale_exempt.is_empty());
 }
 
+/// Register the private dual-stack receiver, a GR helper for both families.
+fn register_dual_stack(
+    manager: &mut RibManager,
+    session_id: u64,
+) -> (
+    mpsc::Sender<OutboundRouteUpdate>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+    let observer = peer_v4(OBSERVER);
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: observer,
+        session_id,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![FAMILY, V6],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (tx, rx) = mpsc::channel(64);
+    let mut up = super::lifecycle::test_peer_up(observer, session_id, tx.clone());
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        export_policy,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![FAMILY, V6];
+        *export_policy = Some(private_policy(None));
+    }
+    manager.handle_update(up);
+    (tx, rx)
+}
+
 /// Establish `address` as a waiter whose OPEN lists `families`.
 fn connect_waiter_for(
     manager: &mut RibManager,
@@ -1626,32 +1661,7 @@ fn dormant_family_keeps_its_carry_until_its_own_gate_arms() {
         });
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
-    let register_both = |manager: &mut RibManager, session_id: u64| {
-        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
-            peer: observer,
-            session_id,
-            peer_restart_state: false,
-            peer_gr_helper: true,
-            peer_gr_families: vec![FAMILY, V6],
-            peer_enhanced_refresh: true,
-            peer_llgr_families: vec![],
-            local_llgr_stale_time: 0,
-        });
-        let (tx, rx) = mpsc::channel(64);
-        let mut up = super::lifecycle::test_peer_up(observer, session_id, tx.clone());
-        if let RibUpdate::PeerUp {
-            sendable_families,
-            export_policy,
-            ..
-        } = &mut up
-        {
-            *sendable_families = vec![FAMILY, V6];
-            *export_policy = Some(private_policy(None));
-        }
-        manager.handle_update(up);
-        (tx, rx)
-    };
-    let (_old_tx, mut old_rx) = register_both(&mut manager, 82);
+    let (_old_tx, mut old_rx) = register_dual_stack(&mut manager, 82);
     let mut rib = PeerRib::new();
     let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
     let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
@@ -1666,7 +1676,7 @@ fn dormant_family_keeps_its_carry_until_its_own_gate_arms() {
         *stale = true;
     }
     delete(&mut manager, rtbh);
-    let (_new_tx, mut new_rx) = register_both(&mut manager, 182);
+    let (_new_tx, mut new_rx) = register_dual_stack(&mut manager, 182);
     let kept_key = Some((Prefix::V4(kept), 0));
     assert_eq!(
         apply(&mut new_rx, &mut rib, kept_key),
@@ -1698,4 +1708,114 @@ fn dormant_family_keeps_its_carry_until_its_own_gate_arms() {
     let _waiter = connect_waiter_for(&mut manager, WAITER, &[FAMILY]);
     assert!(manager.selection_deferred(FAMILY));
     assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
+}
+
+/// A registered session without an exact export encoder fails closed: its
+/// carried set can never be flushed, so the resync timer must not keep
+/// re-arming for it. Red proof: a runnable check that ignores the encoder
+/// leaves the timer pending every tick until the hold ends.
+#[test]
+fn fail_closed_session_leaves_the_resync_timer_idle() {
+    let (mut manager, _rib, (_tx, _rx, _), rtbh, _kept, _peers) = settled_waiting_key();
+    let observer = peer_v4(OBSERVER);
+    assert!(manager.selection_deferred(FAMILY));
+    manager.peer_export_encoders.remove(&observer);
+    // The covering route goes, and the skipped set is marked to re-walk.
+    withdraw_received(&mut manager, rtbh);
+    assert!(
+        manager
+            .helper_stale_exempt
+            .get(&observer)
+            .is_some_and(|carried| !carried.settled),
+        "the skipped set waits for a re-walk"
+    );
+    assert!(
+        !manager.resync_tick_pending(),
+        "nothing the timer can do for a session without an encoder"
+    );
+}
+
+/// A dual-stack helper flaps while only the IPv6 gate is armed; its next
+/// session's IPv4 End-of-RIB goes out at once, which purges the deleted
+/// IPv4 RTBH the helper kept. The IPv4 keys retire then and nothing is
+/// withdrawn for them. Red proof: retiring a dormant family's keys only at
+/// its release keeps them waiting for a gate that has nothing left to do.
+#[test]
+fn dormant_family_keys_retire_once_its_end_of_rib_is_sent() {
+    const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+    const V6_WAITER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 86);
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![
+                SelectionDeferralWaiterConfig {
+                    peer: peer_v4(WAITER),
+                    families: vec![FAMILY],
+                },
+                SelectionDeferralWaiterConfig {
+                    peer: peer_v4(V6_WAITER),
+                    families: vec![V6],
+                },
+            ],
+        });
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx) = register_dual_stack(&mut manager, 82);
+    let mut rib = PeerRib::new();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let key = (Prefix::V4(rtbh), 0);
+    inject_rtbh(&mut manager, rtbh);
+    apply(&mut old_rx, &mut rib, None);
+    let _v6_waiter = connect_waiter_for(&mut manager, V6_WAITER, &[V6]);
+    assert!(manager.selection_deferred(V6) && !manager.selection_deferred(FAMILY));
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    assert!(
+        manager
+            .helper_stale_exempt
+            .get(&observer)
+            .is_some_and(|carried| carried.keys.contains(&key)),
+        "the IPv4 key is carried"
+    );
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    let (_new_tx, mut new_rx) = register_dual_stack(&mut manager, 182);
+    let mut drain = |rib: &mut PeerRib| {
+        let mut markers = 0;
+        while let Ok(update) = new_rx.try_recv() {
+            assert!(!update.withdraw.contains(&key), "nothing is withdrawn");
+            for route in update.announce.iter() {
+                rib.insert((route.prefix, route.path_id), false);
+            }
+            if update.end_of_rib.contains(&FAMILY) {
+                markers += 1;
+                rib.retain(|_, stale| !*stale);
+            }
+        }
+        markers
+    };
+    let mut markers = drain(&mut rib);
+    for _ in 0..4 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        markers += drain(&mut rib);
+    }
+    assert_eq!(
+        markers, 1,
+        "the IPv4 End-of-RIB goes out while IPv6 is held"
+    );
+    assert!(!rib.contains_key(&key), "and purges the stale RTBH");
+    assert!(
+        !manager
+            .helper_stale_exempt
+            .get(&observer)
+            .is_some_and(|carried| carried.keys.contains(&key)),
+        "the IPv4 key retires"
+    );
+    assert!(manager.selection_deferred(V6), "still inside the IPv6 hold");
 }

@@ -1108,6 +1108,8 @@ impl RibManager {
             let mut withdraw = std::collections::BTreeSet::new();
             let mut withdrawn = Vec::new();
             let mut done = Vec::new();
+            // Whether each family's keys retire depends only on the family.
+            let mut retired_families: Vec<((Afi, Safi), bool)> = Vec::new();
             for key in candidates {
                 self.replacement_checkpoint_at("helper_stale_exempt", false);
                 let (prefix, path_id) = key;
@@ -1119,9 +1121,16 @@ impl RibManager {
                 // deferred or has gone out; selection can be staged while the
                 // gate still holds. A family whose gate may still arm keeps
                 // its keys for that gate.
-                if self.helper_stale_family_retired(peer, family)
-                    || self.advertises_unicast_key(peer, prefix, path_id)
+                let retired = if let Some(&(_, retired)) =
+                    retired_families.iter().find(|(seen, _)| *seen == family)
                 {
+                    retired
+                } else {
+                    let retired = self.helper_stale_family_retired(peer, family);
+                    retired_families.push((family, retired));
+                    retired
+                };
+                if retired || self.advertises_unicast_key(peer, prefix, path_id) {
                     done.push(key);
                 } else if !self.selection_convergence_held(family) {
                     if !gate_blocked.contains(&family) {
@@ -1189,9 +1198,7 @@ impl RibManager {
         let mut ready = Vec::new();
         let mut skipped_touched = Vec::new();
         for (&peer, carried) in &self.helper_stale_exempt {
-            if self.helper_stale_exempt_runnable(peer)
-                && self.peer_export_encoders.contains_key(&peer)
-            {
+            if self.helper_stale_exempt_runnable(peer) {
                 ready.push(peer);
             } else if carried.settled && touches_changed(&carried.keys, changed) {
                 skipped_touched.push(peer);
@@ -1316,8 +1323,13 @@ impl RibManager {
     /// A later session is registered and has sent every row the hold lets
     /// it send, its live exempt rows included, so it can take the
     /// withdrawals now. A dirty session that is partially caught up has done
-    /// so; an ORF-gated one has not sent its initial table yet.
+    /// so; an ORF-gated one has not sent its initial table yet. A session
+    /// without an exact export encoder fails closed: no withdrawal can carry
+    /// its export snapshot, so it never runs (and never arms the timer).
     pub(super) fn helper_stale_exempt_runnable(&self, peer: PeerId) -> bool {
+        if !self.peer_export_encoders.contains_key(&peer) {
+            return false;
+        }
         self.outbound_peers.get(&peer).is_some_and(|current| {
             self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
                 !carried
