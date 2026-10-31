@@ -374,6 +374,8 @@ struct Harness {
     /// Keys a GR helper retains as stale from a previous session until our
     /// End-of-RIB on the current one.
     stale: HashSet<(Prefix, u32)>,
+    /// The flap that left `stale` came before the hold armed.
+    stale_before_hold: bool,
     /// The current session's peer OPEN carried a GR capability: it keeps
     /// our routes as stale when the session ends cleanly.
     helper: bool,
@@ -438,6 +440,7 @@ impl Harness {
             blackholed: BTreeMap::new(),
             session: OBSERVER_SESSION,
             stale: HashSet::new(),
+            stale_before_hold: false,
             helper: true,
             gr_families: true,
             registered: false,
@@ -569,6 +572,7 @@ impl Harness {
                 self.wire.remove(&key);
             }
             self.stale = self.wire.keys().copied().collect();
+            self.stale_before_hold = !self.held;
             self.blackholed = self.exempt_rows();
             self.awaiting_first_eor = true;
         } else {
@@ -1275,6 +1279,12 @@ impl Harness {
             });
         if self.stale.contains(&key) && candidate {
             return allowed("LAN-2727");
+        }
+        // LAN-2740: the stale-RTBH carry is built only inside the hold, so
+        // a row a GR helper kept from a flap before the hold armed, and the
+        // new session never re-sent, stays stale until release.
+        if self.stale.contains(&key) && self.stale_before_hold {
+            return allowed("LAN-2740");
         }
         None
     }
@@ -2996,4 +3006,42 @@ fn i2_catches_a_stale_blackhole_tag() {
     assert!(tagged(false).is_ok(), "the retag converges");
     let error = tagged(true).expect_err("a stale tag placement fails I2");
     assert!(error.to_string().contains("I2:"), "{error}");
+}
+
+/// LAN-2740: a private receiver flaps toward a GR helper before the hold
+/// arms and re-registers behind a full writer, so its stale RTBH host is
+/// never re-sent; deleted inside the hold, it stays stale until release.
+/// `ORACLE_STRICT=LAN-2740` turns this red.
+#[test]
+fn pre_hold_flap_leaves_a_deleted_rtbh_stale() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = [
+        Op::Inject {
+            prefix: 1,
+            path: 2,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: true,
+        },
+    ];
+    let hold = [
+        Op::Delete { prefix: 1, path: 2 },
+        Op::Backpressure(false),
+        Op::Drain,
+    ];
+    if let Some(reason) = failure(config, &setup, &hold) {
+        panic!("{reason}");
+    }
 }
