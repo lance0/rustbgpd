@@ -2427,9 +2427,12 @@ session's routes stale until End-of-RIB. While End-of-RIB toward it is held,
 by selection deferral or this grace window, rustbgpd withdraws an RTBH or
 host route deleted since then, but not one whose prefix still has another
 route, local or received from another peer, even if this peer's export
-policy denies it. The helper keeps that
-RTBH until End-of-RIB, so an RTBH controller that replaces a blackhole with
-an ordinary route at the same prefix should expect this window and keep
+policy denies it. The helper keeps that RTBH until an ordinary route for the
+prefix is advertised to it at the same key, or until End-of-RIB, whichever
+comes first. An RTBH controller that replaces a blackhole with an ordinary
+route at the same prefix should expect the RTBH to stay while that
+replacement is export-denied, held by selection deferral, or advertised to
+an Add-Path receiver under a different path ID, and should keep
 `gr_eor_grace_time` short. See
 [Known Issues](known-issues.md#open-issues) for the full scope.
 

@@ -61,14 +61,23 @@ resolved.
   tell whether the helper holds the stale RTBH at that key or an ordinary
   route that was never replaced; withdrawing it could remove a route the
   helper rightly keeps. The candidate counts even when this peer's export
-  policy denies it. The helper therefore keeps that RTBH until End-of-RIB
-  is sent, at selection release or at the end of the grace window,
-  whichever is later. The grace window is at most `gr_eor_grace_time`
+  policy denies it. The helper therefore keeps that RTBH until whichever
+  comes first: an ordinary route for the prefix is advertised to it at the
+  same key, implicitly replacing the stale row, or End-of-RIB is sent, at
+  the later of selection release and the end of the grace window.
+  Selection release distributes routes while the grace window still holds
+  End-of-RIB, so an exportable replacement normally reaches the helper at
+  release. The RTBH stays until End-of-RIB only while no replacement is
+  advertised at its key: the candidate is denied by this peer's export
+  policy, or is still held by selection deferral, or, toward an Add-Path
+  receiver, the replacement is advertised with a different path ID and the
+  stale RTBH keeps its own. The grace window is at most `gr_eor_grace_time`
   (`--check` warns above 240 seconds; the schema maximum is 4095), and the
   helper's own stale-route timer can end it sooner.
   Mitigations: keep `gr_eor_grace_time` short; an RTBH controller that
   replaces a blackhole with an ordinary route at the same prefix should
-  expect the old RTBH to stay at a flapped helper until End-of-RIB.
+  expect the old RTBH to stay at a flapped helper until that replacement is
+  advertised to it, or until End-of-RIB when it is not.
   `rbgp rib --prefix P advertised PEER --explain` shows what rustbgpd now
   advertises for the prefix, or why it is held; the helper's own stale-route
   view shows whether it still holds the RTBH.
