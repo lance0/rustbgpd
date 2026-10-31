@@ -667,9 +667,17 @@ fn run_until(
 /// `withdraw` / `announce` for every update on `rx` touching the followed
 /// prefix, and `eor` for each IPv4 unicast End-of-RIB.
 fn followed_trace(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<&'static str> {
-    let prefix = Prefix::V4(followed());
+    trace_of(
+        &std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+        followed(),
+    )
+}
+
+/// [`followed_trace`] over already drained `updates`, for `prefix`.
+fn trace_of(updates: &[OutboundRouteUpdate], prefix: Ipv4Prefix) -> Vec<&'static str> {
+    let prefix = Prefix::V4(prefix);
     let mut trace = Vec::new();
-    while let Ok(update) = rx.try_recv() {
+    for update in updates {
         if update.withdraw.iter().any(|(p, _)| *p == prefix) {
             trace.push("withdraw");
         }
@@ -772,10 +780,11 @@ async fn later_gr_deadline_waits_for_its_own_backlog() {
 
 /// The earliest ORF End-of-RIB cap (peer A's) falls due with a long batch
 /// queued, and A's session ends inside that drain, retiring A's cap. Peer
-/// B's later cap, already past, must capture its own backlog, so B's
-/// ROUTE-REFRESH queued before B's cap sends the table before the
-/// End-of-RIB. Red proof: a cutoff that outlives its deadline hands B A's
-/// exhausted count, and B's End-of-RIB goes out ahead of its table.
+/// B's cap, later than that capture and past by now, must capture its own
+/// backlog, so B's ROUTE-REFRESH queued before B's cap sends the table
+/// before the End-of-RIB. Red proof: a count-only cutoff that outlives A's
+/// cap hands B A's exhausted count, and B's End-of-RIB goes out ahead of its
+/// table.
 #[tokio::test(start_paused = true)]
 async fn retired_earliest_orf_cap_does_not_lend_its_cutoff() {
     let a = Ipv4Addr::new(10, 0, 0, 11);
@@ -837,9 +846,9 @@ async fn retired_earliest_orf_cap_does_not_lend_its_cutoff() {
     run_until(&mut actor, &mut barrier);
 
     assert_eq!(
-        followed_trace(&mut new_b_rx).first(),
-        Some(&"announce"),
-        "B's refresh delivers its table before the End-of-RIB"
+        followed_trace(&mut new_b_rx),
+        vec!["announce", "eor"],
+        "B's refresh delivers its table, then its End-of-RIB"
     );
 }
 
@@ -855,11 +864,14 @@ async fn later_refresh_window_waits_for_its_own_backlog() {
     let c = Ipv4Addr::new(10, 0, 0, 23);
     let observer = Ipv4Addr::new(10, 0, 0, 24);
     let (tx, rx) = mpsc::channel(16);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let _a_rx = connect_peer(&mut manager, a, 1, false, false);
     let _b_rx = connect_peer(&mut manager, b, 1, false, false);
     let _c_rx = connect_peer(&mut manager, c, 1, false, false);
     let mut out_rx = connect_peer(&mut manager, observer, 1, false, false);
+    let a_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    manager.handle_update(received(a, 1, vec![make_route(a_prefix, a)]));
     manager.handle_update(received(b, 1, vec![make_route(followed(), b)]));
     while manager.process_next_route_chunk() {}
     let begin = |address| RibUpdate::BeginRouteRefresh {
@@ -898,11 +910,28 @@ async fn later_refresh_window_waits_for_its_own_backlog() {
     tokio::time::advance(Duration::from_secs(2)).await;
     run_until(&mut actor, &mut barrier);
 
+    let updates: Vec<_> = std::iter::from_fn(|| out_rx.try_recv().ok()).collect();
     assert_eq!(
-        followed_trace(&mut out_rx),
+        trace_of(&updates, followed()),
         Vec::<&str>::new(),
         "B's refreshed route never leaves the observer"
     );
+    assert_eq!(
+        trace_of(&updates, a_prefix),
+        vec!["withdraw"],
+        "A's window timed out and swept the route it never refreshed"
+    );
+    let in_progress = |address: Ipv4Addr| {
+        gauge_metric_value(
+            &metrics,
+            "bgp_route_refresh_in_progress",
+            &[
+                ("peer", address.to_string().as_str()),
+                ("family", "ipv4_unicast"),
+            ],
+        )
+    };
+    assert!(in_progress(a) < 0.5 && in_progress(b) < 0.5);
 }
 
 /// Registers a session that negotiated LLGR for IPv4 unicast (RFC 9494), so
@@ -1020,10 +1049,16 @@ async fn later_llgr_deadline_waits_for_its_own_backlog() {
     tokio::time::advance(Duration::from_secs(2)).await;
     run_until(&mut actor, &mut barrier);
 
-    let trace = followed_trace(&mut out_rx);
+    let updates: Vec<_> = std::iter::from_fn(|| out_rx.try_recv().ok()).collect();
+    let trace = trace_of(&updates, followed());
     assert!(
         !trace.contains(&"withdraw"),
         "B's fresh route replaces its LLGR-stale one in place: {trace:?}"
+    );
+    assert_eq!(
+        trace_of(&updates, a_prefix),
+        vec!["withdraw"],
+        "A's LLGR deadline fired and swept its stale route"
     );
 }
 
@@ -1136,5 +1171,269 @@ async fn later_conditional_settle_waits_for_its_own_backlog() {
     assert!(
         (transitions("x") - 2.0).abs() < f64::EPSILON,
         "X's deadline fired and suppressed it"
+    );
+}
+
+/// K peers' GR restart deadlines, 1 ms apart, under a primary channel of
+/// `CAP` kept full by queries. With `first_look_at_earliest`, the actor first
+/// looks at the earliest deadline and the rest pass during that drain;
+/// otherwise every deadline has passed before the actor first looks.
+/// Returns, per peer, the queries answered before its sweep.
+async fn staggered_gr_sweeps(first_look_at_earliest: bool) -> Vec<usize> {
+    const K: u8 = 8;
+    let (tx, rx) = mpsc::channel(STAGGER_CAP);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peers: Vec<Ipv4Addr> = (0..K).map(|k| Ipv4Addr::new(10, 9, 0, k + 1)).collect();
+    for (k, &address) in (0u8..).zip(&peers) {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, k * 4), 30);
+        manager.handle_update(received(address, 0, vec![make_route(prefix, address)]));
+        while manager.process_next_route_chunk() {}
+        manager.handle_update(restart(address, 0, 2, 360));
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
+    let expired = |address: Ipv4Addr| {
+        counter_metric_value(
+            &metrics,
+            "bgp_gr_timer_expired_total",
+            &[("peer", address.to_string().as_str())],
+        ) > 0.5
+    };
+    let fill = |tx: &mpsc::Sender<RibUpdate>, pending: &mut Vec<oneshot::Receiver<usize>>| loop {
+        let (reply, response) = oneshot::channel();
+        if tx.try_send(RibUpdate::QueryLocRibCount { reply }).is_err() {
+            break;
+        }
+        pending.push(response);
+    };
+    let mut pending = Vec::new();
+    fill(&tx, &mut pending);
+    let mut actor = Box::pin(manager.run());
+    let mut poll = || {
+        assert!(
+            actor
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    };
+    let spread = Duration::from_millis(u64::from(K));
+    if first_look_at_earliest {
+        // The earliest deadline is t0 + 2 s; the clock reads t0 + K ms.
+        tokio::time::advance(Duration::from_secs(2).saturating_sub(spread)).await;
+        poll();
+        tokio::time::advance(spread).await;
+    } else {
+        tokio::time::advance(Duration::from_secs(2)).await;
+    }
+    let mut answered = 0;
+    let mut swept_after = vec![None; peers.len()];
+    for _ in 0..100_000 {
+        let before = answered;
+        poll();
+        pending.retain_mut(|response| {
+            let done = response.try_recv().is_ok();
+            answered += usize::from(done);
+            !done
+        });
+        for (swept, &address) in swept_after.iter_mut().zip(&peers) {
+            if swept.is_none() && expired(address) {
+                *swept = Some(before);
+            }
+        }
+        if swept_after.iter().all(Option::is_some) {
+            break;
+        }
+        fill(&tx, &mut pending);
+    }
+    swept_after
+        .into_iter()
+        .map(|swept| swept.expect("every peer's deadline fires"))
+        .collect()
+}
+
+/// The primary channel capacity of the staggered-deadline fixture.
+const STAGGER_CAP: usize = 32;
+
+/// ADR-0137 / RFC 4724 §4.2 bound: deadlines of one timer that have all
+/// passed when it is first seen due fire together after one backlog; ones
+/// that pass during that drain wait for at most one more. Red proof:
+/// bounding each expiry by the timer's earliest deadline alone gives the
+/// K-th peer K backlogs.
+#[tokio::test(start_paused = true)]
+async fn staggered_gr_deadlines_fire_within_two_backlogs() {
+    let all_passed = staggered_gr_sweeps(false).await;
+    assert!(
+        all_passed.iter().all(|&answered| answered <= STAGGER_CAP),
+        "deadlines passed at the first look share one backlog: {all_passed:?}"
+    );
+    let during_drain = staggered_gr_sweeps(true).await;
+    assert!(
+        during_drain
+            .iter()
+            .all(|&answered| answered <= 2 * STAGGER_CAP),
+        "deadlines passing during the first drain wait at most one more backlog: {during_drain:?}"
+    );
+}
+
+/// RFC 4724 §4.2: a session not re-established within the Restart Time has
+/// its stale routes deleted. Peer A's and B's restart deadlines have both
+/// passed when the actor first looks; B's context, `PeerUp`, UPDATE and
+/// End-of-RIB arrive only after that capture, so B's stale routes are swept
+/// with A's. Red proof: bounding the expiry by the earliest deadline alone
+/// lets B's late `PeerUp` replace its restart deadline, and its stale routes
+/// are never swept.
+#[tokio::test(start_paused = true)]
+async fn gr_deadline_passed_at_capture_is_not_saved_by_a_late_reconnect() {
+    let a = Ipv4Addr::new(10, 0, 0, 51);
+    let b = Ipv4Addr::new(10, 0, 0, 52);
+    let c = Ipv4Addr::new(10, 0, 0, 53);
+    let observer = Ipv4Addr::new(10, 0, 0, 54);
+    let (tx, rx) = mpsc::channel(16);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let _a_rx = connect_peer(&mut manager, a, 1, false, false);
+    let _b_rx = connect_peer(&mut manager, b, 1, false, false);
+    let _c_rx = connect_peer(&mut manager, c, 1, false, false);
+    let mut out_rx = connect_peer(&mut manager, observer, 1, false, false);
+    let a_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    manager.handle_update(received(a, 1, vec![make_route(a_prefix, a)]));
+    manager.handle_update(received(b, 1, vec![make_route(followed(), b)]));
+    while manager.process_next_route_chunk() {}
+    manager.handle_update(restart(a, 1, 2, 360));
+    tokio::time::advance(Duration::from_millis(500)).await;
+    manager.handle_update(restart(b, 1, 2, 360));
+    while out_rx.try_recv().is_ok() {}
+
+    tx.try_send(long_batch(c)).unwrap();
+    // Both restart deadlines pass before the first look.
+    tokio::time::advance(Duration::from_secs(3)).await;
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending(),
+        "the cutoff captures the long batch with both deadlines passed"
+    );
+    // B returns after its restart time, after the capture.
+    let peer = peer_v4(b);
+    tx.try_send(RibUpdate::SetPeerGracefulRestartContext {
+        peer,
+        session_id: 2,
+        peer_restart_state: true,
+        peer_gr_helper: true,
+        peer_gr_families: ipv4_sendable(),
+        peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
+    })
+    .unwrap();
+    let (new_b_tx, _new_b_rx) = mpsc::channel(16384);
+    tx.try_send(super::lifecycle::test_peer_up(peer, 2, new_b_tx))
+        .unwrap();
+    tx.try_send(received(b, 2, vec![make_route(followed(), b)]))
+        .unwrap();
+    tx.try_send(RibUpdate::EndOfRib {
+        peer,
+        session_id: 2,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .unwrap();
+    let (reply, mut barrier) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    run_until(&mut actor, &mut barrier);
+
+    let expired = |address: Ipv4Addr| {
+        counter_metric_value(
+            &metrics,
+            "bgp_gr_timer_expired_total",
+            &[("peer", address.to_string().as_str())],
+        )
+    };
+    assert!((expired(a) - 1.0).abs() < f64::EPSILON, "A's routes swept");
+    assert!(
+        (expired(b) - 1.0).abs() < f64::EPSILON,
+        "B missed its restart time, so its stale routes are swept"
+    );
+    assert_eq!(
+        followed_trace(&mut out_rx),
+        vec!["withdraw", "announce"],
+        "B's stale route goes, and the new session announces it again"
+    );
+}
+
+/// ADR-0137: a condition that held for its whole settle time applies, even
+/// when it changes after its deadline. X's and Y's settle deadlines have
+/// both passed when the actor first looks; Y's condition is withdrawn only
+/// after that capture. Y's transition applies with X's, and the withdrawal
+/// starts a new settle. Red proof: bounding the expiry by the earliest
+/// deadline alone fires only X; the withdrawal is then admitted first and
+/// re-arms Y, and Y's settled transition is lost.
+#[tokio::test(start_paused = true)]
+async fn conditional_settle_passed_at_capture_applies_before_a_later_flip() {
+    let c = Ipv4Addr::new(10, 0, 0, 41);
+    let x_condition = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32);
+    let y_condition = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 2), 32);
+    let (tx, rx) = mpsc::channel(16);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let _c_rx = connect_peer(&mut manager, c, 1, false, false);
+    let _ = manager.install_conditional_advertisements(vec![
+        absent_if("x", x_condition),
+        absent_if("y", y_condition),
+    ]);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let _ = manager.fire_conditional_advertisement_timers(tokio::time::Instant::now());
+    let transitions = |name: &str| {
+        counter_metric_value(
+            &metrics,
+            "bgp_conditional_advertisement_transitions_total",
+            &[("name", name)],
+        )
+    };
+    manager.handle_update(received(c, 1, vec![make_route(x_condition, c)]));
+    while manager.process_next_route_chunk() {}
+    tokio::time::advance(Duration::from_secs(1)).await;
+    manager.handle_update(received(c, 1, vec![make_route(y_condition, c)]));
+    while manager.process_next_route_chunk() {}
+
+    tx.try_send(long_batch(c)).unwrap();
+    // Both settle deadlines (4 s and 5 s from now) pass before the first look.
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending(),
+        "the cutoff captures the long batch with both deadlines passed"
+    );
+    // After the capture and after Y's deadline.
+    tx.try_send(RibUpdate::RoutesReceived {
+        peer: peer_v4(c),
+        session_id: 1,
+        announced: Vec::new(),
+        withdrawn: vec![(Prefix::V4(y_condition), 0)],
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    })
+    .unwrap();
+    let (reply, mut barrier) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    run_until(&mut actor, &mut barrier);
+
+    assert!(
+        (transitions("x") - 2.0).abs() < f64::EPSILON,
+        "X's settled condition applies"
+    );
+    assert!(
+        (transitions("y") - 2.0).abs() < f64::EPSILON,
+        "Y's settled condition applies before its later withdrawal; transitions={}",
+        transitions("y")
     );
 }

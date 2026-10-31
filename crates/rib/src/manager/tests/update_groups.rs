@@ -9572,6 +9572,7 @@ async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
             manager.expiry_cutoffs.observe(
                 ExpiryTimer::Conditional,
                 Some(tokio::time::Instant::now()),
+                tokio::time::Instant::now(),
                 cutoff,
             );
         }
