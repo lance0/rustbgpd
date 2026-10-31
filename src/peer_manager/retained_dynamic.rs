@@ -76,9 +76,12 @@ pub(super) struct RetentionChecks {
     /// The ranges changed: re-check which retained neighbors a range still
     /// admits, once no transaction snapshot is staged.
     pub(super) admission_dirty: bool,
-    /// Handles a reconnect or collision candidate resolved for itself that
-    /// no session owns any more: deleted and released from the run loop.
-    pub(super) orphaned: Vec<PeerId>,
+    /// Identity slots of reconnects and collision candidates that no session
+    /// owns any more. Read only from the run loop, after the handler that
+    /// queued them has joined or aborted those sessions, since a session
+    /// still resolves its slot while it stops; then a handle it resolved for
+    /// itself is deleted and released.
+    pub(super) orphaned: Vec<OrphanSlot>,
 }
 
 impl Default for RetentionChecks {
@@ -90,6 +93,14 @@ impl Default for RetentionChecks {
             orphaned: Vec::new(),
         }
     }
+}
+
+/// An identity slot no session owns any more, at `peer`. `keep` is the
+/// retained handle, which its own deletion releases.
+pub(super) struct OrphanSlot {
+    pub(super) peer: PeerKey,
+    pub(super) slot: RibPeerSlot,
+    pub(super) keep: Option<PeerId>,
 }
 
 /// The batched retention query in flight, for these neighbors in order,
@@ -247,7 +258,7 @@ impl PeerManager {
 
     /// The candidate `session_id` was promoted: the live neighbor now runs
     /// on its identity slot and counter block, and a handle the loser
-    /// resolved for itself is released.
+    /// resolves for itself, as late as its own shutdown, is released.
     pub(super) fn promote_retained_dynamic_candidate(&mut self, peer: &PeerKey, session_id: u64) {
         let Some(retained) = self.retained_dynamic.get_mut(peer) else {
             return;
@@ -262,19 +273,23 @@ impl PeerManager {
         let Some(candidate) = retained.candidate.take() else {
             return;
         };
-        let held = retained.slot.get();
+        let keep = retained.slot.get();
         let Some(managed) = self.peers.get_mut(peer) else {
             return;
         };
-        let loser = managed.transport_config.rib_peer.get();
-        managed.transport_config.rib_peer = candidate.slot.clone();
+        let loser = std::mem::replace(
+            &mut managed.transport_config.rib_peer,
+            candidate.slot.clone(),
+        );
         managed.transport_config.neighbor_counters = candidate.counters.clone();
         self.rib_peers.insert(peer.clone(), candidate.slot.clone());
         self.neighbor_counters
             .insert(peer.clone(), candidate.counters);
-        if let Some(loser) = loser.filter(|&loser| Some(loser) != held) {
-            self.retention.orphaned.push(loser);
-        }
+        self.retention.orphaned.push(OrphanSlot {
+            peer: peer.clone(),
+            slot: loser,
+            keep,
+        });
     }
 
     /// A candidate that is neither pending nor the primary any more lost or
@@ -295,20 +310,31 @@ impl PeerManager {
             if live {
                 continue;
             }
-            if let Some(handle) = candidate
-                .slot
-                .get()
-                .filter(|&handle| Some(handle) != retained.slot.get())
-            {
-                orphaned.push(handle);
-            }
+            orphaned.push(OrphanSlot {
+                peer: peer.clone(),
+                slot: candidate.slot.clone(),
+                keep: retained.slot.get(),
+            });
             retained.candidate = None;
         }
         self.retention.orphaned.extend(orphaned);
     }
 
+    /// Release each handle an orphaned slot resolved for itself: not the
+    /// retained handle, and not one the live neighbor at its address uses.
     pub(super) async fn release_orphaned_retained_handles(&mut self) {
-        for handle in std::mem::take(&mut self.retention.orphaned) {
+        let mut released = Vec::new();
+        for orphan in std::mem::take(&mut self.retention.orphaned) {
+            let Some(handle) = orphan.slot.get() else {
+                continue;
+            };
+            if Some(handle) == orphan.keep
+                || handle == self.rib_peer_of(&orphan.peer)
+                || released.contains(&handle)
+            {
+                continue;
+            }
+            released.push(handle);
             self.release_side_handle(handle).await;
         }
     }
@@ -351,23 +377,21 @@ impl PeerManager {
     }
 
     /// The live reconnect itself is being deleted: give the retained slot
-    /// back so its deletion releases the identity.
-    /// `live` is the handle the reconnect itself resolved, if any.
-    pub(super) fn take_dormant_retained_dynamic(&mut self, peer: &PeerKey, live: Option<PeerId>) {
+    /// back so its deletion releases the identity. The reconnect's slot
+    /// (`live`) and a candidate's are queued: either session may still
+    /// resolve a handle for itself, from another AS, until it has stopped.
+    pub(super) fn take_dormant_retained_dynamic(&mut self, peer: &PeerKey, live: RibPeerSlot) {
         let Some(retained) = self.retained_dynamic.remove(peer) else {
             return;
         };
-        let held = retained.slot.get();
-        // Handles the reconnect or a candidate resolved for themselves, from
-        // another AS, before their OPEN was handled.
-        let candidate = retained
-            .candidate
-            .as_ref()
-            .and_then(|candidate| candidate.slot.get());
-        for handle in [live, candidate].into_iter().flatten() {
-            if Some(handle) != held && !self.retention.orphaned.contains(&handle) {
-                self.retention.orphaned.push(handle);
-            }
+        let keep = retained.slot.get();
+        let candidate = retained.candidate.map(|candidate| candidate.slot);
+        for slot in std::iter::once(live).chain(candidate) {
+            self.retention.orphaned.push(OrphanSlot {
+                peer: peer.clone(),
+                slot,
+                keep,
+            });
         }
         self.rib_peers.insert(peer.clone(), retained.slot);
     }

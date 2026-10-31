@@ -1240,3 +1240,59 @@ async fn rollback_before_the_reconnects_open_is_handled_releases_both_handles() 
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 0);
     rib_task.abort();
 }
+
+/// A reconnect's OPEN from another AS validates, but its session resolves
+/// its slot only on first use, which can come while the rollback reap is
+/// stopping it: after the reap has taken the retention, before the session
+/// has joined. That late handle is still released. Here the late use is a
+/// task that resolves the reconnect's slot; on this single-threaded runtime
+/// it runs at the reap's first yield, past its read of the slots. Red
+/// proof: reading the slots when the reap starts finds nothing, and the
+/// handle allocated afterwards stays live with no owner.
+#[tokio::test]
+async fn rollback_releases_a_handle_resolved_while_the_reap_stops_the_reconnect() {
+    use super::collision::{read_bgp_message, send_bgp_message};
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let mut client = accept(&mut mgr).await;
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(&mut client, &Message::Open(helper_open(65099))).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let rustbgpd_transport::StateQueryOutcome::State(state) = mgr.peers[&key(MEMBER)]
+                .handle()
+                .query_state_outcome(Duration::from_secs(1))
+                .await
+                && state.fsm_state == SessionState::OpenConfirm
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the reconnect validates its OPEN");
+    let slot = mgr.peers[&key(MEMBER)].transport_config.rib_peer.clone();
+    let late = slot.clone();
+    let resolver =
+        tokio::spawn(async move { late.resolve(|| PeerEndpoint::new(MEMBER, None), 65099) });
+    assert_eq!(slot.get(), None, "not resolved when the reap starts");
+
+    mgr.dynamic_ranges.clear();
+    assert_eq!(
+        mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
+        1
+    );
+    let own = resolver.await.unwrap();
+    assert_ne!(own, peer);
+    mgr.release_orphaned_retained_handles().await;
+    loc_rib_count(&rib_tx).await;
+    assert!(!own.is_live(), "the late handle is released");
+    assert!(!peer.is_live(), "and the retained one");
+    drop(client);
+    rib_task.abort();
+}
