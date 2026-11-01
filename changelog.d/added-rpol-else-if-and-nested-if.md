@@ -12,5 +12,6 @@
   kind. Existing files parse, format and compile exactly as before. See
   [Policies, terms, and evaluation order](../docs/reference/rpol-language.md#policies-terms-and-evaluation-order).
   **Operator-visible:** `rbgp policy check` gains the `unreachable-branch`
-  lint for a branch whose constant-folded guard can never match, and a
-  bare `--deny-lints`, which denies every lint, now includes it.
+  lint for a branch whose constant-folded guard can never match, or that
+  follows a branch whose guard is always true. A bare `--deny-lints`, which
+  denies every lint, now includes it.

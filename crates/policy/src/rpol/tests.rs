@@ -7702,9 +7702,10 @@ fn med_lp_ctx(med: Option<u32>, local_pref: Option<u32>) -> RouteContext<'static
 }
 
 /// An `else if` chain is one term in the source and first-match IR terms
-/// in the compiled form: branch `k` is guarded by the negation of every
-/// earlier branch guard and then its own, in source order, and the
-/// `else` by the negations alone. Explain names them `t.1`, `t.2`, ...
+/// in the compiled form. Every branch here decides, so first-match alone
+/// keeps the walk from reaching a later term after an earlier branch
+/// matched: each branch is guarded by its own guard only, and the `else` is
+/// unconditional. Explain names them `t.1`, `t.2`, ...
 #[test]
 fn else_if_chain_lowers_to_first_match_terms() {
     use crate::engine::PolicyChain;
@@ -7722,20 +7723,14 @@ fn else_if_chain_lowers_to_first_match_terms() {
     let terms = &compiled.policies[0].terms;
     let names: Vec<_> = terms.iter().map(|term| term.name.as_deref()).collect();
     assert_eq!(names, [Some("t.1"), Some("t.2"), Some("t.3")]);
-    let first = terms[0].guard.clone();
-    let second = terms[1].guard.clone();
-    let MatchExpr::And(path) = &second else {
-        panic!("the second branch conjoins its path: {second:?}");
-    };
-    assert_eq!(path[0], MatchExpr::Not(Box::new(first.clone())));
-    assert_eq!(
-        terms[2].guard,
-        MatchExpr::And(vec![
-            MatchExpr::Not(Box::new(first)),
-            MatchExpr::Not(Box::new(path[1].clone())),
-        ]),
-        "the else is guarded by every negation, in source order"
-    );
+    for term in &terms[..2] {
+        assert!(
+            !matches!(term.guard, MatchExpr::And(_) | MatchExpr::Not(_)),
+            "a deciding earlier branch adds no negation: {:?}",
+            term.guard
+        );
+    }
+    assert_eq!(terms[2].guard, MatchExpr::True);
     assert_eq!(terms[2].action, TermAction::Deny);
 
     let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
@@ -7906,21 +7901,29 @@ fn if_nesting_is_capped_at_four_levels() {
 }
 
 /// Every lowered term re-evaluates its whole path guard, and the cost
-/// model charges it: a chain's later branches carry every earlier
-/// guard's negation, so the compiled size grows with the square of the
-/// chain. Red proof: charging each branch only its own guard admits the
-/// 250-branch chain.
+/// model charges it. A chain of modify-only branches carries every earlier
+/// guard's negation into each later branch, so its compiled size grows
+/// with the square of the chain (199 links fit the 100,000-node budget).
+/// A chain of deciding branches carries no negations, so it grows
+/// linearly (12,499 links fit). Red proofs: charging each branch only its
+/// own guard admits the 250-link modify-only chain, and keeping the
+/// negations of deciding branches rejects the 5,000-link deciding chain.
 #[test]
 fn else_if_chain_cost_charges_every_reevaluated_guard() {
-    let chain = |links: u32| {
+    let chain = |links: u32, body: &str| {
         let body: String = (0..links)
-            .map(|n| format!("if route.med == {n} {{ set local-pref {n} }}"))
+            .map(|n| body.replace("{n}", &n.to_string()))
             .collect::<Vec<_>>()
             .join(" else ");
         format!("policy p {{ term t {{ {body} }} }}")
     };
-    compile_ok(&chain(150));
-    let (_, rendered) = diagnostics_of(&chain(250));
+    let modify = "if route.med == {n} { set local-pref {n} }";
+    compile_ok(&chain(150, modify));
+    let (_, rendered) = diagnostics_of(&chain(250, modify));
+    assert!(rendered.contains("IR nodes"), "{rendered}");
+    let deciding = "if route.med == {n} { set local-pref {n}; accept }";
+    compile_ok(&chain(5_000, deciding));
+    let (_, rendered) = diagnostics_of(&chain(13_000, deciding));
     assert!(rendered.contains("IR nodes"), "{rendered}");
 }
 
@@ -8049,6 +8052,154 @@ fn else_if_and_nested_if_format_canonically() {
             reject
         } else {
             set med 1
+        }
+    }
+}
+"
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+    assert_eq!(compile_ok(source), compile_ok(&formatted));
+}
+
+/// A branch that can fall through keeps its negation in every later term,
+/// and the path is one flat `And`, conditions in source order: a term whose
+/// first condition misses costs one evaluation however long the chain.
+#[test]
+fn modify_only_chain_paths_are_flat_and_in_source_order() {
+    let compiled = compile_ok(
+        "policy p {
+             term t {
+                 if route.med >= 30 { set local-pref 1 }
+                 else if route.med >= 20 { set local-pref 2 }
+                 else if route.med >= 10 { set local-pref 3 }
+                 else { set local-pref 4 }
+             }
+         }",
+    );
+    let terms = &compiled.policies[0].terms;
+    assert_eq!(terms.len(), 4);
+    let guards: Vec<_> = terms.iter().map(|term| &term.guard).collect();
+    let ge = |n| MatchExpr::Med(Cmp::Ge(n));
+    let not = |expr: MatchExpr| MatchExpr::Not(Box::new(expr));
+    assert_eq!(*guards[0], ge(30));
+    assert_eq!(*guards[1], MatchExpr::And(vec![not(ge(30)), ge(20)]));
+    assert_eq!(
+        *guards[2],
+        MatchExpr::And(vec![not(ge(30)), not(ge(20)), ge(10)])
+    );
+    assert_eq!(
+        *guards[3],
+        MatchExpr::And(vec![not(ge(30)), not(ge(20)), not(ge(10))])
+    );
+    for guard in &guards {
+        if let MatchExpr::And(children) = guard {
+            assert!(
+                children
+                    .iter()
+                    .all(|child| !matches!(child, MatchExpr::And(_))),
+                "the path is flat: {guard:?}"
+            );
+        }
+    }
+}
+
+/// Dropping a deciding branch's negation is safe when its guard fails
+/// closed: the guard errors at the branch's own term, so the route is
+/// denied there and a later branch never decides it.
+#[test]
+fn deciding_branch_with_a_failing_guard_still_denies() {
+    let chain = compile_ok(
+        "policy p {
+             term t {
+                 if route.origin-as * 1 == 64500 { accept }
+                 else if route.med >= 0 { set local-pref 7; accept }
+             }
+         }",
+    );
+    let ctx = med_lp_ctx(Some(5), None);
+    let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(
+        evaluation.eval_error.map(|error| error.kind),
+        Some(crate::eval::EvalErrorKind::AbsentField(
+            crate::ir::ValueField::OriginAs
+        ))
+    );
+    assert_eq!(result.modifications.set_local_pref, None);
+}
+
+/// An `else if` guard's function call evaluates only where the walk reaches
+/// the branch. A modify-only first branch that matches skips it, so the
+/// call's division by zero never runs; reached, it denies with the error.
+/// The same holds for the guard inside an enclosing branch that is skipped.
+#[test]
+fn skipped_else_if_guard_never_runs_its_function_call() {
+    let chain = compile_ok(
+        "fn per(x: u32) -> u32 { 10 / x }
+         policy p {
+             term t {
+                 if route.local-pref >= 500 { set med 1 }
+                 else if per(route.med) == 10 { set med 2 }
+             }
+             term nested {
+                 if route.local-pref >= 900 {
+                     if per(route.med) == 10 { set med 3 }
+                 }
+             }
+         }",
+    );
+    let skipped = med_lp_ctx(Some(0), Some(600));
+    let (result, evaluation) = chain.evaluate_with_attribution(&skipped);
+    assert_eq!(
+        result.action,
+        PolicyAction::Permit,
+        "{:?}",
+        evaluation.eval_error
+    );
+    assert!(evaluation.eval_error.is_none());
+    assert_eq!(result.modifications.set_med, Some(1));
+
+    let reached = med_lp_ctx(Some(0), Some(100));
+    let (result, evaluation) = chain.evaluate_with_attribution(&reached);
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(
+        evaluation.eval_error.map(|error| error.kind),
+        Some(crate::eval::EvalErrorKind::DivideByZero)
+    );
+
+    let nested = med_lp_ctx(Some(0), Some(950));
+    let (result, evaluation) = chain.evaluate_with_attribution(&nested);
+    assert_eq!(
+        result.action,
+        PolicyAction::Deny,
+        "the enclosing branch reaches it"
+    );
+    assert_eq!(
+        evaluation.eval_error.map(|error| error.kind),
+        Some(crate::eval::EvalErrorKind::DivideByZero)
+    );
+}
+
+/// A comment between branches keeps the chain one statement at the chain's
+/// indent, and the layout is stable.
+#[test]
+fn comments_between_else_if_branches_format_stably() {
+    let source = "policy p { term t {\n  if route.med >= 1 { set med 1 } # c1\n  \
+                  else if route.med >= 2 { set med 2 }\n  else # c2\n  \
+                  if route.med >= 3 { set med 3 } } }\n";
+    let formatted = super::format_rpol(source).expect("formats");
+    assert_eq!(
+        formatted,
+        "policy p {
+    term t {
+        if route.med >= 1 {
+            set med 1
+        } # c1
+        else if route.med >= 2 {
+            set med 2
+        } else # c2
+        if route.med >= 3 {
+            set med 3
         }
     }
 }

@@ -520,13 +520,19 @@ fn stmt_end(children: &[Node<'_>], start: usize, ctx: Ctx) -> usize {
             Node::Group { .. } => {
                 i += 1;
                 // Each `else` (or `else if <cond>`) continues the statement
-                // through its body group.
+                // through its body group, past any comments before it.
                 while head_kind == Tok::IfKw
-                    && let Some(Node::Tok {
-                        kind: Tok::ElseKw, ..
-                    }) = children.get(i)
+                    && let Some(next) =
+                        (i..children.len()).find(|&j| !matches!(children[j], Node::Comment { .. }))
+                    && matches!(
+                        children[next],
+                        Node::Tok {
+                            kind: Tok::ElseKw,
+                            ..
+                        }
+                    )
                 {
-                    i += 1;
+                    i = next + 1;
                     while i < children.len() {
                         let done = matches!(children[i], Node::Group { .. });
                         i += 1;
@@ -632,7 +638,7 @@ fn render_expanded(nodes: &[Node<'_>], ctx: Ctx, indent: usize, out: &mut Vec<St
     let base = INDENT.repeat(indent);
     let mut cur = base.clone();
     let mut prev: Option<Tok> = None;
-    for node in nodes {
+    for (index, node) in nodes.iter().enumerate() {
         match node {
             Node::Comment { text, nl } => {
                 // A trailing comment ends its line (a `#` runs to end
@@ -649,7 +655,21 @@ fn render_expanded(nodes: &[Node<'_>], ctx: Ctx, indent: usize, out: &mut Vec<St
                     }
                     out.push(format!("{base}{text}"));
                 }
-                cur = format!("{base}{INDENT}");
+                // An `if` chain's `else` and `else if` keep the chain's
+                // indent after a comment; anything else continues one deeper.
+                let chain_link = head.0 == Tok::IfKw
+                    && nodes[index + 1..]
+                        .iter()
+                        .find_map(|node| match node {
+                            Node::Tok { kind, .. } => Some(*kind),
+                            _ => None,
+                        })
+                        .is_some_and(|kind| matches!(kind, Tok::ElseKw | Tok::IfKw));
+                cur = if chain_link {
+                    base.clone()
+                } else {
+                    format!("{base}{INDENT}")
+                };
                 prev = None;
             }
             Node::Tok { kind, text, .. } => push_tok(&mut cur, &mut prev, *kind, text),

@@ -886,8 +886,10 @@ impl<'a> Checker<'a> {
                     "`if` nesting limit exceeded",
                 )
                 .with_note(
-                    "every level conjoins another guard into each branch; join the \
-                     conditions with `&&`, use `else if`, or split the term",
+                    "every level conjoins another guard into each branch; use `else if` \
+                     or split the term (`&&` also joins conditions, but its operands may \
+                     evaluate in either order, so it cannot stand in for nesting when an \
+                     operand can fail closed)",
                 ),
             );
         }
@@ -2550,13 +2552,19 @@ fn bound_policy<'a>(
         for stmt in &term.stmts {
             match stmt {
                 Stmt::If(if_stmt) => {
-                    if_terms(if_stmt, 0, pred_cost, fns, &mut |guard, terms, action| {
-                        arms.extend((0..terms).map(|_| guard));
-                        if let Some(action) = action {
-                            action_cost =
-                                action_cost.saturating_add(action_value_cost(action, fns));
-                        }
-                    });
+                    if_terms(
+                        if_stmt,
+                        PathCost::default(),
+                        pred_cost,
+                        fns,
+                        &mut |guard, terms, action| {
+                            arms.extend((0..terms).map(|_| guard));
+                            if let Some(action) = action {
+                                action_cost =
+                                    action_cost.saturating_add(action_value_cost(action, fns));
+                            }
+                        },
+                    );
                 }
                 Stmt::Action(action) => {
                     arms.push(1);
@@ -2699,17 +2707,23 @@ fn for_costs(
             // branch's path conjunction, re-evaluated per term) plus
             // every body action.
             Stmt::If(if_stmt) => {
-                if_terms(if_stmt, 0, pred_cost, fns, &mut |guard, terms, action| {
-                    let guards = guard.saturating_mul(terms);
-                    nodes = nodes.saturating_add(guards);
-                    body_steps = body_steps.saturating_add(guards);
-                    if let Some(action) = action {
-                        nodes = nodes.saturating_add(1);
-                        body_steps = body_steps
-                            .saturating_add(1)
-                            .saturating_add(action_value_cost(action, fns));
-                    }
-                });
+                if_terms(
+                    if_stmt,
+                    PathCost::default(),
+                    pred_cost,
+                    fns,
+                    &mut |guard, terms, action| {
+                        let guards = guard.saturating_mul(terms);
+                        nodes = nodes.saturating_add(guards);
+                        body_steps = body_steps.saturating_add(guards);
+                        if let Some(action) = action {
+                            nodes = nodes.saturating_add(1);
+                            body_steps = body_steps
+                                .saturating_add(1)
+                                .saturating_add(action_value_cost(action, fns));
+                        }
+                    },
+                );
             }
             Stmt::Action(action) => {
                 nodes = nodes.saturating_add(1);
@@ -2739,46 +2753,62 @@ fn binding_value_cmp(rhs: &Rhs, resolved: Field, scope: &Scope<'_>) -> bool {
         if scope.is_local(&name.node) && value_field_of(resolved).is_some())
 }
 
-/// The IR guard nodes of `inner` conjoined under a path condition of
-/// `path` nodes (0: no enclosing condition), as the lowerer builds it:
-/// one `And` node joining the two.
-fn conjoined_cost(path: u64, inner: u64) -> u64 {
-    if path == 0 {
-        inner
-    } else {
-        1u64.saturating_add(path).saturating_add(inner)
+/// An `if` path condition as the lowerer builds it: one flat `And` over
+/// `count` conditions whose IR nodes sum to `nodes` (no `And` node for a
+/// single condition, nothing for none).
+#[derive(Clone, Copy, Default)]
+struct PathCost {
+    nodes: u64,
+    count: u64,
+}
+
+impl PathCost {
+    /// The path with one more condition of `nodes` IR nodes.
+    fn with(self, nodes: u64) -> Self {
+        Self {
+            nodes: self.nodes.saturating_add(nodes),
+            count: self.count.saturating_add(1),
+        }
+    }
+
+    /// The path's IR nodes, its `And` included.
+    fn cost(self) -> u64 {
+        self.nodes.saturating_add(u64::from(self.count > 1))
     }
 }
 
 /// Every IR term an `if` chain lowers to, reported as
 /// `(guard nodes, terms, action)` — mirroring the lowerer: branch `k`
 /// is guarded by the path condition, the negation of every earlier
-/// branch guard, and its own guard; the final `else` by the path and
-/// every negation; a nested `if` conjoins its chain onto its body's
-/// path. Every term re-evaluates its whole guard, and each report
-/// charges it. `action` is `None` for an empty body's placeholder term
-/// and for a nested guard's function-call binds.
+/// branch guard that can fall through, and its own guard, in one flat
+/// `And`; the final `else` by the path and those negations; a nested
+/// `if` conjoins its chain onto its body's path. A branch whose body
+/// always decides adds no negation (`coverage::body_decides`). Every
+/// term re-evaluates its whole guard, and each report charges it.
+/// `action` is `None` for an empty body's placeholder term and for a
+/// nested guard's function-call binds. A single flat `if` keeps its
+/// established lowering, the `else` guarded by the negated condition.
 fn if_terms<'a>(
     if_stmt: &'a IfStmt,
-    path: u64,
+    path: PathCost,
     pred_cost: &HashMap<&str, u64>,
     fns: &HashMap<&str, FnCost>,
     out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>),
 ) {
     fn body_terms<'a>(
         body: &'a [Stmt],
-        path: u64,
+        path: PathCost,
         pred_cost: &HashMap<&str, u64>,
         fns: &HashMap<&str, FnCost>,
         out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>),
     ) {
         if body.is_empty() {
-            out(path, 1, None);
+            out(path.cost(), 1, None);
         }
         for stmt in body {
             match stmt {
                 Stmt::Action(action) => out(
-                    path,
+                    path.cost(),
                     guarded_action_terms(std::slice::from_ref(action), fns),
                     Some(action),
                 ),
@@ -2788,23 +2818,20 @@ fn if_terms<'a>(
             }
         }
     }
+    let flat = if_stmt.is_flat();
     let mut prefix = path;
     for branch in &if_stmt.branches {
         let guard = guard_cost(&branch.cond, pred_cost, fns);
         // A guard's function-call binds run once the walk reaches the
         // branch, under its path condition.
         let binds = guard_call_slots(&branch.cond, fns);
-        if prefix != 0 && binds != 0 {
-            out(prefix, binds, None);
+        if prefix.count != 0 && binds != 0 {
+            out(prefix.cost(), binds, None);
         }
-        body_terms(
-            &branch.body,
-            conjoined_cost(prefix, guard),
-            pred_cost,
-            fns,
-            out,
-        );
-        prefix = conjoined_cost(prefix, guard.saturating_add(1));
+        body_terms(&branch.body, prefix.with(guard), pred_cost, fns, out);
+        if flat || !super::coverage::body_decides(&branch.body) {
+            prefix = prefix.with(guard.saturating_add(1));
+        }
     }
     if let Some(else_body) = &if_stmt.else_body {
         body_terms(&else_body.body, prefix, pred_cost, fns, out);

@@ -438,13 +438,23 @@ to one or more IR terms:
 - An `else if` chain or a nested `if` adds no runtime node. Every IR
   term a branch body lowers to is guarded by the branch's **path
   condition**: the enclosing branch's path, then the negation of each
-  earlier guard in the chain, then the branch's own guard, joined by
-  `&&` in that order. The final `else` takes the negations alone.
-  `&&` evaluates left to right and stops at the first miss, so a guard
-  evaluates only where the source would reach it. Each term
-  re-evaluates its whole path condition, and the compile-time cost and
-  size budgets charge every re-evaluation, so a chain's cost grows with
-  the square of its length.
+  earlier guard in the chain, then the branch's own guard, as one flat
+  conjunction in that order. The final `else` takes the negations alone.
+  The path conjunction evaluates its conditions in that order and stops
+  at the first miss, so a branch's guard evaluates only where the source
+  would reach it. A source-level `&&` makes no such promise: the compiler
+  may evaluate its operands in either order (cheapest first), so
+  `if A && B { ... }` is not `if A { if B { ... } }` when `B` can fail
+  closed. Nest the `if` when `B` must not run unless `A` holds.
+- A branch whose body always ends in `accept` or `reject` adds no
+  negation to the later branches: first-match already keeps the walk from
+  reaching them after it matched, and a guard that fails closed denies the
+  route at the branch's own term. A chain of deciding branches therefore
+  costs about what one term per branch does. A branch that can fall
+  through, by only modifying the route, keeps its negation in every later
+  term, so a chain of such branches re-evaluates the earlier guards and its
+  cost grows with the square of its length. The compile-time cost and size
+  budgets charge every re-evaluation.
 - A run of bare modification actions flushes as an unconditional
   `Continue` IR term (a small IR addition made for this frontend:
   guard matched → apply modifications → keep walking this policy's
@@ -2591,6 +2601,24 @@ policy delete-in-set {
     }
 }
 
+# RPL `if gold then set local-preference 300 elseif silver then set
+# local-preference 200 endif`, then `if as-path length ge 10 then drop
+# endif`, then `pass`: a native `else if` whose branches continue to the
+# later check.
+community-set gold { 65000:1 }
+community-set silver { 65000:2 }
+
+policy tiers-then-check {
+    term tiers {
+        if route.communities in gold { set local-pref 300 }
+        else if route.communities in silver { set local-pref 200 }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
+    }
+    term rest { accept }
+}
+
 # RPL `as-path neighbor-is '65001'`.
 policy from-65001 {
     term t {
@@ -2603,16 +2631,6 @@ test delete-in-set-removes-members-only {
     route { prefix 192.0.2.0/24; communities [65000:666, 65010:1] }
     expect delete-in-set == accept with removes community 65000:666,
         not removed community 65010:1
-}
-
-test first-matching-tier-wins {
-    route { prefix 192.0.2.0/24; communities [65000:1, 65000:2] }
-    expect tiers == accept with local-pref 300
-}
-
-test second-tier {
-    route { prefix 192.0.2.0/24; communities [65000:2] }
-    expect tiers == accept with local-pref 200
 }
 
 test first-branch-wins-over-a-later-branch {
@@ -2706,7 +2724,9 @@ No `while` and no unbounded iteration of any kind — `for`
 iterates finite sources only, capped and fuel-metered. No
 user-defined types, no maps (safety is total by construction —
 ADR-0096 Decision 2). No `as-path-set`. `if` nests at most four levels
-deep (join conditions with `&&`, use `else if`, or split the term). No
+deep (use `else if` or split the term; joining conditions with `&&` works
+only where no operand can fail closed, since `&&` operands may evaluate in
+either order). No
 mutable state of any kind — `let` bindings are immutable, and reads never
 observe staged `set` writes (read-back would break memoization and
 needs its own ADR). EVPN route type takes only an integer literal

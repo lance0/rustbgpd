@@ -498,7 +498,11 @@ fn term_always_decides(term: &TermDef) -> bool {
     body_decides(&term.stmts)
 }
 
-fn body_decides(body: &[Stmt]) -> bool {
+/// Whether a statement list decides every route that reaches it, by the
+/// statically certain cases [`term_always_decides`] lists. The lowerer
+/// and the cost model use it to drop a deciding branch's negation from
+/// the later branches of its chain.
+pub(super) fn body_decides(body: &[Stmt]) -> bool {
     body.iter().any(|stmt| match stmt {
         Stmt::Action(action) => matches!(action, ActionStmt::Accept(_) | ActionStmt::Reject(_)),
         Stmt::For(_) => false,

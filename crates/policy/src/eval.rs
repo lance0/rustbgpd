@@ -1805,7 +1805,9 @@ impl CompiledChain {
     /// (never a runtime call into another policy), and the tree's depth
     /// is capped by the frontend (`MAX_EXPR_DEPTH` at parse,
     /// `MAX_APPLY_DEPTH`/`MAX_APPLY_EXPANSION` at typecheck — LAN-184 /
-    /// LAN-290), so this recursion is statically bounded.
+    /// LAN-290), so this recursion is statically bounded. An `if` path
+    /// joins its conditions in one flat `And` per term, so an `else if`
+    /// chain adds no depth and each nested `if` at most its own guard's.
     ///
     /// `err` is the LAN-299 eval-error slot: a [`MatchExpr::ValueCmp`]
     /// whose value expression fails sets it (first error wins) and

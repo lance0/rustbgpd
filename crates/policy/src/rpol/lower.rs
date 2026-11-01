@@ -106,9 +106,9 @@ impl LetEnv {
             .map(|&(_, slot)| slot)
     }
 
-    /// Declare a binding, allocating the next slot. The typechecker's
-    /// per-scope `MAX_LOCALS` cap bounds `next_slot` below the frame
-    /// size (two nesting levels × 64).
+    /// Declare a binding, allocating the next slot. The typechecker
+    /// bounds `next_slot` below the frame size: every binding live along
+    /// one path shares the frame, and sibling scopes reuse slots.
     fn declare(&mut self, name: &str) -> u8 {
         assert!(
             usize::from(self.next_slot) < crate::eval::LOCAL_FRAME_SLOTS,
@@ -893,8 +893,11 @@ impl<'a> Lowerer<'a> {
         store: &mut SetStore,
         out: &mut Vec<(MatchExpr, TermAction)>,
     ) {
-        // The negation of every earlier branch guard; `None` before the
-        // first branch.
+        // The negation of every earlier branch guard that can fall through;
+        // `None` before the first such branch. An earlier branch whose body
+        // decides on every path needs no negation: a later term is reached
+        // only when that branch's guard did not match (an erroring guard
+        // denies the route at the branch's own term).
         let mut prefix: Option<MatchExpr> = None;
         let count = if_stmt.branches.len();
         for (index, branch) in if_stmt.branches.iter().enumerate() {
@@ -907,18 +910,28 @@ impl<'a> Lowerer<'a> {
             }
             let here = conjoin(prefix.as_ref(), guard.clone());
             let gated = index + 1 < count || if_stmt.else_body.is_some();
-            self.lower_branch(&branch.body, &here, gated, env, lets, store, out);
-            prefix = Some(conjoin(prefix.as_ref(), MatchExpr::Not(Box::new(guard))));
+            self.lower_branch(&branch.body, Some(&here), gated, env, lets, store, out);
+            if !super::coverage::body_decides(&branch.body) {
+                prefix = Some(conjoin(prefix.as_ref(), MatchExpr::Not(Box::new(guard))));
+            }
         }
         if let Some(else_body) = &if_stmt.else_body {
-            let path = prefix.expect("an if chain has a branch");
-            self.lower_branch(&else_body.body, &path, false, env, lets, store, out);
+            self.lower_branch(
+                &else_body.body,
+                prefix.as_ref(),
+                false,
+                env,
+                lets,
+                store,
+                out,
+            );
         }
     }
 
-    /// One branch body under `path`, in its own `lets` scope. `gated`: a
-    /// later branch follows, so an empty body still lowers to one term (as
-    /// a flat `if` does), keeping every branch attributable.
+    /// One branch body under `path` (`None`: no condition), in its own
+    /// `lets` scope. `gated`: a later branch follows, so an empty body still
+    /// lowers to one term (as a flat `if` does), keeping every branch
+    /// attributable.
     #[expect(
         clippy::too_many_arguments,
         reason = "the lowering context plus the branch's path and output"
@@ -926,7 +939,7 @@ impl<'a> Lowerer<'a> {
     fn lower_branch(
         &mut self,
         body: &[Stmt],
-        path: &MatchExpr,
+        path: Option<&MatchExpr>,
         gated: bool,
         env: &HashMap<&str, u32>,
         lets: &mut LetEnv,
@@ -936,16 +949,17 @@ impl<'a> Lowerer<'a> {
         let scope = lets.mark();
         let terms = self.lower_stmts(body, env, lets, store);
         lets.reset(scope);
+        let path_or_true = || path.cloned().unwrap_or(MatchExpr::True);
         if terms.is_empty() && gated {
             out.push((
-                path.clone(),
+                path_or_true(),
                 TermAction::Continue(RouteModifications::default()),
             ));
         }
         for (guard, action) in terms {
             let guard = match guard {
-                MatchExpr::True => path.clone(),
-                inner => conjoin(Some(path), inner),
+                MatchExpr::True => path_or_true(),
+                inner => conjoin(path, inner),
             };
             out.push((guard, action));
         }
@@ -1367,15 +1381,26 @@ fn lower_cmp(
     }
 }
 
-/// `path && inner`, as one `And` with the path first: `And` evaluates
-/// its children in order and stops at the first miss, so `inner` runs
-/// only where the path holds (a branch's guard never evaluates where
-/// the source would not reach it).
+/// `path && inner`, as one flat `And` with the path's conditions first,
+/// in order and never re-sorted: `And` evaluates its children in order and
+/// stops at the first miss, so `inner` runs only where the path holds (a
+/// branch's guard never evaluates where the source would not reach it).
+/// Flattening keeps every term one level deep however long its chain, so
+/// a term whose first condition misses costs one evaluation.
 fn conjoin(path: Option<&MatchExpr>, inner: MatchExpr) -> MatchExpr {
-    match path {
-        None => inner,
-        Some(path) => MatchExpr::And(vec![path.clone(), inner]),
+    let Some(path) = path else {
+        return inner;
+    };
+    let mut children = match path {
+        MatchExpr::And(children) => children.clone(),
+        other => vec![other.clone()],
+    };
+    match inner {
+        MatchExpr::And(more) => children.extend(more),
+        MatchExpr::True => {}
+        other => children.push(other),
     }
+    MatchExpr::And(children)
 }
 
 /// Flush staged modifications as an unconditional
