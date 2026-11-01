@@ -459,6 +459,9 @@ impl PeerManager {
                             self.reap_deleted_peer_metric_series_for_key(&peer_key);
                         }
                     }
+                    // The session is gone: so is its BFD session, unless its
+                    // peer stays, disabled, for a recovery target.
+                    self.release_dynamic_bfd(peer_addr);
                     // Skip pending inbound logic for removed dynamic peers
                 } else {
                     let enabled = self.peers.get(&peer_key).is_some_and(|m| m.enabled);

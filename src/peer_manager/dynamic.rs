@@ -199,8 +199,8 @@ impl PeerManager {
             })?;
         if group.bfd.as_ref().is_some_and(|b| b.enabled) {
             return Err(DynamicRangeError::Invalid(format!(
-                "peer_group {peer_group:?} enables BFD, which is not supported for \
-                dynamic neighbors (static neighbors only in v1 — see ADR-0067)"
+                "peer_group {peer_group:?} enables BFD, but dynamic ranges do not inherit \
+                 BFD from their peer group; configure `bfd` on the range in the config file"
             )));
         }
         if group.tcp_mss.is_some() {
@@ -294,6 +294,7 @@ impl PeerManager {
                 remote_asn,
                 description,
                 tcp_ao: None,
+                bfd: None,
             });
         Ok(())
     }
@@ -319,6 +320,19 @@ impl PeerManager {
         }) {
             return Err(DynamicRangeError::Invalid(format!(
                 "dynamic TCP-AO range {}/{} is startup-pinned; restart rustbgpd to remove it",
+                key.0, key.1
+            )));
+        }
+        // The range's BFD sessions are opened and removed by startup and
+        // SIGHUP, which own the socket preflight and the acknowledged
+        // membership change; runtime range CRUD carries no BFD.
+        if self.current_config.dynamic_neighbors.iter().any(|range| {
+            crate::config::effective_prefix_str(&range.prefix) == Some(key)
+                && range.bfd.as_ref().is_some_and(|bfd| bfd.enabled)
+        }) {
+            return Err(DynamicRangeError::Invalid(format!(
+                "dynamic range {}/{} runs BFD; runtime range CRUD cannot change BFD \
+                 membership — remove it from the config file and reload",
                 key.0, key.1
             )));
         }
@@ -526,6 +540,7 @@ impl PeerManager {
                 .shutdown_handle_bounded(peer_key.address, "dynamic rollback primary", handle)
                 .await;
             self.reap_deleted_peer_metric_series_for_key(&peer_key);
+            self.release_dynamic_bfd(peer_key.address);
             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
             self.refresh_dynamic_neighbor_capacity_metrics();
             removed += 1;

@@ -1661,20 +1661,41 @@ impl Config {
                 }
             }
 
-            // v1 BFD is static-neighbors only (ADR-0067). A dynamic range whose
-            // peer group enables BFD would silently get no BFD session — reject
-            // it at config time rather than mislead the operator into thinking
-            // dynamic peers are BFD-protected.
+            // A range configures its own BFD and never inherits the group's: a
+            // range whose peer group enables BFD would otherwise look
+            // BFD-protected while its sessions run none.
             if group.bfd.as_ref().is_some_and(|b| b.enabled) {
                 return Err(ConfigError::InvalidDynamicNeighbor {
                     reason: format!(
-                        "dynamic_neighbors[{i}]: peer_group {:?} enables BFD, but BFD is not \
-                         supported for dynamic neighbors (static neighbors only in v1; \
-                         set `bfd = {{ enabled = false }}` on the group or use static \
-                         neighbors — see ADR-0067)",
+                        "dynamic_neighbors[{i}]: peer_group {:?} enables BFD, but dynamic \
+                         ranges do not inherit BFD from their peer group; set \
+                         `bfd = {{ profile = \"...\" }}` on the range instead",
                         dn.peer_group
                     ),
                 });
+            }
+            // Single-hop, non-strict only: a strict range would hold a session
+            // that exists only once its connection is accepted, and multihop
+            // ranges are out of scope.
+            if let Some(bfd) = &dn.bfd {
+                if bfd.enabled && (bfd.strict || bfd.multihop) {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: bfd.strict and bfd.multihop are not \
+                             supported on a dynamic range; its sessions run non-strict \
+                             single-hop BFD"
+                        ),
+                    });
+                }
+                if !self.bfd_profiles.iter().any(|p| p.name == bfd.profile) {
+                    return Err(ConfigError::InvalidBfd {
+                        reason: format!(
+                            "dynamic_neighbors[{i}] {:?}: bfd.profile {:?} is not defined in \
+                             [[bfd_profiles]]",
+                            dn.prefix, bfd.profile
+                        ),
+                    });
+                }
             }
             if group.admin_down == Some(true) {
                 return Err(ConfigError::InvalidDynamicNeighbor {

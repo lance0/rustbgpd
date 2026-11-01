@@ -507,6 +507,23 @@ impl PeerManager {
                     }
                 };
 
+                // Before any effect: a range that runs BFD registers the
+                // session's BFD session without waiting on the BFD actor, or
+                // the connection is refused here and the peer retries.
+                let bfd = match self.dynamic_bfd_admission(&accepted_dynamic_range, peer_ip) {
+                    Ok(bfd) => bfd,
+                    Err(error) => {
+                        self.metrics.record_inbound_connection_drop(
+                            InboundConnectionDropReason::BfdUnavailable,
+                        );
+                        warn!(
+                            peer = %peer_ip,
+                            %error,
+                            "dynamic neighbor BFD session cannot be registered, dropping"
+                        );
+                        return;
+                    }
+                };
                 let rfc8212_external = resolved.rfc8212_external;
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
                 let mut transport = self.build_transport_config(&cfg);
@@ -692,6 +709,10 @@ impl PeerManager {
                 );
                 let peer_key = dynamic_peer_key;
                 self.peers.insert(peer_key.clone(), managed);
+                // Its session exists now; it ends with it (`release_dynamic_bfd`).
+                if let Some(bfd) = bfd {
+                    self.register_dynamic_bfd(bfd);
+                }
                 self.retain_neighbor_counters(&peer_key);
                 self.register_session(session_id, &peer_key);
                 self.sync_owned_session_metrics(&peer_key).await;

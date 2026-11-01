@@ -555,6 +555,17 @@ fn debug_reconfigure_failures() -> std::collections::BTreeMap<PeerKey, u32> {
     }
 }
 
+/// The outcome of [`InternalCommand::OpenDynamicBfdSockets`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DynamicBfdSocketOutcome {
+    /// Every family is open; nothing else changed.
+    Ready,
+    /// A family could not open, with no effect.
+    Rejected(String),
+    /// The actor did not acknowledge the prepared sockets.
+    Ambiguous(String),
+}
+
 pub(crate) enum InternalCommand {
     /// ADR-0142 preflight of a SIGHUP candidate, before the reload route's
     /// first effect outside the peer manager. Acceptance holds the
@@ -571,6 +582,12 @@ pub(crate) enum InternalCommand {
         actions: Vec<crate::config::ReloadPeerAction>,
         datasets: crate::config::PreparedDatasetGeneration,
         reply: oneshot::Sender<ReloadGenerationOutcome>,
+    },
+    /// Open the BFD socket families of the ranges a sequential SIGHUP
+    /// candidate adds, before the reload's first effect.
+    OpenDynamicBfdSockets {
+        candidate: Box<Config>,
+        reply: oneshot::Sender<DynamicBfdSocketOutcome>,
     },
     ReplaceConfigSnapshot {
         config: Box<Config>,
@@ -3325,6 +3342,9 @@ impl PeerManager {
                         Some(InternalCommand::PreflightReloadGeneration { candidate, route, reply }) => {
                             let _ = reply.send(self.preflight_reload_generation(&candidate, route));
                         }
+                        Some(InternalCommand::OpenDynamicBfdSockets { candidate, reply }) => {
+                            let _ = reply.send(self.open_dynamic_bfd_sockets(&candidate).await);
+                        }
                         Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
@@ -3445,6 +3465,9 @@ impl PeerManager {
                                 // waits for the commit or rollback.
                                 TransactionConfigScope::Full => self
                                     .unnumbered_preflight(&candidate)
+                                    .and_then(|()| {
+                                        bfd::dynamic_range_bfd_unchanged(&self.current_config, &candidate)
+                                    })
                                     .map(|()| *candidate),
                                 TransactionConfigScope::FibTablesOnly => {
                                     let mut staged = self.current_config.clone();

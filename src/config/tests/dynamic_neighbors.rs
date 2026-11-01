@@ -518,9 +518,9 @@ peer_group = "ix-members"
 
 #[test]
 fn dynamic_neighbor_peer_group_with_bfd_rejected() {
-    // v1 BFD is static-neighbors only (ADR-0067). A dynamic range whose peer
-    // group enables BFD must be rejected so the operator isn't misled into
-    // thinking dynamic peers are BFD-protected.
+    // A range never inherits its group's BFD: a range whose peer group enables
+    // BFD must be rejected so the operator isn't misled into thinking dynamic
+    // peers are BFD-protected by the group block.
     let toml = r#"
 [global]
 asn = 65001
@@ -544,7 +544,7 @@ peer_group = "ix-members"
     let err = parse(toml).unwrap_err();
     assert!(
         err.to_string()
-            .contains("BFD is not supported for dynamic neighbors"),
+            .contains("dynamic ranges do not inherit BFD from their peer group"),
         "unexpected error: {err}"
     );
 
@@ -556,6 +556,74 @@ peer_group = "ix-members"
     assert!(
         parse(&ok).is_ok(),
         "explicitly-disabled BFD should be allowed"
+    );
+}
+
+const RANGE_BFD_BASE: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.ix-members]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+"#;
+
+/// A range's own `bfd` block is accepted single-hop and non-strict, for IPv4
+/// and IPv6 ranges.
+#[test]
+fn dynamic_neighbor_range_bfd_is_accepted_single_hop() {
+    let config = parse(&format!("{RANGE_BFD_BASE}bfd = {{ profile = \"fast\" }}\n")).unwrap();
+    let bfd = config.dynamic_neighbors[0].bfd.as_ref().unwrap();
+    assert_eq!(
+        (bfd.profile.as_str(), bfd.enabled, bfd.strict, bfd.multihop),
+        ("fast", true, false, false)
+    );
+    let v6 = RANGE_BFD_BASE.replace("10.0.0.0/24", "2001:db8::/64");
+    assert!(parse(&format!("{v6}bfd = {{ profile = \"fast\" }}\n")).is_ok());
+    // A disabled block is accepted and runs nothing.
+    assert!(
+        parse(&format!(
+            "{RANGE_BFD_BASE}bfd = {{ profile = \"fast\", enabled = false }}\n"
+        ))
+        .is_ok()
+    );
+    assert!(
+        parse(RANGE_BFD_BASE).unwrap().dynamic_neighbors[0]
+            .bfd
+            .is_none()
+    );
+}
+
+/// Strict and multihop are rejected on a range, and the profile must exist.
+#[test]
+fn dynamic_neighbor_range_bfd_rejects_strict_multihop_and_unknown_profile() {
+    for block in [
+        r#"bfd = { profile = "fast", strict = true }"#,
+        r#"bfd = { profile = "fast", multihop = true }"#,
+    ] {
+        let err = parse(&format!("{RANGE_BFD_BASE}{block}\n")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("bfd.strict and bfd.multihop are not supported on a dynamic range"),
+            "{block}: {err}"
+        );
+    }
+    let err = parse(&format!("{RANGE_BFD_BASE}bfd = {{ profile = \"slow\" }}\n")).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("bfd.profile \"slow\" is not defined in [[bfd_profiles]]"),
+        "{err}"
     );
 }
 
@@ -821,4 +889,88 @@ fn dynamic_neighbor_limit_diff_marks_reload_applied() {
         serde_json::Value::Bool(true)
     );
     assert!(text.contains("[global] dynamic_neighbor_limit updated"));
+}
+
+/// Editing an existing range's `bfd` is a BFD member change: on its own it
+/// takes the generation route, whose preflight and fence settle it, and with
+/// another edit to that range it is rejected with its own reason. Adding or
+/// removing a range that runs BFD is an ordinary range edit.
+#[test]
+fn a_range_bfd_edit_reloads_through_the_generation() {
+    let route = |old: &str, new: &str| {
+        let (old, new) = (parse(old).unwrap(), parse(new).unwrap());
+        classify_sighup_reload(SighupReloadFamilies::from_diff(&diff_config(&old, &new)))
+    };
+    let with_bfd = format!("{RANGE_BFD_BASE}bfd = {{ profile = \"fast\" }}\n");
+    let disabled = format!("{RANGE_BFD_BASE}bfd = {{ profile = \"fast\", enabled = false }}\n");
+    // Mutation-red: ignoring ranges in the member comparison routes these
+    // sequentially, outside any BFD settlement.
+    for (old, new) in [
+        (RANGE_BFD_BASE, with_bfd.as_str()),
+        (with_bfd.as_str(), RANGE_BFD_BASE),
+        (with_bfd.as_str(), disabled.as_str()),
+    ] {
+        assert_eq!(route(old, new), SighupReloadRoute::Generation, "{new}");
+    }
+    let described = with_bfd.replace(
+        "peer_group = \"ix-members\"\n",
+        "peer_group = \"ix-members\"\ndescription = \"leaves\"\n",
+    );
+    assert_eq!(
+        route(RANGE_BFD_BASE, &described),
+        SighupReloadRoute::Rejected {
+            reasons: vec![DYNAMIC_RANGE_BFD_REJECTION.to_string()]
+        }
+    );
+    // Mutation-red: comparing ranges present on one side only rejects these.
+    let other_range = "\n[[dynamic_neighbors]]\nprefix = \"10.1.0.0/24\"\n\
+                       peer_group = \"ix-members\"\nbfd = { profile = \"fast\" }\n";
+    let added = format!("{RANGE_BFD_BASE}{other_range}");
+    // A `bfd` edit to one range with another range added is rejected with
+    // the same reason.
+    assert_eq!(
+        route(RANGE_BFD_BASE, &format!("{with_bfd}{other_range}")),
+        SighupReloadRoute::Rejected {
+            reasons: vec![DYNAMIC_RANGE_BFD_REJECTION.to_string()]
+        }
+    );
+    let moved = with_bfd.replace("10.0.0.0/24", "10.2.0.0/24");
+    for (old, new) in [
+        (RANGE_BFD_BASE, added.as_str()),
+        (added.as_str(), RANGE_BFD_BASE),
+        (with_bfd.as_str(), moved.as_str()),
+    ] {
+        assert!(
+            matches!(route(old, new), SighupReloadRoute::Sequential { .. }),
+            "{new}"
+        );
+    }
+    let other_asn = with_bfd.replace(
+        "peer_group = \"ix-members\"\n",
+        "peer_group = \"ix-members\"\nremote_asn = 65010\n",
+    );
+    assert!(matches!(
+        route(&with_bfd, &other_asn),
+        SighupReloadRoute::Sequential { .. }
+    ));
+}
+
+/// `rustbgpd --diff` reports an existing range's `bfd` edit as reload-applied,
+/// in text and JSON, without the range-matcher flag.
+#[test]
+fn diff_reports_a_range_bfd_edit() {
+    let old = parse(RANGE_BFD_BASE).unwrap();
+    let new = parse(&format!("{RANGE_BFD_BASE}bfd = {{ profile = \"fast\" }}\n")).unwrap();
+    let diff = diff_config(&old, &new);
+    // Mutation-red: without the predicate the diff reads "No changes."
+    assert!(diff.has_reload_applied_changes());
+    assert!(
+        format_config_diff(&diff).contains("[[dynamic_neighbors]] bfd applied to running sessions")
+    );
+    let json = config_diff_json_value(&diff);
+    assert_eq!(
+        json["reload_applied"]["dynamic_neighbors_bfd_changed"],
+        true
+    );
+    assert_eq!(json["reload_applied"]["dynamic_neighbors_changed"], false);
 }

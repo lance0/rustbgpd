@@ -1364,6 +1364,7 @@ async fn rollback_reap_keeps_dynamic_peer_for_host_bit_range_prefix() {
         remote_asn: 0,
         description: Some("host-bit range".to_string()),
         tcp_ao: None,
+        bfd: None,
     }];
     mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&config);
     assert_eq!(
