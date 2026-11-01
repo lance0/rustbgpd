@@ -3144,9 +3144,11 @@ itself under `max_prefix_action = "warning"`): it carries
 `EVENT_SEVERITY_WARNING`, empty old and new states because nothing
 transitioned, and a reason naming the scope, usage, bound, and threshold
 percentage. It is never a teardown. Crossings that happen while an earlier
-warning for the same scope is still queued in the daemon each still get an
-event, but those events repeat the queued crossing's usage, bound, and
-threshold.
+warning for the same scope is still queued in the daemon are folded into
+that warning's single event: its reason then ends with `; N threshold
+crossings since the last report`, and the usage, bound, and threshold it
+names are those of the first crossing. `bgp_max_prefix_warning_total` counts
+every crossing.
 NOTIFICATION sent/received types are not retained in the history ring
 and are rejected here with `INVALID_ARGUMENT`; subscribe to `WatchEvents` with
 `BGP_EVENT_TYPE_NOTIFICATION_SENT` / `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`

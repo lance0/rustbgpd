@@ -704,14 +704,6 @@ pub struct PeerManager {
     /// Per-peer count of `deferred_session_notifications`, so a fence scans
     /// the queue only when its own peer has an entry there.
     deferred_session_notification_counts: HashMap<PeerKey, usize>,
-    /// Max-prefix warning events not yet published, one entry per
-    /// (session, family, stage) with its remaining crossings; drained
-    /// [`notifications::MAX_PREFIX_WARNING_EVENTS_PER_TURN`] per run-loop turn.
-    max_prefix_warning_backlog: VecDeque<(
-        (u64, &'static str, &'static str),
-        rustbgpd_api::peer_types::SessionLifecycleEvent,
-        u64,
-    )>,
     session_lifecycle_tx: mpsc::Sender<SessionLifecycleNotification>,
     session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
@@ -1387,10 +1379,6 @@ impl PeerManager {
         clippy::too_many_arguments,
         reason = "configured peer construction keeps all explicit lifecycle dependencies visible"
     )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one initializer per PeerManager field, in declaration order"
-    )]
     pub fn new_with_config(
         rx: mpsc::Receiver<PeerManagerCommand>,
         internal_rx: mpsc::Receiver<InternalCommand>,
@@ -1452,7 +1440,6 @@ impl PeerManager {
             session_notification_depth: 0,
             deferred_session_notifications: VecDeque::new(),
             deferred_session_notification_counts: HashMap::new(),
-            max_prefix_warning_backlog: VecDeque::new(),
             session_lifecycle_tx,
             session_lifecycle_rx,
             session_notification_event_tx,
@@ -3260,9 +3247,6 @@ impl PeerManager {
                     if changed {
                         self.handle_links_changed();
                     }
-                }
-                () = std::future::ready(()), if !self.max_prefix_warning_backlog.is_empty() => {
-                    self.publish_max_prefix_warning_backlog();
                 }
                 event = Self::receive_discovery_event(&mut self.unnumbered) => {
                     if let Some(event) = event {

@@ -478,12 +478,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sources queued one event per change without limit. The queue now holds at
   most one binding change and one conflict per interface, served in turn,
   so a conflict can arrive ahead of a binding change queued between two
-  conflicts. It keeps the latest binding, every conflict count (reported
-  with the latest addresses), and each first binding that a later change
-  replaced while it was queued, which the owner still checks against a peer
-  learned from an inbound connection. Learned and expired candidates are no
-  longer queued: discovery logs them itself, so those two log lines now
-  come from the `rustbgpd::ra_discovery` target.
+  conflicts. It keeps the latest binding, each conflict (reported with the
+  latest addresses), and each first binding that a later change replaced
+  while it was queued, which the owner still checks against a peer learned
+  from an inbound connection. The resulting conflict count is exact up to 16
+  distinct first-binding addresses per backlog on one interface and
+  approximate beyond that, which takes 17 or more routers on an
+  interface-only point-to-point link while the owner is stalled. Learned and
+  expired candidates are no longer queued: discovery logs them itself, so
+  those two log lines now come from the `rustbgpd::ra_discovery` target.
 - Bound two per-session queues that a peer could grow. A connection whose
   peer stopped reading queued one ROUTE-REFRESH request per max-prefix
   block episode that ended, with no limit when `send_hold_time = 0`. It now
@@ -491,10 +494,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   family whose request is still queued is not sent again. A peer moving
   across a max-prefix warning threshold while the peer manager was busy
   queued one notification per crossing. Each scope now queues one, which
-  carries the crossing count. The peer manager still publishes one
-  `MaxPrefixWarning` event per crossing, at most 64 per turn of its loop;
-  events for crossings coalesced this way repeat the first crossing's
-  usage, bound and threshold.
+  carries the crossing count, and the peer manager publishes one
+  `MaxPrefixWarning` event for it whose reason gives that count.
+  `bgp_max_prefix_warning_total` still counts every crossing.
 
 ### Documentation
 
@@ -565,6 +567,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   other API change; upgrade the three together.
 - This release ships on its per-change regression tests and main CI; no new
   24-hour route-server flagship soak receipt covers it.
+- A `MAX_PREFIX_WARNING` session event can stand for several threshold
+  crossings when a peer's prefix count moves across the threshold while the
+  peer manager is behind. Its reason then ends with `; N threshold crossings
+  since the last report`, and its usage, bound and threshold are those of
+  the first of them. When the peer manager keeps up, each crossing still
+  gets its own event with the reason unchanged.
+  `bgp_max_prefix_warning_total` counts every crossing either way.
 
 ## [0.80.1] — 2026-10-25
 
