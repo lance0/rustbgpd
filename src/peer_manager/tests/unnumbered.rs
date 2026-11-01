@@ -4300,10 +4300,11 @@ async fn removing_an_interface_only_neighbor_behind_a_full_rib_mailbox_does_not_
     );
 }
 
-/// An inbound connection that would bind an interface-only neighbor under
-/// the label of its queued cleanup is refused and counted, never waits for
-/// mailbox room: before a bound endpoint is retired (so it stays bound), and
-/// after a retirement queues one.
+/// An inbound connection that would bind an interface-only neighbor whose
+/// bind would wait for RIB mailbox room is refused and counted before its
+/// bound endpoint is retired (so it stays bound): under the label of a
+/// queued cleanup, and with nothing queued but no room for its
+/// `RebindPeer`.
 #[tokio::test]
 async fn inbound_learning_behind_deferred_cleanup_is_refused_without_waiting() {
     let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
@@ -4343,22 +4344,109 @@ async fn inbound_learning_behind_deferred_cleanup_is_refused_without_waiting() {
     assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
     assert_eq!(dropped(&h, "rib_cleanup_pending"), 1.0);
 
-    // Nothing queued: the retirement of the bound endpoint queues its
-    // deletion under the label, and the new address is refused after it.
+    // Nothing queued, but no room in the mailbox for the neighbor's
+    // `RebindPeer`: still refused before the bound endpoint is retired.
     h.mgr.deferred_rib.queue.clear();
     h.mgr.deferred_rib.sender = None;
     let _client = tokio::time::timeout(Duration::from_secs(5), inbound(&mut h, 3, 7))
         .await
         .expect("refused without waiting for mailbox room");
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "still bound");
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(3)),
+        "refused, not bound"
+    );
+    assert_eq!(dropped(&h, "rib_cleanup_pending"), 2.0);
+}
+
+/// An RA moves a bound interface-only neighbor to a new address while the
+/// RIB mailbox is full and does not drain. Retiring the old endpoint defers
+/// its deletion, and binding the new one would send its `RebindPeer` behind
+/// it, so the bind is retried on the reconcile timer instead of waiting in
+/// the actor. It completes once the RIB has drained.
+#[tokio::test(start_paused = true)]
+async fn an_ra_bind_behind_deferred_cleanup_is_retried_instead_of_waiting() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        h.bind("swp1", Some(endpoint(3, 7))),
+    )
+    .await
+    .expect("the bind does not wait for mailbox room");
     assert!(
         !h.mgr.peers.contains_key(&swp1_key(2)),
         "old endpoint retired"
     );
     assert!(
         !h.mgr.peers.contains_key(&swp1_key(3)),
-        "refused, not bound"
+        "the bind is deferred"
     );
-    assert_eq!(dropped(&h, "rib_cleanup_pending"), 2.0);
+    assert!(!h.mgr.deferred_rib.queue.is_empty());
+    let retry = h.mgr.unnumbered_retry_at().expect("the bind is retried");
+
+    tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    h.mgr
+        .flush_deferred_rib_updates(super::OperatorReadAdmission::Served)
+        .await
+        .unwrap();
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(3)), "bound once drained");
+}
+
+/// An inbound connection would bind an interface-only neighbor that keeps
+/// its RIB handle while the RIB mailbox is full (a cleanup under another
+/// label is deferred behind it). Its `RebindPeer` has no room, so the
+/// connection is refused and counted before the bound endpoint is retired.
+#[tokio::test]
+async fn inbound_learning_with_a_kept_handle_behind_a_full_mailbox_is_refused() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 2, 7).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    h.mgr.reap_deleted_peer_metric_series_for_key(&PeerKey::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+        None,
+    ));
+    let _client = tokio::time::timeout(Duration::from_secs(5), inbound(&mut h, 3, 7))
+        .await
+        .expect("refused without waiting for mailbox room");
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "still bound");
+    assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
+    assert_eq!(dropped(&h, "rib_cleanup_pending"), 1.0);
 }
 
 /// A `SetPeerGroup` session edit that reaches an interface-only member is
@@ -7160,4 +7248,301 @@ async fn bfd_cleanup_retries_behind_a_full_mailbox_queue_one_grace_retirement() 
         .filter(|(_, update)| matches!(update, RibUpdate::RetireEorGraceInterface { .. }))
         .count();
     assert_eq!(retirements, 1);
+}
+
+/// A bound interface-only neighbor loses carrier: its endpoint is retired,
+/// it keeps its RIB handle, and nothing is deferred.
+async fn unbound_with_a_kept_handle() -> Harness {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.reconcile().await;
+    assert!(h.mgr.peers.is_empty(), "the endpoint is retired");
+    assert!(h.mgr.deferred_rib.queue.is_empty());
+    h
+}
+
+/// Re-binding a neighbor that keeps its RIB handle sends `RebindPeer`. With
+/// nothing deferred and the RIB mailbox full and not draining, an RA for a
+/// new address is retried on the reconcile timer instead of waiting in the
+/// actor for room, and it binds once the RIB drains.
+#[tokio::test(start_paused = true)]
+async fn a_rebind_into_a_full_mailbox_is_retried_instead_of_waiting() {
+    let mut h = unbound_with_a_kept_handle().await;
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        h.bind("swp1", Some(endpoint(3, 7))),
+    )
+    .await
+    .expect("the rebind does not wait for mailbox room");
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(3)),
+        "the bind is deferred"
+    );
+    assert!(
+        h.mgr.deferred_rib.queue.is_empty(),
+        "nothing is queued for it"
+    );
+    let retry = h.mgr.unnumbered_retry_at().expect("the bind is retried");
+
+    tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(3)), "bound once drained");
+}
+
+/// Deferred cleanup under another label does not hold back a re-bind of a
+/// neighbor that keeps its RIB handle: nothing of this neighbor's is behind
+/// it, and the mailbox has room for its `RebindPeer`.
+#[tokio::test]
+async fn unrelated_deferred_cleanup_does_not_hold_back_a_rebind() {
+    let mut h = unbound_with_a_kept_handle().await;
+    let (rib_tx, mut rib_rx) = mpsc::channel(2);
+    h.mgr.rib_tx = rib_tx.clone();
+    for _ in 0..2 {
+        rib_tx
+            .try_send(RibUpdate::ReleasePeer {
+                peer: PeerId::UNASSIGNED,
+            })
+            .unwrap();
+    }
+    h.mgr.reap_deleted_peer_metric_series_for_key(&PeerKey::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+        None,
+    ));
+    assert_eq!(h.mgr.deferred_rib.queue.len(), 2);
+    rib_rx.try_recv().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), h.bind("swp1", Some(endpoint(3, 7))))
+        .await
+        .expect("the rebind does not wait");
+    assert!(h.mgr.peers.contains_key(&swp1_key(3)), "bound at once");
+    assert_eq!(
+        h.mgr.deferred_rib.queue.len(),
+        2,
+        "the unrelated cleanup still waits"
+    );
+}
+
+/// An interface-only neighbor removed behind a full RIB mailbox and added
+/// back holds no RIB handle, but its old cleanup is still queued under the
+/// interface's label. An RA binds it only once that cleanup is admitted:
+/// until then the bind is retried on the reconcile timer, never waited for.
+#[tokio::test(start_paused = true)]
+async fn an_ra_bind_of_a_readded_interface_waits_out_its_old_cleanup_on_the_timer() {
+    // A second neighbor keeps discovery running across the removal.
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let original = h.mgr.current_config.clone();
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    let mut removed = original.clone();
+    removed.neighbors.set_interface_only("swp1", None);
+    tokio::time::timeout(Duration::from_secs(60), h.reload(removed))
+        .await
+        .expect("the removal does not wait for mailbox room");
+    assert!(h.mgr.peers.is_empty());
+    assert!(
+        h.mgr
+            .deferred_rib
+            .reaps(&rustbgpd_telemetry::interface_peer_label("swp1")),
+        "the removal's cleanup is queued under the interface's label"
+    );
+    tokio::time::timeout(Duration::from_secs(60), h.reload(original))
+        .await
+        .expect("the re-add does not wait");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        h.bind("swp1", Some(endpoint(2, 7))),
+    )
+    .await
+    .expect("the bind does not wait for the old cleanup");
+    assert!(h.mgr.peers.is_empty(), "the bind is deferred");
+    let retry = h.mgr.unnumbered_retry_at().expect("the bind is retried");
+
+    tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    h.mgr
+        .flush_deferred_rib_updates(super::OperatorReadAdmission::Served)
+        .await
+        .unwrap();
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert!(
+        h.mgr.peers.contains_key(&swp1_key(2)),
+        "bound once the cleanup drained"
+    );
+}
+
+/// A strict-free BFD, GTSM interface-only harness whose listener fills the
+/// RIB mailbox when it installs the next learned selector, once `fill` holds
+/// a sender: the mailbox fills while a bind awaits its GTSM step, after the
+/// bind's own capacity check saw room.
+fn mailbox_filling_harness() -> (
+    Harness,
+    BfdSide,
+    Arc<std::sync::Mutex<Option<mpsc::Sender<RibUpdate>>>>,
+) {
+    let fill: Arc<std::sync::Mutex<Option<mpsc::Sender<RibUpdate>>>> = Arc::default();
+    let update: LearnedGtsmUpdate = {
+        let fill = Arc::clone(&fill);
+        Arc::new(move |request| {
+            if let ListenerGtsmRequest::Selector {
+                selector: Some(_), ..
+            } = request
+                && let Some(rib_tx) = fill.lock().unwrap().take()
+            {
+                while rib_tx
+                    .try_send(RibUpdate::ReleasePeer {
+                        peer: PeerId::UNASSIGNED,
+                    })
+                    .is_ok()
+                {}
+            }
+            Box::pin(async { LearnedGtsmOutcome::Applied })
+        })
+    };
+    let h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "ttl_security = true\nbfd = { profile = \"fast\", strict = false }\n",
+        "[[bfd_profiles]]\nname = \"fast\"\n",
+        Some(update),
+    );
+    let (h, bfd) = attach_bfd(h, &[]);
+    (h, bfd, fill)
+}
+
+/// A rebind whose `RebindPeer` finds the mailbox filled during the bind's
+/// own GTSM step, after its capacity check saw room, is rolled back whole:
+/// the retired endpoint's state stays held (a disable and its max-prefix
+/// latch), the new endpoint's RIB slot and latch go, its BFD session is
+/// removed again, and the RA bind is retried. Once the RIB drains, the
+/// retry binds with the held state.
+#[tokio::test(start_paused = true)]
+async fn a_rebind_that_finds_the_mailbox_filled_mid_bind_is_rolled_back() {
+    let (mut h, mut bfd, fill) = mailbox_filling_harness();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let old = swp1_key(2);
+    let session = h.mgr.peers[&old].session_id();
+    h.mgr
+        .install_max_prefix_latch(old.clone(), session, "max-prefix".into(), Some(60));
+    h.mgr.peers.get_mut(&old).unwrap().enabled = false;
+    let deadline = h.mgr.max_prefix_latches[&old].deadline;
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.reconcile().await;
+
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    *fill.lock().unwrap() = Some(rib_tx);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        h.bind("swp1", Some(endpoint(3, 7))),
+    )
+    .await
+    .expect("the rebind does not wait for mailbox room");
+    let new = swp1_key(3);
+    assert!(
+        fill.lock().unwrap().is_none(),
+        "the bind reached its GTSM step"
+    );
+    assert!(!h.mgr.peers.contains_key(&new), "not bound");
+    assert!(
+        !h.mgr.rib_peers.contains_key(&new),
+        "its RIB slot is removed"
+    );
+    assert!(
+        !h.mgr.max_prefix_latches.contains_key(&new),
+        "its latch is removed"
+    );
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(3)), Some(7))],
+        "its BFD session was registered"
+    );
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [],
+        "and removed again"
+    );
+    let rows = h.mgr.list_peers().await;
+    let unbound = rows
+        .iter()
+        .find(|info| info.interface.as_deref() == Some("swp1"))
+        .expect("the unbound row");
+    assert!(!unbound.enabled, "the disable stays held");
+    assert!(
+        unbound.max_prefix_restart_remaining_millis.is_some(),
+        "the latch stays held"
+    );
+    assert!(
+        h.mgr.deferred_rib.queue.is_empty(),
+        "nothing is queued for it"
+    );
+    let retry = h.mgr.unnumbered_retry_at().expect("the bind is retried");
+
+    tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert!(!h.mgr.peers[&new].enabled, "bound with the held disable");
+    assert_eq!(
+        h.mgr.max_prefix_latches[&new].deadline, deadline,
+        "and the held latch"
+    );
+}
+
+/// The same mid-bind fill on an inbound connection that would learn a new
+/// address: the connection is refused and counted as `rib_cleanup_pending`.
+#[tokio::test]
+async fn inbound_learning_that_finds_the_mailbox_filled_mid_bind_is_refused() {
+    let (mut h, mut bfd, fill) = mailbox_filling_harness();
+    let _client = inbound(&mut h, 2, 7).await;
+    bfd.next_applied();
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    // Room for what the retirement sends, then slots the bind's capacity
+    // check sees free until the GTSM step fills them all.
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    h.mgr.rib_tx = rib_tx.clone();
+    *fill.lock().unwrap() = Some(rib_tx);
+    let _client = tokio::time::timeout(Duration::from_secs(5), inbound(&mut h, 3, 7))
+        .await
+        .expect("refused without waiting for mailbox room");
+    assert!(
+        fill.lock().unwrap().is_none(),
+        "the bind reached its GTSM step"
+    );
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(3)),
+        "refused, not bound"
+    );
+    assert!(!h.mgr.rib_peers.contains_key(&swp1_key(3)));
+    assert_eq!(dropped(&h, "rib_cleanup_pending"), 1.0);
+    assert_eq!(dropped(&h, "unconfigured"), 0.0);
 }

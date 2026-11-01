@@ -3830,7 +3830,10 @@ fn resolve_test_initial_peer_rejection_at() -> Option<usize> {
 }
 
 /// Resolve the RIB channel capacity: [`TEST_RIB_CHANNEL_CAPACITY_ENV`]
-/// (if a positive integer) overrides the production default.
+/// (if a positive integer) overrides the production default. A capacity of
+/// 1 is not supported: the peer manager's deferred RIB cleanup can hold the
+/// only slot through a bounded session command or read, which then runs out
+/// its timeout. Use 2 or more.
 fn resolve_rib_channel_capacity() -> usize {
     let env = match std::env::var(TEST_RIB_CHANNEL_CAPACITY_ENV) {
         Ok(value) => Some(value),
@@ -3841,6 +3844,12 @@ fn resolve_rib_channel_capacity() -> usize {
         }
     };
     let capacity = resolve_rib_channel_capacity_from(env.as_deref());
+    if capacity == 1 {
+        warn!(
+            "{TEST_RIB_CHANNEL_CAPACITY_ENV}=1 is not supported: deferred RIB cleanup can hold \
+             the only slot through a bounded session command or read; use 2 or more"
+        );
+    }
     if capacity != RIB_CHANNEL_CAPACITY {
         warn!(
             capacity,

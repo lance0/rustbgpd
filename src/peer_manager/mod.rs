@@ -299,22 +299,39 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// (`send_rib_update`, or a flush before a direct send) goes behind them. No
 /// session starts under a label one of them reaps until it is admitted, and
 /// inbound connections are refused meanwhile (see
-/// `refuse_inbound_behind_deferred_cleanup`). Every `await_with_readiness*`
-/// wait drives the oldest one's reservation ahead of its read lanes, and a
-/// wait that cannot drive it gives it back first, so the actor never waits
-/// for room while its own reservation holds a slot it does not use.
+/// `refuse_inbound_behind_deferred_cleanup`). An interface-only bind that
+/// would wait for mailbox room (a cleanup queued under its interface's
+/// label, or no room for its `RebindPeer`) is retried on the reconcile timer
+/// or, from an inbound connection, refused.
+///
+/// Every `await_with_readiness*` wait and a session's bounded shutdown
+/// drive the oldest one's reservation (`drive_while`), sending it once it is
+/// granted while keeping its place among waiting senders. The BMP tick sends
+/// it only if it is already granted (`send_if_granted`), and peer-manager
+/// shutdown gives it back. The other bounded waits (session start, stop,
+/// state, purge-reset and collision-dump commands, and the session reads of
+/// `GetPeerState` and `ListPeers`) do neither: a reservation granted while
+/// one of them waits holds one slot until the next drive. That leaves the
+/// other slots of any mailbox above capacity 1; at capacity 1, a test-only
+/// setting, such a wait can run out its own timeout.
 ///
 /// Depth is bounded by state, not by network event rate. While the queue is
-/// not empty no inbound connection creates a RIB identity: a new dynamic
-/// neighbor and a collision candidate beside a retained reconnect are
-/// refused, and a retained neighbor's reconnect resumes the identity it
-/// kept. Static adds wait for the cleanup under their label. Entries are
-/// then at most two per identity that existed when the mailbox filled or
-/// that an operator or reconcile change has created since (its
-/// `PeerDeleted` and `ReleasePeer`), one End-of-RIB grace retirement per
-/// interface-only neighbor being removed, and one `ReleasePeer` per refused
-/// operator or reconcile add. The only other entry is the update a
-/// `send_rib_update` call owns while it flushes.
+/// not empty, the only inbound connection that creates a RIB identity is a
+/// retained neighbor's reconnect from another AS, which allocates one
+/// handle in place of the retained one it releases. A new dynamic neighbor,
+/// a collision candidate beside a retained reconnect, and a new identity
+/// after an eviction are refused; a retained neighbor's reconnect from its
+/// own AS resumes the identity it kept. Static adds wait for the cleanup
+/// under their label. The entries are then:
+/// - at most two per identity (its `PeerDeleted` and `ReleasePeer`) that
+///   existed when the mailbox filled or that an operator or reconcile change
+///   has created since;
+/// - at most four for an interface-only neighbor being removed: a retired
+///   endpoint's deletion, the removal's final deletion, its `ReleasePeer` and
+///   its End-of-RIB grace retirement;
+/// - one `ReleasePeer` per refused operator or reconcile add, or per
+///   interface-only bind that fails to start;
+/// - the update a `send_rib_update` call owns while it flushes.
 ///
 /// The queue never leaves the actor; only `sender` moves into a flush's
 /// wait, so a dropped flush loses nothing but its reservation, which the run
@@ -373,13 +390,49 @@ impl DeferredRibUpdates {
         sent
     }
 
-    /// Give back a reservation in progress, granted or not, before a wait
-    /// that cannot drive it: a granted one would hold a mailbox slot that a
-    /// session or query the wait depends on needs. The update stays queued
-    /// and reserves again when next driven.
+    /// Give back a reservation in progress, granted or not, and with it the
+    /// update's place among waiting senders. Only for peer-manager shutdown,
+    /// whose sessions need every slot for their final `PeerDown` and after
+    /// which nothing is sent. The update stays queued.
     fn release_reservation(&mut self) {
         if let Some(port) = self.sender.as_mut() {
             port.abort_send();
+        }
+    }
+
+    /// Before a short wait that cannot drive the reservation: send the oldest
+    /// update if its reservation is already granted, so the wait does not sit
+    /// beside an unused slot, and otherwise keep its place among waiting
+    /// senders. A grant during the wait leaves one slot unused until the next
+    /// drive, which matters only at a mailbox capacity of 1.
+    fn send_if_granted(&mut self) {
+        use futures::FutureExt as _;
+        if !self.ready() {
+            return;
+        }
+        if let Some(sent) = self.send_oldest().now_or_never()
+            && !sent
+        {
+            debug!("RIB exited: discarding deferred RIB updates");
+        }
+    }
+
+    /// Await `future`, which must not need the actor, while driving the
+    /// oldest deferred update's reservation: a granted one is sent at once,
+    /// so `future` never waits beside a slot the actor holds, and the update
+    /// keeps its place among waiting senders.
+    async fn drive_while<F: Future>(&mut self, future: F) -> F::Output {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut future => return output,
+                sent = self.send_oldest(), if self.ready() => {
+                    if !sent {
+                        debug!("RIB exited: discarding deferred RIB updates");
+                    }
+                }
+            }
         }
     }
 
@@ -1539,11 +1592,11 @@ impl PeerManager {
     /// label has not reached the RIB: handling that deletion reaps the label,
     /// and with it the new session's series. This waits for mailbox room.
     /// Its callers are static adds (operator and reconcile adds run as owned
-    /// mutations under the settlement watchdog; a discovery-driven bind of an
-    /// interface-only neighbor runs under no owner) and the replacement of a
-    /// session whose peer is still in the table. Inbound accepts, including
-    /// an interface-only neighbor learned from an inbound connection, refuse
-    /// instead (`refuse_inbound_behind_deferred_cleanup`).
+    /// mutations under the settlement watchdog) and the replacement of a
+    /// session whose peer is still in the table. An interface-only bind never
+    /// reaches this wait: it retries or refuses first (`bind_would_wait`).
+    /// Inbound accepts refuse instead
+    /// (`refuse_inbound_behind_deferred_cleanup`).
     pub(super) async fn admit_deferred_rib_updates_for(&mut self, peer: &PeerKey) {
         if self.deferred_rib.reaps(&self.peer_metric_label(peer)) {
             let _ = self
@@ -3526,8 +3579,9 @@ impl PeerManager {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    // The BMP sampling waits do not drive deferred admission.
-                    self.deferred_rib.release_reservation();
+                    // The BMP sampling waits, each bounded by
+                    // PEER_QUERY_TIMEOUT, do not drive deferred admission.
+                    self.deferred_rib.send_if_granted();
                     self.emit_periodic_bmp_stats().await;
                 }
                 () = async move {

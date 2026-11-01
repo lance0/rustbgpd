@@ -1547,14 +1547,22 @@ impl PeerManager {
             self.refuse_learned_address(name, endpoint.address, reason, &detail);
             return;
         }
+        if self.bind_would_wait(name) {
+            self.defer_bind_behind_rib(name, endpoint.address);
+            return;
+        }
         let port = self.port_mut(name);
         port.refused = None;
         port.refusal = None;
-        if let Err(error) = self.bind_port(name, endpoint).await {
-            // Nothing else re-raises this binding (refreshed RAs and an
-            // unchanged link emit no event), so retry on the timer.
-            warn!(interface = %name, address = %endpoint.address, %error, "unnumbered: could not add the bound peer; retrying");
-            self.arm_unnumbered_retry();
+        match self.bind_port(name, endpoint).await {
+            Ok(true) => {}
+            Ok(false) => self.defer_bind_behind_rib(name, endpoint.address),
+            Err(error) => {
+                // Nothing else re-raises this binding (refreshed RAs and an
+                // unchanged link emit no event), so retry on the timer.
+                warn!(interface = %name, address = %endpoint.address, %error, "unnumbered: could not add the bound peer; retrying");
+                self.arm_unnumbered_retry();
+            }
         }
     }
 
@@ -1999,11 +2007,10 @@ impl PeerManager {
         if self.inbound_address_held(name, address) {
             return None;
         }
-        // Binding would wait for a deleted endpoint's RIB cleanup under the
-        // interface's label; refuse the connection instead (the remote
-        // retries), here and again after a retirement queues one.
-        let learned = PeerKey::new(IpAddr::V6(address), Some(name.to_string()));
-        if self.refuse_inbound_behind_deferred_cleanup(&learned, false) {
+        // Binding would wait for RIB mailbox room (`bind_would_wait`);
+        // refuse the connection instead (the remote retries), here and again
+        // after a retirement queues its cleanup.
+        if self.refuse_learning_behind_rib(name, address) {
             return None;
         }
         if let Some(key) = bound {
@@ -2066,14 +2073,21 @@ impl PeerManager {
         // The same atomic admission step as an RA binding: no input runs
         // between this check and the insertion in `bind_port`.
         if self.inbound_address_held(name, address)
-            || self.refuse_inbound_behind_deferred_cleanup(&learned, false)
+            || self.refuse_learning_behind_rib(name, address)
         {
             return None;
         }
         let endpoint = Endpoint { address, ifindex };
-        if let Err(error) = self.bind_port(name, endpoint).await {
-            warn!(interface = %name, %address, %error, "unnumbered: could not add the peer learned from an inbound connection");
-            return self.refuse_inbound();
+        match self.bind_port(name, endpoint).await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.record_rib_cleanup_pending_drop(name, address);
+                return None;
+            }
+            Err(error) => {
+                warn!(interface = %name, %address, %error, "unnumbered: could not add the peer learned from an inbound connection");
+                return self.refuse_inbound();
+            }
         }
         info!(interface = %name, %address, "unnumbered: peer address learned from an inbound connection");
         let port = self.port_mut(name);
@@ -2217,15 +2231,77 @@ impl PeerManager {
         Ok(true)
     }
 
+    /// Whether the interface-only neighbor on `name` keeps a RIB handle
+    /// across endpoints, which its next binding moves with `RebindPeer`.
+    fn port_holds_rib_peer(&self, name: &str) -> bool {
+        self.unnumbered
+            .as_ref()
+            .and_then(|unnumbered| unnumbered.ports.get(name))
+            .is_some_and(|port| port.rib_peer.is_some())
+    }
+
+    /// Whether binding `name` now would wait in the actor for RIB mailbox
+    /// room: its session starts only after a cleanup queued under the
+    /// interface's label is admitted, and a neighbor that keeps its RIB handle
+    /// sends `RebindPeer` (with `try_send`, so a mailbox that fills during the
+    /// bind still returns `Ok(false)`). Deferred cleanup under other labels
+    /// does not hold a bind back: nothing of this neighbor's is behind it. Its
+    /// callers retry or refuse instead, so no bind waits with no owner.
+    fn bind_would_wait(&self, name: &str) -> bool {
+        self.deferred_rib
+            .reaps(&rustbgpd_telemetry::interface_peer_label(name))
+            || (self.port_holds_rib_peer(name) && self.rib_tx.capacity() == 0)
+    }
+
+    /// A discovery-driven bind of `name` at `address` would wait for RIB
+    /// mailbox room: retry it on the reconcile timer, and report why as the
+    /// unbound neighbor's last error until then.
+    fn defer_bind_behind_rib(&mut self, name: &str, address: Ipv6Addr) {
+        debug!(interface = %name, %address, deferred = self.deferred_rib.queue.len(), "unnumbered: binding waits for RIB mailbox room; retrying");
+        self.port_mut(name).refusal = Some(refusal_text(
+            "rib_cleanup_pending",
+            address,
+            "the binding waits until the RIB admits the updates ahead of it",
+        ));
+        self.arm_unnumbered_retry();
+    }
+
+    /// Refuse an inbound connection that would learn `address` on `name`
+    /// while its bind would wait for RIB mailbox room.
+    fn refuse_learning_behind_rib(&self, name: &str, address: Ipv6Addr) -> bool {
+        let refused = self.bind_would_wait(name);
+        if refused {
+            self.record_rib_cleanup_pending_drop(name, address);
+        }
+        refused
+    }
+
+    fn record_rib_cleanup_pending_drop(&self, name: &str, address: Ipv6Addr) {
+        self.metrics.record_inbound_connection_drop(
+            rustbgpd_telemetry::reason_labels::InboundConnectionDropReason::RibCleanupPending,
+        );
+        debug!(interface = %name, %address, "unnumbered: dropping an inbound connection whose binding waits for RIB mailbox room");
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "binding admission and rollback share the held neighbor state and must preserve side-effect ordering"
     )]
+    /// `Ok(false)`: the RIB mailbox had no room for the neighbor's
+    /// `RebindPeer`, so nothing was bound and the caller retries or refuses.
     async fn bind_port(
         &mut self,
         name: &str,
         endpoint: Endpoint,
-    ) -> Result<(), PeerLifecycleError> {
+    ) -> Result<bool, PeerLifecycleError> {
+        // Only the actor-owned term: sessions change the mailbox's free
+        // capacity concurrently, and `try_send` below handles a full one.
+        debug_assert!(
+            !self
+                .deferred_rib
+                .reaps(&rustbgpd_telemetry::interface_peer_label(name)),
+            "a bind of {name} would wait for the cleanup queued under its label"
+        );
         if self.port_mut(name).bfd_removal_unsettled {
             self.arm_unnumbered_retry();
             return Err(PeerLifecycleError::Internal(
@@ -2276,7 +2352,11 @@ impl PeerManager {
         // it to the new endpoint, in order after the previous binding's
         // deletion and before the new session's first message. Always sent:
         // the table may not yet reflect a rebind still queued to the RIB,
-        // whose handler skips an unchanged endpoint in its own order.
+        // whose handler skips an unchanged endpoint in its own order. Sent
+        // directly, never waiting: `bind_would_wait` held no cleanup under
+        // this interface's label, so the previous binding's deletion has
+        // reached the RIB and only other neighbors' deferred updates, which
+        // nothing here depends on, can still be queued.
         let rib_peer = self.port_mut(name).rib_peer;
         if let Some(rib_peer) = rib_peer {
             self.rib_peers.insert(
@@ -2284,28 +2364,28 @@ impl PeerManager {
                 rustbgpd_transport::RibPeerSlot::assigned(rib_peer),
             );
             let next = rustbgpd_rib::PeerEndpoint::new(IpAddr::V6(endpoint.address), Some(name));
-            if self
-                .send_rib_update(
-                    rustbgpd_rib::RibUpdate::RebindPeer {
-                        peer: rib_peer,
-                        endpoint: next,
-                    },
-                    super::OperatorReadAdmission::Fenced {
-                        reason: "an interface-only neighbor is changing endpoint",
-                    },
-                )
-                .await
-                .is_err()
-            {
+            let sent = self.rib_tx.try_send(rustbgpd_rib::RibUpdate::RebindPeer {
+                peer: rib_peer,
+                endpoint: next,
+            });
+            if let Err(error) = sent {
                 self.rib_peers.remove(&key);
+                if carried_latch {
+                    self.remove_max_prefix_latch(&key);
+                }
                 self.port_mut(name).held = held;
                 self.conditional_reconcile_pending |= gated;
                 if has_bfd {
                     let _ = self.settle_port_bfd_removal(name).await;
                 }
-                return Err(PeerLifecycleError::Internal(
-                    "RIB channel closed while rebinding the neighbor".into(),
-                ));
+                return match error {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => Ok(false),
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        Err(PeerLifecycleError::Internal(
+                            "RIB channel closed while rebinding the neighbor".into(),
+                        ))
+                    }
+                };
             }
         }
         self.note_binding_reason(name, endpoint.address);
@@ -2345,7 +2425,7 @@ impl PeerManager {
         port.bound = Some(key);
         port.settings = settings;
         self.publish_bound_address(name, endpoint.address);
-        Ok(())
+        Ok(true)
     }
 
     /// Why `name`'s endpoint is being added, for its presence event.

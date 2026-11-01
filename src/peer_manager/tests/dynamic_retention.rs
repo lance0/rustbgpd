@@ -1632,3 +1632,37 @@ async fn a_candidate_beside_a_retained_reconnect_is_refused_behind_deferred_clea
     );
     rib_task.abort();
 }
+
+/// At the dynamic limit behind a full RIB mailbox, a new address evicts a
+/// member kept only while it may hold our routes, which defers that
+/// identity's cleanup. The new address is then refused and counted rather
+/// than admitted as a new identity beside the deferred cleanup.
+#[tokio::test]
+async fn an_eviction_behind_a_full_mailbox_refuses_the_new_identity() {
+    let other = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10));
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    mgr.dynamic_neighbor_limit = 1;
+    let _peer = retained_member(&mut mgr, &rib_tx, OURS).await;
+    let (stalled_tx, _stalled_rx) = mpsc::channel(1);
+    mgr.rib_tx = stalled_tx.clone();
+    stalled_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    assert!(mgr.deferred_rib.queue.is_empty());
+    let _refused = tokio::time::timeout(Duration::from_secs(5), accept_at(&mut mgr, other))
+        .await
+        .expect("refused without waiting for mailbox room");
+    assert!(mgr.retained_dynamic.is_empty(), "the member was evicted");
+    assert_eq!(mgr.deferred_rib.queue.len(), 2, "its cleanup is deferred");
+    assert!(
+        !mgr.peers.contains_key(&key(other)),
+        "the new address is refused"
+    );
+    assert_eq!(
+        inbound_drop_metric(&mgr.metrics, "rib_cleanup_pending"),
+        Some(1.0)
+    );
+    rib_task.abort();
+}
