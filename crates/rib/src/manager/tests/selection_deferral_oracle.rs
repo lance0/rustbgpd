@@ -548,6 +548,8 @@ struct Harness {
     actor: Option<Actor>,
     /// The source's current transport session.
     source_session: u64,
+    /// The absent peer's next transport session.
+    absent_session: u64,
     absent: Option<Absent>,
     source_gr: Option<SourceGr>,
     /// An I7 violation a settled segment found, reported by `observe`.
@@ -608,6 +610,7 @@ impl Harness {
             rt: Rc::clone(&rt),
             actor: None,
             source_session: SOURCE_SESSION,
+            absent_session: ABSENT_SESSION,
             absent: None,
             source_gr: None,
             timer_failure: None,
@@ -1099,10 +1102,14 @@ impl Harness {
         }
         let rt = Rc::clone(&self.rt);
         let _clock = rt.enter();
-        let rx = connect(&mut self.manager, ABSENT, 64, true, true);
+        // Each restart comes up on a session of its own, as the transport's
+        // would.
+        let session_id = self.absent_session;
+        self.absent_session += 1000;
+        let rx = connect_session(&mut self.manager, ABSENT, session_id, 64, true, false, true);
         self.manager.handle_update(RibUpdate::PeerGracefulRestart {
             peer: peer_v4(ABSENT),
-            session_id: ABSENT_SESSION,
+            session_id,
             restart_time: u16::from(restart),
             stale_routes_time: 360,
             gr_families: vec![FAMILY],
@@ -1278,6 +1285,15 @@ impl Harness {
             })
             .expect("the run loop drains its closed queue");
         let now = tokio::time::Instant::now();
+        // The absent peer's deadline fired and swept it: a later race may
+        // restart it on a new session.
+        if self
+            .absent
+            .as_ref()
+            .is_some_and(|absent| now >= absent.deadline)
+        {
+            self.absent = None;
+        }
         let Some(gr) = &self.source_gr else {
             return;
         };
@@ -3597,4 +3613,45 @@ fn queued_refresh_closes_its_window_behind_an_earlier_drain() {
     if let Some(reason) = failure(config, &setup, &[Op::Drain]) {
         panic!("{reason}");
     }
+}
+
+/// A later race in the same case restarts the absent peer again once its
+/// first window has expired, so every race keeps its second GR deadline.
+/// Red proof: keeping the expired window's state skips the second restart,
+/// and the manager holds no absent deadline.
+#[test]
+fn a_later_race_restarts_the_absent_peer_after_its_window_expired() {
+    let mut harness = Harness::new(Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    });
+    let rt = Rc::clone(&harness.rt);
+    let _clock = rt.enter();
+    let restart = Op::RestartPeer {
+        source: false,
+        restart: 1,
+        stale: 0,
+    };
+    harness.apply(&restart);
+    harness.apply(&Op::AdvanceToDeadline);
+    harness.settle();
+    assert!(
+        !harness
+            .manager
+            .gr_stale_deadlines
+            .contains_key(&peer_v4(ABSENT)),
+        "the first window expired"
+    );
+    harness.apply(&restart);
+    assert!(
+        harness
+            .manager
+            .gr_stale_deadlines
+            .contains_key(&peer_v4(ABSENT)),
+        "the later race restarted the absent peer"
+    );
 }
