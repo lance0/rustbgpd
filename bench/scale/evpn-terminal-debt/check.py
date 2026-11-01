@@ -31,6 +31,30 @@ def validate_feed(rows, peers):
                 and (row["target_group"] is None or type(row["target_group"]) is int and row["target_group"] >= 0)
                 and row["owed"] <= 3 and row["capacity"] <= row["max_capacity"] == 4096,
                 "malformed actual feed observation")
+        marker_counts(row)
+
+
+# Every standalone terminal-marker try_send site instrumented by patches.py.
+MARKER_SITES = ("flush", "retry", "initial")
+MARKER_COUNTERS = tuple(f"{site}_{kind}" for site in MARKER_SITES for kind in ("attempts", "refused"))
+
+
+def marker_counts(row):
+    """A site without its counter is INVALID; it is never read as zero refusals."""
+    counts = row.get("markers")
+    require(type(counts) is dict and set(counts) == set(MARKER_COUNTERS), "missing terminal-marker send-site counter")
+    require(all(type(counts[name]) is int and counts[name] >= 0 for name in MARKER_COUNTERS)
+            and all(counts[f"{site}_refused"] <= counts[f"{site}_attempts"] for site in MARKER_SITES),
+            "malformed terminal-marker send-site counter")
+    return counts
+
+
+def marker_refusals(interval):
+    """Refusals at every send site across one peer's ordered feed interval."""
+    counts = [marker_counts(row) for row in interval]
+    require(all(right[name] >= left[name] for left, right in zip(counts, counts[1:]) for name in MARKER_COUNTERS),
+            "nonmonotone terminal-marker send-site counter")
+    return {site: counts[-1][f"{site}_refused"] - counts[0][f"{site}_refused"] for site in MARKER_SITES}
 
 
 def settled(row):
@@ -191,18 +215,37 @@ def debt_receipt(feed, work, sockets, writes, samples, applied_us, source_peer):
                     pressure = kernel_pressure(sockets, writes, samples, peer, before["wall_us"], after["wall_us"],
                                                during["wall_us"], applied_us)
                     if pressure:
+                        refusals = marker_refusals(interval)
                         return {"before": before, "during": during, "admitted_churn": update, "after": after,
                                 "kernel": pressure, "work": work_receipt(work, [during["root"]]),
-                                "marker_refusals": sum(row["event"] == "marker_refused" for row in interval)}
+                                "marker_refusals": sum(refusals.values()), "marker_refusals_by_site": refusals}
     return None
 
 
-def readiness(samples):
+CADENCE = .05  # 20 Hz readiness; also the maximum schedule lag
+
+
+def readiness_window(ordered, start, end, cell):
+    """Bind the series to the workload on the controller's monotonic clock.
+
+    start/end are the load dispatch and finish completion; cell is the physical
+    cell interval. A shifted or truncated series keeps its internal cadence but
+    misses one of these endpoints.
+    """
+    require(cell[0] <= start <= end <= cell[1], "workload phase escapes its physical cell")
+    require(all(cell[0] <= row["scheduled"] <= row["at"] <= cell[1] for row in ordered),
+            "readiness sample outside its physical cell")
+    require(ordered[0]["scheduled"] <= start + CADENCE, "readiness series starts after the workload phase")
+    require(ordered[-1]["scheduled"] >= end - CADENCE, "readiness series ends before the workload phase")
+
+
+def readiness(samples, start, end, cell):
     require(samples, "missing readiness samples")
     ordered = sorted(samples, key=lambda row: row["scheduled"])
-    require(all(abs(right["scheduled"] - left["scheduled"] - .05) < .000001
+    require(all(abs(right["scheduled"] - left["scheduled"] - CADENCE) < .000001
                 for left, right in zip(ordered, ordered[1:])), "missing 20 Hz readiness probe")
-    require(all(0 <= row["at"] - row["scheduled"] < .05 for row in samples), "20 Hz readiness scheduling miss")
+    require(all(0 <= row["at"] - row["scheduled"] < CADENCE for row in samples), "20 Hz readiness scheduling miss")
+    readiness_window(ordered, start, end, cell)
     return all(row["status"] == 200 and 0 <= row["seconds"] < .2 for row in samples)
 
 

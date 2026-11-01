@@ -208,7 +208,14 @@ def evidence(leg, record, q, r, wire):
     check.require(record["settled"] in observations, "settled receipt absent from raw observations")
     q.accept(check.settled(record["settled"]), "completion/proof/dirty/pending duties did not settle")
     samples = [json.loads(line) for line in (leg / "readiness.jsonl").read_text().splitlines()]
-    q.accept(check.readiness(samples), "readiness status/latency bar failed")
+    events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
+    loads = [row["at"] for row in events if row["event"] == "command" and row.get("command") == "load"]
+    finishes = [row["at"] for row in events if row["event"] == "complete" and row.get("command") == "finish"]
+    check.require(len(loads) == len(finishes) == 1, "missing raw load/finish controller clocks")
+    # Online, the cell is still open: the current monotonic time bounds it.
+    cell = (record["cell_started_monotonic_ns"] / 1e9,
+            record.get("cell_finished_monotonic_ns", time.monotonic_ns()) / 1e9)
+    q.accept(check.readiness(samples, loads[0], finishes[0], cell), "readiness status/latency bar failed")
     resets = q.metrics((leg / "metrics.txt").read_text())["executed_resets"]
     q.accept(check.reset_free(resets), "a provenance reset cause executed")
     cgroup = json.loads((leg / "cgroup.json").read_text())
@@ -228,7 +235,6 @@ def evidence(leg, record, q, r, wire):
         ss.extend(parsed)
     q.accept(all(row["terminal_after_churn"] for row in report["wire"]), "terminal marker preceded applied churn on the wire")
     controls = check.lines(leg / "driver.log", "evpn_control ")
-    events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
     check.require([row["command"] for row in controls] == ["connected", "load", "source-barrier", "terminal-baseline",
                   "mark refresh-start", "pause", "refresh", "terminal-churn", "source-barrier", "resume", "settle", "finish"],
                   "missing, repeated or reordered fixed workload command")

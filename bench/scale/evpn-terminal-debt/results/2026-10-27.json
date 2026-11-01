@@ -28,7 +28,9 @@
     "current_complete_debt_spans_applied_churn": true,
     "same_session_and_channel": true,
     "kernel_receive_window_limited_delta_us": 198000,
-    "marker_admission_refusals": 0,
+    "marker_admission_refusals": null,
+    "marker_admission_refusals_flush_path": 0,
+    "marker_refusal_accounting": "INVALID: flush path only; retry and initial-table send sites not instrumented in this run",
     "all_three_receiver_wire_checks_pass": true,
     "candidate_terminal_after_churn": true,
     "full_settlement": true,
@@ -37,6 +39,7 @@
     "readiness_requests_private": 23,
     "readiness_requests_candidate": 34,
     "all_readiness_and_schedule_bars_pass": true,
+    "readiness_bound_to_load_and_finish": "PASS: first probe about 3 ms before load dispatch, last 14-19 ms before finish completion, 50 ms gaps",
     "both_driver_exits": 0,
     "offline_analyze": "FAIL"
   },
@@ -45,5 +48,9 @@
     "quiet-host admission exit 75 before any daemon",
     "source 74c20cd startup INVALID: capture directory already existed"
   ],
-  "scope": "ordinary RR and EVPN EoR only; not ERR, RTC, full-fleet recovery, soak or production activation"
+  "scope": "ordinary RR and EVPN EoR only; not ERR, RTC, full-fleet recovery, soak or production activation",
+  "requalified": {
+    "date": "2026-11-01",
+    "note": "derived fields corrected against retained raw records; no new run, raw unchanged; status and work-count FAIL unchanged"
+  }
 }

@@ -31,7 +31,7 @@ pub(in crate::manager) fn bench_terminal_event(&self, peer: PeerId, event: &str,
             "evpn_terminal_feed {{\"wall_us\":{},\"root\":{},\"peer\":\"{}\",",
             "\"event\":\"{}\",\"rows\":{},\"session\":{},\"record_session\":{},\"channel\":{},",
             "\"channel_match\":{},\"complete\":{},\"current\":{},\"revision\":{},\"target_group\":{},\"table_stamp\":{},",
-            "\"owed\":{},\"dirty\":{},\"capacity\":{},\"max_capacity\":{}}}"
+            "\"owed\":{},\"dirty\":{},\"capacity\":{},\"max_capacity\":{},\"markers\":{}}}"
         ),
         super::terminal_debt::wall_us(),
         super::terminal_debt::id(),
@@ -50,6 +50,7 @@ pub(in crate::manager) fn bench_terminal_event(&self, peer: PeerId, event: &str,
         completion.map_or(0, |completion| completion.owed_markers),
         self.dirty_peers.contains(&peer),
         tx.capacity(),
-        tx.max_capacity()
+        tx.max_capacity(),
+        super::terminal_debt::markers(peer)
     );
 }

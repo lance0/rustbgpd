@@ -98,12 +98,30 @@ def instrument(files, here):
          "        }\n"
          "        if owns_refresh_prior\n            && !self.dirty_peers.contains(&peer)")
     path = manager + "route_refresh.rs"
+    # Count every standalone terminal-marker try_send site: deferred-EoR flush,
+    # the timer retry and the initial-table EoR. A batch-carried marker shares
+    # its data reservation, so a refusal there is a data refusal, not a marker one.
     edit(path, "        if tx.try_send(eor).is_err() {\n            warn!",
-         "        if tx.try_send(eor).is_err() {\n"
+         "        let terminal_sent = tx.try_send(eor).is_ok();\n"
+         "        if evpn_marker { super::terminal_debt::marker(peer, \"flush\", !terminal_sent); }\n"
+         "        if !terminal_sent {\n"
          "            if evpn_marker { self.bench_terminal_event(peer, \"marker_refused\", 0); }\n            warn!")
     edit(path, "            self.evpn_feed_markers_admitted(peer, &tx, bits);",
          "            self.evpn_feed_markers_admitted(peer, &tx, bits);\n"
          "            self.bench_terminal_event(peer, \"terminal_admitted\", 0);")
+    edit(manager + "evpn_recovery.rs",
+         "            if sender.try_send(update).is_ok()\n"
+         "                && self.outbound_session_ids.get(&peer).copied() == session_id",
+         "            let terminal_sent = sender.try_send(update).is_ok();\n"
+         "            if bits != 0 { super::terminal_debt::marker(peer, \"retry\", !terminal_sent); }\n"
+         "            if terminal_sent\n"
+         "                && self.outbound_session_ids.get(&peer).copied() == session_id")
+    edit(manager + "peer_lifecycle.rs",
+         "            if tx.try_send(eor).is_err() {\n                warn!(%peer, \"outbound channel full — `EoR` deferred\");",
+         "            let terminal_sent = tx.try_send(eor).is_ok();\n"
+         "            if eor_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {\n"
+         "                super::terminal_debt::marker(peer, \"initial\", !terminal_sent);\n            }\n"
+         "            if !terminal_sent {\n                warn!(%peer, \"outbound channel full — `EoR` deferred\");")
 
     # Kernel evidence is independent of Tokio Pending. Both arms get the same
     # socket settings, first-Pending and completion events; no timer/queue changes.

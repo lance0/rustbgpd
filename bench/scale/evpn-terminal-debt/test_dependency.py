@@ -248,8 +248,12 @@ class DependencyChecks(unittest.TestCase):
                       {"event": "complete", "command": "settle", "wall_us": 600, "at": 6.0}]
             churn = next(value["result"] for value in controls if value["command"] == "terminal-churn")
             record = {"arm": "candidate", "settled": row, "applied": applied, "churn": churn,
-                      "correctness_only": True, "churn-applied-seconds": None, "convergence-seconds": None}
-            (leg / "readiness.jsonl").write_text(json.dumps({"scheduled": 1, "at": 1.001, "seconds": .01, "status": 200}) + "\n")
+                      "correctness_only": True, "churn-applied-seconds": None, "convergence-seconds": None,
+                      "cell_started_monotonic_ns": 0, "cell_finished_monotonic_ns": 7_000_000_000}
+            # 20 Hz readiness from load dispatch through finish completion.
+            (leg / "readiness.jsonl").write_text("".join(
+                json.dumps({"scheduled": index * .05, "at": index * .05 + .001, "seconds": .01, "status": 200}) + "\n"
+                for index in range(123)))
             metrics = "jemalloc_allocated_bytes 12345\n" + "".join(
                 f'bgp_evpn_recovery_provenance_exhausted_total{{cause="{cause}"}} 0\n' for cause in self.q.CAUSES)
             (leg / "metrics.txt").write_text(metrics)
@@ -289,6 +293,8 @@ class DependencyChecks(unittest.TestCase):
             events.insert(9, before)
             events.insert(-2, after)
             events.insert(-2, {"event": "command", "command": "resume", "wall_us": 530, "at": 5.3})
+            events += [{"event": "command", "command": "finish", "wall_us": 605, "at": 6.05},
+                       {"event": "complete", "command": "finish", "wall_us": 610, "at": 6.1}]
             (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
             record.update(admitted=feed[0], pressure_before=before, pressure_after=after)
 
@@ -305,6 +311,15 @@ class DependencyChecks(unittest.TestCase):
             self.assertEqual(good["debt"]["work"]["inventory_visits"], 32)
             with self.assertRaises(self.q.AcceptanceFailure):
                 terminal.accept_report(good, "candidate", self.q)
+            # A shifted readiness file keeps its cadence but misses the raw load clock.
+            readiness = (leg / "readiness.jsonl").read_text()
+            (leg / "readiness.jsonl").write_text("".join(
+                json.dumps({**value, "scheduled": value["scheduled"] + .5, "at": value["at"] + .5}) + "\n"
+                for value in map(json.loads, readiness.splitlines())))
+            with self.assertRaisesRegex(ValueError, "starts after the workload phase") as failure:
+                terminal.evidence(leg, record, self.q, self.r, self.wire)
+            self.assertNotIsInstance(failure.exception, self.q.AcceptanceFailure)
+            (leg / "readiness.jsonl").write_text(readiness)
             for defect in ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts", "refresh_pending", "eor_pending", "protocol_obligations",
                            "peer_limit", "daemon_limit", "allocation_failure", "capture_unavailable", "admission_invariant", "hidden-peer-peak", "hidden-daemon-peak"):
                 with self.subTest(defect=defect):

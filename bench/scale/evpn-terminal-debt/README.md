@@ -99,7 +99,11 @@ dispatch:
   bar is **zero**. The pinned implementation is expected to breach this bar;
   source evidence is not a substitute for the retained live receipt.
 - Readiness runs at 20 Hz through all workload phases: all HTTP 200, every request
-  below 200 ms, no missing probe and no scheduling lag of 50 ms or more. Every
+  below 200 ms, no missing probe and no scheduling lag of 50 ms or more. The series
+  is bound to the controller's monotonic clock: the first probe is scheduled at most
+  one 50 ms interval after load dispatch, the last at most one interval before
+  finish completion, and every probe lies inside the cell. A shifted or truncated
+  series is INVALID. Every
   convergence is at most 60 seconds. The debt witness wait is bounded at two
   seconds; this changes no daemon timer and cannot extend an expired debt window.
 - Verify every receiver's actual framed socket UPDATE bytes against the checked
@@ -118,8 +122,13 @@ The raw consumer runs online and again during `analyze`. `FAIL` means an observe
 bar miss or absent required witness; malformed or inconsistent evidence is
 `INVALID`. Failed directories are retained and cannot be reused. If the natural
 timer window closes during churn, the fixture fails without changing its timer,
-buffers, workload or bars. A zero marker-admission-refusal count is allowed: call
-the result **timer-deferred terminal debt under kernel backpressure**. Claim that
+buffers, workload or bars. Marker refusals come from per-peer attempt/refusal
+counters at every standalone terminal-marker `try_send` site: the deferred-EoR
+flush, the one-second marker retry and the initial-table EoR. A marker carried in
+a data batch shares that batch's channel reservation, so its refusal is a data
+refusal. A missing site counter is INVALID, never zero. A zero
+marker-admission-refusal count is allowed: call the result **timer-deferred
+terminal debt under kernel backpressure**. Claim that
 backpressure prevented marker admission only if a real refusal was observed.
 Analysis continues checking later raw cells after a private acceptance miss;
 technical corruption overrides `FAIL` with `INVALID`. A partial private failure
@@ -136,6 +145,15 @@ The [2026-10-27 correctness receipt](results/2026-10-27.json), measured on sourc
 The candidate established genuine admitted debt spanning applied churn under
 kernel backpressure and passed receiver wire, settlement, readiness, headroom and
 reset checks, but visited 899,970 inventory rows across four actual root calls
-against the predeclared zero-work bar. Marker-admission refusals were zero: this
-is timer-deferred debt under kernel backpressure. No N=3 timing campaign followed
-the miss, and production ownership remains disabled.
+against the predeclared zero-work bar. No N=3 timing campaign followed the miss,
+and production ownership remains disabled.
+
+On 2026-11-01 the receipt's affected claims were requalified against the retained
+raw records; no cell was rerun. The work-count FAIL is unchanged. The new readiness
+binding passes on both cells: each first probe is scheduled about 3 ms before
+load dispatch, each last probe 14–19 ms before finish completion, and every gap
+is 50 ms. Marker-refusal accounting is INVALID for this run. It recorded no
+flush-path refusal event, but the retry and initial-table send sites were not
+instrumented. The run therefore establishes
+admitted debt under kernel backpressure. It does not establish whether that debt
+was timer-deferred or refused at marker admission.

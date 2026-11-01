@@ -8,7 +8,7 @@ def feed(event, at, root=0, revision=1, rows=0, stamp=10):
     return {"event": event, "wall_us": at, "root": root, "revision": revision, "rows": rows,
             "peer": "127.1.0.2", "session": 7, "record_session": 7, "channel": 1, "channel_match": True,
             "complete": True, "current": True, "owed": 1, "dirty": False, "capacity": 4095, "max_capacity": 4096,
-            "target_group": 1, "table_stamp": stamp}
+            "target_group": 1, "table_stamp": stamp, "markers": {name: 0 for name in check.MARKER_COUNTERS}}
 
 
 def fixture():
@@ -32,6 +32,7 @@ class DebtChecks(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["work"]["inventory_visits"], 16)
         self.assertEqual(result["marker_refusals"], 0)
+        self.assertEqual(result["marker_refusals_by_site"], {"flush": 0, "retry": 0, "initial": 0})
         # A passing fixture still fails the predeclared zero-inventory-work bar.
         self.assertGreater(result["work"]["inventory_visits"], 0)
 
@@ -163,11 +164,48 @@ class DebtChecks(unittest.TestCase):
         self.assertEqual(rows[0]["sndbuf_limited_us"], 2)
         self.assertEqual(rows[1]["rwnd_limited_us"], 0)
 
+    def test_refusal_only_on_retry_path_is_counted(self):
+        args = fixture()
+        args[0][-1]["markers"].update(retry_attempts=1, retry_refused=1)
+        # The old event-only count saw no flush-path refusal event here.
+        self.assertFalse(any(row["event"] == "marker_refused" for row in args[0]))
+        result = check.debt_receipt(*args)
+        self.assertEqual(result["marker_refusals"], 1)
+        self.assertEqual(result["marker_refusals_by_site"], {"flush": 0, "retry": 1, "initial": 0})
+
+    def test_missing_retry_or_any_send_site_counter_is_invalid(self):
+        for name in check.MARKER_COUNTERS:
+            for position in range(4):
+                with self.subTest(counter=name, position=position):
+                    args = fixture()
+                    del args[0][position]["markers"][name]
+                    with self.assertRaisesRegex(ValueError, "missing terminal-marker send-site counter"):
+                        check.debt_receipt(*args)
+                    with self.assertRaisesRegex(ValueError, "missing terminal-marker send-site counter"):
+                        check.validate_feed(args[0], {"127.1.0.2"})
+        args = fixture()
+        del args[0][0]["markers"]
+        with self.assertRaisesRegex(ValueError, "missing terminal-marker send-site counter"):
+            check.debt_receipt(*args)
+
+    def test_send_site_counter_decrease_is_invalid(self):
+        args = fixture()
+        args[0][1]["markers"].update(retry_attempts=2)
+        with self.assertRaisesRegex(ValueError, "nonmonotone terminal-marker"):
+            check.debt_receipt(*args)
+
     def test_kernel_counter_decrease_is_invalid(self):
         args = fixture()
         args[4][1]["rwnd_limited_us"] = 0
         with self.assertRaisesRegex(ValueError, "nonmonotone"):
             check.debt_receipt(*args)
+
+
+WORKLOAD = (0.0, 2.0, (-1, 3))  # load dispatch, finish completion, physical cell
+
+
+def series():
+    return [{"scheduled": i * .05, "at": i * .05 + .001, "status": 200, "seconds": .199999} for i in range(41)]
 
 
 class ReadinessAndWireChecks(unittest.TestCase):
@@ -187,19 +225,58 @@ class ReadinessAndWireChecks(unittest.TestCase):
             check.reset_free({**resets, "unknown": 0})
 
     def test_readiness_boundaries_and_errors(self):
-        rows = [{"scheduled": i * .05, "at": i * .05 + .001, "status": 200, "seconds": .199999} for i in range(3)]
-        self.assertTrue(check.readiness(rows))
+        rows = series()
+        self.assertTrue(check.readiness(rows, *WORKLOAD))
         for status, seconds in ((503, .01), (0, .01), (200, .2)):
             with self.subTest(status=status, seconds=seconds):
                 bad = copy.deepcopy(rows)
                 bad[1].update(status=status, seconds=seconds)
-                self.assertFalse(check.readiness(bad))
+                self.assertFalse(check.readiness(bad, *WORKLOAD))
         for field, value in (("at", .1), ("scheduled", .15)):
             with self.subTest(field=field):
                 bad = copy.deepcopy(rows)
                 bad[1][field] = value
                 with self.assertRaises(ValueError):
-                    check.readiness(bad)
+                    check.readiness(bad, *WORKLOAD)
+
+    def test_readiness_endpoints_allow_at_most_one_cadence(self):
+        rows = series()
+        self.assertTrue(check.readiness(rows[1:-1], *WORKLOAD))
+        for name, bad, reason in (("start", rows[2:], "starts after"), ("end", rows[:-2], "ends before")):
+            with self.subTest(edge=name):
+                with self.assertRaisesRegex(ValueError, reason):
+                    check.readiness(bad, *WORKLOAD)
+
+    def test_common_shift_of_readiness_clock_is_invalid(self):
+        for shift, reason in ((.5, "starts after the workload phase"), (-.5, "ends before the workload phase")):
+            with self.subTest(shift=shift):
+                rows = series()
+                for row in rows:
+                    row["scheduled"] += shift
+                    row["at"] += shift
+                with self.assertRaisesRegex(ValueError, reason):
+                    check.readiness(rows, *WORKLOAD)
+
+    def test_truncated_readiness_series_is_invalid(self):
+        for edge, rows, reason in (("start", series()[10:], "starts after the workload phase"),
+                                   ("end", series()[:-10], "ends before the workload phase")):
+            with self.subTest(edge=edge):
+                with self.assertRaisesRegex(ValueError, reason):
+                    check.readiness(rows, *WORKLOAD)
+
+    def test_one_sample_readiness_series_is_invalid(self):
+        for position, reason in ((0, "ends before the workload phase"), (-1, "starts after the workload phase")):
+            with self.subTest(position=position):
+                with self.assertRaisesRegex(ValueError, reason):
+                    check.readiness([series()[position]], *WORKLOAD)
+
+    def test_readiness_outside_physical_cell_is_invalid(self):
+        start, end, _ = WORKLOAD
+        for cell, reason in (((.01, 3), "workload phase escapes"), ((-1, 1.99), "workload phase escapes"),
+                             ((-1, 2.0005), "readiness sample outside")):
+            with self.subTest(cell=cell):
+                with self.assertRaisesRegex(ValueError, reason):
+                    check.readiness(series(), start, end, cell)
 
     def test_raw_wire_keeps_exact_update_bytes_and_checks_protocol_scope(self):
         update = b"\xff" * 16 + b"\x00\x17\x02" + bytes(4)

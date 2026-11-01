@@ -96,6 +96,49 @@ pub(super) fn count(kind: &str, rows: usize) {
     });
 }
 
+// Cumulative per-peer attempts and refusals at every standalone terminal-marker
+// `try_send` site, in `MARKER_SITES` order. Absent sites are never reported as zero.
+const MARKER_SITES: [&str; 3] = ["flush", "retry", "initial"];
+static MARKERS: std::sync::Mutex<Vec<(crate::PeerId, [u64; 6])>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub(super) fn marker(peer: crate::PeerId, site: &str, refused: bool) {
+    let index = MARKER_SITES
+        .iter()
+        .position(|name| *name == site)
+        .expect("unknown terminal marker site");
+    let mut rows = MARKERS.lock().expect("terminal marker observer");
+    let row = rows
+        .iter()
+        .position(|(key, _)| *key == peer)
+        .unwrap_or_else(|| {
+            rows.push((peer, [0; 6]));
+            rows.len() - 1
+        });
+    rows[row].1[2 * index] += 1;
+    rows[row].1[2 * index + 1] += u64::from(refused);
+}
+
+pub(super) fn markers(peer: crate::PeerId) -> String {
+    let rows = MARKERS.lock().expect("terminal marker observer");
+    let counts = rows
+        .iter()
+        .find(|(key, _)| *key == peer)
+        .map_or([0; 6], |(_, counts)| *counts);
+    let fields: Vec<String> = MARKER_SITES
+        .iter()
+        .enumerate()
+        .map(|(index, site)| {
+            format!(
+                "\"{site}_attempts\":{},\"{site}_refused\":{}",
+                counts[2 * index],
+                counts[2 * index + 1]
+            )
+        })
+        .collect();
+    format!("{{{}}}", fields.join(","))
+}
+
 pub(super) fn id() -> u64 {
     WORK.with_borrow(|slot| slot.as_ref().map_or(0, |work| work.id))
 }
