@@ -248,6 +248,16 @@ replaced the earlier session-level exclusion, whose per-peer
 Adj-RIB-Out + per-peer encode took a 700-client full-table route
 server from ~1.3 GiB to over 100 GiB of RSS when enabled fleet-wide.
 
+With `per_client_best`, a member whose best path is suppressed toward it
+receives its best eligible candidate instead, exactly as an ungrouped
+session does. For a prefix whose candidates carry a suppression form
+(`0:PEER`, `0:RS`, `RS:0:PEER`, `RS:0:0`), the shared group walk therefore
+goes past the runner-up and keeps the permitted candidates after the best
+path, so that prefix costs work and memory in proportion to its permitted
+candidates rather than one runner-up entry. Prefixes without a suppression
+form keep the two-candidate walk. The kept candidates are not counted in
+`bgp_update_group_runner_up_entries`.
+
 ## Verify
 
 ```console

@@ -12,6 +12,19 @@ completion p50 landed at 3.25–3.77 s — inside the grouped-control
 class at both overlap points, F = 0.5 included. Measured rows,
 the campaign's three-defect arc, and preserved non-passing roots:
 [grouped per-client-best receipt](../perf/irr-reload-grouped-per-client-best-2026-08.md).
+**Amended:** 2026-11-01 (RFC 7947 control-community fallback) — a member
+whose winner, or whose lane substitution, is suppressed toward it by a
+control community now receives its best eligible candidate, as the
+per-peer walk selects it. For a prefix where a walked permitted candidate
+carries a suppression-form community (a standard community administered
+by `0`, or a large community with function `0`),
+Decision 2's early exit no longer applies: the walk continues until two
+permitted candidates without one, from different sources, settle every
+member, and the group keeps every permitted candidate after the winner
+as a per-prefix fallback list beside the Decision 3 lane. State and walk
+cost for those prefixes are O(permitted candidates), not one lane entry,
+and the extra evaluations follow Decision 2's over-replay posture.
+Prefixes without such a community keep the decisions as written.
 
 ## Context
 

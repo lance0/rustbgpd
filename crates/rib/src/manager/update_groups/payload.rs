@@ -62,6 +62,8 @@ pub(in crate::manager) struct PriorGroupSlots {
     pub(super) nh: Option<NextHopAction>,
     pub(super) source_attrs: Option<Arc<AttrSet>>,
     pub(super) lane: Option<RunnerUp>,
+    /// The prior RFC 7947 fallback list ([`GroupRibOut::rs_fallback`]).
+    pub(super) rs_fallback: Option<Arc<[RunnerUp]>>,
 }
 
 impl PriorGroupSlots {
@@ -88,6 +90,9 @@ impl PriorGroupSlots {
             lane: (group.per_client_best && path_id == 0)
                 .then(|| group.runner_up.get(&prefix).cloned())
                 .flatten(),
+            rs_fallback: (path_id == 0 && !group.rs_fallback.is_empty())
+                .then(|| group.rs_fallback.get(&prefix).cloned())
+                .flatten(),
         });
         checkpoint(true);
         Some(prior)
@@ -103,13 +108,103 @@ impl PriorGroupSlots {
                 policy_label: None,
             });
         }
-        self.lane.as_ref().map(|entry| AdvEntry {
-            route: &entry.route,
-            local_source: entry.local_source,
-            nh: entry.nh.as_ref(),
-            source_attrs: entry.source_attrs.as_ref(),
-            policy_label: entry.policy_label.as_ref(),
-        })
+        self.lane.as_ref().map(RunnerUp::adv_entry)
+    }
+
+    /// [`Self::adv_entry`] for an `rs_control_communities` member: the
+    /// prior counterpart of [`GroupRibOut::adv_entry_for`].
+    pub(in crate::manager) fn adv_entry_for(
+        &self,
+        member: PeerId,
+        rs_control: Option<(u32, u32)>,
+    ) -> Option<AdvEntry<'_>> {
+        let winner = AdvEntry {
+            route: &self.route,
+            local_source: self.local_source,
+            nh: self.nh.as_ref(),
+            source_attrs: self.source_attrs.as_ref(),
+            policy_label: None,
+        };
+        resolve_member_slot(
+            member,
+            rs_control,
+            winner,
+            self.lane.as_ref(),
+            self.rs_fallback.as_deref(),
+            |entry| source_control_input(entry.source_attrs),
+        )
+    }
+}
+
+/// The ONE RFC 7947 resolution of a per-client-best member's slot, shared
+/// by the live group view and the prior snapshots: the first candidate in
+/// best-path order that the member did not source and whose SOURCE control
+/// communities do not suppress toward it — the per-peer walk, which drops
+/// suppressed candidates before ranking. `fallback` is the walk's ordered
+/// candidate list after the winner, retained only where some walked
+/// candidate carries a suppression-form community; without it (or without
+/// rs-control) the slot is ADR-0126's `adv(m)` — the winner, else the lane
+/// runner-up — and a suppressed slot resolves to nothing.
+pub(in crate::manager) fn resolve_member_slot<'a>(
+    member: PeerId,
+    rs_control: Option<(u32, u32)>,
+    winner: AdvEntry<'a>,
+    lane: Option<&'a RunnerUp>,
+    fallback: Option<&'a [RunnerUp]>,
+    control: impl Fn(&AdvEntry<'a>) -> (&'a [u32], &'a [LargeCommunity]),
+) -> Option<AdvEntry<'a>> {
+    use crate::manager::distribution::rs_control::rs_control_suppressed;
+    let eligible = |entry: &AdvEntry<'a>| {
+        let (communities, large_communities) = control(entry);
+        !rs_control_suppressed(communities, large_communities, rs_control)
+    };
+    match fallback.filter(|_| rs_control.is_some()) {
+        Some(fallback) => std::iter::once(winner)
+            .chain(fallback.iter().map(RunnerUp::adv_entry))
+            .find(|entry| entry.route.peer != member && eligible(entry)),
+        None => if winner.route.peer == member {
+            lane.map(RunnerUp::adv_entry)
+        } else {
+            Some(winner)
+        }
+        .filter(eligible),
+    }
+}
+
+/// Whether a source route carries a community that can suppress it toward
+/// some RFC 7947 target, for any route-server ASN: a standard community
+/// administered by `0` (`0:PEER`, `0:RS`) or a large community with function
+/// `0` (`RS:0:PEER`, `RS:0:0`). A superset of every suppression verdict, so a
+/// walk over candidates without one needs no per-member fallback.
+pub(in crate::manager) fn may_suppress(communities: &[u32], large: &[LargeCommunity]) -> bool {
+    communities.iter().any(|&c| c >> 16 == 0) || large.iter().any(|lc| lc.local_data1 == 0)
+}
+
+/// Content equality of two exception-lane payloads, including the SOURCE
+/// control communities that drive rs-control verdicts.
+pub(in crate::manager) fn runner_up_equal(old: &RunnerUp, new: &RunnerUp) -> bool {
+    old.local_source == new.local_source
+        && crate::manager::helpers::unicast_routes_equal(
+            &old.route,
+            old.nh.as_ref(),
+            &new.route,
+            new.nh.as_ref(),
+        )
+        && source_control_input(old.source_attrs.as_ref())
+            == source_control_input(new.source_attrs.as_ref())
+}
+
+/// [`runner_up_equal`] over two RFC 7947 fallback lists.
+pub(in crate::manager) fn rs_fallback_equal(
+    old: Option<&[RunnerUp]>,
+    new: Option<&[RunnerUp]>,
+) -> bool {
+    match (old, new) {
+        (None, None) => true,
+        (Some(old), Some(new)) => {
+            old.len() == new.len() && old.iter().zip(new).all(|(a, b)| runner_up_equal(a, b))
+        }
+        _ => false,
     }
 }
 
@@ -180,6 +275,18 @@ pub(in crate::manager) struct RunnerUp {
     /// without this field no emit, count, or replay seam could know
     /// which member the substitution targets.
     pub(in crate::manager) winner_source: PeerId,
+}
+
+impl RunnerUp {
+    pub(in crate::manager) fn adv_entry(&self) -> AdvEntry<'_> {
+        AdvEntry {
+            route: &self.route,
+            local_source: self.local_source,
+            nh: self.nh.as_ref(),
+            source_attrs: self.source_attrs.as_ref(),
+            policy_label: self.policy_label.as_ref(),
+        }
+    }
 }
 
 /// One slot of a member's derived advertised view — what
@@ -269,6 +376,11 @@ pub(in crate::manager) struct PerClientBestPrefixStage {
     /// scratch every pass — no stale second-best by construction
     /// (ADR-0126 Decision 6).
     pub(in crate::manager) runner_up: Option<RunnerUp>,
+    /// Every permitted candidate the walk visited after the winner, in
+    /// best-path order — the RFC 7947 per-member fallback
+    /// ([`GroupRibOut::rs_fallback`]). `None` unless a walked candidate
+    /// carries a suppression-form community ([`may_suppress`]).
+    pub(in crate::manager) rs_fallback: Option<Arc<[RunnerUp]>>,
 }
 
 /// Communities and large communities carried by a captured source
@@ -465,6 +577,12 @@ pub(in crate::manager) struct GroupStageOutput {
     /// [`LaneDelta::emit_target`]), via
     /// [`emit_lane_deltas_for_member_with_checkpoint`] in the per-member walk.
     pub(in crate::manager) lane_deltas: Vec<LaneDelta>,
+    /// Prior slots of the per-client-best prefixes whose RFC 7947 fallback
+    /// view may have moved without a `path_id 0` winner delta (a lane,
+    /// tag-only or fallback-list change while some candidate carries a
+    /// suppression-form community). An rs-control member diffs its
+    /// resolved slot for these ([`emit_pcb_rs_member_with_checkpoint`]).
+    pub(in crate::manager) rs_priors: Vec<(Prefix, Option<Box<PriorGroupSlots>>)>,
     /// Members whose emission differs from the shared one: the new
     /// source of an announce delta (announce → substitution/withdraw),
     /// the former PCB winner source (compare its prior substitution),
@@ -497,49 +615,62 @@ impl GroupStageOutput {
             .is_some_and(|tags| !tags.tagged(rs_asn))
     }
 
+    /// The member's prior slot at every key this pass touched, for the
+    /// action-equivalence check. Collected into a map, later entries win: a
+    /// lane prior is the same slot a delta prior resolves for the winner's
+    /// source, and an rs-control member's resolved slots (`rs_control`)
+    /// come last, including the fallback-view priors ([`Self::rs_priors`]).
     pub(in crate::manager) fn prior_slots(
         &self,
         member: PeerId,
+        rs_control: Option<(u32, u32)>,
     ) -> impl Iterator<Item = ((Prefix, u32), AdvEntry<'_>)> {
-        self.deltas
-            .iter()
-            .filter_map(move |delta| {
-                let key = (delta.prefix, delta.path_id);
-                let entry = if let Some(prior) = &delta.prior {
-                    prior.adv_entry(member)
-                } else {
-                    let action = self.prior_equal_actions.get(&key)?;
-                    let (route, _) = delta.new.as_ref()?;
-                    (delta.old_source == Some(route.peer) && route.peer != member).then_some(
+        let lane = self.lane_deltas.iter().filter_map(move |delta| {
+            delta
+                .prior
+                .as_ref()
+                .filter(|entry| entry.winner_source == member)
+                .map(|entry| {
+                    (
+                        (delta.prefix, 0),
                         AdvEntry {
-                            route,
-                            local_source: delta.local_source,
-                            nh: action.as_ref(),
-                            source_attrs: delta.prior_source_attrs.as_ref(),
+                            route: &entry.route,
+                            local_source: entry.local_source,
+                            nh: entry.nh.as_ref(),
+                            source_attrs: entry.source_attrs.as_ref(),
                             policy_label: None,
                         },
                     )
-                };
-                entry.map(|entry| (key, entry))
-            })
-            .chain(self.lane_deltas.iter().filter_map(move |delta| {
-                delta
-                    .prior
-                    .as_ref()
-                    .filter(|entry| entry.winner_source == member)
-                    .map(|entry| {
-                        (
-                            (delta.prefix, 0),
-                            AdvEntry {
-                                route: &entry.route,
-                                local_source: entry.local_source,
-                                nh: entry.nh.as_ref(),
-                                source_attrs: entry.source_attrs.as_ref(),
-                                policy_label: None,
-                            },
-                        )
-                    })
-            }))
+                })
+        });
+        let fallback_views = self
+            .rs_priors
+            .iter()
+            .filter(move |_| rs_control.is_some())
+            .filter_map(move |(prefix, prior)| {
+                prior
+                    .as_deref()?
+                    .adv_entry_for(member, rs_control)
+                    .map(|entry| ((*prefix, 0), entry))
+            });
+        lane.chain(self.deltas.iter().filter_map(move |delta| {
+            let key = (delta.prefix, delta.path_id);
+            let entry = if let Some(prior) = &delta.prior {
+                prior.adv_entry_for(member, rs_control)
+            } else {
+                let action = self.prior_equal_actions.get(&key)?;
+                let (route, _) = delta.new.as_ref()?;
+                (delta.old_source == Some(route.peer) && route.peer != member).then_some(AdvEntry {
+                    route,
+                    local_source: delta.local_source,
+                    nh: action.as_ref(),
+                    source_attrs: delta.prior_source_attrs.as_ref(),
+                    policy_label: None,
+                })
+            };
+            entry.map(|entry| (key, entry))
+        }))
+        .chain(fallback_views)
     }
 
     /// Keys withdrawn by this pass — the tombstone contribution when a
@@ -607,35 +738,46 @@ impl GroupStageOutput {
             let (communities, large_communities) = source_control_input(attrs);
             rs_control_route_tagged(communities, large_communities, rs_asn)
         };
-        self.deltas.iter().any(|delta| {
-            checkpoint();
-            delta.new.as_ref().is_some_and(|(route, _)| {
-                attrs_tagged(delta.source_attrs.as_ref())
-                    || rs_control_route_tagged(
-                        route.communities(),
-                        route.large_communities(),
-                        rs_asn,
-                    )
+        // A recorded fallback-view change exists only where some candidate
+        // may suppress toward a target. A per-client-best winner delta over a
+        // tagged prior is the same: it may promote the member's current
+        // fallback, or replace a winner whose scrubbed form the member already
+        // holds, and the shared payload would re-announce it while the
+        // resolved-slot diff emits nothing.
+        !self.rs_priors.is_empty()
+            || self.deltas.iter().any(|delta| {
+                checkpoint();
+                delta.prior.as_ref().is_some_and(|prior| {
+                    prior.rs_fallback.is_some() || attrs_tagged(prior.source_attrs.as_ref())
+                }) || delta.new.as_ref().is_some_and(|(route, _)| {
+                    attrs_tagged(delta.source_attrs.as_ref())
+                        || rs_control_route_tagged(
+                            route.communities(),
+                            route.large_communities(),
+                            rs_asn,
+                        )
+                })
             })
-        }) || self.rs_transitions.iter().any(|transition| {
-            checkpoint();
-            attrs_tagged(transition.prior_source_attrs.as_ref())
-                || attrs_tagged(transition.source_attrs.as_ref())
-        }) || self.lane_deltas.iter().any(|delta| {
-            checkpoint();
-            // ADR-0126: a tagged lane source must push `source(w)`
-            // onto the per-member walk — the substituted announce
-            // applies suppress/prepend/scrub from the LANE entry's
-            // source attributes, which the shared payload cannot.
-            delta.new.as_ref().is_some_and(|entry| {
-                attrs_tagged(entry.source_attrs.as_ref())
-                    || rs_control_route_tagged(
-                        entry.route.communities(),
-                        entry.route.large_communities(),
-                        rs_asn,
-                    )
+            || self.rs_transitions.iter().any(|transition| {
+                checkpoint();
+                attrs_tagged(transition.prior_source_attrs.as_ref())
+                    || attrs_tagged(transition.source_attrs.as_ref())
             })
-        })
+            || self.lane_deltas.iter().any(|delta| {
+                checkpoint();
+                // ADR-0126: a tagged lane source must push `source(w)`
+                // onto the per-member walk — the substituted announce
+                // applies suppress/prepend/scrub from the LANE entry's
+                // source attributes, which the shared payload cannot.
+                delta.new.as_ref().is_some_and(|entry| {
+                    attrs_tagged(entry.source_attrs.as_ref())
+                        || rs_control_route_tagged(
+                            entry.route.communities(),
+                            entry.route.large_communities(),
+                            rs_asn,
+                        )
+                })
+            })
     }
 
     /// Member-scoped withdraw keys of this pass that [`Self::withdrawn_keys`]
@@ -686,6 +828,13 @@ impl GroupStageOutput {
                 checkpoint();
                 (delta.new.is_none() && delta.emit_target == Some(member))
                     .then_some((delta.prefix, 0))
+            }))
+            // An rs-control member's fallback slot may have moved to nothing
+            // while the key stays staged; over-withdraw is the safe direction
+            // and the resync's retention guard drops a retained key.
+            .chain(self.rs_priors.iter().map(move |(prefix, _)| {
+                checkpoint();
+                (*prefix, 0)
             }))
     }
 
@@ -761,6 +910,9 @@ impl GroupStageOutput {
                 self.source_exclusion_unsafe.insert(target);
             }
         }
+        // A fallback-view change may move an rs-control member's next-hop
+        // action without any delta or lane residue showing it.
+        self.has_next_hop_actions |= !self.rs_priors.is_empty();
         self.prior_control_tags = (!prior_snapshot).then_some(prior_tags);
         checkpoint(true);
         self.shared_announce = announce.into();
@@ -779,6 +931,7 @@ impl GroupStageOutput {
         crate::manager::retire_vec(&mut self.otc_blocked, &mut || checkpoint(false));
         crate::manager::retire_vec(&mut self.rs_transitions, &mut || checkpoint(false));
         crate::manager::retire_vec(&mut self.lane_deltas, &mut || checkpoint(false));
+        crate::manager::retire_vec(&mut self.rs_priors, &mut || checkpoint(false));
         self.evals.retire_with(checkpoint);
         crate::manager::retire_vec(&mut self.shared_withdraw, &mut || checkpoint(false));
         crate::manager::retire_hash_set(&mut self.exceptions, &mut || checkpoint(false));
@@ -1135,8 +1288,8 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
     );
 }
 
-pub(in crate::manager) fn emit_group_deltas_for_member_with_checkpoint(
-    deltas: &[GroupDelta],
+pub(in crate::manager) fn emit_group_deltas_for_member_with_checkpoint<'a>(
+    deltas: impl IntoIterator<Item = &'a GroupDelta>,
     member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
@@ -1321,6 +1474,121 @@ fn prepare_pcb_slot(
     Some((route, entry.nh.cloned()))
 }
 
+/// Per-member emit of one per-client-best staging pass for an
+/// `rs_control_communities` member. Control communities make the member's
+/// slot a per-target selection ([`resolve_member_slot`]): a candidate
+/// suppressed toward the member gives way to the next eligible one, exactly
+/// as the per-peer walk drops it before ranking. Each `path_id 0` key with a
+/// winner delta or a recorded fallback-view change
+/// ([`GroupStageOutput::rs_priors`]) therefore diffs the member's resolved
+/// slot before and after the pass — announce on any change, withdraw when it
+/// empties. The lane and tag-only arms keep the remaining keys, none of whose
+/// walked candidates carries a suppression-form community, and the non-zero
+/// residue withdraws keep the shared matrix arm.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the per-member emit arms it replaces for rs-control members"
+)]
+pub(in crate::manager) fn emit_pcb_rs_member_with_checkpoint(
+    stage: &GroupStageOutput,
+    group: &GroupRibOut,
+    member: PeerId,
+    rs_control: Option<(u32, u32)>,
+    announce: &mut Vec<Route>,
+    withdraw: &mut Vec<(Prefix, u32)>,
+    nh_override_flags: &mut Vec<Option<NextHopAction>>,
+    checkpoint: &mut impl FnMut(),
+) {
+    use crate::manager::distribution::rs_control::rs_control_route_rewrite;
+    let mut resolved: crate::fast_hash::FastSet<Prefix> = crate::fast_hash::FastSet::default();
+    resolved.reserve(
+        stage
+            .deltas
+            .iter()
+            .filter(|delta| delta.path_id == 0)
+            .count()
+            + stage.rs_priors.len(),
+    );
+    let slots = stage
+        .deltas
+        .iter()
+        .filter(|delta| delta.path_id == 0)
+        .map(|delta| (delta.prefix, delta.prior.as_deref()))
+        .chain(
+            stage
+                .rs_priors
+                .iter()
+                .map(|(prefix, prior)| (*prefix, prior.as_deref())),
+        );
+    for (prefix, prior) in slots {
+        checkpoint();
+        resolved.insert(prefix);
+        let old = prior
+            .and_then(|prior| prior.adv_entry_for(member, rs_control))
+            .map(|entry| {
+                let (_, large) = source_control_input(entry.source_attrs);
+                let mut route = entry.route.clone();
+                rs_control_route_rewrite(&mut route, large, rs_control);
+                (route, entry.nh.cloned(), entry.local_source)
+            });
+        let Some(entry) = group.adv_entry_for(member, &prefix, 0, rs_control) else {
+            if old.is_some() {
+                withdraw.push((prefix, 0));
+            }
+            continue;
+        };
+        let (_, large) = group.source_control_for_route(entry.route, entry.source_attrs);
+        let mut route = entry.route.clone();
+        rs_control_route_rewrite(&mut route, large, rs_control);
+        let nh = entry.nh.cloned();
+        if old.as_ref().is_none_or(|(old, old_nh, old_local)| {
+            *old_local != entry.local_source
+                || !crate::manager::helpers::unicast_routes_equal(
+                    old,
+                    old_nh.as_ref(),
+                    &route,
+                    nh.as_ref(),
+                )
+        }) {
+            nh_override_flags.push(nh);
+            announce.push(route);
+        }
+    }
+    emit_group_deltas_for_member_with_checkpoint(
+        stage.deltas.iter().filter(|delta| delta.path_id != 0),
+        member,
+        rs_control,
+        announce,
+        withdraw,
+        nh_override_flags,
+        checkpoint,
+    );
+    emit_lane_deltas_for_member_with_checkpoint(
+        stage
+            .lane_deltas
+            .iter()
+            .filter(|delta| !resolved.contains(&delta.prefix)),
+        member,
+        rs_control,
+        announce,
+        withdraw,
+        nh_override_flags,
+        checkpoint,
+    );
+    emit_rs_tag_transitions_with_checkpoint(
+        stage
+            .rs_transitions
+            .iter()
+            .filter(|transition| !resolved.contains(&transition.prefix)),
+        member,
+        rs_control,
+        announce,
+        withdraw,
+        nh_override_flags,
+        checkpoint,
+    );
+}
+
 /// Per-member emit for a pass's exception-lane transitions (ADR-0126
 /// Decision 5, the lane arm): each [`LaneDelta`] is member-scoped —
 /// it emits toward its [`LaneDelta::emit_target`] (`source(w)`) alone
@@ -1361,8 +1629,8 @@ pub(in crate::manager) fn emit_lane_deltas_for_member(
     );
 }
 
-pub(in crate::manager) fn emit_lane_deltas_for_member_with_checkpoint(
-    lane_deltas: &[LaneDelta],
+pub(in crate::manager) fn emit_lane_deltas_for_member_with_checkpoint<'a>(
+    lane_deltas: impl IntoIterator<Item = &'a LaneDelta>,
     member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
@@ -1459,8 +1727,8 @@ pub(in crate::manager) fn emit_rs_tag_transitions(
     );
 }
 
-pub(in crate::manager) fn emit_rs_tag_transitions_with_checkpoint(
-    transitions: &[RsTagTransition],
+pub(in crate::manager) fn emit_rs_tag_transitions_with_checkpoint<'a>(
+    transitions: impl IntoIterator<Item = &'a RsTagTransition>,
     member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,

@@ -1515,19 +1515,13 @@ impl RibManager {
                         // winner's own source, nothing when the lane is
                         // empty. The rs-control decision and the nh residue
                         // come from the RESOLVED entry.
-                        let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id)
+                        let Some(entry) =
+                            group.adv_entry_for(peer, &staged.prefix, staged.path_id, rs_control)
                         else {
                             continue;
                         };
-                        let (source_communities, source_large_communities) =
+                        let (_, source_large_communities) =
                             group.source_control_for_route(entry.route, entry.source_attrs);
-                        if super::distribution::rs_control::rs_control_suppressed(
-                            source_communities,
-                            source_large_communities,
-                            rs_control,
-                        ) {
-                            continue;
-                        }
                         unicast.next_hop_override.push(entry.nh.cloned());
                         let mut route = entry.route.clone();
                         super::distribution::rs_control::rs_control_route_rewrite(
@@ -1550,6 +1544,7 @@ impl RibManager {
                 );
                 grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
                     peer,
+                    rs_control_asn.zip(target_peer_asn),
                     Some(&all_prefixes),
                     &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);

@@ -65,12 +65,13 @@ pub(in crate::manager) use payload::{
     AdvEntry, BatchedMemberSupplement, BatchedTransitionInventory, CleanPolicyTransitionInventory,
     CleanPolicyTransitionInventoryBuilder, EvpnGroupDelta, EvpnGroupEntry, EvpnGroupInput,
     EvpnGroupStageOutput, GroupDelta, GroupEvalAccumulator, GroupStageOutput, LaneDelta,
-    PerClientBestPrefixStage, PolicyTransitionGroupStart, RsTagTransition, RunnerUp,
-    SharedUnicastPayload, VpnGroupDelta, VpnGroupStageOutput, capture_source_attrs,
+    PerClientBestPrefixStage, PolicyTransitionGroupStart, PriorGroupSlots, RsTagTransition,
+    RunnerUp, SharedUnicastPayload, VpnGroupDelta, VpnGroupStageOutput, capture_source_attrs,
     emit_evpn_group_deltas_for_member_with_checkpoint,
     emit_group_deltas_for_member_with_checkpoint, emit_lane_deltas_for_member_with_checkpoint,
-    emit_rs_tag_transitions_with_checkpoint, emit_vpn_group_deltas_for_member_with_checkpoint,
-    rt_passes, source_control_input,
+    emit_pcb_rs_member_with_checkpoint, emit_rs_tag_transitions_with_checkpoint,
+    emit_vpn_group_deltas_for_member_with_checkpoint, may_suppress, rt_passes,
+    source_control_input,
 };
 use payload::{
     BatchedTransitionCounters, VpnDenialRecord, bump_counter_row, bump_counter_row_with_checkpoint,
@@ -646,6 +647,14 @@ pub(in crate::manager) struct GroupRibOut {
     /// winner on every staging of the prefix. Always empty for plain
     /// groups.
     runner_up: ShardedMap<Prefix, RunnerUp>,
+    /// RFC 7947 per-member fallback of a per-client-best group: every
+    /// permitted candidate the winner walk visited after the winner, in
+    /// best-path order, kept only for prefixes where a walked candidate
+    /// carries a suppression-form community. An `rs_control_communities`
+    /// member whose winner (or substitution) is suppressed toward it takes
+    /// the first eligible entry ([`Self::adv_entry_for`]), as the per-peer
+    /// walk does. Committed with the lane; always empty for plain groups.
+    rs_fallback: ShardedMap<Prefix, Arc<[RunnerUp]>>,
     /// ADR-0126 Decision 4 count residue: per-winner-source lane-entry
     /// counts `[v4, v6]` — how many lane entries currently substitute
     /// for member m (m receives the runner-up exactly where it sourced
@@ -738,14 +747,17 @@ impl GroupRibOut {
     }
 
     /// Every unicast prefix a per-member residue query can return:
-    /// export-policy denials, OTC-blocked winners and runner-up lane
-    /// entries. A grouped join scopes its inventory to these.
+    /// export-policy denials, OTC-blocked winners, runner-up lane entries
+    /// and RFC 7947 fallback lists. A grouped join scopes its inventory to these.
     pub(in crate::manager) fn residue_prefixes(&self) -> impl Iterator<Item = Prefix> + '_ {
         self.policy_filtered
             .keys()
             .copied()
             .chain(self.otc_blocked.keys().map(|(prefix, _)| *prefix))
             .chain(self.runner_up.keys().copied())
+            // An rs-control member's resolved slot (and its OTC verdict) can
+            // be a fallback entry on a prefix with no lane.
+            .chain(self.rs_fallback.keys().copied())
     }
 
     #[cfg(feature = "bench-internals")]
@@ -770,6 +782,7 @@ impl GroupRibOut {
         release_hash_map(&mut self.lane_otc_blocked_counts, checkpoint);
         release_hash_map(&mut self.vpn_member_counts, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.runner_up, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.rs_fallback, checkpoint);
         release_hash_map(&mut self.lane_counts, checkpoint);
         for _ in self.tombstones.drain() {
             checkpoint();
@@ -839,6 +852,7 @@ impl GroupRibOut {
             lane_otc_blocked_counts: AddrMap::default(),
             vpn_member_counts: AddrMap::default(),
             runner_up: ShardedMap::default(),
+            rs_fallback: ShardedMap::default(),
             lane_counts: AddrMap::default(),
             export_chain,
             is_ebgp,
@@ -927,12 +941,18 @@ impl GroupRibOut {
         member: PeerId,
         prefixes: Option<&HashSet<Prefix>>,
     ) -> Vec<Route> {
-        self.otc_blocked_for_member_with_checkpoint(member, prefixes, &mut || {})
+        self.otc_blocked_for_member_with_checkpoint(member, None, prefixes, &mut || {})
     }
 
+    /// The RFC 9234 backstop's per-member outcome over `prefixes` (`None` =
+    /// every staged key): the member's resolved slots the backstop strips.
+    /// `rs_control` is the member's RFC 7947 context, under which a
+    /// per-client-best slot resolves past suppressed candidates
+    /// ([`Self::adv_entry_for`]).
     pub(in crate::manager) fn otc_blocked_for_member_with_checkpoint(
         &self,
         member: PeerId,
+        rs_control: Option<(u32, u32)>,
         prefixes: Option<&HashSet<Prefix>>,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Route> {
@@ -1006,8 +1026,60 @@ impl GroupRibOut {
                 prefixes.map_or(usize::MAX, HashSet::len),
                 self.runner_up.len(),
             );
+            // Nothing is ever blocked toward a role OTC cannot block, such
+            // as the route-server role of an IXP fleet: skip the re-resolve.
+            if rs_control.is_some() && super::distribution::otc_role_blocks(self.local_role) {
+                self.resolve_otc_blocked_for_rs_member(
+                    member,
+                    rs_control,
+                    prefixes,
+                    &mut blocked,
+                    checkpoint,
+                );
+            }
         }
         blocked
+    }
+
+    /// rs-control refinement of a per-client-best member's OTC residue: the
+    /// backstop sees the member's RESOLVED slot. A slot differs from the
+    /// winner/lane projection only where a candidate is suppressed toward
+    /// the member, so the candidates are the projected keys plus the
+    /// fallback-list keys in scope, each re-resolved.
+    fn resolve_otc_blocked_for_rs_member(
+        &self,
+        member: PeerId,
+        rs_control: Option<(u32, u32)>,
+        prefixes: Option<&HashSet<Prefix>>,
+        blocked: &mut Vec<Route>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let mut keys: Vec<Prefix> = blocked.iter().map(|route| route.prefix).collect();
+        if !self.rs_fallback.is_empty() {
+            match prefixes {
+                Some(prefixes) if prefixes.len() <= self.rs_fallback.len() => {
+                    keys.extend(prefixes.iter().copied().filter(|prefix| {
+                        checkpoint();
+                        self.rs_fallback.contains_key(prefix)
+                    }));
+                }
+                _ => keys.extend(self.rs_fallback.keys().copied().filter(|prefix| {
+                    checkpoint();
+                    prefixes.is_none_or(|prefixes| prefixes.contains(prefix))
+                })),
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        blocked.clear();
+        for prefix in keys {
+            checkpoint();
+            if let Some(entry) = self.adv_entry_for(member, &prefix, 0, rs_control)
+                && super::distribution::otc_egress_blocked(entry.route, self.local_role)
+            {
+                blocked.push(entry.route.clone());
+            }
+        }
     }
 
     fn count_slot(prefix: &Prefix) -> usize {
@@ -1189,6 +1261,21 @@ impl GroupRibOut {
         self.table.next_hop_override(&key.0, key.1).cloned()
     }
 
+    /// Commit a prefix's recomputed RFC 7947 fallback list
+    /// ([`Self::rs_fallback`]) alongside its lane.
+    fn apply_rs_fallback(&mut self, prefix: Prefix, fallback: Option<Arc<[RunnerUp]>>) {
+        match fallback {
+            Some(fallback) => {
+                self.rs_fallback.insert(prefix, fallback);
+            }
+            // The common case: no tagged prefix anywhere in the group.
+            None if self.rs_fallback.is_empty() => {}
+            None => {
+                self.rs_fallback.remove(&prefix);
+            }
+        }
+    }
+
     /// RFC 7947 control-decision input for a staged table entry: either the
     /// source snapshot required by a modifying policy or the staged route for
     /// a policy proven to preserve source-control communities.
@@ -1294,16 +1381,69 @@ impl GroupRibOut {
                     || (self.per_client_best && self.runner_up.contains_key(prefix))
             });
         }
-        self.adv_entry(member, prefix, path_id)
-            .is_some_and(|entry| {
-                let (communities, large) =
-                    self.source_control_for_route(entry.route, entry.source_attrs);
-                !super::distribution::rs_control::rs_control_suppressed(
-                    communities,
-                    large,
-                    rs_control,
-                )
-            })
+        self.adv_entry_for(member, prefix, path_id, rs_control)
+            .is_some()
+    }
+
+    /// The member's wire slot at one staged key: [`Self::adv_entry`] with
+    /// RFC 7947 control applied for an `rs_control_communities` member
+    /// (`rs_control` = `(rs_asn, member_asn)`). A suppressed slot resolves
+    /// to nothing, except that a per-client-best group falls back to the
+    /// member's best eligible candidate ([`Self::rs_fallback`]), as the
+    /// per-peer path selects it.
+    pub(in crate::manager) fn adv_entry_for(
+        &self,
+        member: PeerId,
+        prefix: &Prefix,
+        path_id: u32,
+        rs_control: Option<(u32, u32)>,
+    ) -> Option<AdvEntry<'_>> {
+        let staged = self.table.get(prefix, path_id)?;
+        let winner = self.staged_entry(staged, prefix, path_id);
+        payload::resolve_member_slot(
+            member,
+            rs_control,
+            winner,
+            self.per_client_best
+                .then(|| self.runner_up.get(prefix))
+                .flatten(),
+            (self.per_client_best && path_id == 0 && rs_control.is_some())
+                .then(|| self.rs_fallback.get(prefix).map(|fallback| &**fallback))
+                .flatten(),
+            |entry| self.source_control_for_route(entry.route, entry.source_attrs),
+        )
+    }
+
+    /// [`Self::adv_entry_for`] minus the RFC 9234 backstop's outcome, as
+    /// [`Self::adv_entry_post_backstop`].
+    pub(in crate::manager) fn adv_entry_post_backstop_for(
+        &self,
+        member: PeerId,
+        prefix: &Prefix,
+        path_id: u32,
+        rs_control: Option<(u32, u32)>,
+    ) -> Option<AdvEntry<'_>> {
+        self.adv_entry_for(member, prefix, path_id, rs_control)
+            .filter(|entry| !super::distribution::otc_egress_blocked(entry.route, self.local_role))
+    }
+
+    fn staged_entry<'a>(
+        &'a self,
+        staged: &'a Route,
+        prefix: &Prefix,
+        path_id: u32,
+    ) -> AdvEntry<'a> {
+        AdvEntry {
+            route: staged,
+            local_source: self.table.local_export_source(prefix, path_id),
+            nh: self.table.next_hop_override(prefix, path_id),
+            source_attrs: if self.source_control_passthrough {
+                None
+            } else {
+                self.source_attrs.get(&(*prefix, path_id))
+            },
+            policy_label: self.permit_policy_label.as_ref(),
+        }
     }
 
     /// The single ADR-0126 Decision 4 derivation of a member's
@@ -1329,30 +1469,12 @@ impl GroupRibOut {
     ) -> Option<AdvEntry<'_>> {
         let staged = self.table.get(prefix, path_id)?;
         if staged.peer != member {
-            let key = (*prefix, path_id);
-            return Some(AdvEntry {
-                route: staged,
-                local_source: self.table.local_export_source(prefix, path_id),
-                nh: self.table.next_hop_override(prefix, path_id),
-                source_attrs: if self.source_control_passthrough {
-                    None
-                } else {
-                    self.source_attrs.get(&key)
-                },
-                policy_label: self.permit_policy_label.as_ref(),
-            });
+            return Some(self.staged_entry(staged, prefix, path_id));
         }
         if !self.per_client_best {
             return None;
         }
-        let entry = self.runner_up.get(prefix)?;
-        Some(AdvEntry {
-            route: &entry.route,
-            local_source: entry.local_source,
-            nh: entry.nh.as_ref(),
-            source_attrs: entry.source_attrs.as_ref(),
-            policy_label: entry.policy_label.as_ref(),
-        })
+        self.runner_up.get(prefix).map(RunnerUp::adv_entry)
     }
 
     /// [`Self::adv_entry`] minus the RFC 9234 pre-commit backstop's
@@ -1575,7 +1697,7 @@ impl GroupRibOut {
         rejected: &HashSet<ExactExportKey>,
         checkpoint: &mut impl FnMut(bool),
     ) -> RegroupBaseline {
-        use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
+        use super::distribution::rs_control::rs_control_route_rewrite;
         checkpoint(true);
         let mut snapshot =
             FastMap::with_capacity_and_hasher(self.table.len(), FastState::default());
@@ -1588,18 +1710,16 @@ impl GroupRibOut {
             if rejected.contains(&ExactExportKey::Unicast(key.0, key.1)) {
                 continue;
             }
-            let Some(entry) = self.adv_entry(member, &staged.prefix, staged.path_id) else {
+            // A key whose SOURCE communities suppress every eligible
+            // candidate toward the member was never on its wire — the
+            // snapshot records true wire state, not the shared table.
+            let Some(entry) =
+                self.adv_entry_for(member, &staged.prefix, staged.path_id, rs_control)
+            else {
                 continue;
             };
-            let (communities, large_communities) =
+            let (_, large_communities) =
                 self.source_control_for_route(entry.route, entry.source_attrs);
-            // LAN-474: a key whose SOURCE communities suppress it
-            // toward the member was never on its wire — the
-            // snapshot records true wire state, not the shared
-            // table.
-            if rs_control_suppressed(communities, large_communities, rs_control) {
-                continue;
-            }
             let mut route = entry.route.clone();
             rs_control_route_rewrite(&mut route, large_communities, rs_control);
             if let Some(action) = entry.nh {
@@ -1609,8 +1729,12 @@ impl GroupRibOut {
                     // policy sets a next hop on only a few routes.
                     checkpoint(true);
                     next_hop_overrides.reserve(
-                        (self.table.next_hop_override_count() + self.runner_up.len())
-                            .min(self.table.len()),
+                        // A fallback slot (rs-control) can carry an
+                        // override on a prefix with no lane entry.
+                        (self.table.next_hop_override_count()
+                            + self.runner_up.len()
+                            + self.rs_fallback.len())
+                        .min(self.table.len()),
                     );
                     checkpoint(true);
                 }
@@ -2070,22 +2194,16 @@ impl RibManager {
             let projected: &GroupRibOut = group;
             let old_filter = filter.as_ref();
             let project_uc = |staged: &Route| {
-                let entry =
-                    projected.adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)?;
+                let entry = projected.adv_entry_post_backstop_for(
+                    peer,
+                    &staged.prefix,
+                    staged.path_id,
+                    rs_control,
+                )?;
                 let route = entry.route;
                 let key = ExactExportKey::Unicast(route.prefix, route.path_id);
-                if rejected.is_some_and(|keys| keys.contains(&key))
-                    || limits.is_some_and(|limits| !limits.admits_grouped(&route.prefix))
-                {
-                    return None;
-                }
-                let (communities, large) =
-                    projected.source_control_for_route(route, entry.source_attrs);
-                (!super::distribution::rs_control::rs_control_suppressed(
-                    communities,
-                    large,
-                    rs_control,
-                ))
+                (!rejected.is_some_and(|keys| keys.contains(&key))
+                    && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
                 .then_some(Key::Unicast(route.prefix, route.path_id))
             };
             let project_vpn = |route: &VpnRibRoute| {

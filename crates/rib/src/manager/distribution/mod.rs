@@ -595,15 +595,27 @@ impl BestSource {
 }
 
 impl RibManager {
+    /// Whether the member's resolved prior slot — RFC 7947 fallback
+    /// included — was admitted to its wire.
+    fn clean_group_prior_was_admitted(
+        &self,
+        peer: PeerId,
+        prior: &super::update_groups::PriorGroupSlots,
+    ) -> bool {
+        prior
+            .adv_entry_for(peer, self.rs_control_context(peer))
+            .is_some_and(|entry| {
+                self.clean_group_route_was_admitted(peer, entry.route, entry.source_attrs)
+            })
+    }
+
     fn clean_group_delta_was_admitted(
         &self,
         peer: PeerId,
         delta: &super::update_groups::GroupDelta,
     ) -> bool {
         if let Some(prior) = &delta.prior {
-            return prior.adv_entry(peer).is_some_and(|entry| {
-                self.clean_group_route_was_admitted(peer, entry.route, entry.source_attrs)
-            });
+            return self.clean_group_prior_was_admitted(peer, prior);
         }
         let Some(group) = self
             .grouped_member_of(peer)
@@ -1556,19 +1568,26 @@ pub(super) fn no_export_export_suppressed(
 /// RFC 9234 §5 egress rule for IPv4/IPv6 unicast: a route that already
 /// carries OTC must not be propagated toward a Provider, Peer, or Route
 /// Server. The local role names our side of those relationships.
+/// Whether RFC 9234 OTC egress can block anything toward a session with
+/// `local_role`: only toward a provider, a peer or a route server.
+pub(in crate::manager) fn otc_role_blocks(local_role: Option<BgpRole>) -> bool {
+    matches!(
+        local_role,
+        Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
+    )
+}
+
 pub(in crate::manager) fn otc_egress_blocked(
     route: &crate::route::Route,
     local_role: Option<BgpRole>,
 ) -> bool {
     // Valid network OTC is always typed; malformed type 35 is omitted before
     // the RIB. An opaque synthetic type-35 value has no OTC semantics.
-    matches!(
-        local_role,
-        Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
-    ) && route
-        .attributes
-        .iter()
-        .any(|attribute| attribute.only_to_customer().is_some())
+    otc_role_blocks(local_role)
+        && route
+            .attributes
+            .iter()
+            .any(|attribute| attribute.only_to_customer().is_some())
 }
 
 pub(in crate::manager) fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
@@ -3124,16 +3143,12 @@ impl RibManager {
         {
             return false;
         }
+        let rs_control = self.rs_control_context(peer);
         let prior: crate::fast_hash::FastMap<_, _> = clean_stage
             .into_iter()
-            .flat_map(|stage| stage.prior_slots(peer))
+            .flat_map(|stage| stage.prior_slots(peer, rs_control))
             .inspect(|_| self.replacement_checkpoint(false))
             .collect();
-        let rs_control = self
-            .peer_rs_control
-            .get(&peer)
-            .copied()
-            .zip(self.peer_asn.get(&peer).copied());
         let keep: Vec<_> = batch
             .unicast
             .announce
@@ -7656,11 +7671,29 @@ impl RibManager {
             .get(&(route.prefix, route.path_id))
             .copied()
             .or_else(|| {
+                // The member's own slot: an rs-control member may hold a
+                // fallback local route below a suppressed received winner.
                 self.grouped_member_of(peer)
                     .and_then(|gid| self.group_ribs.get(&gid))
-                    .and_then(|group| group.adv_entry(peer, &route.prefix, route.path_id))
+                    .and_then(|group| {
+                        group.adv_entry_for(
+                            peer,
+                            &route.prefix,
+                            route.path_id,
+                            self.rs_control_context(peer),
+                        )
+                    })
                     .and_then(|entry| entry.local_source)
             })
+    }
+
+    /// `(rs_asn, peer_asn)` for a session that enforces RFC 7947 control
+    /// communities, `None` otherwise.
+    pub(in crate::manager) fn rs_control_context(&self, peer: PeerId) -> Option<(u32, u32)> {
+        self.peer_rs_control
+            .get(&peer)
+            .copied()
+            .zip(self.peer_asn.get(&peer).copied())
     }
 
     fn frozen_unicast_withdraw(&self, peer: PeerId, prefix: &Prefix, path_id: u32) -> bool {
@@ -9513,7 +9546,24 @@ impl RibManager {
                                     {
                                         bench_grouped_paths.1 += 1;
                                     }
-                                    super::update_groups::emit_group_deltas_for_member_with_checkpoint(
+                                    if group.per_client_best && rs_control.is_some() {
+                                        // RFC 7947: a candidate suppressed
+                                        // toward this member gives way to its
+                                        // next eligible one, a per-target
+                                        // selection the matrix arms cannot
+                                        // express.
+                                        super::update_groups::emit_pcb_rs_member_with_checkpoint(
+                                            stage,
+                                            group,
+                                            peer,
+                                            rs_control,
+                                            &mut unicast.announce,
+                                            &mut unicast.withdraw,
+                                            &mut unicast.next_hop_override,
+                                            &mut || checkpoint(),
+                                        );
+                                    } else {
+                                        super::update_groups::emit_group_deltas_for_member_with_checkpoint(
                                 &stage.deltas,
                                 peer,
                                 rs_control,
@@ -9522,13 +9572,13 @@ impl RibManager {
                                 &mut unicast.next_hop_override,
                                 &mut || checkpoint(),
                             );
-                                    // ADR-0126 Decision 5 lane arm: a
-                                    // member-scoped emission toward the ONE
-                                    // member each lane transition names
-                                    // (`source(w)`); a no-op for everyone
-                                    // else and for plain groups (no lane
-                                    // deltas exist).
-                                    super::update_groups::emit_lane_deltas_for_member_with_checkpoint(
+                                        // ADR-0126 Decision 5 lane arm: a
+                                        // member-scoped emission toward the ONE
+                                        // member each lane transition names
+                                        // (`source(w)`); a no-op for everyone
+                                        // else and for plain groups (no lane
+                                        // deltas exist).
+                                        super::update_groups::emit_lane_deltas_for_member_with_checkpoint(
                                 &stage.lane_deltas,
                                 peer,
                                 rs_control,
@@ -9537,7 +9587,7 @@ impl RibManager {
                                 &mut unicast.next_hop_override,
                                 &mut || checkpoint(),
                             );
-                                    super::update_groups::emit_rs_tag_transitions_with_checkpoint(
+                                        super::update_groups::emit_rs_tag_transitions_with_checkpoint(
                                         &stage.rs_transitions,
                                         peer,
                                         rs_control,
@@ -9546,6 +9596,7 @@ impl RibManager {
                                         &mut unicast.next_hop_override,
                                         &mut || checkpoint(),
                                     );
+                                    }
                                 }
                             }
                             let mut filtered = group.policy_filtered_for_member_with_checkpoint(
@@ -9562,6 +9613,7 @@ impl RibManager {
                             group_otc_blocked = if resync {
                                 group.otc_blocked_for_member_with_checkpoint(
                                     peer,
+                                    rs_control,
                                     None,
                                     &mut || {
                                         checkpoint();
@@ -9576,6 +9628,7 @@ impl RibManager {
                                 // pass vector below cannot express.
                                 group.otc_blocked_for_member_with_checkpoint(
                                     peer,
+                                    rs_control,
                                     Some(&effective_prefixes),
                                     &mut || checkpoint(),
                                 )
@@ -10337,6 +10390,16 @@ impl RibManager {
                                         prior.insert(crate::update::ExactExportKey::Unicast(
                                             transition.prefix,
                                             transition.path_id,
+                                        ));
+                                    }
+                                }
+                                for (prefix, slots) in &stage.rs_priors {
+                                    checkpoint();
+                                    if slots.as_deref().is_some_and(|slots| {
+                                        self.clean_group_prior_was_admitted(peer, slots)
+                                    }) {
+                                        prior.insert(crate::update::ExactExportKey::Unicast(
+                                            *prefix, 0,
                                         ));
                                     }
                                 }

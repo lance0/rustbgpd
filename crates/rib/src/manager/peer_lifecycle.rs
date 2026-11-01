@@ -973,11 +973,15 @@ impl RibManager {
         }) {
             insert_bounded(&mut keys, group.iter().copied(), &mut checkpoint);
         }
-        let table = match gid {
-            Some(gid) => self.group_ribs.get(&gid).map(|group| &group.table),
-            None => self.adj_ribs_out.get(&peer),
-        };
-        if let Some(table) = table {
+        // A grouped member's wire also records its own admitted provenance:
+        // an rs-control member may hold a local exempt route below a winner
+        // suppressed toward it, which the shared table does not name.
+        let tables = [
+            gid.and_then(|gid| self.group_ribs.get(&gid))
+                .map(|group| &group.table),
+            self.adj_ribs_out.get(&peer),
+        ];
+        for table in tables.into_iter().flatten() {
             // Every provenance entry is visited, ordinary ones included.
             let exempt = table
                 .local_export_sources()
@@ -2811,22 +2815,14 @@ impl RibManager {
             // winner's own source, nothing when the lane is empty.
             // The rs-control decision and the nh residue come from
             // the RESOLVED entry.
-            let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
+            let Some(entry) = group.adv_entry_for(peer, &staged.prefix, staged.path_id, rs_control)
+            else {
                 continue;
             };
             if self.selection_deferred(prefix_family(&entry.route.prefix))
                 && !self
                     .unicast_export_deferral_exempt(entry.route, &mut unicast_deferral_exemptions)
             {
-                continue;
-            }
-            let (source_communities, source_large_communities) =
-                group.source_control_for_route(entry.route, entry.source_attrs);
-            if super::distribution::rs_control::rs_control_suppressed(
-                source_communities,
-                source_large_communities,
-                rs_control,
-            ) {
                 continue;
             }
             replay.push(entry);
@@ -3085,6 +3081,7 @@ impl RibManager {
             );
             grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
                 peer,
+                self.rs_control_context(peer),
                 Some(&otc_prefixes),
                 &mut checkpoint,
             );
@@ -3614,23 +3611,19 @@ impl RibManager {
             .and_then(|gid| self.group_ribs.get(&gid))
             .is_some_and(|group| {
                 group.table.iter().inspect(|_| checkpoint()).any(|staged| {
-                    let Some(entry) =
-                        group.adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)
-                    else {
+                    let Some(entry) = group.adv_entry_post_backstop_for(
+                        peer,
+                        &staged.prefix,
+                        staged.path_id,
+                        rs_control_asn.zip(target_peer_asn),
+                    ) else {
                         return false;
                     };
                     let family = prefix_family(&entry.route.prefix);
-                    let (communities, large) =
-                        group.source_control_for_route(entry.route, entry.source_attrs);
                     self.selection_deferred(family)
                         && !self.unicast_export_deferral_exempt(
                             entry.route,
                             &mut unicast_deferral_exemptions,
-                        )
-                        && !super::distribution::rs_control::rs_control_suppressed(
-                            communities,
-                            large,
-                            rs_control_asn.zip(target_peer_asn),
                         )
                 })
             });
