@@ -638,6 +638,17 @@ fn render_expanded(nodes: &[Node<'_>], ctx: Ctx, indent: usize, out: &mut Vec<St
     let base = INDENT.repeat(indent);
     let mut cur = base.clone();
     let mut prev: Option<Tok> = None;
+    // In an `if` chain, the kind of the first token after each node, from
+    // one backward pass (scanning ahead from every comment would be
+    // quadratic in a run of comments).
+    let mut next_tok = vec![None; if head.0 == Tok::IfKw { nodes.len() } else { 0 }];
+    let mut next = None;
+    for (slot, node) in next_tok.iter_mut().zip(nodes).rev() {
+        *slot = next;
+        if let Node::Tok { kind, .. } = node {
+            next = Some(*kind);
+        }
+    }
     for (index, node) in nodes.iter().enumerate() {
         match node {
             Node::Comment { text, nl } => {
@@ -657,14 +668,11 @@ fn render_expanded(nodes: &[Node<'_>], ctx: Ctx, indent: usize, out: &mut Vec<St
                 }
                 // An `if` chain's `else` and `else if` keep the chain's
                 // indent after a comment; anything else continues one deeper.
-                let chain_link = head.0 == Tok::IfKw
-                    && nodes[index + 1..]
-                        .iter()
-                        .find_map(|node| match node {
-                            Node::Tok { kind, .. } => Some(*kind),
-                            _ => None,
-                        })
-                        .is_some_and(|kind| matches!(kind, Tok::ElseKw | Tok::IfKw));
+                let chain_link = next_tok
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|kind| matches!(kind, Tok::ElseKw | Tok::IfKw));
                 cur = if chain_link {
                     base.clone()
                 } else {

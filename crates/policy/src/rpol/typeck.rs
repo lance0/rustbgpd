@@ -2541,7 +2541,8 @@ fn bound_policy<'a>(
     }
     // Expansion: per-arm guard costs in decision order (upper bound:
     // every `if` decides; an `else` adds a negated arm; a bare action
-    // run lowers to one `True`-guarded term). Action value expressions
+    // charges a `True`-guarded term for itself and each hoisted call
+    // bind, though a run of them may merge into one). Action value expressions
     // (LAN-299) count toward the evaluation-cost budget alongside.
     let mut arms: Vec<u64> = Vec::new();
     let mut action_cost: u64 = 0;
@@ -2567,7 +2568,8 @@ fn bound_policy<'a>(
                     );
                 }
                 Stmt::Action(action) => {
-                    arms.push(1);
+                    let terms = guarded_action_terms(std::slice::from_ref(action), fns);
+                    arms.extend((0..terms).map(|_| 1));
                     action_cost = action_cost.saturating_add(action_value_cost(action, fns));
                 }
                 // LAN-303: one IR term for the loop itself; the body
@@ -2726,9 +2728,10 @@ fn for_costs(
                 );
             }
             Stmt::Action(action) => {
-                nodes = nodes.saturating_add(1);
+                let terms = guarded_action_terms(std::slice::from_ref(action), fns);
+                nodes = nodes.saturating_add(terms);
                 body_steps = body_steps
-                    .saturating_add(1)
+                    .saturating_add(terms)
                     .saturating_add(action_value_cost(action, fns));
             }
             Stmt::For(inner) => {
@@ -2755,7 +2758,7 @@ fn binding_value_cmp(rhs: &Rhs, resolved: Field, scope: &Scope<'_>) -> bool {
 
 /// An `if` path condition as the lowerer builds it: one flat `And` over
 /// `count` conditions whose IR nodes sum to `nodes` (no `And` node for a
-/// single condition, nothing for none).
+/// single condition; the unconditional `True` node for none).
 #[derive(Clone, Copy, Default)]
 struct PathCost {
     nodes: u64,
@@ -2771,9 +2774,10 @@ impl PathCost {
         }
     }
 
-    /// The path's IR nodes, its `And` included.
+    /// The path's IR nodes, its `And` included; an empty path lowers to
+    /// one `True` node.
     fn cost(self) -> u64 {
-        self.nodes.saturating_add(u64::from(self.count > 1))
+        self.nodes.saturating_add(u64::from(self.count > 1)).max(1)
     }
 }
 
@@ -2825,7 +2829,7 @@ fn if_terms<'a>(
         // A guard's function-call binds run once the walk reaches the
         // branch, under its path condition.
         let binds = guard_call_slots(&branch.cond, fns);
-        if prefix.count != 0 && binds != 0 {
+        if binds != 0 {
             out(prefix.cost(), binds, None);
         }
         body_terms(&branch.body, prefix.with(guard), pred_cost, fns, out);

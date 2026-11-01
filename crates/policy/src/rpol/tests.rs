@@ -7927,6 +7927,73 @@ fn else_if_chain_cost_charges_every_reevaluated_guard() {
     assert!(rendered.contains("IR nodes"), "{rendered}");
 }
 
+/// The cost model charges the unconditional `True` guard an empty path
+/// lowers to. Here both branches decide, so the `else` path carries no
+/// condition, and each binding-valued `add community` stands alone as its
+/// own `True`-guarded term: the two `route.med >= n` guards (4 nodes each,
+/// widest), the `let` and N community terms make 9 + N nodes against the
+/// 100,000-node budget. Red proof: charging the empty path 0 admits any N.
+#[test]
+fn else_after_deciding_branches_charges_its_unconditional_terms() {
+    let policy = |terms: usize| {
+        format!(
+            "policy p {{ term t {{ if route.med >= 1 {{ reject }} \
+             else if route.med >= 2 {{ accept }} \
+             else {{ let c = 1\n{} }} }} }}",
+            "add community c\n".repeat(terms)
+        )
+    };
+    compile_ok(&policy(99_991));
+    let (_, rendered) = diagnostics_of(&policy(99_992));
+    assert!(rendered.contains("IR nodes"), "{rendered}");
+}
+
+/// Long runs of own-line comments between a branch's `}` and its `else`
+/// keep every comment and the chain's indent, and format idempotently
+/// (3,000 comments in runs of 1,000; a debug-build lexer recurses once
+/// per skipped comment, so one much longer run overflows a test thread's
+/// stack before formatting starts).
+#[test]
+fn long_comment_runs_between_else_if_branches_format_stably() {
+    use std::fmt::Write as _;
+    const RUN: usize = 1_000;
+    let run = |indent: &str| {
+        (0..RUN).fold(String::new(), |mut out, n| {
+            writeln!(out, "{indent}# note {n}").unwrap();
+            out
+        })
+    };
+    let link = |n: u32, indent: &str| {
+        format!("{indent}else if route.med >= {n} {{\n{indent}    set med {n}\n{indent}}}\n")
+    };
+    let source = format!(
+        "policy p {{ term t {{\nif route.med >= 1 {{ set med 1 }}\n{}{}{}{}{}else {{ set med 9 }} }} }}\n",
+        run(""),
+        link(2, ""),
+        run(""),
+        link(3, ""),
+        run("")
+    );
+    let pad = "        ";
+    let expected = format!(
+        "policy p {{\n    term t {{\n{pad}if route.med >= 1 {{\n{pad}    set med 1\n{pad}}}\n{}{}{}{}{}{pad}else {{\n{pad}    set med 9\n{pad}}}\n    }}\n}}\n",
+        run(pad),
+        link(2, pad),
+        run(pad),
+        link(3, pad),
+        run(pad)
+    );
+    let formatted = super::format_rpol(&source).expect("formats");
+    let head = formatted.len().min(600);
+    assert!(
+        formatted == expected,
+        "unexpected layout:\n{}",
+        &formatted[..head]
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+    assert_eq!(compile_ok(&source), compile_ok(&formatted));
+}
+
 /// Bindings follow the nesting: an enclosing body's `let` is visible in
 /// a nested body, a nested body's `let` is not visible after it, and
 /// sibling branches reuse slots.
