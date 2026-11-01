@@ -9338,3 +9338,81 @@ test x { route { prefix 10.0.0.0/8 } expect p(1,s,65000:1,192.0.2.1) == accept }
     );
     assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
 }
+
+/// Typed parameters combine with `else if` chains, nested `if` and
+/// community patterns: a `community-set` parameter binds a set with
+/// pattern members, and parameters inside `else if` and nested bodies
+/// substitute and range-check like top-level ones.
+#[test]
+fn typed_parameters_bind_pattern_sets_inside_else_if_chains() {
+    const GOOD: &str = "exact, pats, 300, 65000:9, 2, 192.0.2.9";
+    let source = |edge_args: &str| {
+        format!(
+            r"
+community-set pats {{ 64496:*, 64497:100..199, PRIVATE_AS:666 }}
+community-set exact {{ 64496:1 }}
+
+policy tiers(top: community-set, rest: community-set, lp: u32, tag: community, n: u32, nh: ip) {{
+    term t {{
+        if route.communities in top {{ set local-pref lp }}
+        else if route.communities in rest {{
+            if route.med >= 10 {{ prepend as 65000 n }} else {{ add community tag }}
+            set next-hop nh
+        }}
+        else {{ reject }}
+        accept
+    }}
+}}
+
+test exact-first {{
+    route {{ prefix 192.0.2.0/24; communities [64496:1] }}
+    expect tiers({GOOD}) == accept with local-pref 300
+}}
+test range-member {{
+    route {{ prefix 192.0.2.0/24; communities [64497:150] }}
+    expect tiers({GOOD}) == accept with community 65000:9
+}}
+test private-pattern-nested {{
+    route {{ prefix 192.0.2.0/24; communities [64600:666]; med 20 }}
+    expect tiers({GOOD}) == accept with prepend as 65000 2
+}}
+test range-edge {{
+    route {{ prefix 192.0.2.0/24; communities [64497:200] }}
+    expect tiers({edge_args}) == reject
+}}
+"
+        )
+    };
+    let report = super::run_rpol_tests(&source(GOOD)).expect("compiles");
+    assert_eq!(report.total, 4);
+    assert!(report.failures.is_empty(), "{:#?}", report.failures);
+
+    // A nested `prepend` count and `set next-hop` operand are still
+    // range-checked at instantiation.
+    for (args, needle) in [
+        (
+            "exact, pats, 300, 65000:9, 0, 192.0.2.9",
+            "prepend count 0 out of range",
+        ),
+        (
+            "exact, pats, 300, 65000:9, 2, 0.0.0.0",
+            "invalid next hop 0.0.0.0",
+        ),
+    ] {
+        let (_, rendered) = diagnostics_of(&source(args));
+        assert!(rendered.contains(needle), "{needle}: {rendered}");
+    }
+
+    // A pattern is a set member, not a `community` argument, in a test
+    // `expect` and in a configured chain reference.
+    let file = RpolFile::parse(&source(GOOD)).expect("parses");
+    for bad in ["65000:*", "PRIVATE_AS"] {
+        let args = format!("exact, pats, 300, {bad}, 2, 192.0.2.9");
+        let (diags, rendered) = diagnostics_of(&source(&args));
+        assert!(!diags.is_empty(), "{bad}: {rendered}");
+        let reference = format!("tiers({args})");
+        let resolved = super::parse_call_args(&reference)
+            .and_then(|(name, args)| file.resolve_call(name, &args).map(|_| ()));
+        assert!(resolved.is_err(), "{bad}");
+    }
+}
