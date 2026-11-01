@@ -34,6 +34,12 @@ checker, daemon, and adapter. Every "expected output" block below is a
 real run, on the checked-in v7.4 capture, of release-profile binaries built
 from the source tree when it was at 0.71.0, so the version strings below come
 from that capture; hashes and version strings change with the build.
+The member ASNs in those blocks, such as AS1213 and AS112, are real output
+from the checked-in
+[fixture](../../tests/compat/ixp-manager-birdseye/fixtures/ixp-manager-v7.4-rustbgpd.json),
+which uses those ASNs; they are kept verbatim so the captures stay exact.
+Examples written for this page use documentation ASNs (64496–64511 and
+65536–65551, RFC 5398).
 
 The pipeline:
 
