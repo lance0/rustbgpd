@@ -115,7 +115,7 @@ pub enum DatasetEntryAst {
     /// A bare u32 ASN.
     Asn(u32),
     /// A community literal or pattern of any kind.
-    Community(CommunityMatch),
+    Community(crate::sets::CommunityMember),
 }
 
 /// `dataset NAME { members }` inside a `test` block (LAN-305): the
@@ -147,7 +147,7 @@ pub struct CommunitySetDef {
     pub name: Spanned<String>,
     /// Member criteria (standard / large / RT / RO literals and
     /// patterns, mixed).
-    pub entries: Vec<Spanned<CommunityMatch>>,
+    pub entries: Vec<Spanned<crate::sets::CommunityMember>>,
 }
 
 /// A community literal of any of the three kinds.

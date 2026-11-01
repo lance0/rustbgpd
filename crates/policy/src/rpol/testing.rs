@@ -527,12 +527,14 @@ fn override_data(
             )))
         }
         DatasetKind::Community => {
-            DatasetData::Community(CommunitySet::new(entries.iter().filter_map(|entry| {
-                match &entry.node {
-                    DatasetEntryAst::Community(member) => Some(*member),
-                    _ => None,
-                }
-            })))
+            let (criteria, patterns) =
+                crate::sets::split_community_members(entries.iter().filter_map(|entry| {
+                    match &entry.node {
+                        DatasetEntryAst::Community(member) => Some(*member),
+                        _ => None,
+                    }
+                }));
+            DatasetData::Community(CommunitySet::with_patterns(criteria, patterns))
         }
     }
 }

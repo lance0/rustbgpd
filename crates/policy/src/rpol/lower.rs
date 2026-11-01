@@ -55,9 +55,8 @@ use rustbgpd_wire::ExtendedCommunity;
 
 use crate::datasets::DatasetBindings;
 use crate::engine::{
-    AsPathRegex, CommunityMatch, NeighborSetMatch, NextHopAction, PolicyAction,
-    RouteExtendedCommunityAdmin, RouteExtendedCommunityKind, RouteModifications,
-    encode_route_extended_community,
+    AsPathRegex, NeighborSetMatch, NextHopAction, PolicyAction, RouteExtendedCommunityAdmin,
+    RouteExtendedCommunityKind, RouteModifications, encode_route_extended_community,
 };
 use crate::eval::checked_arith;
 use crate::ir::{
@@ -301,9 +300,10 @@ impl SetTables {
             .community_sets
             .iter()
             .map(|def| {
-                let criteria: Vec<CommunityMatch> =
-                    def.entries.iter().map(|entry| entry.node).collect();
-                store.community_set(&criteria)
+                let (criteria, patterns) = crate::sets::split_community_members(
+                    def.entries.iter().map(|entry| entry.node),
+                );
+                store.community_set_with_patterns(&criteria, &patterns)
             })
             .collect();
         let asn_sets = file

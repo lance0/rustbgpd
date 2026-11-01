@@ -7702,7 +7702,8 @@ mod community_patterns {
     use super::super::{format_rpol, parse_dataset_text, run_rpol_tests};
     use super::{compile_ok, diagnostics_of, route_ctx, v4};
     use crate::datasets::{DatasetData, DatasetKind};
-    use crate::engine::{CommunityField, CommunityMatch, PolicyAction};
+    use crate::engine::{CommunityMatch, PolicyAction};
+    use crate::sets::{CommunityField, CommunityPattern};
     use rustbgpd_wire::RpkiValidation;
 
     const SETS: &str = r"
@@ -7933,10 +7934,54 @@ test param-miss { route { prefix 192.0.2.0/24 } expect by-param(4226941128) == a
                 "does not fit in u32",
             ),
             ("community-set s { RT:4294967296:* }", "does not fit in u32"),
+            // RFC 4360: a 4-octet-AS or IPv4 global carries a 2-octet local,
+            // as for the exact literal.
+            (
+                "community-set s { RT:4200000000:70000..70000 }",
+                "exceeds 65535 for a 4-octet-AS global admin",
+            ),
+            (
+                "community-set s { RO:65536..70000:70000..4294967295 }",
+                "exceeds 65535 for a 4-octet-AS global admin",
+            ),
+            (
+                "community-set s { RT:192.0.2.1:70000..70000 }",
+                "exceeds 65535 for an IPv4 global admin",
+            ),
+            (
+                "community-set s { RT:192.0.2.1:70000..80000 }",
+                "exceeds 65535 for an IPv4 global admin",
+            ),
         ] {
             let (_, rendered) = diagnostics_of(source);
             assert!(rendered.contains(reason), "{source}: {rendered}");
         }
+        // A global that admits a 2-octet ASN, or a local that reaches
+        // 65535, can still match.
+        compile_ok(
+            "community-set s { RT:*:70000, RT:PRIVATE_AS:70000, RT:4200000000:1..70000, \
+             RT:192.0.2.1:*, RT:64496:70000..70000 } \
+             policy p { term t { if route.ext-communities in s { reject } } }",
+        );
+    }
+
+    /// Standard patterns under one ASN cost one bucket each, not two.
+    #[test]
+    fn standard_ranges_under_one_asn_count_once() {
+        let ranges = |n: u32| {
+            (0..n)
+                .map(|i| format!("65000:{}..{}", 2 * i, 2 * i + 1))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let policy = "policy p { term t { if route.communities in s { reject } } }";
+        compile_ok(&format!("community-set s {{ {} }} {policy}", ranges(64)));
+        let (_, rendered) =
+            diagnostics_of(&format!("community-set s {{ {} }} {policy}", ranges(65)));
+        assert!(
+            rendered.contains("compared against 65 patterns"),
+            "{rendered}"
+        );
     }
 
     /// Patterns match values; they are not values. Every value position
@@ -8027,7 +8072,7 @@ test miss {
         else {
             panic!("community data");
         };
-        assert_eq!(set.criteria().len(), 6);
+        assert_eq!((set.criteria().len(), set.patterns().len()), (1, 5));
         assert!(set.contains_standard((65_000 << 16) | 9));
         assert!(set.contains_standard((1 << 16) + 666));
         assert!(set.contains_standard((64_512 << 16) | 2));
@@ -8111,6 +8156,34 @@ test miss {
 
     /// `fmt` keeps a pattern token whole, the result is idempotent, and
     /// explain names the kind the set's members belong to.
+    /// Patterns are part of a set's identity: chains that differ only in
+    /// a pattern are unequal and have different warm-checkpoint identities,
+    /// while an exact-only set keeps the identity text it had before.
+    #[test]
+    fn patterns_take_part_in_set_identity() {
+        let chain = |members: &str| {
+            crate::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+                "p".into(),
+                std::sync::Arc::new(compile_ok(&format!(
+                    "community-set s {{ {members} }} \
+                     policy p {{ term t {{ if route.communities in s {{ reject }} }} }}"
+                ))),
+            )])
+        };
+        let identity = |members: &str| chain(members).warm_checkpoint_identity_v1().unwrap();
+        assert_ne!(identity("65000:1, 64496:*"), identity("65000:1, 64497:*"));
+        assert_ne!(
+            compile_ok(
+                "community-set s { 64496:* } policy p { term t { if route.communities in s { reject } } }"
+            ),
+            compile_ok(
+                "community-set s { 64496:1..9 } policy p { term t { if route.communities in s { reject } } }"
+            ),
+        );
+        let exact = String::from_utf8(identity("65000:1")).unwrap();
+        assert!(!exact.contains("patterns"), "{exact}");
+    }
+
     #[test]
     fn fmt_and_explain_render_patterns() {
         let source = "community-set   lc{64496:1..9:*,PRIVATE_AS:*:*}\n\
@@ -8156,31 +8229,32 @@ test miss {
             "community-set s { 64496:*, 64496:5..5, LC:64496:*:*, RT:PRIVATE_AS:1..9 } \
              policy p { term t { if route.communities in s { reject } } }",
         );
-        let criteria = chain.community_sets[0].criteria();
+        let set = &chain.community_sets[0];
         assert_eq!(
-            criteria,
+            set.criteria(),
+            [CommunityMatch::Standard {
+                value: (64_496 << 16) | 5
+            }]
+        );
+        let any32 = CommunityField::Range {
+            lo: 0,
+            hi: u32::MAX,
+        };
+        assert_eq!(
+            set.patterns(),
             [
-                CommunityMatch::Standard {
-                    value: (64_496 << 16) | 5
-                },
-                CommunityMatch::StandardPattern {
+                CommunityPattern::Standard {
                     asn: CommunityField::exact(64_496),
                     value: CommunityField::Range { lo: 0, hi: 0xFFFF },
                 },
-                CommunityMatch::RouteTargetPattern {
+                CommunityPattern::Large {
+                    global_admin: CommunityField::exact(64_496),
+                    local_data1: any32,
+                    local_data2: any32,
+                },
+                CommunityPattern::RouteTarget {
                     global: CommunityField::PrivateAs,
                     local: CommunityField::Range { lo: 1, hi: 9 },
-                },
-                CommunityMatch::LargePattern {
-                    global_admin: CommunityField::exact(64_496),
-                    local_data1: CommunityField::Range {
-                        lo: 0,
-                        hi: u32::MAX
-                    },
-                    local_data2: CommunityField::Range {
-                        lo: 0,
-                        hi: u32::MAX
-                    },
                 },
             ]
         );

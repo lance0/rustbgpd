@@ -208,8 +208,12 @@ community-set customer-tags {
   (`65000:5..5`) is the exact member `65000:5`.
 - Extended patterns compare the decoded `(global, local)` pair, the same
   encoding-agnostic identity RT/RO literals use: `RT:*:666` matches the
-  2-octet-AS, 4-octet-AS and IPv4-administrator encodings alike, and an
-  IPv4 administrator compares as its 32-bit value.
+  2-octet-AS, 4-octet-AS and IPv4-administrator encodings alike. An IPv4
+  administrator compares as its 32-bit value, so `RT:65000:*` also matches
+  the route target `0.0.253.232:x`, as the exact literal `RT:65000:x`
+  does. As for the literal, a pattern whose global administrator needs the
+  4-octet-AS or IPv4 encoding and whose local administrator never fits in
+  16 bits (`RT:192.0.2.1:70000..80000`) is a compile error.
 - Patterns are members, not values. `add`, `remove`, `has` and test
   fixtures reject them; probe with `in`. In `<binding> in <set>` the
   binding is a standard community, so only the set's standard members
@@ -225,9 +229,11 @@ administrator. A pattern with no such field is compared against every
 community of its kind. One route community therefore costs at most one
 probe per bucket, plus the comparisons in those buckets and against the
 unbucketed patterns. A set or dataset snapshot whose worst case exceeds
-64 comparisons per community is a load error; at the wire bound of 16,383
-standard communities, a set at the limit costs about one million
-comparisons per `in` probe, the scale of the evaluation-cost budget.
+64 comparisons per community is a load error. The evaluation-cost budget
+counts an `in` probe as one step whatever the set holds, so patterns
+multiply the work behind that step by up to 64 comparisons per route
+community: at the wire bound of 16,383 standard communities, about one
+million comparisons for one probe of a set at the limit.
 
 Migrating an origin lock from an AS-path regex to an ASN set:
 

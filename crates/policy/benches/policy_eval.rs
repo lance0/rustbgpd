@@ -471,7 +471,8 @@ fn bench_set_heavy(c: &mut Criterion) {
 /// route carrying 30 standard, 5 large and 5 route-target communities.
 /// The exact set holds 200 standard, 20 large and 20 RT members. `miss`
 /// probes every route community of every kind; `hit` matches on the last
-/// standard community. The `pattern_*` arms add 40 patterns to the same
+/// standard community. The `pattern_*` arms, registered only on builds
+/// that accept community patterns, add 40 patterns to the same
 /// set: 16 bucketed by ASN, 8 by value, 4 unbucketed standard patterns, 8
 /// large and 4 RT patterns bucketed by global administrator.
 fn bench_community_set(c: &mut Criterion) {
@@ -491,16 +492,17 @@ fn bench_community_set(c: &mut Criterion) {
             ),
             &mut SetStore::new(),
         )
-        .expect("compiles")
     };
-    let exact_chain = compile(&exact);
+    let exact_chain = compile(&exact).expect("compiles");
     let mut patterned = exact.clone();
     patterned.extend((0..16).map(|i| format!("{}:*", 64_600 + i)));
     patterned.extend((0..8).map(|i| format!("*:{}", 600 + i)));
     patterned.extend((0..4).map(|i| format!("PRIVATE_AS:{}..{}", 1_000 + 10 * i, 1_009 + 10 * i)));
     patterned.extend((0..8).map(|i| format!("{}:1..9:*", 64_600 + i)));
     patterned.extend((0..4).map(|i| format!("RT:{}:*", 64_600 + i)));
-    let pattern_chain = compile(&patterned);
+    // Builds that predate community patterns reject the source, so the
+    // same file runs there with only the exact arms (an A/B control).
+    let pattern_chain = compile(&patterned).ok();
 
     let miss: Vec<u32> = (0..30).map(|i| (65_010 << 16) | i).collect();
     let mut hit = miss.clone();
@@ -522,22 +524,25 @@ fn bench_community_set(c: &mut Criterion) {
     let pattern_hit_ctx = route(&pattern_hit);
     assert_eq!(exact_chain.evaluate(&miss_ctx).action, PolicyAction::Permit);
     assert_eq!(exact_chain.evaluate(&hit_ctx).action, PolicyAction::Deny);
-    assert_eq!(
-        pattern_chain.evaluate(&miss_ctx).action,
-        PolicyAction::Permit
-    );
-    assert_eq!(
-        pattern_chain.evaluate(&pattern_hit_ctx).action,
-        PolicyAction::Deny
-    );
-
-    let mut group = c.benchmark_group("community_set");
-    for (label, chain, ctx) in [
+    let mut arms = vec![
         ("exact_miss", &exact_chain, &miss_ctx),
         ("exact_hit", &exact_chain, &hit_ctx),
-        ("pattern_miss", &pattern_chain, &miss_ctx),
-        ("pattern_hit", &pattern_chain, &pattern_hit_ctx),
-    ] {
+    ];
+    if let Some(pattern_chain) = &pattern_chain {
+        assert_eq!(
+            pattern_chain.evaluate(&miss_ctx).action,
+            PolicyAction::Permit
+        );
+        assert_eq!(
+            pattern_chain.evaluate(&pattern_hit_ctx).action,
+            PolicyAction::Deny
+        );
+        arms.push(("pattern_miss", pattern_chain, &miss_ctx));
+        arms.push(("pattern_hit", pattern_chain, &pattern_hit_ctx));
+    }
+
+    let mut group = c.benchmark_group("community_set");
+    for (label, chain, ctx) in arms {
         group.bench_function(label, |b| {
             b.iter(|| {
                 let r = std::hint::black_box(chain).evaluate(ctx);

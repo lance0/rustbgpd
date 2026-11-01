@@ -10,16 +10,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix};
 
-use crate::engine::{
-    CommunityField, CommunityMatch, NextHopAction, PolicyAction, parse_community_match,
-};
+use crate::engine::{CommunityMatch, NextHopAction, PolicyAction, parse_community_match};
 
 use crate::ir::ArithOp;
 
 use crate::datasets::{DatasetData, DatasetKind, MAX_DATASET_RECORDS};
 use crate::sets::{
-    AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, check_community_pattern_scan,
-    check_length_bounds,
+    AsnSet, CommunityField, CommunityMember, CommunityPattern, CommunitySet, PrefixSet,
+    PrefixSetEntry, check_length_bounds, split_community_members,
 };
 
 use super::ast::{
@@ -377,7 +375,7 @@ impl Parser<'_> {
     /// A `community-set` or dataset member: a community literal, or a
     /// pattern (`65000:*`, `*:666`, `65000:100..199`, `PRIVATE_AS:*`,
     /// `65000:1..9:*`, `RT:65000:*`).
-    fn community_member(&mut self) -> PResult<Spanned<CommunityMatch>> {
+    fn community_member(&mut self) -> PResult<Spanned<CommunityMember>> {
         let Some(token) = self.peek() else {
             return Err(self.error_expected("a community literal or pattern"));
         };
@@ -386,7 +384,10 @@ impl Parser<'_> {
             Tok::CommunityPattern | Tok::LargeCommunityWildcard | Tok::LargeCommunityAllWildcard
         ) {
             let lit = self.community_lit()?;
-            return Ok(Spanned::new(lit.node.to_match(), lit.span));
+            return Ok(Spanned::new(
+                CommunityMember::Exact(lit.node.to_match()),
+                lit.span,
+            ));
         }
         self.bump();
         let text = self.text(token).to_string();
@@ -399,20 +400,41 @@ impl Parser<'_> {
         let half = u32::from(u16::MAX);
         let member = match (prefix, parts.as_slice()) {
             ("RT:" | "RO:", [global, local]) => {
-                let global = match global.parse::<Ipv4Addr>() {
-                    Ok(v4) => CommunityField::exact(u32::from(v4)),
-                    Err(_) => self.pattern_field(global, u32::MAX, &text, span)?,
+                let (global, ipv4_admin) = match global.parse::<Ipv4Addr>() {
+                    Ok(v4) => (CommunityField::exact(u32::from(v4)), true),
+                    Err(_) => (self.pattern_field(global, u32::MAX, &text, span)?, false),
                 };
                 let local = self.pattern_field(local, u32::MAX, &text, span)?;
+                // RFC 4360, as for the exact literal: IPv4-admin and
+                // 4-octet-AS encodings carry a 2-octet local administrator,
+                // so a pattern whose every global needs one of them and
+                // whose every local exceeds 65535 can never match.
+                let half = u32::from(u16::MAX);
+                if (ipv4_admin || global.min() > half) && local.min() > half {
+                    self.diags.push(Diagnostic::coded(
+                        DiagnosticCode::Parse,
+                        span,
+                        format!(
+                            "invalid extended community `{text}`: local administrator exceeds 65535 for {} global admin",
+                            if ipv4_admin { "an IPv4" } else { "a 4-octet-AS" }
+                        ),
+                        "local admin out of range",
+                    ));
+                    return Err(Fail);
+                }
                 let target = prefix == "RT:";
                 match (global.fixed(), local.fixed()) {
                     // `RT:65000:5..5` is an exact member after all.
                     (Some(global), Some(local)) if target => {
-                        CommunityMatch::RouteTarget { global, local }
+                        CommunityMember::Exact(CommunityMatch::RouteTarget { global, local })
                     }
-                    (Some(global), Some(local)) => CommunityMatch::RouteOrigin { global, local },
-                    _ if target => CommunityMatch::RouteTargetPattern { global, local },
-                    _ => CommunityMatch::RouteOriginPattern { global, local },
+                    (Some(global), Some(local)) => {
+                        CommunityMember::Exact(CommunityMatch::RouteOrigin { global, local })
+                    }
+                    _ if target => {
+                        CommunityMember::Pattern(CommunityPattern::RouteTarget { global, local })
+                    }
+                    _ => CommunityMember::Pattern(CommunityPattern::RouteOrigin { global, local }),
                 }
             }
             ("" | "LC:", [global, data1, data2]) => {
@@ -425,27 +447,27 @@ impl Parser<'_> {
                     local_data2.fixed(),
                 ) {
                     (Some(global_admin), Some(local_data1), Some(local_data2)) => {
-                        CommunityMatch::LargeCommunity {
+                        CommunityMember::Exact(CommunityMatch::LargeCommunity {
                             global_admin,
                             local_data1,
                             local_data2,
-                        }
+                        })
                     }
-                    _ => CommunityMatch::LargePattern {
+                    _ => CommunityMember::Pattern(CommunityPattern::Large {
                         global_admin,
                         local_data1,
                         local_data2,
-                    },
+                    }),
                 }
             }
             ("", [asn, value]) => {
                 let asn = self.pattern_field(asn, half, &text, span)?;
                 let value = self.pattern_field(value, half, &text, span)?;
                 match (asn.fixed(), value.fixed()) {
-                    (Some(asn), Some(value)) => CommunityMatch::Standard {
+                    (Some(asn), Some(value)) => CommunityMember::Exact(CommunityMatch::Standard {
                         value: (asn << 16) | value,
-                    },
-                    _ => CommunityMatch::StandardPattern { asn, value },
+                    }),
+                    _ => CommunityMember::Pattern(CommunityPattern::Standard { asn, value }),
                 }
             }
             _ => unreachable!("the CommunityPattern token has two or three fields"),
@@ -497,10 +519,14 @@ impl Parser<'_> {
     /// The [`crate::sets::MAX_COMMUNITY_PATTERN_SCAN`] bound for one set's members.
     fn check_pattern_scan(
         &mut self,
-        members: impl IntoIterator<Item = CommunityMatch>,
+        members: impl IntoIterator<Item = CommunityMember>,
         name: &Spanned<String>,
     ) {
-        if let Err(reason) = check_community_pattern_scan(members) {
+        let (_, patterns) = split_community_members(members);
+        if patterns.is_empty() {
+            return;
+        }
+        if let Err(reason) = CommunitySet::with_patterns([], patterns).check_pattern_scan() {
             self.diags.push(
                 Diagnostic::coded(
                     DiagnosticCode::Parse,
@@ -2268,7 +2294,7 @@ fn address_bits(prefix: Prefix) -> u8 {
 pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<DatasetData, String> {
     let mut prefixes: Vec<PrefixSetEntry> = Vec::new();
     let mut asns: Vec<u32> = Vec::new();
-    let mut communities: Vec<crate::engine::CommunityMatch> = Vec::new();
+    let mut communities: Vec<CommunityMember> = Vec::new();
     let mut records = 0usize;
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
@@ -2326,8 +2352,10 @@ pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<Datase
         DatasetKind::Prefix => DatasetData::Prefix(PrefixSet::new(prefixes)),
         DatasetKind::Asn => DatasetData::Asn(AsnSet::new(asns)),
         DatasetKind::Community => {
-            check_community_pattern_scan(communities.iter().copied())?;
-            DatasetData::Community(CommunitySet::new(communities))
+            let (criteria, patterns) = split_community_members(communities);
+            let set = CommunitySet::with_patterns(criteria, patterns);
+            set.check_pattern_scan()?;
+            DatasetData::Community(set)
         }
     })
 }
@@ -2438,9 +2466,9 @@ policy second { term t { flarp } }
         assert_eq!(file.community_sets[0].entries.len(), 2);
         assert_eq!(
             file.community_sets[0].entries[0].node,
-            CommunityMatch::Standard {
+            CommunityMember::Exact(CommunityMatch::Standard {
                 value: rustbgpd_wire::COMMUNITY_NO_EXPORT
-            }
+            })
         );
     }
 
@@ -2449,11 +2477,13 @@ policy second { term t { flarp } }
         let (file, diags) =
             parse("community-set c { RT:65001:100, RO:192.0.2.1:5, 65000:1:2, LC:65000:3:4 }");
         assert!(diags.is_empty(), "{diags:#?}");
-        let entries: Vec<CommunityMatch> = file.community_sets[0]
-            .entries
-            .iter()
-            .map(|entry| entry.node)
-            .collect();
+        let (entries, patterns) = split_community_members(
+            file.community_sets[0]
+                .entries
+                .iter()
+                .map(|entry| entry.node),
+        );
+        assert_eq!(patterns, Vec::<CommunityPattern>::new());
         assert_eq!(
             entries,
             [

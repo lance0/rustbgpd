@@ -670,16 +670,6 @@ fn parse_community_values(strings: &[String]) -> Result<CommunityValues, ConfigE
             // Well-known extended communities (RFC 8097 OV_* states):
             // the exact raw wire value is the identity.
             CommunityMatch::ExactExt(raw) => extended.push(ExtendedCommunity::new(raw)),
-            // `parse_community_match` never yields a pattern; patterns are
-            // `.rpol` set members, not values to add or remove.
-            CommunityMatch::StandardPattern { .. }
-            | CommunityMatch::LargePattern { .. }
-            | CommunityMatch::RouteTargetPattern { .. }
-            | CommunityMatch::RouteOriginPattern { .. } => {
-                return Err(ConfigError::InvalidPolicyEntry {
-                    reason: format!("community pattern {s:?} is not a community value"),
-                });
-            }
         }
     }
     Ok(CommunityValues {

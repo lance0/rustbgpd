@@ -227,26 +227,6 @@ fn fmt_community_match(cm: &CommunityMatch) -> String {
         // Well-known values (e.g. the RFC 8097 OV_* states) render by
         // name via the wire Display impl; unknown raws render as hex.
         CommunityMatch::ExactExt(raw) => rustbgpd_wire::ExtendedCommunity::new(*raw).to_string(),
-        CommunityMatch::StandardPattern { asn, value } => {
-            let half = u32::from(u16::MAX);
-            format!("{}:{}", asn.render(half), value.render(half))
-        }
-        CommunityMatch::LargePattern {
-            global_admin,
-            local_data1,
-            local_data2,
-        } => format!(
-            "LC:{}:{}:{}",
-            global_admin.render(u32::MAX),
-            local_data1.render(u32::MAX),
-            local_data2.render(u32::MAX)
-        ),
-        CommunityMatch::RouteTargetPattern { global, local } => {
-            format!("RT:{}:{}", global.render(u32::MAX), local.render(u32::MAX))
-        }
-        CommunityMatch::RouteOriginPattern { global, local } => {
-            format!("RO:{}:{}", global.render(u32::MAX), local.render(u32::MAX))
-        }
     }
 }
 
@@ -931,7 +911,7 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
         MatchExpr::CommunityContains(cm) => {
             format!(
                 "{} has {}",
-                community_field(&[*cm]),
+                community_field(&[*cm], &[]),
                 fmt_community_match(cm)
             )
         }
@@ -939,7 +919,9 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
             let field = tables
                 .community_sets
                 .get(id.0 as usize)
-                .map_or("route.communities", |set| community_field(set.criteria()));
+                .map_or("route.communities", |set| {
+                    community_field(set.criteria(), set.patterns())
+                });
             format!(
                 "{field} in {}",
                 set_label(&tables.community_set_names, id.0, "community-set")
@@ -1120,20 +1102,26 @@ fn render_cmp(field: &str, cmp: Cmp) -> String {
 /// `route.communities`, all-large → `route.large-communities`,
 /// all-RT/RO → `route.ext-communities`, mixed → the generic
 /// `route.communities`.
-fn community_field(criteria: &[CommunityMatch]) -> &'static str {
-    let mut fields = criteria.iter().map(|cm| match cm {
-        CommunityMatch::Standard { .. } | CommunityMatch::StandardPattern { .. } => {
-            "route.communities"
-        }
-        CommunityMatch::LargeCommunity { .. } | CommunityMatch::LargePattern { .. } => {
-            "route.large-communities"
-        }
+fn community_field(
+    criteria: &[CommunityMatch],
+    patterns: &[crate::sets::CommunityPattern],
+) -> &'static str {
+    use crate::sets::CommunityPattern;
+    let exact = criteria.iter().map(|cm| match cm {
+        CommunityMatch::Standard { .. } => "route.communities",
+        CommunityMatch::LargeCommunity { .. } => "route.large-communities",
         CommunityMatch::RouteTarget { .. }
         | CommunityMatch::RouteOrigin { .. }
-        | CommunityMatch::ExactExt(_)
-        | CommunityMatch::RouteTargetPattern { .. }
-        | CommunityMatch::RouteOriginPattern { .. } => "route.ext-communities",
+        | CommunityMatch::ExactExt(_) => "route.ext-communities",
     });
+    let patterns = patterns.iter().map(|pattern| match pattern {
+        CommunityPattern::Standard { .. } => "route.communities",
+        CommunityPattern::Large { .. } => "route.large-communities",
+        CommunityPattern::RouteTarget { .. } | CommunityPattern::RouteOrigin { .. } => {
+            "route.ext-communities"
+        }
+    });
+    let mut fields = exact.chain(patterns);
     let Some(first) = fields.next() else {
         return "route.communities";
     };
