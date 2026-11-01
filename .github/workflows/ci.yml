@@ -118,6 +118,7 @@ jobs:
         run: |
           bash -n .github/scripts/retry-docker-image.sh
           shellcheck .github/scripts/retry-docker-image.sh
+          shellcheck .github/scripts/assert-lab-torn-down.sh .github/scripts/report-bundled-scenarios.sh
           python3 -m unittest -v scripts/test_retry_docker_image.py
           python3 -m unittest -v scripts/test_check_ci_image_primer_contract.py
           python3 scripts/check_ci_image_primer_contract.py

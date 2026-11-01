@@ -93,6 +93,10 @@ PR_FILES = {
 
 INTEROP = ".github/workflows/interop.yml"
 KERNEL = ".github/workflows/kernel-dataplane.yml"
+M39_GATE = (
+    "      - name: Run M39 (deploy + test + destroy with retry)\n"
+    "        if: steps.dataplane.outputs.vrf-available == 'true'\n"
+)
 # Line of the `run:` in a step injected just before M1's lab call.
 INJECTED_RUN_LINE = (ROOT / INTEROP).read_text().split("      - name: Run M1 (")[0].count("\n") + 2
 MANIFEST = ".github/pinned-archives.sha256"
@@ -696,19 +700,81 @@ class PrimerContractTests(unittest.TestCase):
                 self.assert_red(expect, (INTEROP, M1_CALL, M1_CALL.replace(old, new)))
         with self.subTest(seam="lab job loses its scenario call"):
             self.assert_red(
-                "kernel-dataplane.yml:m36: has no run-interop-test call",
-                (KERNEL, "        uses: ./.github/actions/run-interop-test\n", "        uses: ./.github/actions/install-containerlab\n"),
+                "kernel-dataplane.yml:m39: has no run-interop-test call",
+                (KERNEL, M39_GATE + "        uses: ./.github/actions/run-interop-test\n", M39_GATE + "        uses: ./.github/actions/install-containerlab\n"),
             )
         with self.subTest(seam="variant label is the job identifier"):
             self.assert_red(
-                "kernel-dataplane.yml:m37-ip: no run-interop-test call labelled M37-IP",
+                "kernel-dataplane.yml:m36_m37_m37-ip_m38: no run-interop-test call labelled M37-IP",
                 (KERNEL, "          label: M37+IP\n", "          label: M37\n"),
             )
         with self.subTest(seam="descriptive label satisfies the job name"):
             self.assertEqual(
                 [],
-                self.mutated_errors((KERNEL, "          label: M36\n", "          label: M36 crash-restart\n")),
+                self.mutated_errors((KERNEL, "          label: M39\n", "          label: M39 crash-restart\n")),
             )
+
+    def test_bundles_run_every_scenario_and_name_every_failure(self):
+        bundle = "kernel-dataplane.yml:m36_m37_m37-ip_m38"
+        fib = "kernel-dataplane.yml:m42_m50_m52_m58"
+        text = (ROOT / KERNEL).read_text()
+        m37 = text[text.index("      - name: Run M37 (") : text.index("      - name: Run M37+IP (")]
+        m37_result = "            M37=${{ steps.m37.outcome }}/${{ steps.m37_teardown.outcome }}\n"
+        m50_teardown = text[text.index("      - name: Verify M50 lab teardown") : text.index("      - name: Run M52 (")]
+        for seam, expect, edits in (
+            (
+                "scenario dropped from a bundle",
+                f"{bundle}: no run-interop-test call labelled M37",
+                [(KERNEL, m37, ""), (KERNEL, m37_result, "")],
+            ),
+            (
+                "scenario stops after an earlier failure",
+                f"{bundle}: M38 run step does not run after an earlier failure",
+                [(KERNEL, "        id: m38\n        if: ${{ !cancelled() && ", "        id: m38\n        if: ${{ ")],
+            ),
+            (
+                "teardown stops after an earlier failure",
+                f"{fib}: M58 teardown step does not run after an earlier failure",
+                [(KERNEL, "        id: m58_teardown\n        if: ${{ !cancelled() && ", "        id: m58_teardown\n        if: ${{ ")],
+            ),
+            (
+                "teardown check dropped",
+                f"{fib}: M50 is not followed by its teardown check",
+                [(KERNEL, m50_teardown, "")],
+            ),
+            (
+                "teardown checks another topology",
+                f"{fib}: M42 is not followed by its teardown check",
+                [(KERNEL, "assert-lab-torn-down.sh 'M42' tests/interop/m42-", "assert-lab-torn-down.sh 'M42' tests/interop/m50-")],
+            ),
+            (
+                "report forgets a scenario",
+                f"{fib}: bundled scenario report does not name exactly its scenarios",
+                [(KERNEL, "            M52=${{ steps.m52.outcome }}/${{ steps.m52_teardown.outcome }}\n", "")],
+            ),
+            (
+                "report reads only the run outcome",
+                f"{fib}: bundled scenario report does not name exactly its scenarios",
+                [(KERNEL, "M52=${{ steps.m52.outcome }}/${{ steps.m52_teardown.outcome }}", "M52=${{ steps.m52.outcome }}")],
+            ),
+            (
+                "report skipped after a failure",
+                f"{bundle}: does not end with its bundled scenario report",
+                [(KERNEL, "      - name: Report bundled scenario results\n        if: ${{ !cancelled() }}\n", "      - name: Report bundled scenario results\n")],
+            ),
+            (
+                "failure swallowed by continue-on-error",
+                f"{bundle}: a bundle step uses continue-on-error",
+                [(KERNEL, "        id: m36\n", "        id: m36\n        continue-on-error: true\n")],
+            ),
+            (
+                "bundle dropped from the aggregate",
+                "kernel-dataplane.yml:check needs drifted: missing m42_m50_m52_m58; extra -",
+                [(KERNEL, " m40, m42_m50_m52_m58,\n", " m40,\n")],
+            ),
+        ):
+            with self.subTest(seam=seam):
+                self.assert_red(expect, *edits)
 
     # 5. Aggregate result.
 
@@ -823,6 +889,65 @@ class PrimerContractTests(unittest.TestCase):
             ):
                 with self.subTest(workflow=workflow, state=(run_labs, results)):
                     self.assertNotEqual(0, self.run_aggregate(workflow, run_labs, results))
+
+
+class LabBundleHelperTests(unittest.TestCase):
+    """The bundle helpers, run against stubbed sudo, containerlab, docker and ip."""
+
+    STUBS = {
+        "sudo": 'exec "$@"',
+        "containerlab": 'echo "containerlab $*" >> "$CALLS"',
+        "docker": 'echo "docker $*" >> "$CALLS"\n[ "$1 $2" != "ps -aq" ] || printf %s "${LEAK_CONTAINERS:-}"',
+        "ip": 'echo "ip $*" >> "$CALLS"\n[ "$1 $2" != "netns list" ] || printf %s "${LEAK_NETNS:-}"',
+    }
+
+    def run_helper(self, script, *args, **env):
+        with tempfile.TemporaryDirectory() as temporary:
+            stubs = Path(temporary)
+            for name, body in self.STUBS.items():
+                (stubs / name).write_text(f"#!/usr/bin/env bash\n{body}\n")
+                (stubs / name).chmod(0o755)
+            calls = stubs / "calls"
+            calls.write_text("")
+            result = subprocess.run(
+                ["bash", str(ROOT / ".github/scripts" / script), *args],
+                env={"PATH": f"{stubs}:/usr/bin:/bin", "CALLS": str(calls), **env},
+                capture_output=True, text=True, check=False,
+            )
+            return result, calls.read_text()
+
+    def test_teardown_check_passes_a_clean_host(self):
+        result, calls = self.run_helper("assert-lab-torn-down.sh", "M36", "m36.clab.yml")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("containerlab destroy -t m36.clab.yml --cleanup", calls)
+        self.assertNotIn("rm -f", calls)
+
+    def test_teardown_check_fails_and_clears_leaked_state(self):
+        result, calls = self.run_helper(
+            "assert-lab-torn-down.sh", "M36", "m36.clab.yml",
+            LEAK_CONTAINERS="abc\ndef\n", LEAK_NETNS="clab-m36-pe1 (id: 3)\nother\n",
+        )
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn("::error::M36 left lab state behind", result.stdout)
+        self.assertIn("docker rm -f abc def", calls)
+        self.assertEqual(["ip netns delete clab-m36-pe1"],
+                         [line for line in calls.splitlines() if "netns delete" in line])
+
+    def test_report_names_every_failed_scenario(self):
+        ok, _ = self.run_helper("report-bundled-scenarios.sh", RESULTS="M36=success/success M37=success/success")
+        self.assertEqual(0, ok.returncode, ok.stdout + ok.stderr)
+        failed, _ = self.run_helper(
+            "report-bundled-scenarios.sh",
+            RESULTS="M36=failure/success M37=success/success M37+IP=skipped/skipped M38=success/failure",
+        )
+        self.assertEqual(1, failed.returncode)
+        self.assertIn(
+            "::error::bundled scenarios failed: M36 (failure/success) "
+            "M37+IP (skipped/skipped) M38 (success/failure)",
+            failed.stdout,
+        )
+        empty, _ = self.run_helper("report-bundled-scenarios.sh", RESULTS="")
+        self.assertNotEqual(0, empty.returncode)
 
 
 class HeavyLabPathClassifierTests(unittest.TestCase):

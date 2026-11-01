@@ -25,8 +25,8 @@ INSTALLER = ROOT / ".github" / "scripts" / "install-bird3.sh"
 
 EXPECTED_JOBS = """
 classify_changes bird3_archive prime_dev_image
-m36 m37 m37-ip m38 m39
-m39b m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
+m36_m37_m37-ip_m38 m39
+m39b m48 m60 m61 m62 m40 m42_m50_m52_m58 m53 m51 m108 m43 m47
 m69 m70 m65 m71 m72 m66 m67 m68 m121 netns
 """.split()
 

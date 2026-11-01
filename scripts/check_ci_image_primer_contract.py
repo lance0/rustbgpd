@@ -16,7 +16,10 @@ goes red when the rule is removed or weakened.
 3. Permissions. Token scopes stay read-only apart from reviewed grants, and no
    workflow runs on pull_request_target.
 4. Lab wiring. Every lab job needs prime_dev_image, and each run-interop-test
-   call's topology and script belong to its label and to the job's name.
+   call's topology and script belong to its label and to the job's name. A
+   kernel-dataplane job named for several scenarios runs each of them after an
+   earlier failure, checks each teardown before the next deploys, and ends with
+   a report naming exactly its scenarios.
 5. Aggregate result. Each lab workflow's `check` job runs always() and needs,
    and expects at run time, every other job in the workflow.
 6. Classifier checkout. Each lab workflow's `classify_changes` job keeps its
@@ -36,6 +39,9 @@ from pathlib import Path
 
 WORKFLOWS = ("ci.yml", "audit.yml", "interop.yml", "kernel-dataplane.yml")
 LAB_WORKFLOWS = ("interop.yml", "kernel-dataplane.yml")
+# Workflows whose multi-scenario jobs (named `m36_m37_...`) keep running after a
+# failed scenario; interop.yml's older bundle still stops at the first failure.
+BUNDLE_WORKFLOWS = ("kernel-dataplane.yml",)
 MANIFEST = ".github/pinned-archives.sha256"
 # External actions are pinned by reviewed version tag: no branch refs and no
 # bare commit SHAs. Adding an action or moving to a new major edits this set.
@@ -146,6 +152,48 @@ def _check_lab_calls(prefix: str, job_name: str, job: str, errors: list[str]) ->
     for token in job_name.split("_"):
         if token.upper() not in labels:
             errors.append(f"{prefix}: no run-interop-test call labelled {token.upper()}")
+
+
+def _check_bundle(prefix: str, job: str, errors: list[str]) -> None:
+    """A bundle runs every scenario, checks each teardown and names every failure."""
+    steps = re.split(r"(?m)^      - ", job)
+    expected: list[str] = []
+    for index, step in enumerate(steps):
+        if not LAB_CALL.search("      - " + step):
+            continue
+        inputs = dict(LAB_CALL_INPUT.findall(step))
+        label = inputs.get("label", "?")
+        step_id = re.search(r"(?m)^        id: ([\w-]+)$", step)
+        if not step_id:
+            errors.append(f"{prefix}: {label} step has no id")
+            continue
+        teardown = steps[index + 1] if index + 1 < len(steps) else ""
+        for kind, body in (("run", step), ("teardown", teardown)):
+            if not re.search(r"(?m)^        if: \$\{\{ !cancelled\(\)", body):
+                errors.append(f"{prefix}: {label} {kind} step does not run after an earlier failure")
+        want = (
+            f"        id: {step_id.group(1)}_teardown\n",
+            f"        run: .github/scripts/assert-lab-torn-down.sh '{label}' {inputs.get('topology')}\n",
+        )
+        if not all(line in teardown for line in want):
+            errors.append(f"{prefix}: {label} is not followed by its teardown check")
+        expected.append(
+            f"{label}=${{{{ steps.{step_id.group(1)}.outcome }}}}"
+            f"/${{{{ steps.{step_id.group(1)}_teardown.outcome }}}}"
+        )
+    report = steps[-1]
+    results = re.search(r"(?ms)^          RESULTS: >-\n(.*?)^        run: ", report)
+    if not (
+        report.startswith("name: Report bundled scenario results\n")
+        and "        if: ${{ !cancelled() }}\n" in report
+        and report.rstrip().endswith("run: .github/scripts/report-bundled-scenarios.sh")
+        and results
+    ):
+        errors.append(f"{prefix}: does not end with its bundled scenario report")
+    elif [line.strip() for line in results.group(1).splitlines()] != expected:
+        errors.append(f"{prefix}: bundled scenario report does not name exactly its scenarios")
+    if "continue-on-error" in job:
+        errors.append(f"{prefix}: a bundle step uses continue-on-error")
 
 
 def _staged_version(step: str, action: str, fallback: str) -> str:
@@ -405,6 +453,8 @@ def check(root: Path) -> list[str]:
             if "prime_dev_image" not in _list_needs(job):
                 errors.append(f"{prefix}: does not need prime_dev_image")
             _check_lab_calls(prefix, job_name, job, errors)
+            if name in BUNDLE_WORKFLOWS and "_" in job_name:
+                _check_bundle(prefix, job, errors)
             _check_staged_builds(prefix, job, root, dockerfiles, bird3_version, errors)
         # 5. Aggregate result.
         aggregate = jobs.get("check", "")
