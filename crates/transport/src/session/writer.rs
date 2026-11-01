@@ -282,6 +282,11 @@ pub(super) fn spawn(
 ) -> WriterHandle {
     let (bulk_tx, bulk_rx) = mpsc::channel::<Bytes>(bulk_buffer);
     let (completed_tx, completed) = watch::channel(0);
+    // Unbounded so the session never waits on its own writer. One writer
+    // per connection carries its OPEN, the KEEPALIVE answering the peer's
+    // OPEN, ROUTE-REFRESH requests and one final NOTIFICATION; periodic
+    // KEEPALIVEs come from `keepalive_tx` and are never queued. A writer
+    // that stops draining ends at `send_hold_time`.
     let (priority_tx, priority_rx) = mpsc::unbounded_channel::<Bytes>();
     let (keepalive_tx, keepalive_rx) = watch::channel(None);
     let (teardown_tx, teardown_rx) = watch::channel(false);

@@ -473,6 +473,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Regroup snapshots reserve next-hop override storage sized to the overrides
   they can hold, and VPN denial updates visit the changed keys instead of
   scanning all denials.
+- Bound the queue from Router Advertisement discovery to the neighbor owner.
+  While the owner was busy, a link that kept changing its advertising
+  sources queued one event per change without limit. The queue now holds at
+  most one binding change and one conflict per interface, and keeps the
+  latest binding and every conflict count. Learned and expired candidates
+  are logged by discovery itself and are no longer queued.
 
 ### Documentation
 

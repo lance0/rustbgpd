@@ -98,7 +98,7 @@ fn harness_with(
     mgr.current_config = config;
     let (links_tx, links_rx) = watch::channel(snapshot(true, links));
     let (discovery, commands) = RaDiscovery::recording();
-    let (_events_tx, events_rx) = mpsc::unbounded_channel();
+    let (_events_tx, events_rx) = crate::ra_discovery::event_channel();
     let mgr = match gtsm {
         Some(update) => mgr.with_gtsm_update(update),
         None => mgr,
@@ -2103,7 +2103,7 @@ fn recording_launcher(mgr: &mut PeerManager) -> Launched {
     mgr.unnumbered_runtime.spawn = Box::new(move |_, _| {
         let (discovery, commands) = RaDiscovery::recording();
         sink.lock().unwrap().push(commands);
-        Ok((discovery, mpsc::unbounded_channel().1))
+        Ok((discovery, crate::ra_discovery::event_channel().1))
     });
     launched
 }
@@ -2597,7 +2597,7 @@ async fn a_discovery_actor_that_fails_to_start_is_retried() {
         }
         let (discovery, commands) = RaDiscovery::recording();
         sink.lock().unwrap().push(commands);
-        Ok((discovery, mpsc::unbounded_channel().1))
+        Ok((discovery, crate::ra_discovery::event_channel().1))
     });
     h.reload(config_with(&port_stanza("swp1", ""))).await;
     assert!(launched.lock().unwrap().is_empty());
@@ -3836,7 +3836,7 @@ async fn a_binding_between_plan_and_stage_refuses_the_static_add() {
         .clone();
     let (links_tx, links_rx) = watch::channel(snapshot(true, &[("swp1", 7, true)]));
     let (discovery, _commands) = RaDiscovery::recording();
-    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let (events_tx, events_rx) = crate::ra_discovery::event_channel();
     let mgr = PeerManager::new_with_config(
         rx,
         internal_rx,
@@ -3875,13 +3875,11 @@ async fn a_binding_between_plan_and_stage_refuses_the_static_add() {
     );
 
     // Handshake: the owner reports the bound peer before the stage is sent.
-    events_tx
-        .send(DiscoveryEvent::BindingChanged {
-            interface: "swp1".into(),
-            previous: None,
-            current: Some(endpoint(2, 7)),
-        })
-        .unwrap();
+    events_tx.send(DiscoveryEvent::BindingChanged {
+        interface: "swp1".into(),
+        previous: None,
+        current: Some(endpoint(2, 7)),
+    });
     let peers = || async {
         let (list_tx, list_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
@@ -4557,7 +4555,7 @@ async fn a_reload_that_adds_interface_only_gtsm_raises_the_listener_hop_limit() 
     h.mgr.unnumbered_runtime.spawn = Box::new(move |_, _| {
         let (discovery, commands) = RaDiscovery::recording();
         sink.lock().unwrap().push(commands);
-        Ok((discovery, mpsc::unbounded_channel().1))
+        Ok((discovery, crate::ra_discovery::event_channel().1))
     });
 
     // Mutation-red: without the raise in the port-set pass the listener

@@ -39,12 +39,11 @@ use std::net::{IpAddr, Ipv6Addr};
 
 use rustbgpd_api::peer_types::{PeerKey, PeerLifecycleError};
 use rustbgpd_fsm::SessionState;
-use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::BindTimeProjection;
 use crate::ra_discovery::{
-    DiscoveryConfig, DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaDiscovery,
+    DiscoveryConfig, DiscoveryEvent, DiscoveryEvents, Endpoint, LinkEvent, LinkState, RaDiscovery,
 };
 
 use super::PeerManager;
@@ -60,7 +59,7 @@ const RETENTION_RECHECK: std::time::Duration = std::time::Duration::from_secs(30
 /// neighbor, by interface name.
 pub(crate) struct Unnumbered {
     discovery: RaDiscovery,
-    events: Option<mpsc::UnboundedReceiver<DiscoveryEvent>>,
+    events: Option<DiscoveryEvents>,
     ports: BTreeMap<String, Port>,
     reconcile_due: bool,
     /// A bound session did not answer its state query: reconcile again then.
@@ -136,8 +135,7 @@ pub(crate) struct UnnumberedRuntime {
         dyn FnMut(
                 DiscoveryConfig,
                 rustbgpd_telemetry::BgpMetrics,
-            )
-                -> Result<(RaDiscovery, mpsc::UnboundedReceiver<DiscoveryEvent>), String>
+            ) -> Result<(RaDiscovery, DiscoveryEvents), String>
             + Send
             + Sync,
     >,
@@ -242,10 +240,7 @@ struct HeldState {
 
 impl Unnumbered {
     /// Take ownership of a spawned discovery actor.
-    pub(crate) fn new(
-        discovery: RaDiscovery,
-        events: mpsc::UnboundedReceiver<DiscoveryEvent>,
-    ) -> Self {
+    pub(crate) fn new(discovery: RaDiscovery, events: DiscoveryEvents) -> Self {
         Self {
             discovery,
             events: Some(events),
@@ -430,12 +425,8 @@ impl PeerManager {
                     unnumbered.reconcile_due = true;
                 }
             }
-            DiscoveryEvent::CandidateLearned { interface, address } => {
-                info!(%interface, %address, "unnumbered: peer address learned");
-            }
-            DiscoveryEvent::CandidateExpired { interface, address } => {
-                info!(%interface, %address, "unnumbered: peer address expired");
-            }
+            // Logged by the discovery actor, which never queues them.
+            DiscoveryEvent::CandidateLearned { .. } | DiscoveryEvent::CandidateExpired { .. } => {}
             DiscoveryEvent::Conflict {
                 interface,
                 bound,

@@ -436,6 +436,12 @@ pub fn peer_session_span(config: &TransportConfig) -> tracing::Span {
 pub fn session_notification_channel(
     metrics: BgpMetrics,
 ) -> (SessionNotificationSender, SessionNotificationReceiver) {
+    // Unbounded: a bounded `send().await` from a session would deadlock with
+    // the peer manager's synchronous `QueryState` during collision
+    // resolution. Each session sends one notification on entering
+    // OpenConfirm, one on falling back to Idle, one max-prefix breach (which
+    // latches it down) and one per warning-threshold crossing. The
+    // reservation accounting exports the queued depth's high-water mark.
     let (sender, receiver) = mpsc::unbounded_channel();
     (
         SessionNotificationSender {

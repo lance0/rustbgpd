@@ -1,12 +1,13 @@
 //! Linux socket runtime: one raw `ICMPv6` socket per started interface, a
 //! reader task per socket, and one actor that owns the [`Engine`].
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, IoSliceMut};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use nix::sys::socket::{ControlMessageOwned, MsgFlags, SockaddrIn6, recvmsg};
@@ -14,7 +15,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::engine::{DiscoveryConfig, DiscoveryEvent, Engine, LinkEvent, Transmit};
 use super::packet::{self, DropReason, NdMessage};
@@ -41,6 +42,139 @@ pub enum DiscoveryError {
     MissingCapNetRaw(#[source] io::Error),
     #[error("cannot open a raw ICMPv6 socket: {0}")]
     Socket(#[source] io::Error),
+}
+
+/// What a queued [`DiscoveryEvent`] is coalesced under.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum EventKey {
+    Binding(String),
+    Conflict(String),
+}
+
+/// Events waiting for the neighbor owner: at most one binding change and one
+/// conflict per interface, in the order each key was first queued.
+#[derive(Default)]
+struct PendingEvents {
+    order: VecDeque<EventKey>,
+    /// The event to deliver and how many times (conflicts keep their count;
+    /// a binding change is delivered once).
+    events: HashMap<EventKey, (DiscoveryEvent, u64)>,
+}
+
+/// Create the discovery → neighbor owner event queue.
+///
+/// Its RA input is untrusted link traffic, and the owner can be busy, so the
+/// queue coalesces instead of growing per event. A binding change merges
+/// with a pending one for the same interface: the earliest `previous` and
+/// the latest `current`, which is all the owner acts on (its reconcile is
+/// level-triggered). A conflict replaces a pending one for the same
+/// interface and adds to its count, so every conflict is still counted.
+/// Learned and expired candidates are only logged; the actor logs them
+/// itself and never queues them. Depth: two entries per interface.
+pub(crate) fn event_channel() -> (EventSender, DiscoveryEvents) {
+    let pending = Arc::new(Mutex::new(PendingEvents::default()));
+    // One wake token covers every pending entry: the receiver drains the map
+    // before it waits again.
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    (
+        EventSender {
+            pending: Arc::clone(&pending),
+            wake: wake_tx,
+        },
+        DiscoveryEvents {
+            pending,
+            wake: wake_rx,
+        },
+    )
+}
+
+/// Sending half of [`event_channel`]. Never blocks.
+pub(crate) struct EventSender {
+    pending: Arc<Mutex<PendingEvents>>,
+    wake: mpsc::Sender<()>,
+}
+
+impl EventSender {
+    pub(crate) fn send(&self, event: DiscoveryEvent) {
+        let key = match &event {
+            DiscoveryEvent::BindingChanged { interface, .. } => {
+                EventKey::Binding(interface.clone())
+            }
+            DiscoveryEvent::Conflict { interface, .. } => EventKey::Conflict(interface.clone()),
+            DiscoveryEvent::CandidateLearned { .. } | DiscoveryEvent::CandidateExpired { .. } => {
+                return;
+            }
+        };
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            let pending = &mut *pending;
+            match pending.events.entry(key) {
+                Entry::Occupied(mut slot) => {
+                    let (queued, count) = slot.get_mut();
+                    match (queued, event) {
+                        (
+                            DiscoveryEvent::BindingChanged { current, .. },
+                            DiscoveryEvent::BindingChanged {
+                                current: latest, ..
+                            },
+                        ) => *current = latest,
+                        (queued, conflict) => {
+                            *queued = conflict;
+                            *count += 1;
+                        }
+                    }
+                }
+                Entry::Vacant(slot) => {
+                    pending.order.push_back(slot.key().clone());
+                    slot.insert((event, 1));
+                }
+            }
+        }
+        // Full means a token is already queued, and the receiver drains the
+        // map after taking it; closed means the owner is gone.
+        let _ = self.wake.try_send(());
+    }
+
+    /// Entries waiting for the owner.
+    #[cfg(test)]
+    fn pending(&self) -> usize {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .order
+            .len()
+    }
+}
+
+/// Receiving half of [`event_channel`], held by the neighbor owner.
+pub struct DiscoveryEvents {
+    pending: Arc<Mutex<PendingEvents>>,
+    wake: mpsc::Receiver<()>,
+}
+
+impl DiscoveryEvents {
+    /// The next event, or `None` once the actor has exited and every queued
+    /// event was received.
+    pub async fn recv(&mut self) -> Option<DiscoveryEvent> {
+        loop {
+            if let Some(event) = self.pop() {
+                return Some(event);
+            }
+            self.wake.recv().await?;
+        }
+    }
+
+    fn pop(&self) -> Option<DiscoveryEvent> {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let key = pending.order.front()?.clone();
+        let (event, count) = pending.events.get_mut(&key)?;
+        if *count > 1 {
+            *count -= 1;
+            return Some(event.clone());
+        }
+        pending.order.pop_front();
+        pending.events.remove(&key).map(|(event, _)| event)
+    }
 }
 
 /// Handle to the discovery actor. Every input is a non-blocking send; events
@@ -138,12 +272,21 @@ impl RaDiscovery {
     pub fn spawn(
         config: DiscoveryConfig,
         metrics: rustbgpd_telemetry::BgpMetrics,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<DiscoveryEvent>), DiscoveryError> {
+    ) -> Result<(Self, DiscoveryEvents), DiscoveryError> {
         drop(raw_socket()?);
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() ^ u64::from(d.subsec_nanos()))
             ^ u64::from(std::process::id());
+        // Unbounded by design, bounded by its one producer: only the peer
+        // manager sends, one command per configured interface added or
+        // removed, per change of an interface's state in its link snapshot
+        // and per bound session's state transition, and its sends never
+        // wait. The actor applies each command without waiting on another
+        // task, so the queue holds only what the peer manager produced
+        // since the actor last ran. A bounded send would make the peer
+        // manager wait on (or drop) a link or session input that discovery
+        // must not lose.
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (mut actor, event_rx, received_rx) =
             Actor::new(config, seed, Box::new(interface_socket));
@@ -393,7 +536,7 @@ struct InterfaceSocket {
 struct Actor {
     engine: Engine,
     sockets: HashMap<String, InterfaceSocket>,
-    events: mpsc::UnboundedSender<DiscoveryEvent>,
+    events: EventSender,
     counters: Arc<Counters>,
     received_tx: mpsc::Sender<Received>,
     local_addresses: HashMap<String, (Instant, Vec<Ipv6Addr>)>,
@@ -439,12 +582,8 @@ impl Actor {
         config: DiscoveryConfig,
         seed: u64,
         opener: Opener,
-    ) -> (
-        Self,
-        mpsc::UnboundedReceiver<DiscoveryEvent>,
-        mpsc::Receiver<Received>,
-    ) {
-        let (events, event_rx) = mpsc::unbounded_channel();
+    ) -> (Self, DiscoveryEvents, mpsc::Receiver<Received>) {
+        let (events, event_rx) = event_channel();
         let (received_tx, received_rx) = mpsc::channel(RECEIVE_QUEUE);
         let actor = Self {
             engine: Engine::new(config, seed),
@@ -682,7 +821,17 @@ impl Actor {
     fn flush(&mut self, now: Instant) {
         for event in self.engine.events.drain(..) {
             debug!(?event, "router discovery event");
-            let _ = self.events.send(event);
+            match &event {
+                DiscoveryEvent::CandidateLearned { interface, address } => {
+                    info!(%interface, %address, "unnumbered: peer address learned");
+                }
+                DiscoveryEvent::CandidateExpired { interface, address } => {
+                    info!(%interface, %address, "unnumbered: peer address expired");
+                }
+                DiscoveryEvent::BindingChanged { .. } | DiscoveryEvent::Conflict { .. } => {
+                    self.events.send(event);
+                }
+            }
         }
         for transmit in std::mem::take(&mut self.engine.transmits) {
             if self.transmit(transmit) {
@@ -1134,5 +1283,105 @@ mod tests {
         assert_eq!(packet.generation, actor.sockets["x"].generation);
         assert_eq!(packet.source, Ipv6Addr::LOCALHOST);
         assert_eq!(packet.payload, b"ra");
+    }
+
+    /// RAs that keep moving the binding or raising conflicts, while the
+    /// neighbor owner is not reading, leave at most one binding change and
+    /// one conflict queued for the interface. The owner then receives the
+    /// final binding and every conflict.
+    #[tokio::test]
+    async fn discovery_events_stay_bounded_while_the_owner_stalls() {
+        use crate::ra_discovery::{DiscoveryEvent, Endpoint};
+
+        let opener = |_: &str, _: u32| Err(std::io::Error::other("unused"));
+        let (mut actor, mut events, _received) =
+            Actor::new(DiscoveryConfig::default(), 1, Box::new(opener));
+        let t0 = Instant::now();
+        actor.engine.start("x");
+        actor.engine.on_link(
+            &LinkEvent {
+                ifindex: 9,
+                name: "x".into(),
+                state: LinkState::Up,
+            },
+            t0,
+        );
+        let generation = actor.engine.bound_interfaces().next().unwrap().2;
+        let mut at = t0;
+        let mut advertise = |actor: &mut Actor, source: Ipv6Addr, lifetime: u16| {
+            // Each RA lands after the previous 1 s candidate expired.
+            at += Duration::from_secs(2);
+            actor
+                .engine
+                .on_router_advertisement(9, generation, source, lifetime, at, |_, _| Some(false))
+                .unwrap();
+            actor.flush(at);
+            assert!(actor.events.pending() <= 2, "{}", actor.events.pending());
+        };
+        // Every RA expires the bound source and binds the new one: four
+        // engine events each, which the old queue held all of.
+        for i in 0..500 {
+            advertise(&mut actor, Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 2, i), 1);
+        }
+        // A long-lived source holds the binding while others conflict.
+        let bound: Ipv6Addr = "fe80::1".parse().unwrap();
+        advertise(&mut actor, bound, 9000);
+        let conflicts = 500;
+        for i in 0..conflicts {
+            advertise(&mut actor, Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 3, i), 1);
+        }
+        let last_other = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 3, conflicts - 1);
+
+        drop(actor);
+        assert_eq!(
+            events.recv().await,
+            Some(DiscoveryEvent::BindingChanged {
+                interface: "x".into(),
+                previous: None,
+                current: Some(Endpoint {
+                    address: bound,
+                    ifindex: 9,
+                }),
+            })
+        );
+        for _ in 0..conflicts {
+            assert_eq!(
+                events.recv().await,
+                Some(DiscoveryEvent::Conflict {
+                    interface: "x".into(),
+                    bound,
+                    other: last_other,
+                })
+            );
+        }
+        assert_eq!(events.recv().await, None, "drained, then closed");
+    }
+
+    /// An event queued while the owner waits wakes it; one queued before
+    /// the owner waits needs no second wake.
+    #[tokio::test]
+    async fn discovery_event_wakes_a_waiting_owner() {
+        use crate::ra_discovery::DiscoveryEvent;
+
+        let (sender, mut events) = super::event_channel();
+        let conflict = |other: &str| DiscoveryEvent::Conflict {
+            interface: "x".into(),
+            bound: "fe80::1".parse().unwrap(),
+            other: other.parse().unwrap(),
+        };
+        let waiting = tokio::spawn(async move {
+            let first = events.recv().await;
+            (first, events)
+        });
+        tokio::task::yield_now().await;
+        sender.send(conflict("fe80::2"));
+        let (first, mut events) = waiting.await.unwrap();
+        assert_eq!(first, Some(conflict("fe80::2")));
+        sender.send(conflict("fe80::3"));
+        sender.send(conflict("fe80::4"));
+        assert_eq!(events.recv().await, Some(conflict("fe80::4")));
+        assert_eq!(events.recv().await, Some(conflict("fe80::4")));
+        drop(sender);
+        assert_eq!(events.recv().await, None);
     }
 }
