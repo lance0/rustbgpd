@@ -1374,11 +1374,10 @@ confirmed interface-down that follows an earlier transport loss also purges
 the routes that loss left under Graceful Restart, through the neighbor's
 session. An idle `[[dynamic_neighbors]]` member has no session left to do
 that: its retained routes stay until its GR or LLGR timers expire, a reconnect
-completes the restart, or the member is deleted. Unlike FRR,
-which resets the session on every confirmed interface-down, rustbgpd checks the
-current state: a down that recovered before the session checked, with the TCP
-connection still up, finds no current local failure requiring teardown and
-leaves the session up. How short an outage this absorbs depends on scheduling
+completes the restart, or the member is deleted. On a confirmed
+interface-down, rustbgpd checks the current state: a down that recovered
+before the session checked, with the TCP connection still up, finds no
+current local failure requiring teardown and leaves the session up. How short an outage this absorbs depends on scheduling
 and is not a fixed threshold. A surviving session does not prove forwarding is
 healthy; BFD and the hold timer still apply. Nothing is
 stopped while the link state is unknown: when

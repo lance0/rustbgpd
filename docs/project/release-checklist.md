@@ -85,9 +85,9 @@ convention in `CONTRIBUTING.md`:
 - [ ] `docs/project/roadmap.md` has one row or checkbox per remaining concern; shipped
       slices say what landed and what remains.
 - [ ] The maintained
-      [EVPN standards tail](evpn-enablement.md#evpn-standards-tail-maintained)
-      table in `docs/project/evpn-enablement.md` reflects shipped and remaining
-      work row by row. The rest of that page and
+      [EVPN standards tail](roadmap.md#evpn-standards-tail)
+      table in `docs/project/roadmap.md` reflects shipped and remaining
+      work row by row. `docs/project/evpn-enablement.md` and
       `docs/how-to/evpn-alpha-soak.md` are historical records: leave their gate
       narratives frozen.
 - [ ] New config knobs follow

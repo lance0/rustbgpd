@@ -42,10 +42,8 @@ points:
   integration still re-drives them after a daemon restart.)
 - **Extra failure domain** — a separate container that could crash, get OOM
   killed, or lose its gRPC connection independently.
-- **Performance overhead** — Go's GC adds latency jitter; under DDoS
-  conditions, you want predictable response times.
-- **Go-flavored API** — GoBGP's v3 protos used `google.protobuf.Any`
-  extensively, making typed clients in other languages awkward.
+- **`Any`-typed API** — GoBGP's v3 protos carried NLRI and path attributes
+  as `google.protobuf.Any`, so clients decoded them by type URL.
 
 After building and operating prefixd, the requirements for a better BGP backend
 became clear. rustbgpd is that backend — designed from day one for the
@@ -71,8 +69,8 @@ attacks and speaks BGP natively.
 
 **The problem:** Your detection system (FastNetMon, Kentik, Prometheus alerts)
 identifies an attack. You need to push FlowSpec rules or blackhole routes to
-your routers — in seconds, not minutes. Scripting ExaBGP or GoBGP works until
-it doesn't: no state persistence, no guardrails, no audit trail.
+your routers — in seconds, not minutes — with state persistence, guardrails,
+and an audit trail.
 
 **The architecture:**
 
