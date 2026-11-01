@@ -42,6 +42,9 @@ pub(in crate::manager) struct EvpnFeedSeal {
     target: EvpnFeedTarget,
     revision: u64,
     pub(in crate::manager) required_markers: u8,
+    /// A sparse renewal's staged keys: the only keys whose admission or
+    /// eligibility can differ from the complete feed it renews.
+    sparse_keys: Option<Box<[EvpnRouteKey]>>,
 }
 
 /// A sparse clean diff, consumed once in the operation that moved membership.
@@ -466,6 +469,96 @@ impl RibManager {
             target: EvpnFeedTarget::PrivateHandoff,
             revision: completion.revision,
             required_markers: 0,
+            sparse_keys: None,
+        })
+    }
+
+    /// Renew a complete feed that was current at `stamp_before`, before this
+    /// operation staged `deltas` onto `group_id`. Only the delta keys changed
+    /// since that admission, so the member's sparse delta payload keeps the
+    /// feed complete; neither inventory is walked again. Verification after
+    /// admission reads only those keys ([`Self::complete_evpn_feed_admitted`]).
+    pub(in crate::manager) fn sparse_evpn_feed_seal(
+        &self,
+        peer: PeerId,
+        group_id: usize,
+        stamp_before: u64,
+        deltas: &[super::update_groups::EvpnGroupDelta],
+    ) -> Option<EvpnFeedSeal> {
+        let record = self.evpn_completion_record(peer)?;
+        let completion = record.evpn_feed_completion.as_ref()?;
+        let group = self
+            .group_ribs
+            .get(&group_id)
+            .filter(|group| group.owns_evpn_routes())?;
+        if !completion.complete
+            || completion.revision == 0
+            || stamp_before == 0
+            || group.evpn_table_stamp == 0
+            || completion.target
+                != (EvpnFeedTarget::Grouped {
+                    group_id,
+                    table_stamp: stamp_before,
+                })
+            || self.evpn_recovery_handle(peer) != Some(completion.provenance)
+            || record.outbound_tx.is_closed()
+            || self.evpn_recovery_reset_pending(peer)
+            || self.selection_deferred(EVPN_FAMILY)
+            || self.evpn_grouped_member_of(peer) != Some(group_id)
+            || !group.members.contains(&peer)
+        {
+            return None;
+        }
+        Some(EvpnFeedSeal {
+            session_id: record.session_id,
+            outbound: record.outbound_tx.clone(),
+            provenance: completion.provenance,
+            target: EvpnFeedTarget::Grouped {
+                group_id,
+                table_stamp: group.evpn_table_stamp,
+            },
+            revision: completion.revision,
+            required_markers: 0,
+            sparse_keys: Some(deltas.iter().map(|delta| delta.key).collect()),
+        })
+    }
+
+    /// [`Self::evpn_projection_matches_proof`] over a sparse renewal's keys:
+    /// each is admitted exactly when the member's projection holds it. The
+    /// renewed feed matched its proof on every other key.
+    fn evpn_sparse_keys_match_proof(
+        &self,
+        peer: PeerId,
+        seal: &EvpnFeedSeal,
+        keys: &[EvpnRouteKey],
+    ) -> bool {
+        let Ok(Some(proof)) = self.evpn_recovery.proof(seal.provenance) else {
+            return false;
+        };
+        let EvpnFeedTarget::Grouped { group_id, .. } = seal.target else {
+            return false;
+        };
+        let Some(group) = self.group_ribs.get(&group_id) else {
+            return false;
+        };
+        let filter = self.member_rt_filter(peer);
+        let rejected = self.peer_unexportable.get(&peer);
+        keys.iter().all(|key| {
+            self.replacement_checkpoint(false);
+            let route = group.table.get_evpn(key);
+            let input = group.evpn_inputs.get(key);
+            route.is_some() == input.is_some()
+                && proof.contains(key)
+                    == route.zip(input).is_some_and(|(route, input)| {
+                        input.eligible(
+                            route,
+                            peer,
+                            group,
+                            self.cluster_id,
+                            filter.as_ref(),
+                            rejected,
+                        )
+                    })
         })
     }
 
@@ -484,7 +577,10 @@ impl RibManager {
         if !self.evpn_feed_seal_is_current(peer, &seal) {
             return false;
         }
-        let matches = self.evpn_projection_matches_proof(peer, &seal);
+        let matches = match seal.sparse_keys.as_deref() {
+            Some(keys) => self.evpn_sparse_keys_match_proof(peer, &seal, keys),
+            None => self.evpn_projection_matches_proof(peer, &seal),
+        };
         #[cfg(test)]
         let matches = matches
             && !std::mem::take(&mut self.adj_rib_out_commit_stats.fail_evpn_feed_completion);
@@ -943,6 +1039,7 @@ impl RibManager {
                 target,
                 revision,
                 required_markers: 0,
+                sparse_keys: None,
             },
             announce,
             withdraw,

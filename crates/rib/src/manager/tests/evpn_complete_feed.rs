@@ -2222,3 +2222,177 @@ fn review2_private_selection_resync_does_not_duplicate_its_terminal() {
 fn review2_dirty_owned_selection_resync_does_not_recreate_its_terminal_debt() {
     assert_review2_selection_resync_terminal(false);
 }
+
+/// Readiness checkpoints of one incremental announcement to a group whose
+/// member holds `untouched + 1` admitted routes in a complete, current feed
+/// with an End-of-RIB still owed. The churn renews the feed from its delta alone.
+fn owned_debt_churn_checkpoints(untouched: u32) -> usize {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    let mut routes = vec![route.clone()];
+    for tag in 0..untouched {
+        let mut other = received(300);
+        if let EvpnRoute::Imet(ref mut imet) = other.route {
+            imet.ethernet_tag = EthernetTagId(tag + 2);
+        } else {
+            panic!("IMET fixture");
+        }
+        routes.push(other);
+    }
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, routes.clone());
+    assert_eq!(output.try_recv().unwrap().evpn_announce.len(), routes.len());
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+        .unwrap();
+    assert!(feed.announce.is_empty() && feed.withdraw.is_empty());
+    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    assert!(output.try_recv().is_err());
+    manager
+        .rtc_eor_hold
+        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    let rib = manager
+        .ribs
+        .entry(route.peer)
+        .or_insert_with(|| AdjRibIn::new(route.peer));
+    for route in &routes {
+        rib.insert_evpn(route.clone());
+    }
+    let resets = count_reset_attempts(&mut manager);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let changed = received(200);
+    let work = super::work_scaling::checkpoints_in(|| {
+        manager.process_evpn_announce_chunk(changed.peer, vec![changed.clone()]);
+    });
+    let update = output.try_recv().unwrap();
+    assert_eq!(update.evpn_announce.len(), 1);
+    assert_eq!(update.evpn_announce[0].key(), changed.key());
+    assert!(update.evpn_withdraw.is_empty() && !update.end_of_rib.contains(&EVPN));
+    assert!(output.try_recv().is_err());
+    assert_eq!(manager.evpn_admitted_count(peer), routes.len());
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+    // The renewed feed still settles on its owed marker.
+    manager.rtc_eor_hold.remove(&peer);
+    manager.retry_evpn_feed_markers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert!(marker.evpn_announce.is_empty() && marker.end_of_rib == vec![EVPN]);
+    assert!(
+        manager
+            .evpn_recovery
+            .is_dormant(manager.evpn_recovery_handle(peer).unwrap())
+    );
+    work["checkpoints"]
+}
+
+/// A one-key change while a complete feed owes its End-of-RIB costs the delta, not
+/// the member's inventory: across a 16x larger table the work stays within
+/// 2x. Re-walking the projections (about five visits per route) grows ~12x.
+#[test]
+fn owned_debt_churn_work_scales_with_the_delta_not_the_inventory() {
+    let small = owned_debt_churn_checkpoints(64);
+    let large = owned_debt_churn_checkpoints(1024);
+    assert!(
+        large <= small * 2,
+        "one-key churn under terminal debt took {small} checkpoints at 65 routes \
+         and {large} at 1025"
+    );
+}
+
+/// A member with a complete feed current at the group's stamp and an End-of-RIB
+/// owed, before any further staging.
+fn current_feed_owing_eor() -> (
+    RibManager,
+    PeerId,
+    usize,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    output.try_recv().unwrap();
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+        .unwrap();
+    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    assert!(manager.evpn_feed_is_current(peer));
+    (manager, peer, gid, output)
+}
+
+fn imet_with_tag(tag: u32) -> EvpnRibRoute {
+    let mut route = received(300);
+    if let EvpnRoute::Imet(ref mut imet) = route.route {
+        imet.ethernet_tag = EthernetTagId(tag);
+    } else {
+        panic!("IMET fixture");
+    }
+    route
+}
+
+/// A sparse renewal is verified on its delta keys: renewing over a staged
+/// key the member never admitted fails, invalidating the feed instead of
+/// marking it complete.
+#[test]
+fn sparse_renewal_without_the_delta_admission_fails_verification() {
+    let (mut manager, peer, gid, _output) = current_feed_owing_eor();
+    let stamp_before = manager.group_ribs[&gid].evpn_table_stamp;
+    let staged = stage(&mut manager, gid, &imet_with_tag(9));
+    let seal = manager
+        .sparse_evpn_feed_seal(peer, gid, stamp_before, &staged.deltas)
+        .expect("current before staging");
+    assert!(!manager.complete_evpn_feed_admitted(peer, seal, 0));
+    assert!(!manager.evpn_feed_is_current(peer));
+}
+
+/// Only the operation that staged onto a current feed may renew it: a feed
+/// current at an older stamp, with an unadmitted staging in between, needs
+/// the full producer.
+#[test]
+fn sparse_renewal_requires_the_feed_current_at_the_pre_stage_stamp() {
+    let (mut manager, peer, gid, _output) = current_feed_owing_eor();
+    let stamp_before = manager.group_ribs[&gid].evpn_table_stamp;
+    let first = stage(&mut manager, gid, &imet_with_tag(9));
+    let after_first = manager.group_ribs[&gid].evpn_table_stamp;
+    let second = stage(&mut manager, gid, &imet_with_tag(10));
+    assert!(
+        manager
+            .sparse_evpn_feed_seal(peer, gid, after_first, &second.deltas)
+            .is_none(),
+        "the feed was never current at the first staging's stamp"
+    );
+    assert!(
+        manager
+            .sparse_evpn_feed_seal(peer, gid, stamp_before, &first.deltas)
+            .is_some(),
+        "the seal still names the feed's own stamp"
+    );
+}
