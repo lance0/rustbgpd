@@ -1605,6 +1605,21 @@ async fn grouped_counts_follow_every_control_form() {
             )],
         )
         .await;
+        // p8: D's own route, the only candidate, carries `0:RS`: D's raw
+        // slot is empty (it sourced the winner and there is no lane), so
+        // the suppression moves nothing for D.
+        announce_unicast(
+            &tx,
+            client_d,
+            vec![route(
+                8,
+                Ipv4Addr::new(192, 0, 2, 231),
+                1,
+                vec![std_c(0, RS_AS)],
+                vec![],
+            )],
+        )
+        .await;
         // p7: D wins with a clean C behind it, so D gets C; C's re-announce
         // naming AS65004 is a lane-only change that takes p7 from D.
         announce_unicast(
@@ -1683,4 +1698,88 @@ async fn grouped_counts_seed_when_routes_precede_the_first_rs_client() {
     }
     assert_eq!(reports[0], reports[1]);
     assert_eq!(reports[0][0].1, 0, "{:?}", reports[0]);
+}
+
+/// A filtered advertised page and its total for `peer`.
+async fn filtered_page(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+    filter: fn(&Route) -> bool,
+) -> (Vec<(String, String)>, u64) {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryRoutesPage {
+        scope: RouteQueryScope::Advertised { peer },
+        filter: Some(Box::new(filter)),
+        after: None,
+        expected_version: None,
+        page_size: 64,
+        reply,
+    })
+    .await
+    .unwrap();
+    let page = response.await.unwrap().unwrap();
+    let rows = page
+        .routes
+        .into_iter()
+        .map(|route| {
+            (
+                route.prefix.to_string(),
+                format!("{:?}", route.attributes.to_vec()),
+            )
+        })
+        .collect();
+    (rows, page.total)
+}
+
+/// A filtered advertised listing of a grouped rs-control client evaluates
+/// the filter on the client's wire form, as on an ungrouped client: a
+/// community filter does not match a row whose control communities are
+/// scrubbed, and an AS-path-length filter matches the prepended row.
+#[tokio::test]
+async fn grouped_filtered_listing_filters_the_rewritten_row() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 141, 0), 24);
+    let source = Ipv4Addr::new(198, 51, 100, 55);
+    let mut reports = Vec::new();
+    for force_ungrouped in [false, true] {
+        let (tx, rx) = mpsc::channel(64);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        manager.test_force_ungrouped = force_ungrouped;
+        let handle = tokio::spawn(manager.run());
+        let client_a = PeerId::from_addr("192.0.2.237".parse().unwrap());
+        let client_b = PeerId::from_addr("192.0.2.238".parse().unwrap());
+        let mut a_rx = rs_client_up(&tx, client_a, 65001, false).await;
+        drain_eor(&mut a_rx).await;
+        let mut b_rx = rs_client_up(&tx, client_b, 65002, false).await;
+        drain_eor(&mut b_rx).await;
+        assert_eq!(
+            query_update_group_label(&tx, client_b)
+                .await
+                .starts_with("group:"),
+            !force_ungrouped
+        );
+        // Two prepends toward B; `0:65009` names no client and is scrubbed.
+        announce_unicast(
+            &tx,
+            peer_v4(source),
+            vec![tagged(
+                make_route_with_as_path(prefix, source, vec![64611]),
+                vec![std_c(0, 65009)],
+                vec![large(102, 65002)],
+            )],
+        )
+        .await;
+        let _ = query_best_routes(&tx).await;
+        let with_communities =
+            filtered_page(&tx, client_b, |route| !route.communities().is_empty()).await;
+        let long_path = filtered_page(&tx, client_b, |route| {
+            route.as_path().is_some_and(|path| path.len() >= 3)
+        })
+        .await;
+        assert_eq!(with_communities.1, 0, "force_ungrouped={force_ungrouped}");
+        assert_eq!(long_path.1, 1, "force_ungrouped={force_ungrouped}");
+        reports.push((with_communities, long_path));
+        drop(tx);
+        handle.await.unwrap();
+    }
+    assert_eq!(reports[0], reports[1]);
 }

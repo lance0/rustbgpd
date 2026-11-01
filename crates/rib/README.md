@@ -66,7 +66,7 @@ The update-group and manager inventory has these boundaries:
 | --- | --- |
 | Group `source_attrs` | Sharded; both route deltas and source-tag transitions use the same writer. Passthrough groups keep the map empty. |
 | Group `runner_up` | Sharded; no full-table reservation of route values for groups without exception lanes. |
-| Group RFC 7947 control index (`rs_tagged`, `rs_all`, per-ASN `rs_named` sets) | Sharded; maintained only while an rs-control member is in the group, written per staged key between checkpoints, and retired per entry when the last such member leaves or the group retires. |
+| Group RFC 7947 control index (`rs_tagged`, `rs_all`, `rs_named` and its per-ASN sets) | Sharded; maintained only while an rs-control member is in the group, written per staged key between checkpoints, collected for a joining member's seed one checkpoint per visited key, and retired per entry when the last such member leaves or the group retires. |
 | Group `policy_filtered` | Sharded outer prefix map; the existing checkpointed writer replaces each affected prefix's candidate denials. |
 | Group `vpn_policy_denied` | Sharded; remove affected keys directly, then insert denials between checkpoints. |
 | Route slabs (Adj-RIB-In, Adj-RIB-Out, group table) | Fixed 64Ki-slot segments: growth allocates one segment and copies at most one, so a group that joins before the feed fills without whole-table copies. The prefix trie and `Self_` flags still double inside one insert; their entries are a fraction of a route body's size. |

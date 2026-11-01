@@ -280,9 +280,9 @@ fn smallest_keys_after<K: Ord>(
 /// Single pass, O(page) allocation — the same mutation-robust cursor
 /// step as [`smallest_keys_after`], carrying the routes alongside the
 /// keys so no per-key re-lookup is needed.
-pub(super) fn page_routes<'a>(
+pub(super) fn page_routes<'a, F: Fn(&crate::route::Route) -> bool + ?Sized>(
     routes: impl Iterator<Item = &'a crate::route::Route>,
-    filter: Option<&RouteQueryFilter>,
+    filter: Option<&F>,
     after: Option<RouteQueryKey>,
     page_size: usize,
 ) -> RoutePage {
@@ -1250,7 +1250,26 @@ impl RibManager {
                 RouteQueryScope::Best => page_routes(self.loc_rib.iter(), filter, after, page_size),
                 RouteQueryScope::Advertised { peer } => {
                     match self.grouped_advertised_routes_iter(peer) {
-                        Some(routes) => page_routes(routes, filter, after, page_size),
+                        // RFC 7947: an rs-control member's filter sees its
+                        // wire form (prepend, control-community scrub), as
+                        // an ungrouped client's Adj-RIB-Out holds it. Other
+                        // members filter the borrowed shared rows.
+                        Some(routes) => {
+                            match filter.filter(|_| self.rs_control_context(peer).is_some()) {
+                                Some(filter) => {
+                                    let wire_form = |route: &crate::route::Route| {
+                                        let mut row = route.clone();
+                                        self.rewrite_grouped_advertised_rows(
+                                            peer,
+                                            std::slice::from_mut(&mut row),
+                                        );
+                                        filter(&row)
+                                    };
+                                    page_routes(routes, Some(&wire_form), after, page_size)
+                                }
+                                None => page_routes(routes, filter, after, page_size),
+                            }
+                        }
                         None => page_routes(
                             self.adj_ribs_out
                                 .get(&peer)

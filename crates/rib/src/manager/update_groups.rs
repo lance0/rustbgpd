@@ -699,7 +699,7 @@ pub(in crate::manager) struct GroupRibOut {
     rs_tagged: ShardedMap<(Prefix, u32), RsTargets>,
     /// [`Self::rs_tagged`] keys by the ASN their targets name, so seeding a
     /// joining member resolves only the keys that can name it.
-    rs_named: FastMap<u32, ShardedMap<(Prefix, u32), ()>>,
+    rs_named: ShardedMap<u32, ShardedMap<(Prefix, u32), ()>>,
     /// [`Self::rs_tagged`] keys carrying the announce-to-none large form.
     rs_all: ShardedMap<(Prefix, u32), ()>,
     /// Per rs-control member, the per-family `[v4, v6]` difference between
@@ -909,7 +909,7 @@ impl GroupRibOut {
             rs_fallback: ShardedMap::default(),
             rs_members: AddrMap::default(),
             rs_tagged: ShardedMap::default(),
-            rs_named: FastMap::default(),
+            rs_named: ShardedMap::default(),
             rs_all: ShardedMap::default(),
             rs_count_adjust: AddrMap::default(),
             lane_counts: AddrMap::default(),
@@ -1364,7 +1364,7 @@ impl GroupRibOut {
         }
         if let Some(targets) = targets {
             for &asn in &targets.asns {
-                self.rs_named.entry(asn).or_default().insert(key, ());
+                self.rs_named.get_or_default(asn).insert(key, ());
             }
             if targets.all {
                 self.rs_all.insert(key, ());
@@ -1376,12 +1376,12 @@ impl GroupRibOut {
     /// Retire the control index, one checkpoint per entry: at a full-table
     /// tagging it is as large as the table.
     fn clear_rs_index(&mut self, checkpoint: &mut impl FnMut()) {
-        use crate::adj_rib_out::{release_hash_map, release_sharded_map};
+        use crate::adj_rib_out::release_sharded_map;
         release_sharded_map(&mut self.rs_tagged, checkpoint);
-        for keys in self.rs_named.values_mut() {
+        for (_, keys) in self.rs_named.iter_mut() {
             release_sharded_map(keys, checkpoint);
         }
-        release_hash_map(&mut self.rs_named, checkpoint);
+        release_sharded_map(&mut self.rs_named, checkpoint);
         release_sharded_map(&mut self.rs_all, checkpoint);
     }
 
@@ -1533,21 +1533,25 @@ impl GroupRibOut {
         } else {
             self.rs_named.get(&rs_asn).unwrap_or(&empty)
         };
-        let keys: Vec<(Prefix, u32)> = self
-            .rs_all
-            .keys()
-            .chain(
-                by_member
-                    .keys()
-                    .filter(|key| !self.rs_all.contains_key(*key)),
-            )
-            .chain(
-                by_rs
-                    .keys()
-                    .filter(|key| !self.rs_all.contains_key(*key) && !by_member.contains_key(*key)),
-            )
-            .copied()
-            .collect();
+        // One checkpoint per visited key, the duplicates included.
+        let mut keys: Vec<(Prefix, u32)> =
+            Vec::with_capacity(self.rs_all.len() + by_member.len() + by_rs.len());
+        for key in self.rs_all.keys() {
+            checkpoint();
+            keys.push(*key);
+        }
+        for key in by_member.keys() {
+            checkpoint();
+            if !self.rs_all.contains_key(key) {
+                keys.push(*key);
+            }
+        }
+        for key in by_rs.keys() {
+            checkpoint();
+            if !self.rs_all.contains_key(key) && !by_member.contains_key(key) {
+                keys.push(*key);
+            }
+        }
         let mut adjust = [0_i64; 2];
         for key in keys {
             checkpoint();
