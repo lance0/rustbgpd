@@ -53,9 +53,7 @@ impl RibManager {
         nh_override_flags: &mut Vec<Option<NextHopAction>>,
         checkpoint: &mut impl FnMut(bool),
     ) {
-        use crate::manager::distribution::rs_control::{
-            rs_control_route_rewrite, rs_control_suppressed,
-        };
+        use crate::manager::distribution::rs_control::rs_control_route_rewrite;
         checkpoint(true);
         let mut suppressed_withdraws: HashSet<(Prefix, u32)> = HashSet::new();
         for staged in group.table.iter() {
@@ -69,19 +67,26 @@ impl RibManager {
             // nh residue come from the RESOLVED entry: a substituted
             // slot reads the lane's captured source attributes, not
             // the staged winner's.
-            let Some(entry) = group.adv_entry(member, &staged.prefix, staged.path_id) else {
-                continue;
-            };
-            let (source_communities, source_large_communities) =
-                group.source_control_for_route(entry.route, entry.source_attrs);
-            if rs_control_suppressed(source_communities, source_large_communities, rs_control) {
+            // An rs-control member resolves past suppressed candidates
+            // (`adv_entry_for`); a slot left with none of them is never on
+            // its wire.
+            let Some(entry) =
+                group.adv_entry_for(member, &staged.prefix, staged.path_id, rs_control)
+            else {
                 // Add a candidate; the admitted proof below decides whether
                 // this receiver actually needs a withdrawal.
-                if !is_force && (is_dirty || baseline.is_some_and(|base| base.contains_key(&key))) {
+                if !is_force
+                    && (is_dirty || baseline.is_some_and(|base| base.contains_key(&key)))
+                    && group
+                        .adv_entry(member, &staged.prefix, staged.path_id)
+                        .is_some()
+                {
                     suppressed_withdraws.insert(key);
                 }
                 continue;
-            }
+            };
+            let (_, source_large_communities) =
+                group.source_control_for_route(entry.route, entry.source_attrs);
             let mut route = entry.route.clone();
             rs_control_route_rewrite(&mut route, source_large_communities, rs_control);
             if !is_force

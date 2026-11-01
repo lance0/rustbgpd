@@ -9,6 +9,10 @@ use super::{
     capture_source_attrs, source_control_input,
 };
 
+/// A per-client-best prefix's recomputed exception lane and RFC 7947
+/// fallback list, committed together after the pass.
+type LaneUpdate = (Prefix, Option<RunnerUp>, Option<std::sync::Arc<[RunnerUp]>>);
+
 impl RibManager {
     /// The group a staging pass read at its top, for the commit block
     /// at its bottom. `&mut self` held across the whole pass is the
@@ -140,7 +144,7 @@ impl RibManager {
         out.deltas.reserve_exact(prefixes.len());
         self.replacement_checkpoint(true);
         let mut labeled_filtered: Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)> = Vec::new();
-        let mut lane_updates: Vec<(Prefix, Option<RunnerUp>)> = Vec::new();
+        let mut lane_updates: Vec<LaneUpdate> = Vec::new();
         let mut result = crate::manager::distribution::UnicastDistributionResult::default();
         let mut per_client_best_result =
             crate::manager::distribution::UnicastDistributionResult::default();
@@ -249,6 +253,7 @@ impl RibManager {
                     // while the WINNER's source control communities
                     // moved — rs-control members' verdicts on the
                     // staged entry may flip with no wire change.
+                    let mut rs_view_moved = false;
                     if out.deltas.len() == deltas_before
                         && let Some(transition) =
                             group.rs_tag_transition(*prefix, stage.winner_source_attrs.as_ref())
@@ -259,6 +264,7 @@ impl RibManager {
                             self.replacement_checkpoint(true);
                         }
                         out.rs_transitions.push(transition);
+                        rs_view_moved = true;
                     }
                     // Lane transition (ADR-0126 Decision 5), equality-
                     // suppressed against the PRIOR lane entry:
@@ -290,6 +296,7 @@ impl RibManager {
                         _ => (false, true),
                     };
                     if !(content_unchanged && control_unchanged) {
+                        rs_view_moved = true;
                         // The member the transition emits toward: the
                         // new entry's winner source, or the REPLACED
                         // entry's for a retire (how the retire arm
@@ -339,7 +346,36 @@ impl RibManager {
                             content_unchanged,
                         });
                     }
-                    lane_updates.push((*prefix, stage.runner_up));
+                    // RFC 7947 fallback view: where a walked candidate may
+                    // be suppressed toward some member, an rs-control
+                    // member's slot can move with the lane, a tag-only
+                    // transition or the fallback list alone. Without a
+                    // `path_id 0` winner delta (whose prior covers the
+                    // slot) the member diff needs this prior snapshot.
+                    let prior_fallback = (!group.rs_fallback.is_empty())
+                        .then(|| group.rs_fallback.get(prefix))
+                        .flatten();
+                    if (prior_fallback.is_some() || stage.rs_fallback.is_some())
+                        && !out.deltas[deltas_before..]
+                            .iter()
+                            .any(|delta| delta.path_id == 0)
+                        && (rs_view_moved
+                            || !super::payload::rs_fallback_equal(
+                                prior_fallback.map(|fallback| &**fallback),
+                                stage.rs_fallback.as_deref(),
+                            ))
+                    {
+                        let prior = PriorGroupSlots::capture(group, *prefix, 0, &mut |force| {
+                            self.replacement_checkpoint(force);
+                        });
+                        if out.rs_priors.capacity() == 0 {
+                            self.replacement_checkpoint(true);
+                            out.rs_priors.reserve_exact(prefixes.len());
+                            self.replacement_checkpoint(true);
+                        }
+                        out.rs_priors.push((*prefix, prior));
+                    }
+                    lane_updates.push((*prefix, stage.runner_up, stage.rs_fallback));
                     continue;
                 }
                 // RFC 7947 decisions at the member-emit seams are made
@@ -491,9 +527,10 @@ impl RibManager {
         // Lane commits live in this commit block ON PURPOSE: the
         // `join_group` table-build pass discards the returned output
         // but must still leave a fully populated lane behind.
-        for (prefix, entry) in lane_updates {
+        for (prefix, entry, rs_fallback) in lane_updates {
             checkpoint();
             group.apply_lane(prefix, entry);
+            group.apply_rs_fallback(prefix, rs_fallback);
         }
         group.commit_rs_transitions(&out.rs_transitions, &mut checkpoint);
         group.record_otc_blocked(prefixes, &out.otc_blocked, &mut checkpoint);

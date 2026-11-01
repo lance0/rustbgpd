@@ -593,15 +593,30 @@ impl BestSource {
 }
 
 impl RibManager {
+    /// Whether the member's resolved prior slot — RFC 7947 fallback
+    /// included — was admitted to its wire.
+    fn clean_group_prior_was_admitted(
+        &self,
+        peer: PeerId,
+        prior: &super::update_groups::PriorGroupSlots,
+    ) -> bool {
+        let rs_control = self
+            .peer_rs_control
+            .get(&peer)
+            .copied()
+            .zip(self.peer_asn.get(&peer).copied());
+        prior.adv_entry_for(peer, rs_control).is_some_and(|entry| {
+            self.clean_group_route_was_admitted(peer, entry.route, entry.source_attrs)
+        })
+    }
+
     fn clean_group_delta_was_admitted(
         &self,
         peer: PeerId,
         delta: &super::update_groups::GroupDelta,
     ) -> bool {
         if let Some(prior) = &delta.prior {
-            return prior.adv_entry(peer).is_some_and(|entry| {
-                self.clean_group_route_was_admitted(peer, entry.route, entry.source_attrs)
-            });
+            return self.clean_group_prior_was_admitted(peer, prior);
         }
         let Some(group) = self
             .grouped_member_of(peer)
@@ -9511,7 +9526,24 @@ impl RibManager {
                                     {
                                         bench_grouped_paths.1 += 1;
                                     }
-                                    super::update_groups::emit_group_deltas_for_member_with_checkpoint(
+                                    if group.per_client_best && rs_control.is_some() {
+                                        // RFC 7947: a candidate suppressed
+                                        // toward this member gives way to its
+                                        // next eligible one, a per-target
+                                        // selection the matrix arms cannot
+                                        // express.
+                                        super::update_groups::emit_pcb_rs_member_with_checkpoint(
+                                            stage,
+                                            group,
+                                            peer,
+                                            rs_control,
+                                            &mut unicast.announce,
+                                            &mut unicast.withdraw,
+                                            &mut unicast.next_hop_override,
+                                            &mut || checkpoint(),
+                                        );
+                                    } else {
+                                        super::update_groups::emit_group_deltas_for_member_with_checkpoint(
                                 &stage.deltas,
                                 peer,
                                 rs_control,
@@ -9520,13 +9552,13 @@ impl RibManager {
                                 &mut unicast.next_hop_override,
                                 &mut || checkpoint(),
                             );
-                                    // ADR-0126 Decision 5 lane arm: a
-                                    // member-scoped emission toward the ONE
-                                    // member each lane transition names
-                                    // (`source(w)`); a no-op for everyone
-                                    // else and for plain groups (no lane
-                                    // deltas exist).
-                                    super::update_groups::emit_lane_deltas_for_member_with_checkpoint(
+                                        // ADR-0126 Decision 5 lane arm: a
+                                        // member-scoped emission toward the ONE
+                                        // member each lane transition names
+                                        // (`source(w)`); a no-op for everyone
+                                        // else and for plain groups (no lane
+                                        // deltas exist).
+                                        super::update_groups::emit_lane_deltas_for_member_with_checkpoint(
                                 &stage.lane_deltas,
                                 peer,
                                 rs_control,
@@ -9535,7 +9567,7 @@ impl RibManager {
                                 &mut unicast.next_hop_override,
                                 &mut || checkpoint(),
                             );
-                                    super::update_groups::emit_rs_tag_transitions_with_checkpoint(
+                                        super::update_groups::emit_rs_tag_transitions_with_checkpoint(
                                         &stage.rs_transitions,
                                         peer,
                                         rs_control,
@@ -9544,6 +9576,7 @@ impl RibManager {
                                         &mut unicast.next_hop_override,
                                         &mut || checkpoint(),
                                     );
+                                    }
                                 }
                             }
                             let mut filtered = group.policy_filtered_for_member_with_checkpoint(
@@ -10335,6 +10368,16 @@ impl RibManager {
                                         prior.insert(crate::update::ExactExportKey::Unicast(
                                             transition.prefix,
                                             transition.path_id,
+                                        ));
+                                    }
+                                }
+                                for (prefix, slots) in &stage.rs_priors {
+                                    checkpoint();
+                                    if slots.as_deref().is_some_and(|slots| {
+                                        self.clean_group_prior_was_admitted(peer, slots)
+                                    }) {
+                                        prior.insert(crate::update::ExactExportKey::Unicast(
+                                            *prefix, 0,
                                         ));
                                     }
                                 }

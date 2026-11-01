@@ -1116,6 +1116,21 @@ impl RibManager {
                 rejected = true;
                 break 'destination;
             }
+            // An rs-control member whose winner is suppressed toward it holds
+            // a fallback candidate; a policy that changes that list changes
+            // the member's slot without touching the shared entries.
+            if !rs_asns.is_empty()
+                && !super::payload::rs_fallback_equal(
+                    source.rs_fallback.get(&route.prefix).map(|list| &**list),
+                    destination
+                        .rs_fallback
+                        .get(&route.prefix)
+                        .map(|list| &**list),
+                )
+            {
+                rejected = true;
+                break 'destination;
+            }
             let changed = match prior {
                 None => true,
                 Some(prior_route) => {

@@ -2811,22 +2811,14 @@ impl RibManager {
             // winner's own source, nothing when the lane is empty.
             // The rs-control decision and the nh residue come from
             // the RESOLVED entry.
-            let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
+            let Some(entry) = group.adv_entry_for(peer, &staged.prefix, staged.path_id, rs_control)
+            else {
                 continue;
             };
             if self.selection_deferred(prefix_family(&entry.route.prefix))
                 && !self
                     .unicast_export_deferral_exempt(entry.route, &mut unicast_deferral_exemptions)
             {
-                continue;
-            }
-            let (source_communities, source_large_communities) =
-                group.source_control_for_route(entry.route, entry.source_attrs);
-            if super::distribution::rs_control::rs_control_suppressed(
-                source_communities,
-                source_large_communities,
-                rs_control,
-            ) {
                 continue;
             }
             replay.push(entry);
@@ -3614,23 +3606,19 @@ impl RibManager {
             .and_then(|gid| self.group_ribs.get(&gid))
             .is_some_and(|group| {
                 group.table.iter().inspect(|_| checkpoint()).any(|staged| {
-                    let Some(entry) =
-                        group.adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)
-                    else {
+                    let Some(entry) = group.adv_entry_post_backstop_for(
+                        peer,
+                        &staged.prefix,
+                        staged.path_id,
+                        rs_control_asn.zip(target_peer_asn),
+                    ) else {
                         return false;
                     };
                     let family = prefix_family(&entry.route.prefix);
-                    let (communities, large) =
-                        group.source_control_for_route(entry.route, entry.source_attrs);
                     self.selection_deferred(family)
                         && !self.unicast_export_deferral_exempt(
                             entry.route,
                             &mut unicast_deferral_exemptions,
-                        )
-                        && !super::distribution::rs_control::rs_control_suppressed(
-                            communities,
-                            large,
-                            rs_control_asn.zip(target_peer_asn),
                         )
                 })
             });

@@ -2,6 +2,7 @@ use super::super::conditional_advertisement::ConditionalGate;
 use super::super::helpers::unicast_deferral_exempt;
 use super::super::update_groups::{
     GroupEvalAccumulator, PerClientBestPrefixStage, PolicyLabel, RunnerUp, capture_source_attrs,
+    may_suppress,
 };
 use super::{
     AdjRibIn, AdjRibOut, Afi, Arc, BgpMetrics, ExplainAdvertisedRoute, ExplainDecision,
@@ -2411,14 +2412,23 @@ impl RibManager {
     /// - **runner-up** = the first permitted candidate whose source
     ///   differs from the winner's, returned as the exception-lane
     ///   payload;
-    /// - early exit once both are found.
+    /// - early exit once both are found, unless one of them carries an
+    ///   RFC 7947 suppression-form community
+    ///   ([`super::super::update_groups::may_suppress`]). Then the walk
+    ///   goes on until two permitted candidates without one, from
+    ///   different sources, settle every member's selection, and returns
+    ///   every permitted candidate after the winner as the RFC 7947
+    ///   fallback list: an `rs_control_communities` member resolves its
+    ///   slot from it, as its per-peer walk drops suppressed candidates
+    ///   before ranking.
     ///
-    /// Candidates sourced by the winner's peer are stepped over
-    /// between the two WITHOUT evaluation: no member's per-peer walk
-    /// evaluates them (the winner's source excludes them by split
-    /// horizon; every other member stops at the winner), so an
-    /// evaluation here would record a verdict no per-peer path
-    /// performs. Every evaluation the walk DOES perform lands in
+    /// Candidates sourced by a peer that already supplied a permitted
+    /// candidate without a suppression-form community (in the common
+    /// case, the winner's) are stepped over WITHOUT evaluation: that
+    /// earlier candidate serves every member it did not source, and its
+    /// source excludes them by split horizon, so no member's per-peer
+    /// walk evaluates them and an evaluation here would record a verdict
+    /// no per-peer path performs. Every evaluation the walk DOES perform lands in
     /// `evals` (ADR-0126 Decision 2): the winner's permit, the
     /// runner-up's permit, and every denial stepped over. Denials
     /// carry their own terminal label into `policy_filtered` — this
@@ -2427,7 +2437,7 @@ impl RibManager {
     ///
     /// `rs_control` and ORR are absent by construction: control
     /// communities diverge per TARGET (enforced at the member-emit
-    /// seams, like today's group staging), and ORR peers cannot be
+    /// seams over the winner and the fallback list), and ORR peers cannot be
     /// per-client-best (validation-enforced). RFC 9234 OTC egress is
     /// deliberately NOT gated in this walk: per-client-best groups
     /// enforce OTC at the central pre-commit backstop
@@ -2507,9 +2517,16 @@ impl RibManager {
 
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let mut winner_source: Option<PeerId> = None;
+        // Sources of permitted candidates that no RFC 7947 control community
+        // can suppress. Each serves every member it did not source, so a
+        // later candidate from one of them is no member's choice, and two of
+        // them settle every member's selection.
+        let mut clean_sources: smallvec::SmallVec<[PeerId; 2]> = smallvec::SmallVec::new();
+        let mut suppressible_seen = false;
+        let mut fallback: Vec<RunnerUp> = Vec::new();
         for candidate in &candidates {
             checkpoint();
-            if winner_source == Some(candidate.peer) {
+            if clean_sources.contains(&candidate.peer) {
                 continue;
             }
             let aspath_str = needs_as_path_string.then(|| memo.aspath_str(candidate));
@@ -2568,17 +2585,39 @@ impl RibManager {
                 continue;
             }
             modified.path_id = 0;
+            if may_suppress(candidate.communities(), candidate.large_communities()) {
+                suppressible_seen = true;
+            } else {
+                clean_sources.push(candidate.peer);
+            }
             if let Some(winner) = winner_source {
-                // Distinct source by the skip above: the runner-up.
-                stage.runner_up = Some(RunnerUp {
+                let entry = RunnerUp {
                     route: modified,
                     nh: nh_action,
                     source_attrs: capture_source_attrs(candidate),
                     policy_label: label,
                     winner_source: winner,
                     local_source: crate::adj_rib_out::LocalExportSource::from_route(candidate),
-                });
-                break;
+                };
+                // The runner-up: the first permitted candidate from another
+                // source.
+                let runner_up = stage.runner_up.is_none() && candidate.peer != winner;
+                let settled = clean_sources.len() == 2;
+                if settled && !suppressible_seen {
+                    // No suppression-form community on the winner or the
+                    // runner-up: the walk ends exactly as it always has, and
+                    // keeps no fallback.
+                    stage.runner_up = Some(entry);
+                    break;
+                }
+                if runner_up {
+                    stage.runner_up = Some(entry.clone());
+                }
+                fallback.push(entry);
+                if settled {
+                    break;
+                }
+                continue;
             }
             winner_source = Some(candidate.peer);
             stage.winner_label = label;
@@ -2615,6 +2654,14 @@ impl RibManager {
             }
         }
 
+        // A member whose winner (or substitution) a control community
+        // suppresses selects from the rest of the walk, like its per-peer
+        // walk; without a suppressible candidate `[winner, runner-up]` is
+        // the whole selection.
+        if suppressible_seen && !fallback.is_empty() {
+            checkpoint();
+            stage.rs_fallback = Some(fallback.into());
+        }
         // Same residue rule as the ungrouped per-client-best arm: at
         // most one route lives at path_id 0. Withdraw any non-zero
         // residue, and 0 itself when no candidate was permitted — an

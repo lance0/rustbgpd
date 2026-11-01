@@ -2995,22 +2995,18 @@ impl RibManager {
             .copied()
             .zip(self.peer_asn.get(&peer).copied());
         for staged in group.table.iter_prefix(prefix) {
-            let Some(entry) = group.adv_entry_post_backstop(peer, prefix, staged.path_id) else {
+            let Some(entry) =
+                group.adv_entry_post_backstop_for(peer, prefix, staged.path_id, rs_control)
+            else {
                 continue;
             };
             let route = entry.route;
-            let (communities, large_communities) =
-                group.source_control_for_route(route, entry.source_attrs);
+            let (_, large_communities) = group.source_control_for_route(route, entry.source_attrs);
             if initial.is_some_and(|admitted| {
                 !admitted.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
             }) || rejected.is_some_and(|keys| {
                 keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
             }) || limits.is_some_and(|limits| !limits.admits_grouped(&route.prefix))
-                || distribution::rs_control::rs_control_suppressed(
-                    communities,
-                    large_communities,
-                    rs_control,
-                )
             {
                 continue;
             }
