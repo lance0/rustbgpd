@@ -1333,18 +1333,17 @@ impl PeerManager {
         // Only cleanup ownership survives deletion, not the old neighbor's
         // operator state, safety latch or lifetime counters.
         self.port_mut(name).held = None;
+        let label = rustbgpd_telemetry::interface_peer_label(name);
         // BGP teardown is settled; a pending BFD cleanup must not let a
-        // deleted and re-added neighbor inherit the old startup window.
-        let _ = self
-            .send_rib_update(
-                rustbgpd_rib::RibUpdate::RetireEorGraceInterface {
-                    interface: name.into(),
-                },
-                super::OperatorReadAdmission::Fenced {
-                    reason: "an interface-only neighbor's removal is partly applied",
-                },
-            )
-            .await;
+        // deleted and re-added neighbor inherit the old startup window. Like
+        // the deletion above it, this never waits for mailbox room, and a
+        // re-added neighbor's session under the label starts behind it.
+        let _ = self.defer_rib_update(
+            Some(label.clone()),
+            rustbgpd_rib::RibUpdate::RetireEorGraceInterface {
+                interface: name.into(),
+            },
+        );
         if !self.settle_port_bfd_removal(name).await {
             // The peer is already gone; only the port's cleanup ownership remains.
             let port = self.port_mut(name);
@@ -1359,26 +1358,21 @@ impl PeerManager {
         else {
             return;
         };
-        let label = rustbgpd_telemetry::interface_peer_label(name);
         if let Some(rib_peer) = port.rib_peer {
             // A binding lost earlier was deleted from the RIB keeping its
             // series; this final deletion, queued behind it, ends them under
             // the interface label after anything that one still emits.
             if port.bound.is_none() {
-                let _ = self
-                    .send_rib_update(
-                        rustbgpd_rib::RibUpdate::PeerDeleted {
-                            peer: rib_peer,
-                            label: Some(label.as_str().into()),
-                            keep_series: false,
-                        },
-                        super::OperatorReadAdmission::Fenced {
-                            reason: "an interface-only neighbor's removal is partly applied",
-                        },
-                    )
-                    .await;
+                let _ = self.defer_rib_update(
+                    Some(label.clone()),
+                    rustbgpd_rib::RibUpdate::PeerDeleted {
+                        peer: rib_peer,
+                        label: Some(label.as_str().into()),
+                        keep_series: false,
+                    },
+                );
             }
-            self.release_unused_rib_peer(rib_peer).await;
+            self.release_unused_rib_peer(rib_peer);
         }
         if let Some(unnumbered) = self.unnumbered.as_mut() {
             unnumbered.discovery.stop(name);

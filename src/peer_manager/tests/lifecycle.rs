@@ -914,7 +914,12 @@ async fn deferred_deletion_stays_ahead_of_later_updates_and_its_label() {
         2,
         "deferred behind the full mailbox"
     );
-    mgr.admit_deferred_rib_updates_for(&other).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        mgr.admit_deferred_rib_updates_for(&other),
+    )
+    .await
+    .expect("a session at another label does not wait for mailbox room");
     assert_eq!(
         mgr.deferred_rib.queue.len(),
         2,
@@ -1017,4 +1022,96 @@ async fn readd_waits_for_the_deleted_neighbors_deferred_cleanup() {
     );
     assert_ne!(mgr.rib_peer_of(&key(addr)), old_handle);
     mgr.delete_peer(key(addr), false).await.unwrap();
+}
+
+/// A deferred deletion's reservation takes the first slot a resumed RIB
+/// frees. A wait for a direct round trip sends it, so on a capacity-1
+/// mailbox the round trip still completes, behind the deletion, instead of
+/// waiting out its deadline beside a slot the actor holds but never uses.
+#[tokio::test]
+async fn a_direct_round_trip_behind_a_deferred_deletion_completes_once_the_rib_resumes() {
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let mut mgr = test_peer_manager();
+    mgr.rib_tx = rib_tx.clone();
+    let deleted = key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    let retiring = key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+    rib_tx.try_send(mailbox_filler()).unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&deleted);
+    // The run loop polls the oldest reservation between turns; it stays
+    // queued for the first free slot when a turn takes another branch.
+    tokio::select! {
+        biased;
+        _ = mgr.deferred_rib.send_oldest() => panic!("the mailbox is full"),
+        () = std::future::ready(()) => {}
+    }
+
+    let rib = tokio::spawn(async move {
+        let mut admitted = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            let kind = match update {
+                RibUpdate::QueryLocRibCount { reply } => {
+                    let _ = reply.send(0);
+                    "QueryLocRibCount"
+                }
+                RibUpdate::PeerDown { .. } => "PeerDown",
+                RibUpdate::PeerDeleted { .. } => "PeerDeleted",
+                RibUpdate::ReleasePeer { .. } => "ReleasePeer",
+                _ => "other",
+            };
+            admitted.push(kind);
+            if admitted.len() == 5 {
+                return admitted;
+            }
+        }
+        admitted
+    });
+    mgr.dampening_retirement_barrier(&retiring, &[7])
+        .await
+        .expect("the barrier completes once the RIB resumes");
+    mgr.flush_deferred_rib_updates(OperatorReadAdmission::Served)
+        .await
+        .unwrap();
+    // The filler, then the deletion that held the first freed slot, ahead of
+    // the barrier. The deletion's release queued for a slot after the
+    // barrier's first send did, and the two interleave in that order.
+    let mut admitted = joined(rib).await;
+    assert_eq!(admitted[..2], ["ReleasePeer", "PeerDeleted"]);
+    admitted[2..].sort_unstable();
+    assert_eq!(
+        admitted[2..],
+        ["PeerDown", "QueryLocRibCount", "ReleasePeer"]
+    );
+}
+
+/// Once the RIB has exited, the deferred updates are discarded rather than
+/// retried, so neither the run loop nor a flush polls the closed lane again.
+#[tokio::test]
+async fn deferred_updates_are_discarded_once_the_rib_exits() {
+    let (rib_tx, rib_rx) = mpsc::channel(1);
+    let mut mgr = test_peer_manager();
+    mgr.rib_tx = rib_tx.clone();
+    rib_tx.try_send(mailbox_filler()).unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    mgr.reap_deleted_peer_metric_series_for_key(&key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))));
+    assert_eq!(mgr.deferred_rib.queue.len(), 4);
+    drop(rib_rx);
+
+    assert!(!mgr.deferred_rib.send_oldest().await, "the RIB has exited");
+    assert!(
+        mgr.deferred_rib.queue.is_empty(),
+        "nothing is left to retry"
+    );
+    assert!(!mgr.deferred_rib.ready());
+
+    let (rib_tx, rib_rx) = mpsc::channel(1);
+    mgr.rib_tx = rib_tx.clone();
+    rib_tx.try_send(mailbox_filler()).unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4))));
+    drop(rib_rx);
+    assert_eq!(
+        mgr.flush_deferred_rib_updates(OperatorReadAdmission::Served)
+            .await,
+        Err(())
+    );
+    assert!(mgr.deferred_rib.queue.is_empty());
 }

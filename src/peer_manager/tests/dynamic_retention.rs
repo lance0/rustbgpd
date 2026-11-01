@@ -1448,3 +1448,119 @@ async fn established_reconnect_idle_releases_attached_candidate_identity() {
     );
     rib_task.abort();
 }
+
+/// A member auto-removed behind a full RIB mailbox that does not drain
+/// defers its cleanup. Its reconnect, and a new address, are refused at once
+/// and counted rather than waiting for room, so no new identity joins the
+/// queue; once the cleanup is admitted the reconnect is accepted.
+#[tokio::test]
+async fn accepts_behind_a_deferred_cleanup_are_refused_without_waiting() {
+    let other = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10));
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let mut mgr = manager_on(rib_tx.clone());
+    let _client = accept(&mut mgr).await;
+    let peer = open_validated(&mut mgr).await;
+    while rib_rx.try_recv().is_ok() {}
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    idle(&mut mgr, NOTHING).await;
+    assert_eq!(
+        mgr.deferred_rib.queue.len(),
+        2,
+        "deferred behind the full mailbox"
+    );
+
+    for addr in [MEMBER, other] {
+        let _client = tokio::time::timeout(Duration::from_secs(5), accept_at(&mut mgr, addr))
+            .await
+            .expect("the accept is refused without waiting for mailbox room");
+        assert!(mgr.peers.is_empty(), "{addr} is refused");
+    }
+    assert_eq!(
+        inbound_drop_metric(&mgr.metrics, "rib_cleanup_pending"),
+        Some(2.0)
+    );
+    assert_eq!(
+        mgr.deferred_rib.queue.len(),
+        2,
+        "no new identity joins the queue"
+    );
+
+    let drain = tokio::spawn(async move {
+        let mut admitted = Vec::new();
+        for _ in 0..3 {
+            admitted.push(rib_rx.recv().await.unwrap());
+        }
+        (admitted, rib_rx)
+    });
+    mgr.flush_deferred_rib_updates(super::OperatorReadAdmission::Served)
+        .await
+        .unwrap();
+    let (admitted, _rib_rx) = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            admitted[1..],
+            [
+                RibUpdate::PeerDeleted { peer: deleted, .. },
+                RibUpdate::ReleasePeer { peer: released },
+            ] if deleted == peer && released == peer
+        ),
+        "the member's cleanup reaches the RIB in order"
+    );
+    let _client = accept(&mut mgr).await;
+}
+
+/// A static neighbor added at a retained member's address starts its session
+/// before the member's identity is deleted. Behind a full RIB mailbox that
+/// deletion is deferred, so the add completes only once it is admitted,
+/// keeping the old identity's label reap ahead of anything the new session
+/// sends.
+#[tokio::test]
+async fn a_static_add_replacing_a_retained_member_waits_for_its_deferred_deletion() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let retained = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let (stalled_tx, mut stalled_rx) = mpsc::channel(1);
+    mgr.rib_tx = stalled_tx.clone();
+    stalled_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    let drain = tokio::spawn(async move {
+        let mut admitted = Vec::new();
+        while let Some(update) = stalled_rx.recv().await {
+            let done = matches!(update, RibUpdate::ReleasePeer { peer } if peer == retained);
+            admitted.push(update);
+            if done {
+                break;
+            }
+        }
+        admitted
+    });
+    mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
+        .await
+        .unwrap();
+    assert!(
+        mgr.deferred_rib.queue.is_empty(),
+        "the add completes only once the retained identity's deletion is admitted"
+    );
+    let admitted = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    let deleted = admitted.iter().position(
+        |update| matches!(update, RibUpdate::PeerDeleted { peer, .. } if *peer == retained),
+    );
+    assert_eq!(
+        deleted,
+        Some(admitted.len() - 2),
+        "PeerDeleted, then ReleasePeer"
+    );
+    rib_task.abort();
+}

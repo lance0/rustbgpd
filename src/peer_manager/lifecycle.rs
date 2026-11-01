@@ -902,7 +902,7 @@ impl PeerManager {
             Ok(handle) => handle,
             Err(error) => {
                 if new_rib_peer && let Some(peer) = transport.rib_peer.get() {
-                    self.release_unused_rib_peer(peer).await;
+                    self.release_unused_rib_peer(peer);
                 }
                 return Err(PeerLifecycleError::Internal(format!(
                     "failed to start peer: {error}"
@@ -2249,16 +2249,11 @@ impl PeerManager {
     }
 
     /// Release a handle the RIB never learned of (a refused add). Queued
-    /// behind anything a session might have sent, like a deletion's release.
-    pub(super) async fn release_unused_rib_peer(&mut self, peer: PeerId) {
+    /// behind anything a session might have sent, like a deletion's release,
+    /// without waiting for mailbox room.
+    pub(super) fn release_unused_rib_peer(&mut self, peer: PeerId) {
         if self
-            .send_rib_update(
-                RibUpdate::ReleasePeer { peer },
-                OperatorReadAdmission::Fenced {
-                    reason: "a refused peer add is releasing its identity",
-                },
-            )
-            .await
+            .defer_rib_update(None, RibUpdate::ReleasePeer { peer })
             .is_err()
         {
             // The RIB is gone, so nothing can still name the handle.
@@ -2277,8 +2272,13 @@ impl PeerManager {
     ///
     /// Never waits for the RIB: a full mailbox defers the deletion's
     /// `PeerDeleted` and `ReleasePeer`, in order, behind every update queued
-    /// before them, and nothing this actor sends later and no session started
-    /// at the label they reap overtakes them.
+    /// before them. Every later update this actor sends through
+    /// `send_rib_update` goes behind them, and no session starts at the label
+    /// they reap before they are admitted. The direct round trips (policy,
+    /// conditional-advertisement, owner publication, outbound refresh,
+    /// dampening barrier, BMP and retention queries) may be admitted first:
+    /// they name live or retained handles or RIB-wide state, never a deleted
+    /// handle.
     pub(super) fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
         // A deleted neighbor's counters end with it; a re-add starts at 0.
         self.neighbor_counters.remove(peer);

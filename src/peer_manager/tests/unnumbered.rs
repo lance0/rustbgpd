@@ -4197,6 +4197,73 @@ async fn an_rpc_delete_ends_a_bound_interface_only_neighbor() {
     );
 }
 
+/// Removing a bound interface-only neighbor behind a full RIB mailbox that
+/// does not drain does not wait for room: its deletion, its interface's
+/// End-of-RIB grace retirement and its identity release are deferred, in
+/// that order, and reach the RIB once it drains.
+#[tokio::test]
+async fn removing_an_interface_only_neighbor_behind_a_full_rib_mailbox_does_not_wait() {
+    use rustbgpd_api::peer_types::{OwnedNeighborMutation, OwnedNeighborMutationOutcome};
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let rib_peer = h.mgr.rib_peer_of(&swp1_key(2));
+    h.drain();
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+
+    let outcome = h
+        .owned_neighbor(OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()))
+        .await;
+    assert!(
+        matches!(outcome, OwnedNeighborMutationOutcome::Success),
+        "{outcome:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(5), h.reconcile())
+        .await
+        .expect("the removal does not wait for mailbox room");
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "session ended");
+    assert_eq!(h.drain(), [Command::Stop("swp1".into())]);
+
+    let drain = tokio::spawn(async move {
+        let mut admitted = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            let done = matches!(update, RibUpdate::ReleasePeer { peer } if peer == rib_peer);
+            admitted.push(match update {
+                RibUpdate::PeerDeleted { peer, .. } if peer == rib_peer => "PeerDeleted",
+                RibUpdate::RetireEorGraceInterface { .. } => "RetireEorGraceInterface",
+                RibUpdate::ReleasePeer { peer } if peer == rib_peer => "ReleasePeer",
+                RibUpdate::ReleasePeer { .. } => "filler",
+                _ => "other",
+            });
+            if done {
+                break;
+            }
+        }
+        admitted
+    });
+    h.mgr
+        .flush_deferred_rib_updates(super::OperatorReadAdmission::Served)
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .unwrap()
+            .unwrap(),
+        [
+            "filler",
+            "PeerDeleted",
+            "RetireEorGraceInterface",
+            "ReleasePeer"
+        ]
+    );
+}
+
 /// A `SetPeerGroup` session edit that reaches an interface-only member is
 /// applied: the member rebinds under the new settings on the reconcile,
 /// and a neighbor of another group keeps its session.

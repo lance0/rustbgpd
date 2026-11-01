@@ -205,18 +205,21 @@ impl PeerManager {
         &mut self,
     ) -> Result<UpdateGroupSnapshot, String> {
         let (reply, recv) = oneshot::channel();
-        let rib_tx = self.rib_tx.clone();
-        let round_trip = async move {
-            rib_tx
-                .send(RibUpdate::QueryUpdateGroupSnapshot { reply })
-                .await
-                .map_err(|_| "RIB unavailable while planning update-group impact".to_string())?;
+        // Ordered behind a deferred deletion, so the snapshot never shows a
+        // neighbor the actor has already removed.
+        self.send_rib_update(
+            RibUpdate::QueryUpdateGroupSnapshot { reply },
+            OperatorReadAdmission::Served,
+        )
+        .await
+        .map_err(|()| "RIB unavailable while planning update-group impact".to_string())?;
+        let reply = async move {
             tokio::time::timeout(RIB_REPLY_TIMEOUT, recv)
                 .await
                 .map_err(|_| "RIB update-group snapshot timed out".to_string())?
                 .map_err(|_| "RIB dropped update-group snapshot reply".to_string())
         };
-        self.await_with_readiness(round_trip, OperatorReadAdmission::Served)
+        self.await_with_readiness(reply, OperatorReadAdmission::Served)
             .await
     }
 

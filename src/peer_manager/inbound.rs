@@ -236,7 +236,9 @@ impl PeerManager {
                 }
             }
         }
-        self.admit_deferred_rib_updates_for(&peer_key).await;
+        if self.refuse_inbound_behind_deferred_cleanup(&peer_key, false) {
+            return false;
+        }
         let session_id = self.allocate_session_id();
         let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
             transport_config,
@@ -600,13 +602,16 @@ impl PeerManager {
                         self.local_forwarding_state.clone(),
                     ));
 
+                // Before an eviction, which would queue another deletion.
+                if self.refuse_inbound_behind_deferred_cleanup(&dynamic_peer_key, true) {
+                    return;
+                }
                 if at_limit && !self.evict_retained_dynamic_for_slot() {
                     self.metrics.record_dynamic_neighbor_limit_rejection();
                     self.metrics
                         .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
                     return;
                 }
-                self.admit_deferred_rib_updates_for(&dynamic_peer_key).await;
                 let session_id = self.allocate_session_id();
                 let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
                     transport.clone(),
@@ -1476,7 +1481,9 @@ impl PeerManager {
         notification_idle_failures: u32,
     ) {
         let peer_addr = peer_key.address;
-        self.admit_deferred_rib_updates_for(&peer_key).await;
+        if self.refuse_inbound_behind_deferred_cleanup(&peer_key, false) {
+            return;
+        }
         let session_id = self.allocate_session_id();
         let projected_keyring = if tcp_ao_info.is_some() {
             let Some(is_dynamic) = self.peers.get(&peer_key).map(|managed| managed.is_dynamic)

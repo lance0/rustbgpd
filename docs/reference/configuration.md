@@ -3171,7 +3171,9 @@ Drops are counted in
 `bgp_inbound_connections_dropped_total{reason="rate_limited"}`; the
 `unconfigured` and `dynamic_limit` reasons account the pre-existing
 drop sites and are recorded even while the limiter is disabled, and
-`notification_backoff` counts the NOTIFICATION reconnect-backoff hold. See
+`notification_backoff` counts the NOTIFICATION reconnect-backoff hold, and
+`rib_cleanup_pending` counts connections refused while a deleted neighbor's
+RIB cleanup waits for RIB mailbox room. See
 `docs/reference/operations.md` for the metric reference.
 
 ---

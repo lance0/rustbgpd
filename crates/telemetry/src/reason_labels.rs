@@ -496,16 +496,21 @@ pub enum InboundConnectionDropReason {
     /// A configured neighbor dialled in while its session waited out an
     /// escalated reconnect wait after consecutive NOTIFICATION teardowns.
     NotificationBackoff,
+    /// A deleted neighbor's RIB cleanup was still waiting for room in the
+    /// RIB mailbox: under the connection's own label, or under any label
+    /// for a connection that would admit a new dynamic neighbor.
+    RibCleanupPending,
 }
 
 impl InboundConnectionDropReason {
     /// Every canonical inbound drop reason, for vocabulary walks in
     /// tests and docs.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Unconfigured,
         Self::RateLimited,
         Self::DynamicLimit,
         Self::NotificationBackoff,
+        Self::RibCleanupPending,
     ];
 
     /// The canonical reason string shared by every surface.
@@ -516,6 +521,7 @@ impl InboundConnectionDropReason {
             Self::RateLimited => "rate_limited",
             Self::DynamicLimit => "dynamic_limit",
             Self::NotificationBackoff => "notification_backoff",
+            Self::RibCleanupPending => "rib_cleanup_pending",
         }
     }
 }

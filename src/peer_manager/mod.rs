@@ -293,52 +293,83 @@ const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Ordered primary-lane RIB updates queued while the mailbox was full, so a
-/// deletion never holds the actor on mailbox admission. Each later update
-/// the actor sends through `send_rib_update` goes behind them, and the run
-/// loop sends them as room frees. A deletion adds at most two (its
-/// `PeerDeleted` and `ReleasePeer`); the ordered update a flush owns is the
-/// only other entry.
+/// deletion never holds the actor on mailbox admission.
+///
+/// Every later update the actor sends through `send_rib_update` goes behind
+/// them; no session starts under a label one of them reaps until it is
+/// admitted, and inbound connections are refused meanwhile (see
+/// `refuse_inbound_behind_deferred_cleanup`). Every `await_with_readiness*`
+/// wait drives the oldest one's reservation, so the actor never waits there
+/// for room while its own reservation holds a slot it does not use.
+///
+/// Depth is bounded by state, not by network event rate: no dynamic neighbor
+/// is accepted while the queue is not empty, and static adds wait for the
+/// cleanup under their label, so each entry belongs to a neighbor that
+/// existed when the mailbox filled or that an operator or reconcile change
+/// configured since. A deletion adds at most two (`PeerDeleted` and
+/// `ReleasePeer`), an interface-only neighbor's removal at most four, and the
+/// ordered update a flush owns is the only other entry.
+///
+/// The queue never leaves the actor; only `sender` moves into a flush's
+/// wait. No caller drops a flush mid-wait, and if one did the run loop
+/// restores the sender, so no update is lost.
 #[derive(Default)]
 struct DeferredRibUpdates {
     /// Oldest first, each with the `peer` metric label its handling reaps.
     queue: VecDeque<(Option<String>, RibUpdate)>,
-    /// Admission for the oldest, set while `queue` is not empty. A
-    /// reservation in progress survives a dropped wait, so the update keeps
-    /// its place among waiting senders across run-loop turns.
+    /// Admission for the oldest: set while `queue` is not empty, except while
+    /// a flush has moved it into its wait. A reservation in progress survives
+    /// a dropped wait, so the update keeps its place among waiting senders.
     sender: Option<tokio_util::sync::PollSender<RibUpdate>>,
 }
 
 impl DeferredRibUpdates {
-    /// Wait for room and send the oldest update. Cancel-safe: the send
-    /// follows the reservation without another suspension point. `false`
-    /// once the RIB has exited, which discards the rest.
+    /// Whether a wait should drive the oldest update's reservation: there is
+    /// one, and no flush owns the sender.
+    fn ready(&self) -> bool {
+        self.sender.is_some() && !self.queue.is_empty()
+    }
+
+    /// Wait for room and send the oldest update. Cancel-safe: the sender
+    /// stays in place while it waits, and the send follows the reservation
+    /// without another suspension point. `false` once the RIB has exited.
     async fn send_oldest(&mut self) -> bool {
-        let Self { queue, sender } = self;
-        let Some(port) = sender.as_mut().filter(|_| !queue.is_empty()) else {
+        debug_assert!(self.ready(), "polled with nothing to send");
+        let Some(port) = self.sender.as_mut() else {
             return true;
         };
-        let sent = std::future::poll_fn(|cx| port.poll_reserve(cx))
+        let reserved = std::future::poll_fn(|cx| port.poll_reserve(cx))
             .await
-            .is_ok_and(|()| {
-                let (_, update) = queue.pop_front().expect("checked not empty above");
-                port.send_item(update).is_ok()
-            });
+            .is_ok();
+        let port = self.sender.take().expect("still in place after the wait");
+        self.send_reserved(port, reserved)
+    }
+
+    /// Send the oldest update on `port`'s reservation, keeping `port` while
+    /// updates remain. A RIB that has exited (`!reserved`, or a failed send)
+    /// discards them all, so no wait polls a closed channel again.
+    fn send_reserved(
+        &mut self,
+        mut port: tokio_util::sync::PollSender<RibUpdate>,
+        reserved: bool,
+    ) -> bool {
+        let sent = reserved
+            && self
+                .queue
+                .pop_front()
+                .is_some_and(|(_, update)| port.send_item(update).is_ok());
         if !sent {
-            queue.clear();
+            self.queue.clear();
         }
-        if queue.is_empty() {
-            *sender = None;
-        }
+        self.sender = (!self.queue.is_empty()).then_some(port);
         sent
     }
 
-    async fn send_all(&mut self) -> bool {
-        while !self.queue.is_empty() {
-            if !self.send_oldest().await {
-                return false;
-            }
-        }
-        true
+    /// Whether a queued update reaps `label`.
+    fn reaps(&self, label: &str) -> bool {
+        self.queue
+            .iter()
+            .any(|(reaps, _)| reaps.as_deref() == Some(label))
     }
 }
 
@@ -1308,6 +1339,13 @@ impl PeerManager {
                         None => self.operator_rx = None,
                     }
                 }
+                // A deferred update's reservation can take the next free
+                // slot; sending it frees the lane for the step's own send.
+                sent = self.deferred_rib.send_oldest(), if self.deferred_rib.ready() => {
+                    if !sent {
+                        debug!("RIB exited: discarding deferred RIB updates");
+                    }
+                }
             }
         }
     }
@@ -1382,6 +1420,15 @@ impl PeerManager {
                         return None;
                     }
                 }
+                sent = self.deferred_rib.send_oldest(), if self.deferred_rib.ready() => {
+                    remaining = remaining.saturating_sub(attended.elapsed());
+                    if !sent {
+                        debug!("RIB exited: discarding deferred RIB updates");
+                    }
+                    if remaining.is_zero() {
+                        return None;
+                    }
+                }
             }
         }
     }
@@ -1432,46 +1479,71 @@ impl PeerManager {
         &mut self,
         admission: OperatorReadAdmission,
     ) -> Result<(), ()> {
-        if self.deferred_rib.queue.is_empty() {
-            return Ok(());
+        while !self.deferred_rib.queue.is_empty() {
+            // Only the sender moves into the wait, so the wait's own drain
+            // arm stays idle and the queue stays with the actor.
+            let mut port = self
+                .deferred_rib
+                .sender
+                .take()
+                .unwrap_or_else(|| tokio_util::sync::PollSender::new(self.rib_tx.clone()));
+            let (port, reserved) = self
+                .await_with_readiness(
+                    async move {
+                        let reserved = std::future::poll_fn(|cx| port.poll_reserve(cx))
+                            .await
+                            .is_ok();
+                        (port, reserved)
+                    },
+                    admission,
+                )
+                .await;
+            if !self.deferred_rib.send_reserved(port, reserved) {
+                return Err(());
+            }
         }
-        // Moved out so the wait need not borrow the actor. No caller drops a
-        // flush mid-wait; one that did would drop the updates with it.
-        let mut deferred = std::mem::take(&mut self.deferred_rib);
-        let (deferred, sent) = self
-            .await_with_readiness(
-                async move {
-                    let sent = deferred.send_all().await;
-                    (deferred, sent)
-                },
-                admission,
-            )
-            .await;
-        debug_assert!(
-            self.deferred_rib.queue.is_empty(),
-            "a readiness or operator read deferred a RIB update during a flush"
-        );
-        self.deferred_rib = deferred;
-        if sent { Ok(()) } else { Err(()) }
+        Ok(())
     }
 
     /// Start no session at `peer` while a deferred deletion under its metric
     /// label has not reached the RIB: handling that deletion reaps the label,
-    /// and with it the new session's series.
+    /// and with it the new session's series. This waits for mailbox room.
+    /// Its callers are static adds (operator and reconcile adds run as owned
+    /// mutations under the settlement watchdog) and the replacement of a
+    /// session whose peer is still in the table; inbound accepts refuse
+    /// instead (`refuse_inbound_behind_deferred_cleanup`).
     pub(super) async fn admit_deferred_rib_updates_for(&mut self, peer: &PeerKey) {
-        let label = self.peer_metric_label(peer);
-        if self
-            .deferred_rib
-            .queue
-            .iter()
-            .any(|(reaps, _)| reaps.as_deref() == Some(label.as_str()))
-        {
+        if self.deferred_rib.reaps(&self.peer_metric_label(peer)) {
             let _ = self
                 .flush_deferred_rib_updates(OperatorReadAdmission::Fenced {
                     reason: "a new session waits for a deleted neighbor's RIB cleanup",
                 })
                 .await;
         }
+    }
+
+    /// Refuse an inbound connection rather than wait for mailbox room while a
+    /// deleted neighbor's RIB cleanup is deferred: under `peer`'s label, or,
+    /// for a connection that would admit a new dynamic neighbor
+    /// (`new_identity`), under any label, so no new identity joins the queue
+    /// until it drains. The neighbor reconnects on its own timer.
+    pub(super) fn refuse_inbound_behind_deferred_cleanup(
+        &self,
+        peer: &PeerKey,
+        new_identity: bool,
+    ) -> bool {
+        let refused = if new_identity {
+            !self.deferred_rib.queue.is_empty()
+        } else {
+            self.deferred_rib.reaps(&self.peer_metric_label(peer))
+        };
+        if refused {
+            self.metrics.record_inbound_connection_drop(
+                rustbgpd_telemetry::reason_labels::InboundConnectionDropReason::RibCleanupPending,
+            );
+            debug!(peer = %peer, deferred = self.deferred_rib.queue.len(), "dropping inbound connection while a deleted neighbor's RIB cleanup waits for mailbox room");
+        }
+        refused
     }
 
     async fn receive_readiness_query(
@@ -1499,7 +1571,9 @@ impl PeerManager {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "configured peer construction keeps all explicit lifecycle dependencies visible"
+        clippy::too_many_lines,
+        reason = "configured peer construction keeps all explicit lifecycle dependencies and \
+                  every actor field's initial state visible"
     )]
     pub fn new_with_config(
         rx: mpsc::Receiver<PeerManagerCommand>,
@@ -1525,7 +1599,10 @@ impl PeerManager {
         for handle in current_config.policy.dataset_bindings.handles() {
             metrics.record_policy_dataset_loaded(handle.name());
         }
-        metrics.set_dynamic_neighbor_capacity(0, current_config.effective_dynamic_neighbor_limit());
+        metrics.set_dynamic_neighbor_capacity(
+            0,
+            Config::effective_dynamic_neighbor_limit(&current_config),
+        );
         Self {
             peers: PeerTable::new(&current_config),
             configured_owners: configured_owners::ConfiguredOwners::new(&current_config),
@@ -3109,6 +3186,12 @@ impl PeerManager {
                 self.release_orphaned_retained_handles();
             }
             let retained_dynamic_check_at = self.next_retained_dynamic_check();
+            if self.deferred_rib.sender.is_none() && !self.deferred_rib.queue.is_empty() {
+                // Only a flush dropped mid-wait leaves its updates without
+                // a sender; none is, but nothing queued is ever stranded.
+                self.deferred_rib.sender =
+                    Some(tokio_util::sync::PollSender::new(self.rib_tx.clone()));
+            }
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
@@ -3314,7 +3397,7 @@ impl PeerManager {
                     }
                     self.finish_operator_seam();
                 }
-                sent = self.deferred_rib.send_oldest(), if !self.deferred_rib.queue.is_empty() => {
+                sent = self.deferred_rib.send_oldest(), if self.deferred_rib.ready() => {
                     if !sent {
                         debug!("RIB exited: discarding deferred RIB updates");
                     }
