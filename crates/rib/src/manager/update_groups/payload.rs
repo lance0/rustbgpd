@@ -1685,8 +1685,30 @@ pub(in crate::manager) fn emit_lane_deltas_for_member_with_checkpoint<'a>(
                 } else {
                     let mut route = entry.route.clone();
                     rs_control_route_rewrite(&mut route, large_communities, rs_control);
-                    nh_override_flags.push(entry.nh.clone());
-                    announce.push(route);
+                    // The target already holds this wire form when the
+                    // replaced entry differed only in communities the
+                    // rewrite scrubs toward it.
+                    let held = delta.prior.as_ref().is_some_and(|prior| {
+                        let (prior_communities, prior_large) =
+                            source_control_input(prior.source_attrs.as_ref());
+                        prior.winner_source == member
+                            && prior.local_source == entry.local_source
+                            && !rs_control_suppressed(prior_communities, prior_large, rs_control)
+                            && {
+                                let mut old = prior.route.clone();
+                                rs_control_route_rewrite(&mut old, prior_large, rs_control);
+                                crate::manager::helpers::unicast_routes_equal(
+                                    &old,
+                                    prior.nh.as_ref(),
+                                    &route,
+                                    entry.nh.as_ref(),
+                                )
+                            }
+                    });
+                    if !held {
+                        nh_override_flags.push(entry.nh.clone());
+                        announce.push(route);
+                    }
                 }
             }
             None => {
