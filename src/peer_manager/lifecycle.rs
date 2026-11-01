@@ -2290,7 +2290,8 @@ impl PeerManager {
     /// retained neighbor deleted after it was sent, and
     /// `finish_retention_pass` drops that answer. An interface-only
     /// neighbor's handle, kept across endpoints (`keep_series`), is reused
-    /// only after the `RebindPeer` that flushes its deletion.
+    /// by a `RebindPeer` sent directly, and only once no cleanup under its
+    /// interface's label is queued, so its deletion has been admitted.
     pub(super) fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
         // A deleted neighbor's counters end with it; a re-add starts at 0.
         self.neighbor_counters.remove(peer);

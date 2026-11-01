@@ -2263,6 +2263,12 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
          await_with_readiness",
     ),
     (
+        "unnumbered.rs::bind_port",
+        1,
+        "the neighbor's RebindPeer uses try_send and never waits: a full mailbox rolls the \
+         bind back for its caller to retry or refuse",
+    ),
+    (
         "retained_dynamic.rs::check_due_retained_dynamic",
         1,
         "never awaited by the actor: the batched retention query and its reply run in a \

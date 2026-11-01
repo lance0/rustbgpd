@@ -3844,6 +3844,12 @@ fn resolve_rib_channel_capacity() -> usize {
         }
     };
     let capacity = resolve_rib_channel_capacity_from(env.as_deref());
+    if capacity == 1 {
+        warn!(
+            "{TEST_RIB_CHANNEL_CAPACITY_ENV}=1 is not supported: deferred RIB cleanup can hold \
+             the only slot through a bounded session command or read; use 2 or more"
+        );
+    }
     if capacity != RIB_CHANNEL_CAPACITY {
         warn!(
             capacity,

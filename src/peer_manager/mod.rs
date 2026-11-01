@@ -300,8 +300,9 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// session starts under a label one of them reaps until it is admitted, and
 /// inbound connections are refused meanwhile (see
 /// `refuse_inbound_behind_deferred_cleanup`). An interface-only bind that
-/// would wait behind them is retried on the reconcile timer or, from an
-/// inbound connection, refused.
+/// would wait for mailbox room (a cleanup queued under its interface's
+/// label, or no room for its `RebindPeer`) is retried on the reconcile timer
+/// or, from an inbound connection, refused.
 ///
 /// Every `await_with_readiness*` wait and a session's bounded shutdown
 /// drive the oldest one's reservation (`drive_while`), sending it once it is
