@@ -7692,6 +7692,640 @@ fn chain_expect_members_retain_only_referenced_tables() {
     }
 }
 
+// ─── `else if` chains and nested `if` ───────────────────────────────
+
+fn med_lp_ctx(med: Option<u32>, local_pref: Option<u32>) -> RouteContext<'static> {
+    let mut ctx = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    ctx.med = med;
+    ctx.local_pref = local_pref;
+    ctx
+}
+
+/// An `else if` chain is one term in the source and first-match IR terms
+/// in the compiled form. Every branch here decides, so first-match alone
+/// keeps the walk from reaching a later term after an earlier branch
+/// matched: each branch is guarded by its own guard only, and the `else` is
+/// unconditional. Explain names them `t.1`, `t.2`, ...
+#[test]
+fn else_if_chain_lowers_to_first_match_terms() {
+    use crate::engine::PolicyChain;
+    use crate::engine::explain::explain_chain_statements;
+
+    let compiled = compile_ok(
+        "policy p {
+             term t {
+                 if route.med >= 100 { set local-pref 10; accept }
+                 else if route.med >= 50 { set local-pref 20; accept }
+                 else { reject }
+             }
+         }",
+    );
+    let terms = &compiled.policies[0].terms;
+    let names: Vec<_> = terms.iter().map(|term| term.name.as_deref()).collect();
+    assert_eq!(names, [Some("t.1"), Some("t.2"), Some("t.3")]);
+    for term in &terms[..2] {
+        assert!(
+            !matches!(term.guard, MatchExpr::And(_) | MatchExpr::Not(_)),
+            "a deciding earlier branch adds no negation: {:?}",
+            term.guard
+        );
+    }
+    assert_eq!(terms[2].guard, MatchExpr::True);
+    assert_eq!(terms[2].action, TermAction::Deny);
+
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )]);
+    for (med, action, local_pref, term) in [
+        (120, PolicyAction::Permit, Some(10), "t.1"),
+        (60, PolicyAction::Permit, Some(20), "t.2"),
+        (10, PolicyAction::Deny, None, "t.3"),
+    ] {
+        let ctx = med_lp_ctx(Some(med), None);
+        let result = chain.evaluate(&ctx);
+        assert_eq!(result.action, action, "med {med}");
+        assert_eq!(result.modifications.set_local_pref, local_pref, "med {med}");
+        let trace = explain_chain_statements(Some(&chain), &ctx);
+        assert_eq!(trace.action, action);
+        assert_eq!(
+            trace.steps[0].term_name.as_deref(),
+            Some(term),
+            "med {med}: explain names the deciding branch's IR term"
+        );
+    }
+}
+
+/// Exactly one branch of a chain runs, even when no branch decides: the
+/// shape that one term per branch cannot express without hand-written
+/// negations. Red proof: dropping the negated earlier guards from a
+/// branch's path runs both modifying branches for `med 120`.
+#[test]
+fn else_if_chain_runs_exactly_one_modifying_branch() {
+    let chain = compile_ok(
+        "policy p {
+             term tag {
+                 if route.med >= 100 { add community 65000:1 }
+                 else if route.med >= 50 { add community 65000:2 }
+                 else { add community 65000:3 }
+             }
+             term done { accept }
+         }",
+    );
+    for (med, community) in [(120, 0xFDE8_0001), (60, 0xFDE8_0002), (10, 0xFDE8_0003)] {
+        let result = chain.evaluate(&med_lp_ctx(Some(med), None));
+        assert_eq!(result.action, PolicyAction::Permit);
+        assert_eq!(
+            result.modifications.communities_add,
+            [community],
+            "med {med}: only the first matching branch runs"
+        );
+    }
+}
+
+/// A nested `if` runs only where every enclosing guard holds, in an
+/// `if` body and in an `else` body. Red proof: lowering a nested branch
+/// without its enclosing path condition accepts the second and fourth
+/// routes.
+#[test]
+fn nested_if_conjoins_the_enclosing_path() {
+    let chain = compile_ok(
+        "policy p {
+             default-action reject
+             term t {
+                 if route.med >= 10 {
+                     if route.local-pref >= 200 { accept }
+                 } else {
+                     set med 1
+                     if route.local-pref >= 300 { accept }
+                 }
+             }
+         }",
+    );
+    for (med, local_pref, action) in [
+        (20, 250, PolicyAction::Permit),
+        (5, 250, PolicyAction::Deny),
+        (20, 100, PolicyAction::Deny),
+        (20, 350, PolicyAction::Permit),
+        (5, 350, PolicyAction::Permit),
+    ] {
+        let result = chain.evaluate(&med_lp_ctx(Some(med), Some(local_pref)));
+        assert_eq!(result.action, action, "med {med}, local-pref {local_pref}");
+    }
+    let result = chain.evaluate(&med_lp_ctx(Some(5), Some(350)));
+    assert_eq!(
+        result.modifications.set_med,
+        Some(1),
+        "the else body's modification precedes its nested accept"
+    );
+}
+
+/// A branch guard evaluates only where the source reaches it. An inner
+/// guard that would fail closed (an absent origin AS in checked
+/// arithmetic) denies only when its enclosing guard holds, even when
+/// that enclosing guard is the costlier set probe.
+#[test]
+fn nested_guard_evaluates_only_under_its_enclosing_guard() {
+    let chain = compile_ok(
+        "prefix-set ours { 10.0.0.0/8 le 32 }
+         policy p {
+             default-action reject
+             term t {
+                 if route.prefix in ours {
+                     if route.origin-as * 1 == 64500 { accept }
+                 } else if route.origin-as * 1 == 64501 {
+                     accept
+                 }
+             }
+         }",
+    );
+    let mut outside = med_lp_ctx(None, None);
+    outside.prefix = Some(v4(192, 0, 2, 0, 24));
+    let inside = med_lp_ctx(None, None);
+    // Outside the set, the else-if guard is reached and fails closed;
+    // inside it, the nested guard is.
+    for ctx in [&outside, &inside] {
+        let result = chain.evaluate(ctx);
+        assert_eq!(result.action, PolicyAction::Deny);
+    }
+    let chain = compile_ok(
+        "prefix-set ours { 10.0.0.0/8 le 32 }
+         policy p {
+             term t {
+                 if route.prefix in ours {
+                     if route.origin-as * 1 == 64500 { reject }
+                 }
+             }
+         }",
+    );
+    let result = chain.evaluate(&outside);
+    assert_eq!(
+        result.action,
+        PolicyAction::Permit,
+        "outside the set the nested guard never evaluates, so no eval error denies"
+    );
+}
+
+fn nested_ifs(depth: usize) -> String {
+    let mut body = "accept".to_string();
+    for level in (0..depth).rev() {
+        body = format!("if route.med >= {level} {{ {body} }}");
+    }
+    format!("policy p {{ term t {{ {body} }} }}")
+}
+
+/// `if` nests up to four levels, like loops; an `else if` chain of any
+/// length is one level.
+#[test]
+fn if_nesting_is_capped_at_four_levels() {
+    let chain = compile_ok(&nested_ifs(4));
+    let terms = &chain.policies[0].terms;
+    assert_eq!(terms.len(), 1);
+    assert!(matches!(terms[0].action, TermAction::Permit(_)));
+    let result = chain.evaluate(&med_lp_ctx(Some(3), None));
+    assert_eq!(result.action, PolicyAction::Permit);
+
+    let (diags, rendered) = diagnostics_of(&nested_ifs(5));
+    assert_eq!(diags.len(), 1, "{rendered}");
+    assert!(
+        rendered.contains("`if` statements nest more than 4 deep"),
+        "{rendered}"
+    );
+
+    let chain: String = (0..20)
+        .map(|n| format!("if route.med == {n} {{ set local-pref {n} }}"))
+        .collect::<Vec<_>>()
+        .join(" else ");
+    let source = format!("policy p {{ term t {{ if route.med >= 1000 {{ {chain} }} }} }}");
+    compile_ok(&source);
+}
+
+/// Every lowered term re-evaluates its whole path guard, and the cost
+/// model charges it. A chain of modify-only branches carries every earlier
+/// guard's negation into each later branch, so its compiled size grows
+/// with the square of the chain (199 links fit the 100,000-node budget).
+/// A chain of deciding branches carries no negations, so it grows
+/// linearly (12,499 links fit). Red proofs: charging each branch only its
+/// own guard admits the 250-link modify-only chain, and keeping the
+/// negations of deciding branches rejects the 5,000-link deciding chain.
+#[test]
+fn else_if_chain_cost_charges_every_reevaluated_guard() {
+    let chain = |links: u32, body: &str| {
+        let body: String = (0..links)
+            .map(|n| body.replace("{n}", &n.to_string()))
+            .collect::<Vec<_>>()
+            .join(" else ");
+        format!("policy p {{ term t {{ {body} }} }}")
+    };
+    let modify = "if route.med == {n} { set local-pref {n} }";
+    compile_ok(&chain(150, modify));
+    let (_, rendered) = diagnostics_of(&chain(250, modify));
+    assert!(rendered.contains("IR nodes"), "{rendered}");
+    let deciding = "if route.med == {n} { set local-pref {n}; accept }";
+    compile_ok(&chain(5_000, deciding));
+    let (_, rendered) = diagnostics_of(&chain(13_000, deciding));
+    assert!(rendered.contains("IR nodes"), "{rendered}");
+}
+
+/// The cost model charges the unconditional `True` guard an empty path
+/// lowers to. Here both branches decide, so the `else` path carries no
+/// condition, and each binding-valued `add community` stands alone as its
+/// own `True`-guarded term: the two `route.med >= n` guards (4 nodes each,
+/// widest), the `let` and N community terms make 9 + N nodes against the
+/// 100,000-node budget. Red proof: charging the empty path 0 admits any N.
+#[test]
+fn else_after_deciding_branches_charges_its_unconditional_terms() {
+    let policy = |terms: usize| {
+        format!(
+            "policy p {{ term t {{ if route.med >= 1 {{ reject }} \
+             else if route.med >= 2 {{ accept }} \
+             else {{ let c = 1\n{} }} }} }}",
+            "add community c\n".repeat(terms)
+        )
+    };
+    compile_ok(&policy(99_991));
+    let (_, rendered) = diagnostics_of(&policy(99_992));
+    assert!(rendered.contains("IR nodes"), "{rendered}");
+}
+
+/// A flat `if` whose body only binds still emits a placeholder term that
+/// gates its `else`, and the model charges it. Each statement here lowers
+/// to three terms under the one-node outer guard: the bind and the
+/// placeholder (3 nodes each: `And` of two guards) and the `else` (4: the
+/// inner guard negated). That is 10 nodes per statement, so 10,000
+/// statements fill the 100,000-node budget exactly. Red proof: without
+/// the placeholder charge the model counts 9 per statement and admits
+/// 10,001.
+#[test]
+fn nested_let_only_if_charges_its_else_placeholder() {
+    let policy = |statements: usize| {
+        let statement = "if route.communities has 65000:1 { \
+                         if route.communities has 65000:2 { let x = 1 } else { set med 5 } }\n";
+        format!(
+            "policy p {{ term t {{\n{} }} }}",
+            statement.repeat(statements)
+        )
+    };
+    compile_ok(&policy(10_000));
+    let (_, rendered) = diagnostics_of(&policy(10_001));
+    assert!(rendered.contains("IR nodes"), "{rendered}");
+}
+
+/// A compact function graph can inline to billions of binds. The budget
+/// check rejects it without recording one arm per inlined term: here each
+/// of six function levels calls the next 40 times, so `set med` would
+/// hoist about 8 billion binds. The evaluation budget fires first, since
+/// the inlined body's value cost grows with its binds. Red proof: with
+/// the uncapped expansion, the test aborts on the allocation.
+#[test]
+fn inlined_bind_counts_reject_without_expanding_each_term() {
+    use std::fmt::Write as _;
+    let mut source = String::from("fn f0(x: u32) -> u32 { x }\n");
+    for level in 1..=6 {
+        let calls = vec![format!("f{}(x)", level - 1); 40].join(" + ");
+        writeln!(source, "fn f{level}(x: u32) -> u32 {{ {calls} }}").unwrap();
+    }
+    for body in [
+        "set med f6(route.med)",
+        "if route.med >= 1 { set med f6(route.med) }",
+    ] {
+        let source = format!("{source}policy p {{ term t {{ {body} }} }}\n");
+        let (_, rendered) = diagnostics_of(&source);
+        assert!(
+            rendered.contains("evaluation budget") || rendered.contains("IR nodes"),
+            "{rendered}"
+        );
+    }
+}
+
+/// Long runs of own-line comments between a branch's `}` and its `else`
+/// keep every comment and the chain's indent, and format idempotently
+/// (3,000 comments in runs of 1,000; a debug-build lexer recurses once
+/// per skipped comment, so one much longer run overflows a test thread's
+/// stack before formatting starts).
+#[test]
+fn long_comment_runs_between_else_if_branches_format_stably() {
+    use std::fmt::Write as _;
+    const RUN: usize = 1_000;
+    let run = |indent: &str| {
+        (0..RUN).fold(String::new(), |mut out, n| {
+            writeln!(out, "{indent}# note {n}").unwrap();
+            out
+        })
+    };
+    let link = |n: u32, indent: &str| {
+        format!("{indent}else if route.med >= {n} {{\n{indent}    set med {n}\n{indent}}}\n")
+    };
+    let source = format!(
+        "policy p {{ term t {{\nif route.med >= 1 {{ set med 1 }}\n{}{}{}{}{}else {{ set med 9 }} }} }}\n",
+        run(""),
+        link(2, ""),
+        run(""),
+        link(3, ""),
+        run("")
+    );
+    let pad = "        ";
+    let expected = format!(
+        "policy p {{\n    term t {{\n{pad}if route.med >= 1 {{\n{pad}    set med 1\n{pad}}}\n{}{}{}{}{}{pad}else {{\n{pad}    set med 9\n{pad}}}\n    }}\n}}\n",
+        run(pad),
+        link(2, pad),
+        run(pad),
+        link(3, pad),
+        run(pad)
+    );
+    let formatted = super::format_rpol(&source).expect("formats");
+    let head = formatted.len().min(600);
+    assert!(
+        formatted == expected,
+        "unexpected layout:\n{}",
+        &formatted[..head]
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+    assert_eq!(compile_ok(&source), compile_ok(&formatted));
+}
+
+/// Bindings follow the nesting: an enclosing body's `let` is visible in
+/// a nested body, a nested body's `let` is not visible after it, and
+/// sibling branches reuse slots.
+#[test]
+fn nested_if_bodies_scope_their_bindings() {
+    let chain = compile_ok(
+        "policy p {
+             term t {
+                 if route.med >= 10 {
+                     let base = route.med + 1
+                     if route.local-pref >= 200 {
+                         let bump = base * 2
+                         set med bump
+                     } else if route.local-pref >= 100 {
+                         set med base
+                     }
+                     accept
+                 }
+             }
+         }",
+    );
+    for (local_pref, med) in [(250, Some(22)), (150, Some(11)), (50, None)] {
+        let result = chain.evaluate(&med_lp_ctx(Some(10), Some(local_pref)));
+        assert_eq!(result.action, PolicyAction::Permit);
+        assert_eq!(result.modifications.set_med, med, "local-pref {local_pref}");
+    }
+
+    let (_, rendered) = diagnostics_of(
+        "policy p {
+             term t {
+                 if route.med >= 10 {
+                     if route.local-pref >= 200 { let inner = 1 }
+                     set med inner
+                 }
+             }
+         }",
+    );
+    assert!(rendered.contains("inner"), "{rendered}");
+}
+
+/// Statements after a verdict in a branch are unreachable, a nested
+/// `if` included, and a loop is not allowed in an `if` body.
+#[test]
+fn nested_if_bodies_reject_unreachable_statements_and_loops() {
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t { if route.med >= 1 { accept if route.med >= 2 { reject } } } }",
+    );
+    assert!(rendered.contains("unreachable statement"), "{rendered}");
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t { if route.med >= 1 { for c in route.communities { break } } } }",
+    );
+    assert!(
+        rendered.contains("`for` is not allowed in an `if` body"),
+        "{rendered}"
+    );
+}
+
+/// Constant-folded guards make branches unreachable: a branch whose guard
+/// is always false, and everything after a branch whose guard is always
+/// true. A chain whose every branch decides makes later terms
+/// unreachable.
+#[test]
+fn unreachable_branches_and_deciding_chains_are_flagged() {
+    use super::LintKind;
+
+    let file = RpolFile::parse(
+        "policy p {
+             term a {
+                 if min(1, 2) >= 2 { set med 1 }
+                 else if route.med >= 5 { set med 2 }
+                 else { set med 3 }
+             }
+             term b {
+                 if min(4, 2) >= 1 { set med 4 }
+                 else if route.med >= 5 { reject }
+                 else { accept }
+             }
+             term c {
+                 if route.med >= 5 { accept }
+                 else if route.med >= 1 { reject }
+                 else { accept }
+             }
+             term d { accept }
+         }
+         test t { route { prefix 10.0.0.0/8 } expect p == accept }",
+    )
+    .expect("parses");
+    let lints = file.lints();
+    let branches: Vec<_> = lints
+        .iter()
+        .filter(|lint| lint.kind == LintKind::UnreachableBranch)
+        .collect();
+    assert_eq!(branches.len(), 3, "{lints:?}");
+    assert!(
+        lints
+            .iter()
+            .any(|lint| lint.kind == LintKind::UnreachableTerm && lint.message.contains("term d")),
+        "{lints:?}"
+    );
+    assert_eq!(
+        LintKind::from_label("unreachable-branch"),
+        Some(LintKind::UnreachableBranch)
+    );
+}
+
+/// The formatter keeps `else if` and `else` on the closing brace's line,
+/// expands a chain's bodies, indents nested ones, and its output
+/// compiles to the same IR.
+#[test]
+fn else_if_and_nested_if_format_canonically() {
+    let source = "policy p { term t { if route.med >= 100 { set local-pref 10 \
+                  if route.local-pref >= 5 { accept } } else if route.med >= 50 { reject } \
+                  else { set med 1 } } }";
+    let formatted = super::format_rpol(source).expect("formats");
+    assert_eq!(
+        formatted,
+        "policy p {
+    term t {
+        if route.med >= 100 {
+            set local-pref 10
+            if route.local-pref >= 5 { accept }
+        } else if route.med >= 50 {
+            reject
+        } else {
+            set med 1
+        }
+    }
+}
+"
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+    assert_eq!(compile_ok(source), compile_ok(&formatted));
+}
+
+/// A branch that can fall through keeps its negation in every later term,
+/// and the path is one flat `And`, conditions in source order: a term whose
+/// first condition misses costs one evaluation however long the chain.
+#[test]
+fn modify_only_chain_paths_are_flat_and_in_source_order() {
+    let compiled = compile_ok(
+        "policy p {
+             term t {
+                 if route.med >= 30 { set local-pref 1 }
+                 else if route.med >= 20 { set local-pref 2 }
+                 else if route.med >= 10 { set local-pref 3 }
+                 else { set local-pref 4 }
+             }
+         }",
+    );
+    let terms = &compiled.policies[0].terms;
+    assert_eq!(terms.len(), 4);
+    let guards: Vec<_> = terms.iter().map(|term| &term.guard).collect();
+    let ge = |n| MatchExpr::Med(Cmp::Ge(n));
+    let not = |expr: MatchExpr| MatchExpr::Not(Box::new(expr));
+    assert_eq!(*guards[0], ge(30));
+    assert_eq!(*guards[1], MatchExpr::And(vec![not(ge(30)), ge(20)]));
+    assert_eq!(
+        *guards[2],
+        MatchExpr::And(vec![not(ge(30)), not(ge(20)), ge(10)])
+    );
+    assert_eq!(
+        *guards[3],
+        MatchExpr::And(vec![not(ge(30)), not(ge(20)), not(ge(10))])
+    );
+    for guard in &guards {
+        if let MatchExpr::And(children) = guard {
+            assert!(
+                children
+                    .iter()
+                    .all(|child| !matches!(child, MatchExpr::And(_))),
+                "the path is flat: {guard:?}"
+            );
+        }
+    }
+}
+
+/// Dropping a deciding branch's negation is safe when its guard fails
+/// closed: the guard errors at the branch's own term, so the route is
+/// denied there and a later branch never decides it.
+#[test]
+fn deciding_branch_with_a_failing_guard_still_denies() {
+    let chain = compile_ok(
+        "policy p {
+             term t {
+                 if route.origin-as * 1 == 64500 { accept }
+                 else if route.med >= 0 { set local-pref 7; accept }
+             }
+         }",
+    );
+    let ctx = med_lp_ctx(Some(5), None);
+    let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(
+        evaluation.eval_error.map(|error| error.kind),
+        Some(crate::eval::EvalErrorKind::AbsentField(
+            crate::ir::ValueField::OriginAs
+        ))
+    );
+    assert_eq!(result.modifications.set_local_pref, None);
+}
+
+/// An `else if` guard's function call evaluates only where the walk reaches
+/// the branch. A modify-only first branch that matches skips it, so the
+/// call's division by zero never runs; reached, it denies with the error.
+/// The same holds for the guard inside an enclosing branch that is skipped.
+#[test]
+fn skipped_else_if_guard_never_runs_its_function_call() {
+    let chain = compile_ok(
+        "fn per(x: u32) -> u32 { 10 / x }
+         policy p {
+             term t {
+                 if route.local-pref >= 500 { set med 1 }
+                 else if per(route.med) == 10 { set med 2 }
+             }
+             term nested {
+                 if route.local-pref >= 900 {
+                     if per(route.med) == 10 { set med 3 }
+                 }
+             }
+         }",
+    );
+    let skipped = med_lp_ctx(Some(0), Some(600));
+    let (result, evaluation) = chain.evaluate_with_attribution(&skipped);
+    assert_eq!(
+        result.action,
+        PolicyAction::Permit,
+        "{:?}",
+        evaluation.eval_error
+    );
+    assert!(evaluation.eval_error.is_none());
+    assert_eq!(result.modifications.set_med, Some(1));
+
+    let reached = med_lp_ctx(Some(0), Some(100));
+    let (result, evaluation) = chain.evaluate_with_attribution(&reached);
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(
+        evaluation.eval_error.map(|error| error.kind),
+        Some(crate::eval::EvalErrorKind::DivideByZero)
+    );
+
+    let nested = med_lp_ctx(Some(0), Some(950));
+    let (result, evaluation) = chain.evaluate_with_attribution(&nested);
+    assert_eq!(
+        result.action,
+        PolicyAction::Deny,
+        "the enclosing branch reaches it"
+    );
+    assert_eq!(
+        evaluation.eval_error.map(|error| error.kind),
+        Some(crate::eval::EvalErrorKind::DivideByZero)
+    );
+}
+
+/// A comment between branches keeps the chain one statement at the chain's
+/// indent, and the layout is stable.
+#[test]
+fn comments_between_else_if_branches_format_stably() {
+    let source = "policy p { term t {\n  if route.med >= 1 { set med 1 } # c1\n  \
+                  else if route.med >= 2 { set med 2 }\n  else # c2\n  \
+                  if route.med >= 3 { set med 3 } } }\n";
+    let formatted = super::format_rpol(source).expect("formats");
+    assert_eq!(
+        formatted,
+        "policy p {
+    term t {
+        if route.med >= 1 {
+            set med 1
+        } # c1
+        else if route.med >= 2 {
+            set med 2
+        } else # c2
+        if route.med >= 3 {
+            set med 3
+        }
+    }
+}
+"
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+    assert_eq!(compile_ok(source), compile_ok(&formatted));
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Community patterns in sets: `*`, `a..b`, `PRIVATE_AS`
 // ─────────────────────────────────────────────────────────────────────
@@ -8258,5 +8892,71 @@ test miss {
                 },
             ]
         );
+    }
+
+    /// Pattern-set guards in an `else if` chain keep first-match semantics:
+    /// a later branch runs only where every earlier pattern guard missed,
+    /// including through a nested `if` and the negation a modify-only
+    /// branch carries forward.
+    #[test]
+    fn pattern_guards_in_else_if_chains_keep_first_match() {
+        let source = r"
+community-set exact { 64496:1 }
+community-set pats { 64496:*, 64497:100..199 }
+community-set priv { PRIVATE_AS:* }
+
+policy p {
+    term t {
+        if route.communities in exact { set local-pref 300 }
+        else if route.communities in pats {
+            if route.communities in priv { set local-pref 250 } else { set local-pref 200 }
+        }
+        else if route.communities in priv { reject }
+        else { set local-pref 100 }
+        accept
+    }
+}
+
+test exact-wins { route { prefix 192.0.2.0/24; communities [64496:1] } expect p == accept with local-pref 300 }
+test pattern { route { prefix 192.0.2.0/24; communities [64496:7] } expect p == accept with local-pref 200 }
+test range { route { prefix 192.0.2.0/24; communities [64497:150] } expect p == accept with local-pref 200 }
+test nested { route { prefix 192.0.2.0/24; communities [64497:150, 64600:1] } expect p == accept with local-pref 250 }
+test private-only { route { prefix 192.0.2.0/24; communities [64600:1] } expect p == reject }
+test range-edge { route { prefix 192.0.2.0/24; communities [64497:200] } expect p == accept with local-pref 100 }
+";
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, 6);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// A pattern-set `in` guard costs what a literal-set guard costs in the
+    /// size model: a modify-only chain of either kind fits the budget at the
+    /// same length and is rejected one link later.
+    #[test]
+    fn pattern_set_guards_cost_like_literal_sets_in_chains() {
+        let chain = |set: &str, links: usize| {
+            let body = (0..links)
+                .map(|n| format!("if route.communities in {set} {{ set med {n} }}"))
+                .collect::<Vec<_>>()
+                .join(" else ");
+            format!(
+                "community-set lit {{ 64496:1 }}\n\
+                 community-set pat {{ 64496:*, 64497:100..199, PRIVATE_AS:* }}\n\
+                 policy p {{ term t {{ {body} }} }}\n\
+                 policy q {{ term t {{ if route.communities in lit {{ accept }} \
+                 if route.communities in pat {{ accept }} }} }}\n"
+            )
+        };
+        let fits = |set: &str, links: usize| {
+            let mut store = crate::sets::SetStore::new();
+            super::super::compile_rpol(&chain(set, links), &mut store).is_ok()
+        };
+        let longest = (1..2_000).take_while(|&n| fits("lit", n)).last().unwrap();
+        assert!(longest > 100, "{longest}");
+        assert!(fits("pat", longest));
+        assert!(!fits("pat", longest + 1));
+        let (_, rendered) = diagnostics_of(&chain("pat", longest + 1));
+        assert!(rendered.contains("IR nodes"), "{rendered}");
+        compile_ok(&chain("pat", longest));
     }
 }
