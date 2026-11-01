@@ -28,18 +28,20 @@ def instrument(files, here):
          "            }\n            let receipt = self.bench_evpn_group_receipt();")
 
     path = manager + "distribution/evpn.rs"
+    # Observe each member's before-state in place, immediately before staging
+    # advances the group stamp; staging and everything after it stay put.
     edit(path, "        let mut stage = self.stage_group_evpn_keys(gid, keys);",
          "        let _terminal_work = super::super::terminal_debt::Scope::new(\n"
-         "            gid, keys.len(), self.bench_terminal_debtors());")
-    # Restrict this edit to the actual root, without changing the staging callers.
+         "            gid, keys.len(), self.bench_terminal_debtors());\n"
+         "        let terminal_members: Vec<PeerId> = self.group_ribs.get(&gid).into_iter()\n"
+         "            .flat_map(|group| group.members.iter().copied()).collect();\n"
+         "        for peer in terminal_members {\n"
+         "            self.bench_terminal_event(peer, \"root_before\", 0);\n        }\n"
+         "        let mut stage = self.stage_group_evpn_keys(gid, keys);")
+    # Restrict these edits to the actual root, without changing the staging callers.
     text = files[path].decode()
     before, root = text.split("    fn distribute_owned_evpn_group(", 1)
     root, after = root.split("    pub(in crate::manager) fn stage_group_evpn_keys(", 1)
-    root = once(root, "        for peer in members {\n            checkpoint();",
-                "        for peer in &members {\n"
-                "            self.bench_terminal_event(*peer, \"root_before\", 0);\n        }\n"
-                "        let mut stage = self.stage_group_evpn_keys(gid, keys);\n"
-                "        for peer in members {\n            checkpoint();")
     # A current feed renewed from its delta payload walks no inventory; count
     # the renewal so a root without the full producer is still accounted for.
     root = once(root, "            let complete = if let Some(seal) = sparse {",
