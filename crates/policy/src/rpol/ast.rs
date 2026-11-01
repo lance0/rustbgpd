@@ -114,8 +114,8 @@ pub enum DatasetEntryAst {
     Prefix(PrefixEntryAst),
     /// A bare u32 ASN.
     Asn(u32),
-    /// A community literal of any kind.
-    Community(CommunityLit),
+    /// A community literal or pattern of any kind.
+    Community(CommunityMatch),
 }
 
 /// `dataset NAME { members }` inside a `test` block (LAN-305): the
@@ -145,8 +145,9 @@ pub struct AsnSetDef {
 pub struct CommunitySetDef {
     /// Set name.
     pub name: Spanned<String>,
-    /// Member community literals (standard / large / RT / RO mixed).
-    pub entries: Vec<Spanned<CommunityLit>>,
+    /// Member criteria (standard / large / RT / RO literals and
+    /// patterns, mixed).
+    pub entries: Vec<Spanned<CommunityMatch>>,
 }
 
 /// A community literal of any of the three kinds.

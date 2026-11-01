@@ -45,6 +45,17 @@ pub enum Tok {
     /// `65000:100` — standard-community literal.
     #[regex(r"[0-9]+:[0-9]+")]
     StdCommunityLit,
+    /// `65000:*`, `*:666`, `65000:100..199`, `PRIVATE_AS:*`,
+    /// `65000:1..9:*`, `RT:65000:*` — a community-set member pattern.
+    /// Every field is a number, `*`, `a..b` or `PRIVATE_AS`. The lowest
+    /// priority hands an all-number spelling, `65000:*:*` and `*:*:*` to
+    /// the tokens above, so existing sources lex unchanged; every other
+    /// match was a lex or parse error before (ADR-0103 Decision 2.3).
+    #[regex(
+        r"((LC:)?(\*|PRIVATE_AS|[0-9]+(\.\.[0-9]+)?):(\*|PRIVATE_AS|[0-9]+(\.\.[0-9]+)?):(\*|PRIVATE_AS|[0-9]+(\.\.[0-9]+)?)|(\*|PRIVATE_AS|[0-9]+(\.\.[0-9]+)?):(\*|PRIVATE_AS|[0-9]+(\.\.[0-9]+)?)|(RT|RO):(\*|PRIVATE_AS|[0-9]+(\.\.[0-9]+)?|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):(\*|PRIVATE_AS|[0-9]+(\.\.[0-9]+)?))",
+        priority = 1
+    )]
+    CommunityPattern,
     /// `10.0.0.0/8`, `2001:db8::/32` — prefix literal.
     #[regex(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+")]
     #[regex(r"[0-9A-Fa-f:]*::[0-9A-Fa-f:.]*/[0-9]+")]
@@ -251,6 +262,7 @@ impl Tok {
             Tok::LargeCommunityAllWildcard => "`*:*:*`",
             Tok::LargeCommunityLit => "large-community literal",
             Tok::StdCommunityLit => "community literal",
+            Tok::CommunityPattern => "community pattern",
             Tok::PrefixLit => "prefix literal",
             Tok::Ipv4Lit | Tok::Ipv6Lit => "IP address literal",
             Tok::Int => "integer",
@@ -379,6 +391,44 @@ mod tests {
         assert_eq!(kinds("RT:65001:100"), vec![Tok::ExtCommunityLit]);
         assert_eq!(kinds("RO:192.0.2.1:5"), vec![Tok::ExtCommunityLit]);
         assert_eq!(kinds("42"), vec![Tok::Int]);
+    }
+
+    /// Community-set patterns are one token; the all-number spellings and
+    /// the two existing large-community wildcards keep their tokens.
+    #[test]
+    fn community_patterns_lex_as_one_token_without_stealing_literals() {
+        for pattern in [
+            "65000:*",
+            "*:666",
+            "*:*",
+            "65000:100..199",
+            "100..199:5",
+            "PRIVATE_AS:*",
+            "65000:PRIVATE_AS",
+            "65000:1:*",
+            "65000:1..9:*",
+            "*:1:*",
+            "PRIVATE_AS:*:*",
+            "LC:65000:*:*",
+            "RT:65000:*",
+            "RO:*:7",
+            "RT:192.0.2.1:*",
+            "RT:PRIVATE_AS:1..9",
+            "65000:5..5",
+        ] {
+            assert_eq!(kinds(pattern), vec![Tok::CommunityPattern], "{pattern}");
+        }
+        assert_eq!(kinds("65000:100"), vec![Tok::StdCommunityLit]);
+        assert_eq!(kinds("65000:1:2"), vec![Tok::LargeCommunityLit]);
+        assert_eq!(kinds("RT:65000:1"), vec![Tok::ExtCommunityLit]);
+        assert_eq!(kinds("65000:*:*"), vec![Tok::LargeCommunityWildcard]);
+        assert_eq!(kinds("*:*:*"), vec![Tok::LargeCommunityAllWildcard]);
+        assert_eq!(kinds("*"), vec![Tok::Star]);
+        assert_eq!(kinds("PRIVATE_AS"), vec![Tok::Ident]);
+        // Spaced forms stay separate tokens.
+        assert_eq!(kinds("65000 : *"), vec![Tok::Int, Tok::Colon, Tok::Star]);
+        assert_eq!(kinds("x: u32"), vec![Tok::Ident, Tok::Colon, Tok::U32Kw]);
+        assert_eq!(kinds("med * 2"), vec![Tok::Ident, Tok::Star, Tok::Int]);
     }
 
     /// LAN-299 / ADR-0103 Decision 2.1: kebab-case maximal munch is

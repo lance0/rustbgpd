@@ -529,7 +529,7 @@ fn override_data(
         DatasetKind::Community => {
             DatasetData::Community(CommunitySet::new(entries.iter().filter_map(|entry| {
                 match &entry.node {
-                    DatasetEntryAst::Community(lit) => Some(lit.to_match()),
+                    DatasetEntryAst::Community(member) => Some(*member),
                     _ => None,
                 }
             })))

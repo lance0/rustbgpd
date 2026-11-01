@@ -107,6 +107,11 @@ boundaries; error messages remain in the legacy `diagnostics` array.
     origin-validation states (non-transitive opaque, type `0x43`
     sub-type `0x00`, state in the last octet), matched and
     added/removed by exact wire value.
+  - Community pattern, valid only as a `community-set` or dataset member:
+    a standard, large or extended literal whose fields may also be `*`,
+    an inclusive range `a..b`, or `PRIVATE_AS` — `65000:*`, `*:666`,
+    `65000:100..199`, `PRIVATE_AS:*`, `65000:1..9:*`, `RT:65000:*` (see
+    "Sets"). A pattern is one token: `65000:*` and `65000 : *` differ.
   - Strings (AS-path regexes, peer-group names): `"..."` with `\"`
     and `\\` escapes.
 - **Statement separators**: `;` between statements is conventional
@@ -157,6 +162,8 @@ asn-set NAME { ASN, ... }
   matches any member** — the set is kind-partitioned internally, and
   the field you write it against (`route.communities in tagged`)
   reads as documentation, not a kind filter.
+- Community-set members may be **patterns** that match a range of
+  values (see "Community patterns" below).
 - ASN sets hold plain ASN literals (u32; 4-byte ASNs are first-class,
   out-of-range literals are a compile error, duplicates deduplicate).
   Membership is probed by `route.origin-as in NAME` and
@@ -168,6 +175,59 @@ asn-set NAME { ASN, ... }
 - There is no `as-path-set` in V1 — inline
   `route.as-path matches "regex"` covers the need (deliberately
   deferred; the regex engine is the existing Cisco-style matcher).
+
+### Community patterns
+
+A community-set or dataset member can match many values:
+
+```rpol
+community-set customer-tags {
+    65000:*,            # any 65000:x
+    *:666,              # x:666 for any ASN half
+    65000:100..199,     # 65000:100 through 65000:199
+    PRIVATE_AS:*,       # a private-use ASN half
+    65000:1..9:*,       # large: 65000:1:x through 65000:9:x
+    PRIVATE_AS:*:*,     # large: a private-use global administrator
+    RT:65000:*          # every route target with global administrator 65000
+}
+```
+
+| Kind | Fields | Examples |
+|---|---|---|
+| Standard | two halves, each 0–65535 | `65000:*`, `*:666`, `65000:100..199`, `PRIVATE_AS:7`, `65000:PRIVATE_AS`, `*:*` |
+| Large | three parts, each 0–4294967295 (`LC:` prefix optional) | `65000:*:*`, `65000:1:*`, `65000:1..9:*`, `*:7:*`, `PRIVATE_AS:*:*` |
+| Extended | `RT:` or `RO:`, then global and local administrators | `RT:65000:*`, `RT:*:666`, `RO:65000:10..20`, `RT:PRIVATE_AS:*`, `RT:192.0.2.1:*` |
+
+- Each field is a number, `*` (every value of the field), an inclusive
+  range `a..b`, or `PRIVATE_AS` — the RFC 6996 private-use ASNs,
+  64512–65534 and, for a 32-bit field, 4200000000–4294967294. A
+  standard-community half is 16 bits, so `PRIVATE_AS` there means
+  64512–65534. A value or range end beyond the field's width, and a
+  range whose low end exceeds its high end (`65000:200..100`), are
+  compile errors. A pattern whose fields each hold one value
+  (`65000:5..5`) is the exact member `65000:5`.
+- Extended patterns compare the decoded `(global, local)` pair, the same
+  encoding-agnostic identity RT/RO literals use: `RT:*:666` matches the
+  2-octet-AS, 4-octet-AS and IPv4-administrator encodings alike, and an
+  IPv4 administrator compares as its 32-bit value.
+- Patterns are members, not values. `add`, `remove`, `has` and test
+  fixtures reject them; probe with `in`. In `<binding> in <set>` the
+  binding is a standard community, so only the set's standard members
+  and patterns can match it.
+- There is no regex form; `ios-regex` and `peeras` elements of an RPL
+  community set have no equivalent.
+
+**Cost.** Exact members stay hash probes, and a set with no patterns of a
+kind evaluates exactly as before. Patterns sit beside the exact members,
+bucketed by a fixed field: a standard pattern by its fixed ASN half, or
+else its fixed low half; a large or extended pattern by its fixed global
+administrator. A pattern with no such field is compared against every
+community of its kind. One route community therefore costs at most one
+probe per bucket, plus the comparisons in those buckets and against the
+unbucketed patterns. A set or dataset snapshot whose worst case exceeds
+64 comparisons per community is a load error; at the wire bound of 16,383
+standard communities, a set at the limit costs about one million
+comparisons per `in` probe, the scale of the evaluation-cost budget.
 
 Migrating an origin lock from an AS-path regex to an ASN set:
 
@@ -278,6 +338,8 @@ declared kind's set definition:
 65000:1:2
 RT:65001:7
 NO_EXPORT
+65001:*          # patterns work as in a community-set
+64496:1..9:*
 ```
 
 Bounds: 64 MiB per file, 1,000,000 records. A line that does not
@@ -1611,7 +1673,8 @@ import-decl := "import" STRING                    # contextual `import`
 dataset-decl := "dataset" ("prefix-set" | "asn-set" | "community-set") IDENT   # contextual `dataset`
 prefix-set-def    := "prefix-set" IDENT "{" [prefix-entry ("," prefix-entry)*] "}"
 prefix-entry      := PREFIX ["ge" INT] ["le" INT]
-community-set-def := "community-set" IDENT "{" [community ("," community)*] "}"
+community-set-def := "community-set" IDENT "{" [community-member ("," community-member)*] "}"
+community-member  := community | COMMUNITY-PATTERN   # `65000:*`, `65000:1..9:*`, `RT:65000:*`
 asn-set-def       := "asn-set" IDENT "{" [INT ("," INT)*] "}"
 fn-def      := "fn" IDENT "(" [param ("," param)*] ")" "->" "u32"
                "{" fn-let* value "}"               # contextual `fn`
@@ -2140,6 +2203,7 @@ and the
 | `as-path length ge 50` | `route.as-path.len >= 50` |
 | `as-path in (ios-regex '...')` | `route.as-path matches "..."` |
 | `community matches-any NAME` | `route.communities in NAME` |
+| `community-set` elements `65000:*`, `65000:[100..199]`, `private-as:*` | `community-set NAME { 65000:*, 65000:100..199, PRIVATE_AS:* }` (see [Community patterns](#community-patterns)) |
 | `validation-state is invalid` | `route.rpki == invalid` |
 | `set local-preference 200` | `set local-pref 200` |
 | `set med 50` | `set med 50` |
@@ -2526,8 +2590,9 @@ These RPL constructs have no `.rpol` spelling today. Each has a form that
 compiles now:
 
 - **`delete community in NAME`** — loop over the route's standard
-  communities and remove those in the set. The loop variable is a standard
-  community, so the set's large and extended members never match it; a
+  communities and remove those in the set, which may hold patterns. The
+  loop variable is a standard community, so the set's large and extended
+  members never match it; a
   named removal also removes a well-known member such as `NO_EXPORT`; and a
   route with more than 4,096 standard communities is denied (the loop's
   iteration cap).

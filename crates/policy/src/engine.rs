@@ -756,12 +756,77 @@ pub fn encode_route_extended_community(
     Ok(ExtendedCommunity::new(raw))
 }
 
+/// One field of a community pattern (`.rpol` community-set members
+/// such as `65000:*`, `65000:100..199` or `PRIVATE_AS:*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CommunityField {
+    /// Inclusive value range. An exact value has `lo == hi`; `*` is the
+    /// field's full range (`0..=65535` for a standard-community half,
+    /// `0..=u32::MAX` otherwise).
+    Range {
+        /// Lowest matching value.
+        lo: u32,
+        /// Highest matching value.
+        hi: u32,
+    },
+    /// A private-use ASN (RFC 6996): 64512..=65534 or
+    /// 4200000000..=4294967294. A 16-bit field can only hit the first
+    /// range.
+    PrivateAs,
+}
+
+impl CommunityField {
+    /// An exact-value field.
+    #[must_use]
+    pub const fn exact(value: u32) -> Self {
+        Self::Range {
+            lo: value,
+            hi: value,
+        }
+    }
+
+    /// Whether `value` falls in this field.
+    #[must_use]
+    #[inline]
+    pub fn matches(self, value: u32) -> bool {
+        match self {
+            Self::Range { lo, hi } => lo <= value && value <= hi,
+            Self::PrivateAs => rustbgpd_wire::is_private_asn(value),
+        }
+    }
+
+    /// The value when the field matches exactly one value.
+    #[must_use]
+    pub const fn fixed(self) -> Option<u32> {
+        match self {
+            Self::Range { lo, hi } if lo == hi => Some(lo),
+            _ => None,
+        }
+    }
+
+    /// Render in `.rpol` syntax; `max` is the field's full-range upper
+    /// bound, rendered as `*`.
+    #[must_use]
+    pub fn render(self, max: u32) -> String {
+        match self {
+            Self::Range { lo: 0, hi } if hi == max => "*".to_string(),
+            Self::Range { lo, hi } if lo == hi => lo.to_string(),
+            Self::Range { lo, hi } => format!("{lo}..{hi}"),
+            Self::PrivateAs => "PRIVATE_AS".to_string(),
+        }
+    }
+}
+
 /// A match criterion for community values (standard, extended, or large).
 ///
 /// Extended community matching is encoding-agnostic: a 2-octet AS RT,
 /// 4-octet AS RT, and IPv4-specific RT with the same decoded
 /// `(global, local)` all match the same `CommunityMatch::RouteTarget`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The `*Pattern` variants are `.rpol` community-set members only
+/// (`65000:*`, `*:666`, `65000:1..9:*`, `RT:65000:*`); they are never
+/// parsed from TOML and never used as add/remove values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CommunityMatch {
     /// Match Route Target (sub-type 0x02) — extended community.
     RouteTarget {
@@ -797,9 +862,53 @@ pub enum CommunityMatch {
     /// `OV_INVALID`); unlike RT/RO matching there is no
     /// encoding-agnostic decode — the wire value *is* the identity.
     ExactExt(u64),
+    /// Match a standard community whose halves fall in the fields.
+    StandardPattern {
+        /// High 16 bits (the ASN half).
+        asn: CommunityField,
+        /// Low 16 bits.
+        value: CommunityField,
+    },
+    /// Match a large community whose three parts fall in the fields.
+    LargePattern {
+        /// Global administrator.
+        global_admin: CommunityField,
+        /// First local data part.
+        local_data1: CommunityField,
+        /// Second local data part.
+        local_data2: CommunityField,
+    },
+    /// Match a Route Target whose decoded `(global, local)` falls in the
+    /// fields (encoding-agnostic, like [`CommunityMatch::RouteTarget`]).
+    RouteTargetPattern {
+        /// Global administrator (ASN, or an IPv4 address as u32).
+        global: CommunityField,
+        /// Local administrator.
+        local: CommunityField,
+    },
+    /// Match a Route Origin whose decoded `(global, local)` falls in the
+    /// fields.
+    RouteOriginPattern {
+        /// Global administrator (ASN, or an IPv4 address as u32).
+        global: CommunityField,
+        /// Local administrator.
+        local: CommunityField,
+    },
 }
 
 impl CommunityMatch {
+    /// Whether this is a `*Pattern` variant (a set member, never a value).
+    #[must_use]
+    pub const fn is_pattern(&self) -> bool {
+        matches!(
+            self,
+            CommunityMatch::StandardPattern { .. }
+                | CommunityMatch::LargePattern { .. }
+                | CommunityMatch::RouteTargetPattern { .. }
+                | CommunityMatch::RouteOriginPattern { .. }
+        )
+    }
+
     /// Check whether a single [`ExtendedCommunity`] matches this criterion.
     #[must_use]
     pub fn matches_ec(&self, ec: &ExtendedCommunity) -> bool {
@@ -811,7 +920,16 @@ impl CommunityMatch {
                 ec.route_origin() == Some((*global, *local))
             }
             CommunityMatch::ExactExt(raw) => ec.as_u64() == *raw,
-            CommunityMatch::Standard { .. } | CommunityMatch::LargeCommunity { .. } => false,
+            CommunityMatch::RouteTargetPattern { global, local } => ec
+                .route_target()
+                .is_some_and(|(g, l)| global.matches(g) && local.matches(l)),
+            CommunityMatch::RouteOriginPattern { global, local } => ec
+                .route_origin()
+                .is_some_and(|(g, l)| global.matches(g) && local.matches(l)),
+            CommunityMatch::Standard { .. }
+            | CommunityMatch::LargeCommunity { .. }
+            | CommunityMatch::StandardPattern { .. }
+            | CommunityMatch::LargePattern { .. } => false,
         }
     }
 
@@ -820,6 +938,9 @@ impl CommunityMatch {
     pub fn matches_standard(&self, community: u32) -> bool {
         match self {
             CommunityMatch::Standard { value } => *value == community,
+            CommunityMatch::StandardPattern { asn, value } => {
+                asn.matches(community >> 16) && value.matches(community & 0xFFFF)
+            }
             _ => false,
         }
     }
@@ -837,6 +958,15 @@ impl CommunityMatch {
                     && lc.local_data1 == *local_data1
                     && lc.local_data2 == *local_data2
             }
+            CommunityMatch::LargePattern {
+                global_admin,
+                local_data1,
+                local_data2,
+            } => {
+                global_admin.matches(lc.global_admin)
+                    && local_data1.matches(lc.local_data1)
+                    && local_data2.matches(lc.local_data2)
+            }
             _ => false,
         }
     }
@@ -846,12 +976,17 @@ impl CommunityMatch {
         match self {
             CommunityMatch::RouteTarget { .. }
             | CommunityMatch::RouteOrigin { .. }
-            | CommunityMatch::ExactExt(_) => ctx
+            | CommunityMatch::ExactExt(_)
+            | CommunityMatch::RouteTargetPattern { .. }
+            | CommunityMatch::RouteOriginPattern { .. } => ctx
                 .extended_communities
                 .iter()
                 .any(|ec| self.matches_ec(ec)),
             CommunityMatch::Standard { value } => ctx.communities.contains(value),
-            CommunityMatch::LargeCommunity { .. } => ctx
+            CommunityMatch::StandardPattern { .. } => {
+                ctx.communities.iter().any(|&c| self.matches_standard(c))
+            }
+            CommunityMatch::LargeCommunity { .. } | CommunityMatch::LargePattern { .. } => ctx
                 .large_communities
                 .iter()
                 .any(|lc| self.matches_large(lc)),

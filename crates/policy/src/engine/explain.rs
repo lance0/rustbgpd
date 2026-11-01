@@ -227,6 +227,26 @@ fn fmt_community_match(cm: &CommunityMatch) -> String {
         // Well-known values (e.g. the RFC 8097 OV_* states) render by
         // name via the wire Display impl; unknown raws render as hex.
         CommunityMatch::ExactExt(raw) => rustbgpd_wire::ExtendedCommunity::new(*raw).to_string(),
+        CommunityMatch::StandardPattern { asn, value } => {
+            let half = u32::from(u16::MAX);
+            format!("{}:{}", asn.render(half), value.render(half))
+        }
+        CommunityMatch::LargePattern {
+            global_admin,
+            local_data1,
+            local_data2,
+        } => format!(
+            "LC:{}:{}:{}",
+            global_admin.render(u32::MAX),
+            local_data1.render(u32::MAX),
+            local_data2.render(u32::MAX)
+        ),
+        CommunityMatch::RouteTargetPattern { global, local } => {
+            format!("RT:{}:{}", global.render(u32::MAX), local.render(u32::MAX))
+        }
+        CommunityMatch::RouteOriginPattern { global, local } => {
+            format!("RO:{}:{}", global.render(u32::MAX), local.render(u32::MAX))
+        }
     }
 }
 
@@ -1102,11 +1122,17 @@ fn render_cmp(field: &str, cmp: Cmp) -> String {
 /// `route.communities`.
 fn community_field(criteria: &[CommunityMatch]) -> &'static str {
     let mut fields = criteria.iter().map(|cm| match cm {
-        CommunityMatch::Standard { .. } => "route.communities",
-        CommunityMatch::LargeCommunity { .. } => "route.large-communities",
+        CommunityMatch::Standard { .. } | CommunityMatch::StandardPattern { .. } => {
+            "route.communities"
+        }
+        CommunityMatch::LargeCommunity { .. } | CommunityMatch::LargePattern { .. } => {
+            "route.large-communities"
+        }
         CommunityMatch::RouteTarget { .. }
         | CommunityMatch::RouteOrigin { .. }
-        | CommunityMatch::ExactExt(_) => "route.ext-communities",
+        | CommunityMatch::ExactExt(_)
+        | CommunityMatch::RouteTargetPattern { .. }
+        | CommunityMatch::RouteOriginPattern { .. } => "route.ext-communities",
     });
     let Some(first) = fields.next() else {
         return "route.communities";

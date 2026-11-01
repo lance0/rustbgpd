@@ -13,7 +13,7 @@ use std::sync::Arc;
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::engine::{AsPathRegex, CommunityMatch, RouteContext};
+use crate::engine::{AsPathRegex, CommunityField, CommunityMatch, RouteContext};
 
 /// Check a candidate prefix against an `(entry, ge, le)` triple using
 /// the exact `PolicyStatement` prefix semantics: the candidate address
@@ -195,8 +195,17 @@ impl std::fmt::Display for PrefixSetEntry {
 
 type PrefixEntryKey = (u8, u128, u8, Option<u8>, Option<u8>);
 
-/// Canonical ordering/interning key for a community criterion.
-type CommunityKey = (u8, u32, u32, u32);
+/// Canonical ordering/interning key for a community criterion: the
+/// kind rank, then the criterion's own ordering.
+type CommunityKey = (u8, CommunityMatch);
+
+/// Most range comparisons one route community value may cost against a
+/// community set's patterns: the largest bucket the value probes plus
+/// the patterns with no fixed field to bucket by. At the wire bound of
+/// 16,383 standard communities per route, a probe stays near
+/// `MAX_EVAL_COST` comparisons. Source sets and dataset snapshots over
+/// the bound are load errors.
+pub const MAX_COMMUNITY_PATTERN_SCAN: usize = 64;
 
 /// An indexed prefix set: membership is one hash probe per *distinct
 /// member prefix length* instead of a scan over every member.
@@ -328,6 +337,10 @@ fn push_group<B: std::hash::Hash + Eq>(
 /// route community satisfies any member criterion. Standard, RT, RO,
 /// and large criteria are partitioned into hash sets so each route
 /// community is one probe against its own kind.
+///
+/// Patterns (`65000:*`, `65000:1..9:*`, `RT:65000:*`) sit beside the
+/// exact partitions, in per-kind indexes bucketed by a fixed field. A set
+/// without patterns carries none, and its probes are the exact ones only.
 #[derive(Debug, Clone, Default)]
 pub struct CommunitySet {
     /// Canonically sorted, deduplicated criteria — the set's identity.
@@ -337,6 +350,144 @@ pub struct CommunitySet {
     route_origins: FxHashSet<(u32, u32)>,
     large: FxHashSet<(u32, u32, u32)>,
     exact_ext: FxHashSet<u64>,
+    /// `None` for a set without patterns.
+    patterns: Option<Box<CommunityPatterns>>,
+}
+
+/// A community set's pattern members, per kind.
+#[derive(Debug, Clone, Default)]
+struct CommunityPatterns {
+    /// Keyed by `(false, asn)` when the ASN half is fixed, else by
+    /// `(true, value)` when the low half is.
+    standard: PatternIndex<(bool, u32), 2>,
+    /// Keyed by the global administrator.
+    large: PatternIndex<u32, 3>,
+    /// Keyed by the global administrator.
+    route_targets: PatternIndex<u32, 2>,
+    /// Keyed by the global administrator.
+    route_origins: PatternIndex<u32, 2>,
+}
+
+impl CommunityPatterns {
+    fn insert(&mut self, cm: CommunityMatch) {
+        match cm {
+            CommunityMatch::StandardPattern { asn, value } => {
+                let key = asn
+                    .fixed()
+                    .map(|asn| (false, asn))
+                    .or_else(|| value.fixed().map(|value| (true, value)));
+                self.standard.insert(key, [asn, value]);
+            }
+            CommunityMatch::LargePattern {
+                global_admin,
+                local_data1,
+                local_data2,
+            } => self.large.insert(
+                global_admin.fixed(),
+                [global_admin, local_data1, local_data2],
+            ),
+            CommunityMatch::RouteTargetPattern { global, local } => {
+                self.route_targets.insert(global.fixed(), [global, local]);
+            }
+            CommunityMatch::RouteOriginPattern { global, local } => {
+                self.route_origins.insert(global.fixed(), [global, local]);
+            }
+            _ => unreachable!("only pattern criteria are inserted"),
+        }
+    }
+
+    #[inline]
+    fn matches_standard(&self, value: u32) -> bool {
+        let (asn, low) = (value >> 16, value & 0xFFFF);
+        self.standard
+            .matches(&[(false, asn), (true, low)], [asn, low])
+    }
+
+    fn matches(&self, ctx: &RouteContext<'_>) -> bool {
+        (!self.standard.is_empty() && ctx.communities.iter().any(|&c| self.matches_standard(c)))
+            || ((!self.route_targets.is_empty() || !self.route_origins.is_empty())
+                && ctx.extended_communities.iter().any(|ec| {
+                    ec.route_target().is_some_and(|(global, local)| {
+                        self.route_targets.matches(&[global], [global, local])
+                    }) || ec.route_origin().is_some_and(|(global, local)| {
+                        self.route_origins.matches(&[global], [global, local])
+                    })
+                }))
+            || (!self.large.is_empty()
+                && ctx.large_communities.iter().any(|lc| {
+                    self.large.matches(
+                        &[lc.global_admin],
+                        [lc.global_admin, lc.local_data1, lc.local_data2],
+                    )
+                }))
+    }
+
+    fn scan_bound(&self) -> usize {
+        self.standard
+            .scan_bound(2)
+            .max(self.large.scan_bound(1))
+            .max(self.route_targets.scan_bound(1))
+            .max(self.route_origins.scan_bound(1))
+    }
+}
+
+/// The range patterns of one community kind. A pattern with a fixed
+/// field lives in that field's bucket; the rest are scanned for every
+/// value.
+#[derive(Debug, Clone)]
+struct PatternIndex<K, const N: usize> {
+    keyed: FxHashMap<K, Vec<[CommunityField; N]>>,
+    unkeyed: Vec<[CommunityField; N]>,
+    largest_bucket: usize,
+}
+
+impl<K, const N: usize> Default for PatternIndex<K, N> {
+    fn default() -> Self {
+        Self {
+            keyed: FxHashMap::default(),
+            unkeyed: Vec::new(),
+            largest_bucket: 0,
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq, const N: usize> PatternIndex<K, N> {
+    fn insert(&mut self, key: Option<K>, fields: [CommunityField; N]) {
+        if let Some(key) = key {
+            let bucket = self.keyed.entry(key).or_default();
+            bucket.push(fields);
+            self.largest_bucket = self.largest_bucket.max(bucket.len());
+        } else {
+            self.unkeyed.push(fields);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.keyed.is_empty() && self.unkeyed.is_empty()
+    }
+
+    /// Whether a pattern in a bucket named by `keys`, or an unkeyed
+    /// pattern, matches every field of `values`.
+    #[inline]
+    fn matches(&self, keys: &[K], values: [u32; N]) -> bool {
+        let hit = |fields: &[CommunityField; N]| {
+            fields
+                .iter()
+                .zip(values)
+                .all(|(field, value)| field.matches(value))
+        };
+        keys.iter().any(|key| {
+            self.keyed
+                .get(key)
+                .is_some_and(|bucket| bucket.iter().any(hit))
+        }) || self.unkeyed.iter().any(hit)
+    }
+
+    /// Most range comparisons one value can cost when it probes `probes`
+    /// buckets.
+    fn scan_bound(&self, probes: usize) -> usize {
+        self.largest_bucket * probes + self.unkeyed.len()
+    }
 }
 
 impl CommunitySet {
@@ -374,6 +525,12 @@ impl CommunitySet {
                 CommunityMatch::ExactExt(raw) => {
                     set.exact_ext.insert(raw);
                 }
+                CommunityMatch::StandardPattern { .. }
+                | CommunityMatch::LargePattern { .. }
+                | CommunityMatch::RouteTargetPattern { .. }
+                | CommunityMatch::RouteOriginPattern { .. } => {
+                    set.patterns.get_or_insert_default().insert(*cm);
+                }
             }
         }
         set
@@ -402,22 +559,43 @@ impl CommunitySet {
         {
             return true;
         }
-        !self.large.is_empty()
+        if !self.large.is_empty()
             && ctx.large_communities.iter().any(|lc| {
                 self.large
                     .contains(&(lc.global_admin, lc.local_data1, lc.local_data2))
             })
+        {
+            return true;
+        }
+        self.patterns
+            .as_deref()
+            .is_some_and(|patterns| patterns.matches(ctx))
     }
 
     /// Whether `value` is a **standard** (RFC 1997) member of this set
-    /// — one hash probe against the standard partition. Backs the
-    /// LAN-303 `<binding> in <community-set>` form, where the binding
-    /// carries a standard community's raw `u32`; large/extended
-    /// members are not `u32`-comparable and never match here.
+    /// — one hash probe against the standard partition, then the
+    /// standard patterns if the set has any. Backs the LAN-303
+    /// `<binding> in <community-set>` form, where the binding carries a
+    /// standard community's raw `u32`; large/extended members are not
+    /// `u32`-comparable and never match here.
     #[must_use]
     #[inline]
     pub fn contains_standard(&self, value: u32) -> bool {
         self.standard.contains(&value)
+            || self
+                .patterns
+                .as_deref()
+                .is_some_and(|patterns| patterns.matches_standard(value))
+    }
+
+    /// Most range comparisons one route community value can cost
+    /// against this set's patterns (0 for a set without patterns); see
+    /// [`MAX_COMMUNITY_PATTERN_SCAN`].
+    #[must_use]
+    pub fn pattern_scan_bound(&self) -> usize {
+        self.patterns
+            .as_deref()
+            .map_or(0, CommunityPatterns::scan_bound)
     }
 
     /// The canonical (sorted, deduplicated) criteria list.
@@ -482,23 +660,43 @@ impl PartialEq for AsnSet {
 
 impl Eq for AsnSet {}
 
-/// Canonical ordering/interning key for a community criterion.
+/// Canonical ordering/interning key for a community criterion. The
+/// exact kinds keep their historical order (standard, RT, RO, large,
+/// raw extended); patterns sort after them.
 fn community_key(cm: CommunityMatch) -> CommunityKey {
-    match cm {
-        CommunityMatch::Standard { value } => (0, value, 0, 0),
-        CommunityMatch::RouteTarget { global, local } => (1, global, local, 0),
-        CommunityMatch::RouteOrigin { global, local } => (2, global, local, 0),
-        CommunityMatch::LargeCommunity {
-            global_admin,
-            local_data1,
-            local_data2,
-        } => (3, global_admin, local_data1, local_data2),
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "deliberate split of the raw u64 into two key halves"
-        )]
-        CommunityMatch::ExactExt(raw) => (4, (raw >> 32) as u32, raw as u32, 0),
+    let rank = match cm {
+        CommunityMatch::Standard { .. } => 0,
+        CommunityMatch::RouteTarget { .. } => 1,
+        CommunityMatch::RouteOrigin { .. } => 2,
+        CommunityMatch::LargeCommunity { .. } => 3,
+        CommunityMatch::ExactExt(_) => 4,
+        CommunityMatch::StandardPattern { .. } => 5,
+        CommunityMatch::RouteTargetPattern { .. } => 6,
+        CommunityMatch::RouteOriginPattern { .. } => 7,
+        CommunityMatch::LargePattern { .. } => 8,
+    };
+    (rank, cm)
+}
+
+/// The load-time [`MAX_COMMUNITY_PATTERN_SCAN`] check for a community
+/// set's members.
+///
+/// # Errors
+///
+/// The reason, without location, when a route community could be
+/// compared against more patterns than the bound.
+pub fn check_community_pattern_scan(
+    criteria: impl IntoIterator<Item = CommunityMatch>,
+) -> Result<(), String> {
+    let bound = CommunitySet::new(criteria.into_iter().filter(CommunityMatch::is_pattern))
+        .pattern_scan_bound();
+    if bound > MAX_COMMUNITY_PATTERN_SCAN {
+        return Err(format!(
+            "a route community can be compared against {bound} patterns in this set, \
+             more than the limit of {MAX_COMMUNITY_PATTERN_SCAN}"
+        ));
     }
+    Ok(())
 }
 
 /// Content-hash interner for match sets and AS-path regexes.
@@ -768,5 +966,214 @@ mod tests {
             &store.as_path_regex(&AsPathRegex::new("_65002_").unwrap())
         ));
         assert!(store.as_path_regex_pattern("(").is_err());
+    }
+    fn range(lo: u32, hi: u32) -> CommunityField {
+        CommunityField::Range { lo, hi }
+    }
+
+    /// The bucketed pattern index agrees with a linear scan of every
+    /// member criterion, for values on and around every field boundary,
+    /// whichever field a pattern is bucketed by.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of patterns and one boundary grid per kind read best together"
+    )]
+    fn community_set_patterns_agree_with_criteria_scan() {
+        use rustbgpd_wire::{ExtendedCommunity, LargeCommunity};
+
+        let any16 = range(0, 0xFFFF);
+        let any32 = range(0, u32::MAX);
+        let criteria = [
+            // Standard: keyed by ASN, keyed by value, and unkeyed.
+            CommunityMatch::StandardPattern {
+                asn: CommunityField::exact(64_496),
+                value: any16,
+            },
+            CommunityMatch::StandardPattern {
+                asn: CommunityField::exact(64_497),
+                value: range(100, 199),
+            },
+            CommunityMatch::StandardPattern {
+                asn: any16,
+                value: CommunityField::exact(666),
+            },
+            CommunityMatch::StandardPattern {
+                asn: CommunityField::PrivateAs,
+                value: range(7, 8),
+            },
+            CommunityMatch::Standard {
+                value: (64_499 << 16) | 1,
+            },
+            // Large: keyed by global admin, and unkeyed.
+            CommunityMatch::LargePattern {
+                global_admin: CommunityField::exact(64_496),
+                local_data1: range(1, 9),
+                local_data2: any32,
+            },
+            CommunityMatch::LargePattern {
+                global_admin: CommunityField::PrivateAs,
+                local_data1: any32,
+                local_data2: range(u32::MAX - 1, u32::MAX),
+            },
+            CommunityMatch::LargePattern {
+                global_admin: any32,
+                local_data1: CommunityField::exact(7),
+                local_data2: any32,
+            },
+            // Extended: RT keyed, RT unkeyed, RO keyed.
+            CommunityMatch::RouteTargetPattern {
+                global: CommunityField::exact(64_496),
+                local: any32,
+            },
+            CommunityMatch::RouteTargetPattern {
+                global: CommunityField::PrivateAs,
+                local: range(1, 2),
+            },
+            CommunityMatch::RouteOriginPattern {
+                global: CommunityField::exact(64_497),
+                local: range(10, 20),
+            },
+        ];
+        let set = CommunitySet::new(criteria.iter().copied());
+        let scan_standard = |c: u32| criteria.iter().any(|cm| cm.matches_standard(c));
+        let scan_large = |lc: &LargeCommunity| criteria.iter().any(|cm| cm.matches_large(lc));
+        let scan_ext = |ec: &ExtendedCommunity| criteria.iter().any(|cm| cm.matches_ec(ec));
+
+        let edges = |points: &[u32]| -> Vec<u32> {
+            points
+                .iter()
+                .flat_map(|&p| [p.saturating_sub(1), p, p.saturating_add(1)])
+                .collect()
+        };
+        let halves = edges(&[
+            0, 7, 8, 100, 199, 666, 64_496, 64_497, 64_499, 64_512, 65_534, 0xFFFF,
+        ]);
+        let words = edges(&[
+            0,
+            1,
+            2,
+            7,
+            9,
+            10,
+            20,
+            64_496,
+            64_497,
+            64_512,
+            65_534,
+            4_200_000_000,
+            u32::MAX - 1,
+            u32::MAX,
+        ]);
+        let mut hits = 0usize;
+        for &hi in &halves {
+            for &lo in &halves {
+                if hi > 0xFFFF || lo > 0xFFFF {
+                    continue;
+                }
+                let c = (hi << 16) | lo;
+                assert_eq!(
+                    set.contains_standard(c),
+                    scan_standard(c),
+                    "standard {hi}:{lo}"
+                );
+                hits += usize::from(scan_standard(c));
+            }
+        }
+        for &ga in &words {
+            for &l1 in &words {
+                for &l2 in &[0, 1, u32::MAX - 2, u32::MAX - 1, u32::MAX] {
+                    let lc = LargeCommunity::new(ga, l1, l2);
+                    let ctx = RouteContext {
+                        large_communities: std::slice::from_ref(&lc),
+                        ..empty_ctx()
+                    };
+                    assert_eq!(set.matches(&ctx), scan_large(&lc), "large {ga}:{l1}:{l2}");
+                    hits += usize::from(scan_large(&lc));
+                }
+            }
+            for &local in &[0u32, 1, 2, 3, 9, 10, 20, 21, 0xFFFF] {
+                let two_octet = |sub: u64| {
+                    ExtendedCommunity::new(
+                        (sub << 48) | (u64::from(ga & 0xFFFF) << 32) | u64::from(local),
+                    )
+                };
+                let four_octet = |sub: u64| {
+                    ExtendedCommunity::new(
+                        (0x02 << 56) | (sub << 48) | (u64::from(ga) << 16) | u64::from(local),
+                    )
+                };
+                for ec in [
+                    two_octet(0x02),
+                    two_octet(0x03),
+                    four_octet(0x02),
+                    four_octet(0x03),
+                ] {
+                    let ctx = RouteContext {
+                        extended_communities: std::slice::from_ref(&ec),
+                        ..empty_ctx()
+                    };
+                    assert_eq!(set.matches(&ctx), scan_ext(&ec), "ext {ec:?}");
+                    hits += usize::from(scan_ext(&ec));
+                }
+            }
+        }
+        assert!(hits > 100, "the grid must exercise matches, got {hits}");
+        // Bucketed by ASN: 64496 and 64497 one each; by value: 666; unkeyed:
+        // the PRIVATE_AS pattern. Standard bound = 2 * 1 + 1.
+        assert_eq!(set.pattern_scan_bound(), 3);
+    }
+
+    #[test]
+    fn pattern_scan_bound_counts_one_bucket_and_the_unkeyed_rest() {
+        let bucket = |n: u32| {
+            (0..n).map(|i| CommunityMatch::LargePattern {
+                global_admin: CommunityField::exact(64_496),
+                local_data1: CommunityField::exact(i),
+                local_data2: range(0, u32::MAX),
+            })
+        };
+        let max = u32::try_from(MAX_COMMUNITY_PATTERN_SCAN).unwrap();
+        assert!(check_community_pattern_scan(bucket(max)).is_ok());
+        assert!(check_community_pattern_scan(bucket(max + 1)).is_err());
+        // Distinct buckets do not add up; exact members never count.
+        let spread = (0..1_000).map(|asn| CommunityMatch::StandardPattern {
+            asn: CommunityField::exact(asn),
+            value: range(0, 0xFFFF),
+        });
+        let exact = (0..1_000).map(|value| CommunityMatch::Standard { value });
+        assert!(check_community_pattern_scan(spread.chain(exact)).is_ok());
+        let unkeyed = |n: u32| {
+            (0..n).map(|i| CommunityMatch::StandardPattern {
+                asn: range(0, i + 1),
+                value: range(0, 0xFFFF),
+            })
+        };
+        assert!(check_community_pattern_scan(unkeyed(max)).is_ok());
+        assert!(check_community_pattern_scan(unkeyed(max + 1)).is_err());
+    }
+
+    fn empty_ctx() -> RouteContext<'static> {
+        RouteContext {
+            prefix: None,
+            next_hop: None,
+            extended_communities: &[],
+            communities: &[],
+            large_communities: &[],
+            as_path_str: "",
+            as_path: None,
+            as_path_len: 0,
+            origin_asn: None,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: None,
+            family: None,
+            evpn_route_type: None,
+            local_pref: None,
+            med: None,
+        }
     }
 }

@@ -302,7 +302,7 @@ impl SetTables {
             .iter()
             .map(|def| {
                 let criteria: Vec<CommunityMatch> =
-                    def.entries.iter().map(|lit| lit.node.to_match()).collect();
+                    def.entries.iter().map(|entry| entry.node).collect();
                 store.community_set(&criteria)
             })
             .collect();
