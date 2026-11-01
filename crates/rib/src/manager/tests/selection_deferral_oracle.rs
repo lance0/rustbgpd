@@ -29,6 +29,18 @@
 //! - I6, send limit: after every UPDATE, no prefix carries more paths from
 //!   the current session than the receiver's Add-Path `send_max`, or more
 //!   than one without Add-Path.
+//! - I7, a deadline waits for its own backlog: when the source restarts
+//!   under GR and its refresh (every path again, then End-of-RIB) is queued
+//!   before its stale deadline, that deadline never expires
+//!   (`bgp_gr_timer_expired_total`), however long an earlier deadline's
+//!   drain runs past it.
+//!
+//! Before the hold, a timer race restarts the source and a GR peer that
+//! never returns, then runs a segment through the real actor loop on a
+//! paused clock: queued input it does not drain (a bulk UPDATE of
+//! withdrawals, the source's refresh) and advances to the next GR deadline,
+//! each followed by one actor turn. The segment settles when its queue
+//! closes and the actor hands the manager back.
 //!
 //! Each case fixes one receiver configuration (private or grouped,
 //! single-best or Add-Path, per-client-best, ORF, prefix limit, and whether
@@ -37,7 +49,9 @@
 //! receiver's session may flap before and during the hold. The source peer
 //! sends several Add-Path paths per prefix, on prefixes that also carry
 //! local paths. Not modelled: IPv6, LLGR, leases, export policy edits, a
-//! second hold, more than one receiver.
+//! second hold, more than one receiver, and timer expiry other than GR
+//! stale deadlines (the ORF and RT-Constrain End-of-RIB caps and selection
+//! deferral are 60 s, beyond every advance).
 //!
 //! Known open defects are allowed only by their exact signature, each
 //! naming its ticket (`allowed`). `ORACLE_STRICT=1` disables every
@@ -47,11 +61,17 @@
 //! sequence minimized by one-op deletion.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
-use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter, private_policy};
+use super::selection_deferral_dirty_rtbh::{
+    connect, connect_session, manager_with_dormant_waiter, private_policy,
+};
 use super::*;
 use crate::update::OutboundRouteUpdate;
 
@@ -62,6 +82,13 @@ const WAITER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 83);
 const OBSERVER_SESSION: u64 = 82;
 const SOURCE_SESSION: u64 = 81;
 const WAITER_SESSION: u64 = 83;
+/// A GR-capable peer that restarts and never returns: the other owner of a
+/// GR deadline in a timer race.
+const ABSENT: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 84);
+const ABSENT_SESSION: u64 = 84;
+/// Withdrawals in one bulk UPDATE: three route chunks, so draining it takes
+/// several actor turns.
+const BULK_WITHDRAWALS: usize = 3 * ROUTES_RECEIVED_CHUNK_SIZE;
 /// Two host routes and one aggregate carry local intent; two aggregates
 /// carry received routes.
 const PREFIXES: usize = 5;
@@ -180,6 +207,37 @@ enum Op {
         kind: RegroupKind,
         on: bool,
     },
+    /// A GR-capable session ends cleanly, which the transport reports as
+    /// `PeerGracefulRestart` with a `restart` s Restart Time. The source
+    /// re-establishes at once (`PeerUp` with the restart flag), which
+    /// rearms its window to `stale` s (RFC 4724 4.2); the absent peer never
+    /// returns. A peer whose window is still open does not restart again.
+    RestartPeer {
+        source: bool,
+        restart: u8,
+        stale: u8,
+    },
+    /// Queue, without draining it, one extended UPDATE from the source
+    /// withdrawing [`BULK_WITHDRAWALS`] prefixes it never announced: a
+    /// backlog that takes several actor turns and changes no route.
+    QueueBulk,
+    /// Queue, without draining it, the restarted source's refresh: every
+    /// live received path again, then its End-of-RIB. Only before its GR
+    /// deadline; once that has passed, nothing.
+    QueueRefresh,
+    /// Move the paused clock to the earliest GR deadline still ahead, then
+    /// give the actor one turn.
+    AdvanceToDeadline,
+}
+
+impl Op {
+    /// Runs inside an open actor segment rather than settling it first.
+    fn in_segment(&self) -> bool {
+        matches!(
+            self,
+            Self::QueueBulk | Self::QueueRefresh | Self::AdvanceToDeadline
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -312,6 +370,66 @@ fn setup_strategy() -> impl Strategy<Value = Op> {
     ]
 }
 
+/// A timer race: both GR peers restart, in either order, and then a
+/// segment of blocks, each queueing input without draining it and then
+/// advancing to the next deadline, with input left queued at its end. The
+/// absent peer's deadline is usually the earlier one.
+fn timer_race_strategy() -> impl Strategy<Value = Vec<Op>> {
+    let queued = || {
+        proptest::collection::vec(
+            prop_oneof![Just(Op::QueueBulk), Just(Op::QueueRefresh)],
+            0..3,
+        )
+    };
+    let block = queued().prop_map(|mut ops| {
+        ops.push(Op::AdvanceToDeadline);
+        ops
+    });
+    (
+        1u8..=2,
+        2u8..=4,
+        any::<bool>(),
+        proptest::collection::vec(block, 1..4),
+        queued(),
+    )
+        .prop_map(
+            |(absent_restart, source_stale, absent_first, blocks, tail)| {
+                let segment = blocks.into_iter().flatten().chain(tail);
+                let absent = Op::RestartPeer {
+                    source: false,
+                    restart: absent_restart,
+                    stale: 0,
+                };
+                let source = Op::RestartPeer {
+                    source: true,
+                    restart: 1,
+                    stale: source_stale,
+                };
+                let mut ops = if absent_first {
+                    vec![absent, source]
+                } else {
+                    vec![source, absent]
+                };
+                ops.extend(segment);
+                ops
+            },
+        )
+}
+
+/// The ops before the hold: single setup ops and whole timer races. A case
+/// keeps about as many setup ops as before races existed (mean 3.4 against
+/// 3.5) and adds about one race.
+fn pre_hold_strategy() -> impl Strategy<Value = Vec<Op>> {
+    proptest::collection::vec(
+        prop_oneof![
+            3 => setup_strategy().prop_map(|op| vec![op]),
+            1 => timer_race_strategy(),
+        ],
+        0..10,
+    )
+    .prop_map(|parts| parts.into_iter().flatten().collect())
+}
+
 fn hold_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         8 => intent_strategy(),
@@ -345,6 +463,39 @@ struct Injection {
     live: bool,
     /// The operator deleted it (a replacement only retires it).
     deleted: bool,
+}
+
+/// The real run loop while a timer segment is open.
+struct Actor {
+    tx: mpsc::Sender<RibUpdate>,
+    run: Pin<Box<dyn Future<Output = RibManager>>>,
+}
+
+/// The GR peer that restarted and never returns.
+struct Absent {
+    rx: mpsc::Receiver<OutboundRouteUpdate>,
+    deadline: tokio::time::Instant,
+}
+
+/// The source's open GR window.
+struct SourceGr {
+    deadline: tokio::time::Instant,
+    /// Received paths still stale: held at the restart, not received again.
+    stale: BTreeSet<(usize, usize)>,
+    /// Its refresh was queued before the deadline.
+    refreshed: bool,
+    /// The source's `bgp_gr_timer_expired_total` at the restart.
+    expired: f64,
+}
+
+/// A source connection: GR families in its OPEN, the restart flag on a
+/// re-establishment.
+fn connect_source(
+    manager: &mut RibManager,
+    session_id: u64,
+    restarting: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    connect_session(manager, SOURCE, session_id, 64, true, restarting, false)
 }
 
 #[expect(
@@ -391,14 +542,34 @@ struct Harness {
     tags: BTreeSet<(usize, u32)>,
     /// Whether each key's row, as last announced, carried BLACKHOLE.
     wire_tag: HashMap<(Prefix, u32), bool>,
+    /// The paused clock and timer driver timer segments run on.
+    rt: Rc<tokio::runtime::Runtime>,
+    /// The run loop while a segment is open; `manager` is then a stand-in.
+    actor: Option<Actor>,
+    /// The source's current transport session.
+    source_session: u64,
+    /// The absent peer's next transport session.
+    absent_session: u64,
+    absent: Option<Absent>,
+    source_gr: Option<SourceGr>,
+    /// An I7 violation a settled segment found, reported by `observe`.
+    timer_failure: Option<String>,
 }
 
 type Checked = Result<(), TestCaseError>;
 
 impl Harness {
     fn new(config: Config) -> Self {
+        let rt = Rc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .expect("a paused runtime"),
+        );
+        let _clock = rt.enter();
         let mut manager = manager_with_dormant_waiter();
-        let source = connect(&mut manager, SOURCE, 64, false, false);
+        let source = connect_source(&mut manager, SOURCE_SESSION, false);
         let observer = peer_v4(OBSERVER);
         manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
             peer: observer,
@@ -436,6 +607,13 @@ impl Harness {
             peer_policy: false,
             tags: BTreeSet::new(),
             wire_tag: HashMap::new(),
+            rt: Rc::clone(&rt),
+            actor: None,
+            source_session: SOURCE_SESSION,
+            absent_session: ABSENT_SESSION,
+            absent: None,
+            source_gr: None,
+            timer_failure: None,
         };
         if !config.late {
             harness.establish();
@@ -692,6 +870,9 @@ impl Harness {
         reason = "one match keeps every operation's daemon call beside its model update"
     )]
     fn apply(&mut self, op: &Op) {
+        if !op.in_segment() {
+            self.settle();
+        }
         match *op {
             Op::Inject {
                 prefix: index,
@@ -758,22 +939,13 @@ impl Harness {
                 // Odd, so a received path never ties a local one.
                 let preference = 101 + 2 * (u32::try_from(path).unwrap() + 3 * preference);
                 let injection = self.new_injection(index, preference, false, blackhole);
-                let Prefix::V4(v4) = prefix(index) else {
-                    unreachable!()
-                };
-                let mut route = make_route_with_lp(v4, SOURCE, preference);
-                route.path_id = PATH_IDS[path];
-                let mut communities =
-                    vec![(IDENTITY_ASN << 16) | u32::try_from(injection).unwrap()];
-                if blackhole {
-                    communities.push(rustbgpd_wire::COMMUNITY_BLACKHOLE);
-                }
-                AttrSet::edit(&mut route.attributes, |attributes| {
-                    attributes.push(PathAttribute::Communities(communities));
-                });
+                let route = Self::received_route(index, path, preference, blackhole, injection);
                 self.receive(vec![route], vec![]);
                 let old = self.received.insert((index, path), injection);
                 self.retire(old);
+                if let Some(gr) = &mut self.source_gr {
+                    gr.stale.remove(&(index, path));
+                }
             }
             Op::ReceiveWithdraw {
                 prefix: index,
@@ -782,6 +954,9 @@ impl Harness {
                 self.receive(vec![], vec![(prefix(index), PATH_IDS[path])]);
                 let old = self.received.remove(&(index, path));
                 self.retire(old);
+                if let Some(gr) = &mut self.source_gr {
+                    gr.stale.remove(&(index, path));
+                }
             }
             Op::Orf { deny } => {
                 // A receiver with no session yet sends no ORF.
@@ -829,6 +1004,316 @@ impl Harness {
             // flap.
             Op::Drain | Op::Reconnect { .. } => {}
             Op::Regroup { kind, on } => self.regroup(kind, on),
+            Op::RestartPeer {
+                source: true,
+                restart,
+                stale,
+            } => self.restart_source(restart, stale),
+            Op::RestartPeer {
+                source: false,
+                restart,
+                ..
+            } => self.restart_absent(restart),
+            Op::QueueBulk => self.queue_bulk(),
+            Op::QueueRefresh => self.queue_refresh(),
+            Op::AdvanceToDeadline => self.advance_to_deadline(),
+        }
+    }
+
+    /// Best first: a fresh path before a GR-stale one (RFC 4724 tier,
+    /// `best_path::stale_rank`), then higher `LOCAL_PREF`.
+    fn rank(&self, injection: usize) -> (bool, std::cmp::Reverse<u32>) {
+        let stale = self.source_gr.as_ref().is_some_and(|gr| {
+            gr.stale
+                .iter()
+                .any(|key| self.received.get(key) == Some(&injection))
+        });
+        (
+            stale,
+            std::cmp::Reverse(self.injections[injection].preference),
+        )
+    }
+
+    /// The source's route for injection `injection` at `(index, path)`.
+    fn received_route(
+        index: usize,
+        path: usize,
+        preference: u32,
+        blackhole: bool,
+        injection: usize,
+    ) -> Route {
+        let Prefix::V4(v4) = prefix(index) else {
+            unreachable!()
+        };
+        let mut route = make_route_with_lp(v4, SOURCE, preference);
+        route.path_id = PATH_IDS[path];
+        let mut communities = vec![(IDENTITY_ASN << 16) | u32::try_from(injection).unwrap()];
+        if blackhole {
+            communities.push(rustbgpd_wire::COMMUNITY_BLACKHOLE);
+        }
+        AttrSet::edit(&mut route.attributes, |attributes| {
+            attributes.push(PathAttribute::Communities(communities));
+        });
+        route
+    }
+
+    fn source_expirations(&self) -> f64 {
+        let peer = SOURCE.to_string();
+        counter_metric_value(
+            &self.manager.metrics,
+            "bgp_gr_timer_expired_total",
+            &[("peer", peer.as_str())],
+        )
+    }
+
+    /// The source's clean end under GR, then its re-establishment with the
+    /// restart flag, as the transport reports them.
+    fn restart_source(&mut self, restart: u8, stale: u8) {
+        if self.source_gr.is_some() {
+            return;
+        }
+        let rt = Rc::clone(&self.rt);
+        let _clock = rt.enter();
+        self.manager.handle_update(RibUpdate::PeerGracefulRestart {
+            peer: peer_v4(SOURCE),
+            session_id: self.source_session,
+            restart_time: u16::from(restart),
+            stale_routes_time: u64::from(stale),
+            gr_families: vec![FAMILY],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        });
+        self.source_session += 1000;
+        self.source = connect_source(&mut self.manager, self.source_session, true);
+        self.source_gr = Some(SourceGr {
+            deadline: self.manager.gr_stale_deadlines[&peer_v4(SOURCE)],
+            stale: self.received.keys().copied().collect(),
+            refreshed: false,
+            expired: self.source_expirations(),
+        });
+    }
+
+    /// The absent peer's session comes up and ends cleanly under GR; it
+    /// never returns, so its deadline sweeps it.
+    fn restart_absent(&mut self, restart: u8) {
+        if self.absent.is_some() {
+            return;
+        }
+        let rt = Rc::clone(&self.rt);
+        let _clock = rt.enter();
+        // Each restart comes up on a session of its own, as the transport's
+        // would.
+        let session_id = self.absent_session;
+        self.absent_session += 1000;
+        let rx = connect_session(&mut self.manager, ABSENT, session_id, 64, true, false, true);
+        self.manager.handle_update(RibUpdate::PeerGracefulRestart {
+            peer: peer_v4(ABSENT),
+            session_id,
+            restart_time: u16::from(restart),
+            stale_routes_time: 360,
+            gr_families: vec![FAMILY],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        });
+        self.absent = Some(Absent {
+            rx,
+            deadline: self.manager.gr_stale_deadlines[&peer_v4(ABSENT)],
+        });
+    }
+
+    /// Open a segment: the real run loop takes the manager, reading a fresh
+    /// primary queue.
+    fn start_actor(&mut self) {
+        if self.actor.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel(64);
+        let stand_in = RibManager::new(
+            mpsc::channel(1).1,
+            dummy_query_rx(),
+            None,
+            None,
+            BgpMetrics::new(),
+        );
+        let mut manager = std::mem::replace(&mut self.manager, stand_in);
+        manager.rx = rx;
+        // As `run()` does, so suspension and the primary run budget behave
+        // as in production.
+        let recorder = manager.metrics.rib_actor_slice_recorder();
+        let suspended = std::sync::Arc::clone(&manager.actor_suspended);
+        self.actor = Some(Actor {
+            tx,
+            run: Box::pin(super::super::slice_timing::TimedActor::new(
+                manager.run_actor(),
+                recorder,
+                suspended,
+            )),
+        });
+    }
+
+    fn queue(&mut self, update: RibUpdate) {
+        self.start_actor();
+        self.actor
+            .as_ref()
+            .expect("an open segment")
+            .tx
+            .try_send(update)
+            .expect("the primary queue has room");
+    }
+
+    fn queue_bulk(&mut self) {
+        let withdrawn = (0..BULK_WITHDRAWALS)
+            .map(|i| {
+                let host = Ipv4Addr::from(0x0a80_0000 + u32::try_from(i).unwrap());
+                (Prefix::V4(Ipv4Prefix::new(host, 32)), 0)
+            })
+            .collect();
+        self.queue(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: self.source_session,
+            announced: vec![],
+            withdrawn,
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+    }
+
+    /// Every live received path again as a fresh injection, then the
+    /// source's End-of-RIB, queued before its deadline.
+    fn queue_refresh(&mut self) {
+        let now = {
+            let _clock = self.rt.enter();
+            tokio::time::Instant::now()
+        };
+        if self
+            .source_gr
+            .as_ref()
+            .is_none_or(|gr| gr.refreshed || now >= gr.deadline)
+        {
+            return;
+        }
+        let paths: Vec<_> = self
+            .received
+            .iter()
+            .map(|(&key, &old)| (key, old))
+            .collect();
+        let mut announced = Vec::new();
+        for ((index, path), old) in paths {
+            let preference = self.injections[old].preference;
+            let blackhole = self.injections[old].community;
+            let injection = self.new_injection(index, preference, false, blackhole);
+            announced.push(Self::received_route(
+                index, path, preference, blackhole, injection,
+            ));
+            self.received.insert((index, path), injection);
+            self.retire(Some(old));
+        }
+        if !announced.is_empty() {
+            self.queue(RibUpdate::RoutesReceived {
+                peer: peer_v4(SOURCE),
+                session_id: self.source_session,
+                announced,
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            });
+        }
+        self.queue(RibUpdate::EndOfRib {
+            peer: peer_v4(SOURCE),
+            session_id: self.source_session,
+            afi: FAMILY.0,
+            safi: FAMILY.1,
+        });
+        let gr = self.source_gr.as_mut().expect("checked above");
+        gr.refreshed = true;
+        gr.stale.clear();
+    }
+
+    /// The earliest GR deadline still ahead, then one actor turn.
+    fn advance_to_deadline(&mut self) {
+        let rt = Rc::clone(&self.rt);
+        let now = {
+            let _clock = rt.enter();
+            tokio::time::Instant::now()
+        };
+        let next = [
+            self.absent.as_ref().map(|absent| absent.deadline),
+            self.source_gr.as_ref().map(|gr| gr.deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|&deadline| deadline > now)
+        .min();
+        if let Some(deadline) = next {
+            rt.block_on(tokio::time::advance(deadline - now));
+        }
+        self.start_actor();
+        let _clock = rt.enter();
+        let actor = self.actor.as_mut().expect("just started");
+        assert!(
+            actor
+                .run
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending(),
+            "the run loop ends only when its queue closes"
+        );
+    }
+
+    /// Close the segment's queue, let the run loop drain it and fire every
+    /// due deadline, take the manager back, and apply the GR outcome.
+    fn settle(&mut self) {
+        let Some(Actor { tx, mut run }) = self.actor.take() else {
+            return;
+        };
+        drop(tx);
+        let rt = Rc::clone(&self.rt);
+        let _clock = rt.enter();
+        let mut context = Context::from_waker(Waker::noop());
+        self.manager = (0..100_000)
+            .find_map(|_| match run.as_mut().poll(&mut context) {
+                Poll::Ready(manager) => Some(manager),
+                Poll::Pending => None,
+            })
+            .expect("the run loop drains its closed queue");
+        let now = tokio::time::Instant::now();
+        // The absent peer's deadline fired and swept it: a later race may
+        // restart it on a new session.
+        if self
+            .absent
+            .as_ref()
+            .is_some_and(|absent| now >= absent.deadline)
+        {
+            self.absent = None;
+        }
+        let Some(gr) = &self.source_gr else {
+            return;
+        };
+        if gr.refreshed {
+            let expired = self.source_expirations();
+            if expired > gr.expired {
+                self.timer_failure = Some(format!(
+                    "I7: the source's GR deadline expired although its refresh was queued before it; \
+                     expirations {} -> {expired}",
+                    gr.expired
+                ));
+            }
+            self.source_gr = None;
+        } else if now >= gr.deadline {
+            // The deadline swept every path still stale.
+            for key in gr.stale.clone() {
+                let old = self.received.remove(&key);
+                self.retire(old);
+            }
+            self.source_gr = None;
         }
     }
 
@@ -934,7 +1419,7 @@ impl Harness {
     fn receive(&mut self, announced: Vec<Route>, withdrawn: Vec<(Prefix, u32)>) {
         self.manager.handle_update(RibUpdate::RoutesReceived {
             peer: peer_v4(SOURCE),
-            session_id: SOURCE_SESSION,
+            session_id: self.source_session,
             announced,
             withdrawn,
             flowspec_announced: vec![],
@@ -948,9 +1433,22 @@ impl Harness {
 
     /// Apply what the receiver got; I4 holds for every announcement.
     fn observe(&mut self) -> Result<usize, TestCaseError> {
+        if let Some(reason) = self.timer_failure.take() {
+            return Err(TestCaseError::fail(reason));
+        }
+        // An open segment's updates are read once it settles, after its GR
+        // outcome reaches the model.
+        if self.actor.is_some() {
+            return Ok(0);
+        }
         // The source and waiter never backpressure: only the receiver
         // retries.
         while self.source.try_recv().is_ok() {}
+        while self
+            .absent
+            .as_mut()
+            .is_some_and(|absent| absent.rx.try_recv().is_ok())
+        {}
         while self
             .waiter
             .as_mut()
@@ -1124,8 +1622,7 @@ impl Harness {
                         .map(|(_, &injection)| injection),
                 )
                 .collect();
-            paths
-                .sort_by_key(|&injection| std::cmp::Reverse(self.injections[injection].preference));
+            paths.sort_by_key(|&injection| self.rank(injection));
             if self.config.add_path {
                 for (rank, &injection) in paths.iter().take(ADD_PATH_MAX).enumerate() {
                     expected.insert((prefix(index), u32::try_from(rank).unwrap() + 1), injection);
@@ -1384,12 +1881,7 @@ impl Harness {
                 }
                 same
             });
-            injections.sort_by_key(|&injection| {
-                (
-                    std::cmp::Reverse(self.injections[injection].preference),
-                    injection,
-                )
-            });
+            injections.sort_by_key(|&injection| (self.rank(injection), injection));
             for (key, injection) in (1..).zip(injections.into_iter().chain(repeated)) {
                 renumbered.insert((prefix, key), injection);
             }
@@ -1435,11 +1927,21 @@ impl Harness {
 
 fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     let mut harness = Harness::new(config);
+    let rt = Rc::clone(&harness.rt);
+    let _clock = rt.enter();
     harness.observe()?;
     for op in setup {
+        if !op.in_segment() {
+            // A settled segment's updates reach the wire checks before the
+            // next op changes the intent they are checked against.
+            harness.settle();
+            harness.observe()?;
+        }
         harness.apply(op);
         harness.observe()?;
     }
+    harness.settle();
+    harness.observe()?;
     harness.drain()?;
     prop_assert!(
         config.late
@@ -1568,7 +2070,7 @@ fn gr_hold_matches_a_fresh_session_model() {
     });
     let strategy = (
         config_strategy(),
-        proptest::collection::vec(setup_strategy(), 0..8),
+        pre_hold_strategy(),
         proptest::collection::vec(hold_strategy(), 1..40),
     );
     let Err(error) = runner.run(&strategy, |(config, setup, hold)| {
@@ -3068,4 +3570,88 @@ fn release_tick_sends_the_end_of_rib_that_purges_a_stale_row() {
     if let Some(reason) = failure(config, &setup, &[]) {
         panic!("{reason}");
     }
+}
+
+/// The timer race the actor's GR sweep once lost: the absent peer's
+/// deadline falls due with a bulk UPDATE queued, its drain runs past the
+/// source's later deadline, and the source's refresh, queued after the
+/// earlier cutoff but before its own deadline, must still close its window.
+/// Red proof: sweeping every deadline up to the current time at the earlier
+/// turn expires the source's deadline (I7).
+#[test]
+fn queued_refresh_closes_its_window_behind_an_earlier_drain() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = [
+        Op::Receive {
+            prefix: 3,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::RestartPeer {
+            source: false,
+            restart: 1,
+            stale: 0,
+        },
+        Op::RestartPeer {
+            source: true,
+            restart: 1,
+            stale: 3,
+        },
+        Op::QueueBulk,
+        Op::AdvanceToDeadline,
+        Op::QueueRefresh,
+        Op::AdvanceToDeadline,
+    ];
+    if let Some(reason) = failure(config, &setup, &[Op::Drain]) {
+        panic!("{reason}");
+    }
+}
+
+/// A later race in the same case restarts the absent peer again once its
+/// first window has expired, so every race keeps its second GR deadline.
+/// Red proof: keeping the expired window's state skips the second restart,
+/// and the manager holds no absent deadline.
+#[test]
+fn a_later_race_restarts_the_absent_peer_after_its_window_expired() {
+    let mut harness = Harness::new(Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    });
+    let rt = Rc::clone(&harness.rt);
+    let _clock = rt.enter();
+    let restart = Op::RestartPeer {
+        source: false,
+        restart: 1,
+        stale: 0,
+    };
+    harness.apply(&restart);
+    harness.apply(&Op::AdvanceToDeadline);
+    harness.settle();
+    assert!(
+        !harness
+            .manager
+            .gr_stale_deadlines
+            .contains_key(&peer_v4(ABSENT)),
+        "the first window expired"
+    );
+    harness.apply(&restart);
+    assert!(
+        harness
+            .manager
+            .gr_stale_deadlines
+            .contains_key(&peer_v4(ABSENT)),
+        "the later race restarted the absent peer"
+    );
 }

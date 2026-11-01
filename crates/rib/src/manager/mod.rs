@@ -6787,14 +6787,17 @@ impl RibManager {
     pub async fn run(self) {
         let recorder = self.metrics.rib_actor_slice_recorder();
         let suspended = Arc::clone(&self.actor_suspended);
-        slice_timing::TimedActor::new(self.run_actor(), recorder, suspended).await;
+        drop(slice_timing::TimedActor::new(self.run_actor(), recorder, suspended).await);
     }
 
+    /// The actor loop. It returns the manager once the primary channel
+    /// closes, so a test can run a segment through the real loop and keep
+    /// driving the same manager afterwards.
     #[expect(
         clippy::too_many_lines,
         reason = "event loop with timer arms and query draining"
     )]
-    async fn run_actor(mut self) {
+    async fn run_actor(mut self) -> Self {
         // Persistent timer: starts far in the future (disabled). Reset to
         // DIRTY_RESYNC_INTERVAL when dirty_peers becomes non-empty.
         let resync_sleep = tokio::time::sleep(DIRTY_RESYNC_INTERVAL);
@@ -6847,7 +6850,7 @@ impl RibManager {
                 tracing::error!(
                     "dampening capacity disable owner unavailable; terminating RIB actor"
                 );
-                return;
+                return self;
             }
             // The export roster's one publication point (ADR-0136): after
             // each completed unit, never while a grouped transition is
@@ -7402,5 +7405,6 @@ impl RibManager {
         }
 
         debug!("rib manager shutting down");
+        self
     }
 }
