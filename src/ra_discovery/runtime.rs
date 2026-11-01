@@ -53,7 +53,11 @@ enum EventKey {
 
 /// Distinct addresses a binding slot keeps replaced first bindings for. The
 /// owner tells them apart only by whether each is its inbound-learned peer,
-/// so beyond this many during one backlog the rest share the last entry.
+/// which discovery does not know. Up to this many distinct first-binding
+/// addresses per backlog on one interface the owner's conflict count is
+/// exact; beyond it the rest share the last entry kept, and the count is
+/// approximate. Reaching it takes 17 or more distinct routers advertising on
+/// an interface-only point-to-point link while the owner is stalled.
 const OBSERVED_FIRST_BINDINGS: usize = super::engine::MAX_CANDIDATES_PER_INTERFACE;
 
 /// One key's coalesced events.
@@ -159,12 +163,13 @@ struct PendingEvents {
 ///   binding (`previous: None`) that a later change replaced is still
 ///   delivered ahead of the latest change, counted per address, because the
 ///   owner checks each one against an Established peer learned inbound and
-///   counts a conflict when the address differs. Beyond
-///   [`OBSERVED_FIRST_BINDINGS`] distinct addresses in one backlog, the rest
-///   are reported under the last one kept.
+///   counts a conflict when the address differs. That count is exact up to
+///   [`OBSERVED_FIRST_BINDINGS`] distinct first-binding addresses per
+///   backlog on one interface; beyond that the rest are reported under the
+///   last address kept, so it is approximate.
 /// - A conflict replaces a pending one for the same interface and adds to
-///   its count, so every conflict is counted; the coalesced deliveries carry
-///   the latest `bound` and `other`.
+///   its count, so every engine conflict is delivered; the coalesced
+///   deliveries carry the latest `bound` and `other`.
 ///
 /// Slots are served round-robin, so a conflict can be delivered ahead of a
 /// binding change queued between two conflicts. Learned and expired
@@ -242,6 +247,11 @@ impl DiscoveryEvents {
     /// event was received.
     pub async fn recv(&mut self) -> Option<DiscoveryEvent> {
         loop {
+            // A counted backlog never waits on the wake channel, so spend the
+            // task's cooperative budget here, before anything is taken: the
+            // owner yields to other tasks, and a recv cancelled at this
+            // await loses nothing.
+            tokio::task::consume_budget().await;
             if let Some(event) = self.pop() {
                 return Some(event);
             }
@@ -1500,6 +1510,71 @@ mod tests {
         assert_eq!(events.recv().await, Some(change(None, foreign)));
         assert_eq!(events.recv().await, Some(change(foreign, None)));
         assert_eq!(events.recv().await, None);
+    }
+
+    /// Draining a large counted backlog yields to other tasks on the same
+    /// thread: receiving never waits on the wake channel, so without the
+    /// cooperative budget the owner would replay it all in one poll.
+    #[tokio::test]
+    async fn receiving_a_counted_backlog_lets_other_tasks_run() {
+        use crate::ra_discovery::DiscoveryEvent;
+        use std::sync::atomic::AtomicBool;
+
+        let (sender, mut events) = super::event_channel();
+        let backlog = 10_000;
+        for _ in 0..backlog {
+            sender.send(DiscoveryEvent::Conflict {
+                interface: "a".into(),
+                bound: "fe80::1".parse().unwrap(),
+                other: "fe80::2".parse().unwrap(),
+            });
+        }
+        let ran = Arc::new(AtomicBool::new(false));
+        let other = Arc::clone(&ran);
+        let _other = tokio::spawn(async move { other.store(true, Ordering::Relaxed) });
+        let mut received = 0;
+        while !ran.load(Ordering::Relaxed) {
+            assert!(
+                received < backlog,
+                "the whole backlog was received before another task ran"
+            );
+            events.recv().await.unwrap();
+            received += 1;
+        }
+    }
+
+    /// Up to `OBSERVED_FIRST_BINDINGS` distinct first-binding addresses
+    /// replaced while queued are each delivered under their own address, so
+    /// the owner's own-versus-foreign check stays exact.
+    #[tokio::test]
+    async fn replaced_first_bindings_keep_their_addresses_up_to_the_cap() {
+        use crate::ra_discovery::{DiscoveryEvent, Endpoint};
+
+        let (sender, mut events) = super::event_channel();
+        let at = |last: u16| {
+            Some(Endpoint {
+                address: Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 2, last),
+                ifindex: 9,
+            })
+        };
+        let change = |previous, current| DiscoveryEvent::BindingChanged {
+            interface: "x".into(),
+            previous,
+            current,
+        };
+        let cap = u16::try_from(super::OBSERVED_FIRST_BINDINGS).unwrap();
+        for last in 0..cap {
+            sender.send(change(None, at(last)));
+            sender.send(change(at(last), None));
+        }
+        drop(sender);
+        let mut delivered = Vec::new();
+        while let Some(event) = events.recv().await {
+            delivered.push(event);
+        }
+        let mut expected: Vec<_> = (0..cap).map(|last| change(None, at(last))).collect();
+        expected.push(change(at(cap - 1), None));
+        assert_eq!(delivered, expected);
     }
 
     /// A conflict storm on one interface cannot hold back another
