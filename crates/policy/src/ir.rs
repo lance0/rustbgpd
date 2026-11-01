@@ -823,7 +823,7 @@ pub enum TermAction {
     /// Scan the arrived route's communities of one attribute once and stage
     /// a concrete removal for every value that is a member of the set (or,
     /// with `negate`, is not). A well-known standard community
-    /// ([`is_well_known_community`]) is removed only when the set names it
+    /// (RFC 1997, `0xFFFF0000`–`0xFFFFFFFF`) is removed only when the set names it
     /// as an exact member — a pattern never names one, and `not in` never
     /// removes one. `.rpol` `remove <kind> in SET` / `remove <kind> not in
     /// SET`; route-only, with the bounded scan of
