@@ -543,26 +543,33 @@ pub(in crate::manager) struct RsTargets {
 }
 
 impl RsTargets {
+    /// Add the ASNs these control communities name to the sorted, deduped
+    /// set (`0:X`, `RS:0:X`), and the announce-to-none flag (`RS:0:0`).
+    /// Sorting once keeps a route with thousands of distinct targets
+    /// linear-logarithmic rather than quadratic.
     fn record(&mut self, communities: &[u32], large: &[LargeCommunity]) {
-        for &community in communities {
-            if community >> 16 == 0 && !self.asns.contains(&(community & 0xFFFF)) {
-                self.asns.push(community & 0xFFFF);
+        self.asns.extend(
+            communities
+                .iter()
+                .filter(|&&community| community >> 16 == 0)
+                .map(|&community| community & 0xFFFF),
+        );
+        for lc in large.iter().filter(|lc| lc.local_data1 == 0) {
+            if lc.local_data2 == 0 {
+                self.all = true;
+            } else {
+                self.asns.push(lc.local_data2);
             }
         }
-        for lc in large {
-            if lc.local_data1 == 0 {
-                if lc.local_data2 == 0 {
-                    self.all = true;
-                } else if !self.asns.contains(&lc.local_data2) {
-                    self.asns.push(lc.local_data2);
-                }
-            }
-        }
+        self.asns.sort_unstable();
+        self.asns.dedup();
     }
 
     /// Whether a member with `(rs_asn, member_asn)` can be suppressed here.
     fn names(&self, (rs_asn, member_asn): (u32, u32)) -> bool {
-        self.all || self.asns.contains(&member_asn) || self.asns.contains(&rs_asn)
+        self.all
+            || self.asns.binary_search(&member_asn).is_ok()
+            || self.asns.binary_search(&rs_asn).is_ok()
     }
 }
 

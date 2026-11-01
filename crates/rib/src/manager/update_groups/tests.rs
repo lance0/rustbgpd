@@ -7246,3 +7246,38 @@ fn vpn_resync_assembly_timing() {
         );
     }
 }
+
+/// RFC 7947 targets of a route naming thousands of distinct ASNs, each
+/// twice: one sorted, deduped set that keeps the union across records and
+/// answers present, absent and route-server-ASN lookups.
+#[test]
+fn rs_targets_record_thousands_of_asns_as_one_sorted_set() {
+    // `0:1`..`0:4000` twice, `0:65000` (`0:RS`) and `1:17185`, which is
+    // not a control form.
+    let communities: Vec<u32> = (1..=4000_u32)
+        .rev()
+        .chain(1..=4000)
+        .chain([65_000, 0x0001_4321])
+        .collect();
+    let mut targets = RsTargets::default();
+    targets.record(&communities, &[]);
+    assert_eq!(targets.asns.len(), 4001);
+    assert!(targets.asns.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(!targets.all);
+    assert!(targets.names((64_999, 17)), "a named member");
+    assert!(!targets.names((64_999, 4001)), "an unnamed member");
+    assert!(!targets.names((64_999, 17_185)), "a non-control community");
+    assert!(targets.names((65_000, 4001)), "named through `0:RS`");
+    let large = |data2| LargeCommunity {
+        global_admin: 65_000,
+        local_data1: 0,
+        local_data2: data2,
+    };
+    targets.record(&[], &[large(4_200_000_001), large(17)]);
+    assert_eq!(targets.asns.len(), 4002, "the union, deduped");
+    assert!(targets.names((64_999, 4_200_000_001)));
+    assert!(targets.names((64_999, 1)) && targets.names((64_999, 4000)));
+    assert!(!targets.names((64_999, 4001)));
+    targets.record(&[], &[large(0)]);
+    assert!(targets.all && targets.names((64_999, 4001)));
+}
