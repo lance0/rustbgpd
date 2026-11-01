@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import io
 from datetime import datetime, timezone
 import json
 import tempfile
@@ -9,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import qualify as Q
 import recovery as R
-from test_qualify import witness, metrics_text
+from test_qualify import witness, metrics_text, set_provenance_peak
 
 
 def two_groups(generation="a"):
@@ -44,6 +45,12 @@ def reload_controls(leg, row, events):
         row[f"reload-{generation}"] = response
         previous = response
     (leg / "reload-control.jsonl").write_text("".join(json.dumps(item) + "\n" for item in controls))
+
+
+def write_readiness(leg, times, **fields):
+    (leg / "readiness.jsonl").write_text("".join(json.dumps({"status": 200, "http_error_code": None, "at": at,
+                                                             "scheduled": at, "seconds": None, **fields}) + "\n"
+                                                 for at in times))
 
 
 class RecoveryTests(unittest.TestCase):
@@ -423,7 +430,8 @@ class RecoveryTests(unittest.TestCase):
             (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
             (leg / "driver.log").write_text('evpn_control ' + json.dumps({"command": "churn-overlap",
                 "result": {"write_started_us": 2100, "writers_drained_us": 3900}}) + "\n")
-            (leg / "readiness.jsonl").write_text(json.dumps({"status": 200, "at": 1., "scheduled": 1., "seconds": None}) + "\n")
+            # One 20 Hz probe series covering the first through last workload event.
+            write_readiness(leg, [1 + n * .05 for n in range(round((56 - 1) / .05) + 1)])
             (leg / "metrics.txt").write_text(metrics_text())
             row.update({key: None for key in R.timings(events)})
             row["cgroup"] = {"memory.current": 1000, "memory.peak": 2000, "memory.max": Q.DAEMON_BYTES,
@@ -520,11 +528,152 @@ class RecoveryTests(unittest.TestCase):
                 self.assertIs(json.loads((root / "recovery-summary.json").read_text())["terminal_only_qualified"], False)
                 path = root / "recovery-00-candidate/observer.log"
                 bad = witness("candidate", 3, 10_000)
-                bad["peak"] = Q.DAEMON_BYTES
+                # Valid evidence over the 80% bar; a peak above the budget is INVALID instead.
+                bad.update(owned_groups=2, peak=int(bad["daemon_budget"] * .9))
                 path.write_text(path.read_text() + "evpn_qualification " + json.dumps(bad) + "\n")
                 with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
                     R.analyze(root)
                 self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "FAIL")
+
+    def test_roster_validates_types_ranges_and_source_before_bars(self):
+        def private_owned(row):
+            row["peers"][0][1] = 1
+        def candidate_private_routes(row):
+            row["private_routes"] = 1
+        cases = {"bool-peer-charge": ("candidate", lambda row: row["peers"][0].__setitem__(3, True)),
+                 "bool-daemon-charge": ("candidate", lambda row: row.update(retained=True)),
+                 "bool-count": ("candidate", lambda row: row.update(completion_receipts=False)),
+                 "negative-peer-charge": ("candidate", lambda row: row["peers"][0].__setitem__(3, -1)),
+                 "negative-daemon-charge": ("candidate", lambda row: row.update(retained=-1)),
+                 "non-numeric-charge": ("candidate", lambda row: row["peers"][0].__setitem__(4, "128")),
+                 "wrong-source-private": ("private", private_owned),
+                 "wrong-source-candidate": ("candidate", candidate_private_routes)}
+        for name, (arm, defect) in cases.items():
+            for over_bar in (False, True):
+                with self.subTest(defect=name, over_bar=over_bar):
+                    row = two_groups() if arm == "candidate" else witness("private", 4, 10)
+                    defect(row)
+                    if over_bar:
+                        # Invalid evidence plus a valid-looking bar miss stays INVALID.
+                        row["peak"] = int(row["daemon_budget"] * .9)
+                    with self.assertRaises(ValueError) as caught:
+                        R.roster(row, arm, 4)
+                    self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+
+    def test_partial_roster_rows_are_checked_against_the_bar(self):
+        for arm in ("candidate", "private"):
+            for target in ("daemon", "peer"):
+                for fraction, failed in ((.8, False), (.9, True)):
+                    with self.subTest(arm=arm, target=target, fraction=fraction):
+                        row = witness(arm, 1, 10)
+                        set_provenance_peak(row, target, int(row[f"{target}_budget"] * fraction))
+                        if failed:
+                            with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
+                                R.roster(row, arm, 4)
+                        else:
+                            R.roster(row, arm, 4)
+
+    def test_online_poll_checks_partial_rows_and_classifies_invalid_first(self):
+        for arm in ("candidate", "private"):
+            for defect, expected in (("partial-over-bar", Q.AcceptanceFailure), ("partial-under-bar", None),
+                                     ("wrong-source-over-bar", ValueError)):
+                with self.subTest(arm=arm, defect=defect):
+                    row = witness(arm, 1, 10)
+                    if defect == "partial-under-bar":
+                        set_provenance_peak(row, "peer", int(row["peer_budget"] * .8))
+                    else:
+                        set_provenance_peak(row, "peer", int(row["peer_budget"] * .9))
+                    if defect == "wrong-source-over-bar":
+                        row["peers"][0][1] = None if arm == "candidate" else 1
+                    controller = R.Controller.__new__(R.Controller)
+                    controller.arm, controller.clients, controller.last_sample = arm, 4, 0
+                    controller.daemon, controller.driver = Mock(poll=Mock(return_value=None)), Mock(poll=Mock(return_value=None))
+                    controller.probes = Mock()
+                    controller.selector = Mock(select=Mock(return_value=[]))
+                    controller.messages, controller.observations, controller.input_barriers = [], [], []
+                    controller.observer_log = io.StringIO("evpn_qualification " + json.dumps(row) + "\n")
+                    controller.observer_buffer = ""
+                    if expected is None:
+                        controller.poll()
+                        self.assertEqual(controller.observations, [row])
+                        continue
+                    with self.assertRaises(expected) as caught:
+                        controller.poll()
+                    if expected is ValueError:
+                        self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+
+    def test_analyze_checks_partial_rows_and_invalid_source_before_bars(self):
+        for arm in ("candidate", "private"):
+            for defect, expected in (("partial-under-bar", "PASS"), ("partial-over-bar", "FAIL"),
+                                     ("wrong-source-over-bar", "INVALID")):
+                with self.subTest(arm=arm, defect=defect), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    report = self.analysis_fixture(root)
+                    path = next(root.glob(f"recovery-*-{arm}")) / "observer.log"
+                    if defect == "wrong-source-over-bar":
+                        row = witness(arm, 3, 10_000)
+                        row["owned_groups"] = 2 if arm == "candidate" else 0
+                        row["peers"][0][1] = None if arm == "candidate" else 1
+                    else:
+                        # Registration rows precede the full roster.
+                        row = witness(arm, 1, 10_000)
+                    fraction = .8 if defect == "partial-under-bar" else .9
+                    set_provenance_peak(row, "peer", int(row["peer_budget"] * fraction))
+                    path.write_text("evpn_qualification " + json.dumps(row) + "\n" + path.read_text())
+                    with patch.object(R, "check_wire", return_value=report):
+                        if expected == "PASS":
+                            R.analyze(root)
+                        else:
+                            with self.assertRaises(ValueError) as caught:
+                                R.analyze(root)
+                            self.assertEqual(isinstance(caught.exception, Q.AcceptanceFailure), expected == "FAIL")
+                    self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], expected)
+
+    def test_readiness_must_cover_the_recorded_workload(self):
+        full = [1 + n * .05 for n in range(1101)]
+        cases = {"one-sample": ([1.], "INVALID"),  # The former positive fixture shape.
+                 "common-shift-later": ([at + .5 for at in full], "INVALID"),
+                 "common-shift-earlier": ([at - .5 for at in full], "INVALID"),
+                 "truncated-start": (full[2:], "INVALID"),
+                 "truncated-end": (full[:-2], "INVALID"),
+                 "truncated-with-503": (full[:-2], "INVALID"),
+                 "one-cadence-edges": (full[1:-1], "PASS"),
+                 "covered-503": (full, "FAIL")}
+        for arm in ("candidate", "private"):
+            for name, (times, expected) in cases.items():
+                with self.subTest(arm=arm, defect=name), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    report = self.analysis_fixture(root)
+                    leg = next(root.glob(f"recovery-*-{arm}"))
+                    write_readiness(leg, times, **({"status": 503, "http_error_code": 503} if "503" in name else {}))
+                    with patch.object(R, "check_wire", return_value=report):
+                        if expected == "PASS":
+                            R.analyze(root)
+                        else:
+                            with self.assertRaises(ValueError) as caught:
+                                R.analyze(root)
+                            self.assertEqual(isinstance(caught.exception, Q.AcceptanceFailure), expected == "FAIL")
+                    self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], expected)
+
+    def test_sampler_issues_the_slot_due_before_stop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            sampler = R.Readiness.__new__(R.Readiness)
+            sampler.path, sampler.correctness = Path(temporary) / "readiness.jsonl", True
+            sampler.results, sampler.stop_event = R.queue.Queue(), R.threading.Event()
+            sampler.thread = Mock(is_alive=Mock(return_value=False))
+            clock = {"now": 0.}
+            def sleep(_):
+                # The stop request lands between two loop checks, after the next slot was due.
+                clock["now"] = round(clock["now"] + .006, 6)
+                if clock["now"] == .054:
+                    sampler.stop()
+            with patch.object(R.time, "monotonic", side_effect=lambda: clock["now"]), \
+                 patch.object(R.time, "sleep", side_effect=sleep), \
+                 patch.object(Q, "probe_readiness", return_value={"status": 200, "http_error_code": None}):
+                sampler.run()
+            scheduled = [json.loads(line)["scheduled"] for line in sampler.path.read_text().splitlines()]
+            self.assertEqual(sorted(scheduled), [0., .05])
+            self.assertGreaterEqual(max(scheduled), sampler.stop_at - .05)
 
     def test_analyze_rejects_reused_marker_and_wrong_shape(self):
         for defect in ("reused-marker", "shape", "post-writes-sample"):

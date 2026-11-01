@@ -60,6 +60,9 @@ budgets and all five executed-reset counters. The historical memory result is
 not an input to the verdict. Peer and daemon provenance peaks must remain at
 most 80% of their existing budgets in both memory and recovery cells. A valid
 peak above that bar is FAIL; malformed charges or budgets remain INVALID.
+Recovery validates every raw roster, including partial registration and
+teardown rows, for charge types and ranges, peer identity and arm ownership
+before it applies the headroom bar; invalid evidence is never a control-arm FAIL.
 
 ```sh
 bash bench/scale/evpn-qualification/run.sh /tmp/evpn-memory-measured
@@ -154,7 +157,7 @@ The fixed recovery bars are:
 
 | Gate | Requirement |
 | --- | --- |
-| Readiness | Requests scheduled at 20 Hz in every phase; zero errors or non-200 responses; every measured latency below 200 ms |
+| Readiness | Requests scheduled at 20 Hz in every phase, with the first probe no later than one 50 ms interval after the first recorded workload event and the last no earlier than one interval before the final event on the same monotonic clock; zero errors or non-200 responses; every measured latency below 200 ms |
 | Wire convergence | Each regroup and recovery at most 60 seconds; candidate median at most private median × 1.03 across three alternating samples |
 | Timing origin | Regroup starts at SIGHUP; recovery starts after every socket resume acknowledgement |
 | Provenance headroom | Observed peer and daemon peaks at most 80% of the existing 16 MiB / 256 MiB budgets |

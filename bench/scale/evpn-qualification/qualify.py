@@ -336,12 +336,14 @@ def accept_provenance_headroom(row):
            "peer provenance headroom breached")
 
 
+OBSERVER_COUNTS = ("owned_groups", "owned_members", "owned_routes", "private_routes", "dirty",
+                   "pending_resets", "completion_receipts", "marker_debt", "retained_recovery",
+                   "refresh_pending", "eor_pending", "protocol_obligations")
+
+
 def ownership(row, arm, clients, routes):
     validate_provenance(row, clients)
-    counts = ("owned_groups", "owned_members", "owned_routes", "private_routes", "dirty",
-              "pending_resets", "completion_receipts", "marker_debt", "retained_recovery",
-              "refresh_pending", "eor_pending", "protocol_obligations")
-    require(all(type(row[name]) is int and row[name] >= 0 for name in counts), "invalid ownership count")
+    require(all(type(row[name]) is int and row[name] >= 0 for name in OBSERVER_COUNTS), "invalid ownership count")
     require(row["members"] == clients and row["dirty"] == row["pending_resets"] == row["marker_debt"] == row["retained_recovery"] == 0,
             "ownership witness is incomplete or unsettled")
     require(row["refresh_pending"] == row["eor_pending"] == row["protocol_obligations"] == 0,

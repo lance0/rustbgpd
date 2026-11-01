@@ -52,11 +52,16 @@ class Readiness:
     def run(self):
         pending, scheduled = [], time.monotonic()
         with self.path.open("x") as stream, ThreadPoolExecutor(max_workers=8) as executor:
-            while not self.stop_event.is_set() or pending:
+            while True:
+                stopping = self.stop_event.is_set()
                 now = time.monotonic()
-                if not self.stop_event.is_set() and now >= scheduled:
+                # A slot due before the stop request is still issued, so the
+                # trace reaches the final workload event.
+                if now >= scheduled and (not stopping or scheduled <= self.stop_at):
                     pending.append(executor.submit(self.probe, scheduled))
                     scheduled += .05
+                elif stopping and not pending:
+                    break
                 for future in list(pending):
                     if future.done():
                         row = future.result()
@@ -67,22 +72,18 @@ class Readiness:
                 time.sleep(.005)
 
     def stop(self):
-        self.stop_event.set()
+        if not self.stop_event.is_set():
+            self.stop_at = time.monotonic()
+            self.stop_event.set()
         self.thread.join(timeout=5)
         Q.require(not self.thread.is_alive(), "readiness sampler did not stop")
 
 
 def roster(row, arm, clients):
-    Q.require(row["members"] == clients and len(row["peers"]) == clients
-              and {p[0] for p in row["peers"]} == {Q.COMMON.peer(i) for i in range(clients)},
-              "observer peer roster differs")
-    Q.require(row["peer_budget"] == 16 * 1024 ** 2 and row["daemon_budget"] == 256 * 1024 ** 2,
-              "observer budgets differ")
-    Q.accept(0 <= row["retained"] <= row["peak"] <= row["daemon_budget"] * .8, "daemon provenance headroom breached")
-    for p in row["peers"]:
-        Q.require(len(p) == 10 and all(type(p[i]) is bool for i in (2, 6, 7, 8, 9)), "invalid peer witness")
-        Q.accept(0 <= p[3] <= p[4] <= row["peer_budget"] * .8 and not p[6], "peer headroom or reset failure")
-    Q.accept(row["pending_resets"] == 0, "pending provenance reset")
+    """Validate any raw roster, including partial registration/teardown rows, before its bars."""
+    Q.validate_provenance(row, clients)
+    Q.require(all(type(row[name]) is int and row[name] >= 0 for name in Q.OBSERVER_COUNTS),
+              "invalid observer count")
     Q.require(row["dirty"] == sum(p[2] for p in row["peers"])
               and row["marker_debt"] == sum(p[5] != 0 for p in row["peers"])
               and row["retained_recovery"] == sum(p[7] for p in row["peers"])
@@ -91,12 +92,16 @@ def roster(row, arm, clients):
               and row["protocol_obligations"] == sum(p[5] != 0 or p[8] or p[9] for p in row["peers"]),
               "aggregate observer differs from peer witnesses")
     if arm == "candidate":
-        Q.require(row["owned_groups"] == 2 and row["owned_members"] == clients
-                  and row["private_routes"] == 0 and all(type(p[1]) is int for p in row["peers"]),
+        full = row["members"] == clients
+        Q.require(row["private_routes"] == 0 and all(type(p[1]) is int for p in row["peers"])
+                  and (not full or row["owned_groups"] == 2 and row["owned_members"] == clients),
                   "candidate does not own two actual EVPN groups")
     else:
         Q.require(row["owned_groups"] == row["owned_members"] == row["owned_routes"] == 0
                   and all(p[1] is None for p in row["peers"]), "private control owns EVPN")
+    # Bars apply only to evidence that passed every type, range and source check.
+    Q.accept_provenance_headroom(row)
+    Q.accept(row["pending_resets"] == 0 and not any(p[6] for p in row["peers"]), "pending provenance reset")
     return {p[0]: p for p in row["peers"]}
 
 
@@ -212,6 +217,27 @@ def timings(events):
     values["recovery-seconds"] = at("complete", command="settle") - at("complete", command="resume")
     Q.require(all(value >= 0 for value in values.values()), "reversed timing boundaries")
     return values
+
+
+def check_readiness(leg, correctness):
+    """Require 20 Hz probes across the whole recorded workload, then apply the readiness bar."""
+    samples = [json.loads(line) for line in (leg / "readiness.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
+    Q.require(samples and events, "missing readiness samples or workload events")
+    Q.require(all(0 <= sample["at"] - sample["scheduled"] < .05 for sample in samples),
+              "readiness sampler missed a scheduled probe")
+    ordered = sorted(samples, key=lambda sample: sample["scheduled"])
+    Q.require(all(abs(right["scheduled"] - left["scheduled"] - .05) < .000001
+                  for left, right in zip(ordered, ordered[1:])), "missing 20 Hz probe")
+    # Probe and workload times share the controller's monotonic clock.
+    period = SAMPLE_PERIOD_US / 1_000_000
+    Q.require(ordered[0]["at"] <= min(event["at"] for event in events) + period,
+              "readiness samples start after the recorded workload")
+    Q.require(ordered[-1]["at"] >= max(event["at"] for event in events) - period,
+              "readiness samples end before the recorded workload")
+    Q.accept(all(sample["status"] == 200 and (correctness or 0 <= sample["seconds"]
+                                              < Q.RECOVERY_BARS["readiness_seconds"])
+                 for sample in samples), "readiness bar failed")
 
 
 def input_applied(rows, clients, generation):
@@ -342,9 +368,8 @@ class Controller:
             self.input_barriers.extend(json.loads(line.removeprefix("evpn_input_barrier ")) for line in lines
                                        if line.startswith("evpn_input_barrier "))
             for row in observed:
-                # Initial registration may be incomplete; every full-roster sample is checked.
-                if row["members"] == self.clients:
-                    roster(row, self.arm, self.clients)
+                # Partial registration/teardown rows stay in the whole-trace headroom scope.
+                roster(row, self.arm, self.clients)
             self.observations.extend(observed)
 
     def command(self, command, timeout=180, *, deadline=None):
@@ -614,6 +639,7 @@ def run_cell(output, manifest, arm, index, correctness):
             controller.command("finish")
             controller.probes.stop()
             controller.check_probes()
+            check_readiness(leg, correctness)
             record["driver_exit"] = driver.wait(timeout=30)
             Q.require(record["driver_exit"] == 0, "driver finish failed")
             record["wire"] = check_wire(leg, clients, routes)
@@ -677,11 +703,11 @@ def analyze_results(output):
         observed = [json.loads(line.removeprefix("evpn_qualification ")) for line in
                     (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_qualification ")]
         for observation in observed:
-            if observation["members"] == clients:
-                roster(observation, row["arm"], clients)
+            roster(observation, row["arm"], clients)
         for key in ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_dirty_previous", "mass_dirty",
                     "protocol_obligation_before_churn", "protocol_obligation_during_churn", "protocol_obligation_after_churn", "settled"):
-            Q.require(row[key] in observed, f"{key} absent from raw observer")
+            Q.require(row[key] in observed and row[key]["members"] == clients,
+                      f"{key} absent from raw observer or not a full roster")
             roster(row[key], row["arm"], clients)
         Q.accept(dirty_pair([row["mass_dirty_previous"], row["mass_dirty"]], clients) is not None
                  and row["protocol_obligation_before_churn"]["protocol_obligations"] > 0
@@ -692,14 +718,7 @@ def analyze_results(output):
         Q.require(first + 1 < len(observed) and observed[first + 1] == row["mass_dirty"],
                   "mass-dirty snapshots are not consecutive actual observations")
         Q.accept(settled(row["settled"]), "proof duty did not settle")
-        samples = [json.loads(line) for line in (leg / "readiness.jsonl").read_text().splitlines()]
-        Q.accept(samples and all(s["status"] == 200 and (correctness or 0 <= s["seconds"] < .2)
-                                for s in samples), "readiness bar failed")
-        Q.require(all(0 <= sample["at"] - sample["scheduled"] < .05 for sample in samples),
-                  "readiness sampler missed a scheduled probe")
-        ordered_samples = sorted(samples, key=lambda sample: sample["scheduled"])
-        Q.require(all(abs(right["scheduled"] - left["scheduled"] - .05) < .000001
-                      for left, right in zip(ordered_samples, ordered_samples[1:])), "missing 20 Hz probe")
+        check_readiness(leg, correctness)
         controls = [json.loads(line.removeprefix("evpn_control ")) for line in
                     (leg / "driver.log").read_text().splitlines() if line.startswith("evpn_control ")]
         protocol_overlap(row, events, controls)
