@@ -2298,3 +2298,80 @@ fn per_client_best_explain_skips_an_llgr_stale_sibling_like_live_staging() {
         explanation.gates
     );
 }
+
+/// Peer-scoped `ExplainBestPath` applies the RFC 9234 OTC egress gate live
+/// Add-Path staging applies at commit: toward a session whose local role is
+/// Customer, a sibling carrying OTC holds no advertised path ID, exactly
+/// like the peer's Adj-RIB-Out, and a session without a role still ranks
+/// it. Red proof: without the `otc_blocked` clause in
+/// `handle_explain_best_path`, explain reports `{198.51.100.161: 2}`.
+#[test]
+fn explain_best_path_add_path_ranks_match_live_otc_egress() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let customer = PeerId::from_addr("192.0.2.160".parse().unwrap());
+    let unscoped = PeerId::from_addr("192.0.2.162".parse().unwrap());
+    let mut receivers = Vec::new();
+    for (peer, local_role) in [
+        (customer, Some(rustbgpd_wire::BgpRole::Customer)),
+        (unscoped, None),
+    ] {
+        manager.handle_update(RibUpdate::SetPeerExportContext {
+            peer,
+            session_id: 0,
+            local_role,
+        });
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        receivers.push(outbound_rx);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65160,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: ipv4_sendable(),
+            add_path_send_max: 2,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+    }
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 160, 0), 24);
+    let sibling = Ipv4Addr::new(198, 51, 100, 161);
+    let mut otc = make_route_with_lp(prefix, sibling, 100);
+    AttrSet::edit(&mut otc.attributes, |attrs| {
+        attrs.push(PathAttribute::OnlyToCustomer(64512));
+    });
+    for route in [
+        make_route_with_lp(prefix, Ipv4Addr::new(198, 51, 100, 160), 200),
+        otc,
+    ] {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    }
+
+    let prefix = Prefix::V4(prefix);
+    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, customer, prefix);
+    assert!(held.is_empty(), "OTC egress keeps the sibling off the wire");
+    assert_eq!(explained, held);
+    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, unscoped, prefix);
+    assert!(held.contains_key(&peer_v4(sibling)), "{held:?}");
+    assert_eq!(explained, held);
+}

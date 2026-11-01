@@ -2847,24 +2847,9 @@ impl RibManager {
             return explanation;
         }
         let afi = prefix_family(&explanation.prefix).0;
-        let Some(limits) = self.outbound_prefix_limits.get(&peer) else {
+        let Some((limit, usage)) = self.outbound_limit_withholds(peer, &explanation.prefix) else {
             return explanation;
         };
-        let Some(limit) = limits.family(afi).and_then(|family| family.limit) else {
-            return explanation;
-        };
-        let grouped = self.grouped_member_of(peer).is_some();
-        let admitted = if grouped {
-            limits.grouped_contains(&explanation.prefix)
-        } else {
-            self.adj_ribs_out
-                .get(&peer)
-                .is_some_and(|rib| rib.iter_prefix(&explanation.prefix).next().is_some())
-        };
-        let usage = self.outbound_family_usage(peer, afi, grouped);
-        if admitted || usage < usize::try_from(limit.get()).unwrap_or(usize::MAX) {
-            return explanation;
-        }
 
         let usage = if usage == usize::MAX {
             "unknown during recovery".to_string()
@@ -2889,6 +2874,30 @@ impl RibManager {
             detail,
         });
         explanation
+    }
+
+    /// ADR-0113 commit gate: `Some((limit, usage))` when `peer`'s outbound
+    /// prefix limit withholds `prefix` — its family is at the cap and the
+    /// prefix holds no admitted slot.
+    fn outbound_limit_withholds(
+        &self,
+        peer: PeerId,
+        prefix: &Prefix,
+    ) -> Option<(std::num::NonZeroU32, usize)> {
+        let afi = prefix_family(prefix).0;
+        let limits = self.outbound_prefix_limits.get(&peer)?;
+        let limit = limits.family(afi)?.limit?;
+        let grouped = self.grouped_member_of(peer).is_some();
+        let admitted = if grouped {
+            limits.grouped_contains(prefix)
+        } else {
+            self.adj_ribs_out
+                .get(&peer)
+                .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
+        };
+        let usage = self.outbound_family_usage(peer, afi, grouped);
+        (!admitted && usage >= usize::try_from(limit.get()).unwrap_or(usize::MAX))
+            .then_some((limit, usage))
     }
 
     /// Whether `peer` is a grouped member whose admitted unicast state is
@@ -3661,7 +3670,9 @@ impl RibManager {
         // gates (`multipath_candidate_suppressed`: `NO_ADVERTISE`,
         // `NO_EXPORT`, route-server control, LLGR) → conditional
         // advertisement → export policy → modified-route `NO_ADVERTISE` →
-        // top-N by best-path. Mirroring the contract is deliberate —
+        // top-N by best-path, then the commit gates: RFC 9234 OTC egress,
+        // exact-export rejection and the ADR-0113 outbound prefix limit.
+        // Mirroring the contract is deliberate —
         // operators trust explain only if it produces the same selection
         // that distribution would, modulo state changes between the two
         // calls.
@@ -3712,8 +3723,11 @@ impl RibManager {
             // RFC 5291, whole-prefix like live staging: a family still
             // waiting on the peer's first ROUTE-REFRESH (§6) stages nothing,
             // and the session's Adj-RIB-Out starts empty when the gate arms;
-            // a prefix the peer's Address-Prefix ORF denies is withdrawn on
-            // every path ID. Either way no candidate holds a path ID.
+            // live staging withdraws every path ID of a prefix the peer's
+            // Address-Prefix ORF denies. Either way no candidate gets a path
+            // ID. This is the next staging decision: a DEFER filter installs
+            // without a re-advertise, so the wire can still carry the prefix
+            // until its next change or the next ROUTE-REFRESH.
             let orf_withheld = self
                 .peer_orf_pending
                 .get(&peer_addr)
@@ -3772,6 +3786,8 @@ impl RibManager {
                     .is_some_and(PolicyChain::requires_as_path_string)
                     || ConditionalGate::requires_as_path_string(conditional.as_ref());
                 let mut permitted: Vec<(&crate::route::Route, Option<bool>)> = Vec::new();
+                let mut otc_blocked: Vec<bool> = Vec::new();
+                let local_role = self.peer_local_roles.get(&peer_addr).copied().flatten();
                 let mut export_memo = distribution::ExportMemo::default();
                 // Rank picks the paths; their keys follow live staging, on
                 // an empty wire before the peer's first commit.
@@ -3833,12 +3849,11 @@ impl RibManager {
                     if distribution::no_advertise_export_suppressed(modified.communities()) {
                         continue;
                     }
+                    // RFC 9234: an OTC-blocked row keeps its rank and key
+                    // but is dropped at commit, like live staging.
+                    otc_blocked.push(distribution::otc_egress_blocked(&modified, local_role));
                     let class = keys.plan_class(
-                        distribution::blackholing(
-                            cand,
-                            &modified,
-                            self.peer_local_roles.get(&peer_addr).copied().flatten(),
-                        ),
+                        distribution::blackholing(cand, &modified, local_role),
                         || {
                             distribution::exact_exportable(
                                 snapshot.as_deref(),
@@ -3852,17 +3867,25 @@ impl RibManager {
                     permitted.push((*cand, class));
                 }
                 let keys = keys.assign_all(&permitted, limit, &mut || {});
-                for ((cand, _), key) in permitted.into_iter().zip(keys) {
-                    if self
-                        .peer_unexportable
-                        .get(&peer_addr)
-                        .is_some_and(|rejected| {
-                            rejected.contains(&ExactExportKey::Unicast(prefix, key))
-                        })
+                for (((cand, _), key), otc_blocked) in
+                    permitted.into_iter().zip(keys).zip(otc_blocked)
+                {
+                    if otc_blocked
+                        || self
+                            .peer_unexportable
+                            .get(&peer_addr)
+                            .is_some_and(|rejected| {
+                                rejected.contains(&ExactExportKey::Unicast(prefix, key))
+                            })
                     {
                         continue;
                     }
                     advertised.push((cand.peer, cand.path_id, key));
+                }
+                // ADR-0113: a prefix the outbound limit withholds at commit
+                // sends no path.
+                if self.outbound_limit_withholds(peer_addr, &prefix).is_some() {
+                    advertised.clear();
                 }
             }
         }

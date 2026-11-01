@@ -4170,7 +4170,8 @@ rbgp rib --prefix 203.0.113.0/24 --explain
 # within the peer's effective Add-Path send_max. Filtered candidates (RFC 5291
 # refresh gate, family mismatch, ORF prefix filter, split-horizon, iBGP /
 # RFC 4456 RR suppression, RFC 1997, route-server control, LLGR, conditional
-# advertisement, export policy reject, beyond send_max) stay at 0.
+# advertisement, export policy reject, beyond send_max, RFC 9234 OTC egress,
+# outbound prefix limit) stay at 0.
 # `rbgp rib --prefix P advertised PEER --explain` shows the gate that
 # stops a path.
 rbgp rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2

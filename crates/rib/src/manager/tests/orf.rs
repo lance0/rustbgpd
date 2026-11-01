@@ -1688,9 +1688,29 @@ fn orf_filter_entry_tracks_installed_filters() {
 /// staging applies: no path holds an advertised path ID while the family
 /// waits on the peer's first ROUTE-REFRESH (§6), nor for a prefix the
 /// peer's Address-Prefix ORF denies, exactly like the peer's Adj-RIB-Out;
-/// a permitted prefix keeps its ranks once the gate lifts.
+/// a permitted prefix keeps its ranks once the gate lifts. Both unicast
+/// families, since each gate is keyed by family.
 #[test]
 fn explain_best_path_add_path_ranks_match_live_orf_staging() {
+    let v6 = |segment| {
+        Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, segment, 0, 0, 0, 0, 0),
+            48,
+        ))
+    };
+    for (afi, denied, permitted) in [
+        (
+            Afi::Ipv4,
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 130, 0), 24)),
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 131, 0), 24)),
+        ),
+        (Afi::Ipv6, v6(0x130), v6(0x131)),
+    ] {
+        explain_best_path_orf_case(afi, denied, permitted);
+    }
+}
+
+fn explain_best_path_orf_case(afi: Afi, denied: Prefix, permitted: Prefix) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let target = peer_v4(Ipv4Addr::new(192, 0, 2, 130));
@@ -1702,29 +1722,34 @@ fn explain_best_path_add_path_ranks_match_live_orf_staging() {
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx,
         export_policy: None,
-        sendable_families: ipv4_sendable(),
+        sendable_families: dual_stack_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
         orr_vantage: None,
         per_client_best: false,
         interpret_rfc1997: true,
-        add_path_send_families: ipv4_sendable(),
+        add_path_send_families: dual_stack_sendable(),
         add_path_send_max: 4,
-        negotiated_orf_recv: ipv4_sendable(),
+        negotiated_orf_recv: vec![(afi, Safi::Unicast)],
         negotiated_llgr_families: vec![],
     });
 
-    let denied = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 130, 0), 24);
-    let permitted = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 131, 0), 24);
     let sibling = Ipv4Addr::new(198, 51, 100, 131);
     for (source, local_pref) in [(Ipv4Addr::new(198, 51, 100, 130), 200), (sibling, 100)] {
+        let route = |prefix: Prefix| {
+            let unspecified = Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0);
+            let mut route = make_route_with_lp(unspecified, source, local_pref);
+            route.prefix = prefix;
+            if let Prefix::V6(_) = prefix {
+                let host = u16::from(source.octets()[3]);
+                route.next_hop = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, host));
+            }
+            route
+        };
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: peer_v4(source),
-            announced: [denied, permitted]
-                .into_iter()
-                .map(|prefix| make_route_with_lp(prefix, source, local_pref))
-                .collect(),
+            announced: vec![route(denied), route(permitted)],
             withdrawn: vec![],
             flowspec_announced: vec![],
             flowspec_withdrawn: vec![],
@@ -1737,7 +1762,6 @@ fn explain_best_path_add_path_ranks_match_live_orf_staging() {
 
     // §6: the family is still gated, so live staging has staged nothing.
     for prefix in [denied, permitted] {
-        let prefix = Prefix::V4(prefix);
         let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, target, prefix);
         assert!(held.is_empty(), "the §6 gate stages nothing: {held:?}");
         assert_eq!(explained, held, "{prefix} under the §6 gate");
@@ -1749,24 +1773,33 @@ fn explain_best_path_add_path_ranks_match_live_orf_staging() {
     manager.handle_update(RibUpdate::PeerOrfUpdate {
         session_id: 0,
         peer: target,
-        afi: Afi::Ipv4,
+        afi,
         safi: Safi::Unicast,
         when: WhenToRefresh::Immediate,
-        entries: vec![orf_permit(10, 24, 24, permitted)],
+        entries: vec![AddressPrefixOrf {
+            action: OrfAction::Add,
+            match_: OrfMatch::Permit,
+            sequence: 10,
+            min_len: permitted.prefix_len(),
+            max_len: permitted.prefix_len(),
+            prefix: Some(permitted),
+        }],
         reply,
     });
     result.try_recv().unwrap().unwrap();
     drain_route_chunks(&mut manager);
     assert!(!manager.peer_orf_pending.contains_key(&target));
 
-    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, target, Prefix::V4(denied));
+    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, target, denied);
     assert!(
         held.is_empty(),
         "the ORF filter withdraws every path: {held:?}"
     );
-    assert_eq!(explained, held, "ORF-denied prefix");
-    let (explained, held) =
-        explain_ranks_and_adj_rib_out(&mut manager, target, Prefix::V4(permitted));
-    assert!(held.contains_key(&peer_v4(sibling)), "{held:?}");
-    assert_eq!(explained, held, "ORF-permitted prefix");
+    assert_eq!(explained, held, "ORF-denied {denied}");
+    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, target, permitted);
+    assert!(
+        held.contains_key(&peer_v4(sibling)),
+        "{permitted}: {held:?}"
+    );
+    assert_eq!(explained, held, "ORF-permitted {permitted}");
 }

@@ -1796,7 +1796,8 @@ pub struct BestPathCandidate {
     /// family check / Address-Prefix ORF filter / split-horizon / iBGP
     /// or RFC 4456 route-reflector suppression / the source-route gates
     /// live staging applies (RFC 1997, route-server control, LLGR) /
-    /// conditional advertisement / export policy, or beyond `send_max`.
+    /// conditional advertisement / export policy, beyond `send_max`, or
+    /// withheld at commit (RFC 9234 OTC egress, outbound prefix limit).
     /// Always zero without Add-Path send (`add_path_send_max == 0`) and
     /// on a global-view explain: such a peer is sent one path at
     /// `path_id = 0` — the Loc-RIB best for an ordinary single-best

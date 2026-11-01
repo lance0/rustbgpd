@@ -2958,8 +2958,9 @@ message ExplainBestPathRequest {
   // check, Address-Prefix ORF filter, split-horizon / RR
   // suppression, RFC 1997 `NO_ADVERTISE` / `NO_EXPORT`,
   // route-server control, LLGR export restriction, conditional
-  // advertisement and export policy, and falls within the peer's
-  // effective `add_path_send_max`, gets a non-zero
+  // advertisement and export policy, falls within the peer's
+  // effective `add_path_send_max`, and is not withheld at commit by
+  // RFC 9234 OTC egress or the outbound prefix limit, gets a non-zero
   // `advertised_path_id`: the outbound Add-Path path ID the peer
   // has or would get. A path keeps its ID while it is sent, so IDs
   // follow no rank order and need not be contiguous; the selected
@@ -3013,7 +3014,8 @@ message BestPathCandidate {
   // mismatch, Address-Prefix ORF filter, split-horizon, iBGP /
   // RFC 4456 route-reflector suppression, RFC 1997, route-server
   // control, LLGR export restriction, conditional advertisement,
-  // export policy reject) or beyond `send_max`. Always zero
+  // export policy reject), beyond `send_max`, or withheld at commit
+  // (RFC 9234 OTC egress, outbound prefix limit). Always zero
   // without Add-Path send (`add_path_send_max == 0`): such a peer
   // gets one path at `path_id = 0`. An ordinary single-best peer
   // gets the selected best (`best_route`) or nothing; a

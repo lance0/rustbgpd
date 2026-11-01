@@ -2095,11 +2095,15 @@ send view: candidates that pass the peer's live export gates (the RFC 5291 §6
 refresh gate, sendable-family, the Address-Prefix ORF filter, split-horizon and
 iBGP / RFC 4456 route-reflector rules, RFC 1997 `NO_ADVERTISE` / `NO_EXPORT`,
 route-server control communities, the LLGR export restriction, conditional
-advertisement and export policy) and fall within the peer's effective
-`add_path_send_max` get a non-zero `advertised_path_id` naming the path ID they
-would carry on the wire; everything else stays at `advertised_path_id = 0`. A
-family still waiting for the peer's ROUTE-REFRESH and an ORF-denied prefix
-report no IDs. `ExplainAdvertisedRoute` names the gate that stops a path. The
+advertisement and export policy), fall within the peer's effective
+`add_path_send_max` and are not withheld at commit (RFC 9234 OTC egress, the
+outbound prefix limit) get a non-zero `advertised_path_id` naming the path ID
+they would carry on the wire; everything else stays at `advertised_path_id =
+0`. A family still waiting for the peer's ROUTE-REFRESH and an ORF-denied
+prefix report no IDs. The IDs are the next staging decision: an ORF filter
+pushed with DEFER takes effect at the prefix's next change or the next
+ROUTE-REFRESH, so until then the peer can still hold a path explain reports at
+0. `ExplainAdvertisedRoute` names the gate that stops a path. The
 response echoes `peer_address` and the effective `add_path_send_max`
 so the operator can read advertisement intent without cross-referencing the
 peer config. Empty `peer_address` returns the v0.7.0 global Loc-RIB view
