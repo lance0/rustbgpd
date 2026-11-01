@@ -2073,3 +2073,228 @@ fn add_path_commit_probes_with_the_planning_snapshot() {
         "both blackholing paths sent, the higher-ranked one in place"
     );
 }
+
+/// `ExplainAdvertisedRoute`'s source-scoped Add-Path walk beside the wire,
+/// for a sibling one source-route gate keeps off it. Toward an eBGP Add-Path
+/// peer (AS 65000, RFC 1997 honored, no LLGR, `send_max` 2) the best path
+/// (LP 300) and a clean third path (LP 100) are sent, and `gate` marks the
+/// LP 200 sibling between them. Returns the third path's explanation and the
+/// peer's Adj-RIB-Out for the prefix, as `source peer -> outbound path ID`.
+/// The sibling holds a rank only if the collector skips the gate, which
+/// pushes the third path beyond `send_max`.
+fn add_path_rank_past_gated_sibling(
+    rs_control_asn: Option<u32>,
+    gate: impl FnOnce(&mut Route),
+) -> (crate::update::ExplainAdvertisedRoute, BTreeMap<PeerId, u32>) {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target = PeerId::from_addr("192.0.2.140".parse().unwrap());
+    manager.handle_update(RibUpdate::SetPeerRsControl {
+        peer: target,
+        session_id: 0,
+        rs_control_asn,
+    });
+    let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 0,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: ipv4_sendable(),
+        add_path_send_max: 2,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 140, 0), 24);
+    let third = Ipv4Addr::new(198, 51, 100, 142);
+    let mut sibling = make_route_with_lp(prefix, Ipv4Addr::new(198, 51, 100, 141), 200);
+    gate(&mut sibling);
+    for route in [
+        make_route_with_lp(prefix, Ipv4Addr::new(198, 51, 100, 140), 300),
+        sibling,
+        make_route_with_lp(prefix, third, 100),
+    ] {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    }
+
+    let prefix = Prefix::V4(prefix);
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+        peer: target,
+        prefix,
+        rd: None,
+        labeled: false,
+        source: Some(crate::update::RouteSourceIdentity {
+            peer: peer_v4(third),
+            path_id: 0,
+        }),
+        reply,
+    });
+    let explanation = response.try_recv().unwrap().unwrap();
+    let held = manager
+        .adj_ribs_out
+        .get(&target)
+        .into_iter()
+        .flat_map(AdjRibOut::iter)
+        .filter(|route| route.prefix == prefix)
+        .map(|route| (route.peer, route.path_id))
+        .collect();
+    (explanation, held)
+}
+
+/// The third path is on the wire, and the explain agrees on its path ID.
+fn assert_third_path_matches_wire(
+    explanation: &crate::update::ExplainAdvertisedRoute,
+    held: &BTreeMap<PeerId, u32>,
+) {
+    assert_eq!(held.len(), 2, "best and third path only: {held:?}");
+    let third = peer_v4(Ipv4Addr::new(198, 51, 100, 142));
+    assert_eq!(
+        explanation.decision,
+        crate::update::ExplainDecision::Advertise,
+        "{:?}",
+        stopped_gate(explanation)
+    );
+    assert_eq!(Some(&explanation.path_id), held.get(&third), "{held:?}");
+}
+
+/// RFC 1997 `NO_EXPORT` toward an eBGP peer is candidate ineligibility in
+/// the source-scoped Add-Path walk, as in live staging. Red proof: dropping
+/// the `NO_EXPORT` check from the predicate `multipath_candidates` applies
+/// ranks the sibling and pushes the third path beyond `send_max`.
+#[test]
+fn add_path_source_explain_skips_a_no_export_sibling_like_live_staging() {
+    let (explanation, held) = add_path_rank_past_gated_sibling(None, |route| {
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![
+                rustbgpd_wire::COMMUNITY_NO_EXPORT,
+            ]));
+        });
+    });
+    assert_third_path_matches_wire(&explanation, &held);
+}
+
+/// An RFC 7947 §2.3.2 "do not announce to AS 65000" control community is
+/// candidate ineligibility toward that peer in the source-scoped Add-Path
+/// walk, as in live staging. Red proof: dropping the route-server control
+/// check from the predicate `multipath_candidates` applies ranks the
+/// sibling and pushes the third path beyond `send_max`.
+#[test]
+fn add_path_source_explain_skips_an_rs_control_sibling_like_live_staging() {
+    let (explanation, held) = add_path_rank_past_gated_sibling(Some(64512), |route| {
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![65000]));
+        });
+    });
+    assert_third_path_matches_wire(&explanation, &held);
+}
+
+/// An `LLGR_STALE` sibling is candidate ineligibility toward an eBGP peer
+/// that did not advertise LLGR (RFC 9494 §4.4) in the per-client-best walk,
+/// as in live staging: with the best path denied by export policy the peer
+/// is sent nothing, and explain says every candidate it walked was denied
+/// rather than electing the stale sibling. The Add-Path fixture above cannot
+/// show this gate: a stale path sorts below every fresh one and a stale
+/// source stops at the ladder's own LLGR rung, so it never displaces a
+/// rank. Red proof: dropping the LLGR check from the predicate
+/// `multipath_candidates` applies elects the stale sibling (`llgr` stop).
+#[test]
+fn per_client_best_explain_skips_an_llgr_stale_sibling_like_live_staging() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target = PeerId::from_addr("192.0.2.150".parse().unwrap());
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 0,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: Some(deny_local_pref_at_least(300)),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: true,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 150, 0), 24);
+    let mut stale = make_route_with_lp(prefix, Ipv4Addr::new(198, 51, 100, 151), 200);
+    AttrSet::edit(&mut stale.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_LLGR_STALE,
+        ]));
+    });
+    for route in [
+        make_route_with_lp(prefix, Ipv4Addr::new(198, 51, 100, 150), 300),
+        stale,
+    ] {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    }
+    let prefix = Prefix::V4(prefix);
+    let mut sent = Vec::new();
+    while let Ok(update) = outbound_rx.try_recv() {
+        sent.extend(
+            update
+                .announce
+                .iter()
+                .filter(|route| route.prefix == prefix)
+                .map(|route| route.peer),
+        );
+    }
+    assert!(sent.is_empty(), "live staging sends nothing: {sent:?}");
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+        peer: target,
+        prefix,
+        rd: None,
+        labeled: false,
+        source: None,
+        reply,
+    });
+    let explanation = response.try_recv().unwrap().unwrap();
+    assert_eq!(explanation.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(
+        stopped_gate(&explanation).map(|step| (step.gate, step.code)),
+        Some(("best_route", "per_client_all_denied")),
+        "{:?}",
+        explanation.gates
+    );
+}
