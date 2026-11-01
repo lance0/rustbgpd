@@ -554,9 +554,9 @@ in v1.
   whose payload semantics are deliberately unsupported: Tunnel Encapsulation
   (23), PE Distinguisher Labels (27), Community Container (34), D-PATH (36),
   SFP (37), BFD Discriminator (38), NHC (39), BGP Prefix-SID (40), BIER (41),
-  and ATTR_SET
-  (128). Registry recognition fences those types' class and outer framing; it
-  is not a claim to understand the value, so the conservative signal still
+  and ATTR_SET (128). Registry recognition fences those types' class and
+  outer framing; it is not a claim to understand the value, so the
+  conservative signal still
   applies. All other flags and the value bytes are preserved unchanged,
   including an explicitly received Extended Length encoding — re-emitting a
   one-octet length under a retained Extended Length flag would corrupt the
@@ -564,8 +564,9 @@ in v1.
 - **Recognized optional transitive attributes — a received Partial is
   preserved, never invented.** AGGREGATOR (7), Communities (8), Extended
   Communities (16), PMSI Tunnel (22), IPv6 Address Specific Extended
-  Communities (25), Large Communities (32), and Only-to-Customer (35) decode into typed values that carry the received
-  Partial bit as state (`PathAttribute::CommunitiesPartial` and its siblings,
+  Communities (25), Large Communities (32), and Only-to-Customer (35) decode
+  into typed values that carry the received Partial bit as state
+  (`PathAttribute::CommunitiesPartial` and its siblings,
   `Aggregator::partial`), so it survives policy and the RIB and is re-emitted
   on egress under both compact and Extended Length framing. rustbgpd
   validated these values, so it never adds Partial to one that arrived

@@ -43,12 +43,12 @@ event history was removed), is Superseded.
 | [0016](0016-socket2-for-md5-gtsm.md) | socket2 for TCP MD5 and GTSM socket options | Accepted | 2026-02-27 | Active |
 | [0017](0017-peer-manager-channel-based-ownership.md) | PeerManager — channel-based single-task ownership | Accepted | 2026-02-27 | Active |
 | [0018](0018-broadcast-channel-for-watch-routes.md) | Broadcast channel for WatchRoutes streaming | Accepted | 2026-02-27 | Active |
-| [0019](0019-inbound-tcp-listener.md) | Inbound TCP listener for passive peering | Accepted | 2026-02-27 | Active |
+| [0019](0019-inbound-tcp-listener.md) | Inbound TCP listener | Accepted | 2026-02-27 | Active |
 | [0020](0020-global-control-services-coordinated-shutdown.md) | GlobalService, ControlService, and coordinated shutdown | Accepted | 2026-02-27 | Active |
 | [0021](0021-tcp-collision-detection.md) | TCP collision detection via PeerManager coordination | Accepted | 2026-02-28 | Active |
 | [0022](0022-grpc-server-supervision.md) | gRPC server supervision — unexpected exit triggers shutdown | Accepted | 2026-02-28 | Active |
 | [0023](0023-prefix-enum-afi-agnostic-rib.md) | Prefix enum and AFI-agnostic RIB for MP-BGP | Accepted | 2026-02-28 | Active |
-| [0024](0024-graceful-restart.md) | Graceful Restart — Receiving Speaker (RFC 4724) | Accepted | 2026-03-01 | Active |
+| [0024](0024-graceful-restart.md) | Graceful Restart — Receiving Speaker / Helper Mode (RFC 4724) | Accepted | 2026-03-01 | Active |
 | [0025](0025-extended-communities.md) | Extended Communities (RFC 4360) | Accepted | 2026-03-01 | Active |
 | [0026](0026-extended-community-policy.md) | Extended Community Policy Matching | Accepted | 2026-03-01 | Active |
 | [0027](0027-route-refresh.md) | Route Refresh (RFC 2918) | Accepted | 2026-03-02 | Active |
@@ -142,7 +142,7 @@ event history was removed), is Superseded.
 | [0114](0114-as4-path-migration.md) | RFC 6793 AS4 path migration across legacy peers | Accepted | 2026-07-21 | Active |
 | [0115](0115-lean-daemon-build-flavors.md) | Lean daemon build flavors | Accepted (no additional flavor) | 2026-07-22 | Active |
 | [0116](0116-rfc-9857-sr-policy-state.md) | RFC 9857 SR Policy state in BGP-LS | Accepted (feature implementation demand-gated) | 2026-07-22 | Active |
-| [0117](0117-authenticated-single-hop-bfd-decision.md) | Authenticated single-hop BFD | Accepted (implementation NO-GO; evidence-gated) | 2026-07-22 | Active |
+| [0117](0117-authenticated-single-hop-bfd-decision.md) | Authenticated single-hop BFD remains demand and interoperability gated | Accepted (implementation NO-GO; evidence-gated) | 2026-07-22 | Active |
 | [0118](0118-presence-preserving-runtime-neighbor-create.md) | Presence-preserving runtime neighbor creation | Accepted — fully shipped | 2026-07-29 | Active |
 | [0119](0119-rfc-8212-secure-default-config-epoch.md) | RFC 8212 secure-default config epoch | Accepted (implemented; activation shipped) | 2026-07-29 | Active |
 | [0120](0120-inbound-connection-admission.md) | Inbound connection admission rate limiting | Accepted | 2026-07-30 | Active |

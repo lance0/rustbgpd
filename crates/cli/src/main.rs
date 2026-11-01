@@ -223,7 +223,7 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     config abort         0 aborted / 1 error\n  \
     config rollback      0 committed or noop / 1 error / 3 rejected\n  \
     config import        0 clean / 1 error / 2 warnings or skips / 3 nothing translatable\n  \
-    doctor               0 all checks green / 1 error / 2 red checks found\n  \
+    doctor               0 no red checks (warnings allowed) / 1 error / 2 red checks found\n  \
     policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below a threshold\n  \
     policy test          0 ran / 1 compile diagnostics\n  \
     policy compare       0 ran / 1 compile diagnostics\n  \
@@ -543,7 +543,7 @@ enum Command {
     /// sections are missing. `--pre-upgrade CONFIG` adds the read-only
     /// pre-upgrade checks (`upgrade.*`) under the same exit contract.
     #[command(after_help = "Exit codes:\n  \
-        0  all checks green\n  \
+        0  no checks red (green and yellow warnings may be present)\n  \
         1  error (could not produce a bundle)\n  \
         2  bundle written but one or more checks are red")]
     Doctor {
@@ -10916,7 +10916,7 @@ printf '%s\n' "${COMPREPLY[@]}"
                 }
             }
         }
-        assert!(man.contains("0  all checks green"));
+        assert!(man.contains("0  no checks red (green and yellow warnings may be present)"));
         assert!(man.contains("2  bundle written but one or more checks are red"));
     }
 

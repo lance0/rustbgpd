@@ -99,7 +99,7 @@ and shell completions under `share/`:
 ```
 rustbgpd, rbgp, rs-config-render        binaries
 birdwatcher-adapter                     Alice-LG birdwatcher shim
-LICENSE-MIT, LICENSE-APACHE             licenses
+LICENSE-MIT, LICENSE-APACHE, LICENSES.md licenses
 rustbgpd.schema.json                    config JSON Schema
 share/man/man1/rbgp.1                   CLI man page
 share/man/man8/rustbgpd.8               daemon man page

@@ -380,8 +380,8 @@ cargo run --release -p birdwatcher-adapter -- \
 
 The owner-only socket is convenient but grants operator-tier `local-operator`;
 the adapter README shows a dedicated token-authenticated `observer` listener
-for least privilege. The adapter also needs
-`[policy.reject_retention]` enabled for the filtered view. The noexport
+for least privilege. The filtered view reads rejected-route retention
+(`[policy.reject_retention]`), which is on by default; keep it enabled. The noexport
 view is served from the export-explain surface (best-routes-minus-
 advertised, one export-ladder dry run per suppressed prefix). Honest
 boundary: this is a maintained single-table unicast subset — a few

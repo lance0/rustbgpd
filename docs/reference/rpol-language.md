@@ -1144,7 +1144,10 @@ in the range RFC 1997 reserves for well-known values, `65535:0` through
 `65535:65535` (`NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`, `NOPEER`,
 `BLACKHOLE`, `GRACEFUL_SHUTDOWN`, `ACCEPT_OWN`, `LLGR_STALE`, `NO_LLGR` and
 the unassigned rest), stay on the route, as IOS-XR RPL `delete community
-all` and `set community` without `additive` keep well-known communities. The
+all` and `set community` without `additive` keep well-known communities.
+Only the five names listed under literals have `.rpol` spellings; `NOPEER`,
+`ACCEPT_OWN`, `LLGR_STALE` and `NO_LLGR` do not, so match or set them
+numerically (`65535:65284`, `65535:1`, `65535:6` and `65535:7`). The
 replace idiom therefore keeps a route's scoping:
 
 ```rpol

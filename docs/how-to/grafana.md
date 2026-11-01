@@ -103,7 +103,7 @@ delayed outbound registration, empty Adj-RIB-In, max-prefix near-limit, breach, 
 inbound blocking, empty RPKI VRP table, update-group residue growth, update-group recovery fallback
 under a resource limit, stalled outbound resync, stalled policy transition, a
 slow peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
-authoritative partial SIGHUP reloads and failed retained reload tasks,
+rejected and authoritative partial SIGHUP reloads and failed retained reload tasks,
 dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, outbound writer deferral,
@@ -204,7 +204,8 @@ inside the bounded window does.
   so enabled peers that never Established are visible while disabled peers do
   not page. The admin series is the effective administrative state, so a
   max-prefix latched peer also reads 0 there; `BgpMaxPrefixLatched` covers it.
-- **Exact session state** uses the one-hot vector directly; preserving
+- For exact session state, query the one-hot `bgp_peer_session_state` vector
+  directly (no shipped panel plots it); preserving
   `interface` keeps scoped siblings distinct and summing the six rows provides
   a built-in integrity check:
   `sum by (instance,peer,interface) (bgp_peer_session_state) == 1`.
@@ -271,7 +272,7 @@ inside the bounded window does.
   groups and remain stable across content-equal reloads. Reinstalling a fully
   retired policy creates a new ID; `-1` means the peer is on the per-peer
   fallback path.
-- Policy-transition **in progress** is current state. **Last completed policy
+- **Policy transition in progress** is current state. **Last completed policy
   transition** is a retained terminal duration and does not count upward while
   another transition runs. Actor p99 uses a fixed 15-minute window and stays
   partitioned by `instance`, `job`, and `poll_kind`. Because polls exist only
@@ -286,7 +287,7 @@ inside the bounded window does.
   bounded SIGHUP signal/task outcome rate. A recovery-fenced reload remains
   owned rather than terminal; use the `bgp_runtime_config_settlement_*` series
   for that state.
-- Accepted-policy age is informational and clamped at zero to tolerate clock
+- **Accepted policy generation age** is informational and clamped at zero to tolerate clock
   correction. A static-policy deployment legitimately lets this age grow from
   boot; rejected reloads also leave the last accepted timestamp unchanged.
 - "Peers registered for distribution" is

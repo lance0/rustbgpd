@@ -92,7 +92,9 @@ M30 (Type 2 reflection), and M31 (MAC mobility / sticky). EVPN GR/LLGR
 stale handling shipped. Peer-down and dirty-resync correctness gaps
 closed.
 
-**Honest completeness estimates:**
+**Honest completeness estimates** (written 2026-04 for the Phase 1 RR role and
+last revised 2026-05; not maintained since; current support levels are in the
+[stability guide](../reference/stability.md)):
 
 | Scope | Completeness |
 |-------|-------------|
@@ -994,8 +996,8 @@ hosted leg, including the non-EVPN dataplane, BFD, and TCP-AO legs, and the
 - **ADR-0050** — architectural record for Phase 1
 - **CHANGELOG.md** — release-by-release EVPN feature history
 - **docs/project/roadmap.md** — EVPN rows in the status-at-a-glance table and the "EVPN standards tail" item
-- **docs/interop.md** — P1.5 "EVPN validation depth" gap list
+- **docs/interop.md** — the "P1.5 — EVPN Route Reflector validation depth" and "P1.5 — EVPN VTEP-mode validation depth" gap lists
 - **docs/reference/rfc-notes.md** — RFC 7432 / 9012 / 9135 implementation notes
 - **docs/explanation/use-cases.md §7** — "VXLAN-EVPN DC Fabric Route Reflector"
-- **docs/explanation/gobgp-parity.md** — DC fabric RR section + feature-parity matrix
+- **docs/explanation/gobgp-parity.md** — "DC Fabric / Whitebox BGP Speaker" section + feature-parity matrix
 - **examples/rr-evpn-fabric/config.toml** — reference RR config
