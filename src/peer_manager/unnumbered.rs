@@ -402,25 +402,10 @@ impl PeerManager {
             } => {
                 info!(%interface, ?previous, ?current, "unnumbered: binding changed");
                 if let Some(port) = unnumbered.ports.get_mut(&interface) {
-                    // An Established peer learned from an inbound connection
-                    // is unknown to discovery, which reports no conflict when
-                    // a second router's RA arrives: its first binding is that
-                    // router. Discovery had no binding, so this is the only
-                    // count.
-                    if previous.is_none()
-                        && port.established
-                        && let (Some(bound), Some(current)) = (&port.bound, current)
-                        && bound.address != IpAddr::V6(current.address)
-                    {
-                        warn!(
-                            %interface, bound = %bound.address, other = %current.address,
-                            reason = "multiple_routers_on_link",
-                            "unnumbered: a second router advertises on an interface-only link"
-                        );
-                        self.metrics.record_unnumbered_ra_conflict(
-                            &rustbgpd_telemetry::interface_peer_label(&interface),
-                        );
-                    }
+                    // A second router beside an Established peer is counted
+                    // from discovery's `Conflict`, even when that peer was
+                    // learned from an inbound connection: its address goes
+                    // to discovery with `session_established`.
                     port.desired = current;
                     unnumbered.reconcile_due = true;
                 }
@@ -470,7 +455,7 @@ impl PeerManager {
         };
         if new == SessionState::Established {
             port.established = true;
-            unnumbered.discovery.session_established(name);
+            unnumbered.discovery.session_established(name, peer.address);
         } else if old == SessionState::Established {
             port.established = false;
             unnumbered.discovery.session_failed(name);
@@ -586,7 +571,7 @@ impl PeerManager {
             Ok(false) => {
                 info!(interface = %name, peer = %key, "unnumbered: bound session became Established; keeping it");
                 if let Some(unnumbered) = self.unnumbered.as_mut() {
-                    unnumbered.discovery.session_established(name);
+                    unnumbered.discovery.session_established(name, key.address);
                 }
                 self.port_mut(name).established = true;
                 false
@@ -1625,7 +1610,7 @@ impl PeerManager {
         match self.bound_session_established(key).await {
             Some(true) => {
                 if let Some(unnumbered) = self.unnumbered.as_mut() {
-                    unnumbered.discovery.session_established(name);
+                    unnumbered.discovery.session_established(name, key.address);
                 }
                 self.port_mut(name).established = true;
                 false
@@ -1687,7 +1672,7 @@ impl PeerManager {
             rustbgpd_transport::StateQueryOutcome::State(state) => match state.fsm_state {
                 SessionState::Established => {
                     if let Some(unnumbered) = self.unnumbered.as_mut() {
-                        unnumbered.discovery.session_established(name);
+                        unnumbered.discovery.session_established(name, key.address);
                     }
                     self.port_mut(name).established = true;
                     false
