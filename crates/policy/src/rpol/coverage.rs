@@ -110,6 +110,9 @@ pub enum LintKind {
     /// policy always decides (unconditional or constant-true guard with
     /// a terminal action).
     UnreachableTerm,
+    /// An `if`, `else if` or `else` branch no route can reach: its guard
+    /// folds to false, or an earlier guard of its chain folds to true.
+    UnreachableBranch,
     /// A policy referenced by no test and no `apply` in the compilation
     /// unit. Daemon config chains are not visible here, so this is a
     /// "within these files" fact, not proof of dead code.
@@ -121,11 +124,12 @@ pub enum LintKind {
 
 impl LintKind {
     /// Every lint, in label order of the CLI reference.
-    pub const ALL: [LintKind; 6] = [
+    pub const ALL: [LintKind; 7] = [
         LintKind::UnusedSet,
         LintKind::UnusedDataset,
         LintKind::UnusedFn,
         LintKind::UnreachableTerm,
+        LintKind::UnreachableBranch,
         LintKind::UnreferencedPolicy,
         LintKind::OptionalFieldNegation,
     ];
@@ -144,6 +148,7 @@ impl LintKind {
             LintKind::UnusedDataset => "unused-dataset",
             LintKind::UnusedFn => "unused-fn",
             LintKind::UnreachableTerm => "unreachable-term",
+            LintKind::UnreachableBranch => "unreachable-branch",
             LintKind::UnreferencedPolicy => "unreferenced-policy",
             LintKind::OptionalFieldNegation => "optional-field-negation",
         }
@@ -374,7 +379,14 @@ impl CoverageAccum {
 fn collect_stmt_applies<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a str>) {
     for stmt in stmts {
         match stmt {
-            Stmt::If(if_stmt) => collect_expr_applies(&if_stmt.cond, out),
+            Stmt::If(if_stmt) => {
+                for branch in &if_stmt.branches {
+                    collect_expr_applies(&branch.cond, out);
+                }
+                for body in if_stmt.bodies() {
+                    collect_stmt_applies(body, out);
+                }
+            }
             Stmt::For(for_stmt) => collect_stmt_applies(&for_stmt.body, out),
             Stmt::Action(_) => {}
         }
@@ -458,6 +470,9 @@ pub(super) fn lints(file: &SourceFile) -> Vec<Lint> {
                 });
             }
         }
+        for term in &def.terms {
+            unreachable_branches(&term.stmts, &def.name.node, &mut out);
+        }
         if !refs.policies.contains(def.name.node.as_str()) {
             out.push(Lint {
                 kind: LintKind::UnreferencedPolicy,
@@ -477,38 +492,100 @@ pub(super) fn lints(file: &SourceFile) -> Vec<Lint> {
 /// Does this term decide every route that reaches it? Only the
 /// statically-certain cases: a bare `accept`/`reject`, an `if` whose
 /// guard folds to a constant (the #768 folding — parameters and fields
-/// never fold) with a terminal branch taken, or an `if`/`else` whose
-/// branches are both terminal. Loops and runtime guards are
+/// never fold) with a terminal branch taken, or an `if` chain whose
+/// branches, `else` included, all decide. Loops and runtime guards are
 /// conservatively non-deciding.
 fn term_always_decides(term: &TermDef) -> bool {
-    for stmt in &term.stmts {
-        match stmt {
-            Stmt::Action(ActionStmt::Accept(_) | ActionStmt::Reject(_)) => return true,
-            Stmt::Action(_) | Stmt::For(_) => {}
-            Stmt::If(if_stmt) => {
-                if if_decides(if_stmt) {
-                    return true;
+    body_decides(&term.stmts)
+}
+
+/// Whether a statement list decides every route that reaches it, by the
+/// statically certain cases [`term_always_decides`] lists. The lowerer
+/// and the cost model use it to drop a deciding branch's negation from
+/// the later branches of its chain.
+pub(super) fn body_decides(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Action(action) => matches!(action, ActionStmt::Accept(_) | ActionStmt::Reject(_)),
+        Stmt::For(_) => false,
+        Stmt::If(if_stmt) => if_decides(if_stmt),
+    })
+}
+
+/// Whether an `if` chain decides every route that reaches it: the first
+/// branch whose guard folds true decides when its body does; a guard
+/// that folds false skips its branch; any other branch must decide, and
+/// so must the `else`, whose absence decides nothing.
+fn if_decides(if_stmt: &IfStmt) -> bool {
+    for branch in &if_stmt.branches {
+        match const_truth(&branch.cond) {
+            Some(true) => return body_decides(&branch.body),
+            Some(false) => {}
+            None => {
+                if !body_decides(&branch.body) {
+                    return false;
                 }
             }
         }
     }
-    false
+    if_stmt
+        .else_body
+        .as_ref()
+        .is_some_and(|else_body| body_decides(&else_body.body))
 }
 
-fn if_decides(if_stmt: &IfStmt) -> bool {
-    let then_terminal = has_terminal(&if_stmt.then_actions);
-    let else_terminal = if_stmt.else_actions.as_deref().is_some_and(has_terminal);
-    match const_truth(&if_stmt.cond) {
-        Some(true) => then_terminal,
-        Some(false) => else_terminal,
-        None => then_terminal && else_terminal,
+/// Branches no route can reach, by constant-folded guards alone: a
+/// branch whose guard folds false, and every branch and `else` after one
+/// whose guard folds true. A nested `if` inside an unreachable branch is
+/// not reported again.
+fn unreachable_branches(stmts: &[Stmt], policy: &str, out: &mut Vec<Lint>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Action(_) => {}
+            Stmt::For(for_stmt) => unreachable_branches(&for_stmt.body, policy, out),
+            Stmt::If(if_stmt) => {
+                let mut decided = false;
+                for branch in &if_stmt.branches {
+                    if decided {
+                        out.push(unreachable_branch(branch.span, policy));
+                        continue;
+                    }
+                    match const_truth(&branch.cond) {
+                        Some(false) => out.push(Lint {
+                            kind: LintKind::UnreachableBranch,
+                            span: branch.span,
+                            message: format!(
+                                "branch in policy {policy} is unreachable (its condition is \
+                                 always false)"
+                            ),
+                        }),
+                        Some(true) => {
+                            decided = true;
+                            unreachable_branches(&branch.body, policy, out);
+                        }
+                        None => unreachable_branches(&branch.body, policy, out),
+                    }
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    if decided {
+                        out.push(unreachable_branch(else_body.span, policy));
+                    } else {
+                        unreachable_branches(&else_body.body, policy, out);
+                    }
+                }
+            }
+        }
     }
 }
 
-fn has_terminal(actions: &[ActionStmt]) -> bool {
-    actions
-        .iter()
-        .any(|a| matches!(a, ActionStmt::Accept(_) | ActionStmt::Reject(_)))
+fn unreachable_branch(span: Span, policy: &str) -> Lint {
+    Lint {
+        kind: LintKind::UnreachableBranch,
+        span,
+        message: format!(
+            "branch in policy {policy} is unreachable (an earlier condition of its chain is \
+             always true)"
+        ),
+    }
 }
 
 /// A guard's compile-time truth value, when every leaf folds — the
@@ -580,10 +657,11 @@ impl<'a> Refs<'a> {
         for stmt in stmts {
             match stmt {
                 Stmt::If(if_stmt) => {
-                    self.expr(&if_stmt.cond);
-                    self.actions(&if_stmt.then_actions);
-                    if let Some(else_actions) = &if_stmt.else_actions {
-                        self.actions(else_actions);
+                    for branch in &if_stmt.branches {
+                        self.expr(&branch.cond);
+                    }
+                    for body in if_stmt.bodies() {
+                        self.stmts(body);
                     }
                 }
                 Stmt::Action(action) => self.action(action),
@@ -594,12 +672,6 @@ impl<'a> Refs<'a> {
                     self.stmts(&for_stmt.body);
                 }
             }
-        }
-    }
-
-    fn actions(&mut self, actions: &'a [ActionStmt]) {
-        for action in actions {
-            self.action(action);
         }
     }
 

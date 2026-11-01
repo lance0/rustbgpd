@@ -11253,7 +11253,7 @@ _rbgp() {
             opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --coverage-matched-min --deny-lints= --fail-on-empty --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             local rbgp_eq_words="" rbgp_eq_done="" rbgp_eq_cur="${cur}"
             case "${cur}" in
-                --deny-lints=*) rbgp_eq_words="unused-set unused-dataset unused-fn unreachable-term unreferenced-policy optional-field-negation"; rbgp_eq_done="--deny-lints="; rbgp_eq_cur="${cur#*=}" ;;
+                --deny-lints=*) rbgp_eq_words="unused-set unused-dataset unused-fn unreachable-term unreachable-branch unreferenced-policy optional-field-negation"; rbgp_eq_done="--deny-lints="; rbgp_eq_cur="${cur#*=}" ;;
             esac
             if [[ -z ${rbgp_eq_words} ]]; then
                 # Split by COMP_WORDBREAKS: the cursor sits on the `=` word
@@ -11266,7 +11266,7 @@ _rbgp() {
                     rbgp_eq_option="${COMP_WORDS[COMP_CWORD-2]}"
                 fi
                 case "${rbgp_eq_option}" in
-                    --deny-lints) rbgp_eq_words="unused-set unused-dataset unused-fn unreachable-term unreferenced-policy optional-field-negation" ;;
+                    --deny-lints) rbgp_eq_words="unused-set unused-dataset unused-fn unreachable-term unreachable-branch unreferenced-policy optional-field-negation" ;;
                 esac
             fi
             if [[ -n ${rbgp_eq_words} ]]; then

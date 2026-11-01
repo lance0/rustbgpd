@@ -539,8 +539,8 @@ the flag and always includes the raw `received_at_epoch_seconds` field.
 | 4 | A lint selected by `--deny-lints` |
 
 Every check computes the static lints. Their stable names are `unused-set`,
-`unused-dataset`, `unused-fn`, `unreachable-term`, `unreferenced-policy` and
-`optional-field-negation`
+`unused-dataset`, `unused-fn`, `unreachable-term`, `unreachable-branch`,
+`unreferenced-policy` and `optional-field-negation`
 (see "Coverage and lints" in the
 [language reference](../../docs/reference/rpol-language.md)). A lint is a
 warning and never changes the exit code unless selected:

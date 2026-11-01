@@ -22,10 +22,10 @@ use crate::sets::{
 
 use super::ast::{
     ActionStmt, AsnSetDef, CmpOp, CommunityArg, CommunityKind, CommunityLit, CommunitySetDef,
-    DatasetDecl, DatasetEntryAst, ExpectCall, ExpectDef, ExpectVerdict, Expr, FieldPath, FieldRoot,
-    FnDef, FnLet, ForSource, ForStmt, IfStmt, NextHopArg, PeerField, PolicyDef, PrefixEntryAst,
-    PrefixSetDef, PrependAsArg, Rhs, RouteField, ScalarAttr, SourceFile, Stmt, TermDef,
-    TestDatasetDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
+    DatasetDecl, DatasetEntryAst, ElseBody, ExpectCall, ExpectDef, ExpectVerdict, Expr, FieldPath,
+    FieldRoot, FnDef, FnLet, ForSource, ForStmt, IfBranch, IfStmt, NextHopArg, PeerField,
+    PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, ScalarAttr, SourceFile,
+    Stmt, TermDef, TestDatasetDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -1027,7 +1027,7 @@ impl Parser<'_> {
     /// smaller semantic nesting cap with a better diagnostic.
     fn stmt(&mut self, depth: u32) -> PResult<Stmt> {
         if self.at(Tok::IfKw) {
-            return Ok(Stmt::If(self.if_stmt()?));
+            return Ok(Stmt::If(self.if_stmt(depth)?));
         }
         // Statement-initial contextual `for` (LAN-303, ADR-0103
         // Decision 2.2): like `let`, statement position admits no
@@ -1081,48 +1081,73 @@ impl Parser<'_> {
         })
     }
 
-    fn if_stmt(&mut self) -> PResult<IfStmt> {
+    /// `if <cond> { body } [else if <cond> { body }]... [else { body }]`.
+    /// The chain parses iteratively into one flat [`IfStmt`]; only a
+    /// nested `if` inside a body recurses, at `depth + 1`.
+    fn if_stmt(&mut self, depth: u32) -> PResult<IfStmt> {
+        let mut branches = vec![self.if_branch(depth)?];
+        let mut else_body = None;
+        while let Some(else_token) = self.eat(Tok::ElseKw) {
+            if self.at(Tok::IfKw) {
+                branches.push(self.if_branch(depth)?);
+                continue;
+            }
+            self.expect(Tok::LBrace, "`{` or `if`")?;
+            let body = self.if_body(depth)?;
+            self.expect(Tok::RBrace, "`}`")?;
+            else_body = Some(ElseBody {
+                body,
+                span: else_token.span,
+            });
+            break;
+        }
+        Ok(IfStmt {
+            branches,
+            else_body,
+        })
+    }
+
+    /// One `if <cond> { body }` link of a chain.
+    fn if_branch(&mut self, depth: u32) -> PResult<IfBranch> {
         let start = self.expect(Tok::IfKw, "`if`")?.span;
         let cond = self.expr(0)?;
         let span = start.to(cond.span());
         self.expect(Tok::LBrace, "`{`")?;
-        let then_actions = self.action_list()?;
+        let body = self.if_body(depth)?;
         self.expect(Tok::RBrace, "`}`")?;
-        let else_actions = if self.eat(Tok::ElseKw).is_some() {
-            self.expect(Tok::LBrace, "`{` (V1 has no `else if`)")?;
-            let actions = self.action_list()?;
-            self.expect(Tok::RBrace, "`}`")?;
-            Some(actions)
-        } else {
-            None
-        };
-        Ok(IfStmt {
-            cond,
-            then_actions,
-            else_actions,
-            span,
-        })
+        Ok(IfBranch { cond, body, span })
     }
 
-    fn action_list(&mut self) -> PResult<Vec<ActionStmt>> {
-        let mut actions = Vec::new();
+    /// An `if`/`else` body: actions, `let` bindings and nested `if`
+    /// statements. The typechecker caps the nesting; `depth` only
+    /// bounds the parse recursion.
+    fn if_body(&mut self, depth: u32) -> PResult<Vec<Stmt>> {
+        let mut body = Vec::new();
         while !self.at(Tok::RBrace) {
             if self.at(Tok::IfKw) {
+                self.check_expr_depth(depth + 1)?;
+                body.push(Stmt::If(self.if_stmt(depth + 1)?));
+                continue;
+            }
+            if let Some(token) = self.peek()
+                && token.kind == Tok::Ident
+                && self.text(token) == "for"
+            {
                 self.diags.push(
                     Diagnostic::coded(
                         DiagnosticCode::Parse,
-                        self.here(),
-                        "nested `if` is not supported in V1",
-                        "`if` bodies contain only actions",
+                        token.span,
+                        "`for` is not allowed in an `if` body",
+                        "loops go in term and loop bodies",
                     )
-                    .with_note("split the condition with `&&`, or use another term"),
+                    .with_note("put the loop in the term body and the `if` inside the loop"),
                 );
                 return Err(Fail);
             }
-            actions.push(self.action()?);
+            body.push(Stmt::Action(self.action()?));
             self.eat(Tok::Semi);
         }
-        Ok(actions)
+        Ok(body)
     }
 
     #[expect(
@@ -2466,8 +2491,8 @@ test customer-in-accepts-tagged {
         let Stmt::If(if_stmt) = &file.policies[0].terms[0].stmts[0] else {
             panic!("expected if")
         };
-        let Expr::Or(lhs, rhs) = &if_stmt.cond else {
-            panic!("top must be Or, got {:?}", if_stmt.cond)
+        let Expr::Or(lhs, rhs) = &if_stmt.branches[0].cond else {
+            panic!("top must be Or, got {:?}", if_stmt.branches[0].cond)
         };
         assert!(matches!(**rhs, Expr::Apply { .. }));
         let Expr::And(not_side, med_side) = &**lhs else {
@@ -2563,6 +2588,9 @@ policy second { term t { flarp } }
         let Stmt::If(if_stmt) = &term.stmts[1] else {
             panic!("expected if")
         };
-        assert_eq!(if_stmt.else_actions.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            if_stmt.else_body.as_ref().map(|other| other.body.len()),
+            Some(2)
+        );
     }
 }

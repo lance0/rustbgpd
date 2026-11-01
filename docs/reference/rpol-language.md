@@ -453,9 +453,12 @@ policy NAME[(param: u32, ...)] {
 
 - Terms evaluate in order. Statements inside a term are: bare
   actions, `let` bindings (see "Bindings"), `for` loops (see "Loops"),
-  or `if <expr> { actions... } [else { actions... }]`. `if` bodies are flat
-  action/`let` lists — **no nested `if`** in V1 (split the condition
-  with `&&` or use another term).
+  or `if <expr> { ... } [else if <expr> { ... }]... [else { ... }]`.
+  The first branch whose condition matches runs, and at most one does.
+  An `if` body holds actions, `let` bindings and nested `if`
+  statements, up to **four levels** of `if` (an `else if` chain of any
+  length is one level); the fifth is a compile error. Loops stay in
+  term and loop bodies.
 - **Verdicts**: `accept` permits the route (with all modifications
   executed so far in this policy); `reject` denies it (a denied route
   has no attributes — modifications in a rejecting branch are
@@ -469,7 +472,7 @@ policy NAME[(param: u32, ...)] {
   An accepting policy continues the chain; a rejecting policy stops it
   and discards staged modifications.
 - Statements after a bare `accept`/`reject` in the same term (or
-  actions after a verdict in the same `if` body) are **unreachable
+  statements after a verdict in the same `if` body) are **unreachable
   and a compile error**.
 
 An optional `default-action accept|reject` declaration must appear at most
@@ -500,6 +503,26 @@ to one or more IR terms:
 
 - Each `if` becomes an IR term (guard = condition); its `else`
   becomes a following IR term guarded by the negated condition.
+- An `else if` chain or a nested `if` adds no runtime node. Every IR
+  term a branch body lowers to is guarded by the branch's **path
+  condition**: the enclosing branch's path, then the negation of each
+  earlier guard in the chain, then the branch's own guard, as one flat
+  conjunction in that order. The final `else` takes the negations alone.
+  The path conjunction evaluates its conditions in that order and stops
+  at the first miss, so a branch's guard evaluates only where the source
+  would reach it. A source-level `&&` makes no such promise: the compiler
+  may evaluate its operands in either order (cheapest first), so
+  `if A && B { ... }` is not `if A { if B { ... } }` when `B` can fail
+  closed. Nest the `if` when `B` must not run unless `A` holds.
+- A branch whose body always ends in `accept` or `reject` adds no
+  negation to the later branches: first-match already keeps the walk from
+  reaching them after it matched, and a guard that fails closed denies the
+  route at the branch's own term. A chain of deciding branches therefore
+  costs about what one term per branch does. A branch that can fall
+  through, by only modifying the route, keeps its negation in every later
+  term, so a chain of such branches re-evaluates the earlier guards and its
+  cost grows with the square of its length. The compile-time cost and size
+  budgets charge every re-evaluation.
 - A run of bare modification actions flushes as an unconditional
   `Continue` IR term (a small IR addition made for this frontend:
   guard matched → apply modifications → keep walking this policy's
@@ -1595,9 +1618,12 @@ Static lints ride the same pass and need no fixtures:
   referenced by any policy (fn-to-fn calls count as uses).
 - `unreachable-term` — an earlier term in the policy always decides.
   Statically-certain cases only: a bare `accept`/`reject`, an
-  `if`/`else` with both branches terminal, or a constant guard that
-  folds true (e.g. a folded builtin call). Runtime guards are
+  `if` chain whose branches and `else` are all terminal, or a constant
+  guard that folds true (e.g. a folded builtin call). Runtime guards are
   conservatively reachable — this is not a reachability prover.
+- `unreachable-branch` — an `if`, `else if` or `else` branch no route
+  can reach: its guard folds to false, or an earlier guard of its chain
+  folds to true. The same constant folding, no reachability proof.
 - `unreferenced-policy` — no test and no `apply` names it in the
   compilation unit (with the config-chain caveat above).
 - `optional-field-negation` — `!(optional-field == literal)` also matches
@@ -2279,6 +2305,7 @@ and the
 | `prepend as-path 65000 3` | `prepend as 65000 3` |
 | `set next-hop self` | `set next-hop self` |
 | `pass` followed by the policy end | `accept`, or nothing when no `default-action reject` is declared |
+| `if ... then ... elseif ... then ... else ... endif`, nested `if` | `if ... { ... } else if ... { ... } else { ... }`, nested up to four levels; one branch runs, and a branch without `accept` or `reject` continues with the rest of the policy |
 | `drop` | `reject` |
 | conditions read the route's initial data ("comparison operators always run on the initial data in the route", 24.x guide) | the same: reads never observe a staged `set` |
 | `neighbor ... route-policy NAME in` | `import_policy_chain = ["NAME"]` on the neighbor (see [Using policies in the daemon](#using-policies-in-the-daemon)) |
@@ -2655,15 +2682,6 @@ test scrub-all-removes-no-export {
 These RPL constructs have no `.rpol` spelling today. Each has a form that
 compiles now:
 
-- **`if ... then ... elseif ... endif` and nested `if`** — one term per
-  branch reproduces `elseif` only when every branch ends the policy with
-  `accept` or `reject`, because the first deciding term wins. A branch that
-  only modifies falls through to the later branch terms, and adding an
-  `accept` to it skips the policy's later checks. For branches that must
-  continue, guard each later branch with the negation of the earlier
-  branch conditions, write a nested `if` as one guard joined with `&&`,
-  and defer the `accept` to a final term after the remaining checks (see
-  "Deliberate V1 exclusions").
 - **`as-path neighbor-is '65001'`**, with one ASN —
   `route.as-path matches "^65001_"`. `_` matches a space, a brace or either
   end of the rendered path, so the pattern matches a path whose first ASN
@@ -2705,31 +2723,17 @@ policy delete-in-set {
     }
 }
 
-# RPL `if ... then ... elseif ... then ... endif` where every branch
-# accepts: one term per branch, first match wins.
-policy tiers {
-    term gold {
-        if route.communities has 65000:1 { set local-pref 300; accept }
-    }
-    term silver {
-        if route.communities has 65000:2 { set local-pref 200; accept }
-    }
-    term rest { accept }
-}
-
 # RPL `if gold then set local-preference 300 elseif silver then set
 # local-preference 200 endif`, then `if as-path length ge 10 then drop
-# endif`, then `pass`: the branches continue, so the later branch is
-# guarded by the negated earlier condition and the accept comes last.
+# endif`, then `pass`: a native `else if` whose branches continue to the
+# later check.
 community-set gold { 65000:1 }
 community-set silver { 65000:2 }
 
 policy tiers-then-check {
-    term gold {
+    term tiers {
         if route.communities in gold { set local-pref 300 }
-    }
-    term silver {
-        if route.communities in silver && !(route.communities in gold) { set local-pref 200 }
+        else if route.communities in silver { set local-pref 200 }
     }
     term too-long {
         if route.as-path.len >= 10 { reject }
@@ -2749,16 +2753,6 @@ test delete-in-set-removes-members-only {
     route { prefix 192.0.2.0/24; communities [65000:666, 65010:1] }
     expect delete-in-set == accept with removes community 65000:666,
         not removed community 65010:1
-}
-
-test first-matching-tier-wins {
-    route { prefix 192.0.2.0/24; communities [65000:1, 65000:2] }
-    expect tiers == accept with local-pref 300
-}
-
-test second-tier {
-    route { prefix 192.0.2.0/24; communities [65000:2] }
-    expect tiers == accept with local-pref 200
 }
 
 test first-branch-wins-over-a-later-branch {
@@ -2851,9 +2845,11 @@ test other-paths-still-run-the-check {
 No `while` and no unbounded iteration of any kind — `for`
 iterates finite sources only, capped and fuel-metered. No
 user-defined types, no maps (safety is total by construction —
-ADR-0096 Decision 2). No `as-path-set`. No `else if` chains and no nested `if`
-(keep terms small; use `&&` or more terms). No mutable state of any
-kind — `let` bindings are immutable, and reads never
+ADR-0096 Decision 2). No `as-path-set`. `if` nests at most four levels
+deep (use `else if` or split the term; joining conditions with `&&` works
+only where no operand can fail closed, since `&&` operands may evaluate in
+either order). No
+mutable state of any kind — `let` bindings are immutable, and reads never
 observe staged `set` writes (read-back would break memoization and
 needs its own ADR). EVPN route type takes only an integer literal
 (no parameters — the value is wire-encoded u8). Full-form all-numeric
