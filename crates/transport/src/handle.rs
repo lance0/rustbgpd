@@ -391,12 +391,16 @@ impl SessionNotificationSender {
     /// Send a [`SessionNotification::MaxPrefixWarning`] unless one for the
     /// same scope is still queued, in which case the crossing is added to
     /// that one. At most one warning per scope is queued.
+    ///
+    /// A closed receiver dropped whatever was queued, so a crossing then
+    /// tries to send and reports the failure rather than adding to a warning
+    /// nobody will receive.
     pub(crate) fn send_max_prefix_warning(
         &self,
         notification: SessionNotification,
         crossings: &MaxPrefixWarningCrossings,
     ) -> Result<(), mpsc::error::SendError<SessionNotification>> {
-        if crossings.0.fetch_add(1, Ordering::AcqRel) > 0 {
+        if crossings.0.fetch_add(1, Ordering::AcqRel) > 0 && !self.inner.is_closed() {
             return Ok(());
         }
         let result = self.send_with(notification, Some(crossings.clone()));
@@ -3614,6 +3618,44 @@ mod tests {
                 "bgp_session_notification_outstanding_high_watermark"
             ) >= 1.0
         );
+    }
+
+    /// Dropping the receiver drops a queued warning without dequeueing it, so
+    /// its scope's count stays nonzero. Later crossings must still try to send
+    /// and report the closed channel instead of adding to that lost warning.
+    /// Mutation-red: coalescing without checking the receiver returns `Ok`.
+    #[test]
+    fn max_prefix_warning_after_receiver_drop_reports_the_closed_channel() {
+        let metrics = BgpMetrics::new();
+        let (sender, receiver) = session_notification_channel(metrics.clone());
+        let crossings = MaxPrefixWarningCrossings::default();
+        let warning = || SessionNotification::MaxPrefixWarning {
+            session_id: 1,
+            role: SessionRole::Primary,
+            peer_addr: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            family: "aggregate",
+            stage: "accepted",
+            usage: 1,
+            bound: 2,
+            percent: 50,
+            crossings: 1,
+        };
+        sender
+            .send_max_prefix_warning(warning(), &crossings)
+            .unwrap();
+        drop(receiver);
+        for _ in 0..2 {
+            assert_eq!(
+                identity(
+                    &sender
+                        .send_max_prefix_warning(warning(), &crossings)
+                        .unwrap_err()
+                        .0
+                ),
+                (1, 3)
+            );
+        }
+        assert_gauge(&metrics, "bgp_session_notification_outstanding", 0.0);
     }
 
     #[test]
