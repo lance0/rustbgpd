@@ -2617,6 +2617,9 @@ pub struct ConfigDiff {
     /// cannot atomically settle the BFD actor with their peer mutations.
     #[serde(skip)]
     pub(crate) bfd_members_changed: bool,
+    /// A range's `bfd` changed: SIGHUP applies it with the generation.
+    #[serde(skip)]
+    pub(crate) dynamic_range_bfd_changed: bool,
     /// `[policy.explain]` (`enabled` / `cache_size`, ADR-0073) changed.
     /// These are read by `build_transport_config` / `resolve_neighbor`
     /// when a session is constructed, so they do not hot-apply to live
@@ -2908,6 +2911,7 @@ impl ConfigDiff {
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
             || self.dynamic_neighbors_reload_applied_changed
+            || self.dynamic_range_bfd_changed
             || self.dynamic_neighbor_limit_changed
             || self.gnmi_dialout_changed
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
@@ -3787,7 +3791,15 @@ pub struct SighupReloadFamilies {
     /// range's password or GTSM setting. Whole static neighbors added or
     /// removed with their own authentication are generation-class.
     pub listener_auth: bool,
+    /// A `[[dynamic_neighbors]]` range present before and after changed its
+    /// `bfd` (also counted in `bfd_members`).
+    pub dynamic_range_bfd: bool,
 }
+
+/// The rejection reason when a range's `bfd` edit, which settles with the
+/// generation, shares a reload with other `[[dynamic_neighbors]]` edits.
+pub const DYNAMIC_RANGE_BFD_REJECTION: &str = "a [[dynamic_neighbors]] range's `bfd` changed \
+    together with other [[dynamic_neighbors]] edits; reload the `bfd` change on its own";
 
 impl SighupReloadFamilies {
     /// Every family a config diff can see. See the type docs for the two
@@ -3827,6 +3839,7 @@ impl SighupReloadFamilies {
             honor_knobs: diff.honor_graceful_shutdown_changed || diff.honor_blackhole_changed,
             tcp_ao: diff.neighbor_tcp_ao_changed || diff.dynamic_neighbor_tcp_ao_changed,
             listener_auth: diff.listener_inbound_auth_changed,
+            dynamic_range_bfd: diff.dynamic_range_bfd_changed,
         }
     }
 }
@@ -3916,7 +3929,11 @@ pub fn classify_sighup_reload(families: SighupReloadFamilies) -> SighupReloadRou
         rejected.push("dataset changes with listener MD5/GTSM changes".to_string());
     }
     if families.dynamic_ranges {
-        rejected.push("[[dynamic_neighbors]]".to_string());
+        rejected.push(if families.dynamic_range_bfd {
+            DYNAMIC_RANGE_BFD_REJECTION.to_string()
+        } else {
+            "[[dynamic_neighbors]]".to_string()
+        });
     }
     if families.evpn_runtime {
         rejected.push("EVPN runtime tables".to_string());
@@ -4562,6 +4579,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
             "dynamic_neighbors_changed": diff.dynamic_neighbors_reload_applied_changed,
+            "dynamic_neighbors_bfd_changed": diff.dynamic_range_bfd_changed,
             "dynamic_neighbor_limit_changed": diff.dynamic_neighbor_limit_changed,
             "gnmi_dialout_changed": diff.gnmi_dialout_changed,
             "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
@@ -4824,6 +4842,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             let _ = writeln!(
                 out,
                 "  {} [[dynamic_neighbors]] matcher rebuilt",
+                style.change_marker
+            );
+        }
+        if diff.dynamic_range_bfd_changed {
+            let _ = writeln!(
+                out,
+                "  {} [[dynamic_neighbors]] bfd applied to running sessions",
                 style.change_marker
             );
         }
@@ -5224,6 +5249,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         unnumbered_changed: unnumbered_settings_changed(old, new),
         bfd_changed,
         bfd_members_changed,
+        dynamic_range_bfd_changed: dynamic_range_bfd_changed(old, new),
         policy_explain_changed: old.policy.explain != new.policy.explain,
         policy_reject_retention_changed: old.policy.reject_retention != new.policy.reject_retention,
         evpn_runtime_change_class,
@@ -5346,26 +5372,48 @@ pub(crate) fn bfd_member_attachments_changed(old: &Config, new: &Config) -> bool
             })
             .collect()
     };
-    // A range's `bfd` registers and removes its running sessions' BFD
-    // sessions and may open a socket family: it settles with the generation,
-    // like any member change.
-    let ranges = |config: &Config| -> BTreeMap<_, _> {
-        config
-            .dynamic_neighbors
-            .iter()
-            .filter_map(|range| {
-                let bfd = range.bfd.clone()?;
-                Some((
-                    (
-                        effective_prefix_str(&range.prefix),
-                        range.peer_group.clone(),
-                    ),
-                    bfd,
-                ))
-            })
-            .collect()
-    };
-    groups(old) != groups(new) || members(old) != members(new) || ranges(old) != ranges(new)
+    groups(old) != groups(new)
+        || members(old) != members(new)
+        || dynamic_range_bfd_changed(old, new)
+}
+
+/// Whether a range present in both configs changed its `bfd`. That edit
+/// registers, replaces or removes its running sessions' BFD sessions, so it
+/// settles with the generation like any member change. Adding a range only
+/// needs its socket family open before the first accept, and removing one
+/// leaves its sessions running until they end: both stay on the sequential
+/// route ([`dynamic_range_bfd_added`]).
+pub(crate) fn dynamic_range_bfd_changed(old: &Config, new: &Config) -> bool {
+    let new = dynamic_range_bfd(new);
+    dynamic_range_bfd(old)
+        .iter()
+        .any(|(key, bfd)| new.get(key).is_some_and(|next| next != bfd))
+}
+
+/// Whether `new` adds a range, absent from `old`, that runs BFD.
+pub(crate) fn dynamic_range_bfd_added(old: &Config, new: &Config) -> bool {
+    let old = dynamic_range_bfd(old);
+    dynamic_range_bfd(new)
+        .iter()
+        .any(|(key, bfd)| bfd.as_ref().is_some_and(|bfd| bfd.enabled) && !old.contains_key(key))
+}
+
+type DynamicRangeKey = (Option<(IpAddr, u8)>, String);
+
+fn dynamic_range_bfd(config: &Config) -> BTreeMap<DynamicRangeKey, Option<BfdConfig>> {
+    config
+        .dynamic_neighbors
+        .iter()
+        .map(|range| {
+            (
+                (
+                    effective_prefix_str(&range.prefix),
+                    range.peer_group.clone(),
+                ),
+                range.bfd.clone(),
+            )
+        })
+        .collect()
 }
 
 /// Whether the `[[dynamic_neighbors]]` records changed apart from their

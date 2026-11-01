@@ -2247,19 +2247,23 @@ bfd = { profile = "fast" }
   hold that keeps a static neighbor down until BFD is Up again does not carry
   over: the peer's next connection is accepted as a new session and registers
   a new BFD session.
-- **Reload.** A range's `bfd` is a BFD member attachment: on SIGHUP it is
-  applied by the reload generation, like a static neighbor's `bfd`, and
-  reaches the running sessions without resetting BGP. Adding it registers
-  their BFD sessions and changing the profile replaces them; removing it
-  removes them. The first range to run BFD in an address family opens that
-  family's BFD socket in the generation's preflight, never when a connection
-  is accepted. A preflight failure rejects the reload with no effect, and an
-  unacknowledged BFD change fences it, as for any BFD member change.
-  Because `[[dynamic_neighbors]]` record edits cannot share a reload with a
-  generation, a candidate that changes a range's `bfd` together with any
-  other range change, including adding or removing a range that runs BFD,
-  is rejected: reload the two parts separately (for example, remove the
-  range's `bfd`, then the range). Runtime range CRUD cannot add BFD to a
+- **Reload.** Adding or removing a range that runs BFD is an ordinary
+  range edit, applied in one SIGHUP. A new range has no session yet: the
+  reload opens its BFD socket family before its first effect, so the first
+  accept registers without waiting. A family that cannot open rejects the
+  reload with no effect, and an unacknowledged opening fences it. Removing a
+  range stops future accepts only; its running sessions keep their BFD
+  sessions until they end.
+- **Editing `bfd` on an existing range** is a BFD member attachment change:
+  SIGHUP applies it with the reload generation, like a static neighbor's
+  `bfd`, without resetting BGP. Adding it registers the running sessions'
+  BFD sessions, changing the profile replaces them, and removing it removes
+  them. A socket preflight failure rejects the reload with no effect, and an
+  unacknowledged change fences it. Because a generation cannot carry other
+  `[[dynamic_neighbors]]` edits, a candidate that edits an existing range's
+  `bfd` together with another range change, such as its prefix, is rejected
+  with a message naming the range `bfd` edit; reload the two separately.
+- **Runtime CRUD and transactions.** Runtime range CRUD cannot add BFD to a
   range or delete a range that runs it, and config transactions cannot
   change a range's `bfd`; edit the file and use SIGHUP.
 - **Status.** Each session appears in `GetBfdSessions` and `rbgp bfd` under

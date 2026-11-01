@@ -891,9 +891,10 @@ fn dynamic_neighbor_limit_diff_marks_reload_applied() {
     assert!(text.contains("[global] dynamic_neighbor_limit updated"));
 }
 
-/// A range's `bfd` is a BFD member change: on its own it takes the
-/// generation route, whose preflight and fence settle it. With any other
-/// range change it is rejected, since range edits cannot share a generation.
+/// Editing an existing range's `bfd` is a BFD member change: on its own it
+/// takes the generation route, whose preflight and fence settle it, and with
+/// another edit to that range it is rejected with its own reason. Adding or
+/// removing a range that runs BFD is an ordinary range edit.
 #[test]
 fn a_range_bfd_edit_reloads_through_the_generation() {
     let route = |old: &str, new: &str| {
@@ -915,20 +916,35 @@ fn a_range_bfd_edit_reloads_through_the_generation() {
         "peer_group = \"ix-members\"\n",
         "peer_group = \"ix-members\"\ndescription = \"leaves\"\n",
     );
-    let new_range = format!(
-        "{RANGE_BFD_BASE}\n[[dynamic_neighbors]]\nprefix = \"10.1.0.0/24\"\n\
-         peer_group = \"ix-members\"\nbfd = {{ profile = \"fast\" }}\n"
+    assert_eq!(
+        route(RANGE_BFD_BASE, &described),
+        SighupReloadRoute::Rejected {
+            reasons: vec![DYNAMIC_RANGE_BFD_REJECTION.to_string()]
+        }
     );
-    for new in [described.as_str(), new_range.as_str()] {
+    // Mutation-red: comparing ranges present on one side only rejects these.
+    let other_range = "\n[[dynamic_neighbors]]\nprefix = \"10.1.0.0/24\"\n\
+                       peer_group = \"ix-members\"\nbfd = { profile = \"fast\" }\n";
+    let added = format!("{RANGE_BFD_BASE}{other_range}");
+    // A `bfd` edit to one range with another range added is rejected with
+    // the same reason.
+    assert_eq!(
+        route(RANGE_BFD_BASE, &format!("{with_bfd}{other_range}")),
+        SighupReloadRoute::Rejected {
+            reasons: vec![DYNAMIC_RANGE_BFD_REJECTION.to_string()]
+        }
+    );
+    let moved = with_bfd.replace("10.0.0.0/24", "10.2.0.0/24");
+    for (old, new) in [
+        (RANGE_BFD_BASE, added.as_str()),
+        (added.as_str(), RANGE_BFD_BASE),
+        (with_bfd.as_str(), moved.as_str()),
+    ] {
         assert!(
-            matches!(
-                route(RANGE_BFD_BASE, new),
-                SighupReloadRoute::Rejected { .. }
-            ),
+            matches!(route(old, new), SighupReloadRoute::Sequential { .. }),
             "{new}"
         );
     }
-    // A range edit that leaves `bfd` alone stays on the sequential route.
     let other_asn = with_bfd.replace(
         "peer_group = \"ix-members\"\n",
         "peer_group = \"ix-members\"\nremote_asn = 65010\n",
@@ -937,4 +953,24 @@ fn a_range_bfd_edit_reloads_through_the_generation() {
         route(&with_bfd, &other_asn),
         SighupReloadRoute::Sequential { .. }
     ));
+}
+
+/// `rustbgpd --diff` reports an existing range's `bfd` edit as reload-applied,
+/// in text and JSON, without the range-matcher flag.
+#[test]
+fn diff_reports_a_range_bfd_edit() {
+    let old = parse(RANGE_BFD_BASE).unwrap();
+    let new = parse(&format!("{RANGE_BFD_BASE}bfd = {{ profile = \"fast\" }}\n")).unwrap();
+    let diff = diff_config(&old, &new);
+    // Mutation-red: without the predicate the diff reads "No changes."
+    assert!(diff.has_reload_applied_changes());
+    assert!(
+        format_config_diff(&diff).contains("[[dynamic_neighbors]] bfd applied to running sessions")
+    );
+    let json = config_diff_json_value(&diff);
+    assert_eq!(
+        json["reload_applied"]["dynamic_neighbors_bfd_changed"],
+        true
+    );
+    assert_eq!(json["reload_applied"]["dynamic_neighbors_changed"], false);
 }

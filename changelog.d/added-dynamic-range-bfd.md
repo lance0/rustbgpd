@@ -7,8 +7,8 @@
   when the session ends, and a genuine BFD Down tears the session down with
   Cease/10 as it does for a static neighbor. A SIGHUP that adds, edits or
   removes a range's `bfd` applies to the running sessions through the reload
-  generation without resetting BGP; changing it together with another range
-  change is rejected. A connection whose BFD session cannot be registered is
+  generation without resetting BGP, and a range that runs BFD is added or
+  removed in one SIGHUP. A connection whose BFD session cannot be registered is
   counted as `bgp_inbound_connections_dropped_total{reason="bfd_unavailable"}`.
   Strict and multihop range BFD are rejected, a range still never
   inherits `bfd` from its peer group, and runtime range CRUD and config

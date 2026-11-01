@@ -2479,6 +2479,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         honor_knobs: honor_graceful_shutdown_changed || honor_blackhole_changed,
         tcp_ao: tcp_ao_rotation_candidate,
         listener_auth: listener_auth_edited,
+        dynamic_range_bfd: config::dynamic_range_bfd_changed(current, &new_config),
     });
     let route = config::reject_unappliable_sequential_reload(route, current, &new_config);
     info!(route = %route.describe(), "reload route classified");
@@ -2576,6 +2577,9 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             config::SighupReloadRoute::Rejected { reasons } => {
                 trace.rejection_target = reasons.iter().find_map(|reason| match reason.as_str() {
                     "[[dynamic_neighbors]]" | "[[fib_tables]]" => Some(reason.clone()),
+                    config::DYNAMIC_RANGE_BFD_REJECTION => {
+                        Some("[[dynamic_neighbors]]".to_string())
+                    }
                     "EVPN runtime tables" => Some("[[evpn_instances]]".to_string()),
                     "[global] honor_graceful_shutdown / honor_blackhole" => {
                         Some("[global]".to_string())
@@ -2708,7 +2712,34 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     {
         return outcome;
     }
+    // A range added with `bfd` has no session yet: its socket family opens
+    // here, before the first effect, so its first accept never waits.
+    if matches!(route, config::SighupReloadRoute::Sequential { .. })
+        && config::dynamic_range_bfd_added(current, &new_config)
+        && let Some(internal_tx) = peer_mgr_internal_tx
+        && let Some(outcome) =
+            dynamic_bfd_socket_preflight(&progress, internal_tx, &new_config).await
+    {
+        return outcome;
+    }
     match route {
+        config::SighupReloadRoute::Rejected { reasons }
+            if reasons
+                .iter()
+                .any(|reason| reason == config::DYNAMIC_RANGE_BFD_REJECTION) =>
+        {
+            error!(
+                reasons = %reasons.join("; "),
+                "reload rejected before any effect: a [[dynamic_neighbors]] range's bfd \
+                 settles with a reload generation, which other range edits cannot share; \
+                 apply them in separate reloads (the candidate file is unchanged and the \
+                 running generation is retained)"
+            );
+            return clean_reload_failure(
+                "reload.preflight",
+                format!("unsupported compound candidate: {}", reasons.join("; ")),
+            );
+        }
         config::SighupReloadRoute::Rejected { reasons } => {
             error!(
                 reasons = %reasons.join("; "),
@@ -4524,6 +4555,48 @@ async fn unnumbered_reload_preflight(
         Err(_) => Some(generation_step_rejected(
             "unnumbered.preflight",
             "peer manager dropped the interface-only preflight reply".to_string(),
+        )),
+    }
+}
+
+/// Open the socket families of the BFD ranges `candidate` adds. A family
+/// that cannot open rejects the reload with no effect; a lost acknowledgement
+/// fences it, as the generation does. A family opened by a reload that
+/// fails later stays open and inert. `Some` is the outcome to return.
+async fn dynamic_bfd_socket_preflight(
+    progress: &SighupMutationProgress<'_>,
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
+    candidate: &Config,
+) -> Option<SighupReloadOutcome> {
+    use crate::peer_manager::DynamicBfdSocketOutcome;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let Ok(permit) = peer_mgr_internal_tx.reserve().await else {
+        return Some(generation_step_rejected(
+            "dynamic_bfd.sockets",
+            "peer manager unavailable for the dynamic-range BFD socket preflight".to_string(),
+        ));
+    };
+    progress.begin_mutation();
+    permit.send(InternalCommand::OpenDynamicBfdSockets {
+        candidate: Box::new(candidate.clone()),
+        reply: reply_tx,
+    });
+    match reply_rx.await {
+        Ok(DynamicBfdSocketOutcome::Ready) => None,
+        Ok(DynamicBfdSocketOutcome::Rejected(error)) => {
+            Some(generation_step_rejected("dynamic_bfd.sockets", error))
+        }
+        Ok(DynamicBfdSocketOutcome::Ambiguous(error)) => Some(fenced_reload_failure(
+            progress,
+            "dynamic_bfd.sockets",
+            ReloadStepError::Rejected(error),
+            RuntimeConfigFenceReason::KnownDivergence,
+        )),
+        Err(_) => Some(fenced_reload_failure(
+            progress,
+            "dynamic_bfd.sockets",
+            ReloadStepError::AcknowledgementLost,
+            RuntimeConfigFenceReason::AcknowledgementLost,
         )),
     }
 }
@@ -8213,6 +8286,131 @@ hold_time = 90
             tags,
             calls,
         )
+    }
+
+    /// A sequential SIGHUP that adds a `[[dynamic_neighbors]]` range running
+    /// BFD asks the peer manager to open its socket family before its first
+    /// effect: a family that cannot open rejects the reload with no effect,
+    /// and an unacknowledged opening fences it. A range without BFD asks
+    /// nothing.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture drives the rejected, fenced, lost, applied and no-BFD outcomes"
+    )]
+    async fn adding_a_bfd_range_opens_its_socket_family_before_any_effect() {
+        use crate::peer_manager::DynamicBfdSocketOutcome;
+        let initial = format!(
+            "{}\n[[bfd_profiles]]\nname = \"fast\"\n\n[peer_groups.fabric]\nhold_time = 90\n",
+            baseline_toml()
+        );
+        let range = "\n[[dynamic_neighbors]]\nprefix = \"10.9.0.0/24\"\npeer_group = \"fabric\"\n";
+        let current = load_config_from_toml("bfd-range-prior", &initial);
+        let with_bfd = load_config_from_toml(
+            "bfd-range-desired",
+            &format!("{initial}{range}bfd = {{ profile = \"fast\" }}\n"),
+        );
+        let without_bfd =
+            load_config_from_toml("plain-range-desired", &format!("{initial}{range}"));
+        let run = |desired: Config, reply: Option<DynamicBfdSocketOutcome>| {
+            let current = current.clone();
+            async move {
+                let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(8);
+                let peer_task = tokio::spawn(async move {
+                    let mut tags = Vec::new();
+                    while let Some(command) = peer_rx.recv().await {
+                        tags.push(cmd_tag(&command));
+                    }
+                    tags
+                });
+                let (internal_tx, mut internal_rx) = mpsc::channel::<InternalCommand>(8);
+                let internal_task = tokio::spawn(async move {
+                    let mut asked = 0;
+                    let mut reply = reply;
+                    while let Some(command) = internal_rx.recv().await {
+                        if let InternalCommand::OpenDynamicBfdSockets { reply: tx, .. } = command {
+                            asked += 1;
+                            if let Some(outcome) = reply.take() {
+                                let _ = tx.send(outcome);
+                            }
+                        }
+                    }
+                    asked
+                });
+                let outcome = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    reload_config_with_tcp_ao(
+                        SighupReloadPlan {
+                            baseline_runtime: current,
+                            desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                        },
+                        None,
+                        None,
+                        &peer_tx,
+                        Some(&internal_tx),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+                .await
+                .expect("the reload settles");
+                drop((peer_tx, internal_tx));
+                (
+                    outcome,
+                    internal_task.await.unwrap(),
+                    peer_task.await.unwrap(),
+                )
+            }
+        };
+
+        let (outcome, asked, effects) = run(
+            with_bfd.clone(),
+            Some(DynamicBfdSocketOutcome::Rejected("address in use".into())),
+        )
+        .await;
+        assert!(
+            matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)),
+            "{outcome:?}"
+        );
+        assert_eq!((asked, effects.len()), (1, 0), "{effects:?}");
+
+        let (outcome, _, _) = run(
+            with_bfd.clone(),
+            Some(DynamicBfdSocketOutcome::Ambiguous("lost".into())),
+        )
+        .await;
+        assert!(
+            matches!(outcome, SighupReloadOutcome::RecoveryFenced { .. }),
+            "{outcome:?}"
+        );
+        let (outcome, _, _) = run(with_bfd.clone(), None).await;
+        assert!(
+            matches!(
+                outcome,
+                SighupReloadOutcome::RecoveryFenced {
+                    reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+
+        // Mutation-red: without the preflight the add proceeds unasked.
+        let (outcome, asked, _) = run(with_bfd, Some(DynamicBfdSocketOutcome::Ready)).await;
+        assert!(
+            matches!(outcome, SighupReloadOutcome::Acknowledged(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(asked, 1);
+        let (outcome, asked, _) = run(without_bfd, None).await;
+        assert!(
+            matches!(outcome, SighupReloadOutcome::Acknowledged(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(asked, 0, "a range without BFD needs no socket");
     }
 
     fn accepted_missing_interface_toml() -> String {

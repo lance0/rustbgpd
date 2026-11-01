@@ -7,6 +7,7 @@ use super::inbound_admission::localhost_inbound_stream;
 use super::*;
 
 use crate::bfd_runtime::{BfdReloadCommand, BfdRuntimeConfig, BfdStateChange};
+use crate::peer_manager::DynamicBfdSocketOutcome;
 use rustbgpd_transport::{SessionEndRetention, SessionRole};
 
 const MEMBER: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9));
@@ -391,11 +392,7 @@ async fn a_failed_socket_preflight_rejects_a_range_bfd_edit_with_no_effect() {
     let running = lab.mgr.current_config.clone();
     let mut slower = running.clone();
     slower.dynamic_neighbors[0].bfd = Some(range_bfd("slow"));
-    lab.mgr
-        .bfd_coupling
-        .as_mut()
-        .unwrap()
-        .socket_preflight_error = Some("address in use");
+    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight = Some(Err("address in use".into()));
     let outcome = lab.generation(slower).await;
     assert!(
         matches!(outcome, ReloadGenerationOutcome::RejectedNoEffect(ref error)
@@ -570,4 +567,149 @@ async fn a_generation_reload_and_a_binding_change_keep_dynamic_members() {
         .unwrap();
     assert_eq!(lab.member(MEMBER).unwrap().revision, revision, "kept");
     assert_eq!(lab.published(), [(MEMBER, MEMBER.to_string(), true)]);
+}
+
+/// The dynamic test config with no range, and the range `range_bfd_config`
+/// adds.
+fn without_ranges() -> Config {
+    let mut config = range_bfd_config();
+    config.dynamic_neighbors.clear();
+    config
+}
+
+/// A sequential SIGHUP that adds a BFD range opens its socket family before
+/// its first effect, through the acknowledged commit with the membership
+/// unchanged, so the range's first accept registers in the same reload.
+#[tokio::test]
+async fn a_reload_that_adds_a_bfd_range_opens_its_socket_family() {
+    let mut lab = lab(without_ranges());
+    let candidate = range_bfd_config();
+    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight =
+        Some(Ok(Some(crate::bfd_runtime::PreparedRuntime::default())));
+    // Mutation-red: reporting Ready without the commit leaves the family
+    // closed, and the accept below is refused.
+    assert_eq!(
+        lab.mgr.open_dynamic_bfd_sockets(&candidate).await,
+        DynamicBfdSocketOutcome::Ready
+    );
+    let taken = lab
+        .applied
+        .try_recv()
+        .expect("the sockets reached the actor");
+    assert_eq!(taken.sessions.len(), 0, "the membership is unchanged");
+    // The sequential route then swaps the candidate in.
+    lab.mgr.current_config = candidate;
+    lab.mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&lab.mgr.current_config);
+    lab.accept(MEMBER).await;
+    assert!(lab.member(MEMBER).is_some(), "the first accept registers");
+
+    // With the family open, a later add needs no sockets.
+    assert_eq!(
+        lab.mgr.open_dynamic_bfd_sockets(&range_bfd_config()).await,
+        DynamicBfdSocketOutcome::Ready
+    );
+    assert!(lab.applied.try_recv().is_err(), "nothing to open");
+}
+
+/// A family that cannot open rejects the adding reload with no effect, and a
+/// lost acknowledgement of the prepared sockets fences BFD.
+#[tokio::test]
+async fn a_bfd_range_add_rejects_on_preflight_failure_and_fences_on_a_lost_ack() {
+    let mut lab = lab(without_ranges());
+    let candidate = range_bfd_config();
+    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight = Some(Err("address in use".into()));
+    assert!(matches!(
+        lab.mgr.open_dynamic_bfd_sockets(&candidate).await,
+        DynamicBfdSocketOutcome::Rejected(error) if error.contains("address in use")
+    ));
+    let coupling = lab.mgr.bfd_coupling.as_ref().unwrap();
+    assert!(!coupling.reloading, "no effect");
+    assert_eq!(coupling.opened.sessions.len(), 0);
+    assert!(lab.applied.try_recv().is_err(), "nothing reached the actor");
+
+    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight =
+        Some(Ok(Some(crate::bfd_runtime::PreparedRuntime::default())));
+    lab.drop_next_reply.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        lab.mgr.open_dynamic_bfd_sockets(&candidate).await,
+        DynamicBfdSocketOutcome::Ambiguous(_)
+    ));
+    assert!(lab.mgr.bfd_coupling.as_ref().unwrap().reloading, "fenced");
+}
+
+/// Removing a BFD range in one sequential reload leaves its running session
+/// with its BFD session, and a later unrelated generation keeps it.
+#[tokio::test]
+async fn a_removed_bfd_ranges_session_keeps_its_bfd_through_a_later_generation() {
+    let mut lab = lab(range_bfd_config());
+    lab.accept(MEMBER).await;
+    let revision = lab.member(MEMBER).unwrap().revision;
+    // The sequential route swaps the candidate in: future accepts stop.
+    lab.mgr.current_config.dynamic_neighbors.clear();
+    lab.mgr.dynamic_ranges.clear();
+    assert!(
+        lab.mgr.peers.contains_key(&key(MEMBER)),
+        "the session runs on"
+    );
+    assert_eq!(lab.member(MEMBER).unwrap().revision, revision);
+
+    // Mutation-red: rebuilding only from the candidate's ranges drops it.
+    let mut unrelated = lab.mgr.current_config.clone();
+    unrelated
+        .peer_groups
+        .get_mut("ix-members")
+        .unwrap()
+        .hold_time = Some(120);
+    assert!(matches!(
+        lab.generation(unrelated).await,
+        ReloadGenerationOutcome::Applied(_)
+    ));
+    assert_eq!(lab.member(MEMBER).unwrap().revision, revision, "kept");
+    assert_eq!(lab.published(), [(MEMBER, MEMBER.to_string(), true)]);
+}
+
+/// A session that ends while a generation is staged, which then aborts,
+/// leaves no BFD admission state behind for a reconnect.
+#[tokio::test]
+async fn a_session_ending_mid_generation_leaves_no_hold_after_an_abort() {
+    let mut lab = lab(range_bfd_config());
+    lab.accept(MEMBER).await;
+    let (tx, _commands) = mpsc::channel::<PeerCommand>(8);
+    let session_id = lab.mgr.peers[&key(MEMBER)].session_id();
+    lab.mgr.peers.replace_handle(
+        &key(MEMBER),
+        PeerHandle::from_parts(tx, tokio::spawn(async { Ok(()) })),
+        session_id,
+    );
+    let revision = lab.member(MEMBER).unwrap().revision;
+    lab.mgr
+        .handle_bfd_state_change(BfdStateChange {
+            revision,
+            peer: MEMBER,
+            state: rustbgpd_bfd::SessionState::Down,
+            diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
+            remote_admin_down: false,
+            resync: false,
+        })
+        .await;
+    assert!(lab.mgr.bfd_withholding(&MEMBER));
+    let candidate = lab.mgr.current_config.clone();
+    let _prepared = lab.mgr.prepare_bfd_reload(&candidate).unwrap();
+    lab.mgr
+        .handle_session_notification(SessionNotification::BackToIdle {
+            session_id,
+            role: SessionRole::Primary,
+            peer_addr: MEMBER,
+        })
+        .await;
+    // Mutation-red: keeping the ended session's saved hold restores it here.
+    lab.mgr.abort_bfd_reload();
+    assert!(
+        !lab.mgr.bfd_withholding(&MEMBER),
+        "no hold survives the abort"
+    );
+    lab.assert_unregistered(MEMBER);
+    lab.accept(MEMBER).await;
+    assert!(lab.member(MEMBER).is_some(), "the reconnect registers");
+    assert!(!lab.mgr.bfd_withholding(&MEMBER), "and starts clean");
 }

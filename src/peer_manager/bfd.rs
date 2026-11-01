@@ -52,10 +52,9 @@ pub(super) struct BfdCoupling {
     pub(super) registering: bool,
     #[cfg(test)]
     pub(super) desired_publications: usize,
-    /// Fail the next reload's socket preflight with this error, as a family
-    /// that cannot open.
+    /// The next socket preflight's result, instead of opening real sockets.
     #[cfg(test)]
-    pub(super) socket_preflight_error: Option<&'static str>,
+    pub(super) socket_preflight: Option<Result<Option<PreparedRuntime>, String>>,
     /// Inner compensation must read accepted strict settings without losing
     /// the candidate needed to fence an uncertain rollback.
     rollback_lookup: bool,
@@ -133,7 +132,7 @@ impl PeerManager {
             #[cfg(test)]
             desired_publications: 0,
             #[cfg(test)]
-            socket_preflight_error: None,
+            socket_preflight: None,
             rollback_lookup: false,
             retries: BTreeMap::new(),
             retry_at: None,
@@ -206,16 +205,7 @@ impl PeerManager {
                 .chain(probes.clone())
                 .collect(),
         };
-        #[cfg(test)]
-        let injected = coupling.socket_preflight_error.take();
-        #[cfg(not(test))]
-        let injected: Option<&str> = None;
-        let prepared = if let Some(error) = injected {
-            Err(std::io::Error::other(error))
-        } else {
-            prepare_reload(&sockets, &coupling.opened)
-        }
-        .map_err(|error| format!("BFD socket preflight: {error}"))?;
+        let prepared = coupling.preflight_sockets(&sockets)?;
         coupling.prior_held.clone_from(&coupling.held_down);
         coupling
             .prior_initially_withheld
@@ -272,7 +262,23 @@ impl PeerManager {
             else {
                 continue;
             };
-            if let Some(params) = dynamic_bfd_params(candidate, accepted, key.address)? {
+            let Some(range) = accepted_range(candidate, accepted) else {
+                // A removed range's sessions run on until they end, with
+                // the BFD session they registered.
+                if let Some(member) = self.bfd_coupling.as_ref().and_then(|coupling| {
+                    coupling
+                        .configured
+                        .get(&key.address)
+                        .filter(|_| coupling.bound.contains(&key.address))
+                }) {
+                    sessions.push(member.clone());
+                }
+                continue;
+            };
+            if let Some(params) =
+                crate::bfd_runtime::dynamic_session_params(candidate, range, key.address)
+                    .map_err(|error| error.to_string())?
+            {
                 sessions.push(params);
             }
         }
@@ -322,7 +328,60 @@ impl PeerManager {
         coupling.configured.insert(peer, params);
         coupling.bound.insert(peer);
         coupling.disabled.remove(&peer);
+        // A new session starts with no BFD admission state.
+        coupling.held_down.remove(&peer);
+        coupling.initially_withheld.remove(&peer);
         self.republish_bfd_desired();
+    }
+
+    /// Open the BFD socket families of the ranges `candidate` adds, before a
+    /// sequential SIGHUP's first effect: the membership is unchanged, and
+    /// prepared sockets reach the actor through the acknowledged commit. A
+    /// lost acknowledgement fences BFD as an uncertain generation does.
+    pub(super) async fn open_dynamic_bfd_sockets(
+        &mut self,
+        candidate: &crate::config::Config,
+    ) -> super::DynamicBfdSocketOutcome {
+        use super::DynamicBfdSocketOutcome;
+        let probes = match crate::bfd_runtime::dynamic_range_socket_probes(candidate) {
+            Ok(probes) => probes,
+            Err(error) => return DynamicBfdSocketOutcome::Rejected(error.to_string()),
+        };
+        let Some(coupling) = self.bfd_coupling.as_mut() else {
+            return if probes.is_empty() {
+                DynamicBfdSocketOutcome::Ready
+            } else {
+                DynamicBfdSocketOutcome::Rejected("BFD is not running".into())
+            };
+        };
+        if coupling.reloading {
+            return DynamicBfdSocketOutcome::Rejected(
+                "a BFD membership change is in progress".into(),
+            );
+        }
+        let prepared = match coupling.preflight_sockets(&BfdRuntimeConfig {
+            sessions: probes.clone(),
+        }) {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return DynamicBfdSocketOutcome::Ready,
+            Err(error) => return DynamicBfdSocketOutcome::Rejected(error),
+        };
+        coupling.prior_held.clone_from(&coupling.held_down);
+        coupling
+            .prior_initially_withheld
+            .clone_from(&coupling.initially_withheld);
+        coupling.pending = Some(coupling.configured.clone());
+        coupling.pending_bound = None;
+        coupling.pending_probes = probes;
+        coupling.reloading = true;
+        coupling.rollback_lookup = false;
+        match self.commit_bfd_reload(Some(prepared)).await {
+            Ok(()) => DynamicBfdSocketOutcome::Ready,
+            Err(error) => {
+                self.fence_bfd_reload().await;
+                DynamicBfdSocketOutcome::Ambiguous(error)
+            }
+        }
     }
 
     /// Remove a dynamic session's BFD session once no dynamic peer at `peer`
@@ -351,6 +410,9 @@ impl PeerManager {
         coupling.disabled.remove(&peer);
         coupling.held_down.remove(&peer);
         coupling.initially_withheld.remove(&peer);
+        // An aborted generation must not restore the ended session's holds.
+        coupling.prior_held.remove(&peer);
+        coupling.prior_initially_withheld.remove(&peer);
         // A change staged now settles without it too.
         if let Some(pending) = coupling.pending.as_mut() {
             pending.remove(&peer);
@@ -1311,15 +1373,39 @@ fn dynamic_bfd_params(
     accepted: &super::dynamic::AcceptedDynamicRange,
     peer: IpAddr,
 ) -> Result<Option<BfdSessionParams>, String> {
-    let Some(range) = config.dynamic_neighbors.iter().find(|range| {
-        range.peer_group == accepted.peer_group
-            && crate::config::effective_prefix_str(&range.prefix)
-                == Some((accepted.addr, accepted.prefix_len))
-    }) else {
+    let Some(range) = accepted_range(config, accepted) else {
         return Ok(None);
     };
     crate::bfd_runtime::dynamic_session_params(config, range, peer)
         .map_err(|error| error.to_string())
+}
+
+/// The range in `config` with a session's accepted prefix and peer group.
+fn accepted_range<'a>(
+    config: &'a crate::config::Config,
+    accepted: &super::dynamic::AcceptedDynamicRange,
+) -> Option<&'a crate::config::DynamicNeighborConfig> {
+    config.dynamic_neighbors.iter().find(|range| {
+        range.peer_group == accepted.peer_group
+            && crate::config::effective_prefix_str(&range.prefix)
+                == Some((accepted.addr, accepted.prefix_len))
+    })
+}
+
+impl BfdCoupling {
+    /// Reserve the socket families `sockets` needs that the actor does not
+    /// own yet; a family that cannot open is an error naming the preflight.
+    fn preflight_sockets(
+        &mut self,
+        sockets: &BfdRuntimeConfig,
+    ) -> Result<Option<PreparedRuntime>, String> {
+        #[cfg(test)]
+        if let Some(result) = self.socket_preflight.take() {
+            return result.map_err(|error| format!("BFD socket preflight: {error}"));
+        }
+        prepare_reload(sockets, &self.opened)
+            .map_err(|error| format!("BFD socket preflight: {error}"))
+    }
 }
 
 /// A config transaction may not change which ranges run BFD or how: those
