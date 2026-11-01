@@ -17,9 +17,9 @@ goes red when the rule is removed or weakened.
    workflow runs on pull_request_target.
 4. Lab wiring. Every lab job needs prime_dev_image, and each run-interop-test
    call's topology and script belong to its label and to the job's name. A
-   kernel-dataplane job named for several scenarios runs each of them after an
-   earlier failure, checks each teardown before the next deploys, and ends with
-   a report naming exactly its scenarios.
+   lab job named for several scenarios runs each of them after an earlier
+   failure, checks each teardown before the next deploys, and ends with a report
+   naming exactly its scenarios.
 5. Aggregate result. Each lab workflow's `check` job runs always() and needs,
    and expects at run time, every other job in the workflow.
 6. Classifier checkout. Each lab workflow's `classify_changes` job keeps its
@@ -39,12 +39,12 @@ from pathlib import Path
 
 WORKFLOWS = ("ci.yml", "audit.yml", "interop.yml", "kernel-dataplane.yml")
 LAB_WORKFLOWS = ("interop.yml", "kernel-dataplane.yml")
-# Workflows whose multi-scenario jobs (named `m36_m37_...`) keep running after a
-# failed scenario; interop.yml's older bundle still stops at the first failure.
-BUNDLE_WORKFLOWS = ("kernel-dataplane.yml",)
-# The exact guard on every bundled run and teardown step: an added `success()`
-# or `failure()` term would bring back stop-at-first-failure.
-BUNDLE_GUARD = "${{ !cancelled() && steps.dataplane.outcome == 'success' }}"
+# A multi-scenario job (named `m36_m37_...`) keeps running after a failed
+# scenario. Its run and teardown steps carry exactly this guard, naming the
+# workflow's last host-setup step: an added `success()` or `failure()` term
+# would bring back stop-at-first-failure.
+BUNDLE_SETUP_STEP = {"interop.yml": "dev_image", "kernel-dataplane.yml": "dataplane"}
+BUNDLE_GUARD = "${{{{ !cancelled() && steps.{}.outcome == 'success' }}}}"
 MANIFEST = ".github/pinned-archives.sha256"
 # External actions are pinned by reviewed version tag: no branch refs and no
 # bare commit SHAs. Adding an action or moving to a new major edits this set.
@@ -157,9 +157,11 @@ def _check_lab_calls(prefix: str, job_name: str, job: str, errors: list[str]) ->
             errors.append(f"{prefix}: no run-interop-test call labelled {token.upper()}")
 
 
-def _check_bundle(prefix: str, job: str, errors: list[str]) -> None:
+def _check_bundle(prefix: str, job: str, setup: str, errors: list[str]) -> None:
     """A bundle runs every scenario, checks each teardown and names every failure."""
     steps = re.split(r"(?m)^      - ", job)
+    if not any(re.search(rf"(?m)^        id: {setup}$", step) for step in steps):
+        errors.append(f"{prefix}: has no host-setup step with id {setup}")
     expected: list[str] = []
     for index, step in enumerate(steps):
         if not LAB_CALL.search("      - " + step):
@@ -173,7 +175,7 @@ def _check_bundle(prefix: str, job: str, errors: list[str]) -> None:
         teardown = steps[index + 1] if index + 1 < len(steps) else ""
         for kind, body in (("run", step), ("teardown", teardown)):
             guard = re.search(r"(?m)^        if: (.*)$", body)
-            if not guard or " ".join(guard.group(1).split()) != BUNDLE_GUARD:
+            if not guard or " ".join(guard.group(1).split()) != BUNDLE_GUARD.format(setup):
                 errors.append(f"{prefix}: {label} {kind} step does not run after an earlier failure")
         want = (
             f"        id: {step_id.group(1)}_teardown\n",
@@ -457,8 +459,8 @@ def check(root: Path) -> list[str]:
             if "prime_dev_image" not in _list_needs(job):
                 errors.append(f"{prefix}: does not need prime_dev_image")
             _check_lab_calls(prefix, job_name, job, errors)
-            if name in BUNDLE_WORKFLOWS and "_" in job_name:
-                _check_bundle(prefix, job, errors)
+            if "_" in job_name:
+                _check_bundle(prefix, job, BUNDLE_SETUP_STEP[name], errors)
             _check_staged_builds(prefix, job, root, dockerfiles, bird3_version, errors)
         # 5. Aggregate result.
         aggregate = jobs.get("check", "")
