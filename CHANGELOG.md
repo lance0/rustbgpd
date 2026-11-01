@@ -476,12 +476,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Bound the queue from Router Advertisement discovery to the neighbor owner.
   While the owner was busy, a link that kept changing its advertising
   sources queued one event per change without limit. The queue now holds at
-  most one binding change and one conflict per interface, served in turn.
-  It keeps the latest binding, every conflict count, and each first binding
-  that a later change replaced while it was queued, which the owner still
-  checks against a peer learned from an inbound connection. Learned and
-  expired candidates are logged by discovery itself and are no longer
-  queued.
+  most one binding change and one conflict per interface, served in turn,
+  so a conflict can arrive ahead of a binding change queued between two
+  conflicts. It keeps the latest binding, every conflict count (reported
+  with the latest addresses), and each first binding that a later change
+  replaced while it was queued, which the owner still checks against a peer
+  learned from an inbound connection. Learned and expired candidates are no
+  longer queued: discovery logs them itself, so those two log lines now
+  come from the `rustbgpd::ra_discovery` target.
 - Bound two per-session queues that a peer could grow. A connection whose
   peer stopped reading queued one ROUTE-REFRESH request per max-prefix
   block episode that ended, with no limit when `send_hold_time = 0`. It now
@@ -490,7 +492,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across a max-prefix warning threshold while the peer manager was busy
   queued one notification per crossing. Each scope now queues one, which
   carries the crossing count. The peer manager still publishes one
-  `MaxPrefixWarning` event per crossing, at most 64 per turn of its loop.
+  `MaxPrefixWarning` event per crossing, at most 64 per turn of its loop;
+  events for crossings coalesced this way repeat the first crossing's
+  usage, bound and threshold.
 
 ### Documentation
 

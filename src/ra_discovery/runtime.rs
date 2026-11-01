@@ -51,14 +51,19 @@ enum EventKey {
     Conflict(String),
 }
 
+/// Distinct addresses a binding slot keeps replaced first bindings for. The
+/// owner tells them apart only by whether each is its inbound-learned peer,
+/// so beyond this many during one backlog the rest share the last entry.
+const OBSERVED_FIRST_BINDINGS: usize = super::engine::MAX_CANDIDATES_PER_INTERFACE;
+
 /// One key's coalesced events.
 enum Slot {
-    /// The latest binding change, after `observed` first bindings
-    /// (`previous: None`) that later changes replaced: the owner checks each
-    /// first binding against an Established peer learned inbound, so they
-    /// are kept as a count with the latest address.
+    /// The latest binding change, after the first bindings
+    /// (`previous: None`) that later changes replaced while queued, counted
+    /// per address: the owner checks each first binding against an
+    /// Established peer learned inbound.
     Binding {
-        observed: Option<(Endpoint, u64)>,
+        observed: VecDeque<(Endpoint, u64)>,
         latest: DiscoveryEvent,
     },
     /// The latest conflict, delivered `count` times.
@@ -73,7 +78,7 @@ impl Slot {
                 count: 1,
             },
             _ => Self::Binding {
-                observed: None,
+                observed: VecDeque::new(),
                 latest: event,
             },
         }
@@ -88,8 +93,13 @@ impl Slot {
                     ..
                 } = latest
                 {
-                    let seen = observed.map_or(0, |(_, count)| count);
-                    *observed = Some((*first, seen + 1));
+                    if let Some(entry) = observed.iter_mut().find(|(seen, _)| seen == first) {
+                        entry.1 += 1;
+                    } else if observed.len() < OBSERVED_FIRST_BINDINGS {
+                        observed.push_back((*first, 1));
+                    } else if let Some(last) = observed.back_mut() {
+                        last.1 += 1;
+                    }
                 }
                 *latest = event;
             }
@@ -103,7 +113,7 @@ impl Slot {
     /// The next event to deliver, and whether this slot has more.
     fn take(&mut self) -> (DiscoveryEvent, bool) {
         match self {
-            Self::Binding { observed, latest } => match observed {
+            Self::Binding { observed, latest } => match observed.front_mut() {
                 Some((first, count)) => {
                     let (DiscoveryEvent::BindingChanged { interface, .. }
                     | DiscoveryEvent::Conflict { interface, .. }
@@ -116,7 +126,7 @@ impl Slot {
                     };
                     *count -= 1;
                     if *count == 0 {
-                        *observed = None;
+                        observed.pop_front();
                     }
                     (event, true)
                 }
@@ -142,15 +152,24 @@ struct PendingEvents {
 /// Create the discovery → neighbor owner event queue.
 ///
 /// Its RA input is untrusted link traffic, and the owner can be busy, so the
-/// queue coalesces instead of growing per event. A binding change replaces
-/// a pending one for the same interface, which is all the owner's
-/// level-triggered reconcile needs; a replaced first binding
-/// (`previous: None`) is still delivered, counted, ahead of it, because the
-/// owner checks each one against an Established peer learned inbound. A
-/// conflict replaces a pending one for the same interface and adds to its
-/// count, so every conflict is still counted. Learned and expired candidates
-/// are only logged; the actor logs them itself and never queues them.
-/// Depth: two slots per interface.
+/// queue coalesces instead of growing per event. What the owner acts on
+/// survives the merge:
+/// - A binding change replaces a pending one for the same interface: the
+///   owner's reconcile is level-triggered on the latest `current`. A first
+///   binding (`previous: None`) that a later change replaced is still
+///   delivered ahead of the latest change, counted per address, because the
+///   owner checks each one against an Established peer learned inbound and
+///   counts a conflict when the address differs. Beyond
+///   [`OBSERVED_FIRST_BINDINGS`] distinct addresses in one backlog, the rest
+///   are reported under the last one kept.
+/// - A conflict replaces a pending one for the same interface and adds to
+///   its count, so every conflict is counted; the coalesced deliveries carry
+///   the latest `bound` and `other`.
+///
+/// Slots are served round-robin, so a conflict can be delivered ahead of a
+/// binding change queued between two conflicts. Learned and expired
+/// candidates are only logged; the actor logs them itself and never queues
+/// them. Depth: two slots per interface.
 pub(crate) fn event_channel() -> (EventSender, DiscoveryEvents) {
     let pending = Arc::new(Mutex::new(PendingEvents::default()));
     // One wake token covers every pending entry: the receiver drains the map
@@ -348,9 +367,10 @@ impl RaDiscovery {
             ^ u64::from(std::process::id());
         // Unbounded by design, bounded by its one producer: only the peer
         // manager sends, one command per configured interface added or
-        // removed, per change of an interface's state in its link snapshot
-        // and per bound session's state transition, and its sends never
-        // wait. The actor applies each command without waiting on another
+        // removed, per change of an interface's state in its link snapshot,
+        // per bound session's state transition, and per reconcile that
+        // confirms or releases a bound session (`session_established` /
+        // `session_failed`); its sends never wait. The actor applies each command without waiting on another
         // task, so the queue holds only what the peer manager produced
         // since the actor last ran. A bounded send would make the peer
         // manager wait on (or drop) a link or session input that discovery
@@ -1413,20 +1433,29 @@ mod tests {
             .iter()
             .filter(|event| matches!(event, DiscoveryEvent::BindingChanged { .. }))
             .collect();
-        // Every replaced first binding is still delivered (counted, with the
-        // latest address), then the final binding.
-        let last_churned = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 2, 499);
+        // Every replaced first binding is still delivered: the first
+        // `OBSERVED_FIRST_BINDINGS` addresses by name, the rest under the
+        // last of those. Then the final binding.
+        let churned = |i| endpoint(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 2, i));
+        let kept = u16::try_from(super::OBSERVED_FIRST_BINDINGS).unwrap();
+        let expected = (0..kept - 1)
+            .map(churned)
+            .chain(std::iter::repeat_n(
+                churned(kept - 1),
+                usize::from(501 - kept),
+            ))
+            .map(|current| DiscoveryEvent::BindingChanged {
+                interface: "x".into(),
+                previous: None,
+                current: Some(current),
+            });
         assert_eq!(bindings.len(), 501);
-        for event in &bindings[..500] {
-            assert_eq!(
-                **event,
-                DiscoveryEvent::BindingChanged {
-                    interface: "x".into(),
-                    previous: None,
-                    current: Some(endpoint(last_churned)),
-                }
-            );
-        }
+        assert!(
+            bindings[..500]
+                .iter()
+                .copied()
+                .eq(expected.collect::<Vec<_>>().iter())
+        );
         assert_eq!(
             *bindings[500],
             DiscoveryEvent::BindingChanged {
@@ -1526,14 +1555,26 @@ mod tests {
             (first, events)
         });
         tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "the owner is waiting before the send"
+        );
         sender.send(conflict("fe80::2"));
-        let (first, mut events) = waiting.await.unwrap();
+        let (first, mut events) = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the send wakes the waiting owner")
+            .unwrap();
         assert_eq!(first, Some(conflict("fe80::2")));
         sender.send(conflict("fe80::3"));
         sender.send(conflict("fe80::4"));
-        assert_eq!(events.recv().await, Some(conflict("fe80::4")));
-        assert_eq!(events.recv().await, Some(conflict("fe80::4")));
+        let mut recv = async || {
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("a queued event needs no further wake")
+        };
+        assert_eq!(recv().await, Some(conflict("fe80::4")));
+        assert_eq!(recv().await, Some(conflict("fe80::4")));
         drop(sender);
-        assert_eq!(events.recv().await, None);
+        assert_eq!(recv().await, None);
     }
 }

@@ -6650,3 +6650,105 @@ async fn inbound_learning_waits_for_uncertain_bfd_removal_acknowledgement() {
         [(IpAddr::V6(ll(3)), Some(7))]
     );
 }
+
+/// The conflict count beside an inbound-learned Established session after
+/// `prefix` is handled one event at a time and `seq` is delivered either
+/// one at a time or through the discovery queue while the owner is behind.
+async fn conflicts_after(
+    prefix: Vec<DiscoveryEvent>,
+    seq: Vec<DiscoveryEvent>,
+    coalesce: bool,
+) -> Option<f64> {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 2, 7).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
+    for event in prefix {
+        h.mgr.handle_discovery_event(event);
+        h.reconcile().await;
+    }
+    let delivered = if coalesce {
+        let (tx, mut rx) = crate::ra_discovery::event_channel();
+        for event in seq {
+            tx.send(event);
+        }
+        drop(tx);
+        let mut out = Vec::new();
+        while let Some(event) = rx.recv().await {
+            out.push(event);
+        }
+        out
+    } else {
+        seq
+    };
+    for event in delivered {
+        h.mgr.handle_discovery_event(event);
+    }
+    h.reconcile().await;
+    sample(
+        &h,
+        "bgp_unnumbered_ra_conflicts_total",
+        &[("peer", "interface:swp1")],
+    )
+}
+
+/// Coalescing first bindings while the owner is behind leaves the owner's
+/// conflict count beside an inbound-learned Established peer (here at
+/// `ll(2)`) exactly what one-at-a-time delivery gives.
+#[tokio::test]
+async fn coalesced_first_bindings_keep_the_conflict_count() {
+    let bc = |previous: Option<u16>, current: Option<u16>| DiscoveryEvent::BindingChanged {
+        interface: "swp1".into(),
+        previous: previous.map(|last| endpoint(last, 7)),
+        current: current.map(|last| endpoint(last, 7)),
+    };
+    let cases = [
+        (
+            "None->R9, R9->None, None->R10",
+            vec![],
+            vec![bc(None, Some(9)), bc(Some(9), None), bc(None, Some(10))],
+        ),
+        (
+            "[None->R9] then R9->None, None->R10",
+            vec![bc(None, Some(9))],
+            vec![bc(Some(9), None), bc(None, Some(10))],
+        ),
+        (
+            "A->None, None->B",
+            vec![],
+            vec![bc(Some(9), None), bc(None, Some(10))],
+        ),
+        (
+            "the bound peer's own first binding between foreign ones",
+            vec![],
+            vec![
+                bc(None, Some(2)),
+                bc(Some(2), None),
+                bc(None, Some(9)),
+                bc(Some(9), None),
+                bc(None, Some(2)),
+            ],
+        ),
+    ];
+    for (name, prefix, seq) in cases {
+        let one_at_a_time = conflicts_after(prefix.clone(), seq.clone(), false).await;
+        let coalesced = conflicts_after(prefix, seq, true).await;
+        assert!(
+            one_at_a_time.is_some_and(|count| count > 0.0),
+            "{name}: {one_at_a_time:?}"
+        );
+        assert_eq!(coalesced, one_at_a_time, "{name}");
+    }
+}

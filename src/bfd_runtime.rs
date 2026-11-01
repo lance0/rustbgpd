@@ -142,8 +142,9 @@ pub struct BfdStateChange {
 pub fn state_change_channel() -> (BfdStateChangeSender, BfdStateChangeReceiver) {
     let pending = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     // Unbounded but bounded by state: the sender queues a wake token only
-    // when it inserts a new pending entry, so at most one token per BFD
-    // session is queued however fast a session flaps.
+    // when it inserts a new pending entry, keyed by peer address, so at most
+    // one token per address (one per BFD session: configuration refuses BFD
+    // on neighbors that share an address) is queued however fast it flaps.
     let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
     (
         BfdStateChangeSender {
