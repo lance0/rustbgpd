@@ -2121,6 +2121,340 @@ policy. What has no equivalent to migrate: the in-file `test` blocks,
 `rbgp policy test` dry runs against the live RIB, and per-term live
 hit counters — those come free after the rewrite.
 
+## Migrating from IOS-XR RPL
+
+Most RPL constructs have a direct `.rpol` spelling. Four of them have
+different semantics, and a line-by-line port changes routing in those
+places. The RPL behavior below is taken from the
+[IOS XR 24.x routing configuration guide for ASR 9000, "Implementing Routing Policy"](https://www.cisco.com/c/en/us/td/docs/routers/asr9000/software/24xx/routing/configuration/guide/b-routing-cg-asr9000-24xx/implementing-routing-policy.html)
+and the
+[Cisco 8000 RPL command reference](https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/routing/cumulative/command/reference/b-routing-cr-cisco8000/m-rpl-commands-1.html)
+(updated 2022-10-25).
+
+### Construct mapping
+
+| RPL | `.rpol` |
+|---|---|
+| `prefix-set NAME` with `ge`/`le`, `destination in NAME` | `prefix-set NAME { ... }`, `route.prefix in NAME` |
+| `as-path originates-from '64500'` | `route.origin-as == 64500`, or `route.origin-as in <asn-set>` for many ASNs |
+| `as-path length ge 50` | `route.as-path.len >= 50` |
+| `as-path in (ios-regex '...')` | `route.as-path matches "..."` |
+| `community matches-any NAME` | `route.communities in NAME` |
+| `validation-state is invalid` | `route.rpki == invalid` |
+| `set local-preference 200` | `set local-pref 200` |
+| `set med 50` | `set med 50` |
+| `set community (65000:100) additive` | `add community 65000:100` |
+| `set community (65000:100)` | `remove community *; add community 65000:100` |
+| `delete community all` | `remove community *` |
+| `prepend as-path 65000 3` | `prepend as 65000 3` |
+| `set next-hop self` | `set next-hop self` |
+| `pass` followed by the policy end | `accept`, or nothing when no `default-action reject` is declared |
+| `drop` | `reject` |
+| conditions read the arrived values | the same: reads never observe a staged `set` |
+| `neighbor ... route-policy NAME in` | `import_policy_chain = ["NAME"]` on the neighbor (see [Using policies in the daemon](#using-policies-in-the-daemon)) |
+
+A customer import policy written this way:
+
+```rpol
+prefix-set customer-prefixes { 192.0.2.0/24 le 26, 2001:db8:100::/40 le 48 }
+asn-set customer-asns { 64500, 64501 }
+
+policy customer-in {
+    term too-long {
+        if route.as-path.len >= 50 { reject }
+    }
+    term rpki-invalid {
+        if route.rpki == invalid { reject }
+    }
+    term customer {
+        if route.prefix in customer-prefixes && route.origin-as in customer-asns {
+            set local-pref 200
+            add community 65000:100
+            accept
+        }
+    }
+    term rest { reject }
+}
+
+test customer-route-is-tagged {
+    route { prefix 192.0.2.0/24; as-path "64500"; rpki valid }
+    expect customer-in == accept with local-pref 200, community 65000:100
+}
+
+test foreign-origin-is-dropped {
+    route { prefix 192.0.2.0/24; as-path "64999" }
+    expect customer-in == reject
+}
+
+test rpki-invalid-is-dropped {
+    route { prefix 192.0.2.0/24; as-path "64500"; rpki invalid }
+    expect customer-in == reject
+}
+```
+
+### Behavior that differs
+
+**1. The default disposition.** RPL drops a route at the end of a policy
+unless the policy passed it or modified an attribute. `.rpol` accepts a
+route that no term decides, unless the policy declares
+`default-action reject`, and a modification never counts as a pass. A
+port that keeps RPL's implicit drop therefore needs `default-action
+reject` *and* an explicit `accept` wherever RPL relied on a `set` to pass
+the route:
+
+```rpol
+prefix-set customers { 192.0.2.0/24 le 24 }
+
+# A literal port: the term only modifies, as an RPL `set` would.
+policy literal-port {
+    default-action reject
+    term tag {
+        if route.prefix in customers { set local-pref 200 }
+    }
+}
+
+# The port that keeps RPL's outcome: accept where RPL's `set` passed.
+policy ported {
+    default-action reject
+    term tag {
+        if route.prefix in customers { set local-pref 200; accept }
+    }
+}
+
+test modifying-does-not-pass {
+    route { prefix 192.0.2.0/24 }
+    expect literal-port == reject
+}
+
+test explicit-accept-passes {
+    route { prefix 192.0.2.0/24 }
+    expect ported == accept with local-pref 200
+}
+
+test unmatched-route-is-dropped {
+    route { prefix 198.51.100.0/24 }
+    expect ported == reject
+}
+```
+
+Without `default-action reject`, the routes RPL would have dropped are
+accepted instead:
+
+```rpol
+prefix-set customers { 192.0.2.0/24 le 24 }
+
+# No default-action: a route no term decides is accepted.
+policy no-default {
+    term tag {
+        if route.prefix in customers { set local-pref 200 }
+    }
+}
+
+test unmatched-route-is-accepted {
+    route { prefix 198.51.100.0/24 }
+    expect no-default == accept with without local-pref
+}
+```
+
+**2. `set med +N` and `set med -N`.** RPL saturates: a subtraction that
+would go below zero sets 0, and an addition that would exceed
+4294967295 sets 4294967295. `.rpol` arithmetic is checked, so
+`set med route.med - 10` on a route with MED 4 is an evaluation error and
+the route is denied (see "Checked u32 value expressions"). Write the
+saturation out:
+
+```rpol
+# A literal port of `set med -10`.
+policy med-minus-literal {
+    term t { set med route.med - 10; accept }
+}
+
+# RPL's floor at zero, written out.
+policy med-minus {
+    term t { set med max(route.med, 10) - 10; accept }
+}
+
+# RPL's ceiling at 4294967295, written out for `set med +10`.
+policy med-plus {
+    term t { set med min(route.med, 4294967285) + 10; accept }
+}
+
+test literal-underflow-denies {
+    route { prefix 192.0.2.0/24; med 4 }
+    expect med-minus-literal == error underflow
+}
+
+test floor-at-zero {
+    route { prefix 192.0.2.0/24; med 4 }
+    expect med-minus == accept with med 0
+}
+
+test ordinary-subtraction {
+    route { prefix 192.0.2.0/24; med 50 }
+    expect med-minus == accept with med 40
+}
+
+test ceiling-at-max {
+    route { prefix 192.0.2.0/24; med 4294967290 }
+    expect med-plus == accept with med 4294967295
+}
+```
+
+**3. Repeated prepends.** RPL accumulates every `prepend as-path` in a
+policy. In `.rpol` a prepend is one scalar slot, so a later prepend
+replaces an earlier one (see "Actions"). Fold the counts into one
+prepend:
+
+```rpol
+# A literal port of two RPL prepends: the second replaces the first.
+policy prepend-literal {
+    term t {
+        prepend as 65000 1
+        prepend as 65000 2
+        accept
+    }
+}
+
+# One prepend with the total count.
+policy prepend-total {
+    term t { prepend as 65000 3; accept }
+}
+
+test later-prepend-replaces {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect prepend-literal == accept with only prepend as 65000 2
+}
+
+test total-count {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect prepend-total == accept with only prepend as 65000 3
+}
+```
+
+**4. Replacing communities.** RPL `set community` without `additive`
+replaces the route's communities but keeps the well-known ones.
+`remove community *` keeps the same RFC 1997 well-known range (see
+"Actions"), so the replace idiom ports directly. A full scrub that also
+removes `NO_EXPORT` and the other well-known values is the loop form:
+
+```rpol
+# RPL `set community (65000:100)`: replace, keeping well-known values.
+policy retag {
+    term t {
+        remove community *
+        add community 65000:100
+        accept
+    }
+}
+
+# Remove every standard community, well-known values included.
+policy scrub-all {
+    term t {
+        for c in route.communities { remove community c }
+        accept
+    }
+}
+
+test retag-keeps-no-export {
+    route { prefix 192.0.2.0/24; communities [NO_EXPORT, 65010:1] }
+    expect retag == accept with removes community 65010:1,
+        not removed community NO_EXPORT, community 65000:100
+}
+
+test scrub-all-removes-no-export {
+    route { prefix 192.0.2.0/24; communities [NO_EXPORT, 65010:1] }
+    expect scrub-all == accept with removes community NO_EXPORT,
+        removes community 65010:1
+}
+```
+
+### Constructs without a direct equivalent
+
+These RPL constructs have no `.rpol` spelling today. Each has a form that
+compiles now:
+
+- **`delete community in NAME`** — loop over the route's communities and
+  remove the members of the set.
+- **`if ... then ... elseif ... endif` and nested `if`** — one term per
+  branch. Terms are first-match, so the first branch that accepts
+  decides (see "Deliberate V1 exclusions").
+- **`as-path neighbor-is '65001'`** — `route.as-path matches "^65001_"`,
+  where `_` is a boundary anchor.
+- **`apply NAME` as a statement** — `.rpol` `apply(p)` is a predicate,
+  and the applied policy's actions do not run (see "`apply` — policy as
+  predicate"). To run another policy's actions, list both policies in
+  the neighbor's policy chain.
+- **`$parameter` of a set, address or community type** — parameters are
+  `u32` only; write one policy per set, or keep the set content in a
+  [dataset](#datasets--external-set-content).
+- **`done`** — `accept` ends the current policy, and the chain continues
+  with the next member.
+
+```rpol
+community-set scrub { 65000:666, 65000:667 }
+
+# RPL `delete community in scrub`.
+policy delete-in-set {
+    term t {
+        for c in route.communities {
+            if c in scrub { remove community c }
+        }
+        accept
+    }
+}
+
+# RPL `if ... then ... elseif ... then ... endif`: one term per branch,
+# first match wins.
+policy tiers {
+    term gold {
+        if route.communities has 65000:1 { set local-pref 300; accept }
+    }
+    term silver {
+        if route.communities has 65000:2 { set local-pref 200; accept }
+    }
+    term rest { accept }
+}
+
+# RPL `as-path neighbor-is '65001'`.
+policy from-65001 {
+    term t {
+        if route.as-path matches "^65001_" { set local-pref 150; accept }
+    }
+    term rest { accept }
+}
+
+test delete-in-set-removes-members-only {
+    route { prefix 192.0.2.0/24; communities [65000:666, 65010:1] }
+    expect delete-in-set == accept with removes community 65000:666,
+        not removed community 65010:1
+}
+
+test first-matching-tier-wins {
+    route { prefix 192.0.2.0/24; communities [65000:1, 65000:2] }
+    expect tiers == accept with local-pref 300
+}
+
+test second-tier {
+    route { prefix 192.0.2.0/24; communities [65000:2] }
+    expect tiers == accept with local-pref 200
+}
+
+test neighbor-is-matches-first-asn {
+    route { prefix 192.0.2.0/24; as-path "65001 64500" }
+    expect from-65001 == accept with local-pref 150
+}
+
+test neighbor-is-is-boundary-anchored {
+    route { prefix 192.0.2.0/24; as-path "650011 64500" }
+    expect from-65001 == accept with without local-pref
+}
+
+test neighbor-is-ignores-later-asns {
+    route { prefix 192.0.2.0/24; as-path "64500 65001" }
+    expect from-65001 == accept with without local-pref
+}
+```
+
 ## Deliberate V1 exclusions
 
 No `while` and no unbounded iteration of any kind — `for`
