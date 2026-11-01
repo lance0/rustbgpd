@@ -23,7 +23,9 @@
 #
 # Cache levers:
 #   - cargo-chef: dep build layer invalidates only on Cargo.lock change
-#   - BuildKit cache mounts: registry + target persist across builds
+#   - BuildKit cache mounts: the registry persists across builds, and so
+#     does the release target; the dev image keeps its cooked target in
+#     the dep layer so the remote CI layer cache can carry it
 #   - mold linker: parallel final link, faster than the default GNU ld
 #
 # Build:
@@ -56,28 +58,29 @@ RUN cargo chef prepare --recipe-path recipe.json && \
 # ── builder: fast `ci`-profile build for the dev image ───────────────
 FROM chef AS builder
 COPY --from=planner /build/recipe.json recipe.json
-# Cook deps under cache mounts. Dep layer invalidates only when
-# Cargo.lock changes; everyday source-only commits skip this step.
+# Cook deps. This layer invalidates only when Cargo.lock or a manifest
+# changes, so everyday source-only commits skip it. The cooked target/
+# lives in the layer itself, not in a cache mount: a cache mount is local
+# to one BuildKit host and is never exported, so a CI runner restoring
+# this layer from the remote cache would otherwise find no dependency
+# artifacts and compile every dependency again in the workspace build.
+# `--workspace` matches that build, which also covers members outside
+# default-members (the bench/scale harnesses).
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
-    cargo chef cook --profile ci --recipe-path recipe.json
+    cargo chef cook --profile ci --workspace --recipe-path recipe.json
 COPY . .
-# Build workspace + stash binaries outside the cache mount so the
-# final-stage COPY can find them. The target/ cache directory is a
-# tmpfs-style mount that the next stage cannot read directly.
+# Build the workspace on the cooked layer and stash binaries in /out for
+# the final stage, then drop target/ so this layer holds only /out.
 #
-# The target cache is shared by every build on the host, and Cargo
-# decides freshness by mtime. COPY keeps the context's mtimes, so a tree
-# whose files are older than the cached artifacts would link another
-# tree's code. Touching the copied sources first makes Cargo rebuild
-# every workspace crate from them; dependency artifacts stay cached.
-# Only local rebuilds lose incremental workspace compiles; CI runners
-# start with an empty target cache. `touch -h` updates a symlink itself,
-# so a dangling one cannot fail the step.
+# Cargo decides freshness by mtime, and COPY keeps the context's mtimes,
+# so sources older than the cooked placeholder artifacts would look up
+# to date. Touching the copied sources first makes Cargo rebuild every
+# workspace crate from them; dependency artifacts stay cooked.
+# `touch -h` updates a symlink itself, so a dangling one cannot fail the
+# step.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
     find . -path ./target -prune -o -exec touch -h {} + && \
     cargo build --workspace --profile ci && \
     mkdir -p /out && \
@@ -85,7 +88,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/ci/rbgp /out/ && \
     cp target/ci/evpn-tester /out/ && \
     cp target/ci/evpn-monitor /out/ && \
-    cp target/ci/rustbgpd-gobgp-bridge /out/
+    cp target/ci/rustbgpd-gobgp-bridge /out/ && \
+    rm -rf target
 
 # ── builder-release: benchmarked-profile build for the runtime image ─
 # Full `release` profile (fat-LTO, codegen-units=1) with jemalloc as

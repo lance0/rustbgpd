@@ -674,7 +674,7 @@ jobs:
           load: true
           tags: bird:m43-tcpao
           cache-from: type=gha,scope=bird3-tcpao
-          cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=bird3-tcpao,ignore-error=true' || '' }}
 
       - name: Run M43 (deploy + test + destroy with retry)
         if: steps.tcp_ao.outputs.supported == 'true'

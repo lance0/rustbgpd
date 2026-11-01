@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROSTER = {
     "core",
+    "bench_smoke",
     "core_tests",
     "scale_receipts",
     "check",
@@ -35,7 +36,7 @@ RECOVERY_MEMORY_CONCURRENCY = (
     "inputs.recovery_memory_receipt == true && "
     "format('recovery-memory-{0}', github.run_id) || github.ref }}"
 )
-RESULTS = ("CORE", "CORE_TESTS", "SCALE_RECEIPTS")
+RESULTS = ("CORE", "BENCH_SMOKE", "CORE_TESTS", "SCALE_RECEIPTS")
 RETIRED_PRIVILEGED_WORKFLOW = ".github/workflows/privileged-interop.yml"
 WORKFLOWS = tuple(
     f".github/workflows/{name}.yml"
@@ -46,8 +47,9 @@ WORKFLOWS = tuple(
 # Floors, not a census: new root Cargo commands need `--locked`. CI floors
 # are job-scoped so scale commands cannot mask removed core checks.
 MIN_ROOT_COMMANDS = {
-    (WORKFLOWS[0], "core"): Counter(check=6, clippy=3, test=4),
-    (WORKFLOWS[0], "core_tests"): Counter(doc=2, test=2),
+    (WORKFLOWS[0], "core"): Counter(check=6, clippy=3, test=1),
+    (WORKFLOWS[0], "bench_smoke"): Counter(test=3),
+    (WORKFLOWS[0], "core_tests"): Counter(doc=2, test=4),
     (WORKFLOWS[0], "msrv"): Counter(check=1),
     (WORKFLOWS[1], None): Counter(test=1),
     (WORKFLOWS[2], None): Counter(test=6),
@@ -64,6 +66,22 @@ SCALE_COMMANDS = (
     "cargo build --locked -p rs-config-render",
     "cargo test --locked --test reloadstall_scenario_emitted_check",
     "cargo build --locked -p reloadstall",
+)
+# Moved out of `core` unchanged; each runs once, in bench_smoke.
+BENCH_SMOKE_COMMANDS = (
+    "bash bench/smoke-benches.sh --locked",
+    "cargo test --locked -p rustbgpd-rib --features bench-internals --bench selection_deferral_release -- --self-test",
+    "cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke",
+    "cargo test --locked -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke",
+)
+# Every shard builds the full workspace test set, proves the shard partition
+# against it, and runs its own selectors; doc tests run once.
+CORE_TESTS_COMMANDS = (
+    "cargo test --locked --workspace --no-run --message-format=json-render-diagnostics",
+    'python3 scripts/check_ci_test_shards.py check "$RUNNER_TEMP/workspace-tests.jsonl"',
+    'cargo test --locked --workspace "${selectors[@]}"',
+    "cargo test --locked --workspace --doc",
+    "cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items",
 )
 SCALE_PROFILE = {
     "inherits": "release",
@@ -411,13 +429,17 @@ def check(root: Path) -> list[str]:
     if core_commands[rib_clippy] != 1:
         errors.append("core must run standalone RIB Clippy exactly once without feature flags")
 
+    bench_smoke = jobs.get("bench_smoke", "")
+    for command in BENCH_SMOKE_COMMANDS:
+        if text.count(command) != 1 or command not in bench_smoke:
+            errors.append(f"{command} must exist exactly once in bench_smoke")
+
     core_tests = jobs.get("core_tests", "")
-    for command in (
-        "cargo test --locked --workspace",
-        "cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items",
-    ):
+    for command in CORE_TESTS_COMMANDS:
         if text.count(command) != 1 or command not in core_tests:
             errors.append(f"{command} must exist exactly once in core_tests")
+    if "        shard: [1, 2]\n" not in core_tests or "      fail-fast: false\n" not in core_tests:
+        errors.append("core_tests must run both shards on separate matrix runners without canceling either")
     if core_tests.count('RUSTDOCFLAGS: "-D warnings"') != 2:
         errors.append("core_tests rustdoc warnings contract drifted")
 
@@ -445,7 +467,7 @@ def check(root: Path) -> list[str]:
     aggregate = jobs.get("check", "")
     if "if: ${{ always() }}" not in aggregate:
         errors.append("aggregate check must run with always()")
-    needs = "needs: [core, core_tests, scale_receipts]"
+    needs = "needs: [core, bench_smoke, core_tests, scale_receipts]"
     if needs not in aggregate:
         errors.append("aggregate check needs drifted")
     for name in RESULTS:

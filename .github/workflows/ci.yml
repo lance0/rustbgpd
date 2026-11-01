@@ -349,24 +349,6 @@ jobs:
       - run: cargo check --locked -p rustbgpd-transport --features bench-internals --benches
       # API owns the feature-gated VPN query benches.
       - run: cargo check --locked -p rustbgpd-api --features bench-internals --benches
-      # `cargo check` above proves the bench targets compile, not that they run.
-      # A fixture the codec later made illegal (RFC 9774 AS_SET in the wire
-      # `rich` AS_PATH) compiled clean and panicked on first iteration, so two
-      # benchmark groups stopped executing without any gate noticing. `cargo
-      # test --bench` runs every Criterion body once; bounded native CLI
-      # fixtures exercise both paging receipt harnesses. Smoke only — no timings.
-      - name: Smoke benchmark targets without dedicated checks
-        run: bash bench/smoke-benches.sh --locked
-      - name: Smoke selection-deferral release receipt
-        run: cargo test --locked -p rustbgpd-rib --features bench-internals --bench selection_deferral_release -- --self-test
-      # LAN-572 keeps the real MRT snapshot encoder benchmark usable in both
-      # deliberately incompatible builds: bare-jemalloc timing, and opt-in
-      # allocation/growth diagnostics.  `--smoke` bounds both executions for
-      # the PR critical path while retaining the harness's path assertions.
-      - name: Smoke MRT snapshot allocation benchmark modes
-        run: |
-          cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
-          cargo test --locked -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke
       # Same class of gap for the root crate: `bench-internals` exposes
       # `pub mod config` (and its EVPN reload-diff dependencies) in the
       # lib, a surface the default `--all-targets` clippy never compiles.
@@ -445,8 +427,10 @@ jobs:
             docs/perf/test-event-history-host-fence.sh \
             docs/perf/test-event-history-naming.sh
 
-  core_tests:
-    name: core tests / rustdoc
+  # The bench smoke runs beside `core` rather than inside it: the steps are
+  # the former `core` steps, unchanged, on their own runner.
+  bench_smoke:
+    name: bench smoke
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -460,6 +444,49 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `core` checks that the bench targets compile, not that they run.
+      # A fixture the codec later made illegal (RFC 9774 AS_SET in the wire
+      # `rich` AS_PATH) compiled clean and panicked on first iteration, so two
+      # benchmark groups stopped executing without any gate noticing. `cargo
+      # test --bench` runs every Criterion body once; bounded native CLI
+      # fixtures exercise both paging receipt harnesses. Smoke only — no timings.
+      - name: Smoke benchmark targets without dedicated checks
+        run: bash bench/smoke-benches.sh --locked
+      - name: Smoke selection-deferral release receipt
+        run: cargo test --locked -p rustbgpd-rib --features bench-internals --bench selection_deferral_release -- --self-test
+      # LAN-572 keeps the real MRT snapshot encoder benchmark usable in both
+      # deliberately incompatible builds: bare-jemalloc timing, and opt-in
+      # allocation/growth diagnostics.  `--smoke` bounds both executions for
+      # the PR critical path while retaining the harness's path assertions.
+      - name: Smoke MRT snapshot allocation benchmark modes
+        run: |
+          cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
+          cargo test --locked -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke
+
+  # Two shards on separate runners. Both build the identical workspace test
+  # set; each runs only its own binaries, one after another, so no two test
+  # binaries share a host (the CLI doctor tests discover live daemons, and
+  # several tests own process-global signal state).
+  core_tests:
+    name: core tests / rustdoc (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1 # stable
+        with:
+          toolchain: stable
+      - uses: ./.github/actions/install-protobuf
+      # Both shards share one key; shard 2 also builds rustdoc, so it saves.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 2 }}
       # The exact release archive comes from its content-addressed cache entry,
       # or on a miss from a retried, checksum-verified release fetch. The key
       # seals the release checksum and deliberately has no partial restore
@@ -496,14 +523,33 @@ jobs:
             --install-archive \
             "$RUNNER_TEMP/rustbgpd-v064-cache/rustbgpd-linux-amd64.tar.gz" \
             "$RUNNER_TEMP/rustbgpd-v064"
-      - run: cargo test --locked --workspace
+      - name: Build every workspace test target
+        run: >-
+          cargo test --locked --workspace --no-run --message-format=json-render-diagnostics
+          > "$RUNNER_TEMP/workspace-tests.jsonl"
+      - name: Prove the shards cover every workspace test target exactly once
+        run: |
+          python3 -m unittest -v scripts/test_check_ci_test_shards.py
+          python3 scripts/check_ci_test_shards.py check "$RUNNER_TEMP/workspace-tests.jsonl"
+      - name: Run this shard's workspace test binaries
         env:
           RUSTBGPD_V064_VALIDATOR: ${{ runner.temp }}/rustbgpd-v064/rustbgpd-v0.64.0
+          SHARD: ${{ matrix.shard }}
+        run: |
+          selectors=$(python3 scripts/check_ci_test_shards.py args "$SHARD")
+          read -ra selectors <<<"$selectors"
+          cargo test --locked --workspace "${selectors[@]}"
+      # DOC_SHARD in scripts/check_ci_test_shards.py.
+      - run: cargo test --locked --workspace --doc
+        if: matrix.shard == 2
       - run: cargo test --locked -p rustbgpd-wire --features tokio-codec
+        if: matrix.shard == 2
       - run: cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items
+        if: matrix.shard == 2
         env:
           RUSTDOCFLAGS: "-D warnings"
       - run: cargo doc --locked -p rustbgpd-wire --lib --no-deps --features tokio-codec
+        if: matrix.shard == 2
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -657,9 +703,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [core, core_tests, scale_receipts]
+    needs: [core, bench_smoke, core_tests, scale_receipts]
     env:
       CORE_RESULT: ${{ needs.core.result }}
+      BENCH_SMOKE_RESULT: ${{ needs.bench_smoke.result }}
       CORE_TESTS_RESULT: ${{ needs.core_tests.result }}
       SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}
     steps:
@@ -667,9 +714,10 @@ jobs:
         run: |
           set -euo pipefail
           printf 'core=%s\n' "$CORE_RESULT"
+          printf 'bench_smoke=%s\n' "$BENCH_SMOKE_RESULT"
           printf 'core_tests=%s\n' "$CORE_TESTS_RESULT"
           printf 'scale_receipts=%s\n' "$SCALE_RECEIPTS_RESULT"
-          if [[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]; then
+          if [[ "$CORE_RESULT" != "success" || "$BENCH_SMOKE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]; then
             exit 1
           fi
 
@@ -755,7 +803,7 @@ jobs:
           load: true
           tags: rustbgpd-netns-tests:latest
           cache-from: type=gha,scope=evpn-bum-kernel
-          cache-to: type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true' || '' }}
 
       - name: Wait before retrying the netns image build
         if: steps.netns_image.outcome == 'failure'
@@ -770,7 +818,7 @@ jobs:
           load: true
           tags: rustbgpd-netns-tests:latest
           cache-from: type=gha,scope=evpn-bum-kernel
-          cache-to: type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true' || '' }}
 
       - name: Run BUM-filter primitive validation
         # The helper handles cap flags + bind-mounts. We pre-built

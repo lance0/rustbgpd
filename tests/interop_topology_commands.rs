@@ -2848,28 +2848,53 @@ fn m104_current_arouteserver_differential_is_exact_and_reuses_m90_inputs() {
 
     let workflow =
         fs::read_to_string(repo_path(".github/workflows/interop.yml")).expect("read workflow");
-    let m104 = workflow
-        .split_once("\n  m104:\n")
-        .and_then(|(_, rest)| rest.split_once("\n  check:\n").map(|(job, _)| job))
-        .expect("interop workflow has bounded M104 job");
-    let context = m104
+    // A job runs from its header to the next line indented by exactly two
+    // spaces: the next job or a comment above it.
+    let job = |name: &str| {
+        let (_, rest) = workflow
+            .split_once(&format!("\n  {name}:\n"))
+            .unwrap_or_else(|| panic!("interop workflow has a {name} job"));
+        let end = rest
+            .match_indices("\n  ")
+            .map(|(index, _)| index)
+            .find(|index| !rest[index + 3..].starts_with([' ', '\n']))
+            .unwrap_or(rest.len());
+        &rest[..end]
+    };
+    let m104 = job("m104");
+    // The M90 context proof needs no lab image, so it runs in its own job
+    // beside the primer; the Interop aggregate requires both jobs.
+    let proof = job("ars_context_proof");
+    let context = proof
         .find("Run immutable M90 context proof (exact 23/23)")
         .unwrap();
-    let protobuf = m104
+    let protobuf = proof
         .find("uses: ./.github/actions/install-protobuf")
         .unwrap();
-    let live = m104
-        .find("Run M104 (single-attempt current-daemon differential)")
-        .unwrap();
     assert!(
-        protobuf < context && context < live,
-        "M104 must install protoc before the context proof and run that proof before live"
+        protobuf < context,
+        "the M90 context proof job must install protoc before the proof"
     );
+    for required in [
+        "if: needs.classify_changes.outputs.run_labs == 'true'",
+        "output=$(bash tests/interop/m90-differential/prove-context-ingestion.sh)",
+        "grep -Fq 'PROOF PASS: 23 checks' <<<\"$output\"",
+    ] {
+        assert!(
+            proof.contains(required),
+            "M90 context proof job lost `{required}`"
+        );
+    }
+    assert!(
+        !m104.contains("prove-context-ingestion.sh"),
+        "the M90 context proof must run once, in its own job"
+    );
+    m104.find("Run M104 (single-attempt current-daemon differential)")
+        .unwrap();
     for required in [
         "needs: [prime_dev_image]",
         "uses: ./.github/actions/stage-bird3-artifact",
         "uses: ./.github/actions/stage-gobgp-artifact",
-        "PROOF PASS: 23 checks",
         "M104_EXPECTED_GIT_SHA: ${{ github.sha }}",
         "max_attempts: \"1\"",
         "--preflight-arouteserver-image",

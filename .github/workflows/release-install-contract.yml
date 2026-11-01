@@ -181,6 +181,6 @@ jobs:
           load: true
           tags: rustbgpd:release-install-contract
           cache-from: type=gha,scope=release-install-contract
-          cache-to: type=gha,mode=max,scope=release-install-contract
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=release-install-contract' || '' }}
       - name: Assert production image runs the adapter
         run: docker run --rm --entrypoint birdwatcher-adapter rustbgpd:release-install-contract --help
