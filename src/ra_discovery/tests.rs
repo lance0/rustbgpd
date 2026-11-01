@@ -230,7 +230,8 @@ fn late_refresh_cannot_revive_an_expired_binding() {
     e.events.clear();
     // fe80::5 expired at t0+10; its RA is processed at t0+11 before any
     // poll. Expiry applies first, so the binding moves to fe80::1 and the
-    // RA relearns fe80::5 as a mere candidate.
+    // RA relearns fe80::5 as a mere candidate. The pair was counted when
+    // fe80::1 was learned, so no conflict is named before a report.
     ra(&mut e, 5, 10, t0 + Duration::from_secs(11)).unwrap();
     assert_eq!(
         e.events,
@@ -247,11 +248,6 @@ fn late_refresh_cannot_revive_an_expired_binding() {
             DiscoveryEvent::CandidateLearned {
                 interface: IF.into(),
                 address: ll(5)
-            },
-            DiscoveryEvent::Conflict {
-                interface: IF.into(),
-                bound: ll(1),
-                other: ll(5)
             },
         ]
     );
@@ -1109,6 +1105,43 @@ fn a_source_learned_before_the_established_report_is_counted_once() {
     ra(&mut e, 9, 10, t0).unwrap();
     e.session_established(IF, ll(2), t0 + Duration::from_secs(10));
     assert_eq!(conflicts(&mut e), []);
+}
+
+/// The number of conflicts `ras` (source, lifetime, seconds after t0) raise
+/// with the Established report for `fe80::2` delivered before them (`early`)
+/// or after them.
+fn conflicts_with_report(ras: &[(u16, u16, u64)], early: bool) -> usize {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    if early {
+        e.session_established(IF, ll(2), t0);
+    }
+    let mut last = t0;
+    for &(source, lifetime, at) in ras {
+        last = t0 + Duration::from_secs(at);
+        ra(&mut e, source, lifetime, last).unwrap();
+    }
+    if !early {
+        e.session_established(IF, ll(2), last);
+    }
+    conflicts(&mut e).len()
+}
+
+/// A source whose candidate expires and is re-learned beside a binding it
+/// was already counted with is counted as the early report counts it: not
+/// at all when it is the peer, once more when it is the foreign router.
+/// Mutation-red: naming the re-learned source at once counts the
+/// continuously live `fe80::9` twice when the peer's RA is re-learned first.
+#[test]
+fn a_relearned_source_is_counted_the_same_before_and_after_the_report() {
+    // The peer's candidate expires and returns while fe80::9 stays live.
+    let peer_relearned = [(2, 10, 0), (9, 60, 0), (2, 60, 11)];
+    // The foreign router's candidate expires and returns.
+    let foreign_relearned = [(9, 10, 0), (2, 60, 0), (9, 60, 11)];
+    for (ras, want) in [(peer_relearned, 1), (foreign_relearned, 2)] {
+        assert_eq!(conflicts_with_report(&ras, true), want, "early: {ras:?}");
+        assert_eq!(conflicts_with_report(&ras, false), want, "late: {ras:?}");
+    }
 }
 
 /// Carrier loss forgets the Established peer: after the link returns, the

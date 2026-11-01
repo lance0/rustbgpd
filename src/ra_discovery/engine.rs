@@ -132,7 +132,9 @@ pub enum DiscoveryEvent {
     /// failing that its binding: when it is learned, or, for a source
     /// learned before the Established report, when that report arrives. A
     /// source a conflict has named, on either side, is not named again
-    /// while it stays a candidate. It never moves the binding.
+    /// while it stays a candidate. Before the report, a source re-learned
+    /// beside the binding it was named with waits for the report, which
+    /// names it unless it is the peer. It never moves the binding.
     Conflict {
         interface: String,
         bound: Ipv6Addr,
@@ -157,6 +159,8 @@ struct Candidate {
     expiry: Instant,
     /// A `Conflict` has named it, as `bound` or `other`.
     reported: bool,
+    /// The `bound` of the conflict that named it as `other`.
+    named_beside: Option<Ipv6Addr>,
 }
 
 #[derive(Debug, Default)]
@@ -363,6 +367,7 @@ impl Engine {
             Candidate {
                 expiry: now + hold,
                 reported: false,
+                named_beside: None,
             },
         );
         self.events.push(DiscoveryEvent::CandidateLearned {
@@ -375,11 +380,20 @@ impl Engine {
             .or(iface.binding.map(|binding| binding.address))
             && bound != source
         {
-            for named in [bound, source] {
-                if let Some(candidate) = iface.candidates.get_mut(&named) {
-                    candidate.reported = true;
-                }
+            // With no Established peer known, a source re-learned beside the
+            // binding it was already counted with is either the peer itself
+            // or that pair's foreign router again. Leave it unnamed: the
+            // Established report counts it only if it is not the peer, as an
+            // RA after the report would.
+            if iface.established_peer.is_none()
+                && iface
+                    .candidates
+                    .get(&bound)
+                    .is_some_and(|binding| binding.named_beside == Some(source))
+            {
+                return Ok(());
             }
+            mark_conflict(&mut iface.candidates, bound, source);
             self.events.push(DiscoveryEvent::Conflict {
                 interface: name.clone(),
                 bound,
@@ -443,6 +457,7 @@ impl Engine {
                 continue;
             }
             candidate.reported = true;
+            candidate.named_beside = Some(peer);
             named = true;
             self.events.push(DiscoveryEvent::Conflict {
                 interface: name.to_owned(),
@@ -506,6 +521,17 @@ impl Engine {
         self.rng ^= self.rng << 17;
         let span = u64::try_from(max.as_millis()).unwrap_or(u64::MAX);
         Duration::from_millis(self.rng % span.saturating_add(1))
+    }
+}
+
+/// Mark `bound` and `other` named by their conflict.
+fn mark_conflict(candidates: &mut BTreeMap<Ipv6Addr, Candidate>, bound: Ipv6Addr, other: Ipv6Addr) {
+    if let Some(candidate) = candidates.get_mut(&bound) {
+        candidate.reported = true;
+    }
+    if let Some(candidate) = candidates.get_mut(&other) {
+        candidate.reported = true;
+        candidate.named_beside = Some(bound);
     }
 }
 

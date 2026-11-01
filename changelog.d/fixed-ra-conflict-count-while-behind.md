@@ -13,4 +13,8 @@
   only beside another foreign router, which that conflict counted instead.
   Once discovery knows the peer, an RA from the peer's own address is not a
   conflict. Before that, the peer's RA beside a foreign binding still
-  raises one, and that conflict counts the foreign router.
+  raises one, and that conflict counts the foreign router. An address whose
+  RAs lapse and return before discovery learns of the peer, beside a
+  binding it was already counted with, waits for discovery to learn of the
+  peer and is counted then unless it is the peer, so a foreign router that
+  stays live is not counted a second time.
