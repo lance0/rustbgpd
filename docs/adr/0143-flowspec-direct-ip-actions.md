@@ -1,7 +1,14 @@
 # ADR-0143: Direct target-IP FlowSpec actions
 
-**Status:** Proposed; accompanies the action and observation implementation.
+**Status:** Accepted (2026-11-01); the action and observation implementation has landed.
 **Date:** 2026-10-27
+
+> **Acceptance note (2026-11-01).** This record was accepted after the typed
+> `redirect_ip` action, the attribute 25 model and the raw IPv6 observation
+> fields shipped as proposed below. Acceptance covers that scope only. It does
+> not qualify router forwarding: installation on a specific router and
+> packet-level traffic diversion remain separate work, as described under
+> [Compatibility and remaining work](#compatibility-and-remaining-work).
 
 ## Context
 

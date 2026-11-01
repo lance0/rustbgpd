@@ -168,7 +168,7 @@ event history was removed), is Superseded.
 | [0140](0140-evpn-core-isolation-es-hold.md) | EVPN core isolation and startup hold for bound Ethernet Segments | Accepted (implemented; M121 interop cell) | 2026-10-12 | Active |
 | [0141](0141-injection-owner-lease.md) | Owner-scoped lease on controller-injected routes | Accepted | 2026-10-19 | Active |
 | [0142](0142-interface-only-unnumbered-neighbors.md) | Interface-only unnumbered neighbors | Accepted | 2026-10-21 | Active |
-| [0143](0143-flowspec-direct-ip-actions.md) | Direct target-IP FlowSpec actions | Proposed | 2026-10-27 | Unstated |
+| [0143](0143-flowspec-direct-ip-actions.md) | Direct target-IP FlowSpec actions | Accepted | 2026-10-27 | Active |
 | [0144](0144-guarded-flowspec-mutations.md) | Guarded FlowSpec mutation contract | Accepted | 2026-10-30 | Active |
 
 ## Supporting records
