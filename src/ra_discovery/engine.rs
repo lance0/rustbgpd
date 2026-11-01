@@ -132,9 +132,10 @@ pub enum DiscoveryEvent {
     /// failing that its binding: when it is learned, or, for a source
     /// learned before the Established report, when that report arrives. A
     /// source a conflict has named, on either side, is not named again
-    /// while it stays a candidate. Before the report, a source re-learned
-    /// beside the binding it was named with waits for the report, which
-    /// names it unless it is the peer. It never moves the binding.
+    /// while it stays a candidate. With no Established peer known, a source
+    /// that returns beside a binding a conflict already named it with is
+    /// held for the report, which names each held return unless the source
+    /// is the peer. It never moves the binding.
     Conflict {
         interface: String,
         bound: Ipv6Addr,
@@ -157,10 +158,9 @@ pub enum Transmit {
 #[derive(Debug, Clone, Copy)]
 struct Candidate {
     expiry: Instant,
-    /// A `Conflict` has named it, as `bound` or `other`.
+    /// A `Conflict` has named it, as `bound` or `other`, or its return was
+    /// held for the Established report.
     reported: bool,
-    /// The `bound` of the conflict that named it as `other`.
-    named_beside: Option<Ipv6Addr>,
 }
 
 #[derive(Debug, Default)]
@@ -183,6 +183,11 @@ struct Interface {
     /// connection may have taught the owner without any RA: a new source
     /// other than it is a conflict even before discovery has a binding.
     established_peer: Option<Ipv6Addr>,
+    /// Each pair of sources a conflict has named (lower address first),
+    /// kept while either is a candidate, with the returns of each side that
+    /// are held for the Established report. At most
+    /// `MAX_CANDIDATES_PER_INTERFACE` pairs per address.
+    named_pairs: BTreeMap<(Ipv6Addr, Ipv6Addr), [u32; 2]>,
     next_ra: Option<Instant>,
     last_ra: Option<Instant>,
     initial_ras_left: u8,
@@ -350,6 +355,7 @@ impl Engine {
         if own {
             if known {
                 iface.candidates.remove(&source);
+                prune_pairs(iface);
                 self.events.push(DiscoveryEvent::CandidateExpired {
                     interface: name.clone(),
                     address: source,
@@ -367,7 +373,6 @@ impl Engine {
             Candidate {
                 expiry: now + hold,
                 reported: false,
-                named_beside: None,
             },
         );
         self.events.push(DiscoveryEvent::CandidateLearned {
@@ -380,20 +385,28 @@ impl Engine {
             .or(iface.binding.map(|binding| binding.address))
             && bound != source
         {
-            // With no Established peer known, a source re-learned beside the
-            // binding it was already counted with is either the peer itself
-            // or that pair's foreign router again. Leave it unnamed: the
-            // Established report counts it only if it is not the peer, as an
-            // RA after the report would.
+            // With no Established peer known, a source returning beside a
+            // binding a conflict already named it with is either the peer
+            // itself or that pair's foreign router again. Hold the return:
+            // the report names it only if it is not the peer, as an RA after
+            // the report would.
+            let key = pair(bound, source);
             if iface.established_peer.is_none()
-                && iface
-                    .candidates
-                    .get(&bound)
-                    .is_some_and(|binding| binding.named_beside == Some(source))
+                && let Some(held) = iface.named_pairs.get_mut(&key)
             {
+                let side = &mut held[usize::from(source == key.1)];
+                *side = side.saturating_add(1);
+                if let Some(candidate) = iface.candidates.get_mut(&source) {
+                    candidate.reported = true;
+                }
                 return Ok(());
             }
-            mark_conflict(&mut iface.candidates, bound, source);
+            for named in [bound, source] {
+                if let Some(candidate) = iface.candidates.get_mut(&named) {
+                    candidate.reported = true;
+                }
+            }
+            record_pair(&mut iface.named_pairs, bound, source);
             self.events.push(DiscoveryEvent::Conflict {
                 interface: name.clone(),
                 bound,
@@ -442,6 +455,10 @@ impl Engine {
     /// binding can go uncounted: one that expired before the report with no
     /// conflict, or one named only beside another foreign router, which that
     /// conflict counted instead.
+    ///
+    /// Each return held before this report is named now unless its source
+    /// is `peer`, so the count matches an earlier report's while one of the
+    /// pair is still a candidate.
     pub(crate) fn session_established(&mut self, name: &str, peer: Ipv6Addr, now: Instant) {
         let Some(iface) = self.interfaces.get_mut(name) else {
             return;
@@ -451,22 +468,41 @@ impl Engine {
         if iface.binding.is_some() {
             iface.established = true;
         }
-        let mut named = false;
+        let mut named = Vec::new();
         for (&address, candidate) in &mut iface.candidates {
             if address == peer || candidate.reported {
                 continue;
             }
             candidate.reported = true;
-            candidate.named_beside = Some(peer);
-            named = true;
+            named.push(address);
             self.events.push(DiscoveryEvent::Conflict {
                 interface: name.to_owned(),
                 bound: peer,
                 other: address,
             });
         }
-        if named && let Some(candidate) = iface.candidates.get_mut(&peer) {
+        if !named.is_empty()
+            && let Some(candidate) = iface.candidates.get_mut(&peer)
+        {
             candidate.reported = true;
+        }
+        for address in named {
+            record_pair(&mut iface.named_pairs, peer, address);
+        }
+        for (&(low, high), [held_low, held_high]) in &mut iface.named_pairs {
+            for (address, held) in [(low, held_low), (high, held_high)] {
+                let returns = std::mem::take(held);
+                if address == peer {
+                    continue;
+                }
+                for _ in 0..returns {
+                    self.events.push(DiscoveryEvent::Conflict {
+                        interface: name.to_owned(),
+                        bound: peer,
+                        other: address,
+                    });
+                }
+            }
         }
     }
 
@@ -507,6 +543,12 @@ impl Engine {
         }
     }
 
+    /// The pairs `name` remembers, for the bound tests.
+    #[cfg(test)]
+    pub(crate) fn named_pairs(&self, name: &str) -> usize {
+        self.interfaces[name].named_pairs.len()
+    }
+
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.interfaces
             .values()
@@ -524,15 +566,37 @@ impl Engine {
     }
 }
 
-/// Mark `bound` and `other` named by their conflict.
-fn mark_conflict(candidates: &mut BTreeMap<Ipv6Addr, Candidate>, bound: Ipv6Addr, other: Ipv6Addr) {
-    if let Some(candidate) = candidates.get_mut(&bound) {
-        candidate.reported = true;
+/// The `named_pairs` key of `a` and `b`.
+fn pair(a: Ipv6Addr, b: Ipv6Addr) -> (Ipv6Addr, Ipv6Addr) {
+    (a.min(b), a.max(b))
+}
+
+/// A conflict named `a` and `b`: remember the pair, unless either address
+/// already has `MAX_CANDIDATES_PER_INTERFACE` pairs (a later return of that
+/// pair is then named at once).
+fn record_pair(pairs: &mut BTreeMap<(Ipv6Addr, Ipv6Addr), [u32; 2]>, a: Ipv6Addr, b: Ipv6Addr) {
+    let key = pair(a, b);
+    if pairs.contains_key(&key) {
+        return;
     }
-    if let Some(candidate) = candidates.get_mut(&other) {
-        candidate.reported = true;
-        candidate.named_beside = Some(bound);
+    let full = |address: Ipv6Addr| {
+        pairs
+            .keys()
+            .filter(|(low, high)| *low == address || *high == address)
+            .count()
+            >= MAX_CANDIDATES_PER_INTERFACE
+    };
+    if !full(a) && !full(b) {
+        pairs.insert(key, [0, 0]);
     }
+}
+
+/// Forget the pairs neither of whose sources is still a candidate.
+fn prune_pairs(iface: &mut Interface) {
+    let candidates = &iface.candidates;
+    iface
+        .named_pairs
+        .retain(|(low, high), _| candidates.contains_key(low) || candidates.contains_key(high));
 }
 
 /// Drop candidates whose lifetime has run out by `now` and reselect. Every
@@ -551,6 +615,7 @@ fn expire(name: &str, iface: &mut Interface, now: Instant, events: &mut Vec<Disc
         live
     });
     if iface.candidates.len() != before {
+        prune_pairs(iface);
         reselect(name, iface, events);
     }
 }
@@ -596,6 +661,7 @@ fn clear(name: &str, iface: &mut Interface, events: &mut Vec<DiscoveryEvent>) {
             address,
         });
     }
+    iface.named_pairs.clear();
     iface.established = false;
     iface.established_peer = None;
     if let Some(previous) = iface.binding.take() {
