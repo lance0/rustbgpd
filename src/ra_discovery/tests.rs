@@ -681,8 +681,9 @@ fn ra_on_an_unstarted_interface_is_ignored() {
 
 /// Wait for a `BindingChanged` to `want`, recording every event in `seen`.
 /// A closed stream or the timeout is an error, never a silent pass.
+#[cfg(target_os = "linux")]
 async fn wait_for_binding(
-    events: &mut tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent>,
+    events: &mut super::DiscoveryEvents,
     seen: &mut Vec<DiscoveryEvent>,
     want: Option<Endpoint>,
     limit: Duration,
@@ -702,15 +703,17 @@ async fn wait_for_binding(
     found.unwrap_or(Err("timed out"))
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn binding_wait_fails_when_the_stream_closes_or_times_out() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = super::event_channel();
     let mut seen = Vec::new();
-    let unrelated = DiscoveryEvent::CandidateLearned {
+    let unrelated = DiscoveryEvent::Conflict {
         interface: IF.into(),
-        address: ll(1),
+        bound: ll(2),
+        other: ll(1),
     };
-    tx.send(unrelated.clone()).unwrap();
+    tx.send(unrelated.clone());
     assert_eq!(
         wait_for_binding(&mut rx, &mut seen, Some(ep(1)), Duration::from_millis(20)).await,
         Err("timed out")
@@ -721,13 +724,12 @@ async fn binding_wait_fails_when_the_stream_closes_or_times_out() {
         Err("event stream closed")
     );
     assert_eq!(seen, vec![unrelated]);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = super::event_channel();
     tx.send(DiscoveryEvent::BindingChanged {
         interface: IF.into(),
         previous: None,
         current: Some(ep(1)),
-    })
-    .unwrap();
+    });
     assert_eq!(
         wait_for_binding(&mut rx, &mut seen, Some(ep(1)), Duration::from_secs(5)).await,
         Ok(())
@@ -744,7 +746,7 @@ mod netns {
     use std::time::Duration;
 
     use nix::sched::{CloneFlags, setns};
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::oneshot;
 
     use super::super::{
         DiscoveryConfig, DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaDiscovery, RaTiming,
@@ -846,7 +848,7 @@ mod netns {
 
     struct Side {
         discovery: Option<RaDiscovery>,
-        events: mpsc::UnboundedReceiver<DiscoveryEvent>,
+        events: super::super::DiscoveryEvents,
         seen: Vec<DiscoveryEvent>,
         stop: Option<oneshot::Sender<()>>,
         thread: Option<std::thread::JoinHandle<()>>,
@@ -954,10 +956,6 @@ mod netns {
             b.d()
                 .link_event(wait_state(&ns_b, IF_B, LinkState::Down).await);
             a.wait_binding(None).await;
-            assert!(a.seen.contains(&DiscoveryEvent::CandidateExpired {
-                interface: IF_A.into(),
-                address: addr_b()
-            }));
 
             // Carrier returns: the link-up RS/RA rediscovers within seconds.
             // Admin down flushed B's address (keep_addr_on_down=0); restore it.
@@ -1008,10 +1006,16 @@ mod netns {
             }))
             .await;
 
-            // Own advertisements never became candidates on either side.
+            // Own advertisements never became a binding or a conflict on
+            // either side.
             for (side, own) in [(&a, addr_a()), (&b, addr_b())] {
-                assert!(!side.seen.iter().any(|ev| matches!(ev,
-                    DiscoveryEvent::CandidateLearned { address, .. } if *address == own)));
+                assert!(!side.seen.iter().any(|ev| match ev {
+                    DiscoveryEvent::BindingChanged { current, .. } => {
+                        current.is_some_and(|c| c.address == own)
+                    }
+                    DiscoveryEvent::Conflict { other, .. } => *other == own,
+                    _ => false,
+                }));
             }
 
             a.shutdown().await;

@@ -98,7 +98,7 @@ fn harness_with(
     mgr.current_config = config;
     let (links_tx, links_rx) = watch::channel(snapshot(true, links));
     let (discovery, commands) = RaDiscovery::recording();
-    let (_events_tx, events_rx) = mpsc::unbounded_channel();
+    let (_events_tx, events_rx) = crate::ra_discovery::event_channel();
     let mgr = match gtsm {
         Some(update) => mgr.with_gtsm_update(update),
         None => mgr,
@@ -2103,7 +2103,7 @@ fn recording_launcher(mgr: &mut PeerManager) -> Launched {
     mgr.unnumbered_runtime.spawn = Box::new(move |_, _| {
         let (discovery, commands) = RaDiscovery::recording();
         sink.lock().unwrap().push(commands);
-        Ok((discovery, mpsc::unbounded_channel().1))
+        Ok((discovery, crate::ra_discovery::event_channel().1))
     });
     launched
 }
@@ -2597,7 +2597,7 @@ async fn a_discovery_actor_that_fails_to_start_is_retried() {
         }
         let (discovery, commands) = RaDiscovery::recording();
         sink.lock().unwrap().push(commands);
-        Ok((discovery, mpsc::unbounded_channel().1))
+        Ok((discovery, crate::ra_discovery::event_channel().1))
     });
     h.reload(config_with(&port_stanza("swp1", ""))).await;
     assert!(launched.lock().unwrap().is_empty());
@@ -3836,7 +3836,7 @@ async fn a_binding_between_plan_and_stage_refuses_the_static_add() {
         .clone();
     let (links_tx, links_rx) = watch::channel(snapshot(true, &[("swp1", 7, true)]));
     let (discovery, _commands) = RaDiscovery::recording();
-    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let (events_tx, events_rx) = crate::ra_discovery::event_channel();
     let mgr = PeerManager::new_with_config(
         rx,
         internal_rx,
@@ -3875,13 +3875,11 @@ async fn a_binding_between_plan_and_stage_refuses_the_static_add() {
     );
 
     // Handshake: the owner reports the bound peer before the stage is sent.
-    events_tx
-        .send(DiscoveryEvent::BindingChanged {
-            interface: "swp1".into(),
-            previous: None,
-            current: Some(endpoint(2, 7)),
-        })
-        .unwrap();
+    events_tx.send(DiscoveryEvent::BindingChanged {
+        interface: "swp1".into(),
+        previous: None,
+        current: Some(endpoint(2, 7)),
+    });
     let peers = || async {
         let (list_tx, list_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
@@ -4557,7 +4555,7 @@ async fn a_reload_that_adds_interface_only_gtsm_raises_the_listener_hop_limit() 
     h.mgr.unnumbered_runtime.spawn = Box::new(move |_, _| {
         let (discovery, commands) = RaDiscovery::recording();
         sink.lock().unwrap().push(commands);
-        Ok((discovery, mpsc::unbounded_channel().1))
+        Ok((discovery, crate::ra_discovery::event_channel().1))
     });
 
     // Mutation-red: without the raise in the port-set pass the listener
@@ -6650,5 +6648,68 @@ async fn inbound_learning_waits_for_uncertain_bfd_removal_acknowledgement() {
     assert_eq!(
         BfdSide::sessions(&bfd.next_applied()),
         [(IpAddr::V6(ll(3)), Some(7))]
+    );
+}
+
+/// Binding changes queued while the owner is behind arrive as the latest
+/// one only, so the owner, reconciling between events, never adds and
+/// removes a peer for an address discovery has already dropped. Delivered
+/// one at a time, the same changes do churn that address.
+#[tokio::test]
+async fn queued_binding_changes_do_not_churn_dropped_addresses() {
+    async fn peer_events(deliver: Vec<DiscoveryEvent>) -> Vec<String> {
+        let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+        h.bind("swp1", Some(endpoint(2, 7))).await;
+        for event in deliver {
+            h.mgr.handle_discovery_event(event);
+            h.reconcile().await;
+        }
+        query_session_event_history(
+            &h.mgr,
+            None,
+            [
+                SessionLifecycleEventType::PeerAdded,
+                SessionLifecycleEventType::PeerRemoved,
+            ]
+            .into_iter()
+            .collect(),
+            0,
+        )
+        .await
+        .iter()
+        .map(|event| format!("{:?} {}", event.event_type, event.reason))
+        .collect()
+    }
+    let change = |previous: Option<u16>, current: Option<u16>| DiscoveryEvent::BindingChanged {
+        interface: "swp1".into(),
+        previous: previous.map(|last| endpoint(last, 7)),
+        current: current.map(|last| endpoint(last, 7)),
+    };
+    let seq = vec![
+        change(Some(2), None),
+        change(None, Some(9)),
+        change(Some(9), None),
+        change(None, Some(10)),
+    ];
+    let (tx, mut rx) = crate::ra_discovery::event_channel();
+    for event in seq.clone() {
+        tx.send(event);
+    }
+    drop(tx);
+    let mut queued = Vec::new();
+    while let Some(event) = rx.recv().await {
+        queued.push(event);
+    }
+    assert_eq!(queued, [change(None, Some(10))]);
+    let dropped = ll(9).to_string();
+    let coalesced = peer_events(queued).await;
+    assert!(
+        !coalesced.iter().any(|event| event.contains(&dropped)),
+        "{coalesced:?}"
+    );
+    let one_at_a_time = peer_events(seq).await;
+    assert!(
+        one_at_a_time.iter().any(|event| event.contains(&dropped)),
+        "the control churns the dropped address: {one_at_a_time:?}"
     );
 }

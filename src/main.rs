@@ -4766,6 +4766,12 @@ async fn run<T>(
     // when a peer reconnects after the global chain was removed.
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let recovery_peer_mgr_tx = peer_mgr_tx.clone();
+    // Unbounded so the RIB actor never waits on (or fails a send into) the
+    // capacity-disable task, and bounded by the dampening sources it
+    // manages: a source's admission latch sends one notice, and re-arms only
+    // when the operator re-enables the peer, which is refused until the
+    // disable for that notice has completed. A full bounded lane would
+    // instead stop the RIB actor (`notice_failed`).
     let (dampening_capacity_tx, dampening_capacity_rx) = mpsc::unbounded_channel();
     let mut rib_manager = RibManager::new(rib_rx, rib_query_rx, None, cluster_id, metrics.clone())
         .with_readiness_queries(rib_readiness_rx)

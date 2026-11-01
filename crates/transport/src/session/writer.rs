@@ -156,6 +156,51 @@ fn is_notification(frame: &[u8]) -> bool {
     frame.get(18) == Some(&3)
 }
 
+/// The raw (AFI, SAFI) of a normal ROUTE-REFRESH request (type 5, RFC 7313
+/// subtype 0) after the 19-octet header, or `None` for any other frame.
+fn route_refresh_request_family(frame: &[u8]) -> Option<(u16, u8)> {
+    match frame {
+        [_header @ .., 5, afi_hi, afi_lo, 0, safi] if frame.len() == 23 => {
+            Some((u16::from_be_bytes([*afi_hi, *afi_lo]), *safi))
+        }
+        _ => None,
+    }
+}
+
+/// Families with a normal ROUTE-REFRESH request queued on the priority
+/// channel that the writer has not yet taken. The session queues a request
+/// only for a family not in the set, and the writer removes the family when
+/// it takes that frame, so at most one request per family is queued. A
+/// request for a family that is already queued is redundant: the queued one
+/// reaches the peer after whatever prompted both.
+#[derive(Clone, Default)]
+pub(super) struct RefreshPending(Arc<std::sync::Mutex<std::collections::HashSet<(u16, u8)>>>);
+
+impl RefreshPending {
+    fn set(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<(u16, u8)>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Reserve the family's queue slot; false when a request is queued.
+    pub(super) fn claim(&self, family: (u16, u8)) -> bool {
+        self.set().insert(family)
+    }
+
+    /// Give a reserved slot back after its frame could not be queued.
+    pub(super) fn release(&self, family: (u16, u8)) {
+        self.set().remove(&family);
+    }
+
+    /// The writer took `frame` off the priority channel.
+    fn taken(&self, frame: &[u8]) {
+        if let Some(family) = route_refresh_request_family(frame) {
+            self.release(family);
+        }
+    }
+}
+
 /// Coalesce already-queued bulk frames behind `first` into one
 /// contiguous buffer, up to [`MAX_BATCH_FRAMES`] / [`MAX_BATCH_BYTES`].
 /// Non-blocking: only frames already sitting in the channel join the
@@ -196,11 +241,14 @@ pub(super) struct WriterHandle {
     pub(super) bulk_tx: mpsc::Sender<Bytes>,
     /// Successful FIFO bulk-write byte watermark, excluding priority traffic.
     pub(super) completed: watch::Receiver<u64>,
-    /// Unbounded channel — `OPEN`, `KEEPALIVE`, `NOTIFICATION`, operator
-    /// `ROUTE-REFRESH` commands, collision `Cease`. Unbounded is safe
-    /// because each of these is bounded by session lifetime or timer
-    /// cadence, not by route volume.
+    /// Unbounded channel — `OPEN`, `KEEPALIVE`, `NOTIFICATION`, normal
+    /// `ROUTE-REFRESH` requests, collision `Cease`. Unbounded is safe
+    /// because the connection queues one OPEN, one KEEPALIVE reply, one
+    /// final NOTIFICATION and at most one request per family
+    /// (`refresh_pending`), not anything that scales with route volume.
     pub(super) priority_tx: mpsc::UnboundedSender<Bytes>,
+    /// Normal ROUTE-REFRESH requests queued on `priority_tx`, by family.
+    pub(super) refresh_pending: RefreshPending,
     /// KEEPALIVE cadence control (ADR-0078): `Some(interval)` starts or
     /// retimes the writer-owned periodic KEEPALIVE, `None` stops it.
     /// Dropping the sender also stops it.
@@ -282,7 +330,13 @@ pub(super) fn spawn(
 ) -> WriterHandle {
     let (bulk_tx, bulk_rx) = mpsc::channel::<Bytes>(bulk_buffer);
     let (completed_tx, completed) = watch::channel(0);
+    // Unbounded so the session never waits on its own writer, and bounded by
+    // state: one writer per connection queues its OPEN, the KEEPALIVE
+    // answering the peer's OPEN, at most one normal ROUTE-REFRESH request
+    // per family (`refresh_pending`) and one final NOTIFICATION. Periodic
+    // KEEPALIVEs come from `keepalive_tx` and are never queued.
     let (priority_tx, priority_rx) = mpsc::unbounded_channel::<Bytes>();
+    let refresh_pending = RefreshPending::default();
     let (keepalive_tx, keepalive_rx) = watch::channel(None);
     let (teardown_tx, teardown_rx) = watch::channel(false);
     let close_started = CloseStarted::default();
@@ -291,6 +345,7 @@ pub(super) fn spawn(
         bulk_rx,
         completed_tx,
         priority_rx,
+        refresh_pending: refresh_pending.clone(),
         keepalive_rx,
         teardown_rx,
         close_started: Arc::clone(&close_started),
@@ -305,6 +360,7 @@ pub(super) fn spawn(
         bulk_tx,
         completed,
         priority_tx,
+        refresh_pending,
         keepalive_tx,
         teardown_tx,
         close_started,
@@ -320,6 +376,7 @@ struct WriterTask {
     bulk_rx: mpsc::Receiver<Bytes>,
     completed_tx: watch::Sender<u64>,
     priority_rx: mpsc::UnboundedReceiver<Bytes>,
+    refresh_pending: RefreshPending,
     keepalive_rx: watch::Receiver<Option<Duration>>,
     teardown_rx: watch::Receiver<bool>,
     close_started: CloseStarted,
@@ -422,6 +479,7 @@ impl WriterTask {
                 }
                 msg = self.priority_rx.recv(), if priority_open => {
                     if let Some(b) = msg {
+                        self.refresh_pending.taken(&b);
                         if is_notification(&b) {
                             return self.close_with_notification(b).await;
                         }

@@ -1202,10 +1202,12 @@ async fn max_prefix_warning_event_names_the_metric_family_and_stage() {
         usage: 80,
         bound: 100,
         percent: 80,
+        crossings: 1,
     })
     .await;
 
     let event = live_events.try_recv().expect("the warning is published");
+    assert!(live_events.try_recv().is_err(), "one event per warning");
     let rustbgpd_api::peer_types::SessionEvent::Lifecycle(event) = event.as_ref() else {
         panic!("expected a lifecycle event, got {event:?}");
     };
@@ -1213,12 +1215,51 @@ async fn max_prefix_warning_event_names_the_metric_family_and_stage() {
         event.event_type,
         SessionLifecycleEventType::MaxPrefixWarning
     );
-    assert!(
-        event
-            .reason
-            .contains(": family ipv4_unicast stage received usage 80 of bound 100 (threshold 80%)"),
-        "{}",
-        event.reason
+    // A single crossing keeps the reason text exactly as before.
+    assert_eq!(
+        event.reason,
+        "max-prefix warning for peer 10.0.0.2: family ipv4_unicast stage received usage 80 of bound 100 (threshold 80%)"
+    );
+}
+
+/// A warning that stands for crossings made while it was queued publishes
+/// one event, whose reason gives the count.
+#[tokio::test]
+async fn a_coalesced_max_prefix_warning_publishes_one_event_with_its_count() {
+    let mut mgr = test_peer_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(peer_addr, SessionState::Established, None, counters),
+        false,
+    );
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
+    mgr.register_session(session_id, &key(peer_addr));
+    let mut live_events = mgr.session_events_tx.subscribe();
+
+    mgr.handle_session_notification(SessionNotification::MaxPrefixWarning {
+        session_id,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+        family: "ipv4_unicast",
+        stage: "accepted",
+        usage: 80,
+        bound: 100,
+        percent: 80,
+        crossings: 150,
+    })
+    .await;
+
+    let event = live_events.try_recv().expect("the warning is published");
+    assert!(live_events.try_recv().is_err(), "one event per warning");
+    let rustbgpd_api::peer_types::SessionEvent::Lifecycle(event) = event.as_ref() else {
+        panic!("expected a lifecycle event, got {event:?}");
+    };
+    assert_eq!(
+        event.reason,
+        "max-prefix warning for peer 10.0.0.2: family ipv4_unicast stage accepted usage 80 of bound 100 (threshold 80%); 150 threshold crossings since the last report"
     );
 }
 
@@ -1246,6 +1287,7 @@ async fn stale_max_prefix_warnings_are_not_published() {
             usage: 80,
             bound: 100,
             percent: 80,
+            crossings: 1,
         })
         .await;
     }
@@ -2864,6 +2906,7 @@ async fn nested_drain_defers_same_address_peer_on_another_interface() {
         usage: 1,
         bound: 2,
         percent: 50,
+        crossings: 1,
     })
     .await;
     assert!(mgr.deferred_session_notifications.is_empty());

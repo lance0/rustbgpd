@@ -58,9 +58,9 @@ mod runtime;
 
 pub use engine::{DiscoveryConfig, DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaTiming};
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) use runtime::Command;
+pub(crate) use runtime::{Command, event_channel};
 #[cfg(target_os = "linux")]
-pub use runtime::{RaDiscovery, probe_raw_socket};
+pub use runtime::{DiscoveryEvents, RaDiscovery, probe_raw_socket};
 
 #[cfg(test)]
 mod tests;

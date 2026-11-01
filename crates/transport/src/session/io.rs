@@ -199,7 +199,7 @@ impl PeerSession {
     }
 
     /// Encode `msg` and enqueue it on the writer's **priority** channel
-    /// (OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH command,
+    /// (OPEN, KEEPALIVE, NOTIFICATION, normal ROUTE-REFRESH request,
     /// collision-dump Cease, saturation Cease/8). The priority channel
     /// is unbounded so this only ever reports `WriterClosed` when the
     /// session has no active TCP connection — same effect as today's
@@ -622,6 +622,7 @@ impl PeerSession {
         // writer-exit select arm needs it to observe the exit.
         self.writer_bulk_tx = None;
         self.writer_priority_tx = None;
+        self.writer_refresh_pending = None;
         self.writer_keepalive_tx = None;
         self.writer_teardown_tx = None;
         self.read_buf.reset_storage();
@@ -671,6 +672,7 @@ impl PeerSession {
         self.read_half = None;
         self.writer_bulk_tx = None;
         self.writer_priority_tx = None;
+        self.writer_refresh_pending = None;
         self.writer_keepalive_tx = None;
         self.writer_teardown_tx = None;
         self.writer_close_started = None;

@@ -491,9 +491,12 @@ impl PeerManager {
                 usage,
                 bound,
                 percent,
+                crossings,
             } => {
                 // Informational: nothing is latched. One durable session event
-                // per crossing so operators can alert on it without a log tail.
+                // per received warning so operators can alert on it without a
+                // log tail. A warning that stands for crossings made while it
+                // was queued says how many; the metric counts each one.
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
                     debug!(peer = %peer_addr, session_id, ?role, "ignoring max-prefix warning from unknown session");
                     return;
@@ -510,17 +513,24 @@ impl PeerManager {
                     return;
                 }
                 let rendered_peer = peer_key.label();
+                let since = if crossings > 1 {
+                    format!("; {crossings} threshold crossings since the last report")
+                } else {
+                    String::new()
+                };
+                let reason = format!(
+                    "max-prefix warning for peer {rendered_peer}: family {family} stage {stage} usage {usage} of bound {bound} (threshold {percent}%){since}"
+                );
                 self.publish_lifecycle_event(rustbgpd_api::peer_types::SessionLifecycleEvent {
-                    event_type: rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
+                    event_type:
+                        rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
                     peer: peer_addr,
                     peer_label: Some(rendered_peer.clone()),
                     timestamp_unix_ms: Self::session_event_timestamp(),
                     old_state: None,
                     new_state: None,
                     session_role: Some(Self::session_role_label(role).to_string()),
-                    reason: format!(
-                        "max-prefix warning for peer {rendered_peer}: family {family} stage {stage} usage {usage} of bound {bound} (threshold {percent}%)"
-                    ),
+                    reason,
                 });
             }
             SessionNotification::MaxPrefixExceeded {
