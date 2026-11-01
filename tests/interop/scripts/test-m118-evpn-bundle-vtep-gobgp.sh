@@ -65,7 +65,7 @@ qualify() {
 }
 
 resolve_grpc_addr
-test "$(gobgp --version)" = "gobgp version 4.10.0"
+test "$(gobgp --version)" = "gobgp version 4.11.0"
 docker exec -d "$GOBGP" sh -c 'exec gobgpd -f /config/gobgp.toml >/tmp/gobgpd.log 2>&1'
 start_rustbgpd /usr/local/bin/start-rustbgpd.sh
 wait_vtep_established 10.0.118.2 "bundle EVPN"

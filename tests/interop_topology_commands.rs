@@ -614,7 +614,7 @@ fn m76_pins_gobgp410_identity_before_preserving_the_orr_contract() {
         "gobgp-c2",
     ] {
         assert_eq!(
-            nodes[peer]["image"], "gobgp:v4.10.0-m76",
+            nodes[peer]["image"], "gobgp:v4.11.0-m76",
             "M76 {peer} image drifted"
         );
     }
@@ -622,11 +622,11 @@ fn m76_pins_gobgp410_identity_before_preserving_the_orr_contract() {
     let script = fs::read_to_string(interop_path("scripts/test-m76-orr-divergent-best-gobgp.sh"))
         .expect("read M76 driver");
     for required in [
-        "GOBGP_IMAGE=\"gobgp:v4.10.0-m76\"",
-        "GOBGP_VERSION=\"gobgp version 4.10.0\"",
-        "GOBGPD_VERSION=\"gobgpd version 4.10.0\"",
-        "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",
-        "bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d",
+        "GOBGP_IMAGE=\"gobgp:v4.11.0-m76\"",
+        "GOBGP_VERSION=\"gobgp version 4.11.0\"",
+        "GOBGPD_VERSION=\"gobgpd version 4.11.0\"",
+        "f2a64916729cb019a6b1b8e1ff83cbf2653d93eae1c5ece498e586bf26afab93",
+        "58127efa0ff1aaeadfbb802c771b18134c401c8c16229b6d3d2ab30935f288b2",
         "docker image inspect -f '{{.Architecture}}' \"$GOBGP_IMAGE\"",
         "docker inspect -f '{{.Config.Image}}' \"$container\"",
         "docker inspect -f '{{.Image}}' \"$container\"",
@@ -683,7 +683,7 @@ fn m77_pins_gobgp410_identity_before_preserving_the_gr_llgr_contract() {
     assert_eq!(nodes["rustbgpd"]["image"], "rustbgpd:dev");
     for peer in ["gobgp-pe", "gobgp-client", "gobgp-ls"] {
         assert_eq!(
-            nodes[peer]["image"], "gobgp:v4.10.0-m77",
+            nodes[peer]["image"], "gobgp:v4.11.0-m77",
             "M77 {peer} image drifted"
         );
     }
@@ -691,11 +691,11 @@ fn m77_pins_gobgp410_identity_before_preserving_the_gr_llgr_contract() {
     let script_path = interop_path("scripts/test-m77-gr-llgr-rr-gobgp.sh");
     let script = fs::read_to_string(&script_path).expect("read M77 driver");
     for required in [
-        "GOBGP_IMAGE=\"gobgp:v4.10.0-m77\"",
-        "GOBGP_VERSION=\"gobgp version 4.10.0\"",
-        "GOBGPD_VERSION=\"gobgpd version 4.10.0\"",
-        "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",
-        "bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d",
+        "GOBGP_IMAGE=\"gobgp:v4.11.0-m77\"",
+        "GOBGP_VERSION=\"gobgp version 4.11.0\"",
+        "GOBGPD_VERSION=\"gobgpd version 4.11.0\"",
+        "f2a64916729cb019a6b1b8e1ff83cbf2653d93eae1c5ece498e586bf26afab93",
+        "58127efa0ff1aaeadfbb802c771b18134c401c8c16229b6d3d2ab30935f288b2",
         "docker image inspect -f '{{.Architecture}}' \"$GOBGP_IMAGE\"",
         "docker inspect -f '{{.Config.Image}}' \"$container\"",
         "docker inspect -f '{{.Image}}' \"$container\"",
@@ -787,7 +787,7 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
     );
     assert_eq!(
         topology["topology"]["nodes"]["gobgp"]["image"],
-        "gobgp:v4.10.0-m83"
+        "gobgp:v4.11.0-m83"
     );
     assert_eq!(topology["topology"]["nodes"]["frr"]["image"], FRR_IMAGE);
 
@@ -829,8 +829,8 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
         .expect("read M83 script");
     for exact_version in [
         "BIRD version 2.19.3",
-        "gobgp version 4.10.0",
-        "gobgpd version 4.10.0",
+        "gobgp version 4.11.0",
+        "gobgpd version 4.11.0",
         "bgpd version 10.7.0_git",
     ] {
         assert!(
@@ -2777,7 +2777,7 @@ fn m104_current_arouteserver_differential_is_exact_and_reuses_m90_inputs() {
     assert_eq!(nodes["bird"]["image"], "bird:v2.19.3-m104");
     for member in ["member1", "member2", "member3"] {
         assert_eq!(
-            nodes[member]["image"], "gobgp:v4.10.0-m104",
+            nodes[member]["image"], "gobgp:v4.11.0-m104",
             "M104 {member} image drifted"
         );
         let binds: Vec<_> = nodes[member]["binds"]
@@ -2803,9 +2803,9 @@ fn m104_current_arouteserver_differential_is_exact_and_reuses_m90_inputs() {
         "BIRD_IMAGE=\"bird:v2.19.3-m104\"",
         "BIRD_VERSION=\"BIRD version 2.19.3\"",
         "BIRD_TARGET_VERSION=\"2.16\"",
-        "GOBGP_IMAGE=\"gobgp:v4.10.0-m104\"",
-        "55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86",
-        "bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d",
+        "GOBGP_IMAGE=\"gobgp:v4.11.0-m104\"",
+        "f2a64916729cb019a6b1b8e1ff83cbf2653d93eae1c5ece498e586bf26afab93",
+        "58127efa0ff1aaeadfbb802c771b18134c401c8c16229b6d3d2ab30935f288b2",
         "--target-version \"$BIRD_TARGET_VERSION\"",
         "bird -p -c /etc/bird/bird.conf",
         "reject-irrdb-prefix-filtered",

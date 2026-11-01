@@ -146,10 +146,10 @@ def live_admission(lines):
 def provenance():
     peers = []
     for container in (PE, SINK):
-        need(gobgp(container, "--version").strip() == "gobgp version 4.10.0", "GoBGP CLI version differs")
-        need(docker(container, "gobgpd", "--version").strip() == "gobgpd version 4.10.0", "GoBGP daemon version differs")
+        need(gobgp(container, "--version").strip() == "gobgp version 4.11.0", "GoBGP CLI version differs")
+        need(docker(container, "gobgpd", "--version").strip() == "gobgpd version 4.11.0", "GoBGP daemon version differs")
         hashes = docker(container, "sha256sum", "/usr/local/bin/gobgp", "/usr/local/bin/gobgpd").splitlines()
-        want = ["55eded2e53f5c597baab409f69d18729292a6e28084fd0ce2be9b5383a406f86", "bea17d8561b776cb35820ce14601a617e26acb1efa687b9d949a1737ee2f670d"]
+        want = ["f2a64916729cb019a6b1b8e1ff83cbf2653d93eae1c5ece498e586bf26afab93", "58127efa0ff1aaeadfbb802c771b18134c401c8c16229b6d3d2ab30935f288b2"]
         need([line.split()[0] for line in hashes] == want, "GoBGP binary identity differs")
         image = command("docker", "inspect", "--format", "{{.Image}}", container).strip()
         need(command("docker", "image", "inspect", "--format", "{{.Architecture}}", image).strip() == "amd64", "GoBGP image architecture differs")
@@ -164,7 +164,7 @@ def provenance():
     hashes = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in inputs}
     save("provenance.json", {"rustbgpd_source_id": source_id, "rustbgpd_commit": command("git", "rev-parse", "HEAD").strip(),
                             "harness_dirty": bool(command("git", "status", "--porcelain").strip()), "harness_sha256": hashes,
-                            "gobgp_source_commit": "da824d99912e02124b53741245ee4186c381adcc", "gobgp_version": "4.10.0", "peers": peers})
+                            "gobgp_source_commit": "53ceb78fe284018ce83a92f3039198f0a86dc823", "gobgp_version": "4.11.0", "peers": peers})
 
 
 def run():
