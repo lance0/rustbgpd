@@ -2721,3 +2721,42 @@ fn a_single_family_override_keeps_the_groups_other_family() {
         assert_eq!(family_row(&manager, peer, "ipv6_unicast").limit, Some(200));
     }
 }
+
+/// Peer-scoped `ExplainBestPath` applies the ADR-0113 commit gate live
+/// Add-Path staging applies: at an IPv4 cap of 1, the second prefix holds
+/// no advertised path ID, exactly like the peer's Adj-RIB-Out, while the
+/// admitted prefix keeps its IDs. Red proof: without the
+/// `outbound_limit_withholds` clause in `handle_explain_best_path`, explain
+/// reports `{192.0.2.114: 2}` for the withheld prefix.
+#[test]
+fn explain_best_path_add_path_ranks_match_the_outbound_prefix_limit() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let mut outbound_rx =
+        register_peer_with_selection(&mut manager, peer, &ipv4_sendable(), false, 2);
+    set_ipv4_limit(&mut manager, peer, 1);
+    let sources = [Ipv4Addr::new(192, 0, 2, 113), Ipv4Addr::new(192, 0, 2, 114)];
+    for octet in [1, 2] {
+        for source in sources {
+            announce(
+                &mut manager,
+                peer_v4(source),
+                source_routes(source, &[octet]),
+            );
+        }
+    }
+    assert_eq!(wire_prefixes(&mut outbound_rx), HashSet::from([v4(1)]));
+
+    let (explained, held) = super::explain_ranks_and_adj_rib_out(&mut manager, peer, v4(2));
+    assert!(held.is_empty(), "the cap withholds the second prefix");
+    assert_eq!(explained, held);
+    assert_eq!(
+        explain_export(&mut manager, peer, v4(2)).decision,
+        crate::update::ExplainDecision::Deny
+    );
+    let (explained, held) = super::explain_ranks_and_adj_rib_out(&mut manager, peer, v4(1));
+    assert!(!held.is_empty(), "the admitted prefix keeps its slots");
+    assert_eq!(explained, held);
+}
