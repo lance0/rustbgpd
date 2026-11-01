@@ -70,20 +70,14 @@ build-order history see [docs/project/milestones.md](milestones.md).
 
 ### Where rustbgpd fits
 
-The BGP daemon space is dominated by monolithic C implementations that bundle
-BGP with OSPF, IS-IS, and every other routing protocol. GoBGP proved that an
-API-first, gRPC-driven BGP daemon is what operators want; rustbgpd keeps that
-shape while using Rust's predictable, GC-free memory model and shipping a
-reusable codec. Observability and automation — Prometheus metrics, structured
-JSON logs, machine-parseable errors, gRPC-first paths, reproducible interop
-gates — are first-class product surface, not afterthoughts.
-
-| Project | Language | Model | Strengths | Gaps |
-|---------|----------|-------|-----------|------|
-| FRR | C | Full routing suite | Feature-complete, wide adoption, production FIB / EVPN depth | Monolith, CLI-first, limited API |
-| BIRD | C | Full routing suite / route-server mainstay | Excellent filter language, lightweight, BIRD 3 multithreading, TCP-AO | CLI-first, no native gRPC |
-| OpenBGPD | C | BGP-only | Clean design, OpenBSD pedigree | Limited platform support, no API |
-| GoBGP | Go | BGP-only, gRPC API | API-first, Zebra/FIB, EVPN, broad library docs | GC runtime, Go-specific protos |
+FRR and BIRD are full routing suites; GoBGP and OpenBGPD are BGP-only
+daemons, and GoBGP is also driven over gRPC. rustbgpd is a BGP-only,
+API-first daemon written in Rust that also publishes its codec, FSM and RPKI
+components as libraries. Observability and automation — Prometheus metrics,
+structured JSON logs, machine-parseable errors, gRPC-first paths, reproducible
+interop gates — are product surface. The dated, source-pinned feature matrix
+is in the [comparison](../explanation/comparison.md), and the GoBGP detail is
+in [GoBGP parity](../explanation/gobgp-parity.md).
 
 Target users: cloud and AI-scale data-center fabric operators, network
 automation teams, IX / route-server operators, and whitebox / lab users who
@@ -424,11 +418,12 @@ IETF GROW/IDR/SIDROPS activity, and documented operator-demand signals
 route-server re-entry playbook, and the Route Server Support Foundation's
 software-diversity funding). Two findings converge:
 
-1. **BMP depth is the open, niche-defining gap.** No open-source daemon
-   ships the full monitoring trio — RFC 7854 (Adj-RIB-In), RFC 8671
-   (Adj-RIB-Out), RFC 9069 (Loc-RIB): FRR and GoBGP stop at Loc-RIB (and
-   FRR documents BMP+Add-Path as unreliable), BIRD's BMP is experimental,
-   OpenBGPd has none. Per-client Adj-RIB-Out monitoring is the
+1. **BMP depth is the open, niche-defining gap.** None of the compared
+   daemons ships the full monitoring trio — RFC 7854 (Adj-RIB-In), RFC 8671
+   (Adj-RIB-Out), RFC 9069 (Loc-RIB). FRR 10.7.1 and GoBGP 4.9.0 stop at
+   Loc-RIB, checked 2026-09-09 against pinned source in the
+   [comparison](../explanation/comparison.md#monitoring--observability).
+   Per-client Adj-RIB-Out monitoring is the
    observability twin of ORR — proving *what the RR actually sent each
    client*. On top of that, the BMPv4 TLV framework
    (draft-ietf-grow-bmp-tlv) plus the path-marking
@@ -642,7 +637,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   verifier unit tests for upstream/downstream Valid, Invalid, Unknown, and
   ASPA-Valid attack-limit cases. Remaining ASPA work is demand-shaped policy
   breadth, not feature scope.
-- **EVPN standards tail.** The current VXLAN/Linux EVPN lane is broad but
+- **EVPN standards tail.** The [status table](#evpn-standards-tail) tracks
+  each row. The current VXLAN/Linux EVPN lane is broad but
   intentionally bounded. Native RFC 9136 GW-IP and ESI overlay-index Type 5
   origination now ship, and both the single-active and all-active ESI
   overlay-index receive paths have real-peer interop proofs (M71 and M72,
@@ -1499,6 +1495,43 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
 
 ---
 
+## EVPN standards tail
+
+> **Maintained section.** This table tracks current status and changes when a
+> row ships or its scope changes. Status follows the
+> [stability guide](../reference/stability.md): Types 1–5 route reflection is
+> the scoped v1 role, while VTEP, IRB, multi-homing, Type 6 relay and Linux
+> dataplane behavior remain alpha. Per-RFC implementation detail lives in the
+> [RFC notes](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane);
+> lab topologies, versions, and assertions live in the [interop matrix](../interop.md).
+> The table moved here from the historical
+> [EVPN enablement record](evpn-enablement.md) on 2026-11-01.
+
+This table separates the remaining EVPN work by fit. It is intentionally not a
+promise to chase full service-provider EVPN parity before there is operator
+demand.
+
+| Area | Status | First reviewable slice | Proof gate |
+|------|--------|------------------------|------------|
+| RFC 9136 ESI overlay-index Type 5 origination + single-active receive | Shipped (bounded first slice; alpha) | RT-5 carries non-zero ESI, zero Gateway Address, L3VNI label, and configured virtual/transit Router MAC; receive-side recursion imports exactly one single-active EAD-per-EVI candidate scoped by linked L2VNI and Ethernet Tag | Pure origination/projection + daemon tests plus M71 GoBGP real-peer receive proof |
+| ADR-0090 all-active ESI overlay-index Type 5 receive | Shipped (bounded first slice; alpha) | Extends the M71 shape to all-active ESI recursion with deterministic remote-VTEP target sets, route-level ECMP, per-VTEP L3 neighbors, and L3VXLAN FDB-NHG for the shared Router MAC. The model distinguishes single-active, all-active, and conflicting EAD redundancy signals; invalid one-member/mixed/family-conflict/Router-MAC-conflict shapes fail closed; valid all-active target sets install through the production L3 writer and reclaim crash-leftover L3 NHID/FDB-NHG state on restart | `l3_all_active_writer` same-host netns proof is CI-gated for both steady-state writer cleanup and abort/restart adoption; M72 real-peer proof is CI-gated with two GoBGP route-source PEs: unresolved before EAD, then VRF ECMP route + `nhid` Router-MAC FDB row, then deterministic target-set collapse/re-expand and withdraw cleanup |
+| VLAN-aware bridges | Demand-shaped Linux/VXLAN operability; ADR-0088 boundary accepted; ADR-0089 v1 VNI-per-broadcast-domain slice landed for traditional multi-VXLAN bridges and SVD / collect-metadata VXLAN: `bridge_vlan` schema/status, observed VLAN topology validation, `NDA_VLAN` remote-MAC FDB attribution for fixed-VNI devices, `NDA_SRC_VNI` attribution for SVD devices, AF_BRIDGE local-MAC VLAN attribution, VLAN-upper AF_INET / AF_INET6 MAC+IP attribution, M70 FRR interop proving same-MAC two-VNI isolation on a traditional rustbgpd-owned `vlan_filtering=1` bridge, `dataplane_vlan_fdb` + `macip_vlan_attribution` proving real-kernel VLAN-scoped FDB and MAC+IP isolation, and `svd_fdb_vni` proving SVD Ready + add + same-MAC two-VNI isolation + scoped delete on a real kernel. Ethernet Tag ID stays `0`; unattributable VLAN observations fail closed as normal "not ours" classifier outcomes, downstream observation backpressure is metered, and startup link-cache/probe priming bounds the boot window | Raw bridge-ifindex ARP/ND on `vlan_filtering=1` bridges remains fail-closed unless the ADR-0093 FDB-correlation design (Proposed) proves freshness and ambiguity handling; true VLAN-aware bundle / non-zero Ethernet Tag is covered by ADR-0092 (Accepted) — its RR reflect/receive slice is CI-gated by the M82 GoBGP-synthetic leg, with the Nokia SR Linux 25.10.1 vendor leg local-only. Single-homed bundle members now originate and import non-zero-tag Type 2/3 and can bind to an IP-VRF in `interface_less` mode (local SR Linux receipts [M119](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md) for L2 and [M120](../artifacts/interop/m120-evpn-bundle-irb-20261011T045852Z/README.md) for IRB); bundle members cannot join Ethernet Segments, and incoming GW-IP/ESI overlay-index resolution through bundle members and non-zero-tag Type 5 remain unsupported; managed netdev creation stays a separate ergonomics track | Unit tests, hosted/gated local kernel netns tests including `dataplane_vlan_fdb`, `macip_vlan_attribution`, and `svd_fdb_vni`, and hosted M70 FRR containerlab receipt |
+| rustbgpd-managed bridge / VXLAN / SVD / VLAN upper / VRF netdev creation | Demand-shaped operator ergonomics; boundary accepted in ADR-0088 and ADR-0091; bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and L3VXLAN lifecycle landed (`[managed_netdevs]`, derived altname stamps, `EvpnService.ListManagedNetdevs`, `rbgp evpn managed-netdevs`, create -> stamp -> fresh-dump confirm, crash-restart adoption, safe same-owner reap, foreign/unsafe preservation). Fixed-VNI VXLAN rows create traditional one-VNI VXLAN devices on the desired bridge and fail closed on SVD/collect-metadata, `vnifilter`, learning, bridge-attachment, or protected-attribute drift. SVD rows create one external / `vnifilter` / `nolearning` VXLAN per bridge, derive bridge-VLAN -> VNI tunnel mappings from configured `[[evpn_instances]] bridge` / `bridge_vlan` pairs, reject ambiguous bindings (a `bridge_vlan` mapping to more than one VNI) at config validation, report protected-attribute drift on an owned SVD as owned-unsafe, and reap exact same-owner SVD orphans. VLAN upper rows create `ip link add link BR name BR.VLAN type vlan id VID` helpers bound to configured `[[evpn_instances]] bridge` / `bridge_vlan` pairs, and reap before their parent bridge. VRF/L3VXLAN rows create the IP-VRF kernel topology, fail closed on protected-attribute drift, refuse VRF deletion while slave links remain, and cross-validate matching `[[evpn_ip_vrfs]]` table/L3VNI/local/Router-MAC identity | Managed-netdev creation is complete for the ADR-0091 classes; future work is class-specific only if a new link class is accepted | Unit + actor tests and hosted/gated local kernel netns tests `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`, `managed_vlan_upper`, `managed_ready`, and `managed_ip_vrf_ready`; the readiness proofs show rustbgpd-created L2, SVD, and IP-VRF topologies drive the real probes from NotReady to Ready on a real kernel |
+| RFC 9785 Don't-Preempt DF recovery | Shipped (bounded) | Preference DF election honors Don't-Preempt on recovery: a recovering segment holds its members non-DF while it waits three seconds for remote Type 4 routes (within 30 seconds of daemon start, also until established L2VPN/EVPN sessions have sent End-of-RIB), inherits a protected reference PE's preference with DP=0, and restores its configured values on becoming the reference. Mixed DP and remote routes arriving after the wait cannot guarantee non-preemption | Pure DF-election unit tests, segment-actor tests, and the hosted M123 cross-vendor leg against SR Linux 25.10.1 ([receipt](../artifacts/interop/m123-evpn-dont-preempt-20261013/README.md)) |
+| RFC 7432 §5 Type 1 (LACP) auto-derived ESI | Shipped (bounded) | `esi = "auto-lacp"` derives the ESI from the CE's LACP system MAC and port key on the 802.3ad bond named by `interface`; the segment originates nothing until the bond has an LACP partner, and re-originates under a new ESI when the CE is replaced. Readiness is reported by `evpn_es_auto_esi_state` and `rbgp doctor`. Type 2 (STP) derivation is not implemented | Unit and converger tests plus the hosted `bond_lacp` and `auto_lacp_daemon` kernel netns selectors |
+| RFC 9721 extended IRB mobility | Partial. Shipped: the §5.1/§6.2 local-move cascade; the §6.1 third rule (a newly activated local MAC/IP binding is sequenced above a different imported remote MAC holding the same IP); partial §6.4/§6.5 same-segment peer-sequence adoption; and optional detect-only §8.2 per-IP M/N accounting (counters and warnings only). §7/§8.3 RT-5 mobility is not applicable because Type 5 routes carry no MAC Mobility extended community. Detail: [RFC notes](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane) | Remaining: the §6.3/§6.7 stale-entry procedures, Peer-Sync-Local origination of a MAC or MAC/IP learned only from the ES peer (§6.4/§6.5), full §8.2 duplicate-address procedures, and §6.8 probing | Pure originator unit tests plus daemon originator and RIB event tests; no interop leg yet |
+| BGP Add-Path for L2VPN EVPN | Demand-shaped control-plane breadth | Negotiate RFC 7911 Add-Path for AFI 25 / SAFI 70 only after EVPN Adj-RIB-In/Out, API, event history, and export paths are path-id-safe | Unit matrix plus FRR/GoBGP interop if a peer supports the shape |
+| RFC 9251 Route Types 6/7/8 | Type 6 typed RR relay implemented, alpha; Types 7/8 and multicast service remain future work | SMET codec, receive/reflect/withdraw, typed inspection and exact explain; no SMET origination, IGMP/MLD proxy, or multicast forwarding | Local regressions and [M113 controlled raw-peer/TShark proof](../artifacts/interop/m113-smet-20261001T180815Z/README.md) for reflection, withdrawal, and recovery; vendor interoperability unproven |
+| RFC 9572 Route Types 9/10/11 | Out-of-current-lane / service-provider BUM segmentation | Typed route-family slice for PMSI/leaf A-D routes | Standards codec tests plus real-peer interop |
+| RFC 7623 PBB-EVPN, EVPN-MVPN, VPWS/E-Tree, MPLS/SRv6 service encapsulation | Out-of-niche unless operator demand appears | New ADR before code; keep MPLS dataplane out of scope unless explicitly reversed | Separate design and interop plan |
+
+Hosted coverage: the `kernel-dataplane` workflow runs the EVPN dataplane smokes
+M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M47 / M48 / M60 / M61 / M65 /
+M66 / M67 / M68 / M69 / M70 / M71 / M72 / M109 / M110 / M117 / M121 / M123. The
+[kernel dataplane runner guide](../how-to/kernel-dataplane-runner.md) lists every
+hosted leg, including the non-EVPN dataplane, BFD, and TCP-AO legs, and the
+[interop matrix](../interop.md) records each topology and its assertions.
+
 ## Deferred (with rationale)
 
 These have explicit rationale and, where noted, are the roadmap counterpart of
@@ -1747,8 +1780,9 @@ If you need these features, combine rustbgpd with purpose-built tools.
   high-N memory profiles, and archived 24 h soaks.
 - **[docs/explanation/comparison.md](../explanation/comparison.md)** + **[docs/explanation/gobgp-parity.md](../explanation/gobgp-parity.md)**
   — the detailed competitive / parity tables vs FRR, BIRD, GoBGP, OpenBGPD.
-- **[docs/project/evpn-enablement.md](evpn-enablement.md)** — the EVPN enablement
-  guide. **[docs/how-to/evpn-alpha-soak.md](../how-to/evpn-alpha-soak.md)** —
+- **[docs/project/evpn-enablement.md](evpn-enablement.md)** — the historical
+  EVPN gate record; the maintained status table is the
+  [EVPN standards tail](#evpn-standards-tail). **[docs/how-to/evpn-alpha-soak.md](../how-to/evpn-alpha-soak.md)** —
   EVPN alpha-soak status and remaining follow-ups.
 - **[docs/benchmarks.md](../benchmarks.md)** — convergence, CPU, and memory results
   (bgperf2 vs BIRD / GoBGP; criterion micro-benches) with methodology and the
