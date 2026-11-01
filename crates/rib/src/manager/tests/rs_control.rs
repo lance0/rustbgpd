@@ -1122,6 +1122,17 @@ async fn rs_client_up(
     peer_asn: u32,
     per_client_best: bool,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    rs_client_up_with_policy(tx, peer, peer_asn, per_client_best, None).await
+}
+
+/// [`rs_client_up`] with an export policy.
+async fn rs_client_up_with_policy(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+    peer_asn: u32,
+    per_client_best: bool,
+    export_policy: Option<rustbgpd_policy::PolicyChain>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     tx.send(RibUpdate::SetPeerRsControl {
         peer,
         session_id: 0,
@@ -1136,7 +1147,7 @@ async fn rs_client_up(
         peer_asn,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
-        export_policy: None,
+        export_policy,
         sendable_families: ipv4_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
@@ -1376,4 +1387,70 @@ async fn grouped_advertised_surfaces_follow_rs_control() {
             "per_client_best={per_client_best}: grouped surfaces match the per-peer path"
         );
     }
+}
+
+/// In a plain group whose chain strips the control communities, the best
+/// path's tag moving from `0:65004` to `0:65005` is a tag-only transition:
+/// the shared row is unchanged while D gains the route and E loses it.
+/// Their counts, gauges and BMP stat 17 follow, as on the per-peer path.
+#[tokio::test]
+async fn grouped_counts_follow_a_tag_only_transition() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 128, 0), 24);
+    let source = Ipv4Addr::new(198, 51, 100, 48);
+    let strip = modifying_export_chain(rustbgpd_policy::RouteModifications {
+        communities_remove: vec![std_c(0, 65004), std_c(0, 65005)],
+        ..rustbgpd_policy::RouteModifications::default()
+    });
+    let mut reports = Vec::new();
+    for force_ungrouped in [false, true] {
+        let metrics = BgpMetrics::new();
+        let (tx, rx) = mpsc::channel(64);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+        manager.test_force_ungrouped = force_ungrouped;
+        let handle = tokio::spawn(manager.run());
+        let client_d = PeerId::from_addr("192.0.2.223".parse().unwrap());
+        let client_e = PeerId::from_addr("192.0.2.224".parse().unwrap());
+        let mut d_rx =
+            rs_client_up_with_policy(&tx, client_d, 65004, false, Some(strip.clone())).await;
+        drain_eor(&mut d_rx).await;
+        let mut e_rx =
+            rs_client_up_with_policy(&tx, client_e, 65005, false, Some(strip.clone())).await;
+        drain_eor(&mut e_rx).await;
+        assert_eq!(
+            query_update_group_label(&tx, client_d)
+                .await
+                .starts_with("group:"),
+            !force_ungrouped
+        );
+        let mut snapshots = Vec::new();
+        for tag in [std_c(0, 65004), std_c(0, 65005)] {
+            announce_unicast(
+                &tx,
+                peer_v4(source),
+                vec![tagged(
+                    make_route_with_as_path(prefix, source, vec![64608]),
+                    vec![tag],
+                    vec![],
+                )],
+            )
+            .await;
+            let _ = query_best_routes(&tx).await;
+            let d = advertised_surfaces(&tx, &metrics, client_d).await;
+            let e = advertised_surfaces(&tx, &metrics, client_e).await;
+            snapshots.push((d.count, d.gauge, d.bmp, e.count, e.gauge, e.bmp));
+        }
+        let one = vec![((Afi::Ipv4, Safi::Unicast), 1)];
+        assert_eq!(
+            snapshots,
+            vec![
+                (0, 0.0, vec![], 1, 1.0, one.clone()),
+                (1, 1.0, one, 0, 0.0, vec![]),
+            ],
+            "force_ungrouped={force_ungrouped}"
+        );
+        reports.push(snapshots);
+        drop(tx);
+        handle.await.unwrap();
+    }
+    assert_eq!(reports[0], reports[1]);
 }
