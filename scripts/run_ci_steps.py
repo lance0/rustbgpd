@@ -26,9 +26,6 @@ LOCAL_SKIPS = {
     "core": {
         "Install exact developer linters": "`just check-devtools` checks the local pins",
         "Install receipt-tool dependencies": INSTALLS_TOOLS,
-        "Smoke benchmark targets without dedicated checks": "`just test-feature-gated`",
-        "Smoke selection-deferral release receipt": "`just test-feature-gated`",
-        "Smoke MRT snapshot allocation benchmark modes": "`just test-feature-gated`",
         "Gate eager policy-set sharing allocation shape": "`just test-feature-gated`",
     },
     "scale_receipts": {

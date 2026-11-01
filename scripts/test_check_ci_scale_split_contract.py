@@ -522,8 +522,8 @@ class ScaleSplitContractTests(unittest.TestCase):
             ),
             (
                 WORKFLOW,
-                "- run: cargo test --locked --workspace",
-                "- run: cargo test --locked --workspace\n      - run: cargo check --workspace",
+                "- run: cargo test --locked --workspace --doc",
+                "- run: cargo test --locked --workspace --doc\n      - run: cargo check --workspace",
             ),
             (
                 WORKFLOW,
@@ -545,7 +545,7 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("clippy", "cargo clippy --locked -p rustbgpd-rib --all-targets -- -D warnings"),
             ("clippy", "cargo clippy --locked --workspace --all-targets -- -D warnings"),
             ("clippy", "cargo clippy --locked -p rustbgpd-wire --all-targets --features tokio-codec -- -D warnings"),
-            ("test", "cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke"),
+            ("test", "cargo test --locked -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation shared_set_batch_allocations_do_not_scale_per_peer -- --exact"),
         ):
             with self.subTest(command=command):
                 with tempfile.TemporaryDirectory() as temporary:
@@ -600,8 +600,8 @@ class ScaleSplitContractTests(unittest.TestCase):
             target = root / WORKFLOW
             target.write_text(
                 target.read_text().replace(
-                    "- run: cargo test --locked --workspace",
-                    "- run: cargo test --locked --workspace\n"
+                    "- run: cargo test --locked --workspace --doc",
+                    "- run: cargo test --locked --workspace --doc\n"
                     "      - run: cargo check --locked -p rustbgpd-api",
                     1,
                 )
@@ -617,11 +617,21 @@ class ScaleSplitContractTests(unittest.TestCase):
         cases = (
             ("  core:\n", "  renamed_core:\n"),
             ("  core_tests:\n", "  renamed_core_tests:\n"),
+            ("  bench_smoke:\n", "  renamed_bench_smoke:\n"),
             ("  scale_receipts:\n", "  renamed_scale:\n"),
             ("  check:\n", "  renamed_check:\n"),
             ("  msrv:\n", "  renamed_msrv:\n"),
             ("  evpn_bum_filter_kernel:\n", "  renamed_evpn:\n"),
-            ("- run: cargo test --locked --workspace", "- run: true"),
+            ("- run: cargo test --locked --workspace --doc", "- run: true"),
+            ("cargo test --locked --workspace --no-run --message-format=json-render-diagnostics", "true"),
+            ('cargo test --locked --workspace "${selectors[@]}"', "true"),
+            ('cargo test --locked --workspace "${selectors[@]}"', 'cargo test --locked --workspace "${selectors[@]}"\n          cargo test --locked --workspace "${selectors[@]}"'),
+            ('python3 scripts/check_ci_test_shards.py check "$RUNNER_TEMP/workspace-tests.jsonl"', "true"),
+            ("        shard: [1, 2]\n", "        shard: [1]\n"),
+            ("      fail-fast: false\n      matrix:\n        shard: [1, 2]", "      matrix:\n        shard: [1, 2]"),
+            ("- name: Smoke benchmark targets without dedicated checks\n        run: bash bench/smoke-benches.sh --locked", "- name: Smoke benchmark targets without dedicated checks\n        run: true"),
+            ("--bench selection_deferral_release -- --self-test", "--bench selection_deferral_release"),
+            ("-- diagnostic --candidate --smoke", "-- diagnostic --candidate"),
             ("- run: cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items", "- run: true"),
             ("--lib --bin rustbgpd --bin rbgp", "--bin rustbgpd --bin rbgp"),
             ("--bin rustbgpd --bin rbgp", "--bin rbgp"),
@@ -642,10 +652,14 @@ class ScaleSplitContractTests(unittest.TestCase):
             ('RUSTDOCFLAGS: "-D warnings"', 'RUSTDOCFLAGS: ""'),
             ("if: ${{ always() }}", "if: ${{ success() }}"),
             (
+                "needs: [core, bench_smoke, core_tests, scale_receipts]",
                 "needs: [core, core_tests, scale_receipts]",
-                "needs: [core]",
             ),
             ("CORE_RESULT: ${{ needs.core.result }}", "CORE_RESULT: success"),
+            (
+                "BENCH_SMOKE_RESULT: ${{ needs.bench_smoke.result }}",
+                "BENCH_SMOKE_RESULT: success",
+            ),
             (
                 "CORE_TESTS_RESULT: ${{ needs.core_tests.result }}",
                 "CORE_TESTS_RESULT: success",
@@ -655,8 +669,8 @@ class ScaleSplitContractTests(unittest.TestCase):
                 "SCALE_RECEIPTS_RESULT: success",
             ),
             (
-                '[[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != '
-                '"success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
+                '[[ "$CORE_RESULT" != "success" || "$BENCH_SMOKE_RESULT" != "success" || '
+                '"$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
                 "[[ false ]]",
             ),
         )
@@ -670,14 +684,14 @@ class ScaleSplitContractTests(unittest.TestCase):
 
         def run(values):
             env = os.environ.copy()
-            for name in ("CORE", "CORE_TESTS", "SCALE_RECEIPTS"):
+            for name in ("CORE", "BENCH_SMOKE", "CORE_TESTS", "SCALE_RECEIPTS"):
                 env.pop(f"{name}_RESULT", None)
             for name, value in values.items():
                 if value is not None:
                     env[f"{name}_RESULT"] = value
             return subprocess.run(["bash", "-c", shell], env=env, capture_output=True)
 
-        names = ("CORE", "CORE_TESTS", "SCALE_RECEIPTS")
+        names = ("CORE", "BENCH_SMOKE", "CORE_TESTS", "SCALE_RECEIPTS")
         good = {name: "success" for name in names}
         self.assertEqual(0, run(good).returncode)
         for name in good:
