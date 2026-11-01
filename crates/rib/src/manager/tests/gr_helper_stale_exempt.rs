@@ -539,9 +539,20 @@ fn queued_rtbh_withdrawal_dropped_at_session_end_is_resent() {
 /// desired-prefix check the flush withdraws it.
 #[test]
 fn private_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh() {
+    assert_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh(false);
+}
+
+/// The grouped receiver's twin: the RTBH replaces the ordinary row in the
+/// group's table.
+#[test]
+fn grouped_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh() {
+    assert_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh(true);
+}
+
+fn assert_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh(grouped: bool) {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
-    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, grouped, false);
     let mut rib = PeerRib::new();
     apply(&mut old_rx, &mut rib, None);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
@@ -566,17 +577,8 @@ fn private_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh() {
         "the queued RTBH's key is carried"
     );
     delete(&mut manager, prefix);
-    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, false, false);
-    for _ in 0..4 {
-        manager.resync_dirty_peers_bounded();
-        apply(&mut new_rx, &mut rib, Some(key));
-    }
-    assert!(manager.selection_deferred(FAMILY), "still inside the hold");
-    assert_eq!(
-        rib.get(&key),
-        Some(&true),
-        "the helper keeps its stale ordinary row until release"
-    );
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, grouped, false);
+    assert_stale_ordinary_row_kept_then_replaced(&mut manager, &mut new_rx, &mut rib, key);
 }
 
 /// The transport closes the channel before the RIB learns the session
@@ -2643,4 +2645,434 @@ fn rs_client_fallback_rtbh_deleted_while_away_leaves_the_helper_in_the_hold() {
              peer {peer_rib:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Guards against narrowing the stale-RTBH flush.
+//
+// While End-of-RIB toward a flapped GR helper is held, the flush withdraws
+// a carried, deleted RTBH key only when its prefix has no other route. The
+// RIB cannot tell which row the helper keeps at the key: queued updates die
+// with the session, and the shared table of an update group, a route-server
+// client's fallback slot or an earlier session's carry need not name what
+// reached the wire. Each sequence below ends with the helper legitimately
+// holding a stale ordinary row at a carried RTBH key while the prefix's
+// route waits in the hold. The flush must leave that row, and the route
+// must replace it once the hold releases. A deleted RTBH there stays until
+// release or End-of-RIB, as documented.
+// ---------------------------------------------------------------------
+
+/// Inside the hold the helper keeps its stale ordinary row at `key` through
+/// every flush; after release the prefix's route replaces it.
+fn assert_stale_ordinary_row_kept_then_replaced(
+    manager: &mut RibManager,
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    rib: &mut PeerRib,
+    key: (Prefix, u32),
+) {
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+        apply(rx, rib, Some(key));
+    }
+    assert!(manager.selection_deferred(FAMILY), "still inside the hold");
+    assert_eq!(
+        rib.get(&key),
+        Some(&true),
+        "the helper keeps its stale ordinary row inside the hold"
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: u64::from(WAITER.octets()[3]),
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    for _ in 0..4 {
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.resync_dirty_peers_bounded();
+        apply(rx, rib, Some(key));
+    }
+    assert!(!manager.selection_deferred(FAMILY));
+    assert_eq!(
+        rib.get(&key),
+        Some(&false),
+        "the prefix's route replaces the stale row after release"
+    );
+}
+
+/// A manager whose selection hold waits on [`WAITER`] and whose replay grace
+/// window holds End-of-RIB toward [`OBSERVER`] for five minutes.
+fn hold_and_grace_manager() -> RibManager {
+    let (_tx, rx) = mpsc::channel(16);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(600),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![FAMILY],
+            }],
+        })
+        .with_eor_grace(crate::EorGraceConfig {
+            peers: vec![crate::EorGracePeerConfig {
+                peer: peer_v4(OBSERVER).into(),
+                deadline,
+                families: vec![FAMILY],
+            }],
+            replay_owners: vec![],
+        })
+}
+
+/// The ordinary row reaches the helper; its source then withdraws it and an
+/// RTBH lands at the now-empty key, both still queued when the session
+/// ends. No table names the ordinary row any more, but the helper keeps it.
+fn assert_withdrawn_ordinary_row_stays_under_a_dropped_rtbh(grouped: bool, aggregate: bool) {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, grouped, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let prefix = if aggregate {
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)
+    } else {
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32)
+    };
+    let key = (Prefix::V4(prefix), 0);
+    announce(&mut manager, [prefix]);
+    apply(&mut old_rx, &mut rib, None);
+    assert!(rib.contains_key(&key), "the ordinary row reaches the peer");
+    withdraw_received(&mut manager, prefix);
+    inject_rtbh(&mut manager, prefix);
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    announce(&mut manager, [prefix]);
+    delete(&mut manager, prefix);
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, grouped, false);
+    assert_stale_ordinary_row_kept_then_replaced(&mut manager, &mut new_rx, &mut rib, key);
+}
+
+#[test]
+fn private_helper_keeps_an_ordinary_row_withdrawn_under_a_dropped_rtbh() {
+    for aggregate in [false, true] {
+        assert_withdrawn_ordinary_row_stays_under_a_dropped_rtbh(false, aggregate);
+    }
+}
+
+#[test]
+fn grouped_helper_keeps_an_ordinary_row_withdrawn_under_a_dropped_rtbh() {
+    for aggregate in [false, true] {
+        assert_withdrawn_ordinary_row_stays_under_a_dropped_rtbh(true, aggregate);
+    }
+}
+
+/// An Add-Path session S1 carries `(P, id)`; S2, without Add-Path,
+/// withdraws it as `(P, 0)` under replay grace and is then sent an ordinary
+/// `(P, 0)`. S2 flaps inside the hold: S3 must keep that ordinary row.
+#[test]
+fn consecutive_flaps_keep_the_ordinary_row_at_a_normalized_add_path_key() {
+    let mut manager = hold_and_grace_manager();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_tx1, mut rx1, _) = register_peer(&mut manager, OBSERVER, 82, false, false, true);
+    let mut s1 = PeerRib::new();
+    apply(&mut rx1, &mut s1, None);
+    let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    inject_rtbh(&mut manager, host);
+    apply(&mut rx1, &mut s1, None);
+    let s1_key = *s1.keys().find(|key| key.0 == Prefix::V4(host)).unwrap();
+    assert_ne!(s1_key.1, 0, "Add-Path key");
+    clean_end(&mut manager, 82);
+    drop(rx1);
+    delete(&mut manager, host);
+    let (_tx2, mut rx2, _) = register_peer(&mut manager, OBSERVER, 182, false, false, false);
+    let mut wire = PeerRib::new();
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+        apply(&mut rx2, &mut wire, None);
+    }
+    let key0 = (Prefix::V4(host), 0);
+    announce(&mut manager, [host]);
+    apply(&mut rx2, &mut wire, None);
+    assert!(
+        wire.contains_key(&key0),
+        "the ordinary row reaches the helper"
+    );
+    clean_end(&mut manager, 182);
+    drop(rx2);
+    for stale in wire.values_mut() {
+        *stale = true;
+    }
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    let (_tx3, mut rx3, _) = register_peer(&mut manager, OBSERVER, 283, false, false, false);
+    assert_stale_ordinary_row_kept_then_replaced(&mut manager, &mut rx3, &mut wire, key0);
+}
+
+fn inject_local(manager: &mut RibManager, prefix: Ipv4Prefix, path_id: u32, lp: u32, tagged: bool) {
+    let mut route = make_route_with_lp(prefix, SOURCE, lp);
+    set_peer(&mut route, crate::PeerId::LOCAL);
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.path_id = path_id;
+    if tagged {
+        AttrSet::edit(&mut route.attributes, |attributes| {
+            attributes.push(PathAttribute::Communities(vec![
+                rustbgpd_wire::COMMUNITY_BLACKHOLE,
+            ]));
+        });
+    }
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route, reply });
+    result.try_recv().unwrap().unwrap();
+}
+
+fn delete_local(manager: &mut RibManager, prefix: Ipv4Prefix, path_id: u32) {
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix: Prefix::V4(prefix),
+        path_id,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    assert!(result.try_recv().unwrap().unwrap().removed);
+}
+
+/// An rs-control client's slot moves from an ordinary local fallback to a
+/// BLACKHOLE local one below an unchanged received winner suppressed toward
+/// it, and that replacement is still queued when the session ends. Neither
+/// slot is the shared table's; the helper keeps the ordinary fallback.
+fn assert_rs_fallback_stays_under_a_dropped_rtbh(grouped: bool) {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register_rs_client(&mut manager, 82, grouped);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let aggregate = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let key = (Prefix::V4(aggregate), 0);
+    let mut received = make_route_with_lp(aggregate, SOURCE, 100);
+    AttrSet::edit(&mut received.attributes, |attributes| {
+        attributes.push(PathAttribute::Communities(vec![65004]));
+    });
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: u64::from(SOURCE.octets()[3]),
+        announced: vec![received],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    inject_local(&mut manager, aggregate, 23, 60, false);
+    apply(&mut old_rx, &mut rib, None);
+    assert!(
+        rib.contains_key(&key),
+        "grouped={grouped}: the client holds its ordinary fallback"
+    );
+    inject_local(&mut manager, aggregate, 17, 80, true);
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    delete_local(&mut manager, aggregate, 17);
+    let (_new_tx, mut new_rx, _) = register_rs_client(&mut manager, 182, grouped);
+    assert_stale_ordinary_row_kept_then_replaced(&mut manager, &mut new_rx, &mut rib, key);
+}
+
+#[test]
+fn private_rs_client_keeps_its_ordinary_fallback_under_a_dropped_rtbh() {
+    assert_rs_fallback_stays_under_a_dropped_rtbh(false);
+}
+
+#[test]
+fn grouped_rs_client_keeps_its_ordinary_fallback_under_a_dropped_rtbh() {
+    assert_rs_fallback_stays_under_a_dropped_rtbh(true);
+}
+
+/// S1 delivers an ordinary row at a key S0's carry still holds, then
+/// queues its withdrawal behind a writer that fills, so no flush can retire
+/// the key before S1 ends, cleanly or by `PeerDown`. The flap drops the
+/// queue: the helper keeps S1's ordinary row. S1 itself sent no exempt row.
+fn assert_ordinary_row_behind_a_full_writer_stays(gr_end: bool) {
+    let mut manager = hold_and_grace_manager();
+    let observer = peer_v4(OBSERVER);
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_tx0, mut rx0, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    apply(&mut rx0, &mut rib, None);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let key = (Prefix::V4(prefix), 0);
+    inject_rtbh(&mut manager, prefix);
+    announce(&mut manager, [prefix]);
+    apply(&mut rx0, &mut rib, None);
+    clean_end(&mut manager, 82);
+    drop(rx0);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, prefix);
+    let (tx1, mut rx1, _) = register(&mut manager, 182, false, false);
+    apply(&mut rx1, &mut rib, None);
+    assert_eq!(rib.get(&key), Some(&false), "S1 sends the ordinary row");
+    // All but one writer slot taken: the withdrawal is queued, and the
+    // flush's own withdrawal then finds the writer full.
+    let mut occupied = occupy(&tx1);
+    occupied.pop();
+    withdraw_received(&mut manager, prefix);
+    if gr_end {
+        clean_end(&mut manager, 182);
+    } else {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: observer,
+            session_id: 182,
+        });
+    }
+    drop(occupied);
+    drop(rx1);
+    // RFC 4724 consecutive restarts: S0's rows S1 did not refresh are gone.
+    rib.retain(|_, stale| !*stale);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    announce(&mut manager, [prefix]);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    let (_tx2, mut rx2, _) = register(&mut manager, 283, false, false);
+    assert_stale_ordinary_row_kept_then_replaced(&mut manager, &mut rx2, &mut rib, key);
+}
+
+#[test]
+fn ordinary_row_whose_withdrawal_a_full_writer_held_stays_after_a_clean_end() {
+    assert_ordinary_row_behind_a_full_writer_stays(true);
+}
+
+#[test]
+fn ordinary_row_whose_withdrawal_a_full_writer_held_stays_after_peer_down() {
+    assert_ordinary_row_behind_a_full_writer_stays(false);
+}
+
+/// A grouped receiver moves to another update group in one authoritative
+/// export-policy batch, whose shared delta withdraws its ordinary row; an
+/// RTBH then lands at the empty key, and the flap drops both.
+#[test]
+fn grouped_helper_keeps_its_ordinary_row_across_a_batched_policy_move() {
+    let mut manager = manager_with_dormant_waiter();
+    let observer = peer_v4(OBSERVER);
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_tx0, mut rx0, _) = register(&mut manager, 82, true, false);
+    let first = manager.grouped_member_of(observer);
+    let mut rib = PeerRib::new();
+    apply(&mut rx0, &mut rib, None);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let key = (Prefix::V4(prefix), 0);
+    announce(&mut manager, [prefix]);
+    apply(&mut rx0, &mut rib, None);
+    assert!(rib.contains_key(&key));
+    // The new policy denies received routes; local ones pass.
+    let mut deny_external = deny_prefixes_chain(&[Prefix::V4(prefix)]);
+    deny_external.policies[0].policy.entries[0].match_route_type =
+        Some(rustbgpd_policy::RouteType::External);
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: vec![crate::update::PeerExportPolicyReplacement {
+            peer: observer,
+            export_policy: Some(deny_external),
+        }],
+        reply,
+    });
+    response.try_recv().unwrap().unwrap();
+    let second = manager.grouped_member_of(observer);
+    assert!(
+        second.is_some() && second != first,
+        "moved to another group"
+    );
+    inject_rtbh(&mut manager, prefix);
+    clean_end(&mut manager, 82);
+    drop(rx0);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    delete(&mut manager, prefix);
+    // The next session's export policy admits the route again; the hold
+    // defers it.
+    let (_tx1, mut rx1, _) = register(&mut manager, 182, true, false);
+    assert_stale_ordinary_row_kept_then_replaced(&mut manager, &mut rx1, &mut rib, key);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SessionEnd {
+    PeerDown,
+    Collision,
+}
+
+/// S0's RTBH key is carried; S1 re-sends the key as an ordinary row in its
+/// initial table, then ends by `PeerDown` or is replaced by S2 in the
+/// collision path, so no GR teardown reconciles S0's carry with S1's wire.
+/// The helper holds S1's ordinary row, and S2 must keep it.
+fn assert_later_sessions_ordinary_row_stays(grouped: bool, end: SessionEnd) {
+    let mut manager = hold_and_grace_manager();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_tx0, mut rx0, _) = register(&mut manager, 82, grouped, false);
+    let mut rib = PeerRib::new();
+    apply(&mut rx0, &mut rib, None);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let key = (Prefix::V4(prefix), 0);
+    inject_rtbh(&mut manager, prefix);
+    announce(&mut manager, [prefix]);
+    apply(&mut rx0, &mut rib, None);
+    clean_end(&mut manager, 82);
+    drop(rx0);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, prefix);
+    let (_tx1, mut rx1, _) = register(&mut manager, 182, grouped, false);
+    apply(&mut rx1, &mut rib, None);
+    assert_eq!(rib.get(&key), Some(&false), "S1 sends the ordinary row");
+    if matches!(end, SessionEnd::PeerDown) {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: peer_v4(OBSERVER),
+            session_id: 182,
+        });
+    }
+    drop(rx1);
+    rib.retain(|_, stale| !*stale);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    let (_tx2, mut rx2, _) = register(&mut manager, 283, grouped, false);
+    assert_stale_ordinary_row_kept_then_replaced(&mut manager, &mut rx2, &mut rib, key);
+}
+
+#[test]
+fn private_helper_keeps_a_later_sessions_ordinary_row_after_peer_down() {
+    assert_later_sessions_ordinary_row_stays(false, SessionEnd::PeerDown);
+}
+
+#[test]
+fn private_helper_keeps_a_later_sessions_ordinary_row_after_a_collision() {
+    assert_later_sessions_ordinary_row_stays(false, SessionEnd::Collision);
+}
+
+#[test]
+fn grouped_helper_keeps_a_later_sessions_ordinary_row_after_peer_down() {
+    assert_later_sessions_ordinary_row_stays(true, SessionEnd::PeerDown);
+}
+
+#[test]
+fn grouped_helper_keeps_a_later_sessions_ordinary_row_after_a_collision() {
+    assert_later_sessions_ordinary_row_stays(true, SessionEnd::Collision);
 }
