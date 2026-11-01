@@ -1338,7 +1338,9 @@ impl RibManager {
             }
         };
         let mut page = RoutePage { version, ..page };
-        if !matches!(scope, RouteQueryScope::Advertised { .. }) {
+        if let RouteQueryScope::Advertised { peer } = scope {
+            self.rewrite_grouped_advertised_rows(peer, &mut page.routes);
+        } else {
             self.tag_injected_rows(&mut page);
         }
         if reply.send(Ok(page)).is_err() {

@@ -478,6 +478,9 @@ impl RibManager {
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
         let initial = self.initial_group_admitted(peer);
+        // RFC 7947: the member's own wire slot, past control-community
+        // suppression (and onto a per-client-best fallback).
+        let rs_control = self.rs_control_context(peer);
         Some(
             group
                 .table
@@ -488,7 +491,12 @@ impl RibManager {
                     // slot, so the member-local overlays key identically for
                     // the staged entry and its lane replacement.
                     let route = group
-                        .adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)?
+                        .adv_entry_post_backstop_for(
+                            peer,
+                            &staged.prefix,
+                            staged.path_id,
+                            rs_control,
+                        )?
                         .route;
                     (initial.is_none_or(|admitted| {
                         admitted.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
@@ -520,6 +528,37 @@ impl RibManager {
         }))
     }
 
+    /// The RFC 7947 per-target wire form (prepend, control-community scrub)
+    /// of a grouped rs-control member's listed rows, as its own Adj-RIB-Out
+    /// would hold them. The listing iterators borrow the shared rows; a
+    /// page rewrites only the rows it returns. A no-op for other members.
+    pub(in crate::manager) fn rewrite_grouped_advertised_rows(
+        &self,
+        peer: PeerId,
+        routes: &mut [Route],
+    ) {
+        use crate::manager::distribution::rs_control::rs_control_route_rewrite;
+        let Some(rs_control) = self.rs_control_context(peer) else {
+            return;
+        };
+        let Some(group) = self
+            .grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))
+        else {
+            return;
+        };
+        for route in routes {
+            self.replacement_checkpoint(false);
+            let Some(entry) =
+                group.adv_entry_for(peer, &route.prefix, route.path_id, Some(rs_control))
+            else {
+                continue;
+            };
+            let (_, large) = group.source_control_for_route(entry.route, entry.source_attrs);
+            rs_control_route_rewrite(route, large, Some(rs_control));
+        }
+    }
+
     /// Ordered sibling used by resumable route listings. The group table's
     /// persistent prefix index resumes at the cursor; member-local split
     /// horizon and exact-export rejection remain streaming filters. A page
@@ -534,13 +573,21 @@ impl RibManager {
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
         let initial = self.initial_group_admitted(peer);
+        // RFC 7947: the member's own wire slot, past control-community
+        // suppression (and onto a per-client-best fallback).
+        let rs_control = self.rs_control_context(peer);
         Some(
             group
                 .table
                 .iter_ordered_from(after)
                 .filter_map(move |staged| {
                     let route = group
-                        .adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)?
+                        .adv_entry_post_backstop_for(
+                            peer,
+                            &staged.prefix,
+                            staged.path_id,
+                            rs_control,
+                        )?
                         .route;
                     // A lane substitution keeps the staged entry's prefix
                     // position, so the persistent prefix-index ordering is
@@ -614,7 +661,12 @@ impl RibManager {
                     // so subtracting its rejection too would count the
                     // one missing slot twice.
                     ExactExportKey::Unicast(prefix, path_id) => group
-                        .adv_entry_post_backstop(peer, prefix, *path_id)
+                        .adv_entry_post_backstop_for(
+                            peer,
+                            prefix,
+                            *path_id,
+                            self.rs_control_context(peer),
+                        )
                         .is_some(),
                     _ => false,
                 })
@@ -650,7 +702,12 @@ impl RibManager {
             // Same double-subtraction rule as `grouped_advertised_count`.
             if let ExactExportKey::Unicast(prefix, path_id) = key
                 && group
-                    .adv_entry_post_backstop(peer, prefix, *path_id)
+                    .adv_entry_post_backstop_for(
+                        peer,
+                        prefix,
+                        *path_id,
+                        self.rs_control_context(peer),
+                    )
                     .is_some()
             {
                 let slot = &mut lens[usize::from(matches!(prefix, Prefix::V6(_)))];
@@ -766,7 +823,12 @@ impl RibManager {
                     // rule, per family).
                     ExactExportKey::Unicast(prefix, path_id)
                         if group
-                            .adv_entry_post_backstop(peer, prefix, *path_id)
+                            .adv_entry_post_backstop_for(
+                                peer,
+                                prefix,
+                                *path_id,
+                                self.rs_control_context(peer),
+                            )
                             .is_some() =>
                     {
                         Some(crate::manager::helpers::prefix_family(prefix))

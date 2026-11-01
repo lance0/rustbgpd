@@ -1113,3 +1113,267 @@ async fn suppressed_otc_winner_is_not_reported_for_the_suppressed_client() {
     }
     assert_eq!(reports[0], reports[1]);
 }
+
+/// `SetPeerRsControl` + `PeerUp` for a route-server client, per-client-best
+/// when `per_client_best`.
+async fn rs_client_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+    peer_asn: u32,
+    per_client_best: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    tx.send(RibUpdate::SetPeerRsControl {
+        peer,
+        session_id: 0,
+        rs_control_asn: Some(RS_AS),
+    })
+    .await
+    .unwrap();
+    let (out_tx, out_rx) = mpsc::channel(32);
+    tx.send(RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best,
+        interpret_rfc1997: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    out_rx
+}
+
+/// What a client's operator surfaces report: the advertised listing
+/// (prefix and source; unfiltered and through a filtered scan), the
+/// advertised count, the IPv4 unicast Adj-RIB-Out gauge and the BMP stat
+/// 17 family counts.
+#[derive(Debug, PartialEq)]
+struct AdvertisedSurfaces {
+    listing: BTreeSet<(String, PeerId, String)>,
+    filtered: BTreeSet<(String, PeerId, String)>,
+    count: usize,
+    gauge: f64,
+    bmp: Vec<((Afi, Safi), u64)>,
+}
+
+/// The `(prefix, source)` keys of a listing.
+fn keys(listing: &BTreeSet<(String, PeerId, String)>) -> BTreeSet<(String, PeerId)> {
+    listing
+        .iter()
+        .map(|(prefix, source, _)| (prefix.clone(), *source))
+        .collect()
+}
+
+async fn advertised_surfaces(
+    tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    peer: PeerId,
+) -> AdvertisedSurfaces {
+    let listing = collect_advertised_routes(tx, peer)
+        .await
+        .into_iter()
+        .map(|route| {
+            (
+                route.prefix.to_string(),
+                route.peer,
+                format!("{:?}", route.attributes.to_vec()),
+            )
+        })
+        .collect();
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryRoutesPage {
+        scope: RouteQueryScope::Advertised { peer },
+        filter: Some(Box::new(|_: &Route| true)),
+        after: None,
+        expected_version: None,
+        page_size: 64,
+        reply,
+    })
+    .await
+    .unwrap();
+    let filtered = response
+        .await
+        .unwrap()
+        .unwrap()
+        .routes
+        .into_iter()
+        .map(|route| {
+            (
+                route.prefix.to_string(),
+                route.peer,
+                format!("{:?}", route.attributes.to_vec()),
+            )
+        })
+        .collect();
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryAdvertisedCount { peer, reply })
+        .await
+        .unwrap();
+    let count = response.await.unwrap();
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryBmpPeerStats { reply })
+        .await
+        .unwrap();
+    let mut bmp = response
+        .await
+        .unwrap()
+        .adj_rib_out_post
+        .remove(&peer)
+        .unwrap_or_default();
+    bmp.retain(|(_, count)| *count != 0);
+    let gauge = metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_rib_adj_out_prefixes")
+        .and_then(|family| {
+            family.get_metric().iter().find(|metric| {
+                let labels = metric.get_label();
+                labels
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer.to_string())
+                    && labels
+                        .iter()
+                        .any(|label| label.name() == "family" && label.value() == "ipv4_unicast")
+            })
+        })
+        .map_or(0.0, |metric| metric.get_gauge().get_value());
+    AdvertisedSurfaces {
+        listing,
+        filtered,
+        count,
+        gauge,
+        bmp,
+    }
+}
+
+/// A route-server client's advertised listing, count, Adj-RIB-Out gauge
+/// and BMP stat 17 report what it was actually sent: not a best path that
+/// RFC 7947 control communities suppress toward it, and, with
+/// `per_client_best`, the fallback it gets instead. Grouped and ungrouped
+/// clients report the same, in a plain and a per-client-best group.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture per group shape, asserted surface by surface"
+)]
+async fn grouped_advertised_surfaces_follow_rs_control() {
+    let tagged_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 124, 0), 24);
+    let fallback_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 125, 0), 24);
+    let plain_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 126, 0), 24);
+    let prepend_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 127, 0), 24);
+    let first = Ipv4Addr::new(198, 51, 100, 45);
+    let second = Ipv4Addr::new(198, 51, 100, 46);
+    for per_client_best in [false, true] {
+        let mut reports = Vec::new();
+        for force_ungrouped in [false, true] {
+            let metrics = BgpMetrics::new();
+            let (tx, rx) = mpsc::channel(64);
+            let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+            manager.test_force_ungrouped = force_ungrouped;
+            let handle = tokio::spawn(manager.run());
+            let client_a = PeerId::from_addr("192.0.2.217".parse().unwrap());
+            let client_b = PeerId::from_addr("192.0.2.218".parse().unwrap());
+            let mut a_rx = rs_client_up(&tx, client_a, 65001, per_client_best).await;
+            drain_eor(&mut a_rx).await;
+            let mut b_rx = rs_client_up(&tx, client_b, 65002, per_client_best).await;
+            drain_eor(&mut b_rx).await;
+            assert_eq!(
+                query_update_group_label(&tx, client_a)
+                    .await
+                    .starts_with("group:"),
+                !force_ungrouped
+            );
+            announce_unicast(
+                &tx,
+                peer_v4(first),
+                vec![
+                    tagged(
+                        make_route_with_as_path(tagged_prefix, first, vec![64605]),
+                        vec![],
+                        vec![large(0, 65001)],
+                    ),
+                    tagged(
+                        make_route_with_as_path(fallback_prefix, first, vec![64605]),
+                        vec![std_c(0, 65001)],
+                        vec![],
+                    ),
+                    make_route_with_as_path(plain_prefix, first, vec![64605]),
+                    // Two prepends toward B; scrubbed toward A.
+                    tagged(
+                        make_route_with_as_path(prepend_prefix, first, vec![64605]),
+                        vec![],
+                        vec![large(102, 65002)],
+                    ),
+                ],
+            )
+            .await;
+            announce_unicast(
+                &tx,
+                peer_v4(second),
+                vec![make_route_with_as_path(
+                    fallback_prefix,
+                    second,
+                    vec![64606, 64606],
+                )],
+            )
+            .await;
+            let _ = query_best_routes(&tx).await;
+            // A third client of AS65001 joins after the routes.
+            let client_c = PeerId::from_addr("192.0.2.219".parse().unwrap());
+            let _c_rx = rs_client_up(&tx, client_c, 65001, per_client_best).await;
+            let a = advertised_surfaces(&tx, &metrics, client_a).await;
+            let b = advertised_surfaces(&tx, &metrics, client_b).await;
+            let c = advertised_surfaces(&tx, &metrics, client_c).await;
+            let mut expected: BTreeSet<_> = BTreeSet::from([
+                (Prefix::V4(plain_prefix).to_string(), peer_v4(first)),
+                (Prefix::V4(prepend_prefix).to_string(), peer_v4(first)),
+            ]);
+            if per_client_best {
+                expected.insert((Prefix::V4(fallback_prefix).to_string(), peer_v4(second)));
+            }
+            assert_eq!(
+                keys(&a.listing),
+                expected,
+                "per_client_best={per_client_best} force_ungrouped={force_ungrouped}"
+            );
+            assert_eq!(a.filtered, a.listing, "{a:?}");
+            assert_eq!(a.count, expected.len(), "{a:?}");
+            assert_eq!(
+                a.gauge,
+                f64::from(u32::try_from(expected.len()).unwrap()),
+                "{a:?}"
+            );
+            assert_eq!(
+                a.bmp,
+                vec![((Afi::Ipv4, Safi::Unicast), expected.len() as u64)],
+                "{a:?}"
+            );
+            assert_eq!(b.count, 4, "{b:?}");
+            assert_eq!(
+                c.listing, a.listing,
+                "the late joiner reports what A reports"
+            );
+            assert_eq!(c.filtered, a.filtered, "{c:?}");
+            assert_eq!(c.count, a.count, "{c:?}");
+            assert_eq!(c.bmp, a.bmp, "{c:?}");
+            reports.push((a, b, c.listing, c.count, c.bmp));
+            drop(tx);
+            handle.await.unwrap();
+        }
+        assert_eq!(
+            reports[0], reports[1],
+            "per_client_best={per_client_best}: grouped surfaces match the per-peer path"
+        );
+    }
+}

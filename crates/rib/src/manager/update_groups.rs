@@ -655,6 +655,18 @@ pub(in crate::manager) struct GroupRibOut {
     /// the first eligible entry ([`Self::adv_entry_for`]), as the per-peer
     /// walk does. Committed with the lane; always empty for plain groups.
     rs_fallback: ShardedMap<Prefix, Arc<[RunnerUp]>>,
+    /// RFC 7947 control contexts `(rs_asn, member_asn)` of the members that
+    /// enforce control communities.
+    rs_members: AddrMap<PeerId, (u32, u32)>,
+    /// Staged keys where an rs-control member's wire slot
+    /// ([`Self::adv_entry_post_backstop_for`]) may differ from `adv(m)`: a
+    /// winner or lane entry with a suppression-form community, or a
+    /// fallback list. Maintained only while `rs_members` is non-empty.
+    rs_tagged: crate::fast_hash::FastSet<(Prefix, u32)>,
+    /// Per rs-control member, the per-family `[v4, v6]` difference between
+    /// its wire slots and `adv(m)` over `rs_tagged`: the correction the O(1)
+    /// count synthesis adds for that member.
+    rs_count_adjust: AddrMap<PeerId, [i64; 2]>,
     /// ADR-0126 Decision 4 count residue: per-winner-source lane-entry
     /// counts `[v4, v6]` — how many lane entries currently substitute
     /// for member m (m receives the runner-up exactly where it sourced
@@ -783,6 +795,9 @@ impl GroupRibOut {
         release_hash_map(&mut self.vpn_member_counts, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.runner_up, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.rs_fallback, checkpoint);
+        release_hash_map(&mut self.rs_members, checkpoint);
+        crate::manager::retire_hash_set(&mut self.rs_tagged, checkpoint);
+        release_hash_map(&mut self.rs_count_adjust, checkpoint);
         release_hash_map(&mut self.lane_counts, checkpoint);
         for _ in self.tombstones.drain() {
             checkpoint();
@@ -853,6 +868,9 @@ impl GroupRibOut {
             vpn_member_counts: AddrMap::default(),
             runner_up: ShardedMap::default(),
             rs_fallback: ShardedMap::default(),
+            rs_members: AddrMap::default(),
+            rs_tagged: crate::fast_hash::FastSet::default(),
+            rs_count_adjust: AddrMap::default(),
             lane_counts: AddrMap::default(),
             export_chain,
             is_ebgp,
@@ -1261,6 +1279,155 @@ impl GroupRibOut {
         self.table.next_hop_override(&key.0, key.1).cloned()
     }
 
+    /// Whether an rs-control member's wire slot at `key` may differ from
+    /// `adv(m)`: the staged winner or the lane entry carries a
+    /// suppression-form community, or the prefix keeps a fallback list.
+    fn rs_relevant(&self, key: (Prefix, u32)) -> bool {
+        if self.table.get(&key.0, key.1).is_none() {
+            return false;
+        }
+        let (communities, large) = self.source_control(key);
+        payload::may_suppress(communities, large)
+            || (key.1 == 0
+                && (self.rs_fallback.contains_key(&key.0)
+                    || self.runner_up.get(&key.0).is_some_and(|entry| {
+                        let (communities, large) =
+                            source_control_input(entry.source_attrs.as_ref());
+                        payload::may_suppress(communities, large)
+                    })))
+    }
+
+    /// `member`'s wire slot at `key` minus its `adv(m)` slot, both after
+    /// the RFC 9234 backstop: `-1`, `0` or `1`.
+    fn rs_slot_adjust(&self, member: PeerId, rs_control: (u32, u32), key: (Prefix, u32)) -> i64 {
+        i64::from(
+            self.adv_entry_post_backstop_for(member, &key.0, key.1, Some(rs_control))
+                .is_some(),
+        ) - i64::from(
+            self.adv_entry_post_backstop(member, &key.0, key.1)
+                .is_some(),
+        )
+    }
+
+    /// Add (`sign` = 1) or remove (`-1`) the rs-control count correction of
+    /// `keys` that are in [`Self::rs_tagged`], for every rs-control member.
+    fn rs_adjust_keys(&mut self, keys: &[(Prefix, u32)], sign: i64, checkpoint: &mut impl FnMut()) {
+        for &key in keys {
+            checkpoint();
+            if !self.rs_tagged.contains(&key) {
+                continue;
+            }
+            let slot = Self::count_slot(&key.0);
+            let members: Vec<_> = self
+                .rs_members
+                .iter()
+                .map(|(member, rs)| (*member, *rs))
+                .collect();
+            for (member, rs) in members {
+                checkpoint();
+                let adjust = self.rs_slot_adjust(member, rs, key);
+                if adjust != 0 {
+                    self.rs_count_adjust.entry(member).or_default()[slot] += sign * adjust;
+                }
+            }
+        }
+    }
+
+    /// Remove the touched keys' rs-control count corrections before a
+    /// staging commit rewrites them. A no-op without rs-control members.
+    pub(super) fn rs_adjust_before_commit(
+        &mut self,
+        keys: &[(Prefix, u32)],
+        checkpoint: &mut impl FnMut(),
+    ) {
+        if !self.rs_members.is_empty() {
+            self.rs_adjust_keys(keys, -1, checkpoint);
+        }
+    }
+
+    /// Re-index the touched keys after a staging commit and add back their
+    /// rs-control count corrections. A no-op without rs-control members.
+    pub(super) fn rs_adjust_after_commit(
+        &mut self,
+        keys: &[(Prefix, u32)],
+        checkpoint: &mut impl FnMut(),
+    ) {
+        if self.rs_members.is_empty() {
+            return;
+        }
+        for &key in keys {
+            checkpoint();
+            if self.rs_relevant(key) {
+                self.rs_tagged.insert(key);
+            } else {
+                self.rs_tagged.remove(&key);
+            }
+        }
+        self.rs_adjust_keys(keys, 1, checkpoint);
+    }
+
+    /// Register an rs-control member and seed its count correction. The
+    /// first one indexes the table (O(table), riding the join's replay);
+    /// later ones walk only [`Self::rs_tagged`].
+    pub(in crate::manager) fn add_rs_member(
+        &mut self,
+        member: PeerId,
+        rs_control: (u32, u32),
+        checkpoint: &mut impl FnMut(),
+    ) {
+        if self.rs_members.is_empty() {
+            self.rs_tagged.clear();
+            let keys: Vec<(Prefix, u32)> = self
+                .table
+                .iter()
+                .map(|route| {
+                    checkpoint();
+                    (route.prefix, route.path_id)
+                })
+                .collect();
+            for key in keys {
+                checkpoint();
+                if self.rs_relevant(key) {
+                    self.rs_tagged.insert(key);
+                }
+            }
+        }
+        self.rs_members.insert(member, rs_control);
+        let mut adjust = [0_i64; 2];
+        for &key in &self.rs_tagged {
+            checkpoint();
+            adjust[Self::count_slot(&key.0)] += self.rs_slot_adjust(member, rs_control, key);
+        }
+        if adjust == [0; 2] {
+            self.rs_count_adjust.remove(&member);
+        } else {
+            self.rs_count_adjust.insert(member, adjust);
+        }
+    }
+
+    /// Drop a leaving member's rs-control state; the last one stops the
+    /// index maintenance.
+    pub(in crate::manager) fn remove_rs_member(&mut self, member: PeerId) {
+        self.rs_members.remove(&member);
+        self.rs_count_adjust.remove(&member);
+        if self.rs_members.is_empty() {
+            self.rs_tagged.clear();
+        }
+    }
+
+    /// Whether any member enforces RFC 7947 control communities.
+    pub(super) fn has_rs_members(&self) -> bool {
+        !self.rs_members.is_empty()
+    }
+
+    /// The rs-control count correction for `member` per family `[v4, v6]`.
+    fn rs_adjust_for(&self, member: PeerId) -> [i64; 2] {
+        self.rs_count_adjust
+            .get(&member)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Commit a prefix's recomputed RFC 7947 fallback list
     /// ([`Self::rs_fallback`]) alongside its lane.
     fn apply_rs_fallback(&mut self, prefix: Prefix, fallback: Option<Arc<[RunnerUp]>>) {
@@ -1540,7 +1707,9 @@ impl GroupRibOut {
             .get(&member)
             .map_or(0, |counts| counts[0] + counts[1]);
         let otc = self.otc_suppressed_counts(member);
-        (self.table.len().saturating_sub(own) + lane).saturating_sub(otc[0] + otc[1])
+        let rs = self.rs_adjust_for(member);
+        let count = (self.table.len().saturating_sub(own) + lane).saturating_sub(otc[0] + otc[1]);
+        usize::try_from(i64::try_from(count).unwrap_or(i64::MAX) + rs[0] + rs[1]).unwrap_or(0)
     }
 
     /// Number of VPN routes `member` currently has advertised. Non-RTC
@@ -1647,6 +1816,7 @@ impl GroupRibOut {
         let own = self.source_counts.get(&member).copied().unwrap_or_default();
         let lane = self.lane_counts.get(&member).copied().unwrap_or_default();
         let otc = self.otc_suppressed_counts(member);
+        let rs = self.rs_adjust_for(member);
         // RTC group: the VPN slots come from the maintained per-member
         // counters (Φ-filtered), not the table synthesis.
         let rtc_vpn = self.rtc_negotiated().then(|| {
@@ -1662,8 +1832,10 @@ impl GroupRibOut {
                 let count = match (slot, rtc_vpn) {
                     (2 | 3, Some(counts)) => counts[slot - 2].max(0).unsigned_abs(),
                     (0 | 1, _) => {
-                        ((totals[slot].saturating_sub(own[slot]) + lane[slot])
-                            .saturating_sub(otc[slot])) as u64
+                        let synthesized = (totals[slot].saturating_sub(own[slot]) + lane[slot])
+                            .saturating_sub(otc[slot]);
+                        u64::try_from(i64::try_from(synthesized).unwrap_or(i64::MAX) + rs[slot])
+                            .unwrap_or(0)
                     }
                     _ => totals[slot].saturating_sub(own[slot]) as u64,
                 };
@@ -3737,6 +3909,7 @@ impl RibManager {
             return;
         };
         group.members.remove(&peer);
+        group.remove_rs_member(peer);
         group.vpn_member_counts.remove(&peer);
         group.dirty_members.remove(&peer);
         if group.dirty_members.is_empty() {

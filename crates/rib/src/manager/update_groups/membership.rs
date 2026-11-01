@@ -681,6 +681,7 @@ impl RibManager {
         // The joining member's advertised-count seed (RTC groups only):
         // the O(table) walk rides the join replay's existing cost.
         let filter = self.member_rt_filter(peer);
+        let rs_control = self.rs_control_context(peer);
         let readiness = self.replacement_readiness.clone();
         #[cfg(feature = "bench-internals")]
         if let Some(group) = self.group_ribs.get(&gid) {
@@ -697,6 +698,11 @@ impl RibManager {
             group.recompute_vpn_member_counts(peer, filter.as_ref(), &mut || {
                 super::super::replacement_readiness_checkpoint(&readiness, false);
             });
+            if let Some(rs_control) = rs_control {
+                group.add_rs_member(peer, rs_control, &mut || {
+                    super::super::replacement_readiness_checkpoint(&readiness, false);
+                });
+            }
         }
     }
 }

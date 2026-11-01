@@ -522,6 +522,25 @@ impl RibManager {
         let readiness = &self.replacement_readiness;
         let mut checkpoint = || replacement_readiness_checkpoint(readiness, false);
         let group = Self::staged_group_mut(&mut self.group_ribs, gid);
+        // Keys whose rs-control count correction this commit may move.
+        let rs_touched: Vec<(Prefix, u32)> = if group.has_rs_members() {
+            let keys: crate::fast_hash::FastSet<(Prefix, u32)> = out
+                .deltas
+                .iter()
+                .map(|delta| (delta.prefix, delta.path_id))
+                .chain(lane_updates.iter().map(|(prefix, _, _)| (*prefix, 0)))
+                .chain(
+                    out.rs_transitions
+                        .iter()
+                        .map(|transition| (transition.prefix, transition.path_id)),
+                )
+                .inspect(|_| checkpoint())
+                .collect();
+            keys.into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        group.rs_adjust_before_commit(&rs_touched, &mut checkpoint);
         for delta in &out.deltas {
             checkpoint();
             group.apply_delta(delta);
@@ -535,6 +554,7 @@ impl RibManager {
             group.apply_rs_fallback(prefix, rs_fallback);
         }
         group.commit_rs_transitions(&out.rs_transitions, &mut checkpoint);
+        group.rs_adjust_after_commit(&rs_touched, &mut checkpoint);
         group.record_otc_blocked(prefixes, &out.otc_blocked, &mut checkpoint);
         group.record_policy_filtered(prefixes, &labeled_filtered, &mut checkpoint);
         if !group.dirty_members.is_empty() {
