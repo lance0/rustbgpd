@@ -362,9 +362,19 @@ impl RibManager {
                         .any(|delta| delta.path_id == 0);
                     // A winner delta over an old or new fallback list may
                     // move an rs-control member's next-hop action on its
-                    // fallback slot: keep the action-equivalence check on.
-                    out.has_next_hop_actions |=
-                        winner_delta && (prior_fallback.is_some() || stage.rs_fallback.is_some());
+                    // fallback slot: keep the action-equivalence check on
+                    // when some fallback entry carries one.
+                    out.has_next_hop_actions |= winner_delta
+                        && prior_fallback
+                            .into_iter()
+                            .flat_map(|fallback| fallback.iter())
+                            .chain(
+                                stage
+                                    .rs_fallback
+                                    .iter()
+                                    .flat_map(|fallback| fallback.iter()),
+                            )
+                            .any(|entry| entry.nh.is_some());
                     if (prior_fallback.is_some() || stage.rs_fallback.is_some())
                         && !winner_delta
                         && (rs_view_moved

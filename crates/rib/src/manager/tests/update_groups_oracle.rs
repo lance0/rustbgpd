@@ -7557,6 +7557,77 @@ async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
     );
 }
 
+/// A winner change over a fallback list whose entries carry no next-hop
+/// action leaves the action-equivalence scan off for clean members: there is
+/// no action for it to compare. The same change with an action-bearing
+/// fallback turns it on.
+#[tokio::test]
+async fn oracle_pcb_rs_control_action_free_fallback_skips_action_scan() {
+    use crate::manager::distribution::ACTION_SUPPRESSION_SCANS;
+    let scans = || ACTION_SUPPRESSION_SCANS.with(std::cell::Cell::get);
+    let mut next_hop_on_marker = permit_all_with(RouteModifications::default());
+    let mut marked = next_hop_on_marker.policies[0].policy.entries[0].clone();
+    marked.match_community = vec![CommunityMatch::Standard {
+        value: PCB_RS_MARKER,
+    }];
+    marked.modifications.set_next_hop = Some(NextHopAction::Self_);
+    next_hop_on_marker.policies[0]
+        .policy
+        .entries
+        .insert(0, marked);
+    for (fallback_marker, expect_scans) in [(false, false), (true, true)] {
+        let mut o = Oracle::spawn(false, None);
+        o.peer_up(A, true, false, None, 64).await;
+        o.peer_up(B, true, false, None, 64).await;
+        for (member, asn) in [(D, 65004), (E, 65005)] {
+            pcb_rs_peer_up_with_policy(&mut o, member, asn, 64, Some(next_hop_on_marker.clone()))
+                .await;
+        }
+        o.routes(
+            A,
+            vec![rs_route(pfx(1, 0), A, vec![64601], vec![65004])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(
+                pfx(1, 0),
+                B,
+                vec![64602; 2],
+                if fallback_marker {
+                    vec![PCB_RS_MARKER]
+                } else {
+                    vec![]
+                },
+            )],
+            vec![],
+        )
+        .await;
+        o.drain_available();
+        let before = scans();
+        // The winner gains an unrelated community (`65010:200`).
+        o.routes(
+            A,
+            vec![rs_route(
+                pfx(1, 0),
+                A,
+                vec![64601],
+                vec![65004, 0xFDF2_00C8],
+            )],
+            vec![],
+        )
+        .await;
+        assert_eq!(
+            scans() > before,
+            expect_scans,
+            "fallback_marker={fallback_marker}: action suppression scans {}",
+            scans() - before
+        );
+        o.finish().await;
+    }
+}
+
 /// All requests are queued before the actor runs. Distinct own-source rows,
 /// a different policy group and negotiated private paths retain the same
 /// normalized announcements, next hops, withdrawals and refresh markers.
