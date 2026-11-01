@@ -6790,13 +6790,13 @@ impl RibManager {
         drop(slice_timing::TimedActor::new(self.run_actor(), recorder, suspended).await);
     }
 
+    /// The actor loop. It returns the manager once the primary channel
+    /// closes, so a test can run a segment through the real loop and keep
+    /// driving the same manager afterwards.
     #[expect(
         clippy::too_many_lines,
         reason = "event loop with timer arms and query draining"
     )]
-    /// The actor loop. It returns the manager once the primary channel
-    /// closes, so a test can run a segment through the real loop and keep
-    /// driving the same manager afterwards.
     async fn run_actor(mut self) -> Self {
         // Persistent timer: starts far in the future (disabled). Reset to
         // DIRTY_RESYNC_INTERVAL when dirty_peers becomes non-empty.

@@ -69,7 +69,9 @@ use std::task::{Context, Poll, Waker};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
-use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter, private_policy};
+use super::selection_deferral_dirty_rtbh::{
+    connect, connect_session, manager_with_dormant_waiter, private_policy,
+};
 use super::*;
 use crate::update::OutboundRouteUpdate;
 
@@ -414,14 +416,16 @@ fn timer_race_strategy() -> impl Strategy<Value = Vec<Op>> {
         )
 }
 
-/// The ops before the hold: single setup ops and whole timer races.
+/// The ops before the hold: single setup ops and whole timer races. A case
+/// keeps about as many setup ops as before races existed (mean 3.4 against
+/// 3.5) and adds about one race.
 fn pre_hold_strategy() -> impl Strategy<Value = Vec<Op>> {
     proptest::collection::vec(
         prop_oneof![
-            9 => setup_strategy().prop_map(|op| vec![op]),
-            6 => timer_race_strategy(),
+            3 => setup_strategy().prop_map(|op| vec![op]),
+            1 => timer_race_strategy(),
         ],
-        0..6,
+        0..10,
     )
     .prop_map(|parts| parts.into_iter().flatten().collect())
 }
@@ -491,37 +495,7 @@ fn connect_source(
     session_id: u64,
     restarting: bool,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
-    let peer = peer_v4(SOURCE);
-    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
-        peer,
-        session_id,
-        peer_restart_state: restarting,
-        peer_gr_helper: true,
-        peer_gr_families: vec![FAMILY],
-        peer_enhanced_refresh: true,
-        peer_llgr_families: vec![],
-        local_llgr_stale_time: 0,
-    });
-    let (outbound_tx, outbound_rx) = mpsc::channel(64);
-    manager.handle_update(RibUpdate::PeerUp {
-        peer,
-        session_id,
-        peer_asn: 65000,
-        peer_router_id: SOURCE,
-        outbound_tx,
-        export_policy: None,
-        sendable_families: vec![FAMILY],
-        is_ebgp: true,
-        route_reflector_client: false,
-        orr_vantage: None,
-        per_client_best: false,
-        interpret_rfc1997: true,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
-        negotiated_orf_recv: vec![],
-        negotiated_llgr_families: vec![],
-    });
-    outbound_rx
+    connect_session(manager, SOURCE, session_id, 64, true, restarting, false)
 }
 
 #[expect(
@@ -1158,9 +1132,17 @@ impl Harness {
         );
         let mut manager = std::mem::replace(&mut self.manager, stand_in);
         manager.rx = rx;
+        // As `run()` does, so suspension and the primary run budget behave
+        // as in production.
+        let recorder = manager.metrics.rib_actor_slice_recorder();
+        let suspended = std::sync::Arc::clone(&manager.actor_suspended);
         self.actor = Some(Actor {
             tx,
-            run: Box::pin(manager.run_actor()),
+            run: Box::pin(super::super::slice_timing::TimedActor::new(
+                manager.run_actor(),
+                recorder,
+                suspended,
+            )),
         });
     }
 

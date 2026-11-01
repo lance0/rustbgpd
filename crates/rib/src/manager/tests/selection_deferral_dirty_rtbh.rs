@@ -13,6 +13,23 @@ pub(super) fn connect(
     waiter: bool,
     private: bool,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let session_id = u64::from(address.octets()[3]);
+    connect_session(
+        manager, address, session_id, capacity, waiter, false, private,
+    )
+}
+
+/// [`connect`] on session `session_id`, with the peer's restart flag set
+/// when `restarting`. `waiter` peers list GR families.
+pub(super) fn connect_session(
+    manager: &mut RibManager,
+    address: Ipv4Addr,
+    session_id: u64,
+    capacity: usize,
+    waiter: bool,
+    restarting: bool,
+    private: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let peer = peer_v4(address);
     let export_policy = private.then(|| {
         let mut chain =
@@ -26,11 +43,10 @@ pub(super) fn connect(
         });
         rustbgpd_policy::PolicyChain::from_named(chain.policies)
     });
-    let session_id = u64::from(address.octets()[3]);
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
         peer,
         session_id,
-        peer_restart_state: false,
+        peer_restart_state: restarting,
         peer_gr_helper: true,
         peer_gr_families: if waiter { vec![FAMILY] } else { vec![] },
         peer_enhanced_refresh: true,
