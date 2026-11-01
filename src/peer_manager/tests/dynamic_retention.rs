@@ -1632,3 +1632,100 @@ async fn a_candidate_beside_a_retained_reconnect_is_refused_behind_deferred_clea
     );
     rib_task.abort();
 }
+
+/// The `(peer, range, retention)` label sets of the retained-neighbor
+/// series, each with whether its deadline is still ahead of the wall clock.
+fn retention_series(mgr: &PeerManager) -> Vec<(String, String, String, bool)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let mut series: Vec<_> = mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| family.name() == "bgp_dynamic_neighbor_retained_until_timestamp_seconds")
+        .flat_map(|family| family.get_metric().to_vec())
+        .map(|metric| {
+            let label = |name: &str| {
+                metric
+                    .get_label()
+                    .iter()
+                    .find(|pair| pair.name() == name)
+                    .map(|pair| pair.value().to_string())
+                    .unwrap()
+            };
+            (
+                label("peer"),
+                label("range"),
+                label("retention"),
+                metric.get_gauge().get_value() > now,
+            )
+        })
+        .collect();
+    series.sort();
+    series
+}
+
+/// `rbgp doctor`'s `dynamic_neighbors.retained` reads what a retained member
+/// holds, and until when, from these series: both retentions with the range,
+/// from the first check that sees the RIB retain its routes; nothing while
+/// a reconnect is live; both again when that reconnect fails before
+/// Established; the hold of ours alone once the GR timer sweeps its routes;
+/// nothing once it is deleted. Red proof: dropping any publish or clear
+/// leaves a series wrong below.
+#[tokio::test(start_paused = true)]
+async fn retained_member_series_name_its_range_reasons_and_deadlines() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let peer = retained_member(&mut mgr, &rib_tx, BOTH).await;
+    let accepted = &mgr.retained_dynamic[&key(MEMBER)].accepted;
+    let range = format!("{}/{}", accepted.addr, accepted.prefix_len);
+    let holding = |retentions: &[&str]| -> Vec<(String, String, String, bool)> {
+        retentions
+            .iter()
+            .map(|retention| {
+                (
+                    MEMBER.to_string(),
+                    range.clone(),
+                    (*retention).to_string(),
+                    true,
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        retention_series(&mgr),
+        holding(&["its_routes", "our_routes"])
+    );
+
+    // A live reconnect is a neighbor row, not a retained one.
+    let _probe = accept(&mut mgr).await;
+    assert_eq!(retention_series(&mgr), holding(&[]));
+    idle(&mut mgr, NOTHING).await;
+    assert_eq!(
+        retention_series(&mgr),
+        holding(&["its_routes", "our_routes"]),
+        "a reconnect that never reached Established leaves both"
+    );
+
+    // The GR timer sweeps its routes; it may still hold ours.
+    tokio::time::sleep(Duration::from_secs(121)).await;
+    assert_eq!(retention(&rib_tx, peer).await.stale_routes, 0);
+    settle(&mut mgr).await;
+    assert_eq!(retention_series(&mgr), holding(&["our_routes"]));
+
+    // Evicted for a new address at the limit: nothing is left.
+    mgr.dynamic_neighbor_limit = 1;
+    let _other = accept_at(&mut mgr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10))).await;
+    assert!(mgr.retained_dynamic.is_empty(), "the member gave way");
+    assert_eq!(retention_series(&mgr), holding(&[]));
+    rib_task.abort();
+
+    // A member kept only while it may hold ours waits for no check: it is
+    // listed from the moment it goes idle.
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    retained_member(&mut mgr, &rib_tx, OURS).await;
+    assert_eq!(retention_series(&mgr), holding(&["our_routes"]));
+    rib_task.abort();
+}

@@ -1947,6 +1947,7 @@ name it.
 | `bgp_dynamic_neighbor_slots_limit` | Effective process-global `dynamic_neighbor_limit` |
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; at zero, a new matching address is rejected unless a retained neighbor kept only because it may hold our routes can be evicted |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
+| `bgp_dynamic_neighbor_retained_until_timestamp_seconds{peer,range,retention}` | An idle dynamic neighbor that keeps its slot for graceful restart retention, with the accepted `range`. `retention="its_routes"` while the RIB retains its routes, valued at the RIB's next GR or LLGR deadline (or the next re-check, at most 30 seconds away, when the RIB reports no timer armed); `retention="our_routes"` while it may retain ours, valued at the latest it can. Unix seconds. A neighbor kept for both has both series. Its routes are listed from the first retention check after the session ends. A value already past means that retention has lapsed and the neighbor's next check removes it. Absent while a reconnect from the address is live, and removed when the neighbor is deleted. `rbgp doctor` reports these as `dynamic_neighbors.retained` |
 | `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait), or `rib_cleanup_pending` (a deleted neighbor's RIB cleanup was waiting for RIB mailbox room). All five series are exported at 0 from startup |
 | `bgp_bmp_identity_conflicts_total{outcome}` | Neighbors admitted at a link-local address another BMP-monitored neighbor holds: `refused` before the session starts, or `excluded` from BMP when every collector sets `on_identity_conflict = "exclude"`. Both series are exported at 0 from startup |
 | `bgp_bmp_identity_excluded_neighbors` | Neighbors whose sessions currently report nothing to BMP for an identity conflict |
@@ -2751,7 +2752,11 @@ plus our `llgr_stale_time` when both sides advertised LLGR, plus the hold time
 after the session ended. A session that ended with a Hard Reset, or with a
 NOTIFICATION when the RFC 8538 N bit was not negotiated, leaves the peer
 nothing of ours to hold. One `idle dynamic neighbor keeps its identity while graceful restart retention lasts`
-INFO line names what is held and for how long. A reconnect from the address
+INFO line names what is held and for how long, and while the neighbor stays
+idle `rbgp doctor` lists it, with its range, reason and deadlines, as
+`dynamic_neighbors.retained` (from
+`bgp_dynamic_neighbor_retained_until_timestamp_seconds`), including one kept
+only because it may hold our routes, which has no neighbor row. A reconnect from the address
 in that window becomes the same neighbor once its OPEN validates, so its
 End-of-RIB completes the restart. An ordinary failed reconnect that never
 reaches Established leaves the retention as it was. An administrative reset
@@ -3158,6 +3163,22 @@ configuration to be available. This advisory warning retains exit status 0.
 RIB holds in the RFC 9494 LLGR phase. The detail names the time until the
 LLGR sweep; long retention is a configured outcome, so
 the warning retains exit status 0. GR-phase families add no check.
+
+`dynamic_neighbors.retained` lists each idle dynamic neighbor that keeps a
+`dynamic_neighbor_limit` slot for graceful restart retention: its address,
+accepted range, reason and deadlines. The reason is `its_routes` (rustbgpd
+retains the neighbor's routes), `our_routes` (the neighbor, as our helper, may
+retain ours) or `both`. Each deadline is shown as Unix seconds and the time
+left, measured against the clock of the host running `rbgp`. Detail lists the
+first 20 neighbors; the metric lists all of them. The check is green and
+informational. It is yellow when `bgp_dynamic_neighbor_slots_headroom` is 0
+and `bgp_dynamic_neighbor_limit_rejections_total` is nonzero, that is, the
+limit is full and new dynamic peers have been refused since the daemon
+started. At the limit a neighbor kept only for `our_routes` gives way to a new
+address, but one whose routes rustbgpd retains does not. To make room, raise
+`global.dynamic_neighbor_limit`, wait for the deadlines, or remove the range.
+The check is absent when no neighbor is retained. The warning retains exit
+status 0.
 
 `peer.<scoped-address>.outbound_resync` and `rib.update_group_recovery` report
 outbound resync and update-group recovery fallback; see

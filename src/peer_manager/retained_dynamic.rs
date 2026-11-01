@@ -47,6 +47,9 @@ pub(super) struct RetainedDynamicPeer {
     /// Whether the RIB may still retain the neighbor's routes: from its
     /// session's end, then from each check.
     pub(super) theirs: bool,
+    /// The RIB's next GR or LLGR deadline for its routes, from the last
+    /// check that found them retained.
+    pub(super) theirs_until: Option<Instant>,
     /// The latest the neighbor, as our helper, can still hold our routes:
     /// the window its session reported, plus a hold time. `None` when it
     /// cannot hold them.
@@ -147,6 +150,7 @@ impl PeerManager {
             remote_asn: managed.remote_asn,
             retained_at: now,
             theirs: end.theirs,
+            theirs_until: None,
             ours_until,
             // Its routes need the RIB's answer; its hold of ours ends at a
             // known time.
@@ -158,7 +162,41 @@ impl PeerManager {
             log_retained(peer, &mut retained, None);
         }
         self.retained_dynamic.insert(peer.clone(), retained);
+        self.publish_retained_dynamic(peer);
         true
+    }
+
+    /// Publish what an idle retained neighbor holds, and until when, for
+    /// `rbgp doctor` and dashboards; nothing while its reconnect is live or
+    /// once it is gone. Its routes are listed from the first check that
+    /// finds them retained, which carries the RIB's deadline.
+    fn publish_retained_dynamic(&self, peer: &PeerKey) {
+        let label = peer.label();
+        let Some(retained) = self
+            .retained_dynamic
+            .get(peer)
+            .filter(|retained| retained.check_at.is_some())
+        else {
+            self.metrics.clear_dynamic_neighbor_retention(&label);
+            return;
+        };
+        let now = Instant::now();
+        let wall_now = std::time::SystemTime::now();
+        let unix = |at: Instant| {
+            (wall_now + at.saturating_duration_since(now))
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs())
+        };
+        let range = format!(
+            "{}/{}",
+            retained.accepted.addr, retained.accepted.prefix_len
+        );
+        self.metrics.set_dynamic_neighbor_retention(
+            &label,
+            &range,
+            retained.theirs_until.filter(|_| retained.theirs).map(unix),
+            retained.ours_until.filter(|&until| now < until).map(unix),
+        );
     }
 
     /// The slot for a reconnect from a retained neighbor's address: its
@@ -337,10 +375,13 @@ impl PeerManager {
     /// retention waits, unchanged, for its session. `false` when the address
     /// has none.
     pub(super) fn retained_dynamic_reconnected(&mut self, peer: &PeerKey) -> bool {
-        self.retained_dynamic
+        let reconnected = self
+            .retained_dynamic
             .get_mut(peer)
             .map(|retained| retained.check_at = None)
-            .is_some()
+            .is_some();
+        self.publish_retained_dynamic(peer);
+        reconnected
     }
 
     /// A reconnect from a retained neighbor's address went idle. If it never
@@ -367,6 +408,7 @@ impl PeerManager {
             .insert(peer.clone(), retained.counters.clone());
         self.rib_peers.insert(peer.clone(), retained.slot.clone());
         retained.check_at = Some(Instant::now());
+        self.publish_retained_dynamic(peer);
         true
     }
 
@@ -391,6 +433,7 @@ impl PeerManager {
     /// candidate resolved for itself.
     fn remove_retained_dynamic(&mut self, peer: &PeerKey) -> Option<RetainedDynamicPeer> {
         let mut retained = self.retained_dynamic.remove(peer)?;
+        self.metrics.clear_dynamic_neighbor_retention(&peer.label());
         if let Some(candidate) = retained.candidate.take() {
             self.retention.orphaned.push(OrphanSlot {
                 peer: peer.clone(),
@@ -515,6 +558,7 @@ impl PeerManager {
         };
         self.retention.backoff = RETENTION_RETRY;
         let mut delete = Vec::new();
+        let mut publish = Vec::new();
         for ((peer, retained_at), retention) in pass.peers.into_iter().zip(answer) {
             // Gone, live again, or retained anew while the query was out:
             // the answer was about an earlier retention.
@@ -530,6 +574,7 @@ impl PeerManager {
                     .unwrap_or(now + RETENTION_RECHECK)
                     .max(now + RETENTION_RETRY)
             });
+            retained.theirs_until = theirs_until;
             let next = theirs_until.or(retained.ours_until.filter(|&until| now < until));
             if next.is_some() {
                 log_retained(&peer, retained, theirs_until);
@@ -537,10 +582,15 @@ impl PeerManager {
             retained.check_at = next;
             if next.is_none() {
                 delete.push(peer);
+            } else {
+                publish.push(peer);
             }
         }
         for peer in delete {
             self.delete_retained_dynamic(&peer);
+        }
+        for peer in publish {
+            self.publish_retained_dynamic(&peer);
         }
     }
 

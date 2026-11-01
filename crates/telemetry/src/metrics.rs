@@ -630,6 +630,7 @@ struct BgpMetricsInner {
     dynamic_neighbor_slots_limit: IntGauge,
     dynamic_neighbor_slots_headroom: IntGauge,
     dynamic_neighbor_limit_rejections: IntCounter,
+    dynamic_neighbor_retained_until: IntGaugeVec,
     inbound_connections_dropped: IntCounterVec,
     bmp_identity_conflicts: IntCounterVec,
     bmp_identity_excluded_neighbors: IntGauge,
@@ -1134,6 +1135,18 @@ impl BgpMetrics {
         let dynamic_neighbor_limit_rejections = IntCounter::new(
             "bgp_dynamic_neighbor_limit_rejections_total",
             "Inbound dynamic-neighbor connections dropped because the process-global admission limit was reached.",
+        )
+        .expect("valid metric definition");
+
+        let dynamic_neighbor_retained_until = IntGaugeVec::new(
+            Opts::new(
+                "bgp_dynamic_neighbor_retained_until_timestamp_seconds",
+                "An idle dynamic neighbor kept with its admission slot for graceful restart retention, \
+                 in Unix seconds: retention its_routes while the RIB retains its routes (the RIB's next \
+                 GR or LLGR deadline), our_routes while it may retain ours (the latest it can). Removed \
+                 when the neighbor reconnects or is deleted.",
+            ),
+            &["peer", "range", "retention"],
         )
         .expect("valid metric definition");
 
@@ -3177,6 +3190,9 @@ impl BgpMetrics {
             .register(Box::new(dynamic_neighbor_limit_rejections.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(dynamic_neighbor_retained_until.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(inbound_connections_dropped.clone()))
             .expect("metric not already registered");
         registry
@@ -3846,6 +3862,7 @@ impl BgpMetrics {
             dynamic_neighbor_slots_limit,
             dynamic_neighbor_slots_headroom,
             dynamic_neighbor_limit_rejections,
+            dynamic_neighbor_retained_until,
             inbound_connections_dropped,
             unnumbered_peer_address_info,
             unnumbered_address_changes,
@@ -4117,6 +4134,35 @@ impl BgpMetrics {
     /// Record an inbound dynamic-neighbor drop caused by slot saturation.
     pub fn record_dynamic_neighbor_limit_rejection(&self) {
         self.0.dynamic_neighbor_limit_rejections.inc();
+    }
+
+    /// Publish a retained idle dynamic neighbor's retentions in Unix
+    /// seconds, replacing any it had: `its_routes_until` while the RIB
+    /// retains its routes, `our_routes_until` while it may retain ours.
+    pub fn set_dynamic_neighbor_retention(
+        &self,
+        peer: &str,
+        range: &str,
+        its_routes_until: Option<u64>,
+        our_routes_until: Option<u64>,
+    ) {
+        self.clear_dynamic_neighbor_retention(peer);
+        for (retention, until) in [
+            ("its_routes", its_routes_until),
+            ("our_routes", our_routes_until),
+        ] {
+            if let Some(until) = until {
+                self.0
+                    .dynamic_neighbor_retained_until
+                    .with_label_values(&[peer, range, retention])
+                    .set(i64::try_from(until).unwrap_or(i64::MAX));
+            }
+        }
+    }
+
+    /// Remove a dynamic neighbor's retention series.
+    pub fn clear_dynamic_neighbor_retention(&self, peer: &str) {
+        Self::reap_peer_series_from_vec(&self.0.dynamic_neighbor_retained_until, peer);
     }
 
     /// Record a BMP identity conflict at admission: `excluded` when every
