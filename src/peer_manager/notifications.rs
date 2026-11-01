@@ -166,27 +166,20 @@ impl PeerManager {
             crossings,
             ..
         } = &notification
-            && let Some(queued) =
-                self.deferred_session_notifications
-                    .iter_mut()
-                    .find_map(|(_, deferred)| match deferred {
-                        SessionNotification::MaxPrefixWarning {
-                            session_id: queued_session,
-                            family: queued_family,
-                            stage: queued_stage,
-                            crossings: queued,
-                            ..
-                        } if queued_session == session_id
-                            && queued_family == family
-                            && queued_stage == stage =>
-                        {
-                            Some(queued)
-                        }
-                        _ => None,
-                    })
         {
-            *queued = queued.saturating_add(*crossings);
-            return;
+            match self
+                .deferred_warning_crossings
+                .entry((*session_id, *family, *stage))
+            {
+                std::collections::hash_map::Entry::Occupied(mut queued) => {
+                    let queued = queued.get_mut();
+                    *queued = queued.saturating_add(*crossings);
+                    return;
+                }
+                std::collections::hash_map::Entry::Vacant(scope) => {
+                    scope.insert(*crossings);
+                }
+            }
         }
         if let Some(owner) = &owner {
             *self
@@ -216,7 +209,20 @@ impl PeerManager {
         &mut self,
         index: usize,
     ) -> Option<SessionNotification> {
-        let (owner, notification) = self.deferred_session_notifications.remove(index)?;
+        let (owner, mut notification) = self.deferred_session_notifications.remove(index)?;
+        if let SessionNotification::MaxPrefixWarning {
+            session_id,
+            family,
+            stage,
+            crossings,
+            ..
+        } = &mut notification
+            && let Some(total) =
+                self.deferred_warning_crossings
+                    .remove(&(*session_id, *family, *stage))
+        {
+            *crossings = total;
+        }
         if let Some(owner) = owner
             && let Some(count) = self.deferred_session_notification_counts.get_mut(&owner)
         {

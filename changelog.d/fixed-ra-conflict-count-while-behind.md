@@ -13,4 +13,14 @@
   only beside another foreign router, which that conflict counted instead.
   Once discovery knows the peer, an RA from the peer's own address is not a
   conflict. Before that, the peer's RA beside a foreign binding still
-  raises one, and that conflict counts the foreign router.
+  raises one, and that conflict counts the foreign router. Before discovery
+  knows the peer, an address whose RAs lapse and return beside an address a
+  conflict already named it with is not counted at once. Each such return
+  is counted when discovery learns of the peer, unless the address is the
+  peer, provided one of the two addresses is still advertising then; a
+  return is never counted if no session reaches Established. A foreign
+  router that stays live is no longer counted a second time when the peer's
+  RAs lapse and return first. Conflicts queued together reach the peer
+  manager as one `multiple_routers_on_link` log record, whose `conflicts`
+  field gives how many it stands for, and are added to the counter in one
+  step.
