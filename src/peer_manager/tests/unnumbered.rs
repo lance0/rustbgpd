@@ -5078,10 +5078,11 @@ async fn deliver_inbound_conflict_events(
 /// coalesced backlog after falling behind by many candidate lifetimes. The
 /// table's routers each send one RA, which becomes the interface's first
 /// binding, and then expire. A foreign router whose RA discovery processed
-/// before the Established report is counted when the report arrives, once;
-/// one that also expired before the report is not counted. The owner
-/// reconciles between delivered events and adds or removes no peer for any
-/// dropped address.
+/// before the Established report is counted once: by a conflict naming it
+/// then, or when the report arrives. A first binding that expired before
+/// the report with no conflict, or was named only beside another foreign
+/// router, is not counted on its own. The owner reconciles between
+/// delivered events and adds or removes no peer for any dropped address.
 /// Mutation-red: counting a conflict from the owner's `previous: None`
 /// binding instead loses every foreign first binding the backlog replaced;
 /// not checking the live sources at the report leaves the early ones
@@ -5092,7 +5093,7 @@ async fn ra_conflicts_beside_an_inbound_learned_session_count_exactly_when_coale
     const OWN: u16 = INBOUND_OWN;
     let (a, b, f) = (0x200, 0x201, 0x300);
     let told_then = |routers: Vec<u16>| [vec![Told], ra_pairs(routers)].concat();
-    let sequences: [(&str, Vec<RaStep>, f64); 13] = [
+    let sequences: Vec<(&str, Vec<RaStep>, f64)> = vec![
         (
             "16 foreign, own",
             told_then(foreign_routers(16).chain([OWN]).collect()),
@@ -5131,6 +5132,21 @@ async fn ra_conflicts_beside_an_inbound_learned_session_count_exactly_when_coale
         (
             "counted beside a binding that expired before the report",
             vec![Ra(a, 10), Ra(f, 1800), Advance(10), Told],
+            1.0,
+        ),
+        (
+            "own RA beside a foreign binding, the own candidate gone before the report",
+            vec![Ra(f, 60), Ra(OWN, 10), Advance(11), Told],
+            1.0,
+        ),
+        (
+            "foreign bound before the report, own RA and a third router beside it",
+            vec![Ra(f, 1800), Ra(OWN, 1800), Ra(a, 1800), Told],
+            2.0,
+        ),
+        (
+            "two foreign routers named together before the report",
+            vec![Ra(a, 1800), Ra(f, 1800), Told],
             1.0,
         ),
         (

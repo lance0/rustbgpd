@@ -129,10 +129,10 @@ pub enum DiscoveryEvent {
         current: Option<Endpoint>,
     },
     /// A live RA source other than the interface's Established peer, or
-    /// failing that its binding. Reported at most once per source while it
-    /// stays a candidate: when it is learned, or when the Established report
-    /// names a peer beside a source learned before it. It never moves the
-    /// binding.
+    /// failing that its binding: when it is learned, or, for a source
+    /// learned before the Established report, when that report arrives. A
+    /// source a conflict has named, on either side, is not named again
+    /// while it stays a candidate. It never moves the binding.
     Conflict {
         interface: String,
         bound: Ipv6Addr,
@@ -155,7 +155,7 @@ pub enum Transmit {
 #[derive(Debug, Clone, Copy)]
 struct Candidate {
     expiry: Instant,
-    /// A `Conflict` has named it as `other`.
+    /// A `Conflict` has named it, as `bound` or `other`.
     reported: bool,
 }
 
@@ -375,8 +375,10 @@ impl Engine {
             .or(iface.binding.map(|binding| binding.address))
             && bound != source
         {
-            if let Some(candidate) = iface.candidates.get_mut(&source) {
-                candidate.reported = true;
+            for named in [bound, source] {
+                if let Some(candidate) = iface.candidates.get_mut(&named) {
+                    candidate.reported = true;
+                }
             }
             self.events.push(DiscoveryEvent::Conflict {
                 interface: name.clone(),
@@ -419,12 +421,13 @@ impl Engine {
     /// owner follows such a retirement with `session_failed`, which also
     /// forgets `peer`.
     ///
-    /// A live source learned before this report and never reported is a
-    /// conflict now: a foreign router whose RA arrived first became the
-    /// binding with nothing to compare it with. The exception is a binding
-    /// that `peer`'s own RA was already reported beside, which counted that
-    /// pair. A foreign router that came and expired before the report is
-    /// never counted.
+    /// A live source learned before this report that no conflict has named
+    /// is a conflict now: a foreign router whose RA arrived first became the
+    /// binding with nothing to compare it with. A conflict already raised
+    /// beside it, `peer`'s own RA's included, counted it. So only a first
+    /// binding can go uncounted: one that expired before the report with no
+    /// conflict, or one named only beside another foreign router, which that
+    /// conflict counted instead.
     pub(crate) fn session_established(&mut self, name: &str, peer: Ipv6Addr, now: Instant) {
         let Some(iface) = self.interfaces.get_mut(name) else {
             return;
@@ -434,24 +437,21 @@ impl Engine {
         if iface.binding.is_some() {
             iface.established = true;
         }
-        let paired = iface
-            .candidates
-            .get(&peer)
-            .is_some_and(|candidate| candidate.reported)
-            .then(|| iface.binding.map(|binding| binding.address))
-            .flatten();
+        let mut named = false;
         for (&address, candidate) in &mut iface.candidates {
             if address == peer || candidate.reported {
                 continue;
             }
             candidate.reported = true;
-            if Some(address) != paired {
-                self.events.push(DiscoveryEvent::Conflict {
-                    interface: name.to_owned(),
-                    bound: peer,
-                    other: address,
-                });
-            }
+            named = true;
+            self.events.push(DiscoveryEvent::Conflict {
+                interface: name.to_owned(),
+                bound: peer,
+                other: address,
+            });
+        }
+        if named && let Some(candidate) = iface.candidates.get_mut(&peer) {
+            candidate.reported = true;
         }
     }
 

@@ -1062,13 +1062,47 @@ fn a_source_learned_before_the_established_report_is_counted_once() {
     assert_eq!(conflicts(&mut e), [], "fe80::9 was counted when learned");
 
     // The peer's own RA was reported beside the foreign binding before the
-    // report: that pair is one router, already counted.
+    // report: that conflict counted the foreign router, even once the peer's
+    // own candidate has expired. A third router is counted on its own.
+    // Mutation-red: marking only `other` counts fe80::9 again at the report.
     let mut e = engine(false, t0);
-    ra(&mut e, 9, 30, t0).unwrap();
-    ra(&mut e, 2, 30, t0).unwrap();
+    ra(&mut e, 9, 60, t0).unwrap();
+    ra(&mut e, 2, 10, t0).unwrap();
     assert_eq!(conflicts(&mut e), [(ll(9), ll(2))]);
+    e.session_established(IF, ll(2), t0 + Duration::from_secs(11));
+    assert_eq!(conflicts(&mut e), [], "the peer's candidate expired first");
+    let mut e = engine(false, t0);
+    ra(&mut e, 9, 60, t0).unwrap();
+    ra(&mut e, 2, 60, t0).unwrap();
+    ra(&mut e, 5, 60, t0).unwrap();
+    assert_eq!(conflicts(&mut e), [(ll(9), ll(2)), (ll(9), ll(5))]);
     e.session_established(IF, ll(2), t0);
     assert_eq!(conflicts(&mut e), []);
+
+    // A first binding named only beside another foreign router is counted
+    // by that conflict alone: two foreign routers, one count.
+    let mut e = engine(false, t0);
+    ra(&mut e, 3, 60, t0).unwrap();
+    ra(&mut e, 9, 60, t0).unwrap();
+    assert_eq!(conflicts(&mut e), [(ll(3), ll(9))]);
+    e.session_established(IF, ll(2), t0);
+    assert_eq!(conflicts(&mut e), []);
+
+    // A former peer is a foreign router to the next one, counted once.
+    let mut e = engine(false, t0);
+    ra(&mut e, 7, 60, t0).unwrap();
+    e.session_established(IF, ll(7), t0);
+    assert_eq!(conflicts(&mut e), []);
+    e.session_failed(IF, t0);
+    e.session_established(IF, ll(2), t0);
+    assert_eq!(conflicts(&mut e), [(ll(2), ll(7))]);
+    e.session_failed(IF, t0);
+    e.session_established(IF, ll(2), t0);
+    assert_eq!(
+        conflicts(&mut e),
+        [],
+        "a report after a failure counts nothing again"
+    );
 
     // A source that came and expired before the report is not counted.
     let mut e = engine(false, t0);

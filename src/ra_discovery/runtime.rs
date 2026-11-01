@@ -73,11 +73,13 @@ struct PendingEvents {
 ///   carry the latest `bound` and `other`.
 ///
 /// Discovery raises every conflict itself, so the counts do not depend on how
-/// far the owner falls behind: the owner reports the Established peer's
-/// address with `session_established`, and discovery counts each other live
-/// source once, including one learned before that report. A foreign router
-/// that arrives and expires before the report reaches discovery is not
-/// counted.
+/// far the owner falls behind. The owner reports the Established peer's
+/// address with `session_established`; discovery counts a source once, when
+/// a conflict first names it, or at that report for one learned before it.
+/// Only a foreign router that was discovery's first binding can go
+/// uncounted: one that expired before the report with no conflict naming
+/// it, or one named only beside another foreign router, which that conflict
+/// counted instead.
 ///
 /// Keys are served round-robin, so a conflict can be delivered ahead of a
 /// binding change queued between two conflicts. Learned and expired

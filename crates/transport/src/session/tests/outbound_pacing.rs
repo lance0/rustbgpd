@@ -236,11 +236,6 @@ async fn parked_session(held: &Arc<AttrSet>, total: usize) -> Parked {
     }
 }
 
-/// An aborted session task never returns from `run()`, as on the
-/// transport-safety abort and a shutdown deadline's expiry. Dropping its
-/// session still hands a large unsent inventory to the paced release.
-/// Mutation-red: handing off only when `run()` returns frees it all in the
-/// abort's turn.
 /// A session dropped while its task unwinds skips the hand-off, so the drop
 /// cannot panic again mid-unwind; the inventory is freed in that turn.
 /// Mutation-red: handing off while panicking leaves the routes alive after
@@ -277,6 +272,11 @@ async fn outbound_pacing_session_dropped_off_runtime_does_not_panic() {
     assert_eq!(Arc::strong_count(&held) - base, 0);
 }
 
+/// An aborted session task never returns from `run()`, as on the
+/// transport-safety abort and a shutdown deadline's expiry. Dropping its
+/// session still hands a large unsent inventory to the paced release.
+/// Mutation-red: handing off only when `run()` returns frees it all in the
+/// abort's turn.
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_aborted_session_hands_inventory_to_paced_release() {
     const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
