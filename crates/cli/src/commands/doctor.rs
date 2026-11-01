@@ -1157,10 +1157,6 @@ fn retained_dynamic_neighbors_check(metrics: Option<&str>, observed_at: u64) -> 
         else {
             continue;
         };
-        // A lapsed retention is removed at the neighbor's next check.
-        if until <= observed_at {
-            continue;
-        }
         let (Some(peer), Some(range), Some(retention)) = (
             labels.remove("peer"),
             labels.remove("range"),
@@ -1168,21 +1164,30 @@ fn retained_dynamic_neighbors_check(metrics: Option<&str>, observed_at: u64) -> 
         ) else {
             continue;
         };
+        // A lapsed our_routes hold is removed at the neighbor's next check.
+        // A lapsed its_routes deadline stays: the peer manager keeps the
+        // neighbor's slot until a check finds the routes gone.
+        let its = match retention.as_str() {
+            "its_routes" => true,
+            "our_routes" if until > observed_at => false,
+            _ => continue,
+        };
         let entry = retained.entry(peer).or_insert((range, None, None));
-        match retention.as_str() {
-            "its_routes" => entry.1 = Some(until),
-            "our_routes" => entry.2 = Some(until),
-            _ => {}
+        if its {
+            entry.1 = Some(until);
+        } else {
+            entry.2 = Some(until);
         }
     }
     if retained.is_empty() {
         return None;
     }
     let until = |what: &str, at: u64| {
-        format!(
-            "{what} until unix {at} ({}s)",
-            at.saturating_sub(observed_at)
-        )
+        if at <= observed_at {
+            format!("{what}: deadline unix {at} passed, awaiting re-check")
+        } else {
+            format!("{what} until unix {at} ({}s)", at - observed_at)
+        }
     };
     let mut listed: Vec<String> = retained
         .iter()
@@ -1225,7 +1230,8 @@ fn retained_dynamic_neighbors_check(metrics: Option<&str>, observed_at: u64) -> 
     let refused = gauge("bgp_dynamic_neighbor_limit_rejections_total ").unwrap_or(0);
     // A neighbor kept only for our_routes gives its slot to a new address,
     // so the limit refuses one only when every retained neighbor's routes
-    // are retained.
+    // are retained, as the peer manager last found them, lapsed deadline
+    // or not.
     let none_evictable = retained.values().all(|(_, its, _)| its.is_some());
     let status = if gauge("bgp_dynamic_neighbor_slots_headroom ") == Some(0)
         && refused > 0
@@ -7346,9 +7352,11 @@ paths = ["x"]
     }
 
     /// Red proofs: merging one neighbor's two retentions into two entries,
-    /// listing a lapsed deadline, warning without a refusal, with headroom
-    /// or beside a member kept only for our_routes (which a new address
-    /// evicts), or reporting with nothing retained fails below.
+    /// listing a lapsed our_routes hold, warning without a refusal, with
+    /// headroom or beside a member kept only for our_routes (which a new
+    /// address evicts), dropping a lapsed its_routes deadline (the slot is
+    /// held until a check clears it), or reporting with nothing retained
+    /// fails below.
     #[test]
     fn retained_dynamic_neighbors_check_lists_reasons_and_warns_only_when_refused_at_the_limit() {
         const SERIES: &str = "bgp_dynamic_neighbor_retained_until_timestamp_seconds";
@@ -7428,6 +7436,24 @@ paths = ["x"]
             full(&pinned, 0, 1)
                 .detail
                 .contains("1 inbound dynamic connection was refused")
+        );
+
+        // The RIB check is late: its_routes has passed its deadline but the
+        // peer manager still keeps the neighbor's slot, so it is not
+        // evictable and the refusal warning stands.
+        let delayed = format!(
+            "{SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"its_routes\"}} 990\n\
+             {SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 1215\n"
+        );
+        let late = full(&delayed, 0, 3);
+        assert_eq!(late.status, CheckStatus::Warn, "{}", late.detail);
+        assert!(
+            late.detail.contains(
+                "198.51.100.7 (range 198.51.100.0/24, reason both: we retain its routes: deadline \
+                 unix 990 passed, awaiting re-check, it may hold ours until unix 1215 (215s))"
+            ),
+            "{}",
+            late.detail
         );
     }
 
