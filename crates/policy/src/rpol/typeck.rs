@@ -2559,7 +2559,7 @@ fn bound_policy<'a>(
                         pred_cost,
                         fns,
                         &mut |guard, terms, action| {
-                            arms.extend((0..terms).map(|_| guard));
+                            push_arms(&mut arms, guard, terms);
                             if let Some(action) = action {
                                 action_cost =
                                     action_cost.saturating_add(action_value_cost(action, fns));
@@ -2569,7 +2569,7 @@ fn bound_policy<'a>(
                 }
                 Stmt::Action(action) => {
                     let terms = guarded_action_terms(std::slice::from_ref(action), fns);
-                    arms.extend((0..terms).map(|_| 1));
+                    push_arms(&mut arms, 1, terms);
                     action_cost = action_cost.saturating_add(action_value_cost(action, fns));
                 }
                 // LAN-303: one IR term for the loop itself; the body
@@ -2688,6 +2688,15 @@ fn loop_iteration_bound(source: &ForSource, file: &SourceFile) -> u64 {
             .map_or(u64::from(MAX_LOOP_ITERATIONS), |s| s.entries.len() as u64),
         ForSource::Field(_) => u64::from(MAX_LOOP_ITERATIONS),
     }
+}
+
+/// Record `terms` lowered terms of `guard` IR nodes each, at most one past
+/// the size budget: an inlined function graph can multiply a term count
+/// into the billions, and every arm costs at least one node, so a capped
+/// list still exceeds the budget and its diagnostic fires.
+fn push_arms(arms: &mut Vec<u64>, guard: u64, terms: u64) {
+    let room = (MAX_APPLY_EXPANSION + 1).saturating_sub(arms.len() as u64);
+    arms.extend((0..terms.min(room)).map(|_| guard));
 }
 
 /// One loop's `(body IR nodes, worst-case evaluation steps)` for the
@@ -2833,6 +2842,18 @@ fn if_terms<'a>(
             out(prefix.cost(), binds, None);
         }
         body_terms(&branch.body, prefix.with(guard), pred_cost, fns, out);
+        // A flat `if` whose body only binds still gates its `else` with a
+        // placeholder term after the binds.
+        if flat
+            && if_stmt.else_body.is_some()
+            && !branch.body.is_empty()
+            && branch
+                .body
+                .iter()
+                .all(|stmt| matches!(stmt, Stmt::Action(ActionStmt::Let { .. })))
+        {
+            out(prefix.with(guard).cost(), 1, None);
+        }
         if flat || !super::coverage::body_decides(&branch.body) {
             prefix = prefix.with(guard.saturating_add(1));
         }

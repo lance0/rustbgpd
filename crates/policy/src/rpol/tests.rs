@@ -7948,6 +7948,56 @@ fn else_after_deciding_branches_charges_its_unconditional_terms() {
     assert!(rendered.contains("IR nodes"), "{rendered}");
 }
 
+/// A flat `if` whose body only binds still emits a placeholder term that
+/// gates its `else`, and the model charges it. Each statement here lowers
+/// to three terms under the one-node outer guard: the bind and the
+/// placeholder (3 nodes each: `And` of two guards) and the `else` (4: the
+/// inner guard negated). That is 10 nodes per statement, so 10,000
+/// statements fill the 100,000-node budget exactly. Red proof: without
+/// the placeholder charge the model counts 9 per statement and admits
+/// 10,001.
+#[test]
+fn nested_let_only_if_charges_its_else_placeholder() {
+    let policy = |statements: usize| {
+        let statement = "if route.communities has 65000:1 { \
+                         if route.communities has 65000:2 { let x = 1 } else { set med 5 } }\n";
+        format!(
+            "policy p {{ term t {{\n{} }} }}",
+            statement.repeat(statements)
+        )
+    };
+    compile_ok(&policy(10_000));
+    let (_, rendered) = diagnostics_of(&policy(10_001));
+    assert!(rendered.contains("IR nodes"), "{rendered}");
+}
+
+/// A compact function graph can inline to billions of binds. The budget
+/// check rejects it without recording one arm per inlined term: here each
+/// of six function levels calls the next 40 times, so `set med` would
+/// hoist about 8 billion binds. The evaluation budget fires first, since
+/// the inlined body's value cost grows with its binds. Red proof: with
+/// the uncapped expansion, the test aborts on the allocation.
+#[test]
+fn inlined_bind_counts_reject_without_expanding_each_term() {
+    use std::fmt::Write as _;
+    let mut source = String::from("fn f0(x: u32) -> u32 { x }\n");
+    for level in 1..=6 {
+        let calls = vec![format!("f{}(x)", level - 1); 40].join(" + ");
+        writeln!(source, "fn f{level}(x: u32) -> u32 {{ {calls} }}").unwrap();
+    }
+    for body in [
+        "set med f6(route.med)",
+        "if route.med >= 1 { set med f6(route.med) }",
+    ] {
+        let source = format!("{source}policy p {{ term t {{ {body} }} }}\n");
+        let (_, rendered) = diagnostics_of(&source);
+        assert!(
+            rendered.contains("evaluation budget") || rendered.contains("IR nodes"),
+            "{rendered}"
+        );
+    }
+}
+
 /// Long runs of own-line comments between a branch's `}` and its `else`
 /// keep every comment and the chain's indent, and format idempotently
 /// (3,000 comments in runs of 1,000; a debug-build lexer recurses once
