@@ -2301,9 +2301,13 @@ impl PeerManager {
         name: &str,
         endpoint: Endpoint,
     ) -> Result<bool, PeerLifecycleError> {
+        // Only the actor-owned term: sessions change the mailbox's free
+        // capacity concurrently, and `try_send` below handles a full one.
         debug_assert!(
-            !self.bind_would_wait(name),
-            "a bind of {name} would wait behind deferred RIB updates"
+            !self
+                .deferred_rib
+                .reaps(&rustbgpd_telemetry::interface_peer_label(name)),
+            "a bind of {name} would wait for the cleanup queued under its label"
         );
         if self.port_mut(name).bfd_removal_unsettled {
             self.arm_unnumbered_retry();

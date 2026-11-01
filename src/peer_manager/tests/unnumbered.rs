@@ -7110,3 +7110,162 @@ async fn an_ra_bind_of_a_readded_interface_waits_out_its_old_cleanup_on_the_time
         "bound once the cleanup drained"
     );
 }
+
+/// A strict-free BFD, GTSM interface-only harness whose listener fills the
+/// RIB mailbox when it installs the next learned selector, once `fill` holds
+/// a sender: the mailbox fills while a bind awaits its GTSM step, after the
+/// bind's own capacity check saw room.
+fn mailbox_filling_harness() -> (
+    Harness,
+    BfdSide,
+    Arc<std::sync::Mutex<Option<mpsc::Sender<RibUpdate>>>>,
+) {
+    let fill: Arc<std::sync::Mutex<Option<mpsc::Sender<RibUpdate>>>> = Arc::default();
+    let update: LearnedGtsmUpdate = {
+        let fill = Arc::clone(&fill);
+        Arc::new(move |request| {
+            if let ListenerGtsmRequest::Selector {
+                selector: Some(_), ..
+            } = request
+                && let Some(rib_tx) = fill.lock().unwrap().take()
+            {
+                while rib_tx
+                    .try_send(RibUpdate::ReleasePeer {
+                        peer: PeerId::UNASSIGNED,
+                    })
+                    .is_ok()
+                {}
+            }
+            Box::pin(async { LearnedGtsmOutcome::Applied })
+        })
+    };
+    let h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "ttl_security = true\nbfd = { profile = \"fast\", strict = false }\n",
+        "[[bfd_profiles]]\nname = \"fast\"\n",
+        Some(update),
+    );
+    let (h, bfd) = attach_bfd(h, &[]);
+    (h, bfd, fill)
+}
+
+/// A rebind whose `RebindPeer` finds the mailbox filled during the bind's
+/// own GTSM step, after its capacity check saw room, is rolled back whole:
+/// the retired endpoint's state stays held (a disable and its max-prefix
+/// latch), the new endpoint's RIB slot and latch go, its BFD session is
+/// removed again, and the RA bind is retried. Once the RIB drains, the
+/// retry binds with the held state.
+#[tokio::test(start_paused = true)]
+async fn a_rebind_that_finds_the_mailbox_filled_mid_bind_is_rolled_back() {
+    let (mut h, mut bfd, fill) = mailbox_filling_harness();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let old = swp1_key(2);
+    let session = h.mgr.peers[&old].session_id();
+    h.mgr
+        .install_max_prefix_latch(old.clone(), session, "max-prefix".into(), Some(60));
+    h.mgr.peers.get_mut(&old).unwrap().enabled = false;
+    let deadline = h.mgr.max_prefix_latches[&old].deadline;
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.reconcile().await;
+
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    *fill.lock().unwrap() = Some(rib_tx);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        h.bind("swp1", Some(endpoint(3, 7))),
+    )
+    .await
+    .expect("the rebind does not wait for mailbox room");
+    let new = swp1_key(3);
+    assert!(
+        fill.lock().unwrap().is_none(),
+        "the bind reached its GTSM step"
+    );
+    assert!(!h.mgr.peers.contains_key(&new), "not bound");
+    assert!(
+        !h.mgr.rib_peers.contains_key(&new),
+        "its RIB slot is removed"
+    );
+    assert!(
+        !h.mgr.max_prefix_latches.contains_key(&new),
+        "its latch is removed"
+    );
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(3)), Some(7))],
+        "its BFD session was registered"
+    );
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [],
+        "and removed again"
+    );
+    let rows = h.mgr.list_peers().await;
+    let unbound = rows
+        .iter()
+        .find(|info| info.interface.as_deref() == Some("swp1"))
+        .expect("the unbound row");
+    assert!(!unbound.enabled, "the disable stays held");
+    assert!(
+        unbound.max_prefix_restart_remaining_millis.is_some(),
+        "the latch stays held"
+    );
+    assert!(
+        h.mgr.deferred_rib.queue.is_empty(),
+        "nothing is queued for it"
+    );
+    let retry = h.mgr.unnumbered_retry_at().expect("the bind is retried");
+
+    tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert!(!h.mgr.peers[&new].enabled, "bound with the held disable");
+    assert_eq!(
+        h.mgr.max_prefix_latches[&new].deadline, deadline,
+        "and the held latch"
+    );
+}
+
+/// The same mid-bind fill on an inbound connection that would learn a new
+/// address: the connection is refused and counted as `rib_cleanup_pending`.
+#[tokio::test]
+async fn inbound_learning_that_finds_the_mailbox_filled_mid_bind_is_refused() {
+    let (mut h, mut bfd, fill) = mailbox_filling_harness();
+    let _client = inbound(&mut h, 2, 7).await;
+    bfd.next_applied();
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    // Room for what the retirement sends, then slots the bind's capacity
+    // check sees free until the GTSM step fills them all.
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    h.mgr.rib_tx = rib_tx.clone();
+    *fill.lock().unwrap() = Some(rib_tx);
+    let _client = tokio::time::timeout(Duration::from_secs(5), inbound(&mut h, 3, 7))
+        .await
+        .expect("refused without waiting for mailbox room");
+    assert!(
+        fill.lock().unwrap().is_none(),
+        "the bind reached its GTSM step"
+    );
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(3)),
+        "refused, not bound"
+    );
+    assert!(!h.mgr.rib_peers.contains_key(&swp1_key(3)));
+    assert_eq!(dropped(&h, "rib_cleanup_pending"), 1.0);
+    assert_eq!(dropped(&h, "unconfigured"), 0.0);
+}
