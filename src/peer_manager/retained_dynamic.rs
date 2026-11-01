@@ -171,7 +171,7 @@ impl PeerManager {
     /// once it is gone. Its routes carry the RIB's deadline from the last
     /// check that found them retained; until a check answers, their next
     /// check time.
-    fn publish_retained_dynamic(&self, peer: &PeerKey) {
+    pub(super) fn publish_retained_dynamic(&self, peer: &PeerKey) {
         let Some(retained) = self.retained_dynamic.get(peer) else {
             return;
         };
@@ -248,8 +248,12 @@ impl PeerManager {
 
     /// Delete and release a handle the live neighbor does not use, keeping
     /// the series it shares their label with. Never waits for mailbox room:
-    /// no session uses the handle, and the deletion reaps no label.
+    /// no session uses the handle, and the deletion reaps no label. The live
+    /// neighbor may publish under the label before the RIB handles the
+    /// deletion, so the handle is superseded at once and its teardown leaves
+    /// the label's gauges to that neighbor.
     fn release_side_handle(&mut self, handle: PeerId) {
+        handle.supersede();
         for update in [
             RibUpdate::PeerDeleted {
                 peer: handle,
@@ -659,6 +663,49 @@ impl PeerManager {
         self.refresh_dynamic_neighbor_capacity_metrics();
         self.reap_deleted_peer_metric_series_for_key(peer);
         info!(peer = %peer, "retained dynamic peer deleted");
+    }
+
+    /// A static neighbor at an idle retained member's address has started
+    /// its session: delete the member and release its identity. The member's
+    /// peer-manager and session series were reaped before that session
+    /// spawned; the label's are now the static neighbor's. The deletion keeps
+    /// them, its handle is superseded, and it is queued under the label so
+    /// the add admits it before completing, ahead of the new session's
+    /// registration. The RIB then finds no successor and reaps the member's
+    /// RIB series, so none of its counts carry over to the new neighbor.
+    pub(super) fn retire_replaced_retained_dynamic(&mut self, peer: &PeerKey) {
+        if self
+            .retained_dynamic
+            .get(peer)
+            .is_none_or(|retained| retained.check_at.is_none())
+        {
+            return;
+        }
+        let Some(retained) = self.remove_retained_dynamic(peer) else {
+            return;
+        };
+        self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+        self.refresh_dynamic_neighbor_capacity_metrics();
+        self.publish_peer_lifecycle_event(
+            peer,
+            rustbgpd_api::peer_types::SessionLifecycleEventType::PeerRemoved,
+            format!("peer {peer} removed"),
+        );
+        if let Some(handle) = retained.slot.get() {
+            handle.supersede();
+            let label = self.peer_metric_label(peer);
+            for update in [
+                RibUpdate::PeerDeleted {
+                    peer: handle,
+                    label: None,
+                    keep_series: true,
+                },
+                RibUpdate::ReleasePeer { peer: handle },
+            ] {
+                let _ = self.defer_rib_update(Some(label.clone()), update);
+            }
+        }
+        info!(peer = %peer, "retained dynamic peer replaced by a static neighbor");
     }
 
     fn set_retained_check(&mut self, peer: &PeerKey, at: Option<Instant>) {

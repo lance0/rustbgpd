@@ -333,6 +333,13 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 ///   interface-only bind that fails to start;
 /// - the update a `send_rib_update` call owns while it flushes.
 ///
+/// Admission is not processing: a new session under a reaped label starts
+/// once the deletion is admitted, so it can emit before the RIB handles that
+/// deletion. That is safe because the RIB reaps only the families it writes
+/// (`BgpMetrics::reap_rib_peer_series`), whose new series come after the
+/// deletion in its order; this actor reaped the rest when it deleted the
+/// neighbor.
+///
 /// The queue never leaves the actor; only `sender` moves into a flush's
 /// wait, so a dropped flush loses nothing but its reservation, which the run
 /// loop restores. `send_rib_update` queues its own update before it
@@ -989,6 +996,10 @@ pub struct PeerManager {
     inject_reconfigure_failures: std::collections::BTreeMap<PeerKey, u32>,
     #[cfg(test)]
     dataset_generations_at_peer_construction: Option<Vec<(PeerKey, String, u64)>>,
+    /// Fail the next new session's start, as a session that exits before it
+    /// accepts the command does.
+    #[cfg(test)]
+    fail_next_peer_start: bool,
     /// The same deterministic fault injection for the in-place applier
     /// (`hot_update_peer_in_place`), so the peer-group hot path's
     /// mid-cohort failure and rollback contract can be exercised.
@@ -1773,6 +1784,8 @@ impl PeerManager {
             inject_reconfigure_failures: debug_reconfigure_failures(),
             #[cfg(test)]
             dataset_generations_at_peer_construction: None,
+            #[cfg(test)]
+            fail_next_peer_start: false,
             #[cfg(test)]
             inject_hot_update_failures: std::collections::BTreeMap::new(),
             #[cfg(test)]

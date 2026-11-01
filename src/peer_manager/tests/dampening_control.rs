@@ -73,6 +73,7 @@ async fn register_source(
             peer: PeerId::from_addr(peer),
             session_id: 1,
             context: Arc::new(PeerSourceContext {
+                exact_export_families: Vec::new(),
                 dampening_admission: Some(admission),
                 peer_interface: None,
                 accepted_dynamic_range: None,

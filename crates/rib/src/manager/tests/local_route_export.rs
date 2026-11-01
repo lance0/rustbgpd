@@ -530,6 +530,7 @@ fn rows_report_the_destination_scope() {
         peer: scoped,
         session_id: 0,
         context: Arc::new(crate::update::PeerSourceContext {
+            exact_export_families: Vec::new(),
             dampening_admission: None,
             peer_interface: Some("eth0".into()),
             accepted_dynamic_range: None,
@@ -1153,6 +1154,7 @@ fn managed_peers_match_registered_sessions_by_scope() {
         peer: link_local,
         session_id: 0,
         context: Arc::new(crate::update::PeerSourceContext {
+            exact_export_families: Vec::new(),
             dampening_admission: None,
             peer_interface: Some("eth0".into()),
             accepted_dynamic_range: None,

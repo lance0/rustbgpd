@@ -1659,6 +1659,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
                     session_id: 1,
                     peer_asn: Some(asn),
                     context: Some(Arc::new(PeerSourceContext {
+                        exact_export_families: Vec::new(),
                         dampening_admission: Some(admission.clone()),
                         peer_interface: None,
                         accepted_dynamic_range: None,

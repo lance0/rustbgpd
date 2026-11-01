@@ -4550,6 +4550,11 @@ pub struct PeerSourceContext {
     pub accepted_dynamic_range: Option<AcceptedDynamicRange>,
     /// Explicit route-server-client exclusion, independent of negotiated role.
     pub route_server_client: bool,
+    /// Configured families the session seeded zero exact-export rejection
+    /// series for when it started. The RIB seeds them again on receipt,
+    /// in its order: an earlier identity's deletion handled since then
+    /// reaped them with the rest of the label's exact-export series.
+    pub exact_export_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
 }
 
 /// Source/session stamp captured when a received batch is admitted.

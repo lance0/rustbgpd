@@ -541,6 +541,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
         peer: target,
         session_id: 0,
         context: Arc::new(crate::update::PeerSourceContext {
+            exact_export_families: Vec::new(),
             dampening_admission: None,
             peer_interface: Some("eth1".into()),
             accepted_dynamic_range: None,

@@ -374,7 +374,7 @@ async fn link_local_neighbor_series_share_one_scoped_peer_value() {
         peer_label_values(&metrics),
         BTreeSet::from(["fe80::1%eth0".to_owned()])
     );
-    metrics.reap_peer_series(&label);
+    metrics.reap_rib_peer_series(&label);
     assert!(peer_label_values(&metrics).is_empty());
 }
 

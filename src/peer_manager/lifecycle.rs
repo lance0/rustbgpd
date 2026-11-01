@@ -119,9 +119,18 @@ impl PeerManager {
         context: &'static str,
     ) -> Result<PeerHandle, PeerCommandError> {
         self.seed_peer_truth_metrics(peer, enabled);
-        if should_start
-            && let Err(error) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await
-        {
+        #[cfg(test)]
+        let forced_failure = std::mem::take(&mut self.fail_next_peer_start);
+        #[cfg(not(test))]
+        let forced_failure = false;
+        let started = if !should_start {
+            Ok(())
+        } else if forced_failure {
+            Err(PeerCommandError::SessionExited)
+        } else {
+            handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await
+        };
+        if let Err(error) = started {
             warn!(peer = %peer, %error, %context, "failed to start new peer session");
             let _ = self
                 .shutdown_handle_bounded(peer.address, context, handle)
@@ -826,7 +835,7 @@ impl PeerManager {
 
         // A static neighbor at a retained dynamic neighbor's address is a new
         // neighbor: none of the retained identity carries over, and the
-        // retained neighbor goes once the add can no longer fail.
+        // retained neighbor goes once the new session has started.
         let replaces_retained = self.retained_dynamic.contains_key(&peer_key);
         transport.neighbor_counters = if replaces_retained {
             rustbgpd_transport::NeighborCounters::default()
@@ -856,6 +865,17 @@ impl PeerManager {
             self.static_rib_peer_slot(&peer_key, transport.interface_only, replaces_retained);
         transport.rib_peer = rib_peer;
 
+        if replaces_retained {
+            // The new session emits under the member's label from its spawn:
+            // the member's series go first. The member itself goes only once
+            // the session has started; a failed start keeps it, with its RIB
+            // series, which the RIB's teardown of the member settles once it
+            // is retired.
+            let label = self.peer_metric_label(&peer_key);
+            self.metrics
+                .reap_peer_identity_series(&label, peer_key.interface.as_deref().unwrap_or(""));
+            self.metrics.reap_non_rib_peer_series(&label);
+        }
         self.admit_deferred_rib_updates_for(&peer_key).await;
         let session_id = self.allocate_session_id();
         #[cfg(test)]
@@ -912,6 +932,10 @@ impl PeerManager {
                 if new_rib_peer && let Some(peer) = transport.rib_peer.get() {
                     self.release_unused_rib_peer(peer);
                 }
+                if replaces_retained {
+                    // The member stays; only its reaped retention gauge comes back.
+                    self.publish_retained_dynamic(&peer_key);
+                }
                 return Err(PeerLifecycleError::Internal(format!(
                     "failed to start peer: {error}"
                 )));
@@ -919,9 +943,11 @@ impl PeerManager {
         };
 
         if replaces_retained {
-            // The new session has started at the retained neighbor's label:
-            // its deletion reaches the RIB before this add completes.
-            self.delete_retained_dynamic(&peer_key);
+            // The member's deletion is admitted before this add completes.
+            // The new session sends the RIB nothing until it is Established,
+            // a BGP handshake later, so the deletion reaches the RIB first
+            // unless older queued cleanup holds its admission that long.
+            self.retire_replaced_retained_dynamic(&peer_key);
             self.admit_deferred_rib_updates_for(&peer_key).await;
         }
         info!(peer = %address, %remote_asn, "peer added dynamically");
@@ -2329,8 +2355,10 @@ impl PeerManager {
         if rib_peer != PeerId::UNASSIGNED {
             // The RIB manager emits bare-address series from its own
             // task; this marker is queued behind the session's final
-            // `PeerDown`, so the RIB manager reaps again *after* its
-            // own teardown emissions instead of racing them. Send
+            // `PeerDown`, so the RIB manager reaps its own families again
+            // *after* its teardown emissions instead of racing them. It
+            // leaves the families reaped above, which a neighbor re-added
+            // at the address may emit before the RIB gets here. Send
             // failure means the RIB manager is gone (daemon shutdown).
             let _ = self.defer_rib_update(
                 Some(peer_label.clone()),

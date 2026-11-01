@@ -2793,6 +2793,7 @@ fn session_peer_scope_reads_only_the_active_session() {
     let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let context = |interface: Option<&str>| {
         Arc::new(PeerSourceContext {
+            exact_export_families: Vec::new(),
             dampening_admission: None,
             peer_interface: interface.map(str::to_string),
             accepted_dynamic_range: None,
@@ -2844,6 +2845,7 @@ async fn accepted_source_context_survives_collision_failback_and_stamps_pending_
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let context = Arc::new(PeerSourceContext {
+        exact_export_families: Vec::new(),
         dampening_admission: None,
         peer_interface: Some("eth1".into()),
         accepted_dynamic_range: Some(AcceptedDynamicRange {
@@ -2862,6 +2864,7 @@ async fn accepted_source_context_survives_collision_failback_and_stamps_pending_
     });
     manager.handle_update(session_peer_up(peer, 1, winner_tx, ipv4_sendable()));
     let loser_context = Arc::new(PeerSourceContext {
+        exact_export_families: Vec::new(),
         accepted_dynamic_range: Some(AcceptedDynamicRange {
             addr: "192.0.0.0".parse().unwrap(),
             prefix_len: 16,
@@ -2923,6 +2926,7 @@ async fn repeated_peer_up_preserves_only_matching_source_context() {
             let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
             let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
             let context = Arc::new(PeerSourceContext {
+                exact_export_families: Vec::new(),
                 dampening_admission: None,
                 peer_interface: Some("eth1".into()),
                 accepted_dynamic_range: None,
@@ -2942,6 +2946,7 @@ async fn repeated_peer_up_preserves_only_matching_source_context() {
             ));
             let expected = if replacement {
                 let replacement = Arc::new(PeerSourceContext {
+                    exact_export_families: Vec::new(),
                     peer_interface: Some("eth2".into()),
                     ..(*context).clone()
                 });
@@ -2986,6 +2991,7 @@ async fn ending_session_preserves_newer_staged_registration_context() {
     let (old_tx, _old_rx) = mpsc::channel(64);
     manager.handle_update(session_peer_up(peer, 1, old_tx, ipv4_sendable()));
     let context = Arc::new(PeerSourceContext {
+        exact_export_families: Vec::new(),
         dampening_admission: None,
         peer_interface: Some("eth2".into()),
         accepted_dynamic_range: None,
@@ -3067,6 +3073,7 @@ async fn aborted_registration_reaps_only_its_own_staged_source_context() {
                     peer,
                     session_id,
                     context: Arc::new(PeerSourceContext {
+                        exact_export_families: Vec::new(),
                         dampening_admission: None,
                         peer_interface: None,
                         accepted_dynamic_range: None,
