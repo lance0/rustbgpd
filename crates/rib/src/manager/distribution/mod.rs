@@ -602,14 +602,11 @@ impl RibManager {
         peer: PeerId,
         prior: &super::update_groups::PriorGroupSlots,
     ) -> bool {
-        let rs_control = self
-            .peer_rs_control
-            .get(&peer)
-            .copied()
-            .zip(self.peer_asn.get(&peer).copied());
-        prior.adv_entry_for(peer, rs_control).is_some_and(|entry| {
-            self.clean_group_route_was_admitted(peer, entry.route, entry.source_attrs)
-        })
+        prior
+            .adv_entry_for(peer, self.rs_control_context(peer))
+            .is_some_and(|entry| {
+                self.clean_group_route_was_admitted(peer, entry.route, entry.source_attrs)
+            })
     }
 
     fn clean_group_delta_was_admitted(
@@ -7671,11 +7668,29 @@ impl RibManager {
             .get(&(route.prefix, route.path_id))
             .copied()
             .or_else(|| {
+                // The member's own slot: an rs-control member may hold a
+                // fallback local route below a suppressed received winner.
                 self.grouped_member_of(peer)
                     .and_then(|gid| self.group_ribs.get(&gid))
-                    .and_then(|group| group.adv_entry(peer, &route.prefix, route.path_id))
+                    .and_then(|group| {
+                        group.adv_entry_for(
+                            peer,
+                            &route.prefix,
+                            route.path_id,
+                            self.rs_control_context(peer),
+                        )
+                    })
                     .and_then(|entry| entry.local_source)
             })
+    }
+
+    /// `(rs_asn, peer_asn)` for a session that enforces RFC 7947 control
+    /// communities, `None` otherwise.
+    pub(in crate::manager) fn rs_control_context(&self, peer: PeerId) -> Option<(u32, u32)> {
+        self.peer_rs_control
+            .get(&peer)
+            .copied()
+            .zip(self.peer_asn.get(&peer).copied())
     }
 
     fn frozen_unicast_withdraw(&self, peer: PeerId, prefix: &Prefix, path_id: u32) -> bool {
@@ -9595,6 +9610,7 @@ impl RibManager {
                             group_otc_blocked = if resync {
                                 group.otc_blocked_for_member_with_checkpoint(
                                     peer,
+                                    rs_control,
                                     None,
                                     &mut || {
                                         checkpoint();
@@ -9609,6 +9625,7 @@ impl RibManager {
                                 // pass vector below cannot express.
                                 group.otc_blocked_for_member_with_checkpoint(
                                     peer,
+                                    rs_control,
                                     Some(&effective_prefixes),
                                     &mut || checkpoint(),
                                 )

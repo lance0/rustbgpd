@@ -6904,6 +6904,396 @@ async fn oracle_pcb_rs_control_fallback_replays_on_join_refresh_and_resync() {
     assert_eq!(d_p4, vec![peer_v4(B); 2]);
 }
 
+/// Export chain denying routes that carry standard community `value`.
+fn deny_community_chain(value: u32) -> PolicyChain {
+    let mut chain = deny_tagged_chain();
+    chain.policies[0].policy.entries[0].match_community = vec![CommunityMatch::Standard { value }];
+    chain
+}
+
+/// A per-client-best member without route-server control.
+const PCB_NO_RS: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 8);
+
+/// A non-control standard community (`65010:100`), as a policy match handle.
+const PCB_RS_MARKER: u32 = 0xFDF2_0064;
+
+/// Announce-to-none (`0:RS`): suppressed toward every rs-control member.
+const PCB_RS_TO_NONE: u32 = PCB_RS_AS;
+
+/// Withdraw `prefix` from `from`'s Adj-RIB-In at `path_id`.
+async fn withdraw_path(o: &mut Oracle, from: Ipv4Addr, prefix: Ipv4Prefix, path_id: u32) {
+    o.tx.send(RibUpdate::RoutesReceived {
+        session_id: SESSION,
+        peer: peer_v4(from),
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(prefix), path_id)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    o.quiesce().await;
+}
+
+/// Export chain setting next hop 192.0.2.9 on routes with an AS path of at
+/// least two hops.
+fn next_hop_for_long_paths() -> PolicyChain {
+    let mut chain = permit_all_with(RouteModifications {
+        set_next_hop: Some(NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(
+            192, 0, 2, 9,
+        )))),
+        ..RouteModifications::default()
+    });
+    chain.policies[0].policy.entries[0].match_as_path_length_ge = Some(2);
+    chain
+}
+
+/// A member's fallback can be a same-source alternative path on a prefix
+/// with no exception lane, carrying a next-hop action. A regroup snapshots
+/// the member's view, whose override set must have room for that slot.
+#[tokio::test]
+async fn oracle_pcb_rs_control_fallback_next_hop_action_survives_regroup() {
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, true, false, None, 64).await;
+        for (member, asn) in [(D, 65004), (E, 65005)] {
+            pcb_rs_peer_up_with_policy(o, member, asn, 64, Some(next_hop_for_long_paths())).await;
+        }
+        let mut first = rs_route(pfx(1, 0), A, vec![64601], vec![65004]);
+        first.path_id = 1;
+        let mut second = rs_route(pfx(1, 0), A, vec![64601; 2], vec![]);
+        second.path_id = 2;
+        o.routes(A, vec![first, second], vec![]).await;
+        // A different chain content: D leaves the group.
+        o.replace_policy(D, Some(deny_prefix_chain(pfx(9, 0))))
+            .await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
+    let folded = fold(&grouped);
+    assert_eq!(folded, fold(&ungrouped));
+    assert_eq!(folded_src(&folded, D, pfx(1, 0)), Some(IpAddr::V4(A)));
+}
+
+/// A winner change over a member's tagged prior sends that member nothing
+/// when its slot does not move: its fallback becoming the untagged winner,
+/// or an untagged replacement equal to the scrubbed winner it holds. The
+/// per-key events match the per-peer path, so neither is announced twice.
+#[tokio::test]
+async fn oracle_pcb_rs_control_unmoved_slot_is_not_reannounced() {
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(B, true, false, None, 64).await;
+        for &(member, asn) in &PCB_RS_MEMBERS {
+            pcb_rs_peer_up(o, member, asn, 64).await;
+        }
+        o.peer_up_families_generation_with_features(
+            PCB_NO_RS,
+            SESSION,
+            true,
+            false,
+            None,
+            64,
+            ipv4_sendable(),
+            OraclePeerFeatures {
+                per_client_best: true,
+                peer_asn: Some(65008),
+                ..OraclePeerFeatures::default()
+            },
+        )
+        .await;
+        // p3: E and F hold D's route below an announce-to-none winner;
+        // the plain member withdraws and D's route becomes the winner they
+        // already hold.
+        o.routes(
+            D,
+            vec![rs_route(pfx(3, 0), D, vec![65004; 3], vec![])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            PCB_NO_RS,
+            vec![rs_route(
+                pfx(3, 0),
+                PCB_NO_RS,
+                vec![65008; 2],
+                vec![PCB_RS_TO_NONE],
+            )],
+            vec![],
+        )
+        .await;
+        o.routes(PCB_NO_RS, vec![], vec![pfx(3, 0)]).await;
+        // p1: F holds B's scrubbed route; B re-announces it untagged.
+        o.routes(
+            B,
+            vec![with_large(
+                rs_route(pfx(1, 0), B, vec![64602], vec![65005]),
+                vec![rs_large(0, 65004), rs_large(1, 65006)],
+            )],
+            vec![],
+        )
+        .await;
+        o.routes(B, vec![rs_route(pfx(1, 0), B, vec![64602], vec![])], vec![])
+            .await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
+    for member in [E, F] {
+        assert_eq!(
+            src_seq(&grouped, member)
+                .iter()
+                .filter(|source| **source == peer_v4(D))
+                .count(),
+            1,
+            "{member} receives D's p3 route once"
+        );
+    }
+}
+
+/// A tag-only change of the winner (the policy strips the tags, so the
+/// shared entry is unchanged) moves the members' fallback view: the winner
+/// stops being suppressed toward D and starts being suppressed toward E,
+/// whose substitute is the unchanged fallback.
+#[tokio::test]
+async fn oracle_pcb_rs_control_tag_only_retag_moves_the_fallback_view() {
+    let strip = permit_all_with(RouteModifications {
+        communities_remove: vec![65004, 65005],
+        ..RouteModifications::default()
+    });
+    let scenario = async |o: &mut Oracle| {
+        for source in [A, B] {
+            o.peer_up(source, true, false, None, 64).await;
+        }
+        for (member, asn) in [(D, 65004), (E, 65005)] {
+            pcb_rs_peer_up_with_policy(o, member, asn, 64, Some(strip.clone())).await;
+        }
+        o.routes(
+            A,
+            vec![rs_route(pfx(1, 0), A, vec![64601], vec![65004])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(pfx(1, 0), B, vec![64602; 2], vec![])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            A,
+            vec![rs_route(pfx(1, 0), A, vec![64601], vec![65005])],
+            vec![],
+        )
+        .await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
+    let folded = fold(&grouped);
+    assert_eq!(folded, fold(&ungrouped));
+    assert_eq!(folded_src(&folded, D, pfx(1, 0)), Some(IpAddr::V4(A)));
+    assert_eq!(folded_src(&folded, E, pfx(1, 0)), Some(IpAddr::V4(B)));
+}
+
+/// A batched policy transition whose new chain denies only D's fallback
+/// candidate leaves the winner and its tags unchanged; D must move to the
+/// next eligible candidate.
+#[tokio::test]
+async fn oracle_pcb_rs_control_batched_transition_moves_the_fallback() {
+    let scenario = async |o: &mut Oracle| {
+        for source in [A, B, C] {
+            o.peer_up(source, true, false, None, 64).await;
+        }
+        for (member, asn) in [(D, 65004), (E, 65005)] {
+            pcb_rs_peer_up(o, member, asn, 64).await;
+        }
+        o.routes(
+            A,
+            vec![rs_route(pfx(1, 0), A, vec![64601], vec![65004])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(pfx(1, 0), B, vec![64602; 2], vec![PCB_RS_MARKER])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            C,
+            vec![rs_route(pfx(1, 0), C, vec![64603; 3], vec![])],
+            vec![],
+        )
+        .await;
+        let (reply, result) = oneshot::channel();
+        o.tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: [D, E]
+                .into_iter()
+                .map(|peer| crate::update::PeerExportPolicyReplacement {
+                    peer: peer_v4(peer),
+                    export_policy: Some(deny_community_chain(PCB_RS_MARKER)),
+                })
+                .collect(),
+            reply,
+        })
+        .await
+        .unwrap();
+        result.await.unwrap().unwrap();
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    let folded = fold(&grouped);
+    assert_eq!(folded, fold(&ungrouped));
+    assert_eq!(folded_src(&folded, D, pfx(1, 0)), Some(IpAddr::V4(C)));
+    assert_eq!(folded_src(&folded, E, pfx(1, 0)), Some(IpAddr::V4(A)));
+}
+
+/// Fallback slots that empty or stand still, compared per key against the
+/// per-peer path: a fallback withdrawn with nothing eligible left, a
+/// fallback whose source becomes a winner suppressed toward every member,
+/// a lane change that leaves the winner's source on the same later
+/// fallback, a regroup that keeps a fallback, and the advertised-route
+/// explain of a fallback slot.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario per fallback transition, asserted together"
+)]
+async fn oracle_pcb_rs_control_fallback_withdrawals_and_regroup() {
+    let scenario = async |o: &mut Oracle| {
+        for source in [A, B, C] {
+            o.peer_up(source, true, false, None, 64).await;
+        }
+        for &(member, asn) in &PCB_RS_MEMBERS {
+            pcb_rs_peer_up(o, member, asn, 64).await;
+        }
+        // p1: the fallback is withdrawn; nothing eligible remains.
+        o.routes(
+            A,
+            vec![rs_route(pfx(1, 0), A, vec![64601], vec![PCB_RS_TO_NONE])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(pfx(1, 0), B, vec![64602; 2], vec![])],
+            vec![],
+        )
+        .await;
+        withdraw_path(o, B, pfx(1, 0), 0).await;
+        // p2: the fallback's source wins with announce-to-none.
+        o.routes(
+            A,
+            vec![rs_route(pfx(2, 0), A, vec![64601; 2], vec![PCB_RS_TO_NONE])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(pfx(2, 0), B, vec![64602; 3], vec![])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(pfx(2, 0), B, vec![64602], vec![PCB_RS_TO_NONE])],
+            vec![],
+        )
+        .await;
+        // p3: D sources the winner (suppressed toward E) and holds C; B's
+        // announce-to-none path becomes the lane runner-up, and D still
+        // holds C.
+        o.routes(
+            D,
+            vec![rs_route(pfx(3, 0), D, vec![65004], vec![65005])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            C,
+            vec![rs_route(pfx(3, 0), C, vec![64603; 3], vec![])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(pfx(3, 0), B, vec![64602; 2], vec![PCB_RS_TO_NONE])],
+            vec![],
+        )
+        .await;
+        // p4: E regroups while it holds a fallback.
+        o.routes(
+            A,
+            vec![rs_route(pfx(4, 0), A, vec![64601], vec![PCB_RS_TO_NONE])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(pfx(4, 0), B, vec![64602; 2], vec![])],
+            vec![],
+        )
+        .await;
+        o.replace_policy(E, Some(deny_prefix_chain(pfx(9, 0))))
+            .await;
+    };
+    let mut explains = Vec::new();
+    let mut runs = Vec::new();
+    for force_ungrouped in [false, true] {
+        let mut o = Oracle::spawn(force_ungrouped, None);
+        scenario(&mut o).await;
+        let (reply, result) = oneshot::channel();
+        o.tx.send(RibUpdate::ExplainAdvertisedRoute {
+            peer: peer_v4(D),
+            prefix: Prefix::V4(pfx(4, 0)),
+            rd: None,
+            labeled: false,
+            source: None,
+            reply,
+        })
+        .await
+        .unwrap();
+        let explain = result.await.unwrap().unwrap();
+        explains.push((
+            explain.decision,
+            explain.route_peer,
+            explain.next_hop,
+            explain.already_advertised,
+        ));
+        runs.push(o.finish().await);
+    }
+    let (grouped, ungrouped) = (&runs[0], &runs[1]);
+    assert_route_parity(grouped, ungrouped);
+    let folded = fold(grouped);
+    assert_eq!(folded, fold(ungrouped));
+    let b = Some(IpAddr::V4(B));
+    let c = Some(IpAddr::V4(C));
+    let d = Some(IpAddr::V4(D));
+    for (member, prefix, expected) in [
+        (D, 1, None),
+        (E, 1, None),
+        (D, 2, None),
+        (F, 2, None),
+        (D, 3, c),
+        (E, 3, c),
+        (F, 3, d),
+        (D, 4, b),
+        (E, 4, b),
+    ] {
+        assert_eq!(
+            folded_src(&folded, member, pfx(prefix, 0)),
+            expected,
+            "{member}'s route for p{prefix}"
+        );
+    }
+    assert_eq!(
+        explains[0], explains[1],
+        "the grouped explain of D's fallback slot matches the per-peer one"
+    );
+    assert_eq!(explains[0].1, Some(peer_v4(B)));
+    assert!(explains[0].3, "D already holds its fallback");
+}
+
 /// All requests are queued before the actor runs. Distinct own-source rows,
 /// a different policy group and negotiated private paths retain the same
 /// normalized announcements, next hops, withdrawals and refresh markers.

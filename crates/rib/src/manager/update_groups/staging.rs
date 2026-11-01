@@ -253,6 +253,9 @@ impl RibManager {
                     // while the WINNER's source control communities
                     // moved — rs-control members' verdicts on the
                     // staged entry may flip with no wire change.
+                    // A lane change needs no flag here: wherever a fallback
+                    // list exists the lane entry is one of its entries,
+                    // compared by the same predicate below.
                     let mut rs_view_moved = false;
                     if out.deltas.len() == deltas_before
                         && let Some(transition) =
@@ -296,7 +299,6 @@ impl RibManager {
                         _ => (false, true),
                     };
                     if !(content_unchanged && control_unchanged) {
-                        rs_view_moved = true;
                         // The member the transition emits toward: the
                         // new entry's winner source, or the REPLACED
                         // entry's for a retire (how the retire arm

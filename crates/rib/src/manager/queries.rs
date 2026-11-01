@@ -2930,8 +2930,10 @@ impl RibManager {
     /// An unsettled member is explained against its retained regroup baseline;
     /// without one, the caller has already refused
     /// ([`Self::grouped_unicast_admission_unknown`]). The advertised listing
-    /// applies the same rule, so the two agree. Explain reads only the
-    /// explained prefix, so the view holds only that prefix's entries.
+    /// applies the same baseline rule. It does not apply RFC 7947 route-server
+    /// control, which this view does, so the two differ for a slot suppressed
+    /// toward an rs-control member. Explain reads only the explained prefix,
+    /// so the view holds only that prefix's entries.
     fn selection_rtbh_admission_known(&self, peer: PeerId, prefix: &Prefix) -> bool {
         if !self.selection_partial_caught_up(peer) {
             return false;
@@ -2943,9 +2945,10 @@ impl RibManager {
             return false;
         };
         let actual = self.adj_ribs_out.get(&peer);
+        let rs_control = self.rs_control_context(peer);
         group.table.iter_prefix(prefix).any(|route| {
             group
-                .adv_entry(peer, prefix, route.path_id)
+                .adv_entry_for(peer, prefix, route.path_id, rs_control)
                 .is_some_and(|entry| {
                     entry
                         .local_source
@@ -2982,18 +2985,14 @@ impl RibManager {
             }
             return Some(view);
         }
-        // The same member filters as `grouped_advertised_routes_iter`,
-        // applied to the staged entries of this one prefix.
+        // The member filters of `grouped_advertised_routes_iter`, applied to
+        // the staged entries of this one prefix, plus route-server control:
+        // the member's wire form is the emit seams' per-target resolution
+        // (suppression and fallback) and rewrite of the shared row.
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
         let initial = self.initial_group_admitted(peer);
-        // The shared row precedes route-server control; the member's wire
-        // form is the emit seams' per-target suppression and rewrite of it.
-        let rs_control = self
-            .peer_rs_control
-            .get(&peer)
-            .copied()
-            .zip(self.peer_asn.get(&peer).copied());
+        let rs_control = self.rs_control_context(peer);
         for staged in group.table.iter_prefix(prefix) {
             let Some(entry) =
                 group.adv_entry_post_backstop_for(peer, prefix, staged.path_id, rs_control)

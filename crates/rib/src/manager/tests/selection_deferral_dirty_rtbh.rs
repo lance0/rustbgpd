@@ -3061,3 +3061,112 @@ fn refused_replacement_salvage_work_is_linear_in_departing_rtbh_prefixes() {
         );
     }
 }
+
+/// A per-client-best receiver that enforces RFC 7947 control communities
+/// toward `asn` (route-server ASN 65000).
+fn connect_rs_member(
+    manager: &mut RibManager,
+    address: Ipv4Addr,
+    asn: u32,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let peer = peer_v4(address);
+    let session_id = u64::from(address.octets()[3]);
+    manager.handle_update(RibUpdate::SetPeerRsControl {
+        peer,
+        session_id,
+        rs_control_asn: Some(65000),
+    });
+    let (outbound_tx, outbound_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: asn,
+        peer_router_id: address,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![FAMILY],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: true,
+        interpret_rfc1997: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    outbound_rx
+}
+
+/// A route-server client whose received best path is suppressed toward it
+/// (`0:65004`) holds the local RTBH host route ranked below it. Removing
+/// that injection in the selection hold withdraws the client's row: the
+/// row's recorded provenance is the local exempt route it actually got,
+/// not the suppressed winner. Grouped and ungrouped clients agree.
+#[test]
+fn rs_member_fallback_rtbh_removal_is_withdrawn_in_the_hold() {
+    let member = Ipv4Addr::new(192, 0, 2, 84);
+    let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
+    for grouped in [true, false] {
+        let mut manager = manager_with_dormant_waiter();
+        manager.test_force_ungrouped = !grouped;
+        let _source_rx = connect(&mut manager, SOURCE, 64, false, false);
+        let mut member_rx = connect_rs_member(&mut manager, member, 65004);
+        let _other_rx = connect_rs_member(&mut manager, Ipv4Addr::new(192, 0, 2, 85), 65005);
+        assert_eq!(
+            manager.grouped_member_of(peer_v4(member)).is_some(),
+            grouped
+        );
+        let mut wire = std::collections::HashMap::new();
+        apply_wire(&mut member_rx, &mut wire);
+        let mut received = make_route_with_lp(host, SOURCE, 100);
+        AttrSet::edit(&mut received.attributes, |attributes| {
+            attributes.push(PathAttribute::Communities(vec![65004]));
+        });
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: u64::from(SOURCE.octets()[3]),
+            announced: vec![received],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+        let mut local = make_route_with_lp(host, SOURCE, 50);
+        set_peer(&mut local, crate::PeerId::LOCAL);
+        local.origin_type = crate::route::RouteOrigin::Local;
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute {
+            route: local,
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        apply_wire(&mut member_rx, &mut wire);
+        assert_eq!(
+            wire.get(&(Prefix::V4(host), 0)).map(|route| route.peer),
+            Some(crate::PeerId::LOCAL),
+            "grouped={grouped}: the client holds the local route"
+        );
+
+        let _waiter = connect(&mut manager, WAITER, 64, true, false);
+        assert!(manager.selection_deferred(FAMILY));
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix: Prefix::V4(host),
+            path_id: 0,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        apply_wire(&mut member_rx, &mut wire);
+        assert!(
+            wire.is_empty(),
+            "grouped={grouped}: the removed RTBH row leaves the wire in the hold: {wire:?}"
+        );
+    }
+}

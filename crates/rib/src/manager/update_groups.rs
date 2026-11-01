@@ -938,12 +938,18 @@ impl GroupRibOut {
         member: PeerId,
         prefixes: Option<&HashSet<Prefix>>,
     ) -> Vec<Route> {
-        self.otc_blocked_for_member_with_checkpoint(member, prefixes, &mut || {})
+        self.otc_blocked_for_member_with_checkpoint(member, None, prefixes, &mut || {})
     }
 
+    /// The RFC 9234 backstop's per-member outcome over `prefixes` (`None` =
+    /// every staged key): the member's resolved slots the backstop strips.
+    /// `rs_control` is the member's RFC 7947 context, under which a
+    /// per-client-best slot resolves past suppressed candidates
+    /// ([`Self::adv_entry_for`]).
     pub(in crate::manager) fn otc_blocked_for_member_with_checkpoint(
         &self,
         member: PeerId,
+        rs_control: Option<(u32, u32)>,
         prefixes: Option<&HashSet<Prefix>>,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Route> {
@@ -1017,8 +1023,58 @@ impl GroupRibOut {
                 prefixes.map_or(usize::MAX, HashSet::len),
                 self.runner_up.len(),
             );
+            if rs_control.is_some() {
+                self.resolve_otc_blocked_for_rs_member(
+                    member,
+                    rs_control,
+                    prefixes,
+                    &mut blocked,
+                    checkpoint,
+                );
+            }
         }
         blocked
+    }
+
+    /// rs-control refinement of a per-client-best member's OTC residue: the
+    /// backstop sees the member's RESOLVED slot. A slot differs from the
+    /// winner/lane projection only where a candidate is suppressed toward
+    /// the member, so the candidates are the projected keys plus the
+    /// fallback-list keys in scope, each re-resolved.
+    fn resolve_otc_blocked_for_rs_member(
+        &self,
+        member: PeerId,
+        rs_control: Option<(u32, u32)>,
+        prefixes: Option<&HashSet<Prefix>>,
+        blocked: &mut Vec<Route>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let mut keys: Vec<Prefix> = blocked.iter().map(|route| route.prefix).collect();
+        if !self.rs_fallback.is_empty() {
+            match prefixes {
+                Some(prefixes) if prefixes.len() <= self.rs_fallback.len() => {
+                    keys.extend(prefixes.iter().copied().filter(|prefix| {
+                        checkpoint();
+                        self.rs_fallback.contains_key(prefix)
+                    }));
+                }
+                _ => keys.extend(self.rs_fallback.keys().copied().filter(|prefix| {
+                    checkpoint();
+                    prefixes.is_none_or(|prefixes| prefixes.contains(prefix))
+                })),
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        blocked.clear();
+        for prefix in keys {
+            checkpoint();
+            if let Some(entry) = self.adv_entry_for(member, &prefix, 0, rs_control)
+                && super::distribution::otc_egress_blocked(entry.route, self.local_role)
+            {
+                blocked.push(entry.route.clone());
+            }
+        }
     }
 
     fn count_slot(prefix: &Prefix) -> usize {
@@ -1207,6 +1263,8 @@ impl GroupRibOut {
             Some(fallback) => {
                 self.rs_fallback.insert(prefix, fallback);
             }
+            // The common case: no tagged prefix anywhere in the group.
+            None if self.rs_fallback.is_empty() => {}
             None => {
                 self.rs_fallback.remove(&prefix);
             }
@@ -1666,8 +1724,12 @@ impl GroupRibOut {
                     // policy sets a next hop on only a few routes.
                     checkpoint(true);
                     next_hop_overrides.reserve(
-                        (self.table.next_hop_override_count() + self.runner_up.len())
-                            .min(self.table.len()),
+                        // A fallback slot (rs-control) can carry an
+                        // override on a prefix with no lane entry.
+                        (self.table.next_hop_override_count()
+                            + self.runner_up.len()
+                            + self.rs_fallback.len())
+                        .min(self.table.len()),
                     );
                     checkpoint(true);
                 }

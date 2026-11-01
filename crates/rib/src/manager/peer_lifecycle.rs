@@ -3077,6 +3077,7 @@ impl RibManager {
             );
             grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
                 peer,
+                self.rs_control_context(peer),
                 Some(&otc_prefixes),
                 &mut checkpoint,
             );

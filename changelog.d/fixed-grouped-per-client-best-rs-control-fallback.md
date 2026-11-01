@@ -10,7 +10,10 @@
   is also suppressed toward it, or a withdrawal when no eligible path
   remains. Per-target prepend and the control-community scrub apply to that
   route. The same applies on join, route refresh and resync, and when a tag
-  arrives on an already advertised best path.
+  arrives on an already advertised best path. When the route a client gets
+  this way is a local RTBH route, removing it during a graceful-restart
+  selection hold withdraws it at once, and RFC 9234 OTC rejection reports
+  name the route the client would have received.
   **Operator-visible:** affected clients now receive routes for these
   prefixes. Prefixes whose paths carry no suppression community keep the
   existing shared update-group emission.

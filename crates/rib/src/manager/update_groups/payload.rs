@@ -726,11 +726,17 @@ impl GroupStageOutput {
             rs_control_route_tagged(communities, large_communities, rs_asn)
         };
         // A recorded fallback-view change exists only where some candidate
-        // may suppress toward a target.
+        // may suppress toward a target. A per-client-best winner delta over a
+        // tagged prior is the same: it may promote the member's current
+        // fallback, or replace a winner whose scrubbed form the member already
+        // holds, and the shared payload would re-announce it while the
+        // resolved-slot diff emits nothing.
         !self.rs_priors.is_empty()
             || self.deltas.iter().any(|delta| {
                 checkpoint();
-                delta.new.as_ref().is_some_and(|(route, _)| {
+                delta.prior.as_ref().is_some_and(|prior| {
+                    prior.rs_fallback.is_some() || attrs_tagged(prior.source_attrs.as_ref())
+                }) || delta.new.as_ref().is_some_and(|(route, _)| {
                     attrs_tagged(delta.source_attrs.as_ref())
                         || rs_control_route_tagged(
                             route.communities(),
@@ -1478,7 +1484,8 @@ pub(in crate::manager) fn emit_pcb_rs_member_with_checkpoint(
     checkpoint: &mut impl FnMut(),
 ) {
     use crate::manager::distribution::rs_control::rs_control_route_rewrite;
-    let mut resolved: HashSet<Prefix> = HashSet::new();
+    let mut resolved: crate::fast_hash::FastSet<Prefix> = crate::fast_hash::FastSet::default();
+    resolved.reserve(stage.deltas.len() + stage.rs_priors.len());
     let slots = stage
         .deltas
         .iter()

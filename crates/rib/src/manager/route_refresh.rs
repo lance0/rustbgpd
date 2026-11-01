@@ -1544,6 +1544,7 @@ impl RibManager {
                 );
                 grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
                     peer,
+                    rs_control_asn.zip(target_peer_asn),
                     Some(&all_prefixes),
                     &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);

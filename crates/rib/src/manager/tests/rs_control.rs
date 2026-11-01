@@ -884,3 +884,112 @@ fn explain_best_path_add_path_ranks_match_live_rs_control_staging() {
     assert!(held.contains_key(&peer_v4(tagged_source)), "{held:?}");
     assert_eq!(explained, held);
 }
+
+/// `SetPeerExportContext` + `SetPeerRsControl` + `PeerUp` for a
+/// per-client-best route-server client whose local RFC 9234 role is
+/// Customer, so routes carrying OTC are blocked toward it.
+async fn pcb_customer_rs_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+    peer_asn: u32,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    tx.send(RibUpdate::SetPeerExportContext {
+        peer,
+        session_id: 0,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::SetPeerRsControl {
+        peer,
+        session_id: 0,
+        rs_control_asn: Some(RS_AS),
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    tx.send(RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: true,
+        interpret_rfc1997: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
+/// A client whose best path is suppressed toward it and whose fallback
+/// carries OTC: the RFC 9234 backstop blocks the fallback, and the client's
+/// update reports exactly that blocked route, as the per-peer path does.
+/// The other client receives the best path and reports nothing.
+#[tokio::test]
+async fn otc_blocked_fallback_is_reported_for_the_suppressed_client() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 121, 0), 24);
+    let best = peer_v4(Ipv4Addr::new(198, 51, 100, 41));
+    let fallback = peer_v4(Ipv4Addr::new(198, 51, 100, 42));
+    let mut reports = Vec::new();
+    for force_ungrouped in [false, true] {
+        let (tx, rx) = mpsc::channel(64);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        manager.test_force_ungrouped = force_ungrouped;
+        let handle = tokio::spawn(manager.run());
+        let client_a = PeerId::from_addr("192.0.2.211".parse().unwrap());
+        let client_b = PeerId::from_addr("192.0.2.212".parse().unwrap());
+        let mut a_rx = pcb_customer_rs_peer_up(&tx, client_a, 65001).await;
+        let mut b_rx = pcb_customer_rs_peer_up(&tx, client_b, 65002).await;
+        assert_eq!(
+            query_update_group_label(&tx, client_a)
+                .await
+                .starts_with("group:"),
+            !force_ungrouped
+        );
+        let winner = tagged(
+            make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 41), vec![64601]),
+            vec![std_c(0, 65001)],
+            vec![],
+        );
+        announce_unicast(&tx, best, vec![winner]).await;
+        let mut runner_up =
+            make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 42), vec![64602, 64602]);
+        AttrSet::edit(&mut runner_up.attributes, |attrs| {
+            attrs.push(PathAttribute::OnlyToCustomer(64602));
+        });
+        announce_unicast(&tx, fallback, vec![runner_up]).await;
+        let _ = query_best_routes(&tx).await;
+        let report = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+            let mut announced = Vec::new();
+            let mut blocked = Vec::new();
+            while let Ok(update) = rx.try_recv() {
+                announced.extend(update.announce.iter().map(|route| route.peer));
+                blocked.extend(update.otc_blocked.iter().map(|route| route.peer));
+            }
+            (announced, blocked)
+        };
+        let a = report(&mut a_rx);
+        let b = report(&mut b_rx);
+        assert_eq!(
+            a,
+            (vec![], vec![fallback]),
+            "force_ungrouped={force_ungrouped}: client A's fallback is blocked and reported"
+        );
+        assert_eq!(b.1, Vec::<PeerId>::new(), "client B gets the best path");
+        reports.push((a, b));
+        drop(tx);
+        handle.await.unwrap();
+    }
+    assert_eq!(reports[0], reports[1]);
+}
