@@ -489,8 +489,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   family whose request is still queued is not sent again. A peer moving
   across a max-prefix warning threshold while the peer manager was busy
   queued one notification per crossing. Each scope now queues one, which
-  carries the crossing count, and the peer manager still publishes one
-  `MaxPrefixWarning` event per crossing.
+  carries the crossing count. The peer manager still publishes one
+  `MaxPrefixWarning` event per crossing, at most 64 per turn of its loop.
 
 ### Documentation
 

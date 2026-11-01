@@ -1235,6 +1235,58 @@ async fn max_prefix_warning_event_names_the_metric_family_and_stage() {
     );
 }
 
+/// A warning standing for many crossings publishes one event per crossing,
+/// but at most `MAX_PREFIX_WARNING_EVENTS_PER_TURN` per run-loop turn; a
+/// later warning for the same scope joins the backlog instead of adding an
+/// entry.
+#[tokio::test]
+async fn coalesced_max_prefix_warning_events_are_paced_per_turn() {
+    use super::super::notifications::MAX_PREFIX_WARNING_EVENTS_PER_TURN as PER_TURN;
+
+    let mut mgr = test_peer_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(peer_addr, SessionState::Established, None, counters),
+        false,
+    );
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
+    mgr.register_session(session_id, &key(peer_addr));
+    let mut live_events = mgr.session_events_tx.subscribe();
+    let warning = |crossings| SessionNotification::MaxPrefixWarning {
+        session_id,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+        family: "ipv4_unicast",
+        stage: "accepted",
+        usage: 80,
+        bound: 100,
+        percent: 80,
+        crossings,
+    };
+    let mut published = || std::iter::from_fn(|| live_events.try_recv().ok()).count();
+
+    mgr.handle_session_notification(warning(150)).await;
+    assert_eq!(published(), usize::try_from(PER_TURN).unwrap());
+    mgr.handle_session_notification(warning(50)).await;
+    assert_eq!(published(), usize::try_from(PER_TURN).unwrap());
+    assert_eq!(
+        mgr.max_prefix_warning_backlog.len(),
+        1,
+        "one entry per scope"
+    );
+    let mut total = 2 * PER_TURN;
+    while !mgr.max_prefix_warning_backlog.is_empty() {
+        mgr.publish_max_prefix_warning_backlog();
+        let turn = u64::try_from(published()).unwrap();
+        assert!(turn <= PER_TURN, "{turn} events in one turn");
+        total += turn;
+    }
+    assert_eq!(total, 200, "one event per crossing");
+}
+
 #[tokio::test]
 async fn stale_max_prefix_warnings_are_not_published() {
     let mut mgr = test_peer_manager();

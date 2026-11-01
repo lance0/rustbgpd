@@ -6,6 +6,14 @@ use tracing::{debug, info, warn};
 
 use super::{ManagedPeer, PeerManager};
 
+/// Max-prefix warning events published per run-loop turn. A coalesced
+/// warning can stand for many crossings, one event each; publishing them a
+/// turn at a time keeps one warning from holding the owner loop while
+/// collisions, link changes and operator requests wait. Each event is a
+/// format, a history push and a broadcast send, so 64 is a small slice of a
+/// turn, and the backlog still drains at 64 events per turn.
+pub(super) const MAX_PREFIX_WARNING_EVENTS_PER_TURN: u64 = 64;
+
 impl PeerManager {
     /// A failed Stop enqueue cannot leave a candidate's sibling primary live:
     /// abort it, fence its old RIB ownership, and install a fresh disabled Idle
@@ -184,6 +192,28 @@ impl PeerManager {
             }
         }
         Some(notification)
+    }
+
+    /// Publish up to [`MAX_PREFIX_WARNING_EVENTS_PER_TURN`] queued
+    /// max-prefix warning events, oldest scope first; the run loop calls
+    /// this again on later turns while any remain.
+    pub(super) fn publish_max_prefix_warning_backlog(&mut self) {
+        let mut budget = MAX_PREFIX_WARNING_EVENTS_PER_TURN;
+        while budget > 0
+            && let Some((scope, event, remaining)) = self.max_prefix_warning_backlog.pop_front()
+        {
+            let now = remaining.min(budget);
+            for _ in 0..now {
+                let mut event = event.clone();
+                event.timestamp_unix_ms = Self::session_event_timestamp();
+                self.publish_lifecycle_event(event);
+            }
+            budget -= now;
+            if remaining > now {
+                self.max_prefix_warning_backlog
+                    .push_front((scope, event, remaining - now));
+            }
+        }
     }
 
     /// Handle one notification; the outermost call then handles whatever
@@ -512,20 +542,33 @@ impl PeerManager {
                     return;
                 }
                 let rendered_peer = peer_key.label();
-                for _ in 0..crossings {
-                    self.publish_lifecycle_event(rustbgpd_api::peer_types::SessionLifecycleEvent {
-                        event_type: rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
-                        peer: peer_addr,
-                        peer_label: Some(rendered_peer.clone()),
-                        timestamp_unix_ms: Self::session_event_timestamp(),
-                        old_state: None,
-                        new_state: None,
-                        session_role: Some(Self::session_role_label(role).to_string()),
-                        reason: format!(
-                            "max-prefix warning for peer {rendered_peer}: family {family} stage {stage} usage {usage} of bound {bound} (threshold {percent}%)"
-                        ),
-                    });
+                let event = rustbgpd_api::peer_types::SessionLifecycleEvent {
+                    event_type:
+                        rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
+                    peer: peer_addr,
+                    peer_label: Some(rendered_peer.clone()),
+                    timestamp_unix_ms: 0,
+                    old_state: None,
+                    new_state: None,
+                    session_role: Some(Self::session_role_label(role).to_string()),
+                    reason: format!(
+                        "max-prefix warning for peer {rendered_peer}: family {family} stage {stage} usage {usage} of bound {bound} (threshold {percent}%)"
+                    ),
+                };
+                // One backlog entry per session scope: a later warning for
+                // the same scope adds its crossings to it.
+                let scope = (session_id, family, stage);
+                if let Some(entry) = self
+                    .max_prefix_warning_backlog
+                    .iter_mut()
+                    .find(|entry| entry.0 == scope)
+                {
+                    entry.2 += crossings;
+                } else {
+                    self.max_prefix_warning_backlog
+                        .push_back((scope, event, crossings));
                 }
+                self.publish_max_prefix_warning_backlog();
             }
             SessionNotification::MaxPrefixExceeded {
                 session_id,
