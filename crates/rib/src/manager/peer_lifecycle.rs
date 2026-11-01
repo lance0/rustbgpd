@@ -565,14 +565,13 @@ impl RibManager {
         self.drop_evpn_feed_receipts(peer, None);
         self.live_sessions.remove(&peer);
         self.clear_policy_filtered_routes_for_peer(peer);
+        let successor = self.label_successor(peer);
         if self.gr_peers.remove(&peer).is_some() {
             self.gr_stale_deadlines.remove(&peer);
             self.gr_stale_routes_time.remove(&peer);
             self.llgr_peer_config.remove(&peer);
             info!(%peer, "peer down during graceful restart — aborting GR");
-            let peer_label = peer.label();
-            self.metrics.set_gr_active(&peer_label, false);
-            self.metrics.set_gr_stale_routes(&peer_label, 0);
+            self.clear_gr_gauges(peer, successor);
         }
 
         if self.llgr_peers.remove(&peer).is_some() {
@@ -582,9 +581,7 @@ impl RibManager {
             // promoted out of gr_peers.
             self.llgr_peer_config.remove(&peer);
             info!(%peer, "peer down during LLGR — aborting LLGR");
-            let peer_label = peer.label();
-            self.metrics.set_gr_active(&peer_label, false);
-            self.metrics.set_gr_stale_routes(&peer_label, 0);
+            self.clear_gr_gauges(peer, successor);
         }
         // Per-family LLGR deadlines can outlive both maps above (they
         // survive re-establishment while routes remain LLGR-stale); a full
@@ -592,9 +589,7 @@ impl RibManager {
         // series those deadlines kept active.
         if self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer) {
             self.llgr_stale_deadlines.retain(|&(p, _, _)| p != peer);
-            let peer_label = peer.label();
-            self.metrics.set_gr_active(&peer_label, false);
-            self.metrics.set_gr_stale_routes(&peer_label, 0);
+            self.clear_gr_gauges(peer, successor);
         }
 
         self.clear_peer_adj_rib_in(peer);
@@ -626,6 +621,17 @@ impl RibManager {
         let Some(rib) = self.ribs.remove(&peer) else {
             return;
         };
+        // The label's gauges show its successor's routes, if it has one.
+        let published = self
+            .label_successor(peer)
+            .and_then(|successor| self.ribs.get(&successor))
+            .map_or(([0, 0], 0, [0, 0]), |successor| {
+                (
+                    successor.unicast_lens(),
+                    successor.evpn_len(),
+                    successor.flowspec_lens(),
+                )
+            });
         self.with_peer_teardown_readiness(|manager| {
             let readiness = manager.replacement_readiness.clone();
             #[cfg(test)]
@@ -682,20 +688,23 @@ impl RibManager {
                 .map(crate::route::RtcRibRoute::key)
                 .collect();
             debug!(%peer, cleared = count, "peer adj-rib-in cleared");
+            let (unicast, evpn, flowspec) = published;
             crate::manager::helpers::set_rib_prefixes(
                 &manager.metrics,
                 &peer.label(),
                 crate::manager::helpers::UNICAST_FAMILIES,
-                [0, 0],
+                unicast,
             );
-            manager
-                .metrics
-                .set_rib_prefixes(&peer.label(), "l2vpn_evpn", 0);
+            manager.metrics.set_rib_prefixes(
+                &peer.label(),
+                "l2vpn_evpn",
+                crate::manager::helpers::gauge_val(evpn),
+            );
             crate::manager::helpers::set_rib_prefixes(
                 &manager.metrics,
                 &peer.label(),
                 crate::manager::helpers::FLOWSPEC_FAMILIES,
-                [0, 0],
+                flowspec,
             );
             let mut changed = manager.recompute_best(&affected);
             manager.distribute_changes(&changed, &affected);
@@ -835,7 +844,8 @@ impl RibManager {
     /// no-op safety net for a peer that was deleted while never
     /// established. Afterwards, remove the deleted peer's metric label
     /// sets entirely — gauges frozen at their last value would
-    /// otherwise keep advertising a peer that no longer exists.
+    /// otherwise keep advertising a peer that no longer exists — unless a
+    /// newer identity now uses the label ([`PeerId::supersede`]).
     ///
     /// Deletion is a config decision, not a session event, so it runs the
     /// teardown unconditionally — the session-identity gate in
@@ -882,10 +892,51 @@ impl RibManager {
                 selection.peer_deleted(peer, &self.metrics)
             });
         self.apply_selection_deferral_transitions(transitions, "peer deleted from configuration");
+        // A newer identity under the label (a re-added neighbor, or a
+        // reconnect at the address) may already emit there: its series are
+        // not this deletion's to reap. What this handle emitted after the
+        // peer manager's own reap stays for the newer identity to overwrite.
         if !keep_series {
-            self.metrics
-                .reap_peer_series(&label.map_or_else(|| peer.label(), |label| label.to_string()));
+            let label = label.map_or_else(|| peer.label(), |label| label.to_string());
+            peer.unless_superseded(|| self.metrics.reap_peer_series(&label));
         }
+    }
+
+    /// The tracked peer that now publishes under `peer`'s label, once a newer
+    /// identity superseded it ([`PeerId::supersede`]): a tearing-down handle
+    /// leaves the label's gauges at that peer's values instead of zero.
+    // ponytail: scans every tracked peer, but only for a superseded handle
+    // (a replaced retained speaker or a re-add racing its predecessor's
+    // cleanup); a label index if those ever become frequent.
+    fn label_successor(&self, peer: PeerId) -> Option<PeerId> {
+        if !peer.is_superseded() {
+            return None;
+        }
+        let label = peer.label();
+        self.live_sessions
+            .keys()
+            .chain(self.ribs.keys())
+            .copied()
+            .find(|&other| other != peer && other.label() == label)
+    }
+
+    /// Whether `peer` holds Graceful Restart or LLGR retention, whose gauges
+    /// it publishes itself.
+    fn in_graceful_restart(&self, peer: PeerId) -> bool {
+        self.gr_peers.contains_key(&peer)
+            || self.llgr_peers.contains_key(&peer)
+            || self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer)
+    }
+
+    /// End `peer`'s Graceful Restart gauges, unless the label's successor
+    /// is in Graceful Restart itself and publishes them.
+    fn clear_gr_gauges(&self, peer: PeerId, successor: Option<PeerId>) {
+        if successor.is_some_and(|successor| self.in_graceful_restart(successor)) {
+            return;
+        }
+        let peer_label = peer.label();
+        self.metrics.set_gr_active(&peer_label, false);
+        self.metrics.set_gr_stale_routes(&peer_label, 0);
     }
 
     /// Move a live neighbor to a new endpoint. Whatever its previous

@@ -145,6 +145,9 @@ struct Slot {
     /// An interface-only neighbor (ADR-0142): its `peer` label names the
     /// interface, which outlives every learned endpoint.
     interface_only: bool,
+    /// A newer identity uses this handle's `peer` label
+    /// ([`PeerId::supersede`]). Read and written under the slots lock only.
+    superseded: bool,
 }
 
 /// The slot allocator and endpoint store behind every allocated [`PeerId`].
@@ -161,7 +164,6 @@ struct Slots {
 }
 
 impl Slots {
-    #[cfg(test)]
     fn slot(&self, peer: PeerId) -> Option<&Slot> {
         slot_of(&self.entries, peer)
     }
@@ -187,6 +189,7 @@ impl Slots {
             slot.state = state;
             slot.endpoint = endpoint;
             slot.interface_only = interface_only;
+            slot.superseded = false;
             return PeerId {
                 index,
                 generation: slot.generation,
@@ -204,6 +207,7 @@ impl Slots {
             state,
             endpoint,
             interface_only,
+            superseded: false,
         });
         PeerId {
             index,
@@ -384,6 +388,44 @@ impl PeerId {
     #[must_use = "a false return means the handle was not live"]
     pub fn release(self) -> bool {
         self.pinned_v4().is_none() && write(|slots| slots.release(self))
+    }
+
+    /// Mark a deleted neighbor's handle whose `peer` label a newer identity
+    /// now uses: a neighbor re-added at its address, or the speaker that
+    /// replaced a retained one. The RIB processes the old handle's cleanup
+    /// after the newer identity has begun emitting under the label, so that
+    /// cleanup must neither reap the label ([`Self::unless_superseded`]) nor
+    /// zero what the newer identity publishes there. A no-op for a pinned or
+    /// stale handle.
+    pub fn supersede(self) {
+        if self.pinned_v4().is_some() {
+            return;
+        }
+        if let Some(slot) = lock()
+            .entries
+            .get_mut(self.index as usize)
+            .filter(|slot| slot.generation == self.generation)
+        {
+            slot.superseded = true;
+        }
+    }
+
+    /// Whether [`Self::supersede`] marked the handle.
+    #[must_use]
+    pub fn is_superseded(self) -> bool {
+        self.pinned_v4().is_none() && lock().slot(self).is_some_and(|slot| slot.superseded)
+    }
+
+    /// Run `f` unless the handle is superseded, holding the table's writer
+    /// lock throughout, so a [`Self::supersede`] made before a newer identity
+    /// starts emitting either lands first (and `f` does not run) or waits for
+    /// `f` to finish.
+    pub fn unless_superseded(self, f: impl FnOnce()) {
+        let slots = lock();
+        if self.pinned_v4().is_some() || slots.slot(self).is_none_or(|slot| !slot.superseded) {
+            f();
+        }
+        drop(slots);
     }
 
     /// Move a live neighbor to a new endpoint (an interface-only neighbor

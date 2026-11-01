@@ -248,8 +248,12 @@ impl PeerManager {
 
     /// Delete and release a handle the live neighbor does not use, keeping
     /// the series it shares their label with. Never waits for mailbox room:
-    /// no session uses the handle, and the deletion reaps no label.
+    /// no session uses the handle, and the deletion reaps no label. The live
+    /// neighbor may publish under the label before the RIB handles the
+    /// deletion, so the handle is superseded at once and its teardown leaves
+    /// the label's gauges to that neighbor.
     fn release_side_handle(&mut self, handle: PeerId) {
+        handle.supersede();
         for update in [
             RibUpdate::PeerDeleted {
                 peer: handle,

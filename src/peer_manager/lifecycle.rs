@@ -826,7 +826,7 @@ impl PeerManager {
 
         // A static neighbor at a retained dynamic neighbor's address is a new
         // neighbor: none of the retained identity carries over, and the
-        // retained neighbor goes once the add can no longer fail.
+        // retained neighbor goes before the new session starts.
         let replaces_retained = self.retained_dynamic.contains_key(&peer_key);
         transport.neighbor_counters = if replaces_retained {
             rustbgpd_transport::NeighborCounters::default()
@@ -856,6 +856,13 @@ impl PeerManager {
             self.static_rib_peer_slot(&peer_key, transport.interface_only, replaces_retained);
         transport.rib_peer = rib_peer;
 
+        if replaces_retained {
+            // Its series reap and RIB deletion go ahead of anything the new
+            // session emits; the admission below fences the deletion. A
+            // session that then fails to start leaves the address to the
+            // speaker's next connection.
+            self.delete_retained_dynamic(&peer_key);
+        }
         self.admit_deferred_rib_updates_for(&peer_key).await;
         let session_id = self.allocate_session_id();
         #[cfg(test)]
@@ -918,12 +925,6 @@ impl PeerManager {
             }
         };
 
-        if replaces_retained {
-            // The new session has started at the retained neighbor's label:
-            // its deletion reaches the RIB before this add completes.
-            self.delete_retained_dynamic(&peer_key);
-            self.admit_deferred_rib_updates_for(&peer_key).await;
-        }
         info!(peer = %address, %remote_asn, "peer added dynamically");
         if bmp_excluded {
             self.metrics.record_bmp_identity_conflict(true);
