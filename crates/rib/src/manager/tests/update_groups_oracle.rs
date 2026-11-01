@@ -7294,6 +7294,77 @@ async fn oracle_pcb_rs_control_fallback_withdrawals_and_regroup() {
     assert!(explains[0].3, "D already holds its fallback");
 }
 
+/// Under an equivalent next-hop profile, an action-only change to the
+/// fallback an rs-control member holds sends that member nothing, as on the
+/// per-peer path: the suppression reads the member's resolved prior slot.
+#[tokio::test]
+async fn oracle_pcb_rs_control_equivalent_fallback_action_is_suppressed() {
+    for initially_self in [false, true] {
+        let mut runs = Vec::new();
+        for force_ungrouped in [false, true] {
+            let mut policy = permit_all_with(RouteModifications {
+                communities_remove: vec![PCB_RS_MARKER],
+                ..RouteModifications::default()
+            });
+            let mut tagged = policy.policies[0].policy.entries[0].clone();
+            tagged.match_community = vec![CommunityMatch::Standard {
+                value: PCB_RS_MARKER,
+            }];
+            tagged.modifications.set_next_hop = Some(NextHopAction::Self_);
+            policy.policies[0].policy.entries.insert(0, tagged);
+            let fallback = |use_self: bool| {
+                rs_route(
+                    pfx(1, 0),
+                    B,
+                    vec![64602; 2],
+                    if use_self {
+                        vec![PCB_RS_MARKER]
+                    } else {
+                        vec![]
+                    },
+                )
+            };
+            let mut o = Oracle::spawn(force_ungrouped, None);
+            for source in [A, B] {
+                o.peer_up(source, true, false, None, 64).await;
+            }
+            for (member, asn) in [(D, 65004), (E, 65005)] {
+                equivalent_action_profile(&mut o, member).await;
+                pcb_rs_peer_up_with_policy(&mut o, member, asn, 64, Some(policy.clone())).await;
+            }
+            assert_eq!(
+                o.group_label(D).await.starts_with("group:"),
+                !force_ungrouped
+            );
+            o.routes(
+                A,
+                vec![rs_route(pfx(1, 0), A, vec![64601], vec![65004])],
+                vec![],
+            )
+            .await;
+            o.routes(B, vec![fallback(initially_self)], vec![]).await;
+            let initial = o.drain_peer_available(D).await;
+            let initial: Vec<_> = initial.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(initial.last().map(|entry| entry.3), Some(peer_v4(B)));
+            assert_eq!(
+                initial.last().map(|entry| entry.5.clone()),
+                Some(initially_self.then_some(NextHopAction::Self_))
+            );
+            o.routes(B, vec![fallback(!initially_self)], vec![]).await;
+            assert!(
+                o.drain_peer_available(D)
+                    .await
+                    .iter()
+                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                "force_ungrouped={force_ungrouped}: an equivalent fallback action change \
+                 must not reach D"
+            );
+            runs.push(o.finish().await);
+        }
+        assert_route_parity(&runs[0], &runs[1]);
+    }
+}
+
 /// All requests are queued before the actor runs. Distinct own-source rows,
 /// a different policy group and negotiated private paths retain the same
 /// normalized announcements, next hops, withdrawals and refresh markers.

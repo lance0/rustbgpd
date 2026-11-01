@@ -1568,19 +1568,26 @@ pub(super) fn no_export_export_suppressed(
 /// RFC 9234 §5 egress rule for IPv4/IPv6 unicast: a route that already
 /// carries OTC must not be propagated toward a Provider, Peer, or Route
 /// Server. The local role names our side of those relationships.
+/// Whether RFC 9234 OTC egress can block anything toward a session with
+/// `local_role`: only toward a provider, a peer or a route server.
+pub(in crate::manager) fn otc_role_blocks(local_role: Option<BgpRole>) -> bool {
+    matches!(
+        local_role,
+        Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
+    )
+}
+
 pub(in crate::manager) fn otc_egress_blocked(
     route: &crate::route::Route,
     local_role: Option<BgpRole>,
 ) -> bool {
     // Valid network OTC is always typed; malformed type 35 is omitted before
     // the RIB. An opaque synthetic type-35 value has no OTC semantics.
-    matches!(
-        local_role,
-        Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
-    ) && route
-        .attributes
-        .iter()
-        .any(|attribute| attribute.only_to_customer().is_some())
+    otc_role_blocks(local_role)
+        && route
+            .attributes
+            .iter()
+            .any(|attribute| attribute.only_to_customer().is_some())
 }
 
 pub(in crate::manager) fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
@@ -3136,16 +3143,12 @@ impl RibManager {
         {
             return false;
         }
+        let rs_control = self.rs_control_context(peer);
         let prior: crate::fast_hash::FastMap<_, _> = clean_stage
             .into_iter()
-            .flat_map(|stage| stage.prior_slots(peer))
+            .flat_map(|stage| stage.prior_slots(peer, rs_control))
             .inspect(|_| self.replacement_checkpoint(false))
             .collect();
-        let rs_control = self
-            .peer_rs_control
-            .get(&peer)
-            .copied()
-            .zip(self.peer_asn.get(&peer).copied());
         let keep: Vec<_> = batch
             .unicast
             .announce

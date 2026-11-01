@@ -615,49 +615,62 @@ impl GroupStageOutput {
             .is_some_and(|tags| !tags.tagged(rs_asn))
     }
 
+    /// The member's prior slot at every key this pass touched, for the
+    /// action-equivalence check. Collected into a map, later entries win: a
+    /// lane prior is the same slot a delta prior resolves for the winner's
+    /// source, and an rs-control member's resolved slots (`rs_control`)
+    /// come last, including the fallback-view priors ([`Self::rs_priors`]).
     pub(in crate::manager) fn prior_slots(
         &self,
         member: PeerId,
+        rs_control: Option<(u32, u32)>,
     ) -> impl Iterator<Item = ((Prefix, u32), AdvEntry<'_>)> {
-        self.deltas
-            .iter()
-            .filter_map(move |delta| {
-                let key = (delta.prefix, delta.path_id);
-                let entry = if let Some(prior) = &delta.prior {
-                    prior.adv_entry(member)
-                } else {
-                    let action = self.prior_equal_actions.get(&key)?;
-                    let (route, _) = delta.new.as_ref()?;
-                    (delta.old_source == Some(route.peer) && route.peer != member).then_some(
+        let lane = self.lane_deltas.iter().filter_map(move |delta| {
+            delta
+                .prior
+                .as_ref()
+                .filter(|entry| entry.winner_source == member)
+                .map(|entry| {
+                    (
+                        (delta.prefix, 0),
                         AdvEntry {
-                            route,
-                            local_source: delta.local_source,
-                            nh: action.as_ref(),
-                            source_attrs: delta.prior_source_attrs.as_ref(),
+                            route: &entry.route,
+                            local_source: entry.local_source,
+                            nh: entry.nh.as_ref(),
+                            source_attrs: entry.source_attrs.as_ref(),
                             policy_label: None,
                         },
                     )
-                };
-                entry.map(|entry| (key, entry))
-            })
-            .chain(self.lane_deltas.iter().filter_map(move |delta| {
-                delta
-                    .prior
-                    .as_ref()
-                    .filter(|entry| entry.winner_source == member)
-                    .map(|entry| {
-                        (
-                            (delta.prefix, 0),
-                            AdvEntry {
-                                route: &entry.route,
-                                local_source: entry.local_source,
-                                nh: entry.nh.as_ref(),
-                                source_attrs: entry.source_attrs.as_ref(),
-                                policy_label: None,
-                            },
-                        )
-                    })
-            }))
+                })
+        });
+        let fallback_views = self
+            .rs_priors
+            .iter()
+            .filter(move |_| rs_control.is_some())
+            .filter_map(move |(prefix, prior)| {
+                prior
+                    .as_deref()?
+                    .adv_entry_for(member, rs_control)
+                    .map(|entry| ((*prefix, 0), entry))
+            });
+        lane.chain(self.deltas.iter().filter_map(move |delta| {
+            let key = (delta.prefix, delta.path_id);
+            let entry = if let Some(prior) = &delta.prior {
+                prior.adv_entry_for(member, rs_control)
+            } else {
+                let action = self.prior_equal_actions.get(&key)?;
+                let (route, _) = delta.new.as_ref()?;
+                (delta.old_source == Some(route.peer) && route.peer != member).then_some(AdvEntry {
+                    route,
+                    local_source: delta.local_source,
+                    nh: action.as_ref(),
+                    source_attrs: delta.prior_source_attrs.as_ref(),
+                    policy_label: None,
+                })
+            };
+            entry.map(|entry| (key, entry))
+        }))
+        .chain(fallback_views)
     }
 
     /// Keys withdrawn by this pass — the tombstone contribution when a
@@ -897,6 +910,9 @@ impl GroupStageOutput {
                 self.source_exclusion_unsafe.insert(target);
             }
         }
+        // A fallback-view change may move an rs-control member's next-hop
+        // action without any delta or lane residue showing it.
+        self.has_next_hop_actions |= !self.rs_priors.is_empty();
         self.prior_control_tags = (!prior_snapshot).then_some(prior_tags);
         checkpoint(true);
         self.shared_announce = announce.into();
@@ -1485,7 +1501,14 @@ pub(in crate::manager) fn emit_pcb_rs_member_with_checkpoint(
 ) {
     use crate::manager::distribution::rs_control::rs_control_route_rewrite;
     let mut resolved: crate::fast_hash::FastSet<Prefix> = crate::fast_hash::FastSet::default();
-    resolved.reserve(stage.deltas.len() + stage.rs_priors.len());
+    resolved.reserve(
+        stage
+            .deltas
+            .iter()
+            .filter(|delta| delta.path_id == 0)
+            .count()
+            + stage.rs_priors.len(),
+    );
     let slots = stage
         .deltas
         .iter()

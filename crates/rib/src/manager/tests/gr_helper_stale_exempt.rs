@@ -2519,3 +2519,128 @@ fn unrelated_hold_events_do_not_walk_the_owners() {
     assert_eq!(work.get("helper_stale_retire"), None, "no walk: {work:?}");
     assert_eq!(peer_ledgers(&manager), 16, "nothing retired");
 }
+
+/// Registers OBSERVER as a GR-helper per-client-best route-server client of
+/// AS65004 that enforces RFC 7947 control communities.
+fn register_rs_client(manager: &mut RibManager, session_id: u64, grouped: bool) -> Session {
+    let observer = peer_v4(OBSERVER);
+    manager.test_force_ungrouped = !grouped;
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: observer,
+        session_id,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    manager.handle_update(RibUpdate::SetPeerRsControl {
+        peer: observer,
+        session_id,
+        rs_control_asn: Some(65000),
+    });
+    let (tx, rx) = mpsc::channel(64);
+    let mut up = super::lifecycle::test_peer_up(observer, session_id, tx.clone());
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        per_client_best,
+        peer_asn,
+        is_ebgp,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![FAMILY];
+        *per_client_best = true;
+        *peer_asn = 65004;
+        *is_ebgp = true;
+    }
+    manager.handle_update(up);
+    assert_eq!(manager.grouped_member_of(observer).is_some(), grouped);
+    (tx, rx, Vec::new())
+}
+
+/// A route-server client holds a local RTBH route as its fallback below a
+/// received best path suppressed toward it (`0:65004`). It ends its
+/// session as a GR helper; while it is away the RTBH route and the
+/// received path both disappear. When it reconnects inside a selection
+/// hold, the stale RTBH row is withdrawn before the deferred End-of-RIB,
+/// grouped or not: the carry records the member's own exempt slot, not
+/// only the shared winner's provenance.
+#[test]
+fn rs_client_fallback_rtbh_deleted_while_away_leaves_the_helper_in_the_hold() {
+    for grouped in [true, false] {
+        let mut manager = manager_with_dormant_waiter();
+        let _source = connect(&mut manager, SOURCE, 64, false, false);
+        let (_old_tx, mut old_rx, _) = register_rs_client(&mut manager, 82, grouped);
+        let mut peer_rib = PeerRib::new();
+        apply(&mut old_rx, &mut peer_rib, None);
+        let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+        let key = (Prefix::V4(host), 0);
+        let mut received = make_route_with_lp(host, SOURCE, 100);
+        AttrSet::edit(&mut received.attributes, |attributes| {
+            attributes.push(PathAttribute::Communities(vec![65004]));
+        });
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: u64::from(SOURCE.octets()[3]),
+            announced: vec![received],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+        let mut local = make_route_with_lp(host, SOURCE, 50);
+        set_peer(&mut local, crate::PeerId::LOCAL);
+        local.origin_type = crate::route::RouteOrigin::Local;
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute {
+            route: local,
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        apply(&mut old_rx, &mut peer_rib, None);
+        assert!(
+            peer_rib.contains_key(&key),
+            "grouped={grouped}: the client holds its RTBH fallback"
+        );
+
+        clean_end(&mut manager, 82);
+        drop(old_rx);
+        for stale in peer_rib.values_mut() {
+            *stale = true;
+        }
+        let _waiter = connect(&mut manager, WAITER, 64, true, false);
+        assert!(manager.selection_deferred(FAMILY));
+        delete(&mut manager, host);
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: u64::from(SOURCE.octets()[3]),
+            announced: vec![],
+            withdrawn: vec![(Prefix::V4(host), 0)],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+
+        let (_new_tx, mut new_rx, _) = register_rs_client(&mut manager, 182, grouped);
+        let mut markers = 0;
+        for _ in 0..4 {
+            manager.resync_dirty_peers_bounded();
+            markers += apply(&mut new_rx, &mut peer_rib, None);
+        }
+        assert!(manager.selection_deferred(FAMILY), "still inside the hold");
+        assert_eq!(markers, 0, "End-of-RIB stays deferred until release");
+        assert!(
+            !peer_rib.contains_key(&key),
+            "grouped={grouped}: the deleted RTBH fallback leaves the helper inside the hold; \
+             peer {peer_rib:?}"
+        );
+    }
+}

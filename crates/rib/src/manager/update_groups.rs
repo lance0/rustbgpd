@@ -747,14 +747,17 @@ impl GroupRibOut {
     }
 
     /// Every unicast prefix a per-member residue query can return:
-    /// export-policy denials, OTC-blocked winners and runner-up lane
-    /// entries. A grouped join scopes its inventory to these.
+    /// export-policy denials, OTC-blocked winners, runner-up lane entries
+    /// and RFC 7947 fallback lists. A grouped join scopes its inventory to these.
     pub(in crate::manager) fn residue_prefixes(&self) -> impl Iterator<Item = Prefix> + '_ {
         self.policy_filtered
             .keys()
             .copied()
             .chain(self.otc_blocked.keys().map(|(prefix, _)| *prefix))
             .chain(self.runner_up.keys().copied())
+            // An rs-control member's resolved slot (and its OTC verdict) can
+            // be a fallback entry on a prefix with no lane.
+            .chain(self.rs_fallback.keys().copied())
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1023,7 +1026,9 @@ impl GroupRibOut {
                 prefixes.map_or(usize::MAX, HashSet::len),
                 self.runner_up.len(),
             );
-            if rs_control.is_some() {
+            // Nothing is ever blocked toward a role OTC cannot block, such
+            // as the route-server role of an IXP fleet: skip the re-resolve.
+            if rs_control.is_some() && super::distribution::otc_role_blocks(self.local_role) {
                 self.resolve_otc_blocked_for_rs_member(
                     member,
                     rs_control,

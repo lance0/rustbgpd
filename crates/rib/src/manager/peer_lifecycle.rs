@@ -973,11 +973,15 @@ impl RibManager {
         }) {
             insert_bounded(&mut keys, group.iter().copied(), &mut checkpoint);
         }
-        let table = match gid {
-            Some(gid) => self.group_ribs.get(&gid).map(|group| &group.table),
-            None => self.adj_ribs_out.get(&peer),
-        };
-        if let Some(table) = table {
+        // A grouped member's wire also records its own admitted provenance:
+        // an rs-control member may hold a local exempt route below a winner
+        // suppressed toward it, which the shared table does not name.
+        let tables = [
+            gid.and_then(|gid| self.group_ribs.get(&gid))
+                .map(|group| &group.table),
+            self.adj_ribs_out.get(&peer),
+        ];
+        for table in tables.into_iter().flatten() {
             // Every provenance entry is visited, ordinary ones included.
             let exempt = table
                 .local_export_sources()
