@@ -7470,6 +7470,10 @@ async fn a_rebind_into_a_mailbox_filled_after_its_check_applies_nothing() {
     .await
     .expect("the rebind does not wait for mailbox room");
     assert!(!bound.unwrap(), "no room for its RebindPeer");
+    assert!(
+        h.mgr.deferred_rib.queue.is_empty(),
+        "nothing is queued for it"
+    );
     let new = swp1_key(3);
     assert_eq!(
         selectors.load(Ordering::SeqCst),
