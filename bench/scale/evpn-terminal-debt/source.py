@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 
 import patches
 
@@ -181,9 +182,16 @@ def build(args):
                    "-p", package, "--bin", target, "-j", "8"]
         if target == "rustbgpd":
             command += ["--features", "rustbgpd-transport/bench-internals"]
-        roster = subprocess.run(["ps", "-C", "cargo", "-o", "pid="], capture_output=True, text=True)
-        require(roster.returncode in (0, 1) and len(roster.stdout.split()) < 2,
-                "two host Cargo processes already active; no build started")
+        # Wait, bounded, for the host's two-build limit instead of failing a
+        # partly built campaign on a busy host.
+        deadline = time.monotonic() + 1800
+        while True:
+            roster = subprocess.run(["ps", "-C", "cargo", "-o", "pid="], capture_output=True, text=True)
+            require(roster.returncode in (0, 1), "cargo roster unavailable; no build started")
+            if len(roster.stdout.split()) < 2:
+                break
+            require(time.monotonic() < deadline, "two host Cargo processes stayed active; no build started")
+            time.sleep(10)
         with (output / f"build-{label}.log").open("x") as log:
             result = subprocess.run(command, cwd=output / "sources" / arm, env=env,
                                     stdout=log, stderr=subprocess.STDOUT)
