@@ -812,7 +812,9 @@ fn stage_removals<T: Copy + Eq + std::hash::Hash>(
 /// of `set` (or, with `negate`, is not), skipping values already staged.
 /// A well-known standard community is removed only by `in` and only when
 /// the set names it as an exact member: patterns never name one, and an
-/// allow-list `not in` scrub cannot strip `NO_EXPORT`. A route carrying more
+/// allow-list `not in` scrub cannot strip `NO_EXPORT`. Likewise `not in`
+/// over extended communities considers only route targets and route
+/// origins (every encoding) and keeps every other extended type. A route carrying more
 /// values of the attribute than its wire bound fails closed (`false`)
 /// before any scan, so the compile-time pre-payment holds. Each value costs
 /// one exact probe plus at most
@@ -851,7 +853,17 @@ pub(crate) fn exec_remove_communities_in_set(
         CommunityAttribute::Extended => stage_removals(
             ctx.extended_communities,
             staged.map_or(&[], |mods| &mods.extended_communities_remove),
-            |value| set.contains_ext(&value) == negate,
+            // `not in` scrubs route targets and route origins only: every
+            // other extended type (encapsulation, color, EVPN, link
+            // bandwidth, origin validation) stays, as a set cannot name
+            // most of them.
+            |value| {
+                if negate && value.route_target().is_none() && value.route_origin().is_none() {
+                    true
+                } else {
+                    set.contains_ext(&value) == negate
+                }
+            },
             &mut mods.extended_communities_remove,
         ),
         CommunityAttribute::Large => stage_removals(

@@ -2002,12 +2002,26 @@ impl<'a> Checker<'a> {
             .iter()
             .find(|s| s.name.node == set.node)
         {
-            if !def
+            // `ext-community not in` acts on route targets and route
+            // origins only, so its set needs one of those.
+            if negate
+                && kind == CommunityKind::Ext
+                && def
+                    .entries
+                    .iter()
+                    .any(|entry| member_kind(&entry.node) == kind)
+                && !def.entries.iter().any(|entry| names_rt_or_ro(&entry.node))
+            {
+                self.diags
+                    .push(ext_not_in_without_rt_ro(set, def.name.span));
+            } else if !def
                 .entries
                 .iter()
                 .any(|entry| member_kind(&entry.node) == kind)
             {
-                let effect = if negate {
+                let effect = if negate && kind == CommunityKind::Ext {
+                    "removes every arrived route target and route origin".to_string()
+                } else if negate {
                     format!("removes every arrived {}", kind_describe(kind))
                 } else {
                     "never removes anything".to_string()
@@ -3345,6 +3359,42 @@ fn kind_describe(kind: CommunityKind) -> &'static str {
         CommunityKind::Standard => "standard-community",
         CommunityKind::Large => "large-community",
         CommunityKind::Ext => "extended-community",
+    }
+}
+
+/// The `remove ext-community not in SET` diagnostic for a set without a
+/// route-target or route-origin member.
+fn ext_not_in_without_rt_ro(set: &Spanned<String>, def_span: Span) -> Diagnostic {
+    Diagnostic::coded(
+        DiagnosticCode::Typecheck,
+        set.span,
+        format!(
+            "community-set `{}` has no route-target or route-origin members, so \
+             `remove ext-community not in {}` removes every route target and route origin",
+            set.node, set.node,
+        ),
+        "no RT or RO member",
+    )
+    .with_label(def_span, format!("`{}` is defined here", set.node))
+    .with_note(
+        "`ext-community not in` considers only route targets and route origins; \
+         other extended communities are never removed by it",
+    )
+}
+
+/// Whether a set member names a route target or route origin.
+fn names_rt_or_ro(member: &crate::sets::CommunityMember) -> bool {
+    use crate::engine::CommunityMatch;
+    use crate::sets::{CommunityMember, CommunityPattern};
+    match member {
+        CommunityMember::Exact(cm) => matches!(
+            cm,
+            CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. }
+        ),
+        CommunityMember::Pattern(pattern) => matches!(
+            **pattern,
+            CommunityPattern::RouteTarget { .. } | CommunityPattern::RouteOrigin { .. }
+        ),
     }
 }
 

@@ -9095,10 +9095,14 @@ test scan-in {
         not removed ext-community RT:64497:5, not removed ext-community OV_VALID
 }
 test scan-not-in {
-    route { prefix 192.0.2.0/24; ext-communities [RT:64496:9, RT:64497:5, RT:200000:7, OV_INVALID] }
+    route {
+        prefix 192.0.2.0/24
+        ext-communities [RT:64496:9, RT:64497:5, RT:200000:7, RO:192.0.2.1:3, OV_INVALID, OV_VALID]
+    }
     expect ext-not-in == accept with only removes ext-community RT:64497:5,
-        removes ext-community RT:200000:7, not removed ext-community RT:64496:9,
-        not removed ext-community OV_INVALID
+        removes ext-community RT:200000:7, removes ext-community RO:192.0.2.1:3,
+        not removed ext-community RT:64496:9, not removed ext-community OV_INVALID,
+        not removed ext-community OV_VALID
 }
 ",
             2,
@@ -9261,7 +9265,11 @@ test chained {
             ),
             (
                 "community-set s { 64496:1:1 } policy p { term t { remove ext-community not in s } }",
-                "removes every arrived extended-community",
+                "removes every arrived route target and route origin",
+            ),
+            (
+                "community-set s { OV_INVALID } policy p { term t { remove ext-community not in s } }",
+                "has no route-target or route-origin members",
             ),
             (
                 "community-set s { 64496:* } policy p { term t { remove community in } }",
@@ -9320,6 +9328,104 @@ test chained {
         assert_eq!(
             spliced.evaluate(&ctx).modifications.communities_remove,
             [(64_498 << 16) + 1]
+        );
+    }
+
+    /// `remove ext-community not in` considers only route targets and route
+    /// origins, in every encoding; encapsulation, color, EVPN, link
+    /// bandwidth and origin-validation values survive an allow-list scrub.
+    /// `in` removes whatever the set names, the OV state included.
+    #[test]
+    fn ext_not_in_scrubs_only_route_targets_and_origins() {
+        use rustbgpd_wire::ExtendedCommunity;
+
+        let rt_member = (0x02u64 << 48) | (65_000 << 32) | 1; // RT:65000:1
+        let rt_other = (0x02u64 << 48) | (64_496 << 32) | 1; // RT:64496:1
+        let rt_ipv4 = (0x0102u64 << 48) | (0xC000_0201 << 16) | 7; // RT:192.0.2.1:7
+        let ro_four_octet = (0x0203u64 << 48) | (200_000 << 16) | 9; // RO:200000:9
+        let rt_non_transitive = (0x4002u64 << 48) | (64_497 << 32) | 2; // RT, type 0x40
+        let encap_vxlan = (0x03u64 << 56) | (0x0c << 48) | 8; // RFC 9012 tunnel type 8
+        let color = (0x03u64 << 56) | (0x0b << 48) | 0x64; // color 100
+        let router_mac = (0x06u64 << 56) | (0x03 << 48) | 0x0000_0102_0304_0506;
+        let es_import = (0x06u64 << 56) | (0x02 << 48) | 0x0000_0a0b_0c0d_0e0f;
+        let link_bw = (0x40u64 << 56) | (0x04 << 48) | (65_000 << 32) | 0x4b98_9680;
+        let opaque = (0x83u64 << 56) | (0x01 << 48) | 0xdead;
+        let ov_valid = ExtendedCommunity::ORIGIN_VALIDATION_VALID.as_u64();
+        let route: Vec<ExtendedCommunity> = [
+            rt_member,
+            rt_other,
+            rt_ipv4,
+            ro_four_octet,
+            rt_non_transitive,
+            encap_vxlan,
+            color,
+            router_mac,
+            es_import,
+            link_bw,
+            opaque,
+            ov_valid,
+        ]
+        .into_iter()
+        .map(ExtendedCommunity::new)
+        .collect();
+        let removed = |source: &str| -> Vec<u64> {
+            let ctx = crate::RouteContext {
+                extended_communities: &route,
+                ..route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound)
+            };
+            let result = compile_ok(source).evaluate(&ctx);
+            assert_eq!(result.action, PolicyAction::Permit);
+            result
+                .modifications
+                .extended_communities_remove
+                .iter()
+                .map(|ec| ec.as_u64())
+                .collect()
+        };
+        assert_eq!(
+            removed(
+                "community-set rts { RT:65000:* } \
+                 policy p { term t { remove ext-community not in rts; accept } }"
+            ),
+            [rt_other, rt_ipv4, ro_four_octet, rt_non_transitive]
+        );
+        assert_eq!(
+            removed(
+                "community-set kill { RT:64496:*, OV_VALID } \
+                 policy p { term t { remove ext-community in kill; accept } }"
+            ),
+            [rt_other, ov_valid]
+        );
+    }
+
+    /// A scan inside an `else if` branch runs only when that branch is
+    /// taken.
+    #[test]
+    fn scans_run_inside_else_if_branches() {
+        assert_passes(
+            r"
+community-set scrub { 64496:* }
+community-set lc { 65000:*:* }
+policy p {
+    term t {
+        if route.communities has 65000:1 { reject }
+        else if route.communities has 65000:2 { remove community in scrub }
+        else { remove large-community not in lc }
+    }
+    term rest { accept }
+}
+test else-if-branch {
+    route { prefix 192.0.2.0/24; communities [65000:2, 64496:7]; large-communities [64496:1:1] }
+    expect p == accept with only removes community 64496:7,
+        not removed large-community 64496:1:1
+}
+test else-branch {
+    route { prefix 192.0.2.0/24; communities [64496:7]; large-communities [64496:1:1, 65000:1:1] }
+    expect p == accept with only removes large-community 64496:1:1,
+        not removed community 64496:7, not removed large-community 65000:1:1
+}
+",
+            2,
         );
     }
 
