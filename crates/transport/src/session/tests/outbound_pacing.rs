@@ -197,6 +197,65 @@ async fn outbound_pacing_session_exit_hands_inventory_to_paced_release() {
     );
 }
 
+/// An aborted session task never returns from `run()`, as on the
+/// transport-safety abort and a shutdown deadline's expiry. Dropping its
+/// session still hands a large unsent inventory to the paced release.
+/// Mutation-red: handing off only when `run()` returns frees it all in the
+/// abort's turn.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_aborted_session_hands_inventory_to_paced_release() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    session.writer_join.take().unwrap().abort();
+    // A full one-slot writer queue keeps every route unsent.
+    let (bulk, _held) = mpsc::channel(1);
+    bulk.try_send(Bytes::from_static(b"held")).unwrap();
+    session.writer_bulk_tx = Some(bulk);
+    let held = make_route(100).attributes;
+    let base = Arc::strong_count(&held);
+    let live = || Arc::strong_count(&held) - base;
+    let total = 5 * SLICE;
+    let routes = (0..u32::try_from(total).unwrap())
+        .map(|index| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32)),
+            attributes: Arc::clone(&held),
+            ..make_route(100)
+        })
+        .collect();
+    session
+        .handle_outbound_route_update(pacing_update(&session, routes))
+        .await;
+    assert_eq!(live(), total, "nothing was sent");
+
+    // Cancel the way an abort does: drop the parked `run()` future, then the
+    // session it borrowed, each as one synchronous step.
+    let mut released = Vec::new();
+    {
+        let mut run = std::pin::pin!(session.run());
+        let before = live();
+        let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+        assert!(polled.is_pending(), "the session is parked in its run loop");
+        released.push(before - live());
+    }
+    let before = live();
+    drop(session);
+    released.push(before - live());
+    for _ in 0..2 * total / SLICE {
+        let before = live();
+        tokio::task::yield_now().await;
+        released.push(before - live());
+    }
+    assert_eq!(live(), 0, "every route is released: {released:?}");
+    assert!(
+        released.iter().all(|&batch| batch <= SLICE),
+        "one step released more than a slice: {released:?}"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_resource_deadline_is_finite_with_send_hold_disabled() {
     let (mut session, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);

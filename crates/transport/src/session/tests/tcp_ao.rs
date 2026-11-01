@@ -386,7 +386,7 @@ fn active_open_second_key_install_failure_abandons_socket_before_connect() {
 async fn tcp_ao_query_refreshes_degraded_cumulative_counters() {
     let mut session = tcp_ao_query_test_session().await;
     session.refresh_tcp_ao_info_with(|_| Ok(tcp_ao_snapshot(43, 1)));
-    let snapshot = session.tcp_ao_info.unwrap();
+    let snapshot = session.tcp_ao_info.take().unwrap();
     assert_eq!(snapshot.pkt_good, 43);
     assert_eq!(snapshot.pkt_bad, 1);
 }
