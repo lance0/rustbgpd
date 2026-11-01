@@ -453,6 +453,52 @@ async fn add_path_withdraws_per_path_id() {
     assert!(!after.contains_key(&(v4(controlled()), 2)));
 }
 
+/// Peer-scoped `ExplainBestPath` applies the gate live Add-Path staging
+/// applies: a suppressed sibling holds no advertised path ID, exactly like
+/// the Adj-RIB-Out, and takes the staged one once the condition settles.
+#[tokio::test(start_paused = true)]
+async fn explain_best_path_add_path_ranks_follow_the_gate() {
+    let mut manager = manager_with(install_set(
+        definition(tagged_predicate(), ConditionalAdvertiseIf::Present),
+        &[TARGET],
+    ));
+    announce(
+        &mut manager,
+        SOURCE,
+        vec![route(controlled(), SOURCE, 200, false)],
+    );
+    announce(
+        &mut manager,
+        SOURCE2,
+        vec![
+            route(controlled(), SOURCE2, 100, true),
+            route(condition(), SOURCE2, 100, false),
+        ],
+    );
+    let mut rx = peer_up(
+        &mut manager,
+        TARGET,
+        Shape {
+            add_path: true,
+            ..Shape::default()
+        },
+    );
+    let _ = drain(&mut rx);
+
+    // Pending: live staging withholds the tagged sibling.
+    let (explained, held) =
+        explain_ranks_and_adj_rib_out(&mut manager, ip(TARGET), v4(controlled()));
+    assert!(held.is_empty(), "{held:?}");
+    assert_eq!(explained, held);
+
+    // Present for a settle window: the sibling is staged, and explain agrees.
+    elapse(&mut manager, SETTLE).await;
+    let (explained, held) =
+        explain_ranks_and_adj_rib_out(&mut manager, ip(TARGET), v4(controlled()));
+    assert!(held.contains_key(&ip(SOURCE2)), "{held:?}");
+    assert_eq!(explained, held);
+}
+
 /// `per_client_best`: a suppressed best candidate works like an export
 /// denial in the first-permitted walk, so the next candidate is staged.
 #[tokio::test(start_paused = true)]

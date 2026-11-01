@@ -1794,7 +1794,9 @@ pub struct BestPathCandidate {
     /// advertised at this rank (1-based, capped at
     /// `add_path_send_max`); zero = filtered out by the peer's
     /// export policy / family check / split-horizon / iBGP or
-    /// RFC 4456 route-reflector suppression, or beyond `send_max`.
+    /// RFC 4456 route-reflector suppression / the source-route gates
+    /// live staging applies (RFC 1997, route-server control, LLGR) /
+    /// conditional advertisement, or beyond `send_max`.
     /// Always zero in single-best send mode
     /// (`add_path_send_max == 0`) and on a global-view explain —
     /// see `ExplainBestPath::add_path_send_max` for why single-best

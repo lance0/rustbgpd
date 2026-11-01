@@ -2093,8 +2093,10 @@ candidates for a prefix with the decisive comparison reason for each. Set
 `peer_address` on the request to scope the response to that peer's Add-Path
 send view: candidates that the peer would actually receive (export-policy
 permitted + sendable-family + not suppressed by split-horizon or iBGP /
-RFC 4456 route-reflector rules + within the peer's effective
-`add_path_send_max`) get a non-zero `advertised_path_id` reflecting the rank
+RFC 4456 route-reflector rules, RFC 1997 `NO_ADVERTISE` / `NO_EXPORT`,
+route-server control communities, the LLGR export restriction or
+conditional advertisement + within the peer's effective
+`add_path_send_max`) get a non-zero `advertised_path_id` naming the path ID
 they would carry on the wire; everything else stays at `advertised_path_id =
 0`. The response echoes `peer_address` and the effective `add_path_send_max`
 so the operator can read advertisement intent without cross-referencing the

@@ -809,3 +809,78 @@ fn rs_member_down_skips_per_member_priors_unless_a_prior_is_tagged() {
         "a tagged prior keeps the per-member admission check"
     );
 }
+
+/// Peer-scoped `ExplainBestPath` applies the RFC 7947 §2.3.2 control gate
+/// live Add-Path staging applies: a sibling tagged "do not announce to the
+/// target's ASN" holds no advertised path ID, exactly like the target's
+/// Adj-RIB-Out, and a session without the knob still ranks it.
+#[test]
+fn explain_best_path_add_path_ranks_match_live_rs_control_staging() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let steered = PeerId::from_addr("192.0.2.211".parse().unwrap());
+    let transparent = PeerId::from_addr("192.0.2.212".parse().unwrap());
+    let mut receivers = Vec::new();
+    for (peer, rs_control_asn) in [(steered, Some(RS_AS)), (transparent, None)] {
+        manager.handle_update(RibUpdate::SetPeerRsControl {
+            peer,
+            session_id: 0,
+            rs_control_asn,
+        });
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        receivers.push(outbound_rx);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65001,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: false,
+            add_path_send_families: ipv4_sendable(),
+            add_path_send_max: 4,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+    }
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 119, 0), 24);
+    let best_source = Ipv4Addr::new(198, 51, 100, 41);
+    let tagged_source = Ipv4Addr::new(198, 51, 100, 42);
+    let best = make_multipath_route(prefix, best_source, vec![65010], 200);
+    let sibling = tagged(
+        make_multipath_route(prefix, tagged_source, vec![65020], 100),
+        vec![],
+        vec![large(0, 65001)],
+    );
+    for route in [best, sibling] {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    }
+
+    let prefix = Prefix::V4(prefix);
+    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, steered, prefix);
+    assert!(
+        held.is_empty(),
+        "live staging suppresses the tagged sibling"
+    );
+    assert_eq!(explained, held);
+    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, transparent, prefix);
+    assert!(held.contains_key(&peer_v4(tagged_source)), "{held:?}");
+    assert_eq!(explained, held);
+}

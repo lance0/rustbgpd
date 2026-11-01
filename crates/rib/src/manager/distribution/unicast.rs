@@ -206,8 +206,8 @@ fn orr_candidates<'a>(
 
 /// Candidate paths for `prefix` visible to `target_peer` in the live
 /// multipath / per-client-best collector: [`orr_candidates`]'
-/// split-horizon and RFC 4456 reflection filter plus the per-candidate
-/// RFC 1997 `NO_ADVERTISE` and RFC 9494 §4.4 LLGR export gates. Shared by
+/// split-horizon and RFC 4456 reflection filter plus
+/// [`multipath_candidate_suppressed`]. Shared by
 /// `distribute_multipath_prefix` and the per-client-best explain arm so
 /// explain walks exactly the candidate set live staging walks.
 #[expect(
@@ -242,48 +242,67 @@ fn multipath_candidates<'a>(
         cluster_id,
     )
     .filter(move |route| {
-        // RFC 1997: NO_ADVERTISE is selection ineligibility, not a
-        // post-policy attribute rewrite. A permit policy that removes
-        // the community must not make the route exportable.
-        if super::no_advertise_export_suppressed(route.communities()) {
-            return false;
-        }
-        // RFC 1997: NO_EXPORT/NO_EXPORT_SUBCONFED are likewise source-route
-        // ineligibility, but only toward eBGP targets in honor mode — see
-        // `no_export_export_suppressed` for the source-only asymmetry.
-        if super::no_export_export_suppressed(
-            route.communities(),
+        !multipath_candidate_suppressed(
+            route,
             target_is_ebgp,
             interpret_rfc1997,
-        ) {
-            return false;
-        }
-        // RFC 7947 §2.3.2: a control community forbidding announcement
-        // toward this target's ASN is candidate ineligibility — a
-        // suppressed sibling must not hold an Add-Path rank (or the
-        // per-client-best slot). `rs_control` is `(rs_asn, peer_asn)`
-        // for sessions with `rs_control_communities`, `None` otherwise.
-        if let Some((rs_asn, peer_asn)) = rs_control
-            && super::rs_control::rs_control_export_suppressed(
-                route.communities(),
-                route.large_communities(),
-                rs_asn,
-                peer_asn,
-            )
-        {
-            return false;
-        }
-        // RFC 9494 §4.4: each staged candidate is gated individually —
-        // a stale candidate must not occupy an Add-Path rank (or the
-        // filtered-best slot) toward a non-LLGR eBGP peer.
-        !super::llgr_stale_export_suppressed(
-            route.is_llgr_stale,
-            route.communities(),
+            rs_control,
             family,
-            target_is_ebgp,
             llgr,
         )
     })
+}
+
+/// Per-candidate source-route export gates of the multipath / per-client-best
+/// walk: RFC 1997 `NO_ADVERTISE` and `NO_EXPORT`, the RFC 7947 §2.3.2
+/// route-server control gate, and the RFC 9494 §4.4 LLGR gate. A suppressed
+/// candidate holds no Add-Path rank (or the per-client-best slot). Live
+/// staging and both explain paths call this one predicate.
+pub(in crate::manager) fn multipath_candidate_suppressed(
+    route: &crate::route::Route,
+    target_is_ebgp: bool,
+    interpret_rfc1997: bool,
+    rs_control: Option<(u32, u32)>,
+    family: (Afi, Safi),
+    llgr: Option<&Vec<(Afi, Safi)>>,
+) -> bool {
+    // RFC 1997: NO_ADVERTISE is selection ineligibility, not a
+    // post-policy attribute rewrite. A permit policy that removes
+    // the community must not make the route exportable.
+    if super::no_advertise_export_suppressed(route.communities()) {
+        return true;
+    }
+    // RFC 1997: NO_EXPORT/NO_EXPORT_SUBCONFED are likewise source-route
+    // ineligibility, but only toward eBGP targets in honor mode — see
+    // `no_export_export_suppressed` for the source-only asymmetry.
+    if super::no_export_export_suppressed(route.communities(), target_is_ebgp, interpret_rfc1997) {
+        return true;
+    }
+    // RFC 7947 §2.3.2: a control community forbidding announcement
+    // toward this target's ASN is candidate ineligibility — a
+    // suppressed sibling must not hold an Add-Path rank (or the
+    // per-client-best slot). `rs_control` is `(rs_asn, peer_asn)`
+    // for sessions with `rs_control_communities`, `None` otherwise.
+    if let Some((rs_asn, peer_asn)) = rs_control
+        && super::rs_control::rs_control_export_suppressed(
+            route.communities(),
+            route.large_communities(),
+            rs_asn,
+            peer_asn,
+        )
+    {
+        return true;
+    }
+    // RFC 9494 §4.4: each staged candidate is gated individually —
+    // a stale candidate must not occupy an Add-Path rank (or the
+    // filtered-best slot) toward a non-LLGR eBGP peer.
+    super::llgr_stale_export_suppressed(
+        route.is_llgr_stale,
+        route.communities(),
+        family,
+        target_is_ebgp,
+        llgr,
+    )
 }
 
 /// Checkpointed live counterpart to [`orr_candidates`]. Explain keeps the
@@ -361,28 +380,14 @@ fn multipath_candidates_with_checkpoint<'a>(
         checkpoint,
     ) {
         checkpoint();
-        if super::no_advertise_export_suppressed(route.communities())
-            || super::no_export_export_suppressed(
-                route.communities(),
-                target_is_ebgp,
-                interpret_rfc1997,
-            )
-            || rs_control.is_some_and(|(rs_asn, peer_asn)| {
-                super::rs_control::rs_control_export_suppressed(
-                    route.communities(),
-                    route.large_communities(),
-                    rs_asn,
-                    peer_asn,
-                )
-            })
-            || super::llgr_stale_export_suppressed(
-                route.is_llgr_stale,
-                route.communities(),
-                family,
-                target_is_ebgp,
-                llgr,
-            )
-        {
+        if multipath_candidate_suppressed(
+            route,
+            target_is_ebgp,
+            interpret_rfc1997,
+            rs_control,
+            family,
+            llgr,
+        ) {
             continue;
         }
         candidates.push(route);
