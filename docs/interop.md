@@ -261,7 +261,7 @@ The hosted `kernel-dataplane` workflow adds the privileged Linux
 coverage that needs containerlab, kernel modules, or real netns route tables:
 **M36**,
 **M37**, **M37+IP**, **M38**, **M39**, **M39b**, **M40**, **M42**,
-**M47**, **M48**, **M50**, **M51**, **M52**, **M53**, **M58**, **M60**, **M61**, **M62**, **M65**, **M66**, **M67**, **M68**, **M69**, **M70**, **M71**, **M72**, **M108**, **M109**, **M110**, **M117**, **M121**, **M123**, the conditional
+**M47**, **M48**, **M50**, **M51**, **M52**, **M53**, **M53b**, **M53c**, **M53d**, **M58**, **M60**, **M61**, **M62**, **M65**, **M66**, **M67**, **M68**, **M69**, **M70**, **M71**, **M72**, **M108**, **M109**, **M110**, **M117**, **M121**, **M123**, the conditional
 **M43** TCP-AO live-rotation and crash-restart receipts, and the Docker netns
 selectors (such as
 `fdb_nhg` / `fib_runtime` / `bfd_runtime` / `dataplane_vlan_fdb` /

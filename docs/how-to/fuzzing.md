@@ -87,11 +87,11 @@ cargo fuzz tmin <target> fuzz/artifacts/<target>/<file>
 
 ## Corpus layout
 
-- `fuzz/seeds/<target>/` — small, hand-pinned seed inputs, **tracked in git**
+- `crates/<crate>/fuzz/seeds/<target>/` — small, hand-pinned seed inputs, **tracked in git**
   (golden wire bytes from the test suite, `.rpol` files from the interop
   configs). Fix any fuzzer-found bug by adding its minimized reproducer here
   as a regression seed.
-- `fuzz/corpus/<target>/` — the growing machine-generated corpus,
+- `crates/<crate>/fuzz/corpus/<target>/` — the growing machine-generated corpus,
   **gitignored**; local runs grow their own from the seeds. The nightly wire
   campaign installs either a validated prior `main` bundle or an exact copy of
   the tracked wire seeds before running.
@@ -245,7 +245,7 @@ night was avoidable.
 
 ### Land the fix
 
-Add the minimized reproducer to `fuzz/seeds/<target>/` so every later campaign
+Add the minimized reproducer to `crates/<crate>/fuzz/seeds/<target>/` so every later campaign
 starts from it, and add an ordinary Rust regression test beside the code for a
 library bug. The seed proves the input no longer crashes; the test states the
 behavior now expected. For wire seeds, also update the existing path and byte/hash
@@ -269,7 +269,7 @@ delegate to `fuzz/build-fuzzers.sh`, which validates and builds all seven fuzz
 crates with `cargo fuzz build -O --debug-assertions`. The crates share one
 Cargo target directory so compatible sanitizer build-std and dependency
 artifacts can be reused across crate builds. The integration ships each
-`fuzz/seeds/<target>/` directory as a `<target>_seed_corpus.zip`.
+`crates/<crate>/fuzz/seeds/<target>/` directory as a `<target>_seed_corpus.zip`.
 Both hosted builders install the reviewed nightly named by
 `fuzz/rust-nightly.txt`; this avoids depending on the older compiler bundled
 in the upstream Rust builder image and must remain at or above the workspace

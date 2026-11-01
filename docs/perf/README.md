@@ -153,9 +153,9 @@ delivering its 1600-route delta in ~15 ms with zero policy evaluations.
 
 ## Route import comparisons
 
-The freshest published [v0.68.0 cross-stack bgperf2
-receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
-is the headline same-host IPv4 import/convergence comparison. All 80 cells
+The [v0.68.0 cross-stack bgperf2
+receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30, is the
+latest full five-shape run and the headline same-host IPv4 import/convergence comparison. All 80 cells
 reached the exact expected route count across five fixed shapes; the largest is
 two peers × 100,000 prefixes, not a full-table cell. A [2026-10-19 paired-read rerun](../benchmarks.md#2026-10-19-paired-read-rerun) measured unreleased rustbgpd `3e3fba0de` against BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with three repetitions per cell. rustbgpd had the lowest median total time in all three shapes on that host, at 10 peers × 1k within one sampling step of BIRD 2. BIRD 2.20.0, released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. Microbenchmarks and memory
 scaling are in [Benchmarks](../benchmarks.md). That page also retains

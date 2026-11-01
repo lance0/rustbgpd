@@ -46,10 +46,11 @@ shared host is:
   (non-root) bench user.
 - If sudo on the harness itself is unavoidable, export
   `RUSTBGPD_HOST_LOCK` explicitly so it points at the bench user's lock
-  file:
+  file. Run this from the bench user's shell, which expands `$HOME`
+  before `sudo` changes user:
 
   ```bash
-  sudo RUSTBGPD_HOST_LOCK=/home/<bench-user>/.local/state/rustbgpd-host.lock \
+  sudo RUSTBGPD_HOST_LOCK="$HOME/.local/state/rustbgpd-host.lock" \
       bash tests/soak/run-<gate>-soak.sh
   ```
 

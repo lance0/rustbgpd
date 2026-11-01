@@ -51,8 +51,11 @@ move with it.
      must also be classified in `copy_peer_group_file_only_fields` in `src/config/mod.rs`. Its
      destructuring is exhaustive, so a new field fails to compile until it is
      marked config-file-only or API-owned (carried by `SetPeerGroup`). A
-     config-file-only field makes a sequential SIGHUP candidate that changes it
-     a `rejected` route; add it to the config-file-only field list under
+     change to a config-file-only field normally rides the generation route.
+     It is rejected only when the candidate takes the sequential route because
+     it also rotates TCP-AO keys or edits a listener's MD5/GTSM settings
+     (`reject_unappliable_sequential_reload`), since `SetPeerGroup` cannot
+     carry the field. Add it to the config-file-only field list under
      "SIGHUP reload routes" in `docs/reference/reload-matrix.md`.
    - Classify the field for diffs and reloads in `src/config/mod.rs`:
      `config_field_impact` (the hot-applied / session-reset / restart-required

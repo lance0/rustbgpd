@@ -185,7 +185,9 @@ must not be activated:
 
 You do not write this file; read it once so the shape is familiar. This is
 the exact `config.toml` rendered from the checked-in capture (MD5 values
-replaced; the file as shown passes `rustbgpd --check --strict`):
+replaced). It passes `rustbgpd --check --strict` only beside the rendered
+`policy/*.rpol` and `datasets/*.list` files it references, which are not
+shown here; check the whole `candidate/` directory, not this file alone:
 
 ```toml
 # GENERATED candidate from IXP Manager 7.4.0.

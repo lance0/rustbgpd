@@ -20,8 +20,9 @@ other API client.
 That is the honest answer to "do I want an AI-facing process in my production
 environment" — in the recommended deployment, you are not putting one there.
 
-The binary is shipped in no release artifact. Plain `cargo build` keeps its
-existing root-package default; build the MCP server explicitly when needed:
+The binary is shipped in no release artifact. `tools/mcp` is a default
+workspace member, so a plain `cargo build` from the repository root also
+builds it; to build only the MCP server:
 
 ```sh
 cargo build --release -p rustbgpd-mcp

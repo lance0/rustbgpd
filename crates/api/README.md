@@ -17,7 +17,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | **BfdService** | BFD session queries (RFC 5880/5881/5882/5883) |
 | **RpkiService** | Bounded origin validation, ASPA provider/path diagnostics, and configured RTR-cache accepted-epoch inventory |
 | **EventService** | Live event stream (`WatchEvents`) and recent in-memory session/policy/EVPN history |
-| **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes |
+| **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes; owner-scoped leased injection (`AddLeasedPath` / `AddLeasedFlowSpec` / `RenewLease` / `ListInjectionLeases` / `ListLeasedKeys`); guarded FlowSpec mutations under a mutation window (`IssueMutationWindow` / `AddGuardedFlowSpec` / `DeleteGuardedFlowSpec` / `RenewGuardedLease`); the controller replay-complete signal for the End-of-RIB grace window (`MarkReplayComplete`); and per-peer export-disposition reads |
 | **ControlService** | Health, handler liveness (`CheckLiveness`), metrics, shutdown, MRT trigger |
 | **EvpnService** | EVPN runtime, instance, next-hop, Ethernet Segment, IP-VRF, and managed-netdev reads; duplicate-MAC quarantine list and clear; Ethernet Segment drain; and the mutating `ApplyEvpnRuntime` |
 | **gnmi.gNMI** | OpenConfig gNMI: read-only telemetry (Capabilities/Get/Subscribe) plus a transaction-backed Set subset |

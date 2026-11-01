@@ -36,9 +36,50 @@ surface: [explain.md](../how-to/explain.md).
 MP-BGP, Add-Path, Extended Next Hop, the experimental opt-in Link-Local
 Next Hop capability 77, Extended Messages, GR/LLGR/
 Notification GR, Route Refresh/Enhanced Route Refresh, receive-side
-Prefix ORF, FlowSpec (with opt-in RFC 9117 feasibility validation),
-Route Reflector, large and extended communities.
+Prefix ORF, FlowSpec (with opt-in RFC 9117 feasibility validation, and
+[guarded controller mutations](../reference/api.md#guarded-flowspec-mutations)
+that fence late-committing adds and deletes with mutation windows and rule
+revisions), Route Reflector, large and extended communities.
 Per-RFC conformance notes: [RFC implementation notes](../reference/rfc-notes.md).
+
+## Origin and path validation
+
+An RTR client (RFC 8210) feeds RPKI origin validation (RFC 6811) and ASPA
+AS_PATH verification (draft-ietf-sidrops-aspa-verification-28, role-aware).
+Validation states rank paths in best-path selection and are policy match
+inputs; rejecting an Invalid route is an explicit policy decision.
+Configuration: [`[rpki]`](../reference/configuration.md#rpki); ASPA
+procedure-by-procedure status: [ASPA conformance](../reference/aspa-conformance.md).
+
+## Session protection and liveness
+
+TCP-AO (RFC 5925) on Linux with ordered static and dynamic-prefix keyrings
+and reload-driven key rollover, alongside TCP MD5 and GTSM. BFD (RFC 5880 /
+5881 / 5883) single-hop and multihop asynchronous sessions for static
+neighbors tear BGP down on a BFD Down. Scope and follow-up work:
+[transport and session limitations](../reference/limitations.md#transport-and-session-features).
+
+## BGP unnumbered
+
+Static IPv6 link-local neighbors, including IPv4 unicast over RFC 8950, and
+Linux interface-only neighbors discovered from Router Advertisements or
+inbound BGP connections. Prerequisites and shared-address restrictions:
+[interface-only neighbors](../reference/configuration.md#interface-only-neighbors).
+
+## Linux FIB integration (opt-in)
+
+RFC 7999 BLACKHOLE discard routes and configured
+[`[[fib_tables]]`](../reference/configuration.md#fib_tables) unicast
+installation, with per-peer allow-lists, per-table route caps, and opt-in
+ECMP. Linux dataplane behavior is outside the v1 contract.
+
+## EVPN
+
+EVPN Types 1–5 route reflection is a
+[scoped RR-only v1 role](../reference/v1-stable-contract.md#evpn-route-reflector-boundary)
+([fabric RR recipe](../cookbook/evpn-fabric-rr.md)). Type 6 SMET relay, the
+Linux/VXLAN local VTEP, IRB, and multi-homing remain alpha
+([VTEP setup](../how-to/evpn-vtep-setup.md)).
 
 ## Typed, compiled policy language (`.rpol`)
 

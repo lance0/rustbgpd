@@ -382,6 +382,12 @@ Categories of structured events:
 
 ## Protocol Scope and Milestones
 
+The milestone sections below are the original M0–M4 build plan and record.
+Their exit criteria, test counts, and interop versions are as of each
+milestone and do not describe the current suite or interop matrix; see
+[Interoperability](../interop.md) and the [milestone history](../project/milestones.md).
+The attribute-validation and best-path tables are maintained.
+
 ### Milestone 0: "Establish"
 
 Implement OPEN, KEEPALIVE, NOTIFICATION. FSM transitions and timer handling. Session reaches Established and stays there.
@@ -804,7 +810,7 @@ See [docs/explanation/architecture.md — Where to Change X](architecture.md#whe
 
 ## Compatibility and Behavior Matrix
 
-This matrix tracks every protocol behavior: its RFC basis, implementation status, and interop validation. It is the source of truth for what rustbgpd does and does not do, and it stays current as the project evolves. Milestone targets (M0–M4) indicate planned implementation phase — not current status.
+This is the original planning matrix: the milestone (M0–M4) or early release in which each core behavior was targeted, with its first interop targets. It is kept as a record and is not updated per release. For current support levels see the [stability guide](../reference/stability.md); for per-RFC behavior see [RFC notes](../reference/rfc-notes.md); for validated peers see [Interoperability](../interop.md).
 
 | Behavior | RFC | Target Milestone | Interop Targets | Notes |
 |---|---|---|---|---|
@@ -836,9 +842,9 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | MRT dump export | 6396 | post-v0.3.0 | — | Implemented (ADR-0044); TABLE_DUMP_V2 periodic + on-demand, gzip optional |
 | RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); `RpkiService` provides bounded point validation, ASPA lookup and AS_PATH verification, and read-only configured-cache accepted-epoch inventory, while cache mutation remains deferred |
 
-This matrix is updated with every milestone. "Interop Tested" means validated
-by a documented containerlab or privileged-netns procedure. CI-gated rows are
-called out explicitly; privileged kernel dataplane smokes run in the hosted
+Current interop validation is a documented containerlab or privileged-netns
+procedure listed in [Interoperability](../interop.md); privileged kernel
+dataplane smokes run in the hosted
 [kernel dataplane workflow](../how-to/kernel-dataplane-runner.md).
 
 ---

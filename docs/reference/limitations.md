@@ -37,8 +37,11 @@ out of alpha.
 - FlowSpec (SAFI 133, IPv4 and IPv6) is control plane only: rules are
   received, injected, and distributed, but rustbgpd installs no FlowSpec
   filters in a dataplane. The [scoped controller contract](v1-stable-contract.md#flowspec-controller-boundary)
-  covers local origination, reconciliation, and committed advertised views.
-  RFC 9117 feasibility validation of received rules remains alpha and
+  covers local origination, reconciliation, and committed advertised views,
+  and the [guarded mutations](v1-stable-contract.md#guarded-flowspec-mutations)
+  of [ADR-0144](../adr/0144-guarded-flowspec-mutations.md) fence a controller's
+  late-committing adds and deletes with mutation windows and rule revisions.
+  Both pin the API shape only, with no forwarding guarantee. RFC 9117 feasibility validation of received rules remains alpha and
   is opt-in (`[flowspec] validation = "rfc9117"`; the default is `"off"`); see
   [ADR-0135](../adr/0135-flowspec-feasibility.md). VPN FlowSpec (SAFI 134) is
   not implemented.

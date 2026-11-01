@@ -553,7 +553,7 @@ These are not guidelines — they are enforced invariants:
 - `transport` owns BGP peer session I/O and drives the FSM — it depends on `wire`, `fsm`, `rib`, `policy`, `rpki`, `telemetry`, and `bmp`
 - `evpn` is the local-VTEP domain crate — depends only on `wire`, never on `rib` or `transport`, never programs the kernel
 - `evpn-linux` is the Linux kernel dataplane for EVPN VTEP mode — depends only on `evpn`, never on `rib` or `transport`
-- `cli` depends only on `wire` and `policy` (client-only proto stubs; dev tests also use `api`, `evpn`, and `bmp`)
+- `cli` depends only on `wire` and `policy` (client-only proto stubs; dev tests also use `api`, `evpn`, `telemetry`, and `bmp`)
 
 ## Pull Request Process
 
