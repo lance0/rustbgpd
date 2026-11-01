@@ -182,7 +182,8 @@ fn first_source_binds_and_second_is_a_sticky_conflict() {
             DiscoveryEvent::Conflict {
                 interface: IF.into(),
                 bound: ll(5),
-                other: ll(1)
+                other: ll(1),
+                count: 1
             },
         ]
     );
@@ -230,7 +231,8 @@ fn late_refresh_cannot_revive_an_expired_binding() {
     e.events.clear();
     // fe80::5 expired at t0+10; its RA is processed at t0+11 before any
     // poll. Expiry applies first, so the binding moves to fe80::1 and the
-    // RA relearns fe80::5 as a mere candidate.
+    // RA relearns fe80::5 as a mere candidate. The pair was counted when
+    // fe80::1 was learned, so no conflict is named before a report.
     ra(&mut e, 5, 10, t0 + Duration::from_secs(11)).unwrap();
     assert_eq!(
         e.events,
@@ -247,11 +249,6 @@ fn late_refresh_cannot_revive_an_expired_binding() {
             DiscoveryEvent::CandidateLearned {
                 interface: IF.into(),
                 address: ll(5)
-            },
-            DiscoveryEvent::Conflict {
-                interface: IF.into(),
-                bound: ll(1),
-                other: ll(5)
             },
         ]
     );
@@ -329,7 +326,8 @@ fn discovery_never_moves_an_established_binding() {
     assert!(events.contains(&DiscoveryEvent::Conflict {
         interface: IF.into(),
         bound: ll(5),
-        other: ll(1)
+        other: ll(1),
+        count: 1
     }));
     assert!(events.contains(&DiscoveryEvent::CandidateExpired {
         interface: IF.into(),
@@ -712,6 +710,7 @@ async fn binding_wait_fails_when_the_stream_closes_or_times_out() {
         interface: IF.into(),
         bound: ll(2),
         other: ll(1),
+        count: 1,
     };
     tx.send(unrelated.clone());
     assert_eq!(
@@ -1109,6 +1108,154 @@ fn a_source_learned_before_the_established_report_is_counted_once() {
     ra(&mut e, 9, 10, t0).unwrap();
     e.session_established(IF, ll(2), t0 + Duration::from_secs(10));
     assert_eq!(conflicts(&mut e), []);
+}
+
+/// RAs as (source, lifetime, seconds after t0).
+type Ras = [(u16, u16, u64)];
+
+/// The number of conflicts `ras` raise with the Established report for
+/// `fe80::2` delivered before them (`early`) or `report_at` seconds after t0.
+fn conflicts_with_report(ras: &Ras, report_at: u64, early: bool) -> usize {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    if early {
+        e.session_established(IF, ll(2), t0);
+    }
+    for &(source, lifetime, at) in ras {
+        ra(&mut e, source, lifetime, t0 + Duration::from_secs(at)).unwrap();
+    }
+    if !early {
+        e.session_established(IF, ll(2), t0 + Duration::from_secs(report_at));
+    }
+    let total: u64 = counted_conflicts(&mut e)
+        .iter()
+        .map(|(_, count)| count)
+        .sum();
+    usize::try_from(total).unwrap()
+}
+
+/// The (other, count) of the conflicts raised since the last drain.
+fn counted_conflicts(e: &mut Engine) -> Vec<(Ipv6Addr, u64)> {
+    e.events
+        .drain(..)
+        .filter_map(|ev| match ev {
+            DiscoveryEvent::Conflict { other, count, .. } => Some((other, count)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A long wait for the Established report holds many returns of one pair:
+/// the report names them in one record carrying their number, not one
+/// record each.
+/// Mutation-red: one record per held return emits 100 000 records.
+#[test]
+fn held_returns_are_named_in_one_record_per_source() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    let returns: u32 = 100_000;
+    let mut at = t0;
+    ra(&mut e, 9, 60, at).unwrap();
+    ra(&mut e, 5, 1, at).unwrap();
+    for _ in 0..returns {
+        // fe80::9 stays the binding; fe80::5 lapses and returns.
+        at += Duration::from_secs(2);
+        ra(&mut e, 9, 60, at).unwrap();
+        ra(&mut e, 5, 1, at).unwrap();
+    }
+    assert_eq!(counted_conflicts(&mut e), [(ll(5), 1)]);
+    e.session_established(IF, ll(2), at);
+    assert_eq!(
+        counted_conflicts(&mut e),
+        [(ll(5), u64::from(returns))],
+        "one record for every held return"
+    );
+}
+
+/// A source whose candidate lapses and returns beside a binding a conflict
+/// already named it with is counted as an early report counts it: not at
+/// all when it is the peer, once per return when it is a foreign router,
+/// whichever side of that conflict it was on, and even when the return has
+/// lapsed again by the report.
+/// Mutation-red: naming a return at once counts the continuously live
+/// `fe80::9` twice when the peer's RA returns first; holding returns on one
+/// side of the pair only, or one return per address, undercounts.
+#[test]
+fn a_returning_source_is_counted_the_same_before_and_after_the_report() {
+    let table: [(&str, &Ras, u64, usize); 7] = [
+        (
+            "peer returns",
+            &[(2, 10, 0), (9, 60, 0), (2, 60, 11)],
+            11,
+            1,
+        ),
+        (
+            "foreign returns",
+            &[(9, 10, 0), (2, 60, 0), (9, 60, 11)],
+            11,
+            2,
+        ),
+        (
+            "foreign returns twice",
+            &[(9, 10, 0), (2, 60, 0), (9, 10, 11), (9, 60, 22)],
+            22,
+            3,
+        ),
+        (
+            "peer returns, reverse arrival",
+            &[(9, 60, 0), (2, 10, 0), (2, 60, 11)],
+            11,
+            1,
+        ),
+        (
+            "foreign return lapses before the report",
+            &[(9, 10, 0), (2, 60, 0), (9, 10, 11)],
+            22,
+            2,
+        ),
+        (
+            "peer returns twice",
+            &[(2, 10, 0), (9, 60, 0), (2, 10, 11), (2, 60, 22)],
+            22,
+            1,
+        ),
+        (
+            "both return in turn",
+            &[(9, 10, 0), (2, 20, 0), (9, 60, 11), (2, 60, 25)],
+            25,
+            2,
+        ),
+    ];
+    for (case, ras, report_at, want) in table {
+        assert_eq!(
+            conflicts_with_report(ras, report_at, true),
+            want,
+            "early: {case}"
+        );
+        assert_eq!(
+            conflicts_with_report(ras, report_at, false),
+            want,
+            "late: {case}"
+        );
+    }
+}
+
+/// The remembered pairs stay bounded while one binding outlives a stream of
+/// short-lived sources, and go with the last candidate of each pair.
+/// Mutation-red: recording every pair keeps one per source.
+#[test]
+fn remembered_conflict_pairs_are_bounded_by_the_candidate_table() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    ra(&mut e, 1, 9000, t0).unwrap();
+    for n in 2..200 {
+        let at = t0 + Duration::from_secs(u64::from(n) * 2);
+        ra(&mut e, n, 1, at).unwrap();
+        assert!(e.named_pairs(IF) <= MAX_CANDIDATES_PER_INTERFACE);
+    }
+    assert_eq!(e.named_pairs(IF), MAX_CANDIDATES_PER_INTERFACE);
+    e.poll(t0 + Duration::from_hours(3));
+    assert_eq!(e.named_pairs(IF), 0, "the binding's expiry forgets them");
 }
 
 /// Carrier loss forgets the Established peer: after the link returns, the

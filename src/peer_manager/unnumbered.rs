@@ -424,6 +424,7 @@ impl PeerManager {
                 interface,
                 bound,
                 other,
+                count,
             } => {
                 // Queued before the neighbor was deleted: counting it would
                 // recreate the series its removal reaped.
@@ -431,13 +432,16 @@ impl PeerManager {
                     debug!(%interface, "unnumbered: conflict for a removed neighbor, ignored");
                     return;
                 }
+                // One record stands for `count` conflicts: logged once and
+                // counted in one increment, however large its backlog.
                 warn!(
-                    %interface, %bound, %other,
+                    %interface, %bound, %other, conflicts = count,
                     reason = "multiple_routers_on_link",
                     "unnumbered: a second router advertises on an interface-only link"
                 );
-                self.metrics.record_unnumbered_ra_conflict(
+                self.metrics.record_unnumbered_ra_conflicts(
                     &rustbgpd_telemetry::interface_peer_label(&interface),
+                    count,
                 );
             }
         }
@@ -1915,7 +1919,7 @@ impl PeerManager {
     /// bound session is Established is one, with or without an RA binding.
     fn refuse_second_router(&self, name: &str) -> Option<PeerKey> {
         self.metrics
-            .record_unnumbered_ra_conflict(&rustbgpd_telemetry::interface_peer_label(name));
+            .record_unnumbered_ra_conflicts(&rustbgpd_telemetry::interface_peer_label(name), 1);
         self.refuse_inbound()
     }
 
@@ -2243,8 +2247,8 @@ impl PeerManager {
     /// Whether binding `name` now would wait in the actor for RIB mailbox
     /// room: its session starts only after a cleanup queued under the
     /// interface's label is admitted, and a neighbor that keeps its RIB handle
-    /// sends `RebindPeer` (with `try_send`, so a mailbox that fills during the
-    /// bind still returns `Ok(false)`). Deferred cleanup under other labels
+    /// sends `RebindPeer` (with `try_send`, so a mailbox that fills after this
+    /// check still returns `Ok(false)`). Deferred cleanup under other labels
     /// does not hold a bind back: nothing of this neighbor's is behind it. Its
     /// callers retry or refuse instead, so no bind waits with no owner.
     fn bind_would_wait(&self, name: &str) -> bool {
@@ -2288,8 +2292,9 @@ impl PeerManager {
         reason = "binding admission and rollback share the held neighbor state and must preserve side-effect ordering"
     )]
     /// `Ok(false)`: the RIB mailbox had no room for the neighbor's
-    /// `RebindPeer`, so nothing was bound and the caller retries or refuses.
-    async fn bind_port(
+    /// `RebindPeer`, which goes before every other step, so nothing was
+    /// applied and the caller retries or refuses.
+    pub(super) async fn bind_port(
         &mut self,
         name: &str,
         endpoint: Endpoint,
@@ -2310,12 +2315,6 @@ impl PeerManager {
         }
         let (neighbor, config) = self.bound_peer_config(name, endpoint)?;
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
-        // GTSM is in force at the listener for this endpoint before the peer
-        // can be matched inbound; a neighbor without it leaves no selector.
-        let selector = learned_selector(endpoint, config.ttl_security_hops);
-        self.set_learned_gtsm(name, selector).await?;
-        // The binding's BFD session exists before its peer, so a strict peer
-        // is added withheld until BFD is Up on this endpoint (ADR-0142).
         let bfd = crate::bfd_runtime::bound_session_params(
             &self.current_config,
             &neighbor,
@@ -2324,6 +2323,46 @@ impl PeerManager {
             endpoint.ifindex,
         )
         .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
+        // The neighbor keeps its RIB identity across endpoints. The RIB moves
+        // it to the new endpoint, in order after the previous binding's
+        // deletion and before the new session's first message. Always sent:
+        // the table may not yet reflect a rebind still queued to the RIB,
+        // whose handler skips an unchanged endpoint in its own order. Sent
+        // directly, never waiting: `bind_would_wait` held no cleanup under
+        // this interface's label, so the previous binding's deletion has
+        // reached the RIB and only other neighbors' deferred updates, which
+        // nothing here depends on, can still be queued.
+        //
+        // Sent before any other side effect, so a mailbox that filled after
+        // `bind_would_wait` leaves nothing to roll back. The gate install
+        // below reaches the RIB after it, which is safe: the moved handle has
+        // no session registered until this binding's `PeerUp`, so the gate
+        // still precedes the peer's first UPDATE. A later failure leaves the
+        // handle at this endpoint with no session; the retry's `RebindPeer`,
+        // or the next binding's, settles it.
+        let rib_peer = self.port_mut(name).rib_peer;
+        if let Some(rib_peer) = rib_peer {
+            let next = rustbgpd_rib::PeerEndpoint::new(IpAddr::V6(endpoint.address), Some(name));
+            let sent = self.rib_tx.try_send(rustbgpd_rib::RibUpdate::RebindPeer {
+                peer: rib_peer,
+                endpoint: next,
+            });
+            match sent {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => return Ok(false),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(PeerLifecycleError::Internal(
+                        "RIB channel closed while rebinding the neighbor".into(),
+                    ));
+                }
+            }
+        }
+        // GTSM is in force at the listener for this endpoint before the peer
+        // can be matched inbound; a neighbor without it leaves no selector.
+        let selector = learned_selector(endpoint, config.ttl_security_hops);
+        self.set_learned_gtsm(name, selector).await?;
+        // The binding's BFD session exists before its peer, so a strict peer
+        // is added withheld until BFD is Up on this endpoint (ADR-0142).
         let has_bfd = bfd.is_some();
         let gated = self.install_binding_gate(&neighbor, &key, name).await?;
         if has_bfd && let Err(error) = self.set_bound_bfd_session(key.address, bfd).await {
@@ -2348,45 +2387,11 @@ impl PeerManager {
             self.recompute_next_max_prefix_restart_deadline();
             carried_latch = true;
         }
-        // The neighbor keeps its RIB identity across endpoints. The RIB moves
-        // it to the new endpoint, in order after the previous binding's
-        // deletion and before the new session's first message. Always sent:
-        // the table may not yet reflect a rebind still queued to the RIB,
-        // whose handler skips an unchanged endpoint in its own order. Sent
-        // directly, never waiting: `bind_would_wait` held no cleanup under
-        // this interface's label, so the previous binding's deletion has
-        // reached the RIB and only other neighbors' deferred updates, which
-        // nothing here depends on, can still be queued.
-        let rib_peer = self.port_mut(name).rib_peer;
         if let Some(rib_peer) = rib_peer {
             self.rib_peers.insert(
                 key.clone(),
                 rustbgpd_transport::RibPeerSlot::assigned(rib_peer),
             );
-            let next = rustbgpd_rib::PeerEndpoint::new(IpAddr::V6(endpoint.address), Some(name));
-            let sent = self.rib_tx.try_send(rustbgpd_rib::RibUpdate::RebindPeer {
-                peer: rib_peer,
-                endpoint: next,
-            });
-            if let Err(error) = sent {
-                self.rib_peers.remove(&key);
-                if carried_latch {
-                    self.remove_max_prefix_latch(&key);
-                }
-                self.port_mut(name).held = held;
-                self.conditional_reconcile_pending |= gated;
-                if has_bfd {
-                    let _ = self.settle_port_bfd_removal(name).await;
-                }
-                return match error {
-                    tokio::sync::mpsc::error::TrySendError::Full(_) => Ok(false),
-                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                        Err(PeerLifecycleError::Internal(
-                            "RIB channel closed while rebinding the neighbor".into(),
-                        ))
-                    }
-                };
-            }
         }
         self.note_binding_reason(name, endpoint.address);
         if let Some(held) = &held {

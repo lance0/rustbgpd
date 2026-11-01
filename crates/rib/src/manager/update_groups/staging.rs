@@ -362,6 +362,24 @@ impl RibManager {
                     let prior_fallback = (!group.rs_fallback.is_empty())
                         .then(|| group.rs_fallback.get(prefix))
                         .flatten();
+                    let winner_delta = out.deltas[deltas_before..]
+                        .iter()
+                        .any(|delta| delta.path_id == 0);
+                    // A winner delta over an old or new fallback list may
+                    // move an rs-control member's next-hop action on its
+                    // fallback slot: keep the action-equivalence check on
+                    // when some fallback entry carries one.
+                    out.has_next_hop_actions |= winner_delta
+                        && prior_fallback
+                            .into_iter()
+                            .flat_map(|fallback| fallback.iter())
+                            .chain(
+                                stage
+                                    .rs_fallback
+                                    .iter()
+                                    .flat_map(|fallback| fallback.iter()),
+                            )
+                            .any(|entry| entry.nh.is_some());
                     let rs_view = prior_fallback.is_some() || stage.rs_fallback.is_some();
                     let fallback_moved = rs_view
                         && (rs_view_moved
@@ -369,9 +387,6 @@ impl RibManager {
                                 prior_fallback.map(|fallback| &**fallback),
                                 stage.rs_fallback.as_deref(),
                             ));
-                    let winner_delta = out.deltas[deltas_before..]
-                        .iter()
-                        .any(|delta| delta.path_id == 0);
                     // A member-specific slot the shared table does not name
                     // (the lane toward the winner's source, or an rs-control
                     // member's next eligible candidate) moved with an exempt

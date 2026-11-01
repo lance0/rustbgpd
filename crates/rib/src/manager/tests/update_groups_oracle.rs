@@ -7365,6 +7365,269 @@ async fn oracle_pcb_rs_control_equivalent_fallback_action_is_suppressed() {
     }
 }
 
+/// A lane entry that changes only in a community the rewrite scrubs toward
+/// the winner's source (`RS:PEER`) reaches that source in the same wire form
+/// it already holds, so nothing is re-sent, as on the per-peer path.
+#[tokio::test]
+async fn oracle_pcb_rs_control_scrub_equal_lane_change_is_not_reannounced() {
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(B, true, false, None, 64).await;
+        for &(member, asn) in &PCB_RS_MEMBERS {
+            pcb_rs_peer_up(o, member, asn, 64).await;
+        }
+        o.routes(
+            B,
+            vec![rs_route(pfx(1, 0), B, vec![64602; 4], vec![])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            F,
+            vec![with_large(
+                rs_route(pfx(1, 0), F, vec![65006; 3], vec![]),
+                vec![rs_large(101, 65004), rs_large(103, 0)],
+            )],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(
+                pfx(1, 0),
+                B,
+                vec![64602; 4],
+                vec![0xFDE8_FDEC], // `RS:65004`
+            )],
+            vec![],
+        )
+        .await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
+    assert_eq!(
+        src_seq(&grouped, F),
+        vec![peer_v4(B)],
+        "F receives its lane substitute once"
+    );
+}
+
+/// Under an equivalent next-hop profile, a winner change in the same pass
+/// as a wire-equivalent action change on D's fallback, and the promotion of
+/// that action-bearing fallback to an equivalent winner, send D nothing,
+/// as on the per-peer path.
+#[tokio::test]
+async fn oracle_pcb_rs_control_equivalent_fallback_action_with_winner_delta() {
+    for promote in [false, true] {
+        let mut runs = Vec::new();
+        for force_ungrouped in [false, true] {
+            let mut policy = permit_all_with(RouteModifications {
+                communities_remove: vec![PCB_RS_MARKER],
+                ..RouteModifications::default()
+            });
+            let mut tagged = policy.policies[0].policy.entries[0].clone();
+            tagged.match_community = vec![CommunityMatch::Standard {
+                value: PCB_RS_MARKER,
+            }];
+            tagged.modifications.set_next_hop = Some(NextHopAction::Self_);
+            policy.policies[0].policy.entries.insert(0, tagged);
+            let path = |path_id: u32, len: usize, communities: Vec<u32>| {
+                let mut route = rs_route(pfx(1, 0), B, vec![64602; len], communities);
+                route.path_id = path_id;
+                route
+            };
+            let mut o = Oracle::spawn(force_ungrouped, None);
+            o.peer_up(B, true, false, None, 64).await;
+            for (member, asn) in [(D, 65004), (E, 65005)] {
+                equivalent_action_profile(&mut o, member).await;
+                pcb_rs_peer_up_with_policy(&mut o, member, asn, 64, Some(policy.clone())).await;
+            }
+            // B's first path wins but is suppressed toward D; D holds the
+            // second path, whose marker sets next hop self.
+            o.routes(
+                B,
+                vec![path(1, 1, vec![65004]), path(2, 2, vec![PCB_RS_MARKER])],
+                vec![],
+            )
+            .await;
+            let initial = o.drain_peer_available(D).await;
+            let initial: Vec<_> = initial.iter().flat_map(|msg| &msg.announce).collect();
+            assert_eq!(
+                initial.last().map(|entry| entry.5.clone()),
+                Some(Some(NextHopAction::Self_))
+            );
+            if promote {
+                // The fallback loses its marker as the winner goes: D's slot
+                // becomes the equivalent winner.
+                o.tx.send(RibUpdate::RoutesReceived {
+                    session_id: SESSION,
+                    peer: peer_v4(B),
+                    announced: vec![path(2, 2, vec![])],
+                    withdrawn: vec![(Prefix::V4(pfx(1, 0)), 1)],
+                    flowspec_announced: vec![],
+                    flowspec_withdrawn: vec![],
+                    evpn_announced: vec![],
+                    evpn_withdrawn: vec![],
+                    validated_with: None,
+                })
+                .await
+                .unwrap();
+                o.quiesce().await;
+            } else {
+                // The winner gains an unrelated community (`65010:200`) in
+                // the same pass as the fallback's action change.
+                o.routes(
+                    B,
+                    vec![path(1, 1, vec![65004, 0xFDF2_00C8]), path(2, 2, vec![])],
+                    vec![],
+                )
+                .await;
+            }
+            assert!(
+                o.drain_peer_available(D)
+                    .await
+                    .iter()
+                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                "promote={promote} force_ungrouped={force_ungrouped}: an equivalent \
+                 action change must not reach D"
+            );
+            runs.push(o.finish().await);
+        }
+        assert_route_parity(&runs[0], &runs[1]);
+    }
+}
+
+/// A batched policy transition whose new chain denies a route withdraws it
+/// only from members that held it: not from its source, and not from the
+/// rs-control member it was suppressed toward.
+#[tokio::test]
+async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
+    let scenario = async |o: &mut Oracle| {
+        for &(member, asn) in &PCB_RS_MEMBERS {
+            pcb_rs_peer_up(o, member, asn, 64).await;
+        }
+        // p3 is suppressed toward E; p4 carries only the policy marker.
+        o.routes(
+            D,
+            vec![
+                rs_route(pfx(3, 0), D, vec![65004; 2], vec![65005]),
+                rs_route(pfx(4, 0), D, vec![65004; 2], vec![PCB_RS_MARKER]),
+            ],
+            vec![],
+        )
+        .await;
+        let mut deny = deny_community_chain(65005);
+        let mut marker = deny.policies[0].policy.entries[0].clone();
+        marker.match_community = vec![CommunityMatch::Standard {
+            value: PCB_RS_MARKER,
+        }];
+        deny.policies[0].policy.entries.push(marker);
+        let (reply, result) = oneshot::channel();
+        o.tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: PCB_RS_MEMBERS
+                .iter()
+                .map(|&(peer, _)| crate::update::PeerExportPolicyReplacement {
+                    peer: peer_v4(peer),
+                    export_policy: Some(deny.clone()),
+                })
+                .collect(),
+            reply,
+        })
+        .await
+        .unwrap();
+        result.await.unwrap().unwrap();
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
+    for member in [D, E] {
+        assert!(
+            grouped[&peer_v4(member)]
+                .iter()
+                .flat_map(|msg| &msg.withdraw)
+                .all(|(prefix, _)| *prefix != Prefix::V4(pfx(3, 0))),
+            "{member} never held p3"
+        );
+    }
+    assert!(
+        grouped[&peer_v4(D)]
+            .iter()
+            .flat_map(|msg| &msg.withdraw)
+            .all(|(prefix, _)| *prefix != Prefix::V4(pfx(4, 0))),
+        "D never held its own p4"
+    );
+}
+
+/// A winner change over a fallback list whose entries carry no next-hop
+/// action leaves the action-equivalence scan off for clean members: there is
+/// no action for it to compare. The same change with an action-bearing
+/// fallback turns it on.
+#[tokio::test]
+async fn oracle_pcb_rs_control_action_free_fallback_skips_action_scan() {
+    use crate::manager::distribution::ACTION_SUPPRESSION_SCANS;
+    let scans = || ACTION_SUPPRESSION_SCANS.with(std::cell::Cell::get);
+    let mut next_hop_on_marker = permit_all_with(RouteModifications::default());
+    let mut marked = next_hop_on_marker.policies[0].policy.entries[0].clone();
+    marked.match_community = vec![CommunityMatch::Standard {
+        value: PCB_RS_MARKER,
+    }];
+    marked.modifications.set_next_hop = Some(NextHopAction::Self_);
+    next_hop_on_marker.policies[0]
+        .policy
+        .entries
+        .insert(0, marked);
+    for (fallback_marker, expect_scans) in [(false, false), (true, true)] {
+        let mut o = Oracle::spawn(false, None);
+        o.peer_up(A, true, false, None, 64).await;
+        o.peer_up(B, true, false, None, 64).await;
+        for (member, asn) in [(D, 65004), (E, 65005)] {
+            pcb_rs_peer_up_with_policy(&mut o, member, asn, 64, Some(next_hop_on_marker.clone()))
+                .await;
+        }
+        o.routes(
+            A,
+            vec![rs_route(pfx(1, 0), A, vec![64601], vec![65004])],
+            vec![],
+        )
+        .await;
+        o.routes(
+            B,
+            vec![rs_route(
+                pfx(1, 0),
+                B,
+                vec![64602; 2],
+                if fallback_marker {
+                    vec![PCB_RS_MARKER]
+                } else {
+                    vec![]
+                },
+            )],
+            vec![],
+        )
+        .await;
+        o.drain_available();
+        let before = scans();
+        // The winner gains an unrelated community (`65010:200`).
+        o.routes(
+            A,
+            vec![rs_route(
+                pfx(1, 0),
+                A,
+                vec![64601],
+                vec![65004, 0xFDF2_00C8],
+            )],
+            vec![],
+        )
+        .await;
+        assert_eq!(
+            scans() > before,
+            expect_scans,
+            "fallback_marker={fallback_marker}: action suppression scans {}",
+            scans() - before
+        );
+        o.finish().await;
+    }
+}
+
 /// All requests are queued before the actor runs. Distinct own-source rows,
 /// a different policy group and negotiated private paths retain the same
 /// normalized announcements, next hops, withdrawals and refresh markers.

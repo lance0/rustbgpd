@@ -4235,12 +4235,13 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Count a second router seen on an interface-only neighbor's link.
-    pub fn record_unnumbered_ra_conflict(&self, peer: &str) {
+    /// Count `count` sightings of a second router on an interface-only
+    /// neighbor's link.
+    pub fn record_unnumbered_ra_conflicts(&self, peer: &str, count: u64) {
         self.0
             .unnumbered_ra_conflicts
             .with_label_values(&[peer])
-            .inc();
+            .inc_by(count);
     }
 
     /// Count an RS or RA discarded by discovery; `reason` is bounded.
@@ -10560,7 +10561,7 @@ mod tests {
         m.record_stale_timer_event(peer, "idle", "hold");
         m.set_unnumbered_peer_address(peer, "swp1", None, Some("fe80::2"));
         m.record_unnumbered_address_change(peer);
-        m.record_unnumbered_ra_conflict(peer);
+        m.record_unnumbered_ra_conflicts(peer, 1);
         m.record_bfd_state(peer, true, false);
         m.record_bfd_state(peer, false, true); // bfd flap counter
         m.record_notification_sent(peer, "6", "0");
@@ -11181,8 +11182,8 @@ mod tests {
         populate_all_peer_families(&m, &swp1);
         assert_eq!(non_canonical_peer_labels(m.registry()), Vec::new());
         // Mutation-red: accepting any prefix lets a malformed value through.
-        m.record_unnumbered_ra_conflict("interface:");
-        m.record_unnumbered_ra_conflict("iface:swp1");
+        m.record_unnumbered_ra_conflicts("interface:", 1);
+        m.record_unnumbered_ra_conflicts("iface:swp1", 1);
         assert_eq!(
             non_canonical_peer_labels(m.registry()),
             [
