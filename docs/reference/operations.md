@@ -3171,14 +3171,19 @@ retains the neighbor's routes), `our_routes` (the neighbor, as our helper, may
 retain ours) or `both`. Each deadline is shown as Unix seconds and the time
 left, measured against the clock of the host running `rbgp`. Detail lists the
 first 20 neighbors; the metric lists all of them. The check is green and
-informational. It is yellow when `bgp_dynamic_neighbor_slots_headroom` is 0
-and `bgp_dynamic_neighbor_limit_rejections_total` is nonzero, that is, the
-limit is full and new dynamic peers have been refused since the daemon
-started. At the limit a neighbor kept only for `our_routes` gives way to a new
-address, but one whose routes rustbgpd retains does not. To make room, raise
-`global.dynamic_neighbor_limit`, wait for the deadlines, or remove the range.
-The check is absent when no neighbor is retained. The warning retains exit
-status 0.
+informational. At the limit a neighbor kept only for `our_routes` gives way to
+a new address, but one whose routes rustbgpd retains does not. The check is
+therefore yellow only when `bgp_dynamic_neighbor_slots_headroom` is 0,
+`bgp_dynamic_neighbor_limit_rejections_total` is nonzero, and every listed
+neighbor has `its_routes`: the limit is full, no retained neighbor can give way,
+and new dynamic peers have been refused since the daemon started. To make
+room, raise `global.dynamic_neighbor_limit`, wait for the deadlines, or remove
+the range. The check is absent when no neighbor is retained. The warning
+retains exit status 0. Deadlines are converted to wall-clock time when the
+daemon publishes them, so a later step of the daemon host's clock does not move
+them. While the RIB does not answer retention checks, a neighbor whose listed
+deadline has passed drops out of the list until a check is answered, although
+it still holds its slot.
 
 `peer.<scoped-address>.outbound_resync` and `rib.update_group_recovery` report
 outbound resync and update-group recovery fallback; see

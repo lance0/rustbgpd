@@ -171,15 +171,15 @@ impl PeerManager {
     /// once it is gone. Its routes are listed from the first check that
     /// finds them retained, which carries the RIB's deadline.
     fn publish_retained_dynamic(&self, peer: &PeerKey) {
-        let label = peer.label();
-        let Some(retained) = self
-            .retained_dynamic
-            .get(peer)
-            .filter(|retained| retained.check_at.is_some())
-        else {
-            self.metrics.clear_dynamic_neighbor_retention(&label);
+        let Some(retained) = self.retained_dynamic.get(peer) else {
             return;
         };
+        let (label, range) = (peer.label(), retained_range(retained));
+        if retained.check_at.is_none() {
+            self.metrics
+                .clear_dynamic_neighbor_retention(&label, &range);
+            return;
+        }
         let now = Instant::now();
         let wall_now = std::time::SystemTime::now();
         let unix = |at: Instant| {
@@ -187,10 +187,6 @@ impl PeerManager {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |since| since.as_secs())
         };
-        let range = format!(
-            "{}/{}",
-            retained.accepted.addr, retained.accepted.prefix_len
-        );
         self.metrics.set_dynamic_neighbor_retention(
             &label,
             &range,
@@ -433,7 +429,8 @@ impl PeerManager {
     /// candidate resolved for itself.
     fn remove_retained_dynamic(&mut self, peer: &PeerKey) -> Option<RetainedDynamicPeer> {
         let mut retained = self.retained_dynamic.remove(peer)?;
-        self.metrics.clear_dynamic_neighbor_retention(&peer.label());
+        self.metrics
+            .clear_dynamic_neighbor_retention(&peer.label(), &retained_range(&retained));
         if let Some(candidate) = retained.candidate.take() {
             self.retention.orphaned.push(OrphanSlot {
                 peer: peer.clone(),
@@ -659,6 +656,14 @@ impl PeerManager {
             retained.check_at = at;
         }
     }
+}
+
+/// The accepted range a retained neighbor's series name.
+fn retained_range(retained: &RetainedDynamicPeer) -> String {
+    format!(
+        "{}/{}",
+        retained.accepted.addr, retained.accepted.prefix_len
+    )
 }
 
 /// Log a retention once, with what it holds and until when.

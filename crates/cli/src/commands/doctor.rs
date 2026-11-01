@@ -1223,9 +1223,16 @@ fn retained_dynamic_neighbors_check(metrics: Option<&str>, observed_at: u64) -> 
             .find_map(|line| line.strip_prefix(prefix)?.trim().parse::<u64>().ok())
     };
     let refused = gauge("bgp_dynamic_neighbor_limit_rejections_total ").unwrap_or(0);
-    let status = if gauge("bgp_dynamic_neighbor_slots_headroom ") == Some(0) && refused > 0 {
+    // A neighbor kept only for our_routes gives its slot to a new address,
+    // so the limit refuses one only when every retained neighbor's routes
+    // are retained.
+    let none_evictable = retained.values().all(|(_, its, _)| its.is_some());
+    let status = if gauge("bgp_dynamic_neighbor_slots_headroom ") == Some(0)
+        && refused > 0
+        && none_evictable
+    {
         detail.push_str(&format!(
-            ". The limit is full and {refused} inbound dynamic connection{} refused at it since daemon start: a neighbor kept only for our_routes gives way to a new address, one whose routes we retain does not. Raise global.dynamic_neighbor_limit, wait for the deadlines, or remove the range",
+            ". The limit is full, none of these gives way to a new address while we retain its routes, and {refused} inbound dynamic connection{} refused at it since daemon start. Raise global.dynamic_neighbor_limit, wait for the deadlines, or remove the range",
             if refused == 1 { " was" } else { "s were" }
         ));
         CheckStatus::Warn
@@ -7339,8 +7346,9 @@ paths = ["x"]
     }
 
     /// Red proofs: merging one neighbor's two retentions into two entries,
-    /// listing a lapsed deadline, warning without a refusal or with headroom,
-    /// or reporting with nothing retained fails below.
+    /// listing a lapsed deadline, warning without a refusal, with headroom
+    /// or beside a member kept only for our_routes (which a new address
+    /// evicts), or reporting with nothing retained fails below.
     #[test]
     fn retained_dynamic_neighbors_check_lists_reasons_and_warns_only_when_refused_at_the_limit() {
         const SERIES: &str = "bgp_dynamic_neighbor_retained_until_timestamp_seconds";
@@ -7371,36 +7379,53 @@ paths = ["x"]
              our_routes: it may hold ours until unix 1300 (300s))"
         );
 
-        let full = |headroom: u64, refused: u64| {
+        let full = |series: &str, headroom: u64, refused: u64| {
             retained_dynamic_neighbors_check(
                 Some(&format!(
-                    "{retained}bgp_dynamic_neighbor_slots_headroom {headroom}\n\
+                    "{series}bgp_dynamic_neighbor_slots_headroom {headroom}\n\
                      bgp_dynamic_neighbor_limit_rejections_total {refused}\n"
                 )),
                 1000,
             )
             .unwrap()
         };
+        // 198.51.100.9 is kept only for our_routes, so a new address evicts
+        // it rather than being refused: no warning, whatever the counters.
         assert_eq!(
-            full(0, 0).status,
+            full(&retained, 0, 3).status,
+            CheckStatus::Ok,
+            "an evictable member makes room"
+        );
+        let pinned = format!(
+            "{SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"its_routes\"}} 1095\n\
+             {SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 1215\n\
+             {SERIES}{{peer=\"198.51.100.8\",range=\"198.51.100.0/24\",retention=\"its_routes\"}} 1060\n\
+             {SERIES}{{peer=\"198.51.100.11\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 999\n"
+        );
+        assert_eq!(
+            full(&pinned, 0, 0).status,
             CheckStatus::Ok,
             "full but nobody refused"
         );
         assert_eq!(
-            full(1, 3).status,
+            full(&pinned, 1, 3).status,
             CheckStatus::Ok,
             "refused earlier, room now"
         );
-        let warn = full(0, 3);
+        let warn = full(&pinned, 0, 3);
         assert_eq!(warn.status, CheckStatus::Warn);
-        assert!(
-            warn.detail
-                .contains("3 inbound dynamic connections were refused"),
-            "{}",
-            warn.detail
+        assert_eq!(
+            warn.detail,
+            "2 idle dynamic neighbors keep a dynamic_neighbor_limit slot for graceful restart retention: \
+             198.51.100.7 (range 198.51.100.0/24, reason both: we retain its routes until unix 1095 (95s), \
+             it may hold ours until unix 1215 (215s)); 198.51.100.8 (range 198.51.100.0/24, reason \
+             its_routes: we retain its routes until unix 1060 (60s)). The limit is full, none of these \
+             gives way to a new address while we retain its routes, and 3 inbound dynamic connections \
+             were refused at it since daemon start. Raise global.dynamic_neighbor_limit, wait for the \
+             deadlines, or remove the range"
         );
         assert!(
-            full(0, 1)
+            full(&pinned, 0, 1)
                 .detail
                 .contains("1 inbound dynamic connection was refused")
         );
