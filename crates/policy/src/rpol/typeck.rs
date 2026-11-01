@@ -18,9 +18,9 @@ use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith};
 use crate::ir::ValueField;
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, CommunityKind, DatasetDecl, DatasetEntryAst, Expr, FieldPath,
-    FieldRoot, FnDef, ForSource, ForStmt, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile,
-    Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CallArg, CmpOp, CommunityArg, CommunityKind, DatasetDecl, DatasetEntryAst, Expr,
+    FieldPath, FieldRoot, FnDef, ForSource, ForStmt, NextHopArg, ParamType, PolicyDef,
+    PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned, closest};
 
@@ -159,6 +159,9 @@ const MAX_LOCALS: usize = 64;
 /// its meaning (LAN-296).
 struct Scope<'a> {
     params: Vec<&'a str>,
+    /// The policy's parameters of a type other than `u32`, which resolve
+    /// only in positions of their own type.
+    typed: Vec<(&'a str, ParamType)>,
     lets: Vec<String>,
     /// False inside a function body (LAN-304): functions are closed
     /// over nothing — `route.`/`peer.` field reads are rejected there;
@@ -174,6 +177,22 @@ impl Scope<'_> {
 
     fn is_local(&self, name: &str) -> bool {
         self.lets.iter().any(|local| local == name)
+    }
+
+    fn typed_param(&self, name: &str) -> Option<ParamType> {
+        self.typed
+            .iter()
+            .find(|(param, _)| *param == name)
+            .map(|(_, ty)| *ty)
+    }
+
+    /// The type of a parameter `name`, `u32` included.
+    fn param_type(&self, name: &str) -> Option<ParamType> {
+        if self.is_param(name) {
+            Some(ParamType::U32)
+        } else {
+            self.typed_param(name)
+        }
     }
 }
 
@@ -443,6 +462,7 @@ impl<'a> Checker<'a> {
             self.duplicate_check("parameter", def.params.iter());
             let mut scope = Scope {
                 params: def.params.iter().map(|p| p.node.as_str()).collect(),
+                typed: Vec::new(),
                 lets: Vec::new(),
                 fields_allowed: false,
             };
@@ -648,8 +668,38 @@ impl<'a> Checker<'a> {
     fn check_policy(&mut self, policy: &PolicyDef) {
         self.duplicate_check("parameter", policy.params.iter());
         self.duplicate_check("term", policy.terms.iter().map(|t| &t.name));
+        let mut params = Vec::new();
+        let mut typed = Vec::new();
+        for (param, ty) in policy.params.iter().zip(&policy.param_types) {
+            if *ty == ParamType::U32 {
+                params.push(param.node.as_str());
+                continue;
+            }
+            typed.push((param.node.as_str(), *ty));
+            // A set parameter stands where a set name does; sharing a
+            // name with a set would make that position ambiguous.
+            if ty.set_kind().is_some()
+                && let Some((kind, span)) = self.symbol_def_of(&param.node)
+                && matches!(kind, "prefix-set" | "community-set" | "asn-set" | "dataset")
+            {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        param.span,
+                        format!(
+                            "parameter `{}` has the name of {} {kind}",
+                            param.node,
+                            article(kind)
+                        ),
+                        "set parameters and sets share one namespace",
+                    )
+                    .with_label(span, format!("`{}` is defined here", param.node)),
+                );
+            }
+        }
         let mut scope = Scope {
-            params: policy.params.iter().map(|p| p.node.as_str()).collect(),
+            params,
+            typed,
             lets: Vec::new(),
             fields_allowed: true,
         };
@@ -726,6 +776,24 @@ impl<'a> Checker<'a> {
     /// finite u32-valued forms, cap nesting, then check the body in a
     /// fresh scope holding the loop variable.
     fn check_for(&mut self, for_stmt: &ForStmt, scope: &mut Scope, loop_depth: u32) {
+        if let ForSource::Set(name) = &for_stmt.source
+            && let Some(ty) = scope.typed_param(&name.node)
+        {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    name.span,
+                    format!(
+                        "parameter `{}` is {} {}; loops iterate a named asn-set only",
+                        name.node,
+                        ty.article(),
+                        ty.keyword()
+                    ),
+                    "a set parameter is not a loop source",
+                )
+                .with_note("a loop's bound is the set's size at compile time, which a parameter does not have"),
+            );
+        }
         if loop_depth == MAX_LOOP_DEPTH {
             self.diags.push(
                 Diagnostic::coded(
@@ -967,6 +1035,18 @@ impl<'a> Checker<'a> {
     )]
     fn check_action(&mut self, action: &ActionStmt, scope: &Scope<'_>, loop_depth: u32) {
         match action {
+            ActionStmt::SetNextHop(NextHopArg::Param(name), _) => {
+                if scope.typed_param(&name.node) != Some(ParamType::Ip)
+                    && !self.typed_param_misused(name, scope, "an `ip` parameter")
+                {
+                    self.diags.push(Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        name.span,
+                        format!("unknown `ip` parameter `{}`", name.node),
+                        "`set next-hop` takes an address, `self`, or an `ip` parameter",
+                    ));
+                }
+            }
             ActionStmt::Accept(_)
             | ActionStmt::Reject(_)
             | ActionStmt::SetNextHop(..)
@@ -1073,7 +1153,13 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
-                if !scope.is_local(&name.node) && !scope.is_param(&name.node) {
+                let community_param = scope.typed_param(&name.node) == Some(ParamType::Community);
+                if !community_param && self.typed_param_misused(name, scope, "a community") {
+                    // Reported.
+                } else if !community_param
+                    && !scope.is_local(&name.node)
+                    && !scope.is_param(&name.node)
+                {
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         name.span,
@@ -1128,16 +1214,9 @@ impl<'a> Checker<'a> {
                             ));
                         }
                     }
-                    U32Arg::Param(name) => {
-                        self.diags.push(Diagnostic::coded(
-                            DiagnosticCode::Typecheck,
-                            name.span,
-                            "prepend count must be a literal",
-                            "parameters are not allowed here",
-                        ).with_note(
-                            "the count is encoded as a u8; a parameterized count cannot be range-checked at definition time",
-                        ));
-                    }
+                    // A u32 parameter: its argument is range-checked where the
+                    // policy is instantiated (an attach, a test, `apply`).
+                    U32Arg::Param(_) => self.check_u32_arg(count, scope),
                 }
             }
         }
@@ -1331,6 +1410,9 @@ impl<'a> Checker<'a> {
         if scope.is_local(&name.node) || scope.is_param(&name.node) {
             return;
         }
+        if self.typed_param_misused(name, scope, "a u32 value") {
+            return;
+        }
         let mut diag = Diagnostic::coded(
             DiagnosticCode::Typecheck,
             name.span,
@@ -1359,6 +1441,9 @@ impl<'a> Checker<'a> {
         if scope.is_param(&name.node) {
             return;
         }
+        if self.typed_param_misused(name, scope, "a u32 value") {
+            return;
+        }
         if scope.is_local(&name.node) {
             self.diags.push(
                 Diagnostic::coded(
@@ -1383,6 +1468,105 @@ impl<'a> Checker<'a> {
         self.diags.push(diag);
     }
 
+    /// A non-`u32` parameter in a position of another type: reports it and
+    /// returns true.
+    fn typed_param_misused(
+        &mut self,
+        name: &Spanned<String>,
+        scope: &Scope<'_>,
+        wanted: &str,
+    ) -> bool {
+        let Some(ty) = scope.typed_param(&name.node) else {
+            return false;
+        };
+        self.diags.push(Diagnostic::coded(
+            DiagnosticCode::Typecheck,
+            name.span,
+            format!(
+                "parameter `{}` is {} {}, but this position needs {wanted}",
+                name.node,
+                ty.article(),
+                ty.keyword()
+            ),
+            "parameter type mismatch",
+        ));
+        true
+    }
+
+    /// A typed parameter where a set name goes: `route.prefix in p`,
+    /// `x in p`. `wanted` lists the set types the position accepts.
+    fn check_set_param(&mut self, set: &Spanned<String>, ty: ParamType, wanted: &[ParamType]) {
+        if !wanted.contains(&ty) {
+            let names: Vec<_> = wanted
+                .iter()
+                .map(|ty| format!("`{}`", ty.keyword()))
+                .collect();
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Typecheck,
+                set.span,
+                format!(
+                    "parameter `{}` is {} {}, but this probe needs {}",
+                    set.node,
+                    ty.article(),
+                    ty.keyword(),
+                    names.join(" or ")
+                ),
+                "parameter type mismatch",
+            ));
+        }
+    }
+
+    /// The arguments of a policy reference against the callee's parameter
+    /// types. `scope` is the caller's inside `apply`, where a name may be
+    /// one of its parameters; `None` in a test `expect`.
+    fn check_call_args(
+        &mut self,
+        target: &PolicyDef,
+        args: &[Spanned<CallArg>],
+        scope: Option<&Scope<'_>>,
+    ) {
+        for (index, arg) in args.iter().enumerate().take(target.param_types.len()) {
+            let ty = target.param_types[index];
+            if let (Some(scope), CallArg::Name(name)) = (scope, &arg.node) {
+                // A u32 position keeps its established checks: parameter,
+                // `let` binding, or unknown name.
+                if ty == ParamType::U32 && scope.typed_param(name).is_none() {
+                    self.check_u32_arg(&U32Arg::Param(Spanned::new(name.clone(), arg.span)), scope);
+                    continue;
+                }
+                if let Some(caller) = scope.param_type(name) {
+                    if caller != ty {
+                        self.diags.push(Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            arg.span,
+                            format!(
+                                "parameter `{name}` is {} {}, but `{}` takes {} {}",
+                                caller.article(),
+                                caller.keyword(),
+                                target.params[index].node,
+                                ty.article(),
+                                ty.keyword()
+                            ),
+                            "parameter type mismatch",
+                        ));
+                    }
+                    continue;
+                }
+            }
+            if let Err(reason) = check_call_arg(self.file, target, index, &arg.node) {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        arg.span,
+                        reason,
+                        "invalid argument",
+                    )
+                    .with_label(target.params[index].span, "parameter declared here"),
+                );
+            }
+        }
+    }
+
     // ── expressions ─────────────────────────────────────────────────
 
     #[expect(
@@ -1404,12 +1588,32 @@ impl<'a> Checker<'a> {
                 self.check_value_expr(lhs, scope);
                 self.check_value_expr(rhs, scope);
             }
-            Expr::In { field, set } => self.check_in(field, set),
+            Expr::In { field, set } => {
+                if let Some(ty) = scope.typed_param(&set.node) {
+                    let wanted: &[ParamType] = match resolve_field(field) {
+                        Ok(Field::Prefix) => &[ParamType::PrefixSet],
+                        Ok(
+                            Field::Communities | Field::LargeCommunities | Field::ExtCommunities,
+                        ) => &[ParamType::CommunitySet],
+                        Ok(Field::OriginAs | Field::PeerAsn) => &[ParamType::AsnSet],
+                        _ => &[],
+                    };
+                    if wanted.is_empty() {
+                        self.check_in(field, set);
+                    } else {
+                        self.check_set_param(set, ty, wanted);
+                    }
+                } else {
+                    self.check_in(field, set);
+                }
+            }
             // LAN-303: `<binding> in <set>` — u32 value against an
             // asn-set, or a community-set's standard members.
             Expr::IdentIn { ident, set } => {
                 self.check_value_ident(ident, scope);
-                if self.file.asn_sets.iter().any(|s| s.name.node == set.node)
+                if let Some(ty) = scope.typed_param(&set.node) {
+                    self.check_set_param(set, ty, &[ParamType::AsnSet, ParamType::CommunitySet]);
+                } else if self.file.asn_sets.iter().any(|s| s.name.node == set.node)
                     || self
                         .file
                         .community_sets
@@ -1478,6 +1682,33 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                 }
             }
+            Expr::HasParam { field, param } => match resolve_field(field) {
+                Err(diag) => self.diags.push(diag),
+                Ok(Field::Communities) => {
+                    if scope.typed_param(&param.node) != Some(ParamType::Community)
+                        && !self.typed_param_misused(param, scope, "a `community` parameter")
+                    {
+                        self.diags.push(Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            param.span,
+                            format!("unknown `community` parameter `{}`", param.node),
+                            "`has` takes a community literal or a `community` parameter",
+                        ));
+                    }
+                }
+                Ok(_) => self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        field.span.to(param.span),
+                        format!(
+                            "`{}` cannot be probed with a `community` parameter",
+                            field.render()
+                        ),
+                        "`community` parameters are standard communities",
+                    )
+                    .with_note("`has <parameter>` works on route.communities"),
+                ),
+            },
             Expr::Has { field, lit } => match resolve_field(field) {
                 Err(diag) => self.diags.push(diag),
                 Ok(resolved) => {
@@ -1568,6 +1799,7 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                     return;
                 };
+                self.check_call_args(target, args, Some(scope));
                 if target.params.len() != args.len() {
                     self.diags.push(
                         Diagnostic::coded(
@@ -1653,9 +1885,6 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
-                for arg in args {
-                    self.check_u32_arg(arg, scope);
-                }
             }
         }
     }
@@ -1730,6 +1959,10 @@ impl<'a> Checker<'a> {
             Field::Family => {
                 eq_only(self);
                 self.expect_enum_rhs(field, rhs, FAMILY_MEMBERS, scope);
+            }
+            Field::NextHop | Field::PeerAddress if matches!(rhs, Rhs::Ident(name) if scope.typed_param(&name.node) == Some(ParamType::Ip)) =>
+            {
+                eq_only(self);
             }
             Field::NextHop => {
                 eq_only(self);
@@ -2290,7 +2523,12 @@ impl<'a> Checker<'a> {
                 }
             }
             for call in test.expects.iter().flat_map(|expect| &expect.calls) {
-                let Some(target) = self.policy(&call.policy.node) else {
+                let file = self.file;
+                let Some(target) = file
+                    .policies
+                    .iter()
+                    .find(|p| p.name.node == call.policy.node)
+                else {
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         call.policy.span,
@@ -2318,6 +2556,7 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                     continue;
                 };
+                self.check_call_args(target, &call.args, None);
                 if target.params.len() != call.args.len() {
                     self.diags.push(
                         Diagnostic::coded(
@@ -2578,6 +2817,109 @@ fn bound_policy<'a>(
     }
     pred_cost.insert(name, total.saturating_add(prior));
     None
+}
+
+/// The parameters a policy uses as a `prepend` count and as a `set
+/// next-hop` operand: their arguments are range-checked at instantiation.
+pub(super) fn param_value_uses(def: &PolicyDef) -> (Vec<&str>, Vec<&str>) {
+    fn visit<'a>(action: &'a ActionStmt, counts: &mut Vec<&'a str>, next_hops: &mut Vec<&'a str>) {
+        match action {
+            ActionStmt::Prepend {
+                count: U32Arg::Param(name),
+                ..
+            } => counts.push(&name.node),
+            ActionStmt::SetNextHop(NextHopArg::Param(name), _) => next_hops.push(&name.node),
+            _ => {}
+        }
+    }
+    fn walk<'a>(stmts: &'a [Stmt], counts: &mut Vec<&'a str>, next_hops: &mut Vec<&'a str>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Action(action) => visit(action, counts, next_hops),
+                Stmt::If(if_stmt) => {
+                    for action in if_stmt
+                        .then_actions
+                        .iter()
+                        .chain(if_stmt.else_actions.iter().flatten())
+                    {
+                        visit(action, counts, next_hops);
+                    }
+                }
+                Stmt::For(for_stmt) => walk(&for_stmt.body, counts, next_hops),
+            }
+        }
+    }
+    let mut counts = Vec::new();
+    let mut next_hops = Vec::new();
+    for term in &def.terms {
+        walk(&term.stmts, &mut counts, &mut next_hops);
+    }
+    (counts, next_hops)
+}
+
+/// One literal argument against the callee's parameter at `index`: its
+/// type, an existing set or dataset of the parameter's kind, and the
+/// value range of a parameter used as a `prepend` count or `set next-hop`
+/// operand. The same check runs for a test `expect`, an `apply`, and a
+/// configured chain reference.
+pub(super) fn check_call_arg(
+    file: &SourceFile,
+    def: &PolicyDef,
+    index: usize,
+    arg: &CallArg,
+) -> Result<(), String> {
+    let ty = def.param_types[index];
+    let param = def.params[index].node.as_str();
+    let (counts, next_hops) = param_value_uses(def);
+    match (ty, arg) {
+        (ParamType::U32, CallArg::Int(value)) => {
+            if counts.contains(&param) && !(1..=255).contains(value) {
+                return Err(format!(
+                    "prepend count {value} out of range for parameter `{param}` (must be 1-255)"
+                ));
+            }
+            Ok(())
+        }
+        (ParamType::Community, CallArg::Community(_)) => Ok(()),
+        (ParamType::Ip, CallArg::Ip(addr)) => {
+            if next_hops.contains(&param)
+                && let Err(why) = crate::engine::NextHopAction::check_specific(*addr)
+            {
+                return Err(format!(
+                    "invalid next hop {addr} for parameter `{param}`: {why}"
+                ));
+            }
+            Ok(())
+        }
+        (
+            ParamType::PrefixSet | ParamType::CommunitySet | ParamType::AsnSet,
+            CallArg::Name(name),
+        ) => {
+            let kind = ty.set_kind().expect("a set type");
+            let declared = match ty {
+                ParamType::PrefixSet => file.prefix_sets.iter().any(|s| s.name.node == *name),
+                ParamType::CommunitySet => file.community_sets.iter().any(|s| s.name.node == *name),
+                _ => file.asn_sets.iter().any(|s| s.name.node == *name),
+            } || file
+                .datasets
+                .iter()
+                .any(|d| d.name.node == *name && d.kind == kind);
+            if declared {
+                Ok(())
+            } else {
+                Err(format!(
+                    "unknown {} `{name}` for parameter `{param}` (name a {} or a {kind} dataset)",
+                    ty.keyword(),
+                    ty.keyword()
+                ))
+            }
+        }
+        _ => Err(format!(
+            "argument `{arg}` is not {} {} (parameter `{param}`)",
+            ty.article(),
+            ty.keyword()
+        )),
+    }
 }
 
 /// Upper bound on the IR nodes `expr` lowers to, given the predicate

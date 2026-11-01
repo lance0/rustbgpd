@@ -989,8 +989,8 @@ enum PolicyAction {
         /// Path to the `.rpol` file
         #[arg(value_hint = clap::ValueHint::FilePath)]
         file: String,
-        /// Policy to evaluate: a name, or a call-form with u32
-        /// arguments for parameterized policies, e.g. "customer-in(200)"
+        /// Policy to evaluate: a name, or a call-form for parameterized
+        /// policies, e.g. "customer-in(200, cust-65001)"
         #[arg(long)]
         policy: String,
         /// Evaluation direction: import (retained post-policy

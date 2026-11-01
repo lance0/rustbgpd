@@ -68,10 +68,10 @@ use crate::ir::{
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, NextHopArg, PolicyDef,
-    PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CallArg, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, NextHopArg,
+    PolicyDef, PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
-use super::diag::{Diagnostic, DiagnosticCode};
+use super::diag::{Diagnostic, DiagnosticCode, Spanned};
 use super::typeck::{Field, community_attribute, resolve_field, value_field_of};
 
 /// Static slot allocation for `let` bindings (LAN-302/LAN-303): one
@@ -252,6 +252,10 @@ pub(super) struct Lowerer<'a> {
     dataset_ids: HashMap<String, DatasetId>,
     bindings: DatasetBindings,
     missing_datasets: Vec<String>,
+    /// The set and address arguments of each policy being lowered,
+    /// innermost last (`apply` lowers its target inside its caller).
+    /// `u32` and community arguments ride the `env` map instead.
+    typed_frames: Vec<HashMap<String, PolicyArg>>,
 }
 
 /// The interned set data of one source file: every defined
@@ -322,6 +326,19 @@ impl SetTables {
     }
 }
 
+/// One instantiation argument of a parameterized policy, after its type
+/// check: a policy lowers once per distinct argument list, so every
+/// argument is a compile-time constant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PolicyArg {
+    /// A `u32` value, or a `community` argument as its RFC 1997 value.
+    U32(u32),
+    /// The name of a set or dataset, for a set-typed parameter.
+    Set(String),
+    /// An address, for an `ip` parameter.
+    Ip(std::net::IpAddr),
+}
+
 impl<'a> Lowerer<'a> {
     /// Build the chain tables over `file`, interning its sets through
     /// the caller-owned store.
@@ -355,6 +372,7 @@ impl<'a> Lowerer<'a> {
             dataset_ids: HashMap::new(),
             bindings: DatasetBindings::new(),
             missing_datasets: Vec::new(),
+            typed_frames: Vec::new(),
         };
         for (index, def) in file.prefix_sets.iter().enumerate() {
             let id = SetId(u32::try_from(index).expect("fits u32"));
@@ -498,7 +516,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn instantiate_chain(
         &mut self,
         name: &str,
-        args: &[u32],
+        args: &[PolicyArg],
         store: &mut SetStore,
         bindings: &DatasetBindings,
     ) -> CompiledChain {
@@ -527,7 +545,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn instantiate_member(
         &mut self,
         name: &str,
-        args: &[u32],
+        args: &[PolicyArg],
         store: &mut SetStore,
         bindings: &DatasetBindings,
     ) -> CompiledChain {
@@ -561,7 +579,7 @@ impl<'a> Lowerer<'a> {
     fn lower_named(
         &mut self,
         name: &str,
-        args: &[u32],
+        args: &[PolicyArg],
         store: &mut SetStore,
         bindings: &DatasetBindings,
     ) -> CompiledPolicy {
@@ -578,19 +596,37 @@ impl<'a> Lowerer<'a> {
     fn lower_policy(
         &mut self,
         def: &PolicyDef,
-        args: &[u32],
+        args: &[PolicyArg],
         store: &mut SetStore,
     ) -> CompiledPolicy {
         debug_assert_eq!(def.params.len(), args.len(), "typechecked arity");
-        let env: HashMap<&str, u32> = def
-            .params
-            .iter()
-            .map(|p| p.node.as_str())
-            .zip(args.iter().copied())
-            .collect();
+        let mut env: HashMap<&str, u32> = HashMap::new();
+        let mut frame = HashMap::new();
+        for (param, arg) in def.params.iter().zip(args) {
+            match arg {
+                PolicyArg::U32(value) => {
+                    env.insert(param.node.as_str(), *value);
+                }
+                typed => {
+                    frame.insert(param.node.clone(), typed.clone());
+                }
+            }
+        }
+        self.typed_frames.push(frame);
+        let policy = self.lower_policy_body(def, &env, store);
+        self.typed_frames.pop();
+        policy
+    }
+
+    fn lower_policy_body(
+        &mut self,
+        def: &PolicyDef,
+        env: &HashMap<&str, u32>,
+        store: &mut SetStore,
+    ) -> CompiledPolicy {
         let mut terms = Vec::new();
         for term_def in &def.terms {
-            let lowered = self.lower_term(term_def, &env, store);
+            let lowered = self.lower_term(term_def, env, store);
             let multi = lowered.len() > 1;
             for (index, (guard, action)) in lowered.into_iter().enumerate() {
                 let name = if multi {
@@ -907,7 +943,14 @@ impl<'a> Lowerer<'a> {
             Expr::Not(inner, _) => {
                 MatchExpr::Not(Box::new(self.lower_expr(inner, env, lets, store, binds)))
             }
-            Expr::Cmp { field, op, rhs, .. } => lower_cmp(field, *op, rhs, env, lets),
+            Expr::Cmp { field, op, rhs, .. } => {
+                if let Rhs::Ident(name) = rhs
+                    && let Some(PolicyArg::Ip(addr)) = self.bound(&name.node)
+                {
+                    return lower_cmp(field, *op, &Rhs::Ip(*addr, name.span), env, lets);
+                }
+                lower_cmp(field, *op, rhs, env, lets)
+            }
             // LAN-299: value comparisons keep their shape (constant
             // subtrees folded) — deliberately NOT rewritten to the
             // legacy scalar nodes even when one side folds to a
@@ -924,6 +967,7 @@ impl<'a> Lowerer<'a> {
                 rhs: self.lower_value(rhs, &Names::Policy(env), lets, binds),
             })),
             Expr::In { field, set } => {
+                let set = &self.bound_set(set);
                 // LAN-305: a dataset reference lowers to a pinned
                 // runtime probe — content is external and never folds.
                 if self.file.datasets.iter().any(|d| d.name.node == set.node) {
@@ -952,6 +996,7 @@ impl<'a> Lowerer<'a> {
             // probe folds to its truth value here (True / empty-Or =
             // never matches).
             Expr::IdentIn { ident, set } => {
+                let set = &self.bound_set(set);
                 // LAN-305: `<binding|param> in <dataset>` stays a
                 // runtime probe either way — dataset content swaps at
                 // runtime, so even a parameter probe cannot fold.
@@ -1011,6 +1056,13 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Expr::Has { lit, .. } => MatchExpr::CommunityContains(lit.node.to_match()),
+            Expr::HasParam { param, .. } => MatchExpr::CommunityContains(
+                CommunityLit::Standard(
+                    *env.get(param.node.as_str())
+                        .expect("typechecked: community parameter in scope"),
+                )
+                .to_match(),
+            ),
             Expr::Matches { pattern, .. } => {
                 MatchExpr::AsPathMatches(self.intern_regex(&pattern.node, store))
             }
@@ -1024,7 +1076,21 @@ impl<'a> Lowerer<'a> {
                 // inlined predicate no larger than MAX_APPLY_EXPANSION
                 // nodes, so this cannot overflow or explode (lowering
                 // only ever sees typechecked ASTs).
-                let args: Vec<u32> = args.iter().map(|arg| resolve_u32(arg, env)).collect();
+                let args: Vec<PolicyArg> = args
+                    .iter()
+                    .map(|arg| match &arg.node {
+                        CallArg::Int(value) | CallArg::Community(value) => PolicyArg::U32(*value),
+                        CallArg::Ip(addr) => PolicyArg::Ip(*addr),
+                        CallArg::Name(name) => env.get(name.as_str()).map_or_else(
+                            || {
+                                self.bound(name)
+                                    .cloned()
+                                    .unwrap_or_else(|| PolicyArg::Set(name.clone()))
+                            },
+                            |value| PolicyArg::U32(*value),
+                        ),
+                    })
+                    .collect();
                 let def = self
                     .file
                     .policies
@@ -1034,6 +1100,32 @@ impl<'a> Lowerer<'a> {
                 let inlined = self.lower_policy(def, &args, store);
                 accept_predicate(&inlined)
             }
+        }
+    }
+
+    /// The set or address argument bound to parameter `name` in the policy
+    /// being lowered, if any.
+    fn bound(&self, name: &str) -> Option<&PolicyArg> {
+        self.typed_frames.last().and_then(|frame| frame.get(name))
+    }
+
+    /// A `set next-hop` operand, with an `ip` parameter resolved.
+    fn next_hop_action(&self, arg: &NextHopArg) -> NextHopAction {
+        match arg {
+            NextHopArg::Self_(_) => NextHopAction::Self_,
+            NextHopArg::Addr(addr, _) => NextHopAction::Specific(*addr),
+            NextHopArg::Param(name) => match self.bound(&name.node) {
+                Some(PolicyArg::Ip(addr)) => NextHopAction::Specific(*addr),
+                _ => unreachable!("typechecked: `ip` parameter in scope"),
+            },
+        }
+    }
+
+    /// `set` itself, or the set its set-typed parameter is bound to.
+    fn bound_set(&self, set: &Spanned<String>) -> Spanned<String> {
+        match self.bound(&set.node) {
+            Some(PolicyArg::Set(name)) => Spanned::new(name.clone(), set.span),
+            _ => set.clone(),
         }
     }
 
@@ -1436,10 +1528,7 @@ impl Lowerer<'_> {
                 }
             }
             ActionStmt::SetNextHop(arg, _) => {
-                mods.set_next_hop = Some(match arg {
-                    NextHopArg::Self_(_) => NextHopAction::Self_,
-                    NextHopArg::Addr(addr, _) => NextHopAction::Specific(*addr),
-                });
+                mods.set_next_hop = Some(self.next_hop_action(arg));
             }
             // LAN-303: a parameter-valued community reference is a
             // compile-time constant — it stages as a literal, exactly like
@@ -1508,8 +1597,13 @@ impl Lowerer<'_> {
                 }
             },
             ActionStmt::Prepend { asn, count, .. } => {
+                // A literal is range-checked at typecheck and a parameter where
+                // the policy is instantiated. Only an `apply` target, whose
+                // modifications never run, can see an unchecked value here.
                 let count = u8::try_from(resolve_u32(count, env))
-                    .expect("typechecked: count is a 1-255 literal");
+                    .ok()
+                    .filter(|count| *count != 0)
+                    .unwrap_or(1);
                 // LAN-296: computed operands lower to the staged
                 // `as_path_prepend_computed` slot (resolved per route by
                 // the evaluator); the literal/parameter form keeps its

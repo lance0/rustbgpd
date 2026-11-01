@@ -26,10 +26,10 @@ use crate::ir::{CompiledChain, is_well_known_community};
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    CommunityKind, CommunityLit, DatasetEntryAst, ExpectDef, ExpectVerdict, NextHopArg, PeerField,
-    RouteField, ScalarAttr, TestDef, WithAssertion,
+    CallArg, CommunityKind, CommunityLit, DatasetEntryAst, ExpectDef, ExpectVerdict, NextHopArg,
+    PeerField, RouteField, ScalarAttr, TestDef, WithAssertion,
 };
-use super::lower::{Lowerer, ext_community_value};
+use super::lower::{Lowerer, PolicyArg, ext_community_value};
 
 /// The outcome of running a source file's `test` blocks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -475,9 +475,13 @@ pub(super) fn assemble_chain(
     // past what a configured chain may hold.
     let mut budget = crate::compile::ChainNodeBudget::default();
     for member in &expect.calls {
-        let args: Vec<u32> = member.args.iter().map(|arg| arg.node).collect();
-        let compiled =
-            Arc::new(lowerer.instantiate_member(&member.policy.node, &args, store, bindings));
+        let args: Vec<CallArg> = member.args.iter().map(|arg| arg.node.clone()).collect();
+        let compiled = Arc::new(lowerer.instantiate_member(
+            &member.policy.node,
+            &policy_args(&args),
+            store,
+            bindings,
+        ));
         let missing = lowerer.take_missing_datasets();
         if !missing.is_empty() {
             return Err(format!(
@@ -546,7 +550,7 @@ fn render_expect(expect: &ExpectDef) -> String {
         .calls
         .iter()
         .map(|call| {
-            let args: Vec<u32> = call.args.iter().map(|arg| arg.node).collect();
+            let args: Vec<CallArg> = call.args.iter().map(|arg| arg.node.clone()).collect();
             render_call(&call.policy.node, &args)
         })
         .collect::<Vec<_>>();
@@ -557,7 +561,19 @@ fn render_expect(expect: &ExpectDef) -> String {
     }
 }
 
-pub(super) fn render_call(name: &str, args: &[u32]) -> String {
+/// Typechecked `expect` arguments for instantiation: literals become
+/// constants and a name is a set (tests have no parameters of their own).
+pub(super) fn policy_args(args: &[CallArg]) -> Vec<PolicyArg> {
+    args.iter()
+        .map(|arg| match arg {
+            CallArg::Int(value) | CallArg::Community(value) => PolicyArg::U32(*value),
+            CallArg::Ip(addr) => PolicyArg::Ip(*addr),
+            CallArg::Name(set) => PolicyArg::Set(set.clone()),
+        })
+        .collect()
+}
+
+pub(super) fn render_call(name: &str, args: &[CallArg]) -> String {
     if args.is_empty() {
         name.to_string()
     } else {
@@ -589,6 +605,7 @@ fn check_assertion(
             let expected = match arg {
                 NextHopArg::Self_(_) => NextHopAction::Self_,
                 NextHopArg::Addr(addr, _) => NextHopAction::Specific(*addr),
+                NextHopArg::Param(_) => unreachable!("a test assertion names no parameter"),
             };
             (mods.set_next_hop.as_ref() != Some(&expected)).then(|| {
                 format!(

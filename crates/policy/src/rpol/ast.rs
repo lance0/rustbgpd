@@ -231,8 +231,10 @@ impl CommunityLit {
 pub struct PolicyDef {
     /// Policy name.
     pub name: Spanned<String>,
-    /// Declared parameters (all `u32` in V1).
+    /// Declared parameters.
     pub params: Vec<Spanned<String>>,
+    /// Each parameter's declared type, parallel to `params`.
+    pub param_types: Vec<ParamType>,
     /// Optional policy fallback; omission preserves accept-and-continue.
     pub default_action: Option<Spanned<PolicyAction>>,
     /// Named terms, in source order.
@@ -543,6 +545,89 @@ pub enum NextHopArg {
     Self_(Span),
     /// A specific address.
     Addr(IpAddr, Span),
+    /// An `ip` policy parameter, substituted at instantiation.
+    Param(Spanned<String>),
+}
+
+/// A policy parameter's declared type. Every argument is a compile-time
+/// constant: a policy instantiates once per distinct argument list, so
+/// the evaluator still sees only literals and interned sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamType {
+    /// `u32`: any u32 value position.
+    U32,
+    /// `prefix-set`: a prefix-set or prefix dataset name.
+    PrefixSet,
+    /// `community-set`: a community-set or community dataset name.
+    CommunitySet,
+    /// `asn-set`: an asn-set or ASN dataset name.
+    AsnSet,
+    /// `community`: one standard (RFC 1997) community, `65000:100`.
+    Community,
+    /// `ip`: one IPv4 or IPv6 address.
+    Ip,
+}
+
+impl ParamType {
+    /// The type as written in a parameter list.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            ParamType::U32 => "u32",
+            ParamType::PrefixSet => "prefix-set",
+            ParamType::CommunitySet => "community-set",
+            ParamType::AsnSet => "asn-set",
+            ParamType::Community => "community",
+            ParamType::Ip => "ip",
+        }
+    }
+
+    /// The indefinite article for [`Self::keyword`] in a message.
+    #[must_use]
+    pub fn article(self) -> &'static str {
+        match self {
+            ParamType::AsnSet | ParamType::Ip => "an",
+            _ => "a",
+        }
+    }
+
+    /// Whether the parameter names a set (or dataset) of this kind.
+    #[must_use]
+    pub fn set_kind(self) -> Option<crate::datasets::DatasetKind> {
+        match self {
+            ParamType::PrefixSet => Some(crate::datasets::DatasetKind::Prefix),
+            ParamType::CommunitySet => Some(crate::datasets::DatasetKind::Community),
+            ParamType::AsnSet => Some(crate::datasets::DatasetKind::Asn),
+            ParamType::U32 | ParamType::Community | ParamType::Ip => None,
+        }
+    }
+}
+
+/// One argument of a policy reference, as written: in `apply(p(...))`, in
+/// a test `expect`, or in a configured chain reference such as
+/// `"customer-in(200, cust-65001)"`. It is checked against the callee's
+/// parameter types before instantiation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallArg {
+    /// An integer literal.
+    Int(u32),
+    /// A name: a set or dataset, or (inside `apply`) a caller parameter.
+    Name(String),
+    /// A standard community literal, as its u32 value.
+    Community(u32),
+    /// An IP address literal.
+    Ip(IpAddr),
+}
+
+impl std::fmt::Display for CallArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallArg::Int(value) => write!(f, "{value}"),
+            CallArg::Name(name) => f.write_str(name),
+            CallArg::Community(value) => write!(f, "{}:{}", value >> 16, value & 0xffff),
+            CallArg::Ip(addr) => write!(f, "{addr}"),
+        }
+    }
 }
 
 /// The context object a field path starts from.
@@ -693,6 +778,13 @@ pub enum Expr {
         /// The community literal to probe for.
         lit: Spanned<CommunityLit>,
     },
+    /// `route.communities has <community parameter>`
+    HasParam {
+        /// Left-hand community-list field.
+        field: FieldPath,
+        /// The `community`-typed parameter.
+        param: Spanned<String>,
+    },
     /// `route.as-path matches "regex"`
     Matches {
         /// Left-hand field (must be `route.as-path`).
@@ -728,7 +820,7 @@ pub enum Expr {
         /// The referenced policy.
         policy: Spanned<String>,
         /// Instantiation arguments.
-        args: Vec<U32Arg>,
+        args: Vec<Spanned<CallArg>>,
         /// Whole-call span.
         span: Span,
     },
@@ -747,6 +839,7 @@ impl Expr {
             Expr::In { field, set } => field.span.to(set.span),
             Expr::IdentIn { ident, set } => ident.span.to(set.span),
             Expr::Has { field, lit } => field.span.to(lit.span),
+            Expr::HasParam { field, param } => field.span.to(param.span),
             Expr::Matches { field, pattern } => field.span.to(pattern.span),
             Expr::Contains { field, asn } => field.span.to(asn.span()),
         }
@@ -821,8 +914,8 @@ pub enum PeerField {
 pub struct ExpectCall {
     /// The policy.
     pub policy: Spanned<String>,
-    /// Instantiation arguments (literals only in `expect`).
-    pub args: Vec<Spanned<u32>>,
+    /// Instantiation arguments (literals and set names in `expect`).
+    pub args: Vec<Spanned<CallArg>>,
 }
 
 /// `expect policy(args) == accept|reject|error [KIND] [with assertions]`,

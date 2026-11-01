@@ -31,11 +31,13 @@ mod parser;
 mod testing;
 mod typeck;
 
+pub use ast::{CallArg, ParamType};
 pub use coverage::{
     CoverageReport, Lint, LintKind, PolicyCoverage, PolicyTestStatus, TermCoverage,
 };
 pub use diag::{Diagnostic, DiagnosticCode, Diagnostics, Span, Spanned, closest_matches};
 pub use fmt::{FmtError, format_rpol};
+pub use lower::PolicyArg;
 pub use modules::{
     DEFAULT_MAX_GRAPH_BYTES, LoadError, MAX_MODULE_DEPTH, MAX_MODULE_FILES, ModuleSource,
 };
@@ -286,6 +288,73 @@ impl RpolFile {
             .map(|result| result.expect("policy references no datasets"))
     }
 
+    /// A policy's declared parameter types, or `None` for an unknown name.
+    #[must_use]
+    pub fn policy_signature(&self, name: &str) -> Option<&[ParamType]> {
+        self.file
+            .policies
+            .iter()
+            .find(|p| p.name.node == name)
+            .map(|p| p.param_types.as_slice())
+    }
+
+    /// Check a reference's arguments against policy `name`'s parameters
+    /// and convert them for instantiation: arity, each argument's type, a
+    /// set or dataset of the right kind for a set parameter, and the range
+    /// of a parameter used as a `prepend` count or `set next-hop` operand.
+    /// The same check a test `expect` gets at `rbgp policy check`.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable reason naming the policy and the argument.
+    pub fn resolve_call(&self, name: &str, args: &[CallArg]) -> Result<Vec<PolicyArg>, String> {
+        let def = self
+            .file
+            .policies
+            .iter()
+            .find(|p| p.name.node == name)
+            .ok_or_else(|| format!("policy {name:?} is not defined"))?;
+        if def.params.len() != args.len() {
+            return Err(format!(
+                "policy {name:?} takes {} parameter(s), {} given",
+                def.params.len(),
+                args.len()
+            ));
+        }
+        args.iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                typeck::check_call_arg(&self.file, def, index, arg)
+                    .map_err(|reason| format!("policy {name:?}: {reason}"))?;
+                Ok(match arg {
+                    CallArg::Int(value) | CallArg::Community(value) => PolicyArg::U32(*value),
+                    CallArg::Ip(addr) => PolicyArg::Ip(*addr),
+                    CallArg::Name(set) => PolicyArg::Set(set.clone()),
+                })
+            })
+            .collect()
+    }
+
+    /// [`Self::compile_policy_bound`] with typed arguments from
+    /// [`Self::resolve_call`]. `cached_tables` selects the
+    /// [`Self::compile_policy_bound_cached_tables`] variant.
+    ///
+    /// # Panics
+    ///
+    /// If `args` were not resolved for this policy by
+    /// [`Self::resolve_call`].
+    #[must_use]
+    pub fn compile_policy_args(
+        &self,
+        name: &str,
+        args: &[PolicyArg],
+        store: &mut SetStore,
+        datasets: &DatasetBindings,
+        cached_tables: bool,
+    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+        self.compile_policy_typed(name, args, store, datasets, cached_tables)
+    }
+
     /// [`Self::compile_policy`] with explicit dataset bindings
     /// (LAN-305): referenced-but-unbound (or kind-mismatched) datasets yield
     /// `Err` naming them. Literal sets are interned through
@@ -336,6 +405,18 @@ impl RpolFile {
         &self,
         name: &str,
         args: &[u32],
+        store: &mut SetStore,
+        datasets: &DatasetBindings,
+        cached_tables: bool,
+    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+        let args: Vec<PolicyArg> = args.iter().copied().map(PolicyArg::U32).collect();
+        self.compile_policy_typed(name, &args, store, datasets, cached_tables)
+    }
+
+    fn compile_policy_typed(
+        &self,
+        name: &str,
+        args: &[PolicyArg],
         store: &mut SetStore,
         datasets: &DatasetBindings,
         cached_tables: bool,
@@ -462,6 +543,30 @@ impl RpolPolicySet {
 ///
 /// A human-readable description of the malformed call-form.
 pub fn parse_call_form(reference: &str) -> Result<(&str, Vec<u32>), String> {
+    let (base, args) = parse_call_args(reference)?;
+    let args = args
+        .into_iter()
+        .map(|arg| match arg {
+            CallArg::Int(value) => Ok(value),
+            other => Err(format!(
+                "invalid reference {reference:?}: argument {:?} is not a u32",
+                other.to_string()
+            )),
+        })
+        .collect::<Result<Vec<u32>, _>>()?;
+    Ok((base, args))
+}
+
+/// Split a policy chain reference into base name + arguments, each an
+/// integer, a standard community (`65000:100`), an IP address, or a name
+/// (a set or dataset): `"customer-in(200, cust-65001)"` →
+/// `("customer-in", [Int(200), Name("cust-65001")])`. Types are checked
+/// against the policy's parameters by [`RpolFile::resolve_call`].
+///
+/// # Errors
+///
+/// A human-readable description of the malformed call-form.
+pub fn parse_call_args(reference: &str) -> Result<(&str, Vec<CallArg>), String> {
     let Some(open) = reference.find('(') else {
         return Ok((reference, Vec::new()));
     };
@@ -483,13 +588,46 @@ pub fn parse_call_form(reference: &str) -> Result<(&str, Vec<u32>), String> {
     let args = inner
         .split(',')
         .map(|arg| {
-            let arg = arg.trim();
-            arg.parse::<u32>().map_err(|e| {
-                format!("invalid reference {reference:?}: argument {arg:?} is not a u32: {e}")
-            })
+            parse_call_arg(arg.trim())
+                .map_err(|why| format!("invalid reference {reference:?}: {why}"))
         })
-        .collect::<Result<Vec<u32>, _>>()?;
+        .collect::<Result<Vec<CallArg>, _>>()?;
     Ok((base, args))
+}
+
+/// One call-form argument's text.
+fn parse_call_arg(arg: &str) -> Result<CallArg, String> {
+    if arg.bytes().all(|b| b.is_ascii_digit()) && !arg.is_empty() {
+        return arg
+            .parse::<u32>()
+            .map(CallArg::Int)
+            .map_err(|e| format!("argument {arg:?} is not a u32: {e}"));
+    }
+    if let Ok(addr) = arg.parse::<std::net::IpAddr>() {
+        return Ok(CallArg::Ip(addr));
+    }
+    if let Some((asn, value)) = arg.split_once(':')
+        && let (Ok(asn), Ok(value)) = (asn.parse::<u16>(), value.parse::<u16>())
+    {
+        return Ok(CallArg::Community(
+            (u32::from(asn) << 16) | u32::from(value),
+        ));
+    }
+    if arg.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+        && let Ok(crate::engine::CommunityMatch::Standard { value }) =
+            crate::engine::parse_community_match(arg)
+    {
+        return Ok(CallArg::Community(value));
+    }
+    let mut chars = arg.chars();
+    if chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Ok(CallArg::Name(arg.to_string()));
+    }
+    Err(format!(
+        "argument {arg:?} is not an integer, a standard community, an IP address, or a set name"
+    ))
 }
 
 impl PartialEq for RpolPolicySet {

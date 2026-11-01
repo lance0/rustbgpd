@@ -4569,10 +4569,7 @@ fn apply_of_a_let_policy_is_rejected() {
 fn let_in_const_position_is_rejected() {
     let (_, rendered) =
         diagnostics_of("policy p { term t { let x = 3; prepend as 65001 x; accept } }");
-    assert!(
-        rendered.contains("prepend count must be a literal"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("`x` is a `let` binding"), "{rendered}");
 
     let (_, rendered) = diagnostics_of("policy p { term t { let x = 3; prepend as x 2; accept } }");
     assert!(rendered.contains("`x` is a `let` binding"), "{rendered}");
@@ -7675,9 +7672,14 @@ fn chain_expect_members_retain_only_referenced_tables() {
             .calls
             .iter()
             .map(|call| {
-                let args: Vec<u32> = call.args.iter().map(|arg| arg.node).collect();
-                let full =
-                    lowerer.instantiate_chain(&call.policy.node, &args, &mut store, &bindings);
+                let args: Vec<super::CallArg> =
+                    call.args.iter().map(|arg| arg.node.clone()).collect();
+                let full = lowerer.instantiate_chain(
+                    &call.policy.node,
+                    &super::testing::policy_args(&args),
+                    &mut store,
+                    &bindings,
+                );
                 assert_eq!(full.asn_sets.len(), SETS);
                 NamedPolicy::from_rpol(
                     super::testing::render_call(&call.policy.node, &args),
@@ -7690,4 +7692,380 @@ fn chain_expect_members_retain_only_referenced_tables() {
             compile_chain(&PolicyChain::from_named(reference), &mut store)
         );
     }
+}
+
+// ─── typed policy parameters ────────────────────────────────────────
+
+const TYPED_SOURCE: &str = "
+prefix-set cust-65001 { 10.10.0.0/16 le 24 }
+prefix-set cust-65002 { 10.20.0.0/16 le 24 }
+community-set blocked { 65000:666 }
+asn-set origins-65001 { 65001 }
+
+policy customer-in(lp: u32, pfx: prefix-set, block: community-set, origins: asn-set,
+                   tag: community, nh: ip) {
+    default-action reject
+    term blocked { if route.communities in block { reject } }
+    term ours {
+        if route.prefix in pfx && route.origin-as in origins {
+            set local-pref lp
+            add community tag
+            set next-hop nh
+            accept
+        }
+    }
+}
+
+policy tagged-only(tag: community) {
+    default-action reject
+    term t { if route.communities has tag { accept } }
+}
+
+policy from-peer(addr: ip) {
+    default-action reject
+    term t { if peer.address == addr && route.next-hop != addr { accept } }
+}
+
+policy pad(n: u32) {
+    term t { prepend as 65000 n; accept }
+}
+";
+
+fn typed_ctx(prefix: Prefix, communities: &[u32], origin: u32) -> RouteContext<'static> {
+    let mut ctx = route_ctx(prefix, communities, RpkiValidation::NotFound);
+    ctx.origin_asn = Some(origin);
+    ctx
+}
+
+fn compile_call(file: &RpolFile, name: &str, args: &[super::CallArg]) -> crate::ir::CompiledChain {
+    let args = file.resolve_call(name, args).expect("arguments resolve");
+    file.compile_policy_args(
+        name,
+        &args,
+        &mut SetStore::new(),
+        &crate::datasets::DatasetBindings::new(),
+        false,
+    )
+    .expect("policy exists")
+    .expect("no datasets")
+}
+
+/// Every parameter type binds at instantiation: the set arguments select
+/// sets, the community and address arguments are constants, and two
+/// argument lists instantiate two independent policies from one template.
+#[test]
+fn typed_parameters_bind_sets_communities_and_addresses() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let args = |prefixes: &str| {
+        vec![
+            CallArg::Int(200),
+            CallArg::Name(prefixes.to_string()),
+            CallArg::Name("blocked".to_string()),
+            CallArg::Name("origins-65001".to_string()),
+            CallArg::Community((65000 << 16) | 0x64),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+        ]
+    };
+    let first = compile_call(&file, "customer-in", &args("cust-65001"));
+    let second = compile_call(&file, "customer-in", &args("cust-65002"));
+    let in_first = typed_ctx(v4(10, 10, 1, 0, 24), &[], 65001);
+    let in_second = typed_ctx(v4(10, 20, 1, 0, 24), &[], 65001);
+
+    let result = first.evaluate(&in_first);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_local_pref, Some(200));
+    assert_eq!(result.modifications.communities_add, [(65000 << 16) | 0x64]);
+    assert_eq!(
+        result.modifications.set_next_hop,
+        Some(crate::engine::NextHopAction::Specific(
+            "192.0.2.1".parse().unwrap()
+        ))
+    );
+    assert_eq!(first.evaluate(&in_second).action, PolicyAction::Deny);
+    assert_eq!(second.evaluate(&in_second).action, PolicyAction::Permit);
+    // Explain renders the set the argument bound.
+    let chain = crate::engine::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "customer-in".to_string(),
+        Arc::new(second.clone()),
+    )]);
+    let trace = crate::engine::explain::explain_chain_statements(Some(&chain), &in_second);
+    let rendered = format!("{:?}", trace.steps);
+    assert!(rendered.contains("cust-65002"), "{rendered}");
+    assert!(!rendered.contains("pfx"), "{rendered}");
+    assert_eq!(second.evaluate(&in_first).action, PolicyAction::Deny);
+    // The community-set and asn-set arguments.
+    let blocked = typed_ctx(v4(10, 10, 1, 0, 24), &[(65000 << 16) | 0x29A], 65001);
+    assert_eq!(first.evaluate(&blocked).action, PolicyAction::Deny);
+    let other_origin = typed_ctx(v4(10, 10, 1, 0, 24), &[], 65009);
+    assert_eq!(first.evaluate(&other_origin).action, PolicyAction::Deny);
+
+    // `has <community>`.
+    let tagged = compile_call(
+        &file,
+        "tagged-only",
+        &[CallArg::Community((65000 << 16) | 0x7)],
+    );
+    assert_eq!(
+        tagged
+            .evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[(65000 << 16) | 0x7], 1))
+            .action,
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        tagged
+            .evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[(65000 << 16) | 0x8], 1))
+            .action,
+        PolicyAction::Deny
+    );
+
+    // `ip` in comparisons.
+    let from = compile_call(
+        &file,
+        "from-peer",
+        &[CallArg::Ip("192.0.2.9".parse().unwrap())],
+    );
+    let mut ctx = typed_ctx(v4(10, 0, 0, 0, 8), &[], 1);
+    ctx.peer_address = Some("192.0.2.9".parse().unwrap());
+    ctx.next_hop = Some("192.0.2.10".parse().unwrap());
+    assert_eq!(from.evaluate(&ctx).action, PolicyAction::Permit);
+    ctx.peer_address = Some("192.0.2.8".parse().unwrap());
+    assert_eq!(from.evaluate(&ctx).action, PolicyAction::Deny);
+}
+
+/// A `prepend` count may be a `u32` parameter. Its argument is range-checked
+/// where the policy is instantiated, as a literal count is at typecheck.
+#[test]
+fn prepend_count_parameter_is_range_checked_at_instantiation() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let chain = compile_call(&file, "pad", &[CallArg::Int(3)]);
+    let result = chain.evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[], 1));
+    assert_eq!(result.modifications.as_path_prepend, Some((65000, 3)));
+    for bad in [0, 256] {
+        let error = file
+            .resolve_call("pad", &[CallArg::Int(bad)])
+            .expect_err("out-of-range count");
+        assert!(error.contains("prepend count"), "{error}");
+        assert!(error.contains("1-255"), "{error}");
+    }
+    let (_, rendered) = diagnostics_of(&format!(
+        "{TYPED_SOURCE}\ntest t {{ route {{ prefix 10.0.0.0/8 }} expect pad(300) == accept }}"
+    ));
+    assert!(
+        rendered.contains("prepend count 300 out of range"),
+        "{rendered}"
+    );
+}
+
+/// Attach-time checks: arity, each argument's type, an unknown set, a set
+/// of the wrong kind, and an unusable `set next-hop` address.
+#[test]
+fn typed_call_resolution_rejects_mismatches() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let good = |index: usize, arg: CallArg| {
+        let mut args = vec![
+            CallArg::Int(200),
+            CallArg::Name("cust-65001".to_string()),
+            CallArg::Name("blocked".to_string()),
+            CallArg::Name("origins-65001".to_string()),
+            CallArg::Community(1),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+        ];
+        args[index] = arg;
+        file.resolve_call("customer-in", &args)
+    };
+    assert!(good(0, CallArg::Int(200)).is_ok());
+    for (index, arg, needle) in [
+        (0, CallArg::Name("cust-65001".to_string()), "is not a u32"),
+        (
+            1,
+            CallArg::Name("nope".to_string()),
+            "unknown prefix-set `nope`",
+        ),
+        (
+            1,
+            CallArg::Name("blocked".to_string()),
+            "unknown prefix-set `blocked`",
+        ),
+        (1, CallArg::Int(5), "is not a prefix-set"),
+        (
+            2,
+            CallArg::Name("cust-65001".to_string()),
+            "unknown community-set",
+        ),
+        (3, CallArg::Community(1), "is not an asn-set"),
+        (4, CallArg::Int(1), "is not a community"),
+        (
+            5,
+            CallArg::Ip("224.0.0.1".parse().unwrap()),
+            "invalid next hop 224.0.0.1",
+        ),
+        (5, CallArg::Name("x".to_string()), "is not an ip"),
+    ] {
+        let error = good(index, arg.clone()).expect_err("mismatch rejected");
+        assert!(error.contains(needle), "{arg:?}: {error}");
+    }
+    let error = file
+        .resolve_call("customer-in", &[CallArg::Int(1)])
+        .expect_err("arity");
+    assert!(error.contains("takes 6 parameter(s), 1 given"), "{error}");
+}
+
+/// Check-time errors: a typed parameter in a position of another type, a set
+/// parameter in the wrong probe, a set parameter as a loop source, a
+/// parameter named like a set, and an `expect` argument of the wrong type.
+#[test]
+fn typed_parameter_misuse_is_a_compile_error() {
+    for (source, needle) in [
+        (
+            "prefix-set s { 10.0.0.0/8 } policy p(x: prefix-set) { term t { set med x } }",
+            "parameter `x` is a prefix-set, but this position needs a u32 value",
+        ),
+        (
+            "policy p(x: prefix-set) { term t { if route.communities in x { accept } } }",
+            "but this probe needs `community-set`",
+        ),
+        (
+            "policy p(x: asn-set) { term t { for a in x { break } } }",
+            "a set parameter is not a loop source",
+        ),
+        (
+            "prefix-set s { 10.0.0.0/8 } policy p(s: prefix-set) { term t { accept } }",
+            "parameter `s` has the name of a prefix-set",
+        ),
+        (
+            "policy p(x: u32) { term t { set next-hop x } }",
+            "parameter `x`",
+        ),
+        (
+            "policy p(x: ip) { term t { add community x } }",
+            "parameter `x` is an ip, but this position needs a community",
+        ),
+        (
+            "policy p(x: community) { term t { if route.large-communities has x { accept } } }",
+            "cannot be probed with a `community` parameter",
+        ),
+        (
+            "prefix-set s { 10.0.0.0/8 }
+             policy p(x: prefix-set) { term t { if route.prefix in x { accept } } }
+             test t { route { prefix 10.0.0.0/8 } expect p(65000:1) == accept }",
+            "is not a prefix-set",
+        ),
+        (
+            "policy p(x: prefix-set) { term t { if route.prefix in x { accept } } }
+             test t { route { prefix 10.0.0.0/8 } expect p(missing) == accept }",
+            "unknown prefix-set `missing`",
+        ),
+    ] {
+        let (_, rendered) = diagnostics_of(source);
+        assert!(rendered.contains(needle), "{source}\n{rendered}");
+    }
+}
+
+/// `apply` passes a caller's typed parameter through, or a set name, and
+/// type-checks both against the target; the in-language test runner
+/// instantiates typed policies from `expect` arguments.
+#[test]
+fn typed_parameters_flow_through_apply_and_tests() {
+    let source = "
+prefix-set ours { 10.0.0.0/8 le 24 }
+prefix-set theirs { 192.0.2.0/24 }
+
+policy member(s: prefix-set) {
+    default-action reject
+    term t { if route.prefix in s { accept } }
+}
+
+policy wrap(s: prefix-set, tag: community) {
+    term t { if apply(member(s)) { add community tag; accept } }
+}
+
+policy fixed {
+    term t { if apply(member(theirs)) { reject } }
+}
+
+test wraps-ours {
+    route { prefix 10.1.0.0/16 }
+    expect wrap(ours, 65000:5) == accept with community 65000:5
+    expect wrap(theirs, 65000:5) == accept
+    expect member(theirs) == reject
+}
+
+test fixed-rejects-theirs {
+    route { prefix 192.0.2.0/24 }
+    expect fixed == reject
+}
+";
+    let file = RpolFile::parse(source).expect("parses");
+    let report = file.run_tests();
+    assert!(report.all_passed(), "{report:?}");
+    assert_eq!(report.total, 2);
+    // Sets used only as arguments are uses, not unused sets.
+    assert!(
+        !file
+            .lints()
+            .iter()
+            .any(|lint| lint.kind == super::LintKind::UnusedSet),
+        "{:?}",
+        file.lints()
+    );
+    let (_, rendered) = diagnostics_of(
+        "policy member(s: prefix-set) { term t { if route.prefix in s { accept } } }
+         policy wrap(tag: community) { term t { if apply(member(tag)) { accept } } }",
+    );
+    assert!(
+        rendered.contains("parameter `tag` is a community, but `s` takes a prefix-set"),
+        "{rendered}"
+    );
+}
+
+/// The configured-chain call form: integers, names, communities and
+/// addresses, with the u32-only reader keeping its error for a name.
+#[test]
+fn call_form_arguments_parse_by_shape() {
+    use super::{CallArg, parse_call_args, parse_call_form};
+
+    let (base, args) = parse_call_args(
+        "customer-in(200, cust-65001, 65000:100, 192.0.2.1, 2001:db8::1, NO_EXPORT)",
+    )
+    .expect("parses");
+    assert_eq!(base, "customer-in");
+    assert_eq!(
+        args,
+        [
+            CallArg::Int(200),
+            CallArg::Name("cust-65001".to_string()),
+            CallArg::Community((65000 << 16) | 0x64),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+            CallArg::Ip("2001:db8::1".parse().unwrap()),
+            CallArg::Community(0xFFFF_FF01),
+        ]
+    );
+    for bad in ["p(4294967296)", "p(70000:1)", "p(@x)"] {
+        assert!(parse_call_args(bad).is_err(), "{bad}");
+    }
+    let error = parse_call_form("p(high)").expect_err("u32 only");
+    assert!(error.contains("is not a u32"), "{error}");
+}
+
+/// Typed parameter lists and arguments format canonically.
+#[test]
+fn typed_parameters_format_canonically() {
+    let source = "policy p( lp:u32,s :prefix-set , t: community,a:ip ) { term t { accept } }
+test x { route { prefix 10.0.0.0/8 } expect p(1,s,65000:1,192.0.2.1) == accept }";
+    let formatted = super::format_rpol(source).expect("formats");
+    assert!(
+        formatted.starts_with("policy p(lp: u32, s: prefix-set, t: community, a: ip) {"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("expect p(1, s, 65000:1, 192.0.2.1) == accept"),
+        "{formatted}"
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
 }

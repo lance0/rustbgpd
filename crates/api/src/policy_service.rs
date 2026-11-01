@@ -2145,14 +2145,14 @@ fn posture_scope_to_proto(
 
 const TEST_POLICY_PAGE_SIZE: usize = 1000;
 
-/// Resolve a candidate policy reference (`name` or `name(u32, ...)`)
-/// against the submitted source.
+/// Resolve a candidate policy reference (`name` or `name(arg, ...)`)
+/// against the submitted source, checking each argument's type.
 fn candidate_call<'a>(
     file: &rustbgpd_policy::rpol::RpolFile,
     call: &'a str,
-) -> Result<(&'a str, Vec<u32>), Status> {
+) -> Result<(&'a str, Vec<rustbgpd_policy::rpol::PolicyArg>), Status> {
     let (base, args) =
-        rustbgpd_policy::rpol::parse_call_form(call).map_err(Status::invalid_argument)?;
+        rustbgpd_policy::rpol::parse_call_args(call).map_err(Status::invalid_argument)?;
     let Some((_, params)) = file.policies().find(|(name, _)| *name == base) else {
         let available: Vec<&str> = file.policies().map(|(name, _)| name).collect();
         return Err(Status::invalid_argument(format!(
@@ -2165,6 +2165,9 @@ fn candidate_call<'a>(
             args.len()
         )));
     }
+    let args = file
+        .resolve_call(base, &args)
+        .map_err(Status::invalid_argument)?;
     Ok((base, args))
 }
 
@@ -2205,16 +2208,12 @@ fn bind_candidate_datasets(
 fn compile_candidate(
     file: &rustbgpd_policy::rpol::RpolFile,
     base: &str,
-    args: &[u32],
+    args: &[rustbgpd_policy::rpol::PolicyArg],
     store: &mut rustbgpd_policy::sets::SetStore,
     bindings: &rustbgpd_policy::datasets::DatasetBindings,
     cached_tables: bool,
 ) -> Result<rustbgpd_policy::ir::CompiledChain, Status> {
-    let compiled = if cached_tables {
-        file.compile_policy_bound_cached_tables(base, args, store, bindings)
-    } else {
-        file.compile_policy_bound(base, args, store, bindings)
-    };
+    let compiled = file.compile_policy_args(base, args, store, bindings, cached_tables);
     compiled
         .expect("candidate_call checked existence")
         .map_err(|missing| {
@@ -2431,7 +2430,7 @@ fn dry_run_route_context<'a>(
 /// dataset bindings stay per request.
 fn compile_compare_candidates(
     file: &rustbgpd_policy::rpol::RpolFile,
-    calls: &[(&str, Vec<u32>)],
+    calls: &[(&str, Vec<rustbgpd_policy::rpol::PolicyArg>)],
     bindings: &rustbgpd_policy::datasets::DatasetBindings,
     store: &mut rustbgpd_policy::sets::SetStore,
     charge: &mut impl FnMut(&rustbgpd_policy::ir::CompiledPolicy) -> Result<(), Status>,
