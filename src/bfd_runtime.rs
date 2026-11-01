@@ -471,6 +471,69 @@ pub(crate) fn bound_session_params(
     }))
 }
 
+/// The single-hop BFD session a session accepted through `range` runs to its
+/// source address `peer`, from the range's own `bfd` block (a range never
+/// inherits its peer group's). `None` when the range runs no BFD.
+/// Configuration validation rejects strict and multihop here.
+pub(crate) fn dynamic_session_params(
+    config: &Config,
+    range: &crate::config::DynamicNeighborConfig,
+    peer: IpAddr,
+) -> Result<Option<BfdSessionParams>, BfdRuntimeConfigError> {
+    let Some(bfd) = range.bfd.as_ref().filter(|bfd| bfd.enabled) else {
+        return Ok(None);
+    };
+    let profile = config
+        .bfd_profiles
+        .iter()
+        .find(|p| p.name == bfd.profile)
+        .ok_or_else(|| {
+            BfdRuntimeConfigError(format!(
+                "dynamic range {:?}: configured BFD profile {:?} is missing",
+                range.prefix, bfd.profile
+            ))
+        })?;
+    Ok(Some(BfdSessionParams {
+        revision: 0,
+        peer,
+        // A dynamic peer's `peer` value is its bare address.
+        peer_label: peer.to_string(),
+        peer_interface: String::new(),
+        scope_id: None,
+        destination: bfd_destination(peer, None, false)?,
+        desired_min_tx_us: profile.min_tx_interval.saturating_mul(1000),
+        required_min_rx_us: profile.min_rx_interval.saturating_mul(1000),
+        detect_mult: u8::try_from(profile.multiplier).unwrap_or(u8::MAX),
+        strict: false,
+        enabled: true,
+        multihop: false,
+        source: None,
+    }))
+}
+
+/// One placeholder session per `[[dynamic_neighbors]]` range that runs BFD,
+/// at the range's network address. Never published: it only names the
+/// single-hop socket family the range's future sessions need, so the socket
+/// is opened by startup or a reload, never by an accepted connection.
+pub(crate) fn dynamic_range_socket_probes(
+    config: &Config,
+) -> Result<Vec<BfdSessionParams>, BfdRuntimeConfigError> {
+    let mut probes = Vec::new();
+    for range in &config.dynamic_neighbors {
+        let Some((addr, _)) = crate::config::effective_prefix_str(&range.prefix) else {
+            continue;
+        };
+        // Link-local sources are never accepted through a range.
+        if is_ipv6_link_local(addr) {
+            continue;
+        }
+        if let Some(probe) = dynamic_session_params(config, range, addr)? {
+            probes.push(probe);
+        }
+    }
+    Ok(probes)
+}
+
 fn is_ipv6_link_local(peer: IpAddr) -> bool {
     matches!(peer, IpAddr::V6(v6) if {
         let octets = v6.octets();
@@ -2275,6 +2338,53 @@ mod linux {
                 [("bfd_session_up".to_owned(), "fe80::1%eth1".to_owned(), 0.0)],
                 "no fe80::1%eth0 BFD series may outlive the retirement"
             );
+        }
+
+        /// Dynamic-range sessions are labelled by their source address and
+        /// leave the desired set when their BGP session ends: under churn
+        /// through many addresses the BFD series stay bounded by the live
+        /// sessions, as the dynamic neighbors' own series are.
+        #[tokio::test]
+        async fn churned_dynamic_sessions_leave_no_bfd_series_behind() {
+            use super::*;
+            let metrics = BgpMetrics::new();
+            let (status_tx, status_rx) = watch::channel(Vec::new());
+            let (event_tx, _event_rx) = broadcast::channel(8);
+            let (state_change_tx, _state_rx) = super::super::state_change_channel();
+            let mut actor = Actor {
+                configured_peers: HashSet::new(),
+                sessions: BTreeMap::new(),
+                discriminators: DiscriminatorAllocator::new(),
+                by_discriminator: HashMap::new(),
+                timers: BinaryHeap::new(),
+                tx_v4: None,
+                tx_v6: None,
+                multihop_tx_v4: None,
+                multihop_tx_v6: None,
+                event_tx,
+                state_change_tx,
+                jitter_state: 1,
+            };
+            let steady = reload_params("192.0.2.1", 1);
+            let series = |metrics: &BgpMetrics| {
+                metrics
+                    .registry()
+                    .gather()
+                    .iter()
+                    .filter(|family| family.name().starts_with("bfd_session_"))
+                    .map(|family| family.get_metric().len())
+                    .sum::<usize>()
+            };
+            for (revision, host) in (2..).zip(10u8..60) {
+                let churned = reload_params(&format!("198.51.100.{host}"), revision);
+                for sessions in [vec![steady.clone(), churned], vec![steady.clone()]] {
+                    actor
+                        .reconcile(&BfdRuntimeConfig { sessions }, &metrics, &status_tx)
+                        .await;
+                }
+            }
+            assert_eq!(status_rx.borrow().len(), 1);
+            assert_eq!(series(&metrics), 1, "only the steady session's gauge");
         }
 
         #[tokio::test]

@@ -522,6 +522,7 @@ fn tcp_ao_listener_capacity_is_bounded_independently_per_address_family() {
         remote_asn: 65002,
         description: None,
         tcp_ao: Some(tcp_ao_test_keyring(256)),
+        bfd: None,
     });
     config
         .validate()

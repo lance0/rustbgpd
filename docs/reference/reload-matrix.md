@@ -473,6 +473,7 @@ Disjoint unprotected range edits can still reload normally.
 | `peer_group` | reload-applied | Inheritance resolves when a passive session promotes to a managed peer. |
 | `remote_asn` | reload-applied | Validated against the OPEN's `my_as` at promotion. |
 | `description` | reload-applied | Metadata. |
+| `bfd` | reload-applied | On the SIGHUP snapshot swap, each running session accepted through the range registers, replaces or removes its single-hop BFD session to match; BGP is not reset. The first BFD range in an address family opens its socket here, through the acknowledged BFD membership change. Runtime CRUD carries no `bfd` and cannot delete a range that runs it; config transactions that change a range's `bfd` are rejected. |
 | `tcp_ao` | live (ordered rotation generations) / otherwise restart-required | Append-only non-preferred successors install on SIGHUP; a later SIGHUP may select an installed successor and observation-gate predecessor deprecation in the same generation; a still-later SIGHUP may delete deprecated, unselected MKTs without changing the owner or survivor order. Protected owner/auth/key-order edits and non-deprecated/selected-key deletion remain pinned. Runtime CRUD/transactions remain restart-required. |
 
 ## `[global]`

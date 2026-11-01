@@ -1234,6 +1234,7 @@ async fn stage_config_snapshot_rebuilds_matcher_and_returns_previous_toml() {
         remote_asn: 65020,
         description: Some("transaction range".to_string()),
         tcp_ao: None,
+        bfd: None,
     }];
 
     let manager = PeerManager::new_with_config(
@@ -1300,6 +1301,7 @@ async fn staged_snapshot_fences_dynamic_accept_and_restore_reaps_candidate_dynam
         remote_asn: 0,
         description: Some("candidate-only".to_string()),
         tcp_ao: None,
+        bfd: None,
     }];
 
     let manager = PeerManager::new_with_config(
@@ -1424,6 +1426,7 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
         remote_asn: 65030,
         description: Some("transaction range".to_string()),
         tcp_ao: None,
+        bfd: None,
     }];
 
     let manager = PeerManager::new_with_config(

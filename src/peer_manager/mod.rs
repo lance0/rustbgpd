@@ -3223,6 +3223,32 @@ impl PeerManager {
         }
     }
 
+    /// Adopt a reloaded runtime config snapshot (SIGHUP and FIB-table CRUD).
+    async fn adopt_config_snapshot(&mut self, config: Config) {
+        self.replace_current_config(config);
+        self.local_forwarding_state
+            .publish_fib(&self.current_config.fib_tables);
+        // #338: rebuild the live dynamic-neighbor accept-matcher so
+        // [[dynamic_neighbors]] edits applied via SIGHUP take effect
+        // (previously only `current_config` was swapped). The shared
+        // runtime-config lock guarantees the reloaded config already
+        // reflects any accepted runtime CRUD, so a plain re-parse is
+        // correct — no merge/provenance needed.
+        self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
+        self.retention.admission_dirty = true;
+        self.reconcile_stale_dynamic_max_prefix_restarts();
+        // A range's `bfd` edit reaches its running sessions.
+        self.resync_dynamic_bfd().await;
+        self.dynamic_neighbor_limit = self.current_config.effective_dynamic_neighbor_limit();
+        self.metrics
+            .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
+        // ADR-0110 freshness: every successful reload flows through this
+        // snapshot replacement — stamp the generation even when policy
+        // content is unchanged (the daemon re-accepted the artifacts). A
+        // rejected reload aborts before this command is ever sent.
+        self.metrics.record_policy_generation_loaded();
+    }
+
     /// Run the `PeerManager` event loop until shutdown or channel close.
     #[expect(
         clippy::too_many_lines,
@@ -3336,31 +3362,9 @@ impl PeerManager {
                             let _ = reply.send(outcome);
                         }
                         Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {
-                            self.replace_current_config(*config);
-                            self.local_forwarding_state.publish_fib(&self.current_config.fib_tables);
                             self.config_snapshot_staged = false;
                             self.staged_policy_routes_prior = None;
-                        // #338: rebuild the live dynamic-neighbor accept-matcher so
-                        // [[dynamic_neighbors]] edits applied via SIGHUP take effect
-                        // (previously only `current_config` was swapped). The shared
-                        // runtime-config lock guarantees the reloaded config already
-                        // reflects any accepted runtime CRUD, so a plain re-parse is
-                        // correct — no merge/provenance needed.
-                        self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
-                        self.retention.admission_dirty = true;
-                        self.reconcile_stale_dynamic_max_prefix_restarts();
-                        self.dynamic_neighbor_limit =
-                            self.current_config.effective_dynamic_neighbor_limit();
-                        self.metrics.set_dynamic_neighbor_capacity(
-                            self.dynamic_peer_count,
-                            self.dynamic_neighbor_limit,
-                        );
-                        // ADR-0110 freshness: every successful reload flows
-                        // through this snapshot replacement — stamp the
-                        // generation even when policy content is unchanged
-                        // (the daemon re-accepted the artifacts). A rejected
-                        // reload aborts before this command is ever sent.
-                        self.metrics.record_policy_generation_loaded();
+                            self.adopt_config_snapshot(*config).await;
                             if let Some(ack) = ack {
                                 let _ = ack.send(());
                             }
@@ -3445,6 +3449,9 @@ impl PeerManager {
                                 // waits for the commit or rollback.
                                 TransactionConfigScope::Full => self
                                     .unnumbered_preflight(&candidate)
+                                    .and_then(|()| {
+                                        bfd::dynamic_range_bfd_unchanged(&self.current_config, &candidate)
+                                    })
                                     .map(|()| *candidate),
                                 TransactionConfigScope::FibTablesOnly => {
                                     let mut staged = self.current_config.clone();

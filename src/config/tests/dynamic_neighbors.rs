@@ -518,9 +518,9 @@ peer_group = "ix-members"
 
 #[test]
 fn dynamic_neighbor_peer_group_with_bfd_rejected() {
-    // v1 BFD is static-neighbors only (ADR-0067). A dynamic range whose peer
-    // group enables BFD must be rejected so the operator isn't misled into
-    // thinking dynamic peers are BFD-protected.
+    // A range never inherits its group's BFD: a range whose peer group enables
+    // BFD must be rejected so the operator isn't misled into thinking dynamic
+    // peers are BFD-protected by the group block.
     let toml = r#"
 [global]
 asn = 65001
@@ -544,7 +544,7 @@ peer_group = "ix-members"
     let err = parse(toml).unwrap_err();
     assert!(
         err.to_string()
-            .contains("BFD is not supported for dynamic neighbors"),
+            .contains("dynamic ranges do not inherit BFD from their peer group"),
         "unexpected error: {err}"
     );
 
@@ -556,6 +556,74 @@ peer_group = "ix-members"
     assert!(
         parse(&ok).is_ok(),
         "explicitly-disabled BFD should be allowed"
+    );
+}
+
+const RANGE_BFD_BASE: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.ix-members]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+"#;
+
+/// A range's own `bfd` block is accepted single-hop and non-strict, for IPv4
+/// and IPv6 ranges.
+#[test]
+fn dynamic_neighbor_range_bfd_is_accepted_single_hop() {
+    let config = parse(&format!("{RANGE_BFD_BASE}bfd = {{ profile = \"fast\" }}\n")).unwrap();
+    let bfd = config.dynamic_neighbors[0].bfd.as_ref().unwrap();
+    assert_eq!(
+        (bfd.profile.as_str(), bfd.enabled, bfd.strict, bfd.multihop),
+        ("fast", true, false, false)
+    );
+    let v6 = RANGE_BFD_BASE.replace("10.0.0.0/24", "2001:db8::/64");
+    assert!(parse(&format!("{v6}bfd = {{ profile = \"fast\" }}\n")).is_ok());
+    // A disabled block is accepted and runs nothing.
+    assert!(
+        parse(&format!(
+            "{RANGE_BFD_BASE}bfd = {{ profile = \"fast\", enabled = false }}\n"
+        ))
+        .is_ok()
+    );
+    assert!(
+        parse(RANGE_BFD_BASE).unwrap().dynamic_neighbors[0]
+            .bfd
+            .is_none()
+    );
+}
+
+/// Strict and multihop are rejected on a range, and the profile must exist.
+#[test]
+fn dynamic_neighbor_range_bfd_rejects_strict_multihop_and_unknown_profile() {
+    for block in [
+        r#"bfd = { profile = "fast", strict = true }"#,
+        r#"bfd = { profile = "fast", multihop = true }"#,
+    ] {
+        let err = parse(&format!("{RANGE_BFD_BASE}{block}\n")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("bfd.strict and bfd.multihop are not supported on a dynamic range"),
+            "{block}: {err}"
+        );
+    }
+    let err = parse(&format!("{RANGE_BFD_BASE}bfd = {{ profile = \"slow\" }}\n")).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("bfd.profile \"slow\" is not defined in [[bfd_profiles]]"),
+        "{err}"
     );
 }
 

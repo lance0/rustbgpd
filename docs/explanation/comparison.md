@@ -452,9 +452,11 @@ member individually.
     FRR `bfdd`, while M108 covers multihop non-strict coupling. IPv4, IPv6
     global, and interface-scoped IPv6 link-local static neighbors are
     supported; link-local RX is pinned to the configured interface through
-    `IPV6_PKTINFO`, and M51 exercises it against FRR. Deferred: echo / demand
-    mode, authentication, C-bit / GR-aware nuance, static-route BFD tracking,
-    dynamic-neighbor BFD, and hardware / offload.
+    `IPV6_PKTINFO`, and M51 exercises it against FRR. Sessions accepted
+    through a `[[dynamic_neighbors]]` range can run single-hop non-strict BFD
+    configured on the range. Deferred: echo / demand mode, authentication,
+    C-bit / GR-aware nuance, static-route BFD tracking, strict or multihop
+    dynamic-range BFD, and hardware / offload.
 
 [^fuzz]: Every entry in this row means in-tree fuzz targets; the scope
     differs. rustbgpd carries libFuzzer targets in

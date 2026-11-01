@@ -44,7 +44,7 @@ struct BfdCommandRetry {
 pub(super) struct BfdCoupling {
     reload_tx: Option<mpsc::Sender<BfdReloadCommand>>,
     /// Socket families stay open after the last member leaves.
-    opened: BfdRuntimeConfig,
+    pub(super) opened: BfdRuntimeConfig,
     next_revision: u64,
     /// During a generation, lifecycle mutations must not publish partial BFD membership.
     pub(super) reloading: bool,
@@ -85,12 +85,17 @@ pub(super) struct BfdCoupling {
     /// withhold is level-triggered without `PeerManager` caching a (possibly
     /// stale) BFD state.
     pub(super) held_down: HashSet<IpAddr>,
-    /// Members registered by an interface-only neighbor's binding (ADR-0142),
-    /// not derived from configuration: a reload carries them over, and the
-    /// binding, not the scope refresh, moves them.
+    /// Members registered at runtime rather than derived from neighbor
+    /// configuration: an interface-only neighbor's binding (ADR-0142) and a
+    /// session accepted through a `[[dynamic_neighbors]]` range that runs
+    /// BFD. A reload rebuilds them from the candidate; the binding, not the
+    /// scope refresh, moves a binding's member.
     pub(super) bound: HashSet<IpAddr>,
     /// The bound members a staged reload settles on, applied with it.
     pending_bound: Option<HashSet<IpAddr>>,
+    /// Range placeholders whose socket families a staged change opens,
+    /// recorded as opened once the actor acknowledges it.
+    pub(super) pending_probes: Vec<BfdSessionParams>,
 }
 
 impl PeerManager {
@@ -103,8 +108,11 @@ impl PeerManager {
         state_change_rx: BfdStateChangeReceiver,
         configured: HashMap<IpAddr, BfdSessionParams>,
     ) -> Self {
+        // Startup opened the families of the dynamic ranges that run BFD too.
+        let probes = crate::bfd_runtime::dynamic_range_socket_probes(&self.current_config)
+            .unwrap_or_default();
         let mut opened = BfdRuntimeConfig {
-            sessions: configured.values().cloned().collect(),
+            sessions: configured.values().cloned().chain(probes).collect(),
         };
         opened
             .sessions
@@ -135,6 +143,7 @@ impl PeerManager {
             held_down: HashSet::new(),
             bound: HashSet::new(),
             pending_bound: None,
+            pending_probes: Vec::new(),
         });
         self
     }
@@ -152,7 +161,10 @@ impl PeerManager {
         &mut self,
         candidate: &crate::config::Config,
     ) -> Result<Option<PreparedRuntime>, String> {
-        let bound = self.rebuild_bound_bfd_sessions(candidate)?;
+        let mut bound = self.rebuild_bound_bfd_sessions(candidate)?;
+        bound.extend(self.rebuild_dynamic_bfd_sessions(candidate)?);
+        let probes = crate::bfd_runtime::dynamic_range_socket_probes(candidate)
+            .map_err(|error| error.to_string())?;
         let Some(coupling) = self.bfd_coupling.as_mut() else {
             return Ok(None);
         };
@@ -180,7 +192,15 @@ impl PeerManager {
                 .checked_add(1)
                 .ok_or("BFD session revision exhausted")?;
         }
-        let prepared = prepare_reload(&desired, &coupling.opened)
+        let sockets = BfdRuntimeConfig {
+            sessions: desired
+                .sessions
+                .iter()
+                .cloned()
+                .chain(probes.clone())
+                .collect(),
+        };
+        let prepared = prepare_reload(&sockets, &coupling.opened)
             .map_err(|error| format!("BFD socket preflight: {error}"))?;
         coupling.prior_held.clone_from(&coupling.held_down);
         coupling
@@ -195,6 +215,7 @@ impl PeerManager {
         );
         // Staged only once preparation succeeds: a rejected one stages nothing.
         coupling.pending_bound = Some(pending_bound);
+        coupling.pending_probes = probes;
         coupling.reloading = true;
         coupling.rollback_lookup = false;
         Ok(prepared)
@@ -220,6 +241,196 @@ impl PeerManager {
             }
         }
         Ok(sessions)
+    }
+
+    /// Every live dynamic session's BFD session as `candidate`'s range for it
+    /// configures it; a session whose range is gone or runs no BFD has none.
+    fn rebuild_dynamic_bfd_sessions(
+        &self,
+        candidate: &crate::config::Config,
+    ) -> Result<Vec<BfdSessionParams>, String> {
+        let mut sessions = Vec::new();
+        for (key, managed) in &self.peers {
+            let Some(accepted) = managed
+                .accepted_dynamic_range
+                .as_ref()
+                .filter(|_| managed.is_dynamic)
+            else {
+                continue;
+            };
+            if let Some(params) = dynamic_bfd_params(candidate, accepted, key.address)? {
+                sessions.push(params);
+            }
+        }
+        Ok(sessions)
+    }
+
+    /// The BFD session a connection from `peer` accepted through `accepted`
+    /// registers, or `None` when its range runs no BFD. Refused, before the
+    /// session is spawned, when the session could not be registered without
+    /// waiting on the BFD actor: a membership change is in progress, or the
+    /// range's socket family is not open (startup and reloads open it). The
+    /// caller drops the connection; the peer retries.
+    pub(super) fn dynamic_bfd_admission(
+        &self,
+        accepted: &super::dynamic::AcceptedDynamicRange,
+        peer: IpAddr,
+    ) -> Result<Option<BfdSessionParams>, String> {
+        let Some(params) = dynamic_bfd_params(&self.current_config, accepted, peer)? else {
+            return Ok(None);
+        };
+        let coupling = self.bfd_coupling.as_ref().ok_or("BFD is not running")?;
+        if coupling.reloading {
+            return Err("a BFD membership change is in progress".into());
+        }
+        if !coupling
+            .opened
+            .sessions
+            .iter()
+            .any(|old| old.peer.is_ipv6() == peer.is_ipv6() && !old.multihop)
+        {
+            return Err("the range's BFD socket family is not open".into());
+        }
+        Ok(Some(params))
+    }
+
+    /// Register an accepted dynamic session's BFD session under a fresh
+    /// revision. Published level-triggered, as an admin enable is: the
+    /// accept never waits on the BFD actor, and a range runs no strict
+    /// sessions whose admission would need its acknowledgement.
+    pub(super) fn register_dynamic_bfd(&mut self, mut params: BfdSessionParams) {
+        let Some(coupling) = self.bfd_coupling.as_mut() else {
+            return;
+        };
+        let peer = params.peer;
+        params.revision = coupling.next_revision;
+        coupling.next_revision = coupling.next_revision.saturating_add(1);
+        coupling.configured.insert(peer, params);
+        coupling.bound.insert(peer);
+        coupling.disabled.remove(&peer);
+        self.republish_bfd_desired();
+    }
+
+    /// Remove a dynamic session's BFD session once no dynamic peer at `peer`
+    /// remains; a dynamic peer kept disabled keeps it, drained. A no-op for
+    /// an address that registered none.
+    pub(super) fn release_dynamic_bfd(&mut self, peer: IpAddr) {
+        let remaining = self
+            .peers
+            .get(&rustbgpd_api::peer_types::PeerKey::new(peer, None))
+            .filter(|managed| managed.is_dynamic)
+            .map(|managed| managed.enabled);
+        if let Some(enabled) = remaining {
+            if !enabled {
+                self.set_bfd_peer_disabled(peer, true);
+            }
+            return;
+        }
+        self.cancel_bfd_retry(peer, None);
+        let Some(coupling) = self.bfd_coupling.as_mut() else {
+            return;
+        };
+        if !coupling.bound.remove(&peer) {
+            return;
+        }
+        coupling.configured.remove(&peer);
+        coupling.disabled.remove(&peer);
+        coupling.held_down.remove(&peer);
+        coupling.initially_withheld.remove(&peer);
+        // A change staged now settles without it too.
+        if let Some(pending) = coupling.pending.as_mut() {
+            pending.remove(&peer);
+        }
+        if let Some(pending) = coupling.pending_bound.as_mut() {
+            pending.remove(&peer);
+        }
+        self.republish_bfd_desired();
+    }
+
+    /// Bring every live dynamic session's BFD session in line with the
+    /// accepted ranges after a reload swapped them in: register, replace or
+    /// remove each. A change that needs a new socket family goes through the
+    /// acknowledged replacement path; a reload owns this step, so it may wait.
+    pub(super) async fn resync_dynamic_bfd(&mut self) {
+        let Some(coupling) = self.bfd_coupling.as_ref() else {
+            return;
+        };
+        if coupling.reloading {
+            warn!("dynamic-range BFD resync skipped: a BFD membership change is in progress");
+            return;
+        }
+        let built = self.rebuild_dynamic_bfd_sessions(&self.current_config);
+        let probes = crate::bfd_runtime::dynamic_range_socket_probes(&self.current_config)
+            .map_err(|error| error.to_string());
+        let (desired, probes) = match (built, probes) {
+            (Ok(desired), Ok(probes)) => (desired, probes),
+            (Err(error), _) | (_, Err(error)) => {
+                warn!(%error, "dynamic-range BFD resync failed; sessions keep their BFD state");
+                return;
+            }
+        };
+        let live: HashSet<IpAddr> = self
+            .peers
+            .iter()
+            .filter(|(_, managed)| managed.is_dynamic)
+            .map(|(key, _)| key.address)
+            .collect();
+        let coupling = self.bfd_coupling.as_mut().expect("checked above");
+        let mut configured = coupling.configured.clone();
+        let mut bound = coupling.bound.clone();
+        let wanted: HashSet<IpAddr> = desired.iter().map(|params| params.peer).collect();
+        for peer in coupling.bound.iter().filter(|peer| live.contains(peer)) {
+            if !wanted.contains(peer) {
+                configured.remove(peer);
+                bound.remove(peer);
+            }
+        }
+        for mut params in desired {
+            if let Some(old) = configured.get(&params.peer) {
+                params.revision = old.revision;
+                if *old == params {
+                    continue;
+                }
+            }
+            params.revision = coupling.next_revision;
+            coupling.next_revision = coupling.next_revision.saturating_add(1);
+            bound.insert(params.peer);
+            configured.insert(params.peer, params);
+        }
+        let sockets = BfdRuntimeConfig {
+            sessions: configured.values().cloned().chain(probes.clone()).collect(),
+        };
+        let prepared = match prepare_reload(&sockets, &coupling.opened) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                warn!(%error, "dynamic-range BFD socket preflight failed; sessions keep their BFD state");
+                return;
+            }
+        };
+        if configured == coupling.configured && prepared.is_none() {
+            return;
+        }
+        let removed: Vec<IpAddr> = coupling
+            .configured
+            .keys()
+            .filter(|peer| !configured.contains_key(peer))
+            .copied()
+            .collect();
+        coupling.prior_held.clone_from(&coupling.held_down);
+        coupling
+            .prior_initially_withheld
+            .clone_from(&coupling.initially_withheld);
+        coupling.pending = Some(configured);
+        coupling.pending_bound = Some(bound);
+        coupling.pending_probes = probes;
+        coupling.reloading = true;
+        coupling.rollback_lookup = false;
+        for peer in removed {
+            self.cancel_bfd_retry(peer, None);
+        }
+        if let Err(error) = self.commit_bfd_reload(prepared).await {
+            warn!(%error, "dynamic-range BFD membership change was not acknowledged");
+        }
     }
 
     /// Restore strict lookup before rollback re-adds peers, but keep publication suspended.
@@ -454,6 +665,7 @@ impl PeerManager {
         if let Some(coupling) = self.bfd_coupling.as_mut() {
             coupling.pending = None;
             coupling.pending_bound = None;
+            coupling.pending_probes.clear();
             coupling.reloading = false;
             coupling.rollback_lookup = false;
             coupling.held_down.retain(|peer| {
@@ -576,11 +788,15 @@ impl PeerManager {
                 })
                 .collect(),
         };
+        // Sockets prepared for a range with no session yet must still reach
+        // the actor, so their family counts as open.
         if !require_ack
             && !changed
+            && prepared.is_none()
             && coupling.configured.is_empty()
             && coupling.held_down.is_empty()
         {
+            coupling.pending_probes.clear();
             coupling.prior_held.clear();
             coupling.prior_initially_withheld.clear();
             coupling.desired_tx.send_replace(desired);
@@ -645,7 +861,8 @@ impl PeerManager {
                 }
             }
         }
-        for params in &desired.sessions {
+        let probes = std::mem::take(&mut coupling.pending_probes);
+        for params in desired.sessions.iter().chain(&probes) {
             if !coupling.opened.sessions.iter().any(|old| {
                 old.peer.is_ipv6() == params.peer.is_ipv6() && old.multihop == params.multihop
             }) {
@@ -917,7 +1134,14 @@ impl PeerManager {
         peer: IpAddr,
         params: Option<BfdSessionParams>,
     ) -> Result<(), String> {
-        let live = self.unnumbered_bound_addresses();
+        let mut live = self.unnumbered_bound_addresses();
+        // A dynamic session's member is runtime-registered too.
+        live.extend(
+            self.peers
+                .iter()
+                .filter(|(_, managed)| managed.is_dynamic)
+                .map(|(key, _)| key.address),
+        );
         let Some(coupling) = self.bfd_coupling.as_mut() else {
             return if params.is_some() {
                 Err("BFD is not running".into())
@@ -1149,5 +1373,59 @@ impl PeerManager {
             }
             SessionState::Init | SessionState::Up => {}
         }
+    }
+}
+
+/// The BFD session `config`'s range for an accepted dynamic session runs to
+/// `peer`: the range with the session's accepted prefix and peer group.
+fn dynamic_bfd_params(
+    config: &crate::config::Config,
+    accepted: &super::dynamic::AcceptedDynamicRange,
+    peer: IpAddr,
+) -> Result<Option<BfdSessionParams>, String> {
+    let Some(range) = config.dynamic_neighbors.iter().find(|range| {
+        range.peer_group == accepted.peer_group
+            && crate::config::effective_prefix_str(&range.prefix)
+                == Some((accepted.addr, accepted.prefix_len))
+    }) else {
+        return Ok(None);
+    };
+    crate::bfd_runtime::dynamic_session_params(config, range, peer)
+        .map_err(|error| error.to_string())
+}
+
+/// A config transaction may not change which ranges run BFD or how: those
+/// sessions are registered and removed by startup and SIGHUP, which own the
+/// socket preflight and the acknowledged membership change.
+pub(super) fn dynamic_range_bfd_unchanged(
+    current: &crate::config::Config,
+    candidate: &crate::config::Config,
+) -> Result<(), String> {
+    let inventory = |config: &crate::config::Config| {
+        let mut ranges: Vec<String> = config
+            .dynamic_neighbors
+            .iter()
+            .filter(|range| range.bfd.as_ref().is_some_and(|bfd| bfd.enabled))
+            .map(|range| {
+                format!(
+                    "{:?} {} {:?}",
+                    crate::config::effective_prefix_str(&range.prefix),
+                    range.peer_group,
+                    range.bfd
+                )
+            })
+            .collect();
+        ranges.sort();
+        ranges
+    };
+    if inventory(current) == inventory(candidate) {
+        Ok(())
+    } else {
+        Err(
+            "[[dynamic_neighbors]] transaction changes a range's `bfd`; dynamic-range BFD is \
+             applied only by startup or SIGHUP reload — apply this change through the config \
+             file and SIGHUP"
+                .to_string(),
+        )
     }
 }
