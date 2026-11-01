@@ -24,7 +24,7 @@ topology:
 
     gobgp:
       kind: linux
-      image: gobgp:v4.10.0-m118
+      image: gobgp:v4.11.0-m118
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m118-peer.toml:/config/gobgp.toml:ro

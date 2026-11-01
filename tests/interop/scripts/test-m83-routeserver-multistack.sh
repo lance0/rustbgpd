@@ -9,7 +9,7 @@
 # (RFC 7947 / RFC 7948 / RFC 9234 / ADR-0101 proof-ladder closer).
 #
 # rustbgpd is the route server (AS 65500) for three member stacks —
-# BIRD 2.19.3, GoBGP 4.10.0 (Add-Path receive), FRR 10.7.0 — with a
+# BIRD 2.19.3, GoBGP 4.11.0 (Add-Path receive), FRR 10.7.0 — with a
 # StayRTR RTR fixture feeding ROV and a tshark capture on the RS↔BIRD
 # link for the byte-level assertions.
 #
@@ -17,7 +17,7 @@
 #   FRR 10.7.0  — per-neighbor `no neighbor X enforce-first-as`
 #                 (global form alone is insufficient, the M19 finding)
 #   BIRD 2.19.3 — `enforce first as off` (explicit; also the default)
-#   GoBGP 4.10.0 — no first-AS enforcement exists; nothing to disable
+#   GoBGP 4.11.0 — no first-AS enforcement exists; nothing to disable
 #
 # Assertions:
 #    1  RTR: both VRPs loaded from StayRTR (bgp_rpki_vrp_count == 2)
@@ -105,7 +105,7 @@
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t bird:v2.19.3-m83 -f tests/interop/Dockerfile.bird2 tests/interop
-#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.10.0 --build-arg GOBGP_SHA256=05a1c9fa1fe5c8d59de5a923efa4afe692c371c33b84750cfeb8f8df24db5fbe -t gobgp:v4.10.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.11.0 --build-arg GOBGP_SHA256=b45eefb6f8cb662740efa99631f14bac23c9ea8cca158843293a3ecb5cbc72b6 -t gobgp:v4.11.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   - docker pull quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b
 #   - containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
 #
@@ -929,12 +929,12 @@ preflight_incumbent_versions() {
         echo "ERROR: M83 requires BIRD version 2.19.3, got: $bird_version" >&2
         return 1
     }
-    [ "$gobgp_version" = "gobgp version 4.10.0" ] || {
-        echo "ERROR: M83 requires gobgp version 4.10.0, got: $gobgp_version" >&2
+    [ "$gobgp_version" = "gobgp version 4.11.0" ] || {
+        echo "ERROR: M83 requires gobgp version 4.11.0, got: $gobgp_version" >&2
         return 1
     }
-    [ "$gobgpd_version" = "gobgpd version 4.10.0" ] || {
-        echo "ERROR: M83 requires gobgpd version 4.10.0, got: $gobgpd_version" >&2
+    [ "$gobgpd_version" = "gobgpd version 4.11.0" ] || {
+        echo "ERROR: M83 requires gobgpd version 4.11.0, got: $gobgpd_version" >&2
         return 1
     }
     [ "$frr_config_image" = "$FRR_IMAGE" ] || {
@@ -949,7 +949,7 @@ preflight_incumbent_versions() {
         echo "ERROR: M83 requires $FRR_VERSION, got: $frr_version" >&2
         return 1
     }
-    log "Runtime preflight: BIRD 2.19.3, GoBGP 4.10.0, and FRR 10.7.0 exact identities confirmed"
+    log "Runtime preflight: BIRD 2.19.3, GoBGP 4.11.0, and FRR 10.7.0 exact identities confirmed"
 }
 
 stop_capture() {
@@ -1822,7 +1822,7 @@ assert_reload_stability() {
 # ---------------------------------------------------------------------------
 
 main() {
-    log "M83 interop test: route-server profile, multi-stack (BIRD 2.19.3 + GoBGP 4.10.0 + FRR 10.7.0 + RTR)"
+    log "M83 interop test: route-server profile, multi-stack (BIRD 2.19.3 + GoBGP 4.11.0 + FRR 10.7.0 + RTR)"
     log "Topology: $TOPO"
 
     resolve_grpc_addr

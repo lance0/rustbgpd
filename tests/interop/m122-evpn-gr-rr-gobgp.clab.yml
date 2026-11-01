@@ -1,6 +1,6 @@
 # M122: EVPN Types 1–5 RR helper restart, EoR sweep and LLGR expiry.
-# GoBGP 4.10.0 source and client; no VTEP or Linux dataplane configuration.
-# Build rustbgpd:dev, gobgp:v4.10.0-m122 and rustbgpd:m122-tools first.
+# GoBGP 4.11.0 source and client; no VTEP or Linux dataplane configuration.
+# Build rustbgpd:dev, gobgp:v4.11.0-m122 and rustbgpd:m122-tools first.
 # Deploy this topology, then run scripts/test-m122-evpn-gr-rr-gobgp.sh.
 name: m122-evpn-gr-rr-gobgp
 topology:
@@ -21,7 +21,7 @@ topology:
         - ip link set eth2 up
     gobgp-source:
       kind: linux
-      image: gobgp:v4.10.0-m122
+      image: gobgp:v4.11.0-m122
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m122-source.toml:/config/gobgp.toml:ro
@@ -30,7 +30,7 @@ topology:
         - ip link set eth1 up
     gobgp-client:
       kind: linux
-      image: gobgp:v4.10.0-m122
+      image: gobgp:v4.11.0-m122
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m122-client.toml:/config/gobgp.toml:ro
