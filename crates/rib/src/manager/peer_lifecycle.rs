@@ -591,6 +591,14 @@ impl RibManager {
             self.llgr_stale_deadlines.retain(|&(p, _, _)| p != peer);
             self.clear_gr_gauges(peer, successor);
         }
+        // A superseded handle's own GR state may already be gone (its timer
+        // expired while its deletion waited): the label shows the
+        // successor's, whatever this handle held.
+        if let Some(successor) = successor {
+            self.metrics
+                .set_gr_active(&successor.label(), self.in_graceful_restart(successor));
+            self.publish_gr_stale_routes(successor);
+        }
 
         self.clear_peer_adj_rib_in(peer, successor);
 
@@ -894,8 +902,10 @@ impl RibManager {
         self.apply_selection_deferral_transitions(transitions, "peer deleted from configuration");
         // Only the families the RIB writes: the peer manager reaped the rest
         // when it deleted the neighbor, and a neighbor re-added at the
-        // address may already emit them.
-        if !keep_series {
+        // address may already emit them. A superseded handle keeps the
+        // label's series, but while no successor reaches the RIB the RIB's
+        // ones are only this handle's.
+        if !keep_series || (peer.is_superseded() && self.label_successor(peer).is_none()) {
             self.metrics.reap_rib_peer_series(
                 &label.map_or_else(|| peer.label(), |label| label.to_string()),
             );
@@ -913,9 +923,13 @@ impl RibManager {
             return None;
         }
         let label = peer.label();
+        // A successor that entered GR before its first UPDATE holds only
+        // retention, no Adj-RIB-In or live session.
+        let retention = self.gr_retention_peers();
         self.live_sessions
             .keys()
             .chain(self.ribs.keys())
+            .chain(retention.iter())
             .copied()
             .find(|&other| other != peer && other.label() == label && !other.is_superseded())
     }
@@ -928,10 +942,10 @@ impl RibManager {
             || self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer)
     }
 
-    /// End `peer`'s Graceful Restart gauges, unless the label's successor
-    /// is in Graceful Restart itself and publishes them.
+    /// End `peer`'s Graceful Restart gauges, unless a successor holds the
+    /// label: the teardown publishes the successor's instead.
     fn clear_gr_gauges(&self, peer: PeerId, successor: Option<PeerId>) {
-        if successor.is_some_and(|successor| self.in_graceful_restart(successor)) {
+        if successor.is_some() {
             return;
         }
         let peer_label = peer.label();
@@ -2364,6 +2378,15 @@ impl RibManager {
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
         self.export_chains.insert(peer, export_policy);
+        // The session seeded these zero series when it started; an earlier
+        // identity's deletion handled since then reaped them with the rest of
+        // the label's exact-export series, so seed them again in RIB order.
+        self.metrics.initialize_exact_export_rejection_series(
+            &peer.label(),
+            sendable_families
+                .iter()
+                .filter_map(|&(afi, safi)| rustbgpd_wire::family_label(afi, safi)),
+        );
         self.peer_sendable_families.insert(peer, sendable_families);
         self.outbound_roster_generation = self.outbound_roster_generation.wrapping_add(1);
         self.peer_advertised_llgr_families

@@ -868,11 +868,13 @@ impl PeerManager {
         if replaces_retained {
             // The new session emits under the member's label from its spawn:
             // the member's series go first. The member itself goes only once
-            // the session has started; a failed start keeps it.
+            // the session has started; a failed start keeps it, with its RIB
+            // series, which the RIB's teardown of the member settles once it
+            // is retired.
             let label = self.peer_metric_label(&peer_key);
             self.metrics
                 .reap_peer_identity_series(&label, peer_key.interface.as_deref().unwrap_or(""));
-            self.metrics.reap_peer_series(&label);
+            self.metrics.reap_non_rib_peer_series(&label);
         }
         self.admit_deferred_rib_updates_for(&peer_key).await;
         let session_id = self.allocate_session_id();

@@ -158,10 +158,21 @@ impl RibManager {
     /// counters: every route held GR- or LLGR-stale, across every family
     /// table. A partial-GR peer holds both kinds at once, so both count.
     pub(super) fn publish_gr_stale_routes(&self, peer: PeerId) {
+        let Some(peer_label) = Self::owned_label(peer) else {
+            return;
+        };
         self.metrics.set_gr_stale_routes(
-            &peer.label(),
+            &peer_label,
             i64::try_from(self.retained_stale_count(peer)).unwrap_or(i64::MAX),
         );
+    }
+
+    /// The `peer` label `peer`'s own gauge writes go under, or `None` for a
+    /// superseded handle: a newer identity holds its label, and the handle's
+    /// deletion publishes that identity's values there
+    /// ([`crate::PeerId::supersede`]).
+    pub(super) fn owned_label(peer: PeerId) -> Option<String> {
+        (!peer.is_superseded()).then(|| peer.label())
     }
 
     /// Routes `peer` holds GR- or LLGR-stale, from maintained counters.
@@ -919,8 +930,10 @@ impl RibManager {
             .collect();
         self.gr_stale_deadlines.remove(&peer);
         self.gr_stale_routes_time.remove(&peer);
-        let peer_label = peer.label();
-        self.metrics.record_gr_timer_expired(&peer_label);
+        let peer_label = Self::owned_label(peer);
+        if let Some(peer_label) = &peer_label {
+            self.metrics.record_gr_timer_expired(peer_label);
+        }
 
         // Check if LLGR applies. Read — don't consume — the config: the
         // entry must survive the LLGR stale phase so that a peer
@@ -954,9 +967,9 @@ impl RibManager {
         // GR-stale sweeps below; they stay until those deadlines fire, so
         // retention accounting stays active while any remain.
         let llgr_retention_remains = self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer);
-        if !llgr_retention_remains {
-            self.metrics.set_gr_active(&peer_label, false);
-            self.metrics.set_gr_stale_routes(&peer_label, 0);
+        if !llgr_retention_remains && let Some(peer_label) = &peer_label {
+            self.metrics.set_gr_active(peer_label, false);
+            self.metrics.set_gr_stale_routes(peer_label, 0);
         }
 
         self.with_selection_readiness(|manager| {
@@ -1000,7 +1013,7 @@ impl RibManager {
             (Afi::Ipv6, Safi::LabeledUnicast),
             (Afi::Ipv4, Safi::RtConstrain),
         ];
-        let peer_label = peer.label();
+        let peer_label = Self::owned_label(peer);
         let readiness = self.replacement_readiness.clone();
         let mut inventory =
             || super::replacement_readiness_checkpoint_at(&readiness, "gr_expiry_inventory", false);
@@ -1084,10 +1097,12 @@ impl RibManager {
             self.attr_intern.gc_with_checkpoint(&mut cleanup);
             self.metrics
                 .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
-            if !fs_affected.is_empty() {
+            if !fs_affected.is_empty()
+                && let Some(peer_label) = &peer_label
+            {
                 crate::manager::helpers::set_rib_prefixes(
                     &self.metrics,
-                    &peer_label,
+                    peer_label,
                     crate::manager::helpers::FLOWSPEC_FAMILIES,
                     rib.flowspec_lens_with_checkpoint(&mut inventory),
                 );
@@ -1105,12 +1120,14 @@ impl RibManager {
             || had_rtc_swept;
         if !affected.is_empty() {
             info!(%peer, count = affected.len(), "swept stale routes");
-            crate::manager::helpers::set_rib_prefixes(
-                &self.metrics,
-                &peer_label,
-                crate::manager::helpers::UNICAST_FAMILIES,
-                rib_len,
-            );
+            if let Some(peer_label) = &peer_label {
+                crate::manager::helpers::set_rib_prefixes(
+                    &self.metrics,
+                    peer_label,
+                    crate::manager::helpers::UNICAST_FAMILIES,
+                    rib_len,
+                );
+            }
             let mut changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
             super::retire_hash_set(&mut changed, &mut inventory);
@@ -1119,8 +1136,10 @@ impl RibManager {
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
         if !evpn_affected.is_empty() {
-            self.metrics
-                .set_rib_prefixes(&peer_label, "l2vpn_evpn", gauge_val(evpn_len));
+            if let Some(peer_label) = &peer_label {
+                self.metrics
+                    .set_rib_prefixes(peer_label, "l2vpn_evpn", gauge_val(evpn_len));
+            }
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
         if !bgpls_affected.is_empty() {
@@ -1205,7 +1224,7 @@ impl RibManager {
         families: &[(Afi, Safi)],
         llgr_config: &LlgrPeerConfig,
     ) {
-        let peer_label = peer.label();
+        let peer_label = Self::owned_label(peer);
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "llgr_inventory", false);
@@ -1371,12 +1390,14 @@ impl RibManager {
                     &mut checkpoint,
                 );
             }
-            crate::manager::helpers::set_rib_prefixes(
-                &self.metrics,
-                &peer_label,
-                crate::manager::helpers::FLOWSPEC_FAMILIES,
-                rib.flowspec_lens(),
-            );
+            if let Some(peer_label) = &peer_label {
+                crate::manager::helpers::set_rib_prefixes(
+                    &self.metrics,
+                    peer_label,
+                    crate::manager::helpers::FLOWSPEC_FAMILIES,
+                    rib.flowspec_lens(),
+                );
+            }
             rib_len = rib.unicast_lens();
             evpn_len = rib.evpn_len();
             // First GC catches interned sets made unreachable by direct
@@ -1436,14 +1457,16 @@ impl RibManager {
             // no-ops.
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
-        crate::manager::helpers::set_rib_prefixes(
-            &self.metrics,
-            &peer_label,
-            crate::manager::helpers::UNICAST_FAMILIES,
-            rib_len,
-        );
-        self.metrics
-            .set_rib_prefixes(&peer_label, "l2vpn_evpn", gauge_val(evpn_len));
+        if let Some(peer_label) = &peer_label {
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                peer_label,
+                crate::manager::helpers::UNICAST_FAMILIES,
+                rib_len,
+            );
+            self.metrics
+                .set_rib_prefixes(peer_label, "l2vpn_evpn", gauge_val(evpn_len));
+        }
 
         // Set the LLGR timer per family (RFC 9494 §4.3: stale time is
         // negotiated per AFI/SAFI): min(local config, the peer's
@@ -1537,7 +1560,7 @@ impl RibManager {
         reason = "family-scoped sweeps and recomputes across all seven route tables"
     )]
     fn sweep_llgr_stale_with_readiness(&mut self, peer: PeerId, families: &[(Afi, Safi)]) {
-        let peer_label = peer.label();
+        let peer_label = Self::owned_label(peer);
         let readiness = self.replacement_readiness.clone();
         let mut inventory = || {
             super::replacement_readiness_checkpoint_at(&readiness, "llgr_expiry_inventory", false);
@@ -1642,12 +1665,14 @@ impl RibManager {
                         false,
                     );
                 };
-                crate::manager::helpers::set_rib_prefixes(
-                    &self.metrics,
-                    &peer_label,
-                    crate::manager::helpers::FLOWSPEC_FAMILIES,
-                    rib.flowspec_lens_with_checkpoint(&mut metrics),
-                );
+                if let Some(peer_label) = &peer_label {
+                    crate::manager::helpers::set_rib_prefixes(
+                        &self.metrics,
+                        peer_label,
+                        crate::manager::helpers::FLOWSPEC_FAMILIES,
+                        rib.flowspec_lens_with_checkpoint(&mut metrics),
+                    );
+                }
             }
             rib_len = rib.unicast_lens();
             evpn_len = rib.evpn_len();
@@ -1662,12 +1687,14 @@ impl RibManager {
             || had_rtc_swept;
         if !affected.is_empty() {
             info!(%peer, count = affected.len(), "swept LLGR-stale routes");
-            crate::manager::helpers::set_rib_prefixes(
-                &self.metrics,
-                &peer_label,
-                crate::manager::helpers::UNICAST_FAMILIES,
-                rib_len,
-            );
+            if let Some(peer_label) = &peer_label {
+                crate::manager::helpers::set_rib_prefixes(
+                    &self.metrics,
+                    peer_label,
+                    crate::manager::helpers::UNICAST_FAMILIES,
+                    rib_len,
+                );
+            }
             let mut changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
             super::retire_hash_set(&mut changed, &mut inventory);
@@ -1676,8 +1703,10 @@ impl RibManager {
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
         if !evpn_affected.is_empty() {
-            self.metrics
-                .set_rib_prefixes(&peer_label, "l2vpn_evpn", gauge_val(evpn_len));
+            if let Some(peer_label) = &peer_label {
+                self.metrics
+                    .set_rib_prefixes(peer_label, "l2vpn_evpn", gauge_val(evpn_len));
+            }
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
         if !bgpls_affected.is_empty() {
@@ -1718,7 +1747,7 @@ impl RibManager {
     /// Publish the retention state left by an LLGR expiry, releasing the
     /// peer once no retention phase remains.
     fn finish_llgr_expiry(&mut self, peer: PeerId) {
-        let peer_label = peer.label();
+        let peer_label = Self::owned_label(peer);
 
         // Terminal only when no family retains an LLGR deadline: other
         // families with longer stale times keep their retention (and the
@@ -1738,8 +1767,10 @@ impl RibManager {
         // LLGR is the last retention phase — the per-peer LLGR config has
         // no further reader once the stale routes are swept.
         self.llgr_peer_config.remove(&peer);
-        self.metrics.set_gr_active(&peer_label, false);
-        self.metrics.set_gr_stale_routes(&peer_label, 0);
+        if let Some(peer_label) = &peer_label {
+            self.metrics.set_gr_active(peer_label, false);
+            self.metrics.set_gr_stale_routes(peer_label, 0);
+        }
         self.release_peer_state_if_departed(peer);
     }
 

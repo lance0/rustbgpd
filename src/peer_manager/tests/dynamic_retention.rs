@@ -2050,16 +2050,20 @@ async fn a_static_add_replacing_a_retained_member_keeps_its_series_through_the_c
 }
 
 /// A static add at a retained member's address whose session fails to start
-/// changes nothing but the member's metric series: the add fails, the
+/// changes nothing but the member's peer-manager series: the add fails, the
 /// member keeps its identity, its retained routes, its place under the
-/// dynamic-neighbor limit and its retention gauge, and no removal is
-/// published, so a fully compensated create is true. Red proof: retiring
-/// the member before the session starts purges its routes and frees its
-/// place.
+/// dynamic-neighbor limit, its retention gauge and its RIB gauges, and no
+/// removal is published, so a fully compensated create is true. Red proofs:
+/// retiring the member before the session starts purges its routes and
+/// frees its place; reaping every family before the spawn drops its Graceful
+/// Restart and prefix gauges.
 #[tokio::test]
 async fn a_static_add_that_fails_to_start_keeps_the_retained_member() {
     let (mut mgr, rib_tx, metrics, rib_task) = manager_sharing_metrics_with_rib();
     let old = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    loc_rib_count(&rib_tx).await;
+    let rib_gauges = member_gr_gauges(&metrics);
+    assert_eq!(rib_gauges, [Some(1.0), Some(3.0), Some(3.0)]);
     mgr.fail_next_peer_start = true;
     assert!(
         mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
@@ -2082,6 +2086,11 @@ async fn a_static_add_that_fails_to_start_keeps_the_retained_member() {
         )
         .is_some(),
         "the member's retention gauge is published again"
+    );
+    assert_eq!(
+        member_gr_gauges(&metrics),
+        rib_gauges,
+        "the member's RIB gauges are untouched"
     );
     rib_task.abort();
 }
@@ -2106,6 +2115,15 @@ async fn a_re_added_static_neighbor_keeps_its_series_through_the_old_cleanup() {
 
     let before = member_series(&metrics);
     release_held(&mut held, &rib_tx).await;
+    // The new session registers in the RIB, after the deletion.
+    let (tx, _rx) = mpsc::channel(16);
+    let new = mgr.rib_peer_of(&key(MEMBER));
+    send_all(
+        &rib_tx,
+        session(new, 3, MEMBER_ASN, false, false, false, tx),
+    )
+    .await;
+    loc_rib_count(&rib_tx).await;
     assert_new_neighbor_series(&metrics);
     assert_cleanup_keeps(&metrics, &before);
     assert!(!old.is_live(), "the deleted identity is released");
@@ -2145,8 +2163,18 @@ async fn a_dynamic_reconnect_keeps_its_series_through_the_deleted_members_cleanu
     assert!(mgr.retained_dynamic.is_empty(), "deleted at idle");
 
     let _second = accept(&mut mgr).await;
+    let new = open_validated(&mut mgr).await;
+    assert_ne!(new, old);
     let before = member_series(&metrics);
     release_held(&mut held, &rib_tx).await;
+    // The reconnect's session registers in the RIB, after the deletion.
+    let (tx, _rx) = mpsc::channel(16);
+    send_all(
+        &rib_tx,
+        session(new, 2, MEMBER_ASN, false, false, false, tx),
+    )
+    .await;
+    loc_rib_count(&rib_tx).await;
     assert_new_neighbor_series(&metrics);
     assert_cleanup_keeps(&metrics, &before);
     assert!(!old.is_live(), "the deleted identity is released");
@@ -2235,4 +2263,134 @@ fn assert_cleanup_keeps(metrics: &BgpMetrics, before: &std::collections::BTreeSe
         lost.is_empty(),
         "the old identity's cleanup removed the new neighbor's series: {lost:?}"
     );
+}
+
+/// The member label's Graceful Restart and received-prefix gauges.
+fn member_gr_gauges(metrics: &BgpMetrics) -> [Option<f64>; 3] {
+    [
+        "bgp_gr_active_peers",
+        "bgp_gr_stale_routes",
+        "bgp_rib_prefixes",
+    ]
+    .map(|family| member_gauge(metrics, family))
+}
+
+/// A new speaker that restarts before its first UPDATE holds only Graceful
+/// Restart retention in the RIB: no routes and no live session. The replaced
+/// speaker's deletion still finds it as the label's successor and leaves its
+/// restart in view. Red proof: looking for the successor only among live
+/// sessions and Adj-RIBs-In ends the restart's gauge.
+#[tokio::test]
+async fn a_successor_restarting_before_its_first_update_keeps_its_gr_gauge() {
+    let (mut mgr, rib_tx, metrics, rib_task) = manager_sharing_metrics_with_rib();
+    let old = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let mut held = hold_rib(&mut mgr);
+    let _second = accept(&mut mgr).await;
+    let new = open_from(&mut mgr, 65099).await;
+    let (tx, _rx) = mpsc::channel(16);
+    send_all(&rib_tx, session(new, 2, 65099, false, false, false, tx)).await;
+    send_all(&rib_tx, [graceful_end(new, 2)]).await;
+    loc_rib_count(&rib_tx).await;
+    assert_eq!(member_gauge(&metrics, "bgp_gr_active_peers"), Some(1.0));
+
+    release_held(&mut held, &rib_tx).await;
+    assert!(!old.is_live());
+    assert_eq!(
+        member_gauge(&metrics, "bgp_gr_active_peers"),
+        Some(1.0),
+        "the new speaker is still restarting"
+    );
+    assert_eq!(member_gauge(&metrics, "bgp_gr_stale_routes"), Some(0.0));
+    rib_task.abort();
+}
+
+/// The member label's exact-export rejection count for one reason.
+fn member_export_rejections(metrics: &BgpMetrics, reason: &str) -> Option<f64> {
+    let member = MEMBER.to_string();
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_exact_export_rejections_total")?
+        .get_metric()
+        .iter()
+        .find(|metric| {
+            let labels = metric.get_label();
+            let has = |name: &str, value: &str| {
+                labels
+                    .iter()
+                    .any(|label| label.name() == name && label.value() == value)
+            };
+            has("peer", &member) && has("family", "ipv4_unicast") && has("reason", reason)
+        })
+        .map(|metric| metric.get_counter().get_value())
+}
+
+/// A deleted neighbor's export still in flight in the RIB counts a
+/// rejection after the peer manager's reap and after the re-added neighbor's
+/// session seeded its zero series under the same label. Once the RIB has
+/// handled the deletion and registered the new session, the new neighbor's
+/// zero series are there and none of the old count is. Red proof: reaping
+/// only the nonzero series the RIB incremented, without seeding at
+/// registration, loses that zero series.
+#[tokio::test]
+async fn a_re_added_neighbor_keeps_its_zero_export_rejection_series() {
+    let (mut mgr, rib_tx, metrics, rib_task) = manager_sharing_metrics_with_rib();
+    mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
+        .await
+        .unwrap();
+    let mut held = hold_rib(&mut mgr);
+    mgr.delete_peer(key(MEMBER), false).await.unwrap();
+    mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        member_export_rejections(&metrics, "message_too_long"),
+        Some(0.0)
+    );
+    metrics.record_exact_export_rejection(
+        &MEMBER.to_string(),
+        "ipv4_unicast",
+        rustbgpd_telemetry::reason_labels::ExactExportReason::MessageTooLong,
+    );
+
+    release_held(&mut held, &rib_tx).await;
+    let new = mgr.rib_peer_of(&key(MEMBER));
+    let (tx, _rx) = mpsc::channel(16);
+    send_all(
+        &rib_tx,
+        session(new, 3, MEMBER_ASN, false, false, false, tx),
+    )
+    .await;
+    loc_rib_count(&rib_tx).await;
+    for reason in ["message_too_long", "encoding"] {
+        assert_eq!(
+            member_export_rejections(&metrics, reason),
+            Some(0.0),
+            "the new neighbor's {reason} series"
+        );
+    }
+    rib_task.abort();
+}
+
+/// A static neighbor replaces a retained member and the member's deletion
+/// reaches the RIB before anything of the new neighbor's does. The member's
+/// RIB series go with it, so none of its Graceful Restart state or counts
+/// carries over to the new neighbor, whose own series stay. Red proof:
+/// keeping every series of a superseded deletion leaves the member's
+/// restart gauge behind.
+#[tokio::test]
+async fn a_replaced_members_rib_series_go_when_no_successor_reached_the_rib() {
+    let (mut mgr, rib_tx, metrics, rib_task) = manager_sharing_metrics_with_rib();
+    let old = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    assert_eq!(member_gauge(&metrics, "bgp_gr_active_peers"), Some(1.0));
+    let mut held = hold_rib(&mut mgr);
+    mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
+        .await
+        .unwrap();
+    release_held(&mut held, &rib_tx).await;
+    assert!(!old.is_live());
+    assert_eq!(member_gr_gauges(&metrics), [None, None, None]);
+    assert_new_neighbor_series(&metrics);
+    rib_task.abort();
 }

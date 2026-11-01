@@ -4276,8 +4276,20 @@ impl BgpMetrics {
     /// no-op.
     ///
     /// REAP LIST — keep in sync with the `peer`-labeled Vec fields on
-    /// [`BgpMetrics`] (see the struct doc comment).
+    /// [`BgpMetrics`] (see the struct doc comment): a family the RIB writes
+    /// goes in [`Self::reap_rib_peer_series`], every other one in
+    /// [`Self::reap_non_rib_peer_series`].
     pub fn reap_peer_series(&self, peer: &str) {
+        self.reap_non_rib_peer_series(peer);
+        self.reap_rib_peer_series(peer);
+    }
+
+    /// Remove the series of `peer` in every family the RIB does not write:
+    /// the peer manager's, the session's and the BFD runtime's, and the
+    /// session's `direction="import"` policy routes. A static neighbor
+    /// replacing a retained dynamic member reaps these before its session
+    /// starts, and leaves the member's RIB series to the member.
+    pub fn reap_non_rib_peer_series(&self, peer: &str) {
         Self::reap_peer_series_from_vec(&self.0.state_transitions, peer);
         Self::reap_peer_series_from_vec(&self.0.session_flaps, peer);
         Self::reap_peer_series_from_vec(&self.0.session_established, peer);
@@ -4327,10 +4339,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.import_explain_cache_evictions, peer);
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_import_policy, peer);
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_export_policy, peer);
-        Self::reap_peer_series_from_vec(&self.0.peer_update_group, peer);
         Self::reap_peer_series_from_vec(&self.0.dynamic_neighbor_retained_until, peer);
-        Self::reap_peer_series_from_vec(&self.0.rib_prefixes, peer);
-        Self::reap_peer_series_from_vec(&self.0.rib_adj_out_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_usage, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_headroom, peer);
@@ -4339,23 +4348,9 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.max_prefix_blocked, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_warning, peer);
         Self::reap_peer_series_from_vec(&self.0.add_path_receive_limit_attempts, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_usage, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_limit, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocking, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocked, peer);
-        Self::reap_peer_series_from_vec(&self.0.orf_capacity_rejections, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_route_drops, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_eor_deferrals, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_commit_refusals, peer);
-        Self::reap_peer_series_from_vec(&self.0.rib_outbound_registration_replaced, peer);
-        Self::reap_peer_series_from_vec(&self.0.rib_stale_peer_down_ignored, peer);
-        Self::reap_peer_series_from_vec(&self.0.rib_stale_session_message_ignored, peer);
-        Self::reap_peer_series_from_vec(&self.0.rib_outbound_registration_failover, peer);
         Self::reap_peer_series_from_vec(&self.0.inbound_rib_backpressure, peer);
         Self::reap_peer_series_from_vec(&self.0.hold_timer_rearmed_pending_input, peer);
         Self::reap_peer_series_from_vec(&self.0.send_hold_expirations, peer);
-        Self::reap_peer_series_from_vec(&self.0.exact_export_rejections, peer);
         Self::reap_peer_series_from_vec(&self.0.export_family_suppressed, peer);
         Self::reap_peer_series_from_vec(&self.0.as_path_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.0.rr_loop_detected, peer);
@@ -4367,13 +4362,10 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.update_malformed_causes, peer);
         Self::reap_peer_series_from_vec(&self.0.otc_routes_blocked, peer);
         Self::reap_peer_series_from_vec(&self.0.role_mismatch, peer);
-        let policy_routes_removed = Self::reap_peer_series_from_vec(&self.0.policy_routes, peer);
-        Self::reap_peer_series_from_vec(&self.0.gr_active_peers, peer);
-        Self::reap_peer_series_from_vec(&self.0.gr_stale_routes, peer);
-        Self::reap_peer_series_from_vec(&self.0.gr_timer_expired, peer);
-        Self::reap_peer_series_from_vec(&self.0.gr_eor_grace_released, peer);
-        Self::reap_peer_series_from_vec(&self.0.route_refresh_in_progress, peer);
-        Self::reap_peer_series_from_vec(&self.0.route_refresh_stale_entries, peer);
+        let policy_routes_removed = Self::reap_label_series_from_vec(
+            &self.0.policy_routes,
+            &[("peer", peer), ("direction", "import")],
+        );
         Self::reap_peer_series_from_vec(&self.0.bmp_source_drops, peer);
         // Invalidate memoized policy-routes handles AFTER the removal:
         // every memo taken before this point (including one resolved
@@ -4401,14 +4393,15 @@ impl BgpMetrics {
     /// cannot remove them.
     ///
     /// Two families have a second writer. The session counts
-    /// `direction="import"` policy routes and the RIB `direction="export"`.
-    /// The session seeds zero `bgp_exact_export_rejections_total` series and
-    /// the RIB only increments them, so only the nonzero series are the
-    /// RIB's.
+    /// `direction="import"` policy routes and the RIB `direction="export"`,
+    /// so only the export series go here. The session seeds zero
+    /// `bgp_exact_export_rejections_total` series and the RIB increments
+    /// them: the whole family goes here, and the RIB seeds a session's zero
+    /// series again when it registers the session, which it handles after
+    /// any earlier deletion under the label.
     ///
-    /// RIB REAP LIST: a `peer`-labelled family the RIB writes belongs here as
-    /// well as in [`Self::reap_peer_series`]. The RIB crate's census test
-    /// fails when the two drift.
+    /// RIB REAP LIST: every `peer`-labelled family the RIB writes, and no
+    /// other. The RIB crate's static census fails when they drift.
     pub fn reap_rib_peer_series(&self, peer: &str) {
         let inner = &self.0;
         Self::reap_peer_series_from_vec(&inner.rib_prefixes, peer);
@@ -4433,11 +4426,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&inner.rib_outbound_registration_failover, peer);
         Self::reap_peer_series_from_vec(&inner.rib_stale_peer_down_ignored, peer);
         Self::reap_peer_series_from_vec(&inner.rib_stale_session_message_ignored, peer);
-        Self::reap_label_series_from_vec_where(
-            &inner.exact_export_rejections,
-            &[("peer", peer)],
-            |metric| metric.get_counter().get_value() > 0.0,
-        );
+        Self::reap_peer_series_from_vec(&inner.exact_export_rejections, peer);
         // As in `reap_peer_series`: invalidate memoized handles after the
         // removal.
         if Self::reap_label_series_from_vec(
@@ -4571,16 +4560,6 @@ impl BgpMetrics {
         vec: &prometheus::core::MetricVec<T>,
         matches: &[(&str, &str)],
     ) -> usize {
-        Self::reap_label_series_from_vec_where(vec, matches, |_| true)
-    }
-
-    /// [`Self::reap_label_series_from_vec`], removing only the matching
-    /// series `select` accepts.
-    fn reap_label_series_from_vec_where<T: prometheus::core::MetricVecBuilder>(
-        vec: &prometheus::core::MetricVec<T>,
-        matches: &[(&str, &str)],
-        select: impl Fn(&prometheus::proto::Metric) -> bool,
-    ) -> usize {
         use prometheus::core::Collector;
 
         let descs = vec.desc();
@@ -4597,8 +4576,7 @@ impl BgpMetrics {
                     labels
                         .iter()
                         .any(|pair| pair.name() == *label && pair.value() == *value)
-                }) || !select(metric)
-                {
+                }) {
                     continue;
                 }
                 // Every declared variable label must be present on the
