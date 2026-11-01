@@ -787,6 +787,101 @@ class PrimerContractTests(unittest.TestCase):
                 "kernel-dataplane.yml:check needs drifted: missing m42_m50_m52_m58; extra -",
                 [(KERNEL, " m40, m42_m50_m52_m58,\n", " m40,\n")],
             ),
+            (
+                "host-setup step loses its id",
+                f"{bundle}: has no host-setup step with id dataplane",
+                [(KERNEL, "      - uses: ./.github/actions/setup-dataplane-host\n        id: dataplane\n      # One runner",
+                  "      - uses: ./.github/actions/setup-dataplane-host\n      # One runner")],
+            ),
+        ):
+            with self.subTest(seam=seam):
+                self.assert_red(expect, *edits)
+
+    def test_interop_bundle_runs_every_scenario_and_names_every_failure(self):
+        bundle = "interop.yml:m26_m27_m28_m59_m91"
+        text = (ROOT / INTEROP).read_text()
+        m27 = text[text.index("      - name: Run M27 (") : text.index("      - name: Run M28 (")]
+        m27_teardown = text[text.index("      - name: Verify M27 lab teardown") : text.index("      - name: Run M28 (")]
+        gate = "if: ${{ !cancelled() && "
+        report = "      - name: Report bundled scenario results\n        if: ${{ !cancelled() }}\n"
+        for seam, expect, edits in (
+            (
+                "scenario dropped from the bundle",
+                f"{bundle}: no run-interop-test call labelled M27",
+                [(INTEROP, m27, ""),
+                 (INTEROP, "            M27=${{ steps.m27.outcome }}/${{ steps.m27_teardown.outcome }}\n", "")],
+            ),
+            (
+                "scenario stops after an earlier failure",
+                f"{bundle}: M28 run step does not run after an earlier failure",
+                [(INTEROP, f"        id: m28\n        {gate}", "        id: m28\n        if: ${{ ")],
+            ),
+            (
+                "scenario guard adds success()",
+                f"{bundle}: M59 run step does not run after an earlier failure",
+                [(INTEROP, f"        id: m59\n        {gate}", f"        id: m59\n        {gate}success() && ")],
+            ),
+            (
+                "teardown stops after an earlier failure",
+                f"{bundle}: M91 teardown step does not run after an earlier failure",
+                [(INTEROP, f"        id: m91_teardown\n        {gate}", "        id: m91_teardown\n        if: ${{ ")],
+            ),
+            (
+                "teardown guard adds success()",
+                f"{bundle}: M26 teardown step does not run after an earlier failure",
+                [(INTEROP, f"        id: m26_teardown\n        {gate}", f"        id: m26_teardown\n        {gate}success() && ")],
+            ),
+            (
+                "guard names another setup step",
+                f"{bundle}: M28 run step does not run after an earlier failure",
+                [(INTEROP, "        id: m28\n        if: ${{ !cancelled() && steps.dev_image.",
+                  "        id: m28\n        if: ${{ !cancelled() && steps.dataplane.")],
+            ),
+            (
+                "host-setup step loses its id",
+                f"{bundle}: has no host-setup step with id dev_image",
+                [(INTEROP, "        id: dev_image\n", "")],
+            ),
+            (
+                "teardown check dropped",
+                f"{bundle}: M27 is not followed by its teardown check",
+                [(INTEROP, m27_teardown, "\n")],
+            ),
+            (
+                "teardown checks another topology",
+                f"{bundle}: M26 is not followed by its teardown check",
+                [(INTEROP, "assert-lab-torn-down.sh 'M26' tests/interop/m26-", "assert-lab-torn-down.sh 'M26' tests/interop/m27-")],
+            ),
+            (
+                "report forgets a scenario",
+                f"{bundle}: bundled scenario report does not name exactly its scenarios",
+                [(INTEROP, "            M59=${{ steps.m59.outcome }}/${{ steps.m59_teardown.outcome }}\n", "")],
+            ),
+            (
+                "report reads only the run outcome",
+                f"{bundle}: bundled scenario report does not name exactly its scenarios",
+                [(INTEROP, "M91=${{ steps.m91.outcome }}/${{ steps.m91_teardown.outcome }}", "M91=${{ steps.m91.outcome }}")],
+            ),
+            (
+                "report skipped after a failure",
+                f"{bundle}: does not end with its bundled scenario report",
+                [(INTEROP, report, "      - name: Report bundled scenario results\n")],
+            ),
+            (
+                "report guard adds success()",
+                f"{bundle}: does not end with its bundled scenario report",
+                [(INTEROP, report, "      - name: Report bundled scenario results\n        if: ${{ !cancelled() && success() }}\n")],
+            ),
+            (
+                "failure swallowed by continue-on-error",
+                f"{bundle}: a bundle step uses continue-on-error",
+                [(INTEROP, "        id: m26\n", "        id: m26\n        continue-on-error: true\n")],
+            ),
+            (
+                "bundle dropped from the aggregate",
+                "interop.yml:check needs drifted: missing m26_m27_m28_m59_m91; extra -",
+                [(INTEROP, " m26_m27_m28_m59_m91, m92,", " m92,")],
+            ),
         ):
             with self.subTest(seam=seam):
                 self.assert_red(expect, *edits)

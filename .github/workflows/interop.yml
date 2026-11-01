@@ -1584,42 +1584,87 @@ jobs:
           .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
+        id: dev_image
         uses: ./.github/actions/build-rustbgpd-dev
 
+      # A failed scenario does not stop the next one; each scenario's teardown
+      # is checked before the next deploys, and the last step names every
+      # scenario that failed.
       - name: Run M26 (deploy + test + destroy with retry)
+        id: m26
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M26
           topology: tests/interop/m26-cease-frr.clab.yml
           script: tests/interop/scripts/test-m26-cease-frr.sh
+      - name: Verify M26 lab teardown
+        id: m26_teardown
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M26' tests/interop/m26-cease-frr.clab.yml
 
       - name: Run M27 (deploy + test + destroy with retry)
+        id: m27
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M27
           topology: tests/interop/m27-aspa-rtr2.clab.yml
           script: tests/interop/scripts/test-m27-aspa-rtr2.sh
+      - name: Verify M27 lab teardown
+        id: m27_teardown
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M27' tests/interop/m27-aspa-rtr2.clab.yml
 
       - name: Run M28 (deploy + test + destroy with retry)
+        id: m28
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M28
           topology: tests/interop/m28-dynamic-frr.clab.yml
           script: tests/interop/scripts/test-m28-dynamic-frr.sh
+      - name: Verify M28 lab teardown
+        id: m28_teardown
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M28' tests/interop/m28-dynamic-frr.clab.yml
 
       - name: Run M59 (deploy + test + destroy with retry)
+        id: m59
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M59
           topology: tests/interop/m59-aspa-roles-rtr2.clab.yml
           script: tests/interop/scripts/test-m59-aspa-roles.sh
+      - name: Verify M59 lab teardown
+        id: m59_teardown
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M59' tests/interop/m59-aspa-roles-rtr2.clab.yml
 
       - name: Run M91 (deploy + test + destroy with retry)
+        id: m91
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M91
           topology: tests/interop/m91-rfc7606-malformed.clab.yml
           script: tests/interop/scripts/test-m91-rfc7606-malformed.sh
+      - name: Verify M91 lab teardown
+        id: m91_teardown
+        if: ${{ !cancelled() && steps.dev_image.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M91' tests/interop/m91-rfc7606-malformed.clab.yml
+
+      - name: Report bundled scenario results
+        if: ${{ !cancelled() }}
+        env:
+          RESULTS: >-
+            M26=${{ steps.m26.outcome }}/${{ steps.m26_teardown.outcome }}
+            M27=${{ steps.m27.outcome }}/${{ steps.m27_teardown.outcome }}
+            M28=${{ steps.m28.outcome }}/${{ steps.m28_teardown.outcome }}
+            M59=${{ steps.m59.outcome }}/${{ steps.m59_teardown.outcome }}
+            M91=${{ steps.m91.outcome }}/${{ steps.m91_teardown.outcome }}
+        run: .github/scripts/report-bundled-scenarios.sh
 
   m92:
     needs: [prime_dev_image]
