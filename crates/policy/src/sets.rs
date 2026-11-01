@@ -347,26 +347,28 @@ impl CommunityPattern {
 }
 
 /// One `.rpol` community-set or dataset member: an exact criterion or a
-/// pattern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// pattern. The pattern is boxed so a member is no larger than an exact
+/// criterion: million-record dataset files and retained set ASTs keep
+/// their footprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommunityMember {
     /// An exact community value.
     Exact(CommunityMatch),
     /// A range pattern.
-    Pattern(CommunityPattern),
+    Pattern(Box<CommunityPattern>),
 }
 
 /// Split members into exact criteria and patterns.
 #[must_use]
-pub fn split_community_members(
-    members: impl IntoIterator<Item = CommunityMember>,
+pub fn split_community_members<'a>(
+    members: impl IntoIterator<Item = &'a CommunityMember>,
 ) -> (Vec<CommunityMatch>, Vec<CommunityPattern>) {
     let mut exact = Vec::new();
     let mut patterns = Vec::new();
     for member in members {
         match member {
-            CommunityMember::Exact(cm) => exact.push(cm),
-            CommunityMember::Pattern(pattern) => patterns.push(pattern),
+            CommunityMember::Exact(cm) => exact.push(*cm),
+            CommunityMember::Pattern(pattern) => patterns.push(**pattern),
         }
     }
     (exact, patterns)
@@ -586,6 +588,9 @@ impl CommunityPatterns {
             || self.standard_by_value.matches(low, [asn, low])
     }
 
+    /// Out of line, so the exact-only probe loops compile as they did
+    /// before patterns existed.
+    #[inline(never)]
     fn matches(&self, ctx: &RouteContext<'_>) -> bool {
         (self.has_standard() && ctx.communities.iter().any(|&c| self.matches_standard(c)))
             || ((!self.route_targets.is_empty() || !self.route_origins.is_empty())
@@ -736,17 +741,15 @@ impl CommunitySet {
         {
             return true;
         }
-        if !self.large.is_empty()
+        (!self.large.is_empty()
             && ctx.large_communities.iter().any(|lc| {
                 self.large
                     .contains(&(lc.global_admin, lc.local_data1, lc.local_data2))
-            })
-        {
-            return true;
-        }
-        self.patterns
-            .as_deref()
-            .is_some_and(|patterns| patterns.matches(ctx))
+            }))
+            || self
+                .patterns
+                .as_deref()
+                .is_some_and(|patterns| patterns.matches(ctx))
     }
 
     /// Whether `value` is a **standard** (RFC 1997) member of this set
@@ -1398,6 +1401,7 @@ mod tests {
         assert_eq!(size_of::<CommunityMatch>(), 16);
         assert_eq!(size_of::<crate::ir::MatchExpr>(), 32);
         assert_eq!(size_of::<crate::ir::Term>(), 272);
+        assert_eq!(size_of::<CommunityMember>(), 16);
         // One pointer for a set's optional pattern index.
         assert_eq!(size_of::<Option<Box<CommunityPatterns>>>(), 8);
     }

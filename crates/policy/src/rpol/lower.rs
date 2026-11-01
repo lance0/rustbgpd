@@ -301,7 +301,7 @@ impl SetTables {
             .iter()
             .map(|def| {
                 let (criteria, patterns) = crate::sets::split_community_members(
-                    def.entries.iter().map(|entry| entry.node),
+                    def.entries.iter().map(|entry| &entry.node),
                 );
                 store.community_set_with_patterns(&criteria, &patterns)
             })

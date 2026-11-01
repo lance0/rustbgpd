@@ -405,23 +405,7 @@ impl Parser<'_> {
                     Err(_) => (self.pattern_field(global, u32::MAX, &text, span)?, false),
                 };
                 let local = self.pattern_field(local, u32::MAX, &text, span)?;
-                // RFC 4360, as for the exact literal: IPv4-admin and
-                // 4-octet-AS encodings carry a 2-octet local administrator,
-                // so a pattern whose every global needs one of them and
-                // whose every local exceeds 65535 can never match.
-                let half = u32::from(u16::MAX);
-                if (ipv4_admin || global.min() > half) && local.min() > half {
-                    self.diags.push(Diagnostic::coded(
-                        DiagnosticCode::Parse,
-                        span,
-                        format!(
-                            "invalid extended community `{text}`: local administrator exceeds 65535 for {} global admin",
-                            if ipv4_admin { "an IPv4" } else { "a 4-octet-AS" }
-                        ),
-                        "local admin out of range",
-                    ));
-                    return Err(Fail);
-                }
+                self.check_ext_pattern_width(global, ipv4_admin, local, &text, span)?;
                 let target = prefix == "RT:";
                 match (global.fixed(), local.fixed()) {
                     // `RT:65000:5..5` is an exact member after all.
@@ -432,9 +416,15 @@ impl Parser<'_> {
                         CommunityMember::Exact(CommunityMatch::RouteOrigin { global, local })
                     }
                     _ if target => {
-                        CommunityMember::Pattern(CommunityPattern::RouteTarget { global, local })
+                        CommunityMember::Pattern(Box::new(CommunityPattern::RouteTarget {
+                            global,
+                            local,
+                        }))
                     }
-                    _ => CommunityMember::Pattern(CommunityPattern::RouteOrigin { global, local }),
+                    _ => CommunityMember::Pattern(Box::new(CommunityPattern::RouteOrigin {
+                        global,
+                        local,
+                    })),
                 }
             }
             ("" | "LC:", [global, data1, data2]) => {
@@ -453,11 +443,11 @@ impl Parser<'_> {
                             local_data2,
                         })
                     }
-                    _ => CommunityMember::Pattern(CommunityPattern::Large {
+                    _ => CommunityMember::Pattern(Box::new(CommunityPattern::Large {
                         global_admin,
                         local_data1,
                         local_data2,
-                    }),
+                    })),
                 }
             }
             ("", [asn, value]) => {
@@ -467,7 +457,10 @@ impl Parser<'_> {
                     (Some(asn), Some(value)) => CommunityMember::Exact(CommunityMatch::Standard {
                         value: (asn << 16) | value,
                     }),
-                    _ => CommunityMember::Pattern(CommunityPattern::Standard { asn, value }),
+                    _ => CommunityMember::Pattern(Box::new(CommunityPattern::Standard {
+                        asn,
+                        value,
+                    })),
                 }
             }
             _ => unreachable!("the CommunityPattern token has two or three fields"),
@@ -516,10 +509,38 @@ impl Parser<'_> {
         Ok(CommunityField::Range { lo, hi })
     }
 
-    /// The [`crate::sets::MAX_COMMUNITY_PATTERN_SCAN`] bound for one set's members.
-    fn check_pattern_scan(
+    /// RFC 4360, as for the exact literal: IPv4-admin and 4-octet-AS
+    /// encodings carry a 2-octet local administrator, so an RT/RO pattern
+    /// whose every global needs one of them and whose every local exceeds
+    /// 65535 can never match.
+    fn check_ext_pattern_width(
         &mut self,
-        members: impl IntoIterator<Item = CommunityMember>,
+        global: CommunityField,
+        ipv4_admin: bool,
+        local: CommunityField,
+        text: &str,
+        span: Span,
+    ) -> PResult<()> {
+        let half = u32::from(u16::MAX);
+        if (ipv4_admin || global.min() > half) && local.min() > half {
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Parse,
+                span,
+                format!(
+                    "invalid extended community `{text}`: local administrator exceeds 65535 for {} global admin",
+                    if ipv4_admin { "an IPv4" } else { "a 4-octet-AS" }
+                ),
+                "local admin out of range",
+            ));
+            return Err(Fail);
+        }
+        Ok(())
+    }
+
+    /// The [`crate::sets::MAX_COMMUNITY_PATTERN_SCAN`] bound for one set's members.
+    fn check_pattern_scan<'m>(
+        &mut self,
+        members: impl IntoIterator<Item = &'m CommunityMember>,
         name: &Spanned<String>,
     ) {
         let (_, patterns) = split_community_members(members);
@@ -768,7 +789,7 @@ impl Parser<'_> {
         }
         self.expect(Tok::RBrace, "`}` or `,` and another member")?;
         self.check_pattern_scan(
-            entries.iter().filter_map(|entry| match entry.node {
+            entries.iter().filter_map(|entry| match &entry.node {
                 DatasetEntryAst::Community(member) => Some(member),
                 _ => None,
             }),
@@ -803,7 +824,7 @@ impl Parser<'_> {
             }
         }
         self.expect(Tok::RBrace, "`}` or `,` and another community")?;
-        self.check_pattern_scan(entries.iter().map(|entry| entry.node), &name);
+        self.check_pattern_scan(entries.iter().map(|entry| &entry.node), &name);
         Ok(CommunitySetDef { name, entries })
     }
 
@@ -2294,7 +2315,10 @@ fn address_bits(prefix: Prefix) -> u8 {
 pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<DatasetData, String> {
     let mut prefixes: Vec<PrefixSetEntry> = Vec::new();
     let mut asns: Vec<u32> = Vec::new();
-    let mut communities: Vec<CommunityMember> = Vec::new();
+    // Exact members and patterns go straight to their own lists, so a
+    // million-record exact file peaks as it did before patterns.
+    let mut communities: Vec<CommunityMatch> = Vec::new();
+    let mut patterns: Vec<CommunityPattern> = Vec::new();
     let mut records = 0usize;
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
@@ -2330,9 +2354,10 @@ pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<Datase
             DatasetKind::Asn => parser
                 .expect_u32("an ASN (a u32 integer)")
                 .map(|(asn, _)| asns.push(asn)),
-            DatasetKind::Community => parser
-                .community_member()
-                .map(|member| communities.push(member.node)),
+            DatasetKind::Community => parser.community_member().map(|member| match member.node {
+                CommunityMember::Exact(cm) => communities.push(cm),
+                CommunityMember::Pattern(pattern) => patterns.push(*pattern),
+            }),
         };
         if result.is_err() {
             let message = parser
@@ -2352,8 +2377,7 @@ pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<Datase
         DatasetKind::Prefix => DatasetData::Prefix(PrefixSet::new(prefixes)),
         DatasetKind::Asn => DatasetData::Asn(AsnSet::new(asns)),
         DatasetKind::Community => {
-            let (criteria, patterns) = split_community_members(communities);
-            let set = CommunitySet::with_patterns(criteria, patterns);
+            let set = CommunitySet::with_patterns(communities, patterns);
             set.check_pattern_scan()?;
             DatasetData::Community(set)
         }
@@ -2481,7 +2505,7 @@ policy second { term t { flarp } }
             file.community_sets[0]
                 .entries
                 .iter()
-                .map(|entry| entry.node),
+                .map(|entry| &entry.node),
         );
         assert_eq!(patterns, Vec::<CommunityPattern>::new());
         assert_eq!(

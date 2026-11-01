@@ -530,7 +530,7 @@ fn override_data(
             let (criteria, patterns) =
                 crate::sets::split_community_members(entries.iter().filter_map(|entry| {
                     match &entry.node {
-                        DatasetEntryAst::Community(member) => Some(*member),
+                        DatasetEntryAst::Community(member) => Some(member),
                         _ => None,
                     }
                 }));
