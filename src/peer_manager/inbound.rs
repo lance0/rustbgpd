@@ -236,7 +236,8 @@ impl PeerManager {
                 }
             }
         }
-        if self.refuse_inbound_behind_deferred_cleanup(&peer_key, false) {
+        // A candidate beside a retained reconnect resolves its own identity.
+        if self.refuse_inbound_behind_deferred_cleanup(&peer_key, candidate_identity.is_some()) {
             return false;
         }
         let session_id = self.allocate_session_id();
@@ -602,8 +603,10 @@ impl PeerManager {
                         self.local_forwarding_state.clone(),
                     ));
 
-                // Before an eviction, which would queue another deletion.
-                if self.refuse_inbound_behind_deferred_cleanup(&dynamic_peer_key, true) {
+                // Before an eviction, which would queue another deletion. A
+                // retained neighbor's reconnect resumes its identity, so only
+                // a cleanup under its own label refuses it.
+                if self.refuse_inbound_behind_deferred_cleanup(&dynamic_peer_key, !retained) {
                     return;
                 }
                 if at_limit && !self.evict_retained_dynamic_for_slot() {

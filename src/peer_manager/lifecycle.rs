@@ -111,7 +111,7 @@ impl PeerManager {
     }
 
     pub(super) async fn provision_new_peer_session(
-        &self,
+        &mut self,
         peer: &PeerKey,
         enabled: bool,
         should_start: bool,
@@ -443,12 +443,16 @@ impl PeerManager {
         outcome
     }
 
+    /// Stop `handle` within the bounded shutdown. The session sends its final
+    /// `PeerDown` while it stops, and this wait does not drive deferred RIB
+    /// admission, so a reservation in progress is given back first.
     pub(super) async fn shutdown_handle_bounded(
-        &self,
+        &mut self,
         address: std::net::IpAddr,
         context: &'static str,
         handle: PeerHandle,
     ) -> PeerShutdownOutcome {
+        self.deferred_rib.release_reservation();
         Self::shutdown_handle_bounded_owned(address, context, handle).await
     }
 
@@ -2272,13 +2276,17 @@ impl PeerManager {
     ///
     /// Never waits for the RIB: a full mailbox defers the deletion's
     /// `PeerDeleted` and `ReleasePeer`, in order, behind every update queued
-    /// before them. Every later update this actor sends through
-    /// `send_rib_update` goes behind them, and no session starts at the label
-    /// they reap before they are admitted. The direct round trips (policy,
+    /// before them. Every later update this actor sends through the ordered
+    /// path goes behind them, and no session starts at the label they reap
+    /// before they are admitted. The direct round trips (policy,
     /// conditional-advertisement, owner publication, outbound refresh,
     /// dampening barrier, BMP and retention queries) may be admitted first:
-    /// they name live or retained handles or RIB-wide state, never a deleted
-    /// handle.
+    /// they name live or retained handles or RIB-wide state. Two come close
+    /// to a deleted handle. The spawned retention query can ask about a
+    /// retained neighbor deleted after it was sent, and
+    /// `finish_retention_pass` drops that answer. An interface-only
+    /// neighbor's handle, kept across endpoints (`keep_series`), is reused
+    /// only after the `RebindPeer` that flushes its deletion.
     pub(super) fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
         // A deleted neighbor's counters end with it; a re-add starts at 0.
         self.neighbor_counters.remove(peer);

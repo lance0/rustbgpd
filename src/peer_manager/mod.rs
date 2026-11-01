@@ -295,24 +295,32 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Ordered primary-lane RIB updates queued while the mailbox was full, so a
 /// deletion never holds the actor on mailbox admission.
 ///
-/// Every later update the actor sends through `send_rib_update` goes behind
-/// them; no session starts under a label one of them reaps until it is
-/// admitted, and inbound connections are refused meanwhile (see
+/// Every later update the actor sends through the ordered path
+/// (`send_rib_update`, or a flush before a direct send) goes behind them. No
+/// session starts under a label one of them reaps until it is admitted, and
+/// inbound connections are refused meanwhile (see
 /// `refuse_inbound_behind_deferred_cleanup`). Every `await_with_readiness*`
-/// wait drives the oldest one's reservation, so the actor never waits there
+/// wait drives the oldest one's reservation ahead of its read lanes, and a
+/// wait that cannot drive it gives it back first, so the actor never waits
 /// for room while its own reservation holds a slot it does not use.
 ///
-/// Depth is bounded by state, not by network event rate: no dynamic neighbor
-/// is accepted while the queue is not empty, and static adds wait for the
-/// cleanup under their label, so each entry belongs to a neighbor that
-/// existed when the mailbox filled or that an operator or reconcile change
-/// configured since. A deletion adds at most two (`PeerDeleted` and
-/// `ReleasePeer`), an interface-only neighbor's removal at most four, and the
-/// ordered update a flush owns is the only other entry.
+/// Depth is bounded by state, not by network event rate. While the queue is
+/// not empty no inbound connection creates a RIB identity: a new dynamic
+/// neighbor and a collision candidate beside a retained reconnect are
+/// refused, and a retained neighbor's reconnect resumes the identity it
+/// kept. Static adds wait for the cleanup under their label. Entries are
+/// then at most two per identity that existed when the mailbox filled or
+/// that an operator or reconcile change has created since (its
+/// `PeerDeleted` and `ReleasePeer`), one End-of-RIB grace retirement per
+/// interface-only neighbor being removed, and one `ReleasePeer` per refused
+/// operator or reconcile add. The only other entry is the update a
+/// `send_rib_update` call owns while it flushes.
 ///
 /// The queue never leaves the actor; only `sender` moves into a flush's
-/// wait. No caller drops a flush mid-wait, and if one did the run loop
-/// restores the sender, so no update is lost.
+/// wait, so a dropped flush loses nothing but its reservation, which the run
+/// loop restores. `send_rib_update` queues its own update before it
+/// flushes, so a dropped call would still deliver it later; no caller drops
+/// one, and cancellable callers (planning) flush and then send directly.
 #[derive(Default)]
 struct DeferredRibUpdates {
     /// Oldest first, each with the `peer` metric label its handling reaps.
@@ -363,6 +371,23 @@ impl DeferredRibUpdates {
         }
         self.sender = (!self.queue.is_empty()).then_some(port);
         sent
+    }
+
+    /// Give back a reservation in progress, granted or not, before a wait
+    /// that cannot drive it: a granted one would hold a mailbox slot that a
+    /// session or query the wait depends on needs. The update stays queued
+    /// and reserves again when next driven.
+    fn release_reservation(&mut self) {
+        if let Some(port) = self.sender.as_mut() {
+            port.abort_send();
+        }
+    }
+
+    /// Whether `interface`'s End-of-RIB grace retirement is queued.
+    fn retires_eor_grace(&self, interface: &str) -> bool {
+        self.queue.iter().any(|(_, update)| {
+            matches!(update, RibUpdate::RetireEorGraceInterface { interface: queued } if &**queued == interface)
+        })
     }
 
     /// Whether a queued update reaps `label`.
@@ -773,7 +798,8 @@ pub struct PeerManager {
     /// spawned tasks and the inner future of `await_with_readiness{,_budget}`.
     /// The only `&mut self` futures raced in a `select!` or wrapped in a
     /// `timeout` are `plan_config_transaction`, `await_with_readiness` (whose
-    /// arms serve only readiness and operator reads) and
+    /// arms serve only readiness and operator reads and send deferred RIB
+    /// updates) and
     /// `query_warm_checkpoint_capture`, and none of them drains session
     /// notifications. Keep it that way, or reset the depth where a drop can
     /// happen; the run loop `debug_assert!`s the depth is zero between steps.
@@ -1324,6 +1350,15 @@ impl PeerManager {
             tokio::select! {
                 biased;
                 result = &mut future => return result,
+                // A deferred update's reservation can take the next free
+                // slot; sending it frees the lane for the step's own send.
+                // Polled before the read lanes, so a probe flood cannot keep
+                // a granted slot unused.
+                sent = self.deferred_rib.send_oldest(), if self.deferred_rib.ready() => {
+                    if !sent {
+                        debug!("RIB exited: discarding deferred RIB updates");
+                    }
+                }
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
                         Some(query) => self.handle_readiness_query(query).await,
@@ -1337,13 +1372,6 @@ impl PeerManager {
                         // when a read is actually admitted.
                         Some(query) => Box::pin(self.handle_waiting_operator_query(query)).await,
                         None => self.operator_rx = None,
-                    }
-                }
-                // A deferred update's reservation can take the next free
-                // slot; sending it frees the lane for the step's own send.
-                sent = self.deferred_rib.send_oldest(), if self.deferred_rib.ready() => {
-                    if !sent {
-                        debug!("RIB exited: discarding deferred RIB updates");
                     }
                 }
             }
@@ -1374,6 +1402,17 @@ impl PeerManager {
             tokio::select! {
                 biased;
                 result = tokio::time::timeout(remaining, &mut future) => return result.ok(),
+                // As in `await_with_readiness`: ahead of the read and event
+                // lanes. Sending is not the step, so it is not charged.
+                sent = self.deferred_rib.send_oldest(), if self.deferred_rib.ready() => {
+                    remaining = remaining.saturating_sub(attended.elapsed());
+                    if !sent {
+                        debug!("RIB exited: discarding deferred RIB updates");
+                    }
+                    if remaining.is_zero() {
+                        return None;
+                    }
+                }
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     // Time until the query arrived was genuine waiting on the
                     // step; the servicing below is not, so stop the clock.
@@ -1416,15 +1455,6 @@ impl PeerManager {
                 } => {
                     remaining = remaining.saturating_sub(attended.elapsed());
                     self.retry_link_checks();
-                    if remaining.is_zero() {
-                        return None;
-                    }
-                }
-                sent = self.deferred_rib.send_oldest(), if self.deferred_rib.ready() => {
-                    remaining = remaining.saturating_sub(attended.elapsed());
-                    if !sent {
-                        debug!("RIB exited: discarding deferred RIB updates");
-                    }
                     if remaining.is_zero() {
                         return None;
                     }
@@ -1509,8 +1539,10 @@ impl PeerManager {
     /// label has not reached the RIB: handling that deletion reaps the label,
     /// and with it the new session's series. This waits for mailbox room.
     /// Its callers are static adds (operator and reconcile adds run as owned
-    /// mutations under the settlement watchdog) and the replacement of a
-    /// session whose peer is still in the table; inbound accepts refuse
+    /// mutations under the settlement watchdog; a discovery-driven bind of an
+    /// interface-only neighbor runs under no owner) and the replacement of a
+    /// session whose peer is still in the table. Inbound accepts, including
+    /// an interface-only neighbor learned from an inbound connection, refuse
     /// instead (`refuse_inbound_behind_deferred_cleanup`).
     pub(super) async fn admit_deferred_rib_updates_for(&mut self, peer: &PeerKey) {
         if self.deferred_rib.reaps(&self.peer_metric_label(peer)) {
@@ -3049,6 +3081,8 @@ impl PeerManager {
             }
             PeerManagerCommand::Shutdown => {
                 info!("peer manager shutting down {} peers", self.peers.len());
+                // Sessions send their final PeerDown while they stop.
+                self.deferred_rib.release_reservation();
                 let drained = self.peers.drain();
                 let mut shutdowns = JoinSet::new();
                 for (addr, managed) in drained {
@@ -3492,6 +3526,8 @@ impl PeerManager {
                         std::future::pending::<()>().await;
                     }
                 } => {
+                    // The BMP sampling waits do not drive deferred admission.
+                    self.deferred_rib.release_reservation();
                     self.emit_periodic_bmp_stats().await;
                 }
                 () = async move {

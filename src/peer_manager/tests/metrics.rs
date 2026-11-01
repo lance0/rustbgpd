@@ -135,7 +135,7 @@ fn blocked_truth_observing_start_handle(
 }
 
 async fn assert_new_peer_start_truth_is_seeded(peer: PeerKey) {
-    let mgr = test_peer_manager();
+    let mut mgr = test_peer_manager();
     let metrics = mgr.metrics.clone();
     let label = rustbgpd_telemetry::peer_label(peer.address);
     let interface = peer.interface.as_deref().unwrap_or("");
@@ -222,7 +222,7 @@ fn fresh_dynamic_accept_routes_start_through_truth_provisioning_before_install()
 
 #[tokio::test(start_paused = true)]
 async fn failed_start_exact_reaps_provisional_truth_and_preserves_scoped_sibling() {
-    let mgr = test_peer_manager();
+    let mut mgr = test_peer_manager();
     let metrics = mgr.metrics.clone();
     let address = "fe80::1".parse().unwrap();
     let failed = scoped_key(address, "eth0");

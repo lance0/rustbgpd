@@ -1115,3 +1115,175 @@ async fn deferred_updates_are_discarded_once_the_rib_exits() {
     );
     assert!(mgr.deferred_rib.queue.is_empty());
 }
+
+/// A plan cancelled while its update-group snapshot query waits behind a
+/// deferred deletion leaves nothing of its own queued: the plan flushes the
+/// deferred updates and then sends its query directly, so a dropped wait
+/// strands no query to send later.
+#[tokio::test]
+async fn a_cancelled_plan_leaves_nothing_queued_behind_a_deferred_deletion() {
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    let mut mgr = test_peer_manager();
+    mgr.rib_tx = rib_tx.clone();
+    rib_tx.try_send(mailbox_filler()).unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    for _ in 0..3 {
+        tokio::select! {
+            biased;
+            _ = mgr.query_update_group_snapshot() => panic!("the mailbox is full"),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    assert_eq!(
+        deletion_trace(
+            &mgr.deferred_rib
+                .queue
+                .drain(..)
+                .map(|(_, update)| update)
+                .collect::<Vec<_>>()
+        ),
+        [
+            (
+                "PeerDeleted",
+                PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+            ),
+            (
+                "ReleasePeer",
+                PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+            ),
+        ],
+        "only the deletion is queued"
+    );
+}
+
+/// Under a continuous readiness-probe flood, a wait still sends a deferred
+/// update whose reservation took the only free slot, so the step's own
+/// send gets the next one: the drain is polled ahead of the read lanes, in
+/// both wait helpers.
+async fn drain_under_a_probe_flood(budgeted: bool) {
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let mut mgr = test_peer_manager().with_readiness_queries(readiness_rx);
+    mgr.rib_tx = rib_tx.clone();
+    rib_tx.try_send(mailbox_filler()).unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    tokio::select! {
+        biased;
+        _ = mgr.deferred_rib.send_oldest() => panic!("the mailbox is full"),
+        () = std::future::ready(()) => {}
+    }
+    let flood = tokio::spawn(async move {
+        loop {
+            let (reply, _) = oneshot::channel();
+            if readiness_tx
+                .send(PeerManagerReadinessQuery::Ping { reply })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    let rib = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    let step_tx = mgr.rib_tx.clone();
+    let step = async move {
+        step_tx
+            .send(RibUpdate::RetireEorGraceInterface {
+                interface: "eth0".into(),
+            })
+            .await
+            .is_ok()
+    };
+    let sent = tokio::time::timeout(Duration::from_secs(5), async {
+        if budgeted {
+            mgr.await_with_readiness_budget(
+                step,
+                Duration::from_secs(60),
+                OperatorReadAdmission::Served,
+            )
+            .await
+        } else {
+            Some(
+                mgr.await_with_readiness(step, OperatorReadAdmission::Served)
+                    .await,
+            )
+        }
+    })
+    .await
+    .expect("the step's send completes during the probe flood");
+    assert_eq!(sent, Some(true));
+    flood.abort();
+    rib.abort();
+}
+
+#[tokio::test]
+async fn a_probe_flood_does_not_starve_the_deferred_drain() {
+    drain_under_a_probe_flood(false).await;
+}
+
+#[tokio::test]
+async fn a_probe_flood_does_not_starve_the_deferred_drain_on_the_budget_clock() {
+    drain_under_a_probe_flood(true).await;
+}
+
+/// A session's bounded shutdown cannot drive deferred admission, so it gives
+/// a reservation in progress back first: on a capacity-1 mailbox the
+/// session's final `PeerDown` takes the slot the RIB frees, and the session
+/// is joined instead of timing out beside a slot the actor holds.
+#[tokio::test]
+async fn a_session_shutdown_behind_a_deferred_deletion_gets_the_freed_slot() {
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let mut mgr = test_peer_manager();
+    mgr.rib_tx = rib_tx.clone();
+    rib_tx.try_send(mailbox_filler()).unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    tokio::select! {
+        biased;
+        _ = mgr.deferred_rib.send_oldest() => panic!("the mailbox is full"),
+        () = std::future::ready(()) => {}
+    }
+    let (command_tx, mut command_rx) = mpsc::channel(8);
+    let session_rib = rib_tx.clone();
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            if matches!(command, PeerCommand::Shutdown | PeerCommand::Stop { .. }) {
+                let _ = session_rib
+                    .send(RibUpdate::PeerDown {
+                        peer: PeerId::UNASSIGNED,
+                        session_id: 9,
+                    })
+                    .await;
+                break;
+            }
+        }
+        Ok(())
+    });
+    let rib = tokio::spawn(async move {
+        let mut admitted = Vec::new();
+        while let Some(update) = rib_rx.recv().await {
+            admitted.push(matches!(update, RibUpdate::PeerDown { .. }));
+            if admitted.len() == 2 {
+                break;
+            }
+        }
+        admitted
+    });
+    let outcome = mgr
+        .shutdown_handle_bounded(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+            "test",
+            PeerHandle::from_parts(command_tx, task),
+        )
+        .await;
+    assert!(outcome.joined(), "the session sent its PeerDown and exited");
+    assert_eq!(
+        joined(rib).await,
+        [false, true],
+        "the filler, then the PeerDown"
+    );
+    assert_eq!(
+        mgr.deferred_rib.queue.len(),
+        2,
+        "the deletion is still queued"
+    );
+}

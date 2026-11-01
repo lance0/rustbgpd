@@ -1564,3 +1564,71 @@ async fn a_static_add_replacing_a_retained_member_waits_for_its_deferred_deletio
     );
     rib_task.abort();
 }
+
+/// A member kept for graceful restart reconnects while an unrelated
+/// neighbor's cleanup is deferred: it resumes the identity it kept, so it is
+/// admitted rather than refused until its connect-retry timer, which could
+/// outlast its stale routes.
+#[tokio::test]
+async fn a_retained_reconnect_is_admitted_behind_unrelated_deferred_cleanup() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let _peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let (stalled_tx, _stalled_rx) = mpsc::channel(1);
+    mgr.rib_tx = stalled_tx.clone();
+    stalled_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&PeerKey::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+        None,
+    ));
+    let _client = tokio::time::timeout(Duration::from_secs(5), accept_at(&mut mgr, MEMBER))
+        .await
+        .expect("the reconnect does not wait for mailbox room");
+    assert!(
+        mgr.peers.contains_key(&key(MEMBER)),
+        "the reconnect is admitted"
+    );
+    assert!(mgr.retained_dynamic.contains_key(&key(MEMBER)));
+    assert_eq!(
+        inbound_drop_metric(&mgr.metrics, "rib_cleanup_pending"),
+        Some(0.0)
+    );
+    rib_task.abort();
+}
+
+/// A collision candidate beside a retained reconnect resolves its own RIB
+/// identity, so it is refused while any cleanup is deferred, like a new
+/// dynamic neighbor: no new identity joins the queue.
+#[tokio::test]
+async fn a_candidate_beside_a_retained_reconnect_is_refused_behind_deferred_cleanup() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let _peer = retained_member(&mut mgr, &rib_tx, OURS).await;
+    let _primary = accept(&mut mgr).await;
+    let (stalled_tx, _stalled_rx) = mpsc::channel(1);
+    mgr.rib_tx = stalled_tx.clone();
+    stalled_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&PeerKey::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+        None,
+    ));
+    let _candidate = tokio::time::timeout(Duration::from_secs(5), accept_at(&mut mgr, MEMBER))
+        .await
+        .expect("the candidate does not wait for mailbox room");
+    assert!(
+        mgr.peers[&key(MEMBER)].pending_inbound.is_none(),
+        "the candidate is refused"
+    );
+    assert!(mgr.retained_dynamic[&key(MEMBER)].candidate.is_none());
+    assert_eq!(
+        inbound_drop_metric(&mgr.metrics, "rib_cleanup_pending"),
+        Some(1.0)
+    );
+    rib_task.abort();
+}

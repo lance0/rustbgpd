@@ -4264,6 +4264,67 @@ async fn removing_an_interface_only_neighbor_behind_a_full_rib_mailbox_does_not_
     );
 }
 
+/// An inbound connection that would bind an interface-only neighbor under
+/// the label of its queued cleanup is refused and counted, never waits for
+/// mailbox room: before a bound endpoint is retired (so it stays bound), and
+/// after a retirement queues one.
+#[tokio::test]
+async fn inbound_learning_behind_deferred_cleanup_is_refused_without_waiting() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 2, 7).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+
+    // A cleanup already queued under the interface's label: the bound
+    // endpoint is not retired for a connection that would be refused.
+    let label = rustbgpd_telemetry::interface_peer_label("swp1");
+    h.mgr
+        .defer_rib_update(
+            Some(label),
+            RibUpdate::RetireEorGraceInterface {
+                interface: "swp1".into(),
+            },
+        )
+        .unwrap();
+    let _client = tokio::time::timeout(Duration::from_secs(5), inbound(&mut h, 3, 7))
+        .await
+        .expect("refused without waiting for mailbox room");
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "still bound");
+    assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
+    assert_eq!(dropped(&h, "rib_cleanup_pending"), 1.0);
+
+    // Nothing queued: the retirement of the bound endpoint queues its
+    // deletion under the label, and the new address is refused after it.
+    h.mgr.deferred_rib.queue.clear();
+    h.mgr.deferred_rib.sender = None;
+    let _client = tokio::time::timeout(Duration::from_secs(5), inbound(&mut h, 3, 7))
+        .await
+        .expect("refused without waiting for mailbox room");
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(2)),
+        "old endpoint retired"
+    );
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(3)),
+        "refused, not bound"
+    );
+    assert_eq!(dropped(&h, "rib_cleanup_pending"), 2.0);
+}
+
 /// A `SetPeerGroup` session edit that reaches an interface-only member is
 /// applied: the member rebinds under the new settings on the reconcile,
 /// and a neighbor of another group keeps its session.
@@ -6779,4 +6840,47 @@ async fn queued_binding_changes_do_not_churn_dropped_addresses() {
         one_at_a_time.iter().any(|event| event.contains(&dropped)),
         "the control churns the dropped address: {one_at_a_time:?}"
     );
+}
+
+/// A removal whose BFD cleanup keeps failing is retried, and each retry
+/// repeats its End-of-RIB grace retirement. Behind a full RIB mailbox that
+/// retirement is queued once, not once per retry.
+#[tokio::test(start_paused = true)]
+async fn bfd_cleanup_retries_behind_a_full_mailbox_queue_one_grace_retirement() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let mut removed = h.mgr.current_config.clone();
+    removed.neighbors.set_interface_only("swp1", None);
+    bfd.unanswered.store(true, Ordering::SeqCst);
+    h.reload(removed).await;
+    assert!(h.mgr.peers.is_empty(), "the session ended");
+    let (rib_tx, _rib_rx) = mpsc::channel(1);
+    h.mgr.rib_tx = rib_tx.clone();
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    for _ in 0..3 {
+        // The BFD actor leaves each removal unanswered once.
+        bfd.unanswered.store(true, Ordering::SeqCst);
+        let retry = h
+            .mgr
+            .unnumbered_retry_at()
+            .expect("the BFD cleanup is retried");
+        tokio::time::sleep_until(retry).await;
+        h.mgr.unnumbered_retry_due();
+        tokio::time::timeout(Duration::from_secs(60), h.reconcile())
+            .await
+            .expect("a retry does not wait for mailbox room");
+    }
+    let retirements = h
+        .mgr
+        .deferred_rib
+        .queue
+        .iter()
+        .filter(|(_, update)| matches!(update, RibUpdate::RetireEorGraceInterface { .. }))
+        .count();
+    assert_eq!(retirements, 1);
 }

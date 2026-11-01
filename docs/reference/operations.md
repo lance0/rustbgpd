@@ -1924,9 +1924,11 @@ an interface-only neighbor refused to learn on its interface), `rate_limited` (t
 waited out an escalated NOTIFICATION reconnect wait; see
 [Debugging a session that won't establish](#debugging-a-session-that-wont-establish)),
 and `rib_cleanup_pending` (a deleted neighbor's RIB cleanup was still waiting
-for room in a full RIB mailbox: a connection that would admit a new dynamic
-neighbor is refused until it drains, and so is any connection under the
-deleted neighbor's own `peer` label; the neighbor reconnects on its own timer).
+for room in a full RIB mailbox: a connection that would create a new RIB
+identity, a new dynamic neighbor or a collision candidate beside one kept for
+graceful restart, is refused until it drains, and so is any connection under
+the deleted neighbor's own `peer` label, including an interface-only neighbor
+learned from an inbound connection; the neighbor reconnects on its own timer).
 There is deliberately no per-source label — source cardinality is unbounded
 exactly under the floods these drops account for.
 The Grafana overview graphs every reason in "Inbound connection drops by

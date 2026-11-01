@@ -1338,12 +1338,16 @@ impl PeerManager {
         // deleted and re-added neighbor inherit the old startup window. Like
         // the deletion above it, this never waits for mailbox room, and a
         // re-added neighbor's session under the label starts behind it.
-        let _ = self.defer_rib_update(
-            Some(label.clone()),
-            rustbgpd_rib::RibUpdate::RetireEorGraceInterface {
-                interface: name.into(),
-            },
-        );
+        // A BFD cleanup retry repeats this step; one queued retirement for
+        // the interface covers them all.
+        if !self.deferred_rib.retires_eor_grace(name) {
+            let _ = self.defer_rib_update(
+                Some(label.clone()),
+                rustbgpd_rib::RibUpdate::RetireEorGraceInterface {
+                    interface: name.into(),
+                },
+            );
+        }
         if !self.settle_port_bfd_removal(name).await {
             // The peer is already gone; only the port's cleanup ownership remains.
             let port = self.port_mut(name);
@@ -1960,6 +1964,10 @@ impl PeerManager {
     /// backoff, and, while BMP collectors are configured, when another
     /// neighbor holds the address (`bmp_identity_conflict`). A bound session that has not
     /// reached `OpenSent` is retired: the peer moved address.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every refusal of a learned inbound endpoint stays in one ordered admission check"
+    )]
     pub(super) async fn learn_inbound_endpoint(
         &mut self,
         name: &str,
@@ -1996,6 +2004,13 @@ impl PeerManager {
         // Checked before the current endpoint is retired, so a refused
         // address leaves the port bound, and again just before binding.
         if self.inbound_address_held(name, address) {
+            return None;
+        }
+        // Binding would wait for a deleted endpoint's RIB cleanup under the
+        // interface's label; refuse the connection instead (the remote
+        // retries), here and again after a retirement queues one.
+        let learned = PeerKey::new(IpAddr::V6(address), Some(name.to_string()));
+        if self.refuse_inbound_behind_deferred_cleanup(&learned, false) {
             return None;
         }
         if let Some(key) = bound {
@@ -2057,7 +2072,9 @@ impl PeerManager {
         }
         // The same atomic admission step as an RA binding: no input runs
         // between this check and the insertion in `bind_port`.
-        if self.inbound_address_held(name, address) {
+        if self.inbound_address_held(name, address)
+            || self.refuse_inbound_behind_deferred_cleanup(&learned, false)
+        {
             return None;
         }
         let endpoint = Endpoint { address, ifindex };
