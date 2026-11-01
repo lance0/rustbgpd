@@ -888,6 +888,41 @@ async fn query_explain_best_path_for_peer(
     reply_rx.await.unwrap()
 }
 
+/// Peer-scoped `ExplainBestPath` Add-Path ranks beside the peer's
+/// Adj-RIB-Out for `prefix`, both as `source peer -> outbound path ID`.
+/// The best route has no candidate row, so its Adj-RIB-Out row is left
+/// out; fixtures give each source one path for the prefix.
+fn explain_ranks_and_adj_rib_out(
+    manager: &mut RibManager,
+    peer: PeerId,
+    prefix: Prefix,
+) -> (BTreeMap<PeerId, u32>, BTreeMap<PeerId, u32>) {
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainBestPath {
+        prefix,
+        peer: Some(peer),
+        reply,
+    });
+    let explanation = result.try_recv().unwrap().expect("known peer");
+    assert!(explanation.add_path_send_max > 0, "an Add-Path peer");
+    let best = explanation.best.as_ref().expect("a best route").peer;
+    let explained = explanation
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.advertised_path_id != 0)
+        .map(|candidate| (candidate.route.peer, candidate.advertised_path_id))
+        .collect();
+    let held = manager
+        .adj_ribs_out
+        .get(&peer)
+        .into_iter()
+        .flat_map(AdjRibOut::iter)
+        .filter(|route| route.prefix == prefix && route.peer != best)
+        .map(|route| (route.peer, route.path_id))
+        .collect();
+    (explained, held)
+}
+
 async fn query_neighbor_policy_stats(
     tx: &mpsc::Sender<RibUpdate>,
     peer: PeerId,

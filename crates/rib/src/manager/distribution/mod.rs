@@ -56,7 +56,9 @@ mod unicast;
 mod vpn;
 
 pub(in crate::manager) use export_memo::ExportMemo;
-pub(in crate::manager) use unicast::{AddPathKeys, blackholing, exact_exportable, lease_rejection};
+pub(in crate::manager) use unicast::{
+    AddPathKeys, blackholing, exact_exportable, lease_rejection, multipath_candidate_suppressed,
+};
 
 /// Bounds on one cross-message distribution window. Each bound caps a
 /// different cost: queued input messages and ingested routes cap the ingest
