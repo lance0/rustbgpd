@@ -311,7 +311,8 @@ the stale time both sides advertised, which can be hours or days. One kept
 only while it may hold our routes (our restart time, plus our
 `llgr_stale_time` when LLGR was negotiated, plus the hold time) gives its
 slot to a new address at the limit, oldest first. Size the limit for the
-members a restart event can leave idle at once.
+members a restart event can leave idle at once. `rbgp doctor` lists the
+retained members and their deadlines as `dynamic_neighbors.retained`.
 
 ### `apply_bum_enforcement` — top-level (document-root) key
 

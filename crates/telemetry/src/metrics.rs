@@ -630,6 +630,7 @@ struct BgpMetricsInner {
     dynamic_neighbor_slots_limit: IntGauge,
     dynamic_neighbor_slots_headroom: IntGauge,
     dynamic_neighbor_limit_rejections: IntCounter,
+    dynamic_neighbor_retained_until: IntGaugeVec,
     inbound_connections_dropped: IntCounterVec,
     bmp_identity_conflicts: IntCounterVec,
     bmp_identity_excluded_neighbors: IntGauge,
@@ -1134,6 +1135,18 @@ impl BgpMetrics {
         let dynamic_neighbor_limit_rejections = IntCounter::new(
             "bgp_dynamic_neighbor_limit_rejections_total",
             "Inbound dynamic-neighbor connections dropped because the process-global admission limit was reached.",
+        )
+        .expect("valid metric definition");
+
+        let dynamic_neighbor_retained_until = IntGaugeVec::new(
+            Opts::new(
+                "bgp_dynamic_neighbor_retained_until_timestamp_seconds",
+                "An idle dynamic neighbor kept with its admission slot for graceful restart retention, \
+                 in Unix seconds: retention its_routes while the RIB retains its routes (the RIB's next \
+                 GR or LLGR deadline), our_routes while it may retain ours (the latest it can). Removed \
+                 when the neighbor reconnects or is deleted.",
+            ),
+            &["peer", "range", "retention"],
         )
         .expect("valid metric definition");
 
@@ -3177,6 +3190,9 @@ impl BgpMetrics {
             .register(Box::new(dynamic_neighbor_limit_rejections.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(dynamic_neighbor_retained_until.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(inbound_connections_dropped.clone()))
             .expect("metric not already registered");
         registry
@@ -3846,6 +3862,7 @@ impl BgpMetrics {
             dynamic_neighbor_slots_limit,
             dynamic_neighbor_slots_headroom,
             dynamic_neighbor_limit_rejections,
+            dynamic_neighbor_retained_until,
             inbound_connections_dropped,
             unnumbered_peer_address_info,
             unnumbered_address_changes,
@@ -4119,6 +4136,43 @@ impl BgpMetrics {
         self.0.dynamic_neighbor_limit_rejections.inc();
     }
 
+    /// Publish a retained idle dynamic neighbor's retentions in Unix
+    /// seconds, replacing any it had: `its_routes_until` while the RIB
+    /// retains its routes, `our_routes_until` while it may retain ours.
+    pub fn set_dynamic_neighbor_retention(
+        &self,
+        peer: &str,
+        range: &str,
+        its_routes_until: Option<u64>,
+        our_routes_until: Option<u64>,
+    ) {
+        for (retention, until) in [
+            ("its_routes", its_routes_until),
+            ("our_routes", our_routes_until),
+        ] {
+            let labels = [peer, range, retention];
+            match until {
+                Some(until) => self
+                    .0
+                    .dynamic_neighbor_retained_until
+                    .with_label_values(&labels)
+                    .set(i64::try_from(until).unwrap_or(i64::MAX)),
+                // Absent already is fine.
+                None => {
+                    let _ = self
+                        .0
+                        .dynamic_neighbor_retained_until
+                        .remove_label_values(&labels);
+                }
+            }
+        }
+    }
+
+    /// Remove a dynamic neighbor's retention series for `range`.
+    pub fn clear_dynamic_neighbor_retention(&self, peer: &str, range: &str) {
+        self.set_dynamic_neighbor_retention(peer, range, None, None);
+    }
+
     /// Record a BMP identity conflict at admission: `excluded` when every
     /// collector excludes, otherwise `refused`.
     pub fn record_bmp_identity_conflict(&self, excluded: bool) {
@@ -4273,6 +4327,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_import_policy, peer);
         Self::reap_peer_series_from_vec(&self.0.rfc8212_missing_export_policy, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_update_group, peer);
+        Self::reap_peer_series_from_vec(&self.0.dynamic_neighbor_retained_until, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.0.rib_adj_out_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_usage, peer);
@@ -10471,6 +10526,7 @@ mod tests {
         m.record_import_explain_cache_evictions(peer, 1);
         m.set_rfc8212_missing_policy(peer, true, true);
         m.set_peer_update_group(peer, 1);
+        m.set_dynamic_neighbor_retention(peer, "192.0.2.0/24", Some(1), Some(2));
         m.set_max_prefix_capacity(peer, "aggregate", "accepted", 80, Some(100));
         m.set_outbound_prefix_capacity(peer, "ipv4_unicast", 5, Some(8), true);
         m.record_outbound_prefix_blocked(peer, "ipv4_unicast", 2);
@@ -10563,10 +10619,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 82 peer-labeled series; state transitions and EVPN discard types
-        // hold two each, while exact
+        // 84 peer-labeled series; state transitions, EVPN discard types
+        // and dynamic-neighbor retentions hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 82);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 84);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -10576,7 +10632,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 82);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 84);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -10959,11 +11015,12 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 70] = [
+    const PEER_LABELED_FAMILIES: [&str; 71] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
         "bgp_bgpls_nlri_discarded_total",
+        "bgp_dynamic_neighbor_retained_until_timestamp_seconds",
         "bgp_evpn_nlri_discarded_by_type_total",
         "bgp_evpn_nlri_discarded_total",
         "bgp_exact_export_rejections_total",

@@ -1136,6 +1136,122 @@ fn update_group_recovery_check(metrics: Option<&str>) -> Option<Check> {
     })
 }
 
+/// Idle dynamic neighbors that keep their slot while graceful restart
+/// retention lasts, with range, reason and deadlines. Informational; yellow
+/// while the slot limit is full and new dynamic peers have been refused at
+/// it. `None` when no neighbor is retained.
+fn retained_dynamic_neighbors_check(metrics: Option<&str>, observed_at: u64) -> Option<Check> {
+    const SERIES: &str = "bgp_dynamic_neighbor_retained_until_timestamp_seconds{";
+    const LISTED: usize = 20;
+    let metrics = metrics?;
+    // Peer -> (range, its routes retained until, it may hold ours until).
+    let mut retained: BTreeMap<String, (String, Option<u64>, Option<u64>)> = BTreeMap::new();
+    for line in metrics.lines() {
+        let Some((labels, value)) = line
+            .strip_prefix(SERIES)
+            .and_then(|rest| rest.split_once("} "))
+        else {
+            continue;
+        };
+        let (Some(mut labels), Ok(until)) = (parse_metric_labels(labels), value.trim().parse())
+        else {
+            continue;
+        };
+        let (Some(peer), Some(range), Some(retention)) = (
+            labels.remove("peer"),
+            labels.remove("range"),
+            labels.remove("retention"),
+        ) else {
+            continue;
+        };
+        // A lapsed our_routes hold is removed at the neighbor's next check.
+        // A lapsed its_routes deadline stays: the peer manager keeps the
+        // neighbor's slot until a check finds the routes gone.
+        let its = match retention.as_str() {
+            "its_routes" => true,
+            "our_routes" if until > observed_at => false,
+            _ => continue,
+        };
+        let entry = retained.entry(peer).or_insert((range, None, None));
+        if its {
+            entry.1 = Some(until);
+        } else {
+            entry.2 = Some(until);
+        }
+    }
+    if retained.is_empty() {
+        return None;
+    }
+    let until = |what: &str, at: u64| {
+        if at <= observed_at {
+            format!("{what}: deadline unix {at} passed, awaiting re-check")
+        } else {
+            format!("{what} until unix {at} ({}s)", at - observed_at)
+        }
+    };
+    let mut listed: Vec<String> = retained
+        .iter()
+        .take(LISTED)
+        .map(|(peer, (range, its, ours))| {
+            let reason = match (its, ours) {
+                (Some(_), Some(_)) => "both",
+                (Some(_), None) => "its_routes",
+                _ => "our_routes",
+            };
+            let deadlines: Vec<String> = its
+                .map(|at| until("we retain its routes", at))
+                .into_iter()
+                .chain(ours.map(|at| until("it may hold ours", at)))
+                .collect();
+            format!(
+                "{peer} (range {range}, reason {reason}: {})",
+                deadlines.join(", ")
+            )
+        })
+        .collect();
+    if retained.len() > LISTED {
+        listed.push(format!(
+            "and {} more in bgp_dynamic_neighbor_retained_until_timestamp_seconds",
+            retained.len() - LISTED
+        ));
+    }
+    let count = retained.len();
+    let mut detail = format!(
+        "{count} idle dynamic neighbor{} keep{} a dynamic_neighbor_limit slot for graceful restart retention: {}",
+        if count == 1 { "" } else { "s" },
+        if count == 1 { "s" } else { "" },
+        listed.join("; ")
+    );
+    let gauge = |prefix: &str| {
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix)?.trim().parse::<u64>().ok())
+    };
+    let refused = gauge("bgp_dynamic_neighbor_limit_rejections_total ").unwrap_or(0);
+    // A neighbor kept only for our_routes gives its slot to a new address,
+    // so the limit refuses one only when every retained neighbor's routes
+    // are retained, as the peer manager last found them, lapsed deadline
+    // or not.
+    let none_evictable = retained.values().all(|(_, its, _)| its.is_some());
+    let status = if gauge("bgp_dynamic_neighbor_slots_headroom ") == Some(0)
+        && refused > 0
+        && none_evictable
+    {
+        detail.push_str(&format!(
+            ". The limit is full, none of these gives way to a new address while we retain its routes, and {refused} inbound dynamic connection{} refused at it since daemon start. Raise global.dynamic_neighbor_limit, wait for the deadlines, or remove the range",
+            if refused == 1 { " was" } else { "s were" }
+        ));
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Ok
+    };
+    Some(Check {
+        name: "dynamic_neighbors.retained".to_string(),
+        status,
+        detail,
+    })
+}
+
 /// A blocking outbound family is intentionally withholding routes. Rows that
 /// are merely limited (or unlimited) are capacity inventory, not failures.
 fn outbound_prefix_limit_checks(
@@ -3885,7 +4001,13 @@ async fn run_with_deadlines(
                 Ok(resp) => {
                     let text = resp.into_inner().prometheus_text;
                     bundle.add("system/metrics.prom", redact_text(&text).into_bytes());
-                    if let Some(check) = update_group_recovery_check(Some(&text)) {
+                    for check in [
+                        update_group_recovery_check(Some(&text)),
+                        retained_dynamic_neighbors_check(Some(&text), now_unix_seconds()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
                         reporter.record(check.name, check.status, check.detail)?;
                     }
                     metrics_text = Some(text);
@@ -7226,6 +7348,112 @@ paths = ["x"]
             duplicate.detail.contains("malformed"),
             "{}",
             duplicate.detail
+        );
+    }
+
+    /// Red proofs: merging one neighbor's two retentions into two entries,
+    /// listing a lapsed our_routes hold, warning without a refusal, with
+    /// headroom or beside a member kept only for our_routes (which a new
+    /// address evicts), dropping a lapsed its_routes deadline (the slot is
+    /// held until a check clears it), or reporting with nothing retained
+    /// fails below.
+    #[test]
+    fn retained_dynamic_neighbors_check_lists_reasons_and_warns_only_when_refused_at_the_limit() {
+        const SERIES: &str = "bgp_dynamic_neighbor_retained_until_timestamp_seconds";
+        let retained = format!(
+            "{SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"its_routes\"}} 1095\n\
+             {SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 1215\n\
+             {SERIES}{{peer=\"198.51.100.9\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 1300\n\
+             {SERIES}{{peer=\"198.51.100.11\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 999\n"
+        );
+        assert!(retained_dynamic_neighbors_check(None, 1000).is_none());
+        assert!(
+            retained_dynamic_neighbors_check(
+                Some("bgp_dynamic_neighbor_slots_headroom 0\nbgp_dynamic_neighbor_limit_rejections_total 4\n"),
+                1000
+            )
+            .is_none(),
+            "nothing retained adds no check"
+        );
+
+        let ok = retained_dynamic_neighbors_check(Some(&retained), 1000).unwrap();
+        assert_eq!(ok.name, "dynamic_neighbors.retained");
+        assert_eq!(ok.status, CheckStatus::Ok);
+        assert_eq!(
+            ok.detail,
+            "2 idle dynamic neighbors keep a dynamic_neighbor_limit slot for graceful restart retention: \
+             198.51.100.7 (range 198.51.100.0/24, reason both: we retain its routes until unix 1095 (95s), \
+             it may hold ours until unix 1215 (215s)); 198.51.100.9 (range 198.51.100.0/24, reason \
+             our_routes: it may hold ours until unix 1300 (300s))"
+        );
+
+        let full = |series: &str, headroom: u64, refused: u64| {
+            retained_dynamic_neighbors_check(
+                Some(&format!(
+                    "{series}bgp_dynamic_neighbor_slots_headroom {headroom}\n\
+                     bgp_dynamic_neighbor_limit_rejections_total {refused}\n"
+                )),
+                1000,
+            )
+            .unwrap()
+        };
+        // 198.51.100.9 is kept only for our_routes, so a new address evicts
+        // it rather than being refused: no warning, whatever the counters.
+        assert_eq!(
+            full(&retained, 0, 3).status,
+            CheckStatus::Ok,
+            "an evictable member makes room"
+        );
+        let pinned = format!(
+            "{SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"its_routes\"}} 1095\n\
+             {SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 1215\n\
+             {SERIES}{{peer=\"198.51.100.8\",range=\"198.51.100.0/24\",retention=\"its_routes\"}} 1060\n\
+             {SERIES}{{peer=\"198.51.100.11\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 999\n"
+        );
+        assert_eq!(
+            full(&pinned, 0, 0).status,
+            CheckStatus::Ok,
+            "full but nobody refused"
+        );
+        assert_eq!(
+            full(&pinned, 1, 3).status,
+            CheckStatus::Ok,
+            "refused earlier, room now"
+        );
+        let warn = full(&pinned, 0, 3);
+        assert_eq!(warn.status, CheckStatus::Warn);
+        assert_eq!(
+            warn.detail,
+            "2 idle dynamic neighbors keep a dynamic_neighbor_limit slot for graceful restart retention: \
+             198.51.100.7 (range 198.51.100.0/24, reason both: we retain its routes until unix 1095 (95s), \
+             it may hold ours until unix 1215 (215s)); 198.51.100.8 (range 198.51.100.0/24, reason \
+             its_routes: we retain its routes until unix 1060 (60s)). The limit is full, none of these \
+             gives way to a new address while we retain its routes, and 3 inbound dynamic connections \
+             were refused at it since daemon start. Raise global.dynamic_neighbor_limit, wait for the \
+             deadlines, or remove the range"
+        );
+        assert!(
+            full(&pinned, 0, 1)
+                .detail
+                .contains("1 inbound dynamic connection was refused")
+        );
+
+        // The RIB check is late: its_routes has passed its deadline but the
+        // peer manager still keeps the neighbor's slot, so it is not
+        // evictable and the refusal warning stands.
+        let delayed = format!(
+            "{SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"its_routes\"}} 990\n\
+             {SERIES}{{peer=\"198.51.100.7\",range=\"198.51.100.0/24\",retention=\"our_routes\"}} 1215\n"
+        );
+        let late = full(&delayed, 0, 3);
+        assert_eq!(late.status, CheckStatus::Warn, "{}", late.detail);
+        assert!(
+            late.detail.contains(
+                "198.51.100.7 (range 198.51.100.0/24, reason both: we retain its routes: deadline \
+                 unix 990 passed, awaiting re-check, it may hold ours until unix 1215 (215s))"
+            ),
+            "{}",
+            late.detail
         );
     }
 
