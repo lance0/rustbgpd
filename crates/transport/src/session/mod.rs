@@ -1016,6 +1016,21 @@ struct AcceptedTransport {
     tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
 }
 
+/// A dropped session must not free a whole outbound inventory in that one
+/// turn, whether its task returned from `run()` or was cancelled at an await
+/// point (`abort_for_transport_safety`, a `shutdown_timeout` expiry): the remainder
+/// goes to the paced release task. Skipped without a runtime, where
+/// `tokio::spawn` would panic and nothing could run the release, and while
+/// unwinding. A runtime that is shutting down cancels the spawned task at
+/// once instead of panicking, which drops the inventory in that turn.
+impl Drop for PeerSession {
+    fn drop(&mut self) {
+        if !std::thread::panicking() && tokio::runtime::Handle::try_current().is_ok() {
+            self.hand_off_retirement();
+        }
+    }
+}
+
 impl PeerSession {
     /// This session's neighbor identity in the RIB. A dynamic neighbor gets
     /// its handle (a new one, or the retained one its slot resumes for the
@@ -2805,13 +2820,11 @@ impl PeerSession {
             .record_otc_routes_blocked(&self.peer_label, reason, count);
     }
 
-    /// Main event loop. Runs until Shutdown command or fatal error.
+    /// Main event loop. Runs until Shutdown command or fatal error. The
+    /// owning task drops the session next, which hands any outbound
+    /// inventory to the paced release (see the `Drop` impl).
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
-        let result = self.run_loop().await;
-        // The owning task drops the session next; nothing may free a whole
-        // outbound inventory in that one turn.
-        self.hand_off_retirement();
-        result
+        self.run_loop().await
     }
 
     #[expect(

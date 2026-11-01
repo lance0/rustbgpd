@@ -3312,6 +3312,49 @@ async fn shared_group_concurrent_completions_still_retire_in_bounded_steps() {
     }
 }
 
+/// A session task cancelled at one of the elected encoder's slice yields,
+/// as an abort does, while its envelope holds the last reference to the
+/// inventory, still hands that inventory to the paced release.
+/// Mutation-red: holding the envelope in a plain local across the encode
+/// frees it whole when the task is cancelled.
+#[tokio::test]
+async fn cancelled_shared_encoder_hands_its_inventory_to_paced_release() {
+    let mut fixture = RetirementFixture::new(false, RETIRE_TOTAL, 100_000);
+    let RetirementFixture {
+        held,
+        base,
+        members,
+        updates,
+    } = &mut fixture;
+    let live = || Arc::strong_count(held) - *base;
+    drop(updates.pop());
+    let update = updates.pop().expect("the encoder's envelope");
+    assert_eq!(
+        live(),
+        RETIRE_TOTAL,
+        "this envelope holds the last reference"
+    );
+    let mut released = Vec::new();
+    {
+        let mut handle = std::pin::pin!(members[0].0.handle_outbound_route_update(update));
+        let polled =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(handle.as_mut().poll(cx))).await;
+        assert!(polled.is_pending(), "the encoder yields between slices");
+        assert_eq!(live(), RETIRE_TOTAL);
+    }
+    released.push(RETIRE_TOTAL - live());
+    for _ in 0..2 * RETIRE_TOTAL / RETIRE_SLICE {
+        let before = live();
+        tokio::task::yield_now().await;
+        released.push(before - live());
+    }
+    assert_eq!(live(), 0, "every route is released: {released:?}");
+    assert!(
+        released.iter().all(|&batch| batch <= RETIRE_SLICE),
+        "one step released more than a slice: {released:?}"
+    );
+}
+
 /// A disconnect while the last owner is still releasing its inventory keeps
 /// the bounded release going instead of dropping the remainder at once.
 #[tokio::test]

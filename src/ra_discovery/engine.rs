@@ -128,8 +128,11 @@ pub enum DiscoveryEvent {
         previous: Option<Endpoint>,
         current: Option<Endpoint>,
     },
-    /// A second live RA source on an interface that has a binding. Reported
-    /// once per source while it stays a candidate; it never moves the binding.
+    /// A live RA source other than the interface's Established peer, or
+    /// failing that its binding: when it is learned, or, for a source
+    /// learned before the Established report, when that report arrives. A
+    /// source a conflict has named, on either side, is not named again
+    /// while it stays a candidate. It never moves the binding.
     Conflict {
         interface: String,
         bound: Ipv6Addr,
@@ -148,6 +151,14 @@ pub enum Transmit {
     RouterSolicitation { ifindex: u32 },
 }
 
+/// A live RA source.
+#[derive(Debug, Clone, Copy)]
+struct Candidate {
+    expiry: Instant,
+    /// A `Conflict` has named it, as `bound` or `other`.
+    reported: bool,
+}
+
 #[derive(Debug, Default)]
 struct Interface {
     ifindex: Option<u32>,
@@ -159,12 +170,15 @@ struct Interface {
     /// layer stamps each packet with the generation it was read under, and
     /// input from an older generation is discarded.
     generation: u64,
-    /// Live candidates and their expiry.
-    candidates: BTreeMap<Ipv6Addr, Instant>,
+    candidates: BTreeMap<Ipv6Addr, Candidate>,
     binding: Option<Endpoint>,
     /// The neighbor's session is Established: discovery must not move the
     /// binding until an explicit session-failed or confirmed-down input.
     established: bool,
+    /// Address of the neighbor's Established peer, which an inbound
+    /// connection may have taught the owner without any RA: a new source
+    /// other than it is a conflict even before discovery has a binding.
+    established_peer: Option<Ipv6Addr>,
     next_ra: Option<Instant>,
     last_ra: Option<Instant>,
     initial_ras_left: u8,
@@ -340,22 +354,35 @@ impl Engine {
             }
             return Err(DropReason::OwnAddress);
         }
-        if let Some(expiry) = iface.candidates.get_mut(&source) {
-            *expiry = now + hold;
+        if let Some(candidate) = iface.candidates.get_mut(&source) {
+            candidate.expiry = now + hold;
             return Ok(());
         }
-        iface.candidates.insert(source, now + hold);
+        iface.candidates.insert(
+            source,
+            Candidate {
+                expiry: now + hold,
+                reported: false,
+            },
+        );
         self.events.push(DiscoveryEvent::CandidateLearned {
             interface: name.clone(),
             address: source,
         });
         reselect(name, iface, &mut self.events);
-        if let Some(bound) = iface.binding
-            && bound.address != source
+        if let Some(bound) = iface
+            .established_peer
+            .or(iface.binding.map(|binding| binding.address))
+            && bound != source
         {
+            for named in [bound, source] {
+                if let Some(candidate) = iface.candidates.get_mut(&named) {
+                    candidate.reported = true;
+                }
+            }
             self.events.push(DiscoveryEvent::Conflict {
                 interface: name.clone(),
-                bound: bound.address,
+                bound,
                 other: source,
             });
         }
@@ -386,15 +413,45 @@ impl Engine {
         iface.next_ra = Some(next.min(earliest + delay));
     }
 
-    /// The neighbor's session reached Established: freeze the binding.
-    /// Ignored without a binding: Established means "the bound peer is
-    /// Established", and a report queued from a session retired by carrier
-    /// loss must not freeze an interface that has nothing bound.
-    pub(crate) fn session_established(&mut self, name: &str) {
-        if let Some(iface) = self.interfaces.get_mut(name)
-            && iface.binding.is_some()
-        {
+    /// The neighbor's session with `peer` reached Established: freeze the
+    /// binding, and count later sources other than `peer` as conflicts.
+    /// The freeze is ignored without a binding: Established means "the bound
+    /// peer is Established", and a report queued from a session retired by
+    /// carrier loss must not freeze an interface that has nothing bound. The
+    /// owner follows such a retirement with `session_failed`, which also
+    /// forgets `peer`.
+    ///
+    /// A live source learned before this report that no conflict has named
+    /// is a conflict now: a foreign router whose RA arrived first became the
+    /// binding with nothing to compare it with. A conflict already raised
+    /// beside it, `peer`'s own RA's included, counted it. So only a first
+    /// binding can go uncounted: one that expired before the report with no
+    /// conflict, or one named only beside another foreign router, which that
+    /// conflict counted instead.
+    pub(crate) fn session_established(&mut self, name: &str, peer: Ipv6Addr, now: Instant) {
+        let Some(iface) = self.interfaces.get_mut(name) else {
+            return;
+        };
+        expire(name, iface, now, &mut self.events);
+        iface.established_peer = Some(peer);
+        if iface.binding.is_some() {
             iface.established = true;
+        }
+        let mut named = false;
+        for (&address, candidate) in &mut iface.candidates {
+            if address == peer || candidate.reported {
+                continue;
+            }
+            candidate.reported = true;
+            named = true;
+            self.events.push(DiscoveryEvent::Conflict {
+                interface: name.to_owned(),
+                bound: peer,
+                other: address,
+            });
+        }
+        if named && let Some(candidate) = iface.candidates.get_mut(&peer) {
+            candidate.reported = true;
         }
     }
 
@@ -403,6 +460,7 @@ impl Engine {
     pub(crate) fn session_failed(&mut self, name: &str, now: Instant) {
         if let Some(iface) = self.interfaces.get_mut(name) {
             iface.established = false;
+            iface.established_peer = None;
             expire(name, iface, now, &mut self.events);
             reselect(name, iface, &mut self.events);
         }
@@ -437,7 +495,7 @@ impl Engine {
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.interfaces
             .values()
-            .flat_map(|i| i.candidates.values().copied().chain(i.next_ra))
+            .flat_map(|i| i.candidates.values().map(|c| c.expiry).chain(i.next_ra))
             .min()
     }
 
@@ -456,8 +514,8 @@ impl Engine {
 /// expiry timer or the input was processed first.
 fn expire(name: &str, iface: &mut Interface, now: Instant, events: &mut Vec<DiscoveryEvent>) {
     let before = iface.candidates.len();
-    iface.candidates.retain(|address, expiry| {
-        let live = *expiry > now;
+    iface.candidates.retain(|address, candidate| {
+        let live = candidate.expiry > now;
         if !live {
             events.push(DiscoveryEvent::CandidateExpired {
                 interface: name.to_owned(),
@@ -513,6 +571,7 @@ fn clear(name: &str, iface: &mut Interface, events: &mut Vec<DiscoveryEvent>) {
         });
     }
     iface.established = false;
+    iface.established_peer = None;
     if let Some(previous) = iface.binding.take() {
         events.push(DiscoveryEvent::BindingChanged {
             interface: name.to_owned(),

@@ -218,7 +218,10 @@ async fn a_binding_becomes_a_scoped_peer_and_session_state_reaches_discovery() {
 
     h.mgr
         .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
-    assert_eq!(h.drain(), [Command::SessionEstablished("swp1".into())]);
+    assert_eq!(
+        h.drain(),
+        [Command::SessionEstablished("swp1".into(), ll(2))]
+    );
     h.mgr
         .note_unnumbered_session_state(&key, SessionState::Established, SessionState::Idle);
     assert_eq!(h.drain(), [Command::SessionFailed("swp1".into())]);
@@ -342,6 +345,33 @@ async fn a_lost_binding_keeps_an_established_peer_while_the_link_is_up() {
     // Mutation-red: treating a lost binding as an unbind removes the peer.
     h.bind("swp1", None).await;
     assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+}
+
+/// A lost binding whose session reached Established unreported is read from
+/// the session, and discovery learns that session's address, against which
+/// it counts later sources.
+/// Mutation-red: reporting any other address from that read fails here.
+#[tokio::test]
+async fn a_lost_binding_reports_the_established_session_address_to_discovery() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    h.drain();
+    h.bind("swp1", None).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept");
+    assert_eq!(
+        h.drain(),
+        [Command::SessionEstablished("swp1".into(), ll(2))]
+    );
 }
 
 /// ADR-0142: the binding expires under an Established session, which then
@@ -1418,7 +1448,10 @@ async fn a_dropped_transition_to_established_never_displaces_the_session() {
     h.bind("swp1", Some(endpoint(3, 7))).await;
     assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept");
     assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
-    assert_eq!(h.drain(), [Command::SessionEstablished("swp1".into())]);
+    assert_eq!(
+        h.drain(),
+        [Command::SessionEstablished("swp1".into(), ll(2))]
+    );
 }
 
 /// A bound session that does not answer its state query is kept, nothing is
@@ -2851,7 +2884,10 @@ async fn an_address_change_never_retires_a_session_established_after_the_state_r
     assert_eq!(shutdowns.load(Ordering::SeqCst), 0, "never shut down");
     assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "Established session kept");
     assert_eq!(h.peers_at(ll(3)), []);
-    assert_eq!(h.drain(), [Command::SessionEstablished("swp1".into())]);
+    assert_eq!(
+        h.drain(),
+        [Command::SessionEstablished("swp1".into(), ll(2))]
+    );
 }
 
 /// The same guarantee on the inbound-learning path, which retires a bound
@@ -4984,9 +5020,10 @@ async fn a_failed_endpoint_start_keeps_the_neighbors_identity_series() {
     assert_eq!(down(&h), Some(1.0));
 }
 
-/// A neighbor learned from an inbound connection is unknown to discovery,
-/// so a second router seen only by RA, or only by another inbound
-/// connection, is still counted once each.
+/// A neighbor learned from an inbound connection has no RA binding, so a
+/// second router seen only by RA, or only by another inbound connection, is
+/// still counted once each: the inbound one by the owner, the RA one by
+/// discovery, which learns the Established peer's address.
 #[tokio::test]
 async fn second_routers_beside_an_inbound_learned_session_are_counted() {
     let conflicts = |h: &Harness| {
@@ -5019,12 +5056,252 @@ async fn second_routers_beside_an_inbound_learned_session_are_counted() {
     assert_eq!(conflicts(&h), Some(1.0));
     assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept");
 
-    // The second router's first RA: discovery had no binding, so it raises
-    // no conflict of its own. Mutation-red: without the manager's check the
-    // counter stays at 1.
+    // Discovery learns the Established peer's address, so it raises the
+    // conflict for a second router's first RA itself; the binding change
+    // that RA also causes is not counted a second time.
+    assert!(
+        h.drain()
+            .contains(&Command::SessionEstablished("swp1".into(), ll(2)))
+    );
     h.bind("swp1", Some(endpoint(9, 7))).await;
-    assert_eq!(conflicts(&h), Some(2.0));
+    assert_eq!(conflicts(&h), Some(1.0));
     assert!(h.mgr.peers.contains_key(&swp1_key(2)), "still kept");
+}
+
+/// The inbound-learned Established peer of the conflict-count test.
+const INBOUND_OWN: u16 = 2;
+
+/// One input to discovery in the conflict-count test.
+#[derive(Clone, Copy)]
+enum RaStep {
+    /// Discovery applies the owner's Established report.
+    Told,
+    /// An RA from `fe80::<router>` with this Router Lifetime, in seconds.
+    Ra(u16, u16),
+    /// The clock advances this many seconds and discovery expires what ran out.
+    Advance(u64),
+}
+
+/// Each of `routers`' RA, then its expiry.
+fn ra_pairs(routers: impl IntoIterator<Item = u16>) -> Vec<RaStep> {
+    routers
+        .into_iter()
+        .flat_map(|router| [RaStep::Ra(router, 30), RaStep::Advance(30)])
+        .collect()
+}
+
+/// `count` distinct foreign router addresses.
+fn foreign_routers(count: u16) -> impl Iterator<Item = u16> {
+    (0..count).map(|n| 0x100 + n)
+}
+
+/// Discovery's events for `steps`, told what the owner told it.
+fn inbound_conflict_discovery_events(told: &[Command], steps: &[RaStep]) -> Vec<DiscoveryEvent> {
+    let mut now = std::time::Instant::now();
+    let mut engine = crate::ra_discovery::engine::Engine::new(
+        crate::ra_discovery::DiscoveryConfig::default(),
+        1,
+    );
+    engine.start("swp1");
+    engine.on_link(
+        &LinkEvent {
+            ifindex: 7,
+            name: "swp1".into(),
+            state: LinkState::Up,
+        },
+        now,
+    );
+    let generation = engine.bound_interfaces().next().unwrap().2;
+    for step in steps {
+        match *step {
+            RaStep::Told => {
+                for command in told {
+                    if let Command::SessionEstablished(name, peer) = command {
+                        engine.session_established(name, *peer, now);
+                    }
+                }
+            }
+            RaStep::Ra(router, lifetime) => engine
+                .on_router_advertisement(7, generation, ll(router), lifetime, now, |_, _| {
+                    Some(false)
+                })
+                .unwrap(),
+            RaStep::Advance(secs) => {
+                now += Duration::from_secs(secs);
+                engine.poll(now);
+            }
+        }
+    }
+    std::mem::take(&mut engine.events)
+}
+
+/// The conflict count and peer presence events after delivering the events
+/// of `steps`, coalesced or one at a time.
+async fn deliver_inbound_conflict_events(
+    steps: &[RaStep],
+    coalesced: bool,
+) -> (Option<f64>, Vec<String>) {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, INBOUND_OWN, 7).await;
+    h.replace_session(
+        &swp1_key(INBOUND_OWN),
+        fake_peer_handle(
+            IpAddr::V6(ll(INBOUND_OWN)),
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(INBOUND_OWN),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
+    let mut events = inbound_conflict_discovery_events(&h.drain(), steps);
+    if coalesced {
+        let (tx, mut rx) = crate::ra_discovery::event_channel();
+        for event in events {
+            tx.send(event);
+        }
+        drop(tx);
+        events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+    }
+    for event in events {
+        h.mgr.handle_discovery_event(event);
+        h.reconcile().await;
+    }
+    assert_eq!(
+        h.mgr.peers.keys().collect::<Vec<_>>(),
+        [&swp1_key(INBOUND_OWN)]
+    );
+    let presence = query_session_event_history(
+        &h.mgr,
+        None,
+        [
+            SessionLifecycleEventType::PeerAdded,
+            SessionLifecycleEventType::PeerRemoved,
+        ]
+        .into_iter()
+        .collect(),
+        0,
+    )
+    .await
+    .iter()
+    .map(|event| event.reason.clone())
+    .collect();
+    let conflicts = sample(
+        &h,
+        "bgp_unnumbered_ra_conflicts_total",
+        &[("peer", "interface:swp1")],
+    );
+    (conflicts, presence)
+}
+
+/// Discovery raises a conflict for each foreign router beside an
+/// Established peer learned from an inbound connection, so the count is the
+/// same whether the owner receives every event as it happens or only the
+/// coalesced backlog after falling behind by many candidate lifetimes. The
+/// table's routers each send one RA, which becomes the interface's first
+/// binding, and then expire. A foreign router whose RA discovery processed
+/// before the Established report is counted once: by a conflict naming it
+/// then, or when the report arrives. A first binding that expired before
+/// the report with no conflict, or was named only beside another foreign
+/// router, is not counted on its own. The owner reconciles between
+/// delivered events and adds or removes no peer for any dropped address.
+/// Mutation-red: counting a conflict from the owner's `previous: None`
+/// binding instead loses every foreign first binding the backlog replaced;
+/// not checking the live sources at the report leaves the early ones
+/// uncounted.
+#[tokio::test]
+async fn ra_conflicts_beside_an_inbound_learned_session_count_exactly_when_coalesced() {
+    use RaStep::{Advance, Ra, Told};
+    const OWN: u16 = INBOUND_OWN;
+    let (a, b, f) = (0x200, 0x201, 0x300);
+    let told_then = |routers: Vec<u16>| [vec![Told], ra_pairs(routers)].concat();
+    let sequences: Vec<(&str, Vec<RaStep>, f64)> = vec![
+        (
+            "16 foreign, own",
+            told_then(foreign_routers(16).chain([OWN]).collect()),
+            16.0,
+        ),
+        (
+            "15 foreign, own, 2 foreign",
+            told_then(foreign_routers(15).chain([OWN, a, b]).collect()),
+            17.0,
+        ),
+        (
+            "16 foreign, own x3",
+            told_then(foreign_routers(16).chain([OWN; 3]).collect()),
+            16.0,
+        ),
+        ("20 foreign", told_then(foreign_routers(20).collect()), 20.0),
+        ("A, None, B", told_then(vec![a, b]), 2.0),
+        ("A, None, own", told_then(vec![a, OWN]), 1.0),
+        ("own, None, B", told_then(vec![OWN, b]), 1.0),
+        ("A, None, own, None, B", told_then(vec![a, OWN, b]), 2.0),
+        (
+            "foreign bound before the report, then own",
+            vec![Ra(f, 1800), Told, Ra(OWN, 1800)],
+            1.0,
+        ),
+        (
+            "foreign bound before the report",
+            vec![Ra(f, 1800), Told],
+            1.0,
+        ),
+        (
+            "foreign bound before the report, then refreshed",
+            vec![Ra(f, 1800), Told, Ra(f, 1800)],
+            1.0,
+        ),
+        (
+            "counted beside a binding that expired before the report",
+            vec![Ra(a, 10), Ra(f, 1800), Advance(10), Told],
+            1.0,
+        ),
+        (
+            "own RA beside a foreign binding, the own candidate gone before the report",
+            vec![Ra(f, 60), Ra(OWN, 10), Advance(11), Told],
+            1.0,
+        ),
+        (
+            "foreign bound before the report, own RA and a third router beside it",
+            vec![Ra(f, 1800), Ra(OWN, 1800), Ra(a, 1800), Told],
+            2.0,
+        ),
+        (
+            "two foreign routers named together before the report",
+            vec![Ra(a, 1800), Ra(f, 1800), Told],
+            1.0,
+        ),
+        (
+            "16 foreign, own, the first gone before the report",
+            [
+                ra_pairs([0x100]),
+                vec![Told],
+                ra_pairs(foreign_routers(16).skip(1).chain([OWN])),
+            ]
+            .concat(),
+            15.0,
+        ),
+    ];
+    for (name, steps, expected) in sequences {
+        let one_at_a_time = deliver_inbound_conflict_events(&steps, false).await;
+        let coalesced = deliver_inbound_conflict_events(&steps, true).await;
+        assert_eq!(one_at_a_time.0, Some(expected), "{name}: one at a time");
+        assert_eq!(coalesced.0, Some(expected), "{name}: coalesced");
+        assert_eq!(coalesced.1, one_at_a_time.1, "{name}");
+        assert_eq!(
+            coalesced.1,
+            [format!(
+                "peer fe80::{OWN:x}%swp1 added: peer_address_learned"
+            )],
+            "{name}: no churn for a dropped address"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

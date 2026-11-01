@@ -72,11 +72,14 @@ struct PendingEvents {
 ///   delivered, so engine conflicts are counted exactly. The deliveries
 ///   carry the latest `bound` and `other`.
 ///
-/// One count is exact only while the owner keeps up: the owner also counts
-/// a conflict when a first binding (`previous: None`) names a router other
-/// than an Established peer it learned from an inbound connection. If the
-/// owner falls behind by more than a candidate lifetime, such a first
-/// binding can be replaced before it is delivered and go uncounted.
+/// Discovery raises every conflict itself, so the counts do not depend on how
+/// far the owner falls behind. The owner reports the Established peer's
+/// address with `session_established`; discovery counts a source once, when
+/// a conflict first names it, or at that report for one learned before it.
+/// Only a foreign router that was discovery's first binding can go
+/// uncounted: one that expired before the report with no conflict naming
+/// it, or one named only beside another foreign router, which that conflict
+/// counted instead.
 ///
 /// Keys are served round-robin, so a conflict can be delivered ahead of a
 /// binding change queued between two conflicts. Learned and expired
@@ -205,7 +208,7 @@ pub(crate) enum Command {
     Start(String),
     Stop(String),
     Link(LinkEvent),
-    SessionEstablished(String),
+    SessionEstablished(String, Ipv6Addr),
     SessionFailed(String),
 }
 
@@ -347,12 +350,12 @@ impl RaDiscovery {
         let _ = self.commands.send(Command::Link(event));
     }
 
-    /// The interface's session reached Established; discovery stops moving
-    /// its binding.
-    pub fn session_established(&self, interface: &str) {
+    /// The interface's session with `peer` reached Established; discovery
+    /// stops moving its binding and reports any other source as a conflict.
+    pub fn session_established(&self, interface: &str, peer: Ipv6Addr) {
         let _ = self
             .commands
-            .send(Command::SessionEstablished(interface.to_owned()));
+            .send(Command::SessionEstablished(interface.to_owned(), peer));
     }
 
     /// The interface's session failed; the binding may move again.
@@ -719,7 +722,9 @@ impl Actor {
             Command::Start(name) => self.engine.start(&name),
             Command::Stop(name) => self.engine.stop(&name),
             Command::Link(event) => self.engine.on_link(&event, now),
-            Command::SessionEstablished(name) => self.engine.session_established(&name),
+            Command::SessionEstablished(name, peer) => {
+                self.engine.session_established(&name, peer, now);
+            }
             Command::SessionFailed(name) => self.engine.session_failed(&name, now),
         }
     }

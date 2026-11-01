@@ -138,14 +138,7 @@ impl PeerManager {
                 if owner.is_some() && owner.as_ref() == peer {
                     Some(notification)
                 } else {
-                    if let Some(owner) = &owner {
-                        *self
-                            .deferred_session_notification_counts
-                            .entry(owner.clone())
-                            .or_default() += 1;
-                    }
-                    self.deferred_session_notifications
-                        .push_back((owner, notification));
+                    self.defer_session_notification(owner, notification);
                     None
                 }
             } else {
@@ -155,6 +148,54 @@ impl PeerManager {
                 self.handle_session_notification(notification).await;
             }
         }
+    }
+
+    /// Defer another peer's notification to the outermost handler. Dequeueing
+    /// a max-prefix warning frees its scope's slot in the session channel, so
+    /// a long nested drain can take that scope's next warning too; it is added
+    /// to the deferred one, keeping one deferred warning per session scope.
+    fn defer_session_notification(
+        &mut self,
+        owner: Option<PeerKey>,
+        notification: SessionNotification,
+    ) {
+        if let SessionNotification::MaxPrefixWarning {
+            session_id,
+            family,
+            stage,
+            crossings,
+            ..
+        } = &notification
+            && let Some(queued) =
+                self.deferred_session_notifications
+                    .iter_mut()
+                    .find_map(|(_, deferred)| match deferred {
+                        SessionNotification::MaxPrefixWarning {
+                            session_id: queued_session,
+                            family: queued_family,
+                            stage: queued_stage,
+                            crossings: queued,
+                            ..
+                        } if queued_session == session_id
+                            && queued_family == family
+                            && queued_stage == stage =>
+                        {
+                            Some(queued)
+                        }
+                        _ => None,
+                    })
+        {
+            *queued = queued.saturating_add(*crossings);
+            return;
+        }
+        if let Some(owner) = &owner {
+            *self
+                .deferred_session_notification_counts
+                .entry(owner.clone())
+                .or_default() += 1;
+        }
+        self.deferred_session_notifications
+            .push_back((owner, notification));
     }
 
     /// Remove `peer`'s oldest deferred notification. The scan is O(deferred)

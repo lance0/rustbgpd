@@ -525,11 +525,39 @@ impl PendingOutbound {
     }
 }
 
+/// An envelope held across `prepare_shared_group`, whose encoder role yields
+/// between slices. A task cancelled at one of those yields drops this before
+/// the session, so it hands the inventory to the paced release itself, under
+/// the same guards as the session's `Drop`.
+struct PreparingOutbound(Option<OutboundRouteUpdate>);
+
+impl Drop for PreparingOutbound {
+    fn drop(&mut self) {
+        if let Some(update) = self.0.take()
+            && !std::thread::panicking()
+            && tokio::runtime::Handle::try_current().is_ok()
+            && let Some(mut pending) =
+                PendingOutbound::new(update, None, Vec::new()).into_retiring()
+        {
+            tokio::spawn(async move {
+                while pending.retire_step() {
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+    }
+}
+
 impl PeerSession {
     pub(super) async fn handle_outbound_route_update(&mut self, mut update: OutboundRouteUpdate) {
         debug_assert!(self.pending_outbound.is_none());
         let shared = if update.replay.is_none() {
-            self.prepare_shared_group(&update).await
+            let mut preparing = PreparingOutbound(Some(update));
+            let shared = self
+                .prepare_shared_group(preparing.0.as_ref().expect("held until taken"))
+                .await;
+            update = preparing.0.take().expect("held until taken");
+            shared
         } else {
             None
         };
