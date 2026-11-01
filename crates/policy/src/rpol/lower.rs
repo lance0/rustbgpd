@@ -68,8 +68,8 @@ use crate::ir::{
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, NextHopArg, PolicyDef,
-    PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, IfStmt, NextHopArg,
+    PolicyDef, PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode};
 use super::typeck::{Field, community_attribute, resolve_field, value_field_of};
@@ -778,48 +778,10 @@ impl<'a> Lowerer<'a> {
                 }
                 Stmt::If(if_stmt) => {
                     flush_pending(&mut out, &mut pending);
-                    // Function calls in the guard hoist their binds as
-                    // unconditional terms ahead of the guard's own
-                    // (LAN-304): they evaluate when the walk reaches
-                    // this statement — eager like `let`, so both the
-                    // positive and negated guard read written slots.
-                    let mut guard_binds = Vec::new();
-                    let guard = self.lower_expr(&if_stmt.cond, env, lets, store, &mut guard_binds);
-                    for bind in guard_binds {
-                        out.push((MatchExpr::True, bind));
-                    }
-                    let scope = lets.mark();
-                    let (then_binds, then_tail) = self.lower_body(&if_stmt.then_actions, env, lets);
-                    lets.reset(scope);
-                    let needs_else_guard = if_stmt.else_actions.is_some();
-                    // Body `let`s become Bind terms guarded by the
-                    // branch condition, ahead of the body's action
-                    // terms (guards are pure, so re-evaluating the
-                    // condition per term cannot diverge).
-                    for bind in then_binds {
-                        out.push((guard.clone(), bind));
-                    }
-                    if then_tail.is_empty() && needs_else_guard {
-                        // An empty/no-op then-branch still gates the else.
-                        out.push((
-                            guard.clone(),
-                            TermAction::Continue(RouteModifications::default()),
-                        ));
-                    }
-                    for action in then_tail {
-                        out.push((guard.clone(), action));
-                    }
-                    if let Some(else_actions) = &if_stmt.else_actions {
-                        let scope = lets.mark();
-                        let (else_binds, else_tail) = self.lower_body(else_actions, env, lets);
-                        lets.reset(scope);
-                        let negated = MatchExpr::Not(Box::new(guard));
-                        for bind in else_binds {
-                            out.push((negated.clone(), bind));
-                        }
-                        for action in else_tail {
-                            out.push((negated.clone(), action));
-                        }
+                    if if_stmt.is_flat() {
+                        self.lower_flat_if(if_stmt, env, lets, store, &mut out);
+                    } else {
+                        self.lower_if_chain(if_stmt, env, lets, store, &mut out);
                     }
                 }
                 // LAN-303: the loop variable is a binding in a fresh
@@ -857,6 +819,136 @@ impl<'a> Lowerer<'a> {
             out.push((MatchExpr::True, TermAction::Continue(pending)));
         }
         out
+    }
+
+    /// A single `if` with flat action bodies: the guard on every term of
+    /// the body, its negation on every term of the `else`.
+    fn lower_flat_if(
+        &mut self,
+        if_stmt: &IfStmt,
+        env: &HashMap<&str, u32>,
+        lets: &mut LetEnv,
+        store: &mut SetStore,
+        out: &mut Vec<(MatchExpr, TermAction)>,
+    ) {
+        let branch = &if_stmt.branches[0];
+        // Function calls in the guard hoist their binds as
+        // unconditional terms ahead of the guard's own
+        // (LAN-304): they evaluate when the walk reaches
+        // this statement — eager like `let`, so both the
+        // positive and negated guard read written slots.
+        let mut guard_binds = Vec::new();
+        let guard = self.lower_expr(&branch.cond, env, lets, store, &mut guard_binds);
+        for bind in guard_binds {
+            out.push((MatchExpr::True, bind));
+        }
+        let scope = lets.mark();
+        let (then_binds, then_tail) = self.lower_body(&branch.body, env, lets);
+        lets.reset(scope);
+        let needs_else_guard = if_stmt.else_body.is_some();
+        // Body `let`s become Bind terms guarded by the
+        // branch condition, ahead of the body's action
+        // terms (guards are pure, so re-evaluating the
+        // condition per term cannot diverge).
+        for bind in then_binds {
+            out.push((guard.clone(), bind));
+        }
+        if then_tail.is_empty() && needs_else_guard {
+            // An empty/no-op then-branch still gates the else.
+            out.push((
+                guard.clone(),
+                TermAction::Continue(RouteModifications::default()),
+            ));
+        }
+        for action in then_tail {
+            out.push((guard.clone(), action));
+        }
+        if let Some(else_body) = &if_stmt.else_body {
+            let scope = lets.mark();
+            let (else_binds, else_tail) = self.lower_body(&else_body.body, env, lets);
+            lets.reset(scope);
+            let negated = MatchExpr::Not(Box::new(guard));
+            for bind in else_binds {
+                out.push((negated.clone(), bind));
+            }
+            for action in else_tail {
+                out.push((negated.clone(), action));
+            }
+        }
+    }
+
+    /// An `else if` chain or a nested `if`, as first-match IR terms with no
+    /// new runtime node: every term a branch body lowers to is guarded by
+    /// the branch's path condition, the negation of each earlier branch
+    /// guard and then its own guard, joined by `And` in that order (`And`
+    /// short-circuits, so a later guard evaluates only where the source
+    /// would reach it). The final `else` takes the negations alone, and a
+    /// nested `if` lowers the same way inside its body, so its terms
+    /// conjoin onto the enclosing path.
+    fn lower_if_chain(
+        &mut self,
+        if_stmt: &IfStmt,
+        env: &HashMap<&str, u32>,
+        lets: &mut LetEnv,
+        store: &mut SetStore,
+        out: &mut Vec<(MatchExpr, TermAction)>,
+    ) {
+        // The negation of every earlier branch guard; `None` before the
+        // first branch.
+        let mut prefix: Option<MatchExpr> = None;
+        let count = if_stmt.branches.len();
+        for (index, branch) in if_stmt.branches.iter().enumerate() {
+            // A guard's function-call binds evaluate when the walk reaches
+            // the branch: under the negations of the earlier branches.
+            let mut guard_binds = Vec::new();
+            let guard = self.lower_expr(&branch.cond, env, lets, store, &mut guard_binds);
+            for bind in guard_binds {
+                out.push((prefix.clone().unwrap_or(MatchExpr::True), bind));
+            }
+            let here = conjoin(prefix.as_ref(), guard.clone());
+            let gated = index + 1 < count || if_stmt.else_body.is_some();
+            self.lower_branch(&branch.body, &here, gated, env, lets, store, out);
+            prefix = Some(conjoin(prefix.as_ref(), MatchExpr::Not(Box::new(guard))));
+        }
+        if let Some(else_body) = &if_stmt.else_body {
+            let path = prefix.expect("an if chain has a branch");
+            self.lower_branch(&else_body.body, &path, false, env, lets, store, out);
+        }
+    }
+
+    /// One branch body under `path`, in its own `lets` scope. `gated`: a
+    /// later branch follows, so an empty body still lowers to one term (as
+    /// a flat `if` does), keeping every branch attributable.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the lowering context plus the branch's path and output"
+    )]
+    fn lower_branch(
+        &mut self,
+        body: &[Stmt],
+        path: &MatchExpr,
+        gated: bool,
+        env: &HashMap<&str, u32>,
+        lets: &mut LetEnv,
+        store: &mut SetStore,
+        out: &mut Vec<(MatchExpr, TermAction)>,
+    ) {
+        let scope = lets.mark();
+        let terms = self.lower_stmts(body, env, lets, store);
+        lets.reset(scope);
+        if terms.is_empty() && gated {
+            out.push((
+                path.clone(),
+                TermAction::Continue(RouteModifications::default()),
+            ));
+        }
+        for (guard, action) in terms {
+            let guard = match guard {
+                MatchExpr::True => path.clone(),
+                inner => conjoin(Some(path), inner),
+            };
+            out.push((guard, action));
+        }
     }
 
     /// Resolve a loop's iteration source (LAN-303; runs on typechecked
@@ -1275,6 +1367,17 @@ fn lower_cmp(
     }
 }
 
+/// `path && inner`, as one `And` with the path first: `And` evaluates
+/// its children in order and stops at the first miss, so `inner` runs
+/// only where the path holds (a branch's guard never evaluates where
+/// the source would not reach it).
+fn conjoin(path: Option<&MatchExpr>, inner: MatchExpr) -> MatchExpr {
+    match path {
+        None => inner,
+        Some(path) => MatchExpr::And(vec![path.clone(), inner]),
+    }
+}
+
 /// Flush staged modifications as an unconditional
 /// [`TermAction::Continue`] term, preserving execution order around
 /// terms that must stand alone (`if` blocks, loops, loop control,
@@ -1288,7 +1391,7 @@ fn flush_pending(out: &mut Vec<(MatchExpr, TermAction)>, pending: &mut RouteModi
     }
 }
 
-/// Lower an `if` body (a flat action list) to its `let` bindings
+/// Lower a flat `if` body (actions only) to its `let` bindings
 /// (LAN-302 — [`TermAction::Bind`]s the caller emits ahead of the
 /// action terms, guarded by the branch condition; function-call binds
 /// hoist here too, LAN-304) and its ordered action tail: staged
@@ -1301,10 +1404,15 @@ fn flush_pending(out: &mut Vec<(MatchExpr, TermAction)>, pending: &mut RouteModi
 impl Lowerer<'_> {
     fn lower_body(
         &self,
-        actions: &[ActionStmt],
+        body: &[Stmt],
         env: &HashMap<&str, u32>,
         lets: &mut LetEnv,
     ) -> (Vec<TermAction>, Vec<TermAction>) {
+        // Flat bodies only (the caller checked `IfStmt::is_flat`).
+        let actions = body.iter().filter_map(|stmt| match stmt {
+            Stmt::Action(action) => Some(action),
+            Stmt::If(_) | Stmt::For(_) => None,
+        });
         let mut binds = Vec::new();
         let mut tail: Vec<TermAction> = Vec::new();
         let mut mods = RouteModifications::default();

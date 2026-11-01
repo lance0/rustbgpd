@@ -19,8 +19,8 @@ use crate::ir::ValueField;
 
 use super::ast::{
     ActionStmt, CmpOp, CommunityArg, CommunityKind, DatasetDecl, DatasetEntryAst, Expr, FieldPath,
-    FieldRoot, FnDef, ForSource, ForStmt, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile,
-    Stmt, U32Arg, ValueExprAst,
+    FieldRoot, FnDef, ForSource, ForStmt, IfStmt, PolicyDef, PrependAsArg, Rhs, RouteField,
+    SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned, closest};
 
@@ -108,6 +108,12 @@ const MAX_APPLY_EXPANSION: u64 = 100_000;
 /// the cost DP would reject most of them anyway.
 const MAX_LOOP_DEPTH: u32 = 4;
 
+/// Maximum `if` nesting depth: an `if` inside an `if` body, up to this
+/// many levels, the loop precedent. An `else if` chain is one level, at
+/// any length. Each level conjoins one more guard into every IR term it
+/// lowers to, and the cost DP charges every re-evaluated guard.
+const MAX_IF_DEPTH: u32 = 4;
+
 /// The value-expression builtins (LAN-299) and their arities.
 const VALUE_BUILTINS: &[(&str, usize)] = &[("min", 2), ("max", 2), ("clamp", 3)];
 
@@ -141,10 +147,11 @@ struct FnCost {
 }
 
 /// Maximum `let` bindings per lexical scope (LAN-302, ADR-0103
-/// Decision 3). A scope is one term body or one `if`/`else` body; the
-/// grammar has exactly those two nesting levels, so the evaluation
-/// frame is statically `2 × MAX_LOCALS` slots
-/// (`crate::eval::LOCAL_FRAME_SLOTS`) — no runtime growth, ever.
+/// Decision 3). A scope is one term, loop, or `if`/`else` body. Sibling
+/// scopes reuse slots, and every binding live along one path shares the
+/// fixed `crate::eval::LOCAL_FRAME_SLOTS` frame, which
+/// `declare_binding` and the per-term high-water check enforce, so
+/// deeper nesting never grows the frame at runtime.
 const MAX_LOCALS: usize = 64;
 
 /// Name-resolution scope for one policy body (LAN-302): the declared
@@ -672,7 +679,7 @@ impl<'a> Checker<'a> {
         for stmt in stmts {
             if let Some((terminal_span, label)) = terminated {
                 let span = match stmt {
-                    Stmt::If(if_stmt) => if_stmt.span,
+                    Stmt::If(if_stmt) => if_stmt.span(),
                     Stmt::Action(action) => action.span(),
                     Stmt::For(for_stmt) => for_stmt.span,
                 };
@@ -709,13 +716,7 @@ impl<'a> Checker<'a> {
                         _ => {}
                     }
                 }
-                Stmt::If(if_stmt) => {
-                    self.check_expr(&if_stmt.cond, scope);
-                    self.check_action_list(&if_stmt.then_actions, scope, loop_depth);
-                    if let Some(else_actions) = &if_stmt.else_actions {
-                        self.check_action_list(else_actions, scope, loop_depth);
-                    }
-                }
+                Stmt::If(if_stmt) => self.check_if(if_stmt, scope, loop_depth, 0),
                 Stmt::For(for_stmt) => self.check_for(for_stmt, scope, loop_depth),
             }
         }
@@ -873,26 +874,82 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// One `if` chain at `if_depth` enclosing `if` bodies: every guard,
+    /// then every body. `MAX_IF_DEPTH` caps the nesting.
+    fn check_if(&mut self, if_stmt: &IfStmt, scope: &mut Scope, loop_depth: u32, if_depth: u32) {
+        if if_depth == MAX_IF_DEPTH {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    if_stmt.span(),
+                    format!("`if` statements nest more than {MAX_IF_DEPTH} deep"),
+                    "`if` nesting limit exceeded",
+                )
+                .with_note(
+                    "every level conjoins another guard into each branch; join the \
+                     conditions with `&&`, use `else if`, or split the term",
+                ),
+            );
+        }
+        for branch in &if_stmt.branches {
+            self.check_expr(&branch.cond, scope);
+            self.check_if_body(&branch.body, scope, loop_depth, if_depth + 1);
+        }
+        if let Some(else_body) = &if_stmt.else_body {
+            self.check_if_body(&else_body.body, scope, loop_depth, if_depth + 1);
+        }
+    }
+
     /// One `if`/`else` body — its own lexical scope (LAN-302): `let`
     /// bindings declared here are visible to the rest of the body and
-    /// nowhere else. `loop_depth` scopes `break`/`continue` (LAN-303).
-    fn check_action_list(&mut self, actions: &[ActionStmt], scope: &mut Scope, loop_depth: u32) {
+    /// nowhere else. `loop_depth` scopes `break`/`continue` (LAN-303);
+    /// `if_depth` counts the enclosing `if` bodies, this one included.
+    fn check_if_body(&mut self, body: &[Stmt], scope: &mut Scope, loop_depth: u32, if_depth: u32) {
         let mark = scope.lets.len();
         let mut body_locals = 0usize;
         let mut terminated: Option<Span> = None;
-        for action in actions {
+        for stmt in body {
             if let Some(verdict_span) = terminated {
-                self.diags.push(
-                    Diagnostic::coded(
-                        DiagnosticCode::Typecheck,
+                let (span, message, label) = match stmt {
+                    Stmt::Action(action) => (
                         action.span(),
                         "unreachable action",
                         "this action can never execute",
-                    )
-                    .with_label(verdict_span, "the branch already decided here"),
+                    ),
+                    Stmt::If(if_stmt) => (
+                        if_stmt.span(),
+                        "unreachable statement",
+                        "this statement can never execute",
+                    ),
+                    Stmt::For(for_stmt) => (
+                        for_stmt.span,
+                        "unreachable statement",
+                        "this statement can never execute",
+                    ),
+                };
+                self.diags.push(
+                    Diagnostic::coded(DiagnosticCode::Typecheck, span, message, label)
+                        .with_label(verdict_span, "the branch already decided here"),
                 );
                 break;
             }
+            let action = match stmt {
+                Stmt::Action(action) => action,
+                Stmt::If(if_stmt) => {
+                    self.check_if(if_stmt, scope, loop_depth, if_depth);
+                    continue;
+                }
+                // The parser admits no loop in an `if` body.
+                Stmt::For(for_stmt) => {
+                    self.diags.push(Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        for_stmt.span,
+                        "`for` is not allowed in an `if` body",
+                        "loops go in term or loop bodies",
+                    ));
+                    continue;
+                }
+            };
             if let ActionStmt::Let { name, init, .. } = action {
                 self.check_value_expr(init, scope);
                 self.declare_binding(scope, name, &mut body_locals);
@@ -2391,7 +2448,14 @@ fn apply_edges(file: &SourceFile) -> HashMap<&str, Vec<(&str, Span)>> {
     fn walk_stmts<'a>(stmts: &'a [Stmt], targets: &mut Vec<(&'a str, Span)>) {
         for stmt in stmts {
             match stmt {
-                Stmt::If(if_stmt) => collect_applies(&if_stmt.cond, targets),
+                Stmt::If(if_stmt) => {
+                    for branch in &if_stmt.branches {
+                        collect_applies(&branch.cond, targets);
+                    }
+                    for body in if_stmt.bodies() {
+                        walk_stmts(body, targets);
+                    }
+                }
                 Stmt::Action(_) => {}
                 // LAN-303: `if apply(p)` inside a loop body still
                 // participates in the DAG/bounds analyses.
@@ -2486,22 +2550,13 @@ fn bound_policy<'a>(
         for stmt in &term.stmts {
             match stmt {
                 Stmt::If(if_stmt) => {
-                    let cost = guard_cost(&if_stmt.cond, pred_cost, fns);
-                    arms.extend(
-                        (0..guarded_action_terms(&if_stmt.then_actions, fns)).map(|_| cost),
-                    );
-                    if let Some(actions) = &if_stmt.else_actions {
-                        arms.extend(
-                            (0..guarded_action_terms(actions, fns)).map(|_| cost.saturating_add(1)),
-                        );
-                    }
-                    for action in if_stmt
-                        .then_actions
-                        .iter()
-                        .chain(if_stmt.else_actions.iter().flatten())
-                    {
-                        action_cost = action_cost.saturating_add(action_value_cost(action, fns));
-                    }
+                    if_terms(if_stmt, 0, pred_cost, fns, &mut |guard, terms, action| {
+                        arms.extend((0..terms).map(|_| guard));
+                        if let Some(action) = action {
+                            action_cost =
+                                action_cost.saturating_add(action_value_cost(action, fns));
+                        }
+                    });
                 }
                 Stmt::Action(action) => {
                     arms.push(1);
@@ -2556,13 +2611,15 @@ fn bound_policy<'a>(
                 def.name.span,
                 format!(
                     "policy `{name}` expands past {MAX_APPLY_EXPANSION} IR nodes \
-                     through `apply` inlining"
+                     through `apply` inlining or `if` branches"
                 ),
                 "compiled size limit exceeded",
             )
             .with_note(
                 "apply(p) inlines p's decision predicate — and every function call its \
-                 fully-inlined body — at every use site; split or flatten the composition",
+                 fully-inlined body — at every use site, and every `else if` branch \
+                 repeats the negation of each earlier guard in its chain; split or \
+                 flatten the composition, or shorten the chain",
             ),
         );
     }
@@ -2638,31 +2695,21 @@ fn for_costs(
     let mut body_steps: u64 = 1; // the loop-var bind per iteration
     for stmt in &for_stmt.body {
         match stmt {
+            // Upper bound per iteration: every lowered term's guard (each
+            // branch's path conjunction, re-evaluated per term) plus
+            // every body action.
             Stmt::If(if_stmt) => {
-                let guard = guard_cost(&if_stmt.cond, pred_cost, fns);
-                // Upper bound per iteration: the guard (twice with an
-                // else — the negated arm) plus every body action.
-                let mut guards =
-                    guard.saturating_mul(guarded_action_terms(&if_stmt.then_actions, fns));
-                if let Some(actions) = &if_stmt.else_actions {
-                    guards = guards.saturating_add(
-                        guard
+                if_terms(if_stmt, 0, pred_cost, fns, &mut |guard, terms, action| {
+                    let guards = guard.saturating_mul(terms);
+                    nodes = nodes.saturating_add(guards);
+                    body_steps = body_steps.saturating_add(guards);
+                    if let Some(action) = action {
+                        nodes = nodes.saturating_add(1);
+                        body_steps = body_steps
                             .saturating_add(1)
-                            .saturating_mul(guarded_action_terms(actions, fns)),
-                    );
-                }
-                nodes = nodes.saturating_add(guards);
-                body_steps = body_steps.saturating_add(guards);
-                for action in if_stmt
-                    .then_actions
-                    .iter()
-                    .chain(if_stmt.else_actions.iter().flatten())
-                {
-                    nodes = nodes.saturating_add(1);
-                    body_steps = body_steps
-                        .saturating_add(1)
-                        .saturating_add(action_value_cost(action, fns));
-                }
+                            .saturating_add(action_value_cost(action, fns));
+                    }
+                });
             }
             Stmt::Action(action) => {
                 nodes = nodes.saturating_add(1);
@@ -2690,6 +2737,78 @@ fn for_costs(
 fn binding_value_cmp(rhs: &Rhs, resolved: Field, scope: &Scope<'_>) -> bool {
     matches!(rhs, Rhs::Ident(name)
         if scope.is_local(&name.node) && value_field_of(resolved).is_some())
+}
+
+/// The IR guard nodes of `inner` conjoined under a path condition of
+/// `path` nodes (0: no enclosing condition), as the lowerer builds it:
+/// one `And` node joining the two.
+fn conjoined_cost(path: u64, inner: u64) -> u64 {
+    if path == 0 {
+        inner
+    } else {
+        1u64.saturating_add(path).saturating_add(inner)
+    }
+}
+
+/// Every IR term an `if` chain lowers to, reported as
+/// `(guard nodes, terms, action)` — mirroring the lowerer: branch `k`
+/// is guarded by the path condition, the negation of every earlier
+/// branch guard, and its own guard; the final `else` by the path and
+/// every negation; a nested `if` conjoins its chain onto its body's
+/// path. Every term re-evaluates its whole guard, and each report
+/// charges it. `action` is `None` for an empty body's placeholder term
+/// and for a nested guard's function-call binds.
+fn if_terms<'a>(
+    if_stmt: &'a IfStmt,
+    path: u64,
+    pred_cost: &HashMap<&str, u64>,
+    fns: &HashMap<&str, FnCost>,
+    out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>),
+) {
+    fn body_terms<'a>(
+        body: &'a [Stmt],
+        path: u64,
+        pred_cost: &HashMap<&str, u64>,
+        fns: &HashMap<&str, FnCost>,
+        out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>),
+    ) {
+        if body.is_empty() {
+            out(path, 1, None);
+        }
+        for stmt in body {
+            match stmt {
+                Stmt::Action(action) => out(
+                    path,
+                    guarded_action_terms(std::slice::from_ref(action), fns),
+                    Some(action),
+                ),
+                Stmt::If(inner) => if_terms(inner, path, pred_cost, fns, out),
+                // Rejected by the typechecker; nothing lowers.
+                Stmt::For(_) => {}
+            }
+        }
+    }
+    let mut prefix = path;
+    for branch in &if_stmt.branches {
+        let guard = guard_cost(&branch.cond, pred_cost, fns);
+        // A guard's function-call binds run once the walk reaches the
+        // branch, under its path condition.
+        let binds = guard_call_slots(&branch.cond, fns);
+        if prefix != 0 && binds != 0 {
+            out(prefix, binds, None);
+        }
+        body_terms(
+            &branch.body,
+            conjoined_cost(prefix, guard),
+            pred_cost,
+            fns,
+            out,
+        );
+        prefix = conjoined_cost(prefix, guard.saturating_add(1));
+    }
+    if let Some(else_body) = &if_stmt.else_body {
+        body_terms(&else_body.body, prefix, pred_cost, fns, out);
+    }
 }
 
 /// Conservative guarded-tail count: every source action plus every Bind term
@@ -2735,18 +2854,11 @@ fn action_value_cost(action: &ActionStmt, fns: &HashMap<&str, FnCost>) -> u64 {
 /// bodies, `if`/`else` bodies, and loop bodies — or `None`. Backs the
 /// LAN-302 `apply`-target rejection.
 fn first_let(def: &PolicyDef) -> Option<Span> {
-    fn in_actions(actions: &[ActionStmt]) -> Option<Span> {
-        actions.iter().find_map(|action| match action {
-            ActionStmt::Let { span, .. } => Some(*span),
-            _ => None,
-        })
-    }
     fn in_stmts(stmts: &[Stmt]) -> Option<Span> {
         stmts.iter().find_map(|stmt| match stmt {
             Stmt::Action(ActionStmt::Let { span, .. }) => Some(*span),
             Stmt::Action(_) => None,
-            Stmt::If(if_stmt) => in_actions(&if_stmt.then_actions)
-                .or_else(|| if_stmt.else_actions.as_deref().and_then(in_actions)),
+            Stmt::If(if_stmt) => if_stmt.bodies().find_map(in_stmts),
             Stmt::For(for_stmt) => in_stmts(&for_stmt.body),
         })
     }
@@ -2807,15 +2919,11 @@ fn first_fn_call(def: &PolicyDef, file: &SourceFile) -> Option<Span> {
     fn in_stmts(stmts: &[Stmt], file: &SourceFile) -> Option<Span> {
         stmts.iter().find_map(|stmt| match stmt {
             Stmt::Action(action) => in_action(action, file),
-            Stmt::If(if_stmt) => in_expr(&if_stmt.cond, file)
-                .or_else(|| if_stmt.then_actions.iter().find_map(|a| in_action(a, file)))
-                .or_else(|| {
-                    if_stmt
-                        .else_actions
-                        .iter()
-                        .flatten()
-                        .find_map(|a| in_action(a, file))
-                }),
+            Stmt::If(if_stmt) => if_stmt
+                .branches
+                .iter()
+                .find_map(|branch| in_expr(&branch.cond, file))
+                .or_else(|| if_stmt.bodies().find_map(|body| in_stmts(body, file))),
             Stmt::For(for_stmt) => in_stmts(&for_stmt.body, file),
         })
     }
@@ -2888,21 +2996,6 @@ fn guard_call_slots(expr: &Expr, fns: &HashMap<&str, FnCost>) -> u64 {
 /// `if`/`else` and loop bodies mark/reset, so sibling scopes reuse
 /// slots (their readers execute before the sibling's binds — LAN-302).
 fn stmts_slot_high_water(stmts: &[Stmt], base: u64, fns: &HashMap<&str, FnCost>) -> u64 {
-    fn actions_high_water(actions: &[ActionStmt], base: u64, fns: &HashMap<&str, FnCost>) -> u64 {
-        let mut cur = base;
-        for action in actions {
-            match action {
-                ActionStmt::Let { init, .. } => {
-                    cur = cur.saturating_add(call_slots(init, fns)).saturating_add(1);
-                }
-                ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => {
-                    cur = cur.saturating_add(call_slots(expr, fns));
-                }
-                _ => {}
-            }
-        }
-        cur
-    }
     let mut cur = base;
     let mut high = base;
     for stmt in stmts {
@@ -2914,11 +3007,15 @@ fn stmts_slot_high_water(stmts: &[Stmt], base: u64, fns: &HashMap<&str, FnCost>)
                 cur = cur.saturating_add(call_slots(expr, fns));
             }
             Stmt::Action(_) => {}
+            // Every branch guard's call binds persist at this level; each
+            // body is a nested scope, reset on exit.
             Stmt::If(if_stmt) => {
-                cur = cur.saturating_add(guard_call_slots(&if_stmt.cond, fns));
-                high = high.max(actions_high_water(&if_stmt.then_actions, cur, fns));
-                if let Some(else_actions) = &if_stmt.else_actions {
-                    high = high.max(actions_high_water(else_actions, cur, fns));
+                for branch in &if_stmt.branches {
+                    cur = cur.saturating_add(guard_call_slots(&branch.cond, fns));
+                    high = high.max(stmts_slot_high_water(&branch.body, cur, fns));
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    high = high.max(stmts_slot_high_water(&else_body.body, cur, fns));
                 }
             }
             // Loop variable + body in a nested scope, reset on exit.

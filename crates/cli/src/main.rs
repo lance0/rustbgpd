@@ -939,7 +939,8 @@ enum PolicyAction {
         coverage_matched_min: Option<f64>,
         /// Fail the check (exit 4) on the named lints, comma-separated:
         /// unused-set, unused-dataset, unused-fn, unreachable-term,
-        /// unreferenced-policy, optional-field-negation. Bare `--deny-lints`
+        /// unreachable-branch, unreferenced-policy, optional-field-negation.
+        /// Bare `--deny-lints`
         /// denies every lint.
         /// Lints are always computed; without this flag they are
         /// warnings and never change the exit code. Exit codes 1, 2
@@ -7119,6 +7120,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             "unused-dataset",
             "unused-fn",
             "unreachable-term",
+            "unreachable-branch",
             "unreferenced-policy",
             "optional-field-negation",
         ];
@@ -7128,6 +7130,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             replies(&["--deny-lints=unr"]).1,
             [
                 "--deny-lints=unreachable-term",
+                "--deny-lints=unreachable-branch",
                 "--deny-lints=unreferenced-policy"
             ]
         );
@@ -7147,9 +7150,16 @@ printf '%s\n' "${COMPREPLY[@]}"
         words.push("unr");
         let (_, after_equals) =
             bash_replies_at(&script, files.path(), &words, false, Some(("unr", "=")));
-        assert_eq!(after_equals, ["unreachable-term", "unreferenced-policy"]);
         assert_eq!(
-            replies(&["--deny-lints", "=", "unused-set,unreach"]).1,
+            after_equals,
+            [
+                "unreachable-term",
+                "unreachable-branch",
+                "unreferenced-policy"
+            ]
+        );
+        assert_eq!(
+            replies(&["--deny-lints", "=", "unused-set,unreachable-t"]).1,
             ["unused-set,unreachable-term"]
         );
         assert_eq!(

@@ -457,7 +457,8 @@ fn is_starter(children: &[Node<'_>], i: usize, ctx: Ctx, prev: Tok, expr_head: b
 }
 
 /// End (exclusive) of the statement starting at `start`. Statements
-/// end at their brace group (with `else` continuation for `if`), at a
+/// end at their brace group (with `else` and `else if` continuation
+/// for `if`), at a
 /// consumed separator, before the next statement starter, before an
 /// own-line comment, or at the end of the block.
 fn stmt_end(children: &[Node<'_>], start: usize, ctx: Ctx) -> usize {
@@ -518,7 +519,9 @@ fn stmt_end(children: &[Node<'_>], start: usize, ctx: Ctx) -> usize {
             }
             Node::Group { .. } => {
                 i += 1;
-                if head_kind == Tok::IfKw
+                // Each `else` (or `else if <cond>`) continues the statement
+                // through its body group.
+                while head_kind == Tok::IfKw
                     && let Some(Node::Tok {
                         kind: Tok::ElseKw, ..
                     }) = children.get(i)
