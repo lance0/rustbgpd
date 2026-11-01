@@ -346,6 +346,46 @@ fn peer_up_initial_table_work_is_linear() {
     );
 }
 
+/// The last rs-control member of a group holding `ROUTES * LARGE` prefixes
+/// goes down. With every route carrying `0:64999`, a control community
+/// naming no member, the group's control index is as large as the table;
+/// the leave retires it one checkpoint per entry, not in one clear.
+fn last_rs_member_down(tagged: bool) -> Work {
+    let (_tx, mut manager) = manager();
+    let mut receivers = vec![
+        join(&mut manager, 0, false, None).0,
+        join(&mut manager, 1, true, None).0,
+    ];
+    let mut update = routes_from(external(), 0, 1, ROUTES * LARGE);
+    if tagged && let RibUpdate::RoutesReceived { announced, .. } = &mut update {
+        for route in announced {
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities(vec![64_999]));
+            });
+        }
+    }
+    manager.handle_update(update);
+    drain_route_chunks(&mut manager);
+    assert_eq!(drain(&mut receivers), (2 * ROUTES * LARGE, 0), "setup");
+    checkpoints_in(|| {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: member(1),
+            session_id: 1,
+        });
+    })
+}
+
+#[test]
+fn last_rs_member_down_checkpoints_every_control_index_entry() {
+    let plain = last_rs_member_down(false);
+    let tagged = last_rs_member_down(true);
+    // Each key sits in the index and in its named-ASN set.
+    assert!(
+        tagged[ALL] >= plain[ALL] + 2 * ROUTES * LARGE,
+        "untagged: {plain:?}\ntagged: {tagged:?}"
+    );
+}
+
 #[test]
 fn policy_reload_work_is_linear() {
     assert_linear(

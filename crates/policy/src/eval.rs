@@ -316,12 +316,12 @@ impl fmt::Display for EvalErrorKind {
 
 /// Size of the per-evaluation `let`-binding register file (LAN-302 /
 /// LAN-303): scopes are a term body, up to `MAX_LOOP_DEPTH` (4) nested
-/// loop bodies, and one `if`/`else` body — each capped at `MAX_LOCALS`
-/// = 64 bindings by the typechecker, which additionally rejects any
-/// program whose live bindings along one path exceed this frame (the
-/// slot is a `u8`, so 256 is the natural register-file size and stays
-/// well under ADR-0103 Decision 3's 1,024-slot cap). Slots reset per
-/// source term and sibling scopes reuse.
+/// loop bodies, and up to four nested `if`/`else` bodies — each capped
+/// at `MAX_LOCALS` = 64 bindings by the typechecker, which additionally
+/// rejects any program whose live bindings along one path exceed this
+/// frame (the slot is a `u8`, so 256 is the natural register-file size
+/// and stays well under ADR-0103 Decision 3's 1,024-slot cap). Slots
+/// reset per source term and sibling scopes reuse.
 pub(crate) const LOCAL_FRAME_SLOTS: usize = 256;
 
 /// The fixed-size evaluation frame `let` bindings live in: a stack
@@ -1805,7 +1805,9 @@ impl CompiledChain {
     /// (never a runtime call into another policy), and the tree's depth
     /// is capped by the frontend (`MAX_EXPR_DEPTH` at parse,
     /// `MAX_APPLY_DEPTH`/`MAX_APPLY_EXPANSION` at typecheck — LAN-184 /
-    /// LAN-290), so this recursion is statically bounded.
+    /// LAN-290), so this recursion is statically bounded. An `if` path
+    /// joins its conditions in one flat `And` per term, so an `else if`
+    /// chain adds no depth and each nested `if` at most its own guard's.
     ///
     /// `err` is the LAN-299 eval-error slot: a [`MatchExpr::ValueCmp`]
     /// whose value expression fails sets it (first error wins) and

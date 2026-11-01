@@ -114,8 +114,8 @@ pub enum DatasetEntryAst {
     Prefix(PrefixEntryAst),
     /// A bare u32 ASN.
     Asn(u32),
-    /// A community literal of any kind.
-    Community(CommunityLit),
+    /// A community literal or pattern of any kind.
+    Community(crate::sets::CommunityMember),
 }
 
 /// `dataset NAME { members }` inside a `test` block (LAN-305): the
@@ -145,8 +145,9 @@ pub struct AsnSetDef {
 pub struct CommunitySetDef {
     /// Set name.
     pub name: Spanned<String>,
-    /// Member community literals (standard / large / RT / RO mixed).
-    pub entries: Vec<Spanned<CommunityLit>>,
+    /// Member criteria (standard / large / RT / RO literals and
+    /// patterns, mixed).
+    pub entries: Vec<Spanned<crate::sets::CommunityMember>>,
 }
 
 /// A community literal of any of the three kinds.
@@ -253,13 +254,13 @@ pub struct TermDef {
 /// A term-body statement.
 #[derive(Debug)]
 pub enum Stmt {
-    /// `if <expr> { actions } [else { actions }]`.
+    /// `if <expr> { body } [else if <expr> { body }]... [else { body }]`.
     If(IfStmt),
     /// A bare action executed unconditionally.
     Action(ActionStmt),
     /// `for <var> in <source> { statements }` (LAN-303). Legal in term
     /// bodies and (nested, depth-capped) in loop bodies; `if` bodies
-    /// stay flat action lists (the V1 rule).
+    /// hold actions, `let` and nested `if` only.
     For(ForStmt),
 }
 
@@ -304,18 +305,67 @@ impl ForSource {
     }
 }
 
-/// `if <cond> { then } [else { otherwise }]`. Bodies are flat action
-/// lists — V1 has no nested `if`.
+/// `if <cond> { body } [else if <cond> { body }]... [else { body }]`.
+///
+/// The `else if` chain is flat: one [`IfBranch`] per condition, in
+/// source order, so no consumer recurses along a long chain. A branch
+/// body holds actions, `let` bindings and nested `if` statements
+/// (depth-capped by the typechecker); loops stay at term and loop-body
+/// level.
 #[derive(Debug)]
 pub struct IfStmt {
+    /// The `if` branch, then each `else if` branch. Never empty.
+    pub branches: Vec<IfBranch>,
+    /// The final `else` body, if any.
+    pub else_body: Option<ElseBody>,
+}
+
+/// One conditional branch of an [`IfStmt`].
+#[derive(Debug)]
+pub struct IfBranch {
     /// The guard expression.
     pub cond: Expr,
-    /// Actions when the guard matches.
-    pub then_actions: Vec<ActionStmt>,
-    /// Actions when it does not (optional `else`).
-    pub else_actions: Option<Vec<ActionStmt>>,
+    /// Statements when this guard matches and no earlier one did.
+    pub body: Vec<Stmt>,
     /// Span of the `if` keyword + condition.
     pub span: Span,
+}
+
+/// The final `else` of an [`IfStmt`].
+#[derive(Debug)]
+pub struct ElseBody {
+    /// Statements when no branch guard matched.
+    pub body: Vec<Stmt>,
+    /// Span of the `else` keyword.
+    pub span: Span,
+}
+
+impl IfStmt {
+    /// Span of the leading `if` keyword + condition.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        self.branches[0].span
+    }
+
+    /// Every body — each branch's, then the final `else` — in source
+    /// order.
+    pub fn bodies(&self) -> impl Iterator<Item = &[Stmt]> {
+        self.branches
+            .iter()
+            .map(|branch| branch.body.as_slice())
+            .chain(self.else_body.iter().map(|other| other.body.as_slice()))
+    }
+
+    /// Whether every body is a flat list of actions (the pre-nesting
+    /// shape, which lowers exactly as it always has).
+    #[must_use]
+    pub fn is_flat(&self) -> bool {
+        self.branches.len() == 1
+            && self
+                .bodies()
+                .flatten()
+                .all(|stmt| matches!(stmt, Stmt::Action(_)))
+    }
 }
 
 /// A `u32` value expression (LAN-299): checked arithmetic over

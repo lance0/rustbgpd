@@ -455,7 +455,8 @@ fn is_starter(children: &[Node<'_>], i: usize, ctx: Ctx, prev: Tok, expr_head: b
 }
 
 /// End (exclusive) of the statement starting at `start`. Statements
-/// end at their brace group (with `else` continuation for `if`), at a
+/// end at their brace group (with `else` and `else if` continuation
+/// for `if`), at a
 /// consumed separator, before the next statement starter, before an
 /// own-line comment, or at the end of the block.
 fn stmt_end(children: &[Node<'_>], start: usize, ctx: Ctx) -> usize {
@@ -516,12 +517,20 @@ fn stmt_end(children: &[Node<'_>], start: usize, ctx: Ctx) -> usize {
             }
             Node::Group { .. } => {
                 i += 1;
-                if head_kind == Tok::IfKw
-                    && let Some(Node::Tok {
-                        kind: Tok::ElseKw, ..
-                    }) = children.get(i)
+                // Each `else` (or `else if <cond>`) continues the statement
+                // through its body group, past any comments before it.
+                while head_kind == Tok::IfKw
+                    && let Some(next) =
+                        (i..children.len()).find(|&j| !matches!(children[j], Node::Comment { .. }))
+                    && matches!(
+                        children[next],
+                        Node::Tok {
+                            kind: Tok::ElseKw,
+                            ..
+                        }
+                    )
                 {
-                    i += 1;
+                    i = next + 1;
                     while i < children.len() {
                         let done = matches!(children[i], Node::Group { .. });
                         i += 1;
@@ -627,7 +636,18 @@ fn render_expanded(nodes: &[Node<'_>], ctx: Ctx, indent: usize, out: &mut Vec<St
     let base = INDENT.repeat(indent);
     let mut cur = base.clone();
     let mut prev: Option<Tok> = None;
-    for node in nodes {
+    // In an `if` chain, the kind of the first token after each node, from
+    // one backward pass (scanning ahead from every comment would be
+    // quadratic in a run of comments).
+    let mut next_tok = vec![None; if head.0 == Tok::IfKw { nodes.len() } else { 0 }];
+    let mut next = None;
+    for (slot, node) in next_tok.iter_mut().zip(nodes).rev() {
+        *slot = next;
+        if let Node::Tok { kind, .. } = node {
+            next = Some(*kind);
+        }
+    }
+    for (index, node) in nodes.iter().enumerate() {
         match node {
             Node::Comment { text, nl } => {
                 // A trailing comment ends its line (a `#` runs to end
@@ -644,7 +664,18 @@ fn render_expanded(nodes: &[Node<'_>], ctx: Ctx, indent: usize, out: &mut Vec<St
                     }
                     out.push(format!("{base}{text}"));
                 }
-                cur = format!("{base}{INDENT}");
+                // An `if` chain's `else` and `else if` keep the chain's
+                // indent after a comment; anything else continues one deeper.
+                let chain_link = next_tok
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|kind| matches!(kind, Tok::ElseKw | Tok::IfKw));
+                cur = if chain_link {
+                    base.clone()
+                } else {
+                    format!("{base}{INDENT}")
+                };
                 prev = None;
             }
             Node::Tok { kind, text, .. } => push_tok(&mut cur, &mut prev, *kind, text),

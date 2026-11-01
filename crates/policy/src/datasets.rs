@@ -148,7 +148,7 @@ impl DatasetData {
         match self {
             DatasetData::Prefix(set) => set.entries().len(),
             DatasetData::Asn(set) => set.asns().len(),
-            DatasetData::Community(set) => set.criteria().len(),
+            DatasetData::Community(set) => set.criteria().len() + set.patterns().len(),
         }
     }
 }

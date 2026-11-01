@@ -500,17 +500,23 @@ pub enum InboundConnectionDropReason {
     /// RIB mailbox: under the connection's own label, or under any label
     /// for a connection that would admit a new dynamic neighbor.
     RibCleanupPending,
+    /// A `[[dynamic_neighbors]]` range runs BFD, but the new session's BFD
+    /// session could not be registered without waiting on the BFD actor: a
+    /// BFD membership change was in progress, or the range's socket family
+    /// is not open.
+    BfdUnavailable,
 }
 
 impl InboundConnectionDropReason {
     /// Every canonical inbound drop reason, for vocabulary walks in
     /// tests and docs.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Unconfigured,
         Self::RateLimited,
         Self::DynamicLimit,
         Self::NotificationBackoff,
         Self::RibCleanupPending,
+        Self::BfdUnavailable,
     ];
 
     /// The canonical reason string shared by every surface.
@@ -522,6 +528,7 @@ impl InboundConnectionDropReason {
             Self::DynamicLimit => "dynamic_limit",
             Self::NotificationBackoff => "notification_backoff",
             Self::RibCleanupPending => "rib_cleanup_pending",
+            Self::BfdUnavailable => "bfd_unavailable",
         }
     }
 }

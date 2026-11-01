@@ -339,6 +339,7 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
             remote_asn: 0,
             description: Some("wide".to_string()),
             tcp_ao: None,
+            bfd: None,
         },
         crate::config::DynamicNeighborConfig {
             prefix: "127.0.0.9/24".to_string(),
@@ -346,6 +347,7 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
             remote_asn: 0,
             description: Some("narrow".to_string()),
             tcp_ao: None,
+            bfd: None,
         },
     ];
     let mut mgr = PeerManager::new_with_config(
@@ -696,6 +698,7 @@ async fn inbound_link_local_is_not_accepted_as_dynamic_peer() {
         remote_asn: 0,
         description: Some("ll-auto".to_string()),
         tcp_ao: None,
+        bfd: None,
     }];
     let mut mgr = PeerManager::new_with_config(
         rx,

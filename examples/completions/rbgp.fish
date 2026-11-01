@@ -1674,10 +1674,11 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l max-graph-bytes -d 'Total source-byte budget for the resolved import graph — mirror of the daemon\'s `[policy] rpol_max_graph_bytes` (default 256 MiB). Set this to match a daemon whose budget was raised, so the offline verdict matches the daemon\'s' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l coverage-min -d 'Minimum acceptable exercised-term percentage, from 0 through 100 (implies --coverage): exit 3 when coverage falls below PCT (CI gate). Diagnostics (1) and test failures (2) take precedence' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l coverage-matched-min -d 'Minimum acceptable matched-term percentage, from 0 through 100 (implies --coverage): exit 3 when fewer source terms match a test route. Independent of --coverage-min; diagnostics (1) and test failures (2) take precedence. Does not guarantee branch coverage or detect every widened guard' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l deny-lints -d 'Fail the check (exit 4) on the named lints, comma-separated: unused-set, unused-dataset, unused-fn, unreachable-term, unreferenced-policy, optional-field-negation. Bare `--deny-lints` denies every lint. Lints are always computed; without this flag they are warnings and never change the exit code. Exit codes 1, 2 and 3 take precedence' -f -a "unused-set\t''
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l deny-lints -d 'Fail the check (exit 4) on the named lints, comma-separated: unused-set, unused-dataset, unused-fn, unreachable-term, unreachable-branch, unreferenced-policy, optional-field-negation. Bare `--deny-lints` denies every lint. Lints are always computed; without this flag they are warnings and never change the exit code. Exit codes 1, 2 and 3 take precedence' -f -a "unused-set\t''
 unused-dataset\t''
 unused-fn\t''
 unreachable-term\t''
+unreachable-branch\t''
 unreferenced-policy\t''
 optional-field-negation\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r

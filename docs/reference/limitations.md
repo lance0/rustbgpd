@@ -206,10 +206,13 @@ full gate ladder.
 - TCP MD5 and GTSM are supported.
 - BFD supports IPv4, IPv6 global, and interface-scoped IPv6 link-local
   single-hop asynchronous sessions, and IPv4 / IPv6 global multihop (RFC 5883)
-  asynchronous sessions, for static neighbors. Multihop sessions apply no
+  asynchronous sessions, for static neighbors. Sessions accepted through a
+  `[[dynamic_neighbors]]` range run IPv4 and IPv6 global single-hop
+  non-strict sessions configured on the range; strict and multihop range
+  BFD are not supported. Multihop sessions apply no
   receive TTL bound (RFC 5883 leaves a GTSM-style check optional; none is
   configurable) and cannot target an IPv6 link-local neighbor. Echo, demand
-  mode, authentication, and dynamic-neighbor BFD remain follow-up work. BGP
+  mode and authentication remain follow-up work. BGP
   sessions to non-adjacent peers require no separate enablement and can be
   distance-bounded with `ttl_security_hops`.
 - BGP unnumbered supports static IPv6 link-local neighbors, including IPv4

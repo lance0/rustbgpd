@@ -435,6 +435,7 @@ fn empty_dynamic_neighbor(prefix: &str) -> DynamicNeighborConfig {
         remote_asn: 0,
         description: None,
         tcp_ao: None,
+        bfd: None,
     }
 }
 
@@ -1560,6 +1561,7 @@ description = "old"
             remote_asn: 65010,
             description: Some("existing".to_string()),
             tcp_ao: None,
+            bfd: None,
         });
 
         let candidate = apply_transaction_to_config(
@@ -1587,6 +1589,7 @@ description = "old"
             remote_asn: 0,
             description: None,
             tcp_ao: None,
+            bfd: None,
         });
 
         let candidate = apply_transaction_to_config(
@@ -1628,6 +1631,7 @@ description = "old"
             remote_asn: 65010,
             description: Some("existing".to_string()),
             tcp_ao: None,
+            bfd: None,
         });
 
         let candidate = apply_transaction_to_config(
@@ -1656,6 +1660,7 @@ description = "old"
             remote_asn: 0,
             description: None,
             tcp_ao: None,
+            bfd: None,
         });
 
         let candidate = apply_transaction_to_config(

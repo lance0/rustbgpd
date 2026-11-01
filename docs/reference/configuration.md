@@ -1812,8 +1812,10 @@ modes transmit with TTL/Hop-Limit 255; there is no BFD receive minimum-TTL
 knob. Set `[global].listen_addresses` when a multihop session must originate
 from a routed loopback. BFD authentication is not supported.
 
-BFD is **static-neighbors only** — a `[[dynamic_neighbors]]` range whose peer
-group enables BFD is rejected at config time. IPv4, IPv6 global, and IPv6
+Static neighbors attach BFD through their own or their peer group's `bfd`. A
+`[[dynamic_neighbors]]` range attaches it on the range instead (see
+[Dynamic-range BFD](#dynamic-range-bfd)); a range whose peer group enables BFD
+is rejected at config time. IPv4, IPv6 global, and IPv6
 link-local neighbors are supported for single-hop; multihop requires a global
 peer address. A link-local neighbor already requires a
 unique bare address plus `interface`; startup resolves that interface to the
@@ -2139,6 +2141,7 @@ Dynamic peers:
 | `remote_asn`  | u32    | no       | `0`     | Expected remote ASN. `0` means accept any ASN from the peer's OPEN |
 | `description` | string | no       | --      | Optional description applied to accepted dynamic peers |
 | `tcp_ao`      | table or array | no | -- | Direct ordered TCP-AO prefix keyring; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation |
+| `bfd`         | table  | no       | --      | Single-hop BFD for every accepted session, `{ profile = "..." }`; see [Dynamic-range BFD](#dynamic-range-bfd) |
 
 When `remote_asn = 0`, the accepted peer keeps the configured range as
 accept-any, but the ephemeral peer's session state uses the ASN learned from the
@@ -2199,6 +2202,78 @@ Validation rules:
 - static and dynamic TCP-AO keyrings may contain at most 4,096 listener MKTs
   per address family in aggregate
 
+### Dynamic-range BFD
+
+A range's `bfd` block gives every session accepted through it single-hop
+asynchronous BFD (RFC 5880/5881) to the session's source address, with the
+timers of the referenced `[[bfd_profiles]]` entry:
+
+```toml
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 300
+min_rx_interval = 300
+multiplier = 3
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "fabric"
+bfd = { profile = "fast" }
+```
+
+- **Inheritance.** The setting is configured once on the range and inherited
+  by each accepted session. A range never inherits `bfd` from its peer group,
+  as it never inherits authentication; a range whose peer group enables BFD is
+  rejected. `bfd = { profile = "...", enabled = false }` runs no session.
+- **Scope.** IPv4 and IPv6 global sessions, single-hop only: `strict = true`
+  and `multihop = true` are rejected on a range. A connection from an IPv6
+  link-local source is never accepted through a range, so there is no
+  link-local dynamic session to run BFD for. Echo, demand mode and
+  authentication are not supported, as for static neighbors.
+- **Lifecycle.** The accepted session registers its BFD session when the
+  connection is accepted and removes it when the session ends: on its
+  automatic removal at Idle, when graceful restart retains its routes after
+  the session ends (the retained identity has no session; a reconnect
+  registers again), and when a rolled-back config transaction reaps it. A
+  connection refused at `dynamic_neighbor_limit` registers nothing. The
+  registration never waits on the BFD actor; a connection that arrives while
+  a BFD membership change is in progress is dropped, and the peer retries;
+  it is counted in
+  `bgp_inbound_connections_dropped_total{reason="bfd_unavailable"}`.
+- **BFD Down.** A detection timeout or a remote-signaled `Down` tears the
+  session down with Cease/10 (RFC 9384) before the hold timer, exactly as for a
+  non-strict static neighbor, including the purge of routes retained for
+  graceful restart. Because the BFD session ends with the BGP session, the
+  hold that keeps a static neighbor down until BFD is Up again does not carry
+  over: the peer's next connection is accepted as a new session and registers
+  a new BFD session.
+- **Reload.** Adding or removing a range that runs BFD is an ordinary
+  range edit, applied in one SIGHUP. A new range has no session yet: the
+  reload opens its BFD socket family before its first effect, so the first
+  accept registers without waiting. A family that cannot open rejects the
+  reload with no effect, and an unacknowledged opening fences it. Removing a
+  range stops future accepts only; its running sessions keep their BFD
+  sessions until they end.
+- **Editing `bfd` on an existing range** is a BFD member attachment change:
+  SIGHUP applies it with the reload generation, like a static neighbor's
+  `bfd`, without resetting BGP. Adding it registers the running sessions'
+  BFD sessions, changing the profile replaces them, and removing it removes
+  them. A socket preflight failure rejects the reload with no effect, and an
+  unacknowledged change fences it. Because a generation cannot carry other
+  `[[dynamic_neighbors]]` edits, a candidate that edits an existing range's
+  `bfd` together with another range change, such as its prefix, is rejected
+  with a message naming the range `bfd` edit; reload the two separately.
+- **Runtime CRUD and transactions.** Runtime range CRUD cannot add BFD to a
+  range or delete a range that runs it, and config transactions cannot
+  change a range's `bfd`; edit the file and use SIGHUP.
+- **Status.** Each session appears in `GetBfdSessions` and `rbgp bfd` under
+  its source address, and in `bfd_session_up` / `bfd_session_flaps_total`
+  with the bare address as the `peer` label. The series are removed with the
+  session, so their number is bounded by the live dynamic sessions, as for
+  the other per-peer dynamic-neighbor metrics.
+
+The setting is outside the v1 inventory, like every other BFD attachment.
+
 ### Runtime management (gRPC / `rbgp`)
 
 Ranges can be added and removed at runtime without a restart, in addition to
@@ -2228,7 +2303,8 @@ rbgp dynamic-neighbor delete 10.0.0.0/24
   a removed range keep running and drain naturally when they next return to
   Idle; delete never tears down a live session.
 - Add is rejected for an unknown or BFD-enabled peer group, an invalid prefix,
-  or a duplicate effective prefix. Delete matches by effective prefix, so a
+  or a duplicate effective prefix. Runtime add carries no `bfd`, and delete is
+  rejected for a range that runs BFD. Delete matches by effective prefix, so a
   host-bit variant of the same network (e.g. `10.0.0.7/24`) removes the
   `10.0.0.0/24` range.
 - Protected ranges cannot be added or deleted through runtime CRUD. Adds that
@@ -3174,7 +3250,9 @@ Drops are counted in
 drop sites and are recorded even while the limiter is disabled, and
 `notification_backoff` counts the NOTIFICATION reconnect-backoff hold, and
 `rib_cleanup_pending` counts connections refused while a deleted neighbor's
-RIB cleanup waits for RIB mailbox room. See
+RIB cleanup waits for RIB mailbox room, and `bfd_unavailable` counts
+dynamic-range connections refused because their BFD session could not be
+registered without waiting. See
 `docs/reference/operations.md` for the metric reference.
 
 ---
