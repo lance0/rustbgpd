@@ -1068,7 +1068,7 @@ _arguments "${_arguments_options[@]}" : \
 '--family=[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
 '-p+[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--prefix=[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
-'--explain-peer=[Scope --explain to a specific peer'\''s Add-Path send view. When set, candidates are filtered by the peer'\''s export policy + sendable families, and the paths within the peer'\''s Add-Path send limit are tagged with their outbound path ID. Omit for the global Loc-RIB view]:EXPLAIN_PEER:_default' \
+'--explain-peer=[Scope --explain to a specific peer'\''s Add-Path send view. When set, candidates are filtered by the peer'\''s export gates and policy, and the paths within the peer'\''s Add-Path send limit are tagged with their outbound path ID. Omit for the global Loc-RIB view]:EXPLAIN_PEER:_default' \
 '--origin-asn=[Filter by origin ASN (last ASN in AS_PATH)]:ORIGIN_ASN:_default' \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \

@@ -453,6 +453,147 @@ async fn add_path_withdraws_per_path_id() {
     assert!(!after.contains_key(&(v4(controlled()), 2)));
 }
 
+/// Peer-scoped `ExplainBestPath` applies the gate live Add-Path staging
+/// applies: a suppressed sibling holds no advertised path ID, exactly like
+/// the Adj-RIB-Out, and takes the staged one once the condition settles.
+#[tokio::test(start_paused = true)]
+async fn explain_best_path_add_path_ranks_follow_the_gate() {
+    let mut manager = manager_with(install_set(
+        definition(tagged_predicate(), ConditionalAdvertiseIf::Present),
+        &[TARGET],
+    ));
+    announce(
+        &mut manager,
+        SOURCE,
+        vec![route(controlled(), SOURCE, 200, false)],
+    );
+    announce(
+        &mut manager,
+        SOURCE2,
+        vec![
+            route(controlled(), SOURCE2, 100, true),
+            route(condition(), SOURCE2, 100, false),
+        ],
+    );
+    let mut rx = peer_up(
+        &mut manager,
+        TARGET,
+        Shape {
+            add_path: true,
+            ..Shape::default()
+        },
+    );
+    let _ = drain(&mut rx);
+
+    // Pending: live staging withholds the tagged sibling.
+    let (explained, held) =
+        explain_ranks_and_adj_rib_out(&mut manager, ip(TARGET), v4(controlled()));
+    assert!(held.is_empty(), "{held:?}");
+    assert_eq!(explained, held);
+
+    // Present for a settle window: the sibling is staged, and explain agrees.
+    elapse(&mut manager, SETTLE).await;
+    let (explained, held) =
+        explain_ranks_and_adj_rib_out(&mut manager, ip(TARGET), v4(controlled()));
+    assert!(held.contains_key(&ip(SOURCE2)), "{held:?}");
+    assert_eq!(explained, held);
+}
+
+/// An `advertise_policy` that reads the AS-path string: peer-scoped
+/// `ExplainBestPath` renders it for the gate, as live staging does, so a
+/// matching sibling is withheld while pending and staged once present.
+#[tokio::test(start_paused = true)]
+async fn explain_best_path_add_path_ranks_follow_an_as_path_gate() {
+    let as_path_predicate = rpol(
+        r#"policy viapath { term t { if route.as-path matches "65200$" { accept } } term rest { reject } }"#,
+        "viapath",
+    );
+    let mut manager = manager_with(install_set(
+        definition(as_path_predicate, ConditionalAdvertiseIf::Present),
+        &[TARGET],
+    ));
+    announce(
+        &mut manager,
+        SOURCE,
+        vec![make_multipath_route(controlled(), SOURCE, vec![65100], 200)],
+    );
+    announce(
+        &mut manager,
+        SOURCE2,
+        vec![
+            make_multipath_route(controlled(), SOURCE2, vec![65200], 100),
+            make_multipath_route(condition(), SOURCE2, vec![65100], 100),
+        ],
+    );
+    let mut rx = peer_up(
+        &mut manager,
+        TARGET,
+        Shape {
+            add_path: true,
+            ..Shape::default()
+        },
+    );
+    let _ = drain(&mut rx);
+
+    let (explained, held) =
+        explain_ranks_and_adj_rib_out(&mut manager, ip(TARGET), v4(controlled()));
+    assert!(held.is_empty(), "{held:?}");
+    assert_eq!(explained, held);
+    elapse(&mut manager, SETTLE).await;
+    let (explained, held) =
+        explain_ranks_and_adj_rib_out(&mut manager, ip(TARGET), v4(controlled()));
+    assert!(held.contains_key(&ip(SOURCE2)), "{held:?}");
+    assert_eq!(explained, held);
+}
+
+/// Add-Path `send_max = 1` with the best path gated: the gated best takes
+/// no slot, so explain names the sibling at the path ID live staging sends.
+#[tokio::test(start_paused = true)]
+async fn explain_best_path_gated_best_frees_the_only_add_path_slot() {
+    let mut manager = manager_with(install_set(
+        definition(tagged_predicate(), ConditionalAdvertiseIf::Present),
+        &[TARGET],
+    ));
+    announce(
+        &mut manager,
+        SOURCE,
+        vec![route(controlled(), SOURCE, 200, true)],
+    );
+    announce(
+        &mut manager,
+        SOURCE2,
+        vec![
+            route(controlled(), SOURCE2, 100, false),
+            route(condition(), SOURCE2, 100, false),
+        ],
+    );
+    let (outbound_tx, mut rx) = mpsc::channel(256);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: ip(TARGET),
+        session_id: 0,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: ipv4_sendable(),
+        add_path_send_max: 1,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    let _ = drain(&mut rx);
+
+    let (explained, held) =
+        explain_ranks_and_adj_rib_out(&mut manager, ip(TARGET), v4(controlled()));
+    assert!(held.contains_key(&ip(SOURCE2)), "{held:?}");
+    assert_eq!(explained, held);
+}
+
 /// `per_client_best`: a suppressed best candidate works like an export
 /// denial in the first-permitted walk, so the next candidate is staged.
 #[tokio::test(start_paused = true)]

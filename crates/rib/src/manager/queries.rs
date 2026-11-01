@@ -3532,6 +3532,7 @@ impl RibManager {
             BestPathReason, best_path_cmp, best_path_cmp_orr, best_path_cmp_orr_with_reason,
             best_path_cmp_with_reason, best_path_reason_detail, orr_interior_cost_detail,
         };
+        use crate::manager::conditional_advertisement::ConditionalGate;
         use crate::manager::helpers::should_suppress_ibgp_inner;
         use rustbgpd_policy::{PolicyAction, RouteContext, RouteType, evaluate_chain};
 
@@ -3654,13 +3655,16 @@ impl RibManager {
 
         // For the peer-aware path, build the ranked advertised set so
         // each candidate can be tagged with its `advertised_path_id`.
-        // The selection mirrors `distribute_multipath_prefix` exactly:
-        // family check → split-horizon → iBGP/RR suppression → export
-        // eligibility (including source `NO_ADVERTISE`) → export policy →
-        // modified-route `NO_ADVERTISE` → top-N by best-path. Mirroring the
-        // contract is deliberate — operators trust explain only if it
-        // produces the same selection that distribution would, modulo state
-        // changes between the two calls.
+        // The selection mirrors `distribute_multipath_prefix`:
+        // family check → split-horizon → iBGP/RR suppression → source-route
+        // gates (`multipath_candidate_suppressed`: `NO_ADVERTISE`,
+        // `NO_EXPORT`, route-server control, LLGR) → conditional
+        // advertisement → export policy → modified-route `NO_ADVERTISE` →
+        // top-N by best-path. Mirroring the contract is deliberate —
+        // operators trust explain only if it produces the same selection
+        // that distribution would, modulo state changes between the two
+        // calls. Not mirrored: the whole-prefix Address-Prefix ORF filter
+        // and the RFC 5291 §6 refresh gate (tracked separately).
         let mut advertised: Vec<(PeerId, u32, u32)> = Vec::new();
         let mut add_path_send_max: u32 = 0;
         if let Some(peer_addr) = peer {
@@ -3689,19 +3693,16 @@ impl RibManager {
             // for an IPv6 prefix — same answer distribution would
             // produce.
             //
-            // Single-best peers (`effective send_max == 0`) skip the
-            // ranking loop entirely — `distribute_single_best_prefix`
-            // only ever advertises the Loc-RIB best with
-            // `path_id = 0`, never falls back to the next-best
-            // candidate. Marking a non-best candidate as "advertised"
-            // because it sorts first in the export-filtered set would
-            // lie to the operator about what distribution would
-            // actually do (e.g. when the global best is suppressed by
-            // split-horizon). In that mode the operator infers
-            // winner-advertisement from `best_route` plus the export
-            // policy state visible elsewhere; the candidates list
-            // still surfaces the alternatives with
-            // `advertised_path_id = 0`.
+            // Peers without Add-Path send (`effective send_max == 0`)
+            // skip the ranking loop entirely and are sent one path at
+            // `path_id = 0`: `distribute_single_best_prefix` sends only
+            // the Loc-RIB best, never the next-best candidate, while a
+            // per-client-best route-server client is sent the first
+            // candidate its export gates permit, which can be a non-best
+            // one. Neither selection fits this field, so the candidates
+            // list surfaces the alternatives with `advertised_path_id =
+            // 0` and `ExplainAdvertisedRoute` answers what the peer is
+            // sent.
             let family_sendable = sendable.is_some_and(|f| f.contains(&family));
             add_path_send_max = if family_sendable {
                 self.add_path_send_max_for_prefix(peer_addr, &prefix)
@@ -3710,6 +3711,15 @@ impl RibManager {
             };
             if add_path_send_max > 0 {
                 let export_pol = self.export_policy_for(peer_addr);
+                let rs_control = self
+                    .peer_rs_control
+                    .get(&peer_addr)
+                    .copied()
+                    .zip(target_peer_asn);
+                let llgr = self.peer_advertised_llgr_families.get(&peer_addr);
+                // The live gate: `None` while every attached definition
+                // advertises, the same verdicts otherwise.
+                let conditional = self.conditional_gate(peer_addr, false);
                 let mut filtered: Vec<&crate::route::Route> = all_candidates
                     .iter()
                     .filter(|route| crate::srv6::unicast_eligible(route))
@@ -3726,7 +3736,14 @@ impl RibManager {
                         ) {
                             return false;
                         }
-                        true
+                        !distribution::multipath_candidate_suppressed(
+                            route,
+                            target_is_ebgp,
+                            interpret_rfc1997,
+                            rs_control,
+                            family,
+                            llgr,
+                        )
                     })
                     .collect();
                 filtered.sort_by(|a, b| compare(a, b));
@@ -3737,8 +3754,9 @@ impl RibManager {
                     add_path_send_max as usize
                 };
 
-                let needs_as_path_string =
-                    export_pol.is_some_and(PolicyChain::requires_as_path_string);
+                let needs_as_path_string = export_pol
+                    .is_some_and(PolicyChain::requires_as_path_string)
+                    || ConditionalGate::requires_as_path_string(conditional.as_ref());
                 let mut permitted: Vec<(&crate::route::Route, Option<bool>)> = Vec::new();
                 let mut export_memo = distribution::ExportMemo::default();
                 // Rank picks the paths; their keys follow live staging, on
@@ -3755,11 +3773,6 @@ impl RibManager {
                     .peer_export_encoders
                     .get(&peer_addr)
                     .map(|encoder| encoder.snapshot());
-                let rs_control = self
-                    .peer_rs_control
-                    .get(&peer_addr)
-                    .copied()
-                    .zip(target_peer_asn);
                 for cand in &filtered {
                     if permitted.len() >= limit {
                         break;
@@ -3793,18 +3806,9 @@ impl RibManager {
                         local_pref: cand.local_pref_attr(),
                         med: cand.med_attr(),
                     };
-                    // Pre-policy source-route gates: NO_ADVERTISE, then the
-                    // eBGP-only NO_EXPORT/NO_EXPORT_SUBCONFED form. Kept in
-                    // lockstep with live staging so this candidate walk and
-                    // apply agree (plan-vs-apply equivalence).
-                    if distribution::no_export_export_suppressed(
-                        cand.communities(),
-                        target_is_ebgp,
-                        interpret_rfc1997,
-                    ) {
-                        continue;
-                    }
-                    if distribution::no_advertise_export_suppressed(cand.communities()) {
+                    // ADR-0137: conditional advertisement, last before the
+                    // export chain; a suppressed candidate consumes no rank.
+                    if ConditionalGate::evaluate(conditional.as_ref(), &ctx).suppresses() {
                         continue;
                     }
                     let result = evaluate_chain(export_pol, &ctx);

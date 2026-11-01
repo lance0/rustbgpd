@@ -581,6 +581,72 @@ async fn explain_best_path_candidate_walk_matches_live_no_export_staging() {
     handle.await.unwrap();
 }
 
+/// Peer-scoped `ExplainBestPath` applies the RFC 9494 §4.4 LLGR export gate
+/// live Add-Path staging applies: an `LLGR_STALE` sibling holds no
+/// advertised path ID toward an eBGP peer that did not advertise LLGR for
+/// the family, exactly like that peer's Adj-RIB-Out, and keeps its rank
+/// toward one that did.
+#[test]
+fn explain_best_path_add_path_ranks_match_live_llgr_stale_staging() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let plain = PeerId::from_addr("192.0.2.120".parse().unwrap());
+    let llgr = PeerId::from_addr("192.0.2.121".parse().unwrap());
+    let mut receivers = Vec::new();
+    for (peer, negotiated_llgr_families) in [(plain, vec![]), (llgr, ipv4_sendable())] {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        receivers.push(outbound_rx);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: ipv4_sendable(),
+            add_path_send_max: 4,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families,
+        });
+    }
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
+    let stale_source = Ipv4Addr::new(198, 51, 100, 51);
+    let best = make_route_with_lp(prefix, Ipv4Addr::new(198, 51, 100, 50), 200);
+    let sibling = with_communities(
+        make_route_with_lp(prefix, stale_source, 100),
+        vec![rustbgpd_wire::COMMUNITY_LLGR_STALE],
+    );
+    for route in [best, sibling] {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    }
+
+    let prefix = Prefix::V4(prefix);
+    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, plain, prefix);
+    assert!(held.is_empty(), "live staging suppresses the stale sibling");
+    assert_eq!(explained, held);
+    let (explained, held) = explain_ranks_and_adj_rib_out(&mut manager, llgr, prefix);
+    assert!(held.contains_key(&peer_v4(stale_source)), "{held:?}");
+    assert_eq!(explained, held);
+}
+
 /// RFC 1997 MUST outranks RFC 9494 LLGR export eligibility: a RECEIVED
 /// route already carrying `NO_EXPORT` (the upstream §4.6 stale form is
 /// exactly `LLGR_STALE` + `NO_EXPORT`) is suppressed toward an eBGP
