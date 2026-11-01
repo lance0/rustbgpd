@@ -1846,7 +1846,7 @@ impl PeerManager {
                 });
             }
         }
-        self.reap_deleted_peer_metric_series_for_key(&key).await;
+        self.reap_deleted_peer_metric_series_for_key(&key);
         self.port_mut(name).presence_reason = None;
         if held.latch.is_some() {
             self.metrics.set_max_prefix_latched(

@@ -525,8 +525,7 @@ impl PeerManager {
             let _ = self
                 .shutdown_handle_bounded(peer_key.address, "dynamic rollback primary", handle)
                 .await;
-            self.reap_deleted_peer_metric_series_for_key(&peer_key)
-                .await;
+            self.reap_deleted_peer_metric_series_for_key(&peer_key);
             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
             self.refresh_dynamic_neighbor_capacity_metrics();
             removed += 1;
@@ -535,7 +534,7 @@ impl PeerManager {
                 "config rollback: removed dynamic peer whose accepting range is no longer present"
             );
         }
-        removed + self.release_unadmitted_retained_dynamic().await
+        removed + self.release_unadmitted_retained_dynamic()
     }
 
     /// Snapshot any unfired hot-apply / Route Refresh intent for a peer

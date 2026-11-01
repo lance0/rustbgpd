@@ -36,6 +36,7 @@ impl PeerManager {
             return;
         };
 
+        self.admit_deferred_rib_updates_for(peer_key).await;
         let new_session_id = self.allocate_session_id();
         let replacement = PeerHandle::spawn_at_tcp_ao_generation(
             transport,
@@ -244,7 +245,7 @@ impl PeerManager {
                     .get(&peer_key)
                     .is_some_and(|m| m.session_id() == session_id)
                 {
-                    self.retained_dynamic_open_from(&peer_key, peer_asn).await;
+                    self.retained_dynamic_open_from(&peer_key, peer_asn);
                 }
             }
             SessionNotification::BackToIdle {
@@ -369,6 +370,7 @@ impl PeerManager {
                         {
                             // A late terminal block or an unacknowledged RIB
                             // fence must retain the explicit recovery target.
+                            self.admit_deferred_rib_updates_for(&peer_key).await;
                             let session_id = self.allocate_session_id();
                             let handle = PeerHandle::spawn_at_tcp_ao_generation(
                                 managed.transport_config.clone(),
@@ -407,8 +409,7 @@ impl PeerManager {
                             // no terminal block, so auto-removal is authoritative.
                             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
                             self.refresh_dynamic_neighbor_capacity_metrics();
-                            self.reap_deleted_peer_metric_series_for_key(&peer_key)
-                                .await;
+                            self.reap_deleted_peer_metric_series_for_key(&peer_key);
                         }
                     }
                     // Skip pending inbound logic for removed dynamic peers

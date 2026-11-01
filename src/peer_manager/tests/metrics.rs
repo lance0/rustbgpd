@@ -1010,7 +1010,7 @@ fn peer_presence_source_ordering_contracts() {
         .split_once("pub(super) async fn delete_peer_checked")
         .unwrap()
         .1
-        .split_once("pub(super) async fn reap_deleted_peer_metric_series_for_key")
+        .split_once("pub(super) fn reap_deleted_peer_metric_series_for_key")
         .unwrap()
         .0;
     assert!(

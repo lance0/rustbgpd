@@ -135,12 +135,12 @@ async fn idle(mgr: &mut PeerManager, end: SessionEndRetention) {
 /// Run the due checks as the run loop does, through each batched query.
 async fn settle(mgr: &mut PeerManager) {
     loop {
-        mgr.check_due_retained_dynamic().await;
+        mgr.check_due_retained_dynamic();
         let Some(pass) = mgr.retention.pass.as_mut() else {
             return;
         };
         let answer = (&mut pass.answer).await.unwrap();
-        mgr.finish_retention_pass(answer).await;
+        mgr.finish_retention_pass(answer);
     }
 }
 
@@ -602,7 +602,7 @@ async fn unretained_member_goes_at_idle_and_a_removed_range_takes_a_retained_one
     let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
     mgr.delete_dynamic_range("127.0.0.0/8").unwrap();
     assert!(mgr.retention.admission_dirty);
-    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 1);
+    assert_eq!(mgr.release_unadmitted_retained_dynamic(), 1);
     assert_eq!(mgr.dynamic_peer_count, 0);
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 0);
     rib_task.abort();
@@ -644,7 +644,7 @@ async fn staged_ranges_do_not_delete_a_retained_member() {
     // Rollback restores the range; the re-check keeps the member.
     mgr.dynamic_ranges = ranges;
     mgr.config_snapshot_staged = false;
-    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 0);
+    assert_eq!(mgr.release_unadmitted_retained_dynamic(), 0);
     assert_eq!(mgr.dynamic_peer_count, 1);
     rib_task.abort();
 }
@@ -740,7 +740,7 @@ async fn due_members_share_one_query_and_an_unanswered_one_backs_off() {
 
     let mut retry = Duration::from_secs(1);
     for _ in 0..3 {
-        mgr.check_due_retained_dynamic().await;
+        mgr.check_due_retained_dynamic();
         let pass = mgr.retention.pass.as_mut().expect("one pass");
         let mut held_replies = Vec::new();
         let mut queries = 0;
@@ -758,7 +758,7 @@ async fn due_members_share_one_query_and_an_unanswered_one_backs_off() {
         assert_eq!(queries, 1, "one query for every due member");
         let answer = (&mut pass.answer).await.unwrap();
         let unanswered = tokio::time::Instant::now();
-        mgr.finish_retention_pass(answer).await;
+        mgr.finish_retention_pass(answer);
         assert_eq!(mgr.next_retained_dynamic_check(), Some(unanswered + retry));
         tokio::time::sleep_until(unanswered + retry).await;
         retry *= 2;
@@ -781,7 +781,7 @@ async fn an_answer_about_an_earlier_retention_is_ignored() {
         .rib_peer
         .resolve(|| PeerEndpoint::new(MEMBER, None), MEMBER_ASN);
     idle(&mut mgr, THEIRS).await;
-    mgr.check_due_retained_dynamic().await;
+    mgr.check_due_retained_dynamic();
     let reply = loop {
         if let RibUpdate::QueryPeerRetentions { reply, .. } = rib_rx.recv().await.unwrap() {
             break reply;
@@ -798,7 +798,7 @@ async fn an_answer_about_an_earlier_retention_is_ignored() {
     let newer = mgr.retained_dynamic.get_mut(&key(MEMBER)).unwrap();
     newer.retained_at += Duration::from_millis(1);
     let check_at = newer.check_at;
-    mgr.finish_retention_pass(answer).await;
+    mgr.finish_retention_pass(answer);
     let newer = &mgr.retained_dynamic[&key(MEMBER)];
     assert!(newer.theirs, "the newer retention still holds the routes");
     assert_eq!(newer.check_at, check_at);
@@ -1099,7 +1099,7 @@ async fn staged_ranges_do_not_reject_a_retention_at_idle() {
     // Rollback restores the range; the re-check keeps the member.
     mgr.dynamic_ranges = ranges;
     mgr.config_snapshot_staged = false;
-    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 0);
+    assert_eq!(mgr.release_unadmitted_retained_dynamic(), 0);
     settle(&mut mgr).await;
     assert_eq!(mgr.dynamic_peer_count, 1);
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
@@ -1192,7 +1192,7 @@ async fn another_as_candidate_winning_after_the_primary_resolved_has_its_own_ide
         }
     }
     mgr.reconcile_retained_dynamic_candidates();
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
 
     let live = &mgr.peers[&key(MEMBER)].transport_config;
     // The winner's session resolves its slot on first use, as here.
@@ -1231,7 +1231,7 @@ async fn rollback_before_the_reconnects_open_is_handled_releases_both_handles() 
         mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
         1
     );
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     assert_eq!(mgr.dynamic_peer_count, 0);
     assert!(mgr.retained_dynamic.is_empty());
     loc_rib_count(&rib_tx).await;
@@ -1289,7 +1289,7 @@ async fn rollback_releases_a_handle_resolved_while_the_reap_stops_the_reconnect(
     );
     let own = resolver.await.unwrap();
     assert_ne!(own, peer);
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     loc_rib_count(&rib_tx).await;
     assert!(!own.is_live(), "the late handle is released");
     assert!(!peer.is_live(), "and the retained one");
@@ -1391,7 +1391,7 @@ async fn primary_handoff_releases_losing_candidate(primary_asn: u32) {
     assert_eq!(mgr.peers[&key(MEMBER)].session_id(), primary_session);
     assert_eq!(mgr.retained_dynamic.is_empty(), primary_asn != MEMBER_ASN);
     mgr.reconcile_retained_dynamic_candidates();
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     assert_eq!(loc_rib_count(&rib_tx).await, 0);
     assert!(
         !candidate_peer.is_live(),
@@ -1402,7 +1402,7 @@ async fn primary_handoff_releases_losing_candidate(primary_asn: u32) {
     // Final dynamic auto-removal sees only the winning primary's slot.
     idle(&mut mgr, HARD_RESET).await;
     mgr.reconcile_retained_dynamic_candidates();
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     assert_eq!(loc_rib_count(&rib_tx).await, 0);
     assert!(!primary_peer.is_live(), "the primary is deleted normally");
     assert!(mgr.retained_dynamic.is_empty());
@@ -1440,7 +1440,7 @@ async fn established_reconnect_idle_releases_attached_candidate_identity() {
     idle(&mut mgr, HARD_RESET).await;
     assert!(mgr.retained_dynamic.is_empty());
     mgr.reconcile_retained_dynamic_candidates();
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     assert_eq!(loc_rib_count(&rib_tx).await, 0);
     assert!(
         !candidate_peer.is_live(),

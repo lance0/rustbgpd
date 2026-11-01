@@ -117,7 +117,7 @@ impl PeerManager {
                 effects.push(PeerReconcileEffect::RemovedForFailedReplacement(
                     addr.clone(),
                 ));
-                self.reap_deleted_peer_metric_series_for_key(&addr).await;
+                self.reap_deleted_peer_metric_series_for_key(&addr);
             } else {
                 effects.push(PeerReconcileEffect::Replaced(addr));
             }
