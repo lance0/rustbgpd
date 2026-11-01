@@ -145,6 +145,10 @@ impl RibManager {
         self.replacement_checkpoint(true);
         let mut labeled_filtered: Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)> = Vec::new();
         let mut lane_updates: Vec<LaneUpdate> = Vec::new();
+        // Keys whose member-specific slot moved with an exempt entry, while
+        // our End-of-RIB may be held (the commit records them).
+        let member_slots_hold = self.helper_stale_may_hold_any();
+        let mut member_slots_met: Vec<(Prefix, u32)> = Vec::new();
         let mut result = crate::manager::distribution::UnicastDistributionResult::default();
         let mut per_client_best_result =
             crate::manager::distribution::UnicastDistributionResult::default();
@@ -298,7 +302,8 @@ impl RibManager {
                         (None, None) => (true, true),
                         _ => (false, true),
                     };
-                    if !(content_unchanged && control_unchanged) {
+                    let lane_moved = !(content_unchanged && control_unchanged);
+                    if lane_moved {
                         // The member the transition emits toward: the
                         // new entry's winner source, or the REPLACED
                         // entry's for a retire (how the retire arm
@@ -357,16 +362,53 @@ impl RibManager {
                     let prior_fallback = (!group.rs_fallback.is_empty())
                         .then(|| group.rs_fallback.get(prefix))
                         .flatten();
-                    if (prior_fallback.is_some() || stage.rs_fallback.is_some())
-                        && !out.deltas[deltas_before..]
-                            .iter()
-                            .any(|delta| delta.path_id == 0)
+                    let rs_view = prior_fallback.is_some() || stage.rs_fallback.is_some();
+                    let fallback_moved = rs_view
                         && (rs_view_moved
                             || !super::payload::rs_fallback_equal(
                                 prior_fallback.map(|fallback| &**fallback),
                                 stage.rs_fallback.as_deref(),
-                            ))
-                    {
+                            ));
+                    let winner_delta = out.deltas[deltas_before..]
+                        .iter()
+                        .any(|delta| delta.path_id == 0);
+                    // A member-specific slot the shared table does not name
+                    // (the lane toward the winner's source, or an rs-control
+                    // member's next eligible candidate) moved with an exempt
+                    // entry among its old or new candidates: the member may
+                    // hold an ordinary row at the key instead.
+                    if member_slots_hold && (lane_moved || fallback_moved || winner_delta) {
+                        let exempt = |entry: &RunnerUp| {
+                            entry
+                                .local_source
+                                .is_some_and(|source| source.deferral_exempt)
+                        };
+                        let exempt_winner = || {
+                            group
+                                .table
+                                .local_export_source(prefix, 0)
+                                .is_some_and(|source| source.deferral_exempt)
+                                || out.deltas[deltas_before..].iter().any(|delta| {
+                                    delta.path_id == 0
+                                        && delta
+                                            .local_source
+                                            .is_some_and(|source| source.deferral_exempt)
+                                })
+                        };
+                        if prior.is_some_and(exempt)
+                            || stage.runner_up.as_ref().is_some_and(exempt)
+                            || (rs_view
+                                && (prior_fallback
+                                    .into_iter()
+                                    .chain(stage.rs_fallback.as_ref())
+                                    .flat_map(|fallback| fallback.iter())
+                                    .any(exempt)
+                                    || exempt_winner()))
+                        {
+                            member_slots_met.push((*prefix, 0));
+                        }
+                    }
+                    if fallback_moved && !winner_delta {
                         let prior = PriorGroupSlots::capture(group, *prefix, 0, &mut |force| {
                             self.replacement_checkpoint(force);
                         });
@@ -504,56 +546,56 @@ impl RibManager {
             labeled_filtered = per_client_best_result.policy_filtered;
         }
         self.replacement_checkpoint(true);
-        // The committed table forgets a withdrawn row's provenance; keep the
-        // exempt rows withdrawn outright while our End-of-RIB may be held,
-        // for a GR helper's flap.
+        // The committed table forgets a withdrawn row's provenance. While our
+        // End-of-RIB may be held, keep the exempt rows withdrawn outright for
+        // a GR helper's flap, and the keys where a member may hold an
+        // ordinary row instead of the exempt one: an ordinary row withdrawn,
+        // an exempt row over an ordinary one, an ordinary row where an exempt
+        // one was or was withdrawn, or a member-specific slot above.
         if self.helper_stale_may_hold_any() {
-            let withdrawn = out
-                .deltas
-                .iter()
-                .filter(|delta| delta.new.is_none() && delta.withdrawn_exempt())
-                .map(|delta| (delta.prefix, delta.path_id));
+            let mut withdrawn = Vec::new();
+            if let Some(group) = self.group_ribs.get(&gid) {
+                let withdrawn_exempt = self
+                    .hold_exempt_withdrawn
+                    .get(&super::super::HoldWithdrawOwner::Group(gid))
+                    .map(|ledger| &ledger.withdrawn);
+                for delta in &out.deltas {
+                    self.replacement_checkpoint(false);
+                    let key = (delta.prefix, delta.path_id);
+                    let met = if delta.new.is_none() {
+                        if delta.withdrawn_exempt() {
+                            withdrawn.push(key);
+                            false
+                        } else {
+                            group.table.get(&key.0, key.1).is_some()
+                        }
+                    } else {
+                        let held_exempt = group
+                            .table
+                            .local_export_source(&key.0, key.1)
+                            .is_some_and(|source| source.deferral_exempt);
+                        if delta
+                            .local_source
+                            .is_some_and(|source| source.deferral_exempt)
+                        {
+                            !held_exempt && group.table.get(&key.0, key.1).is_some()
+                        } else {
+                            held_exempt || withdrawn_exempt.is_some_and(|keys| keys.contains(&key))
+                        }
+                    };
+                    if met {
+                        member_slots_met.push(key);
+                    }
+                }
+            }
             self.record_hold_exempt_withdrawn(
                 super::super::HoldWithdrawOwner::Group(gid),
                 withdrawn,
                 "group_commit",
             );
-            // An ordinary row meeting an exempt one at a key: an exempt row
-            // over an ordinary one, or an ordinary row where an exempt one
-            // was or was withdrawn. A member may hold the ordinary row there.
-            let withdrawn_exempt = self
-                .hold_exempt_withdrawn
-                .get(&super::super::HoldWithdrawOwner::Group(gid))
-                .map(|ledger| &ledger.withdrawn);
-            let replaced: Vec<_> = self.group_ribs.get(&gid).map_or_else(Vec::new, |group| {
-                out.deltas
-                    .iter()
-                    .inspect(|_| self.replacement_checkpoint(false))
-                    .filter(|delta| {
-                        if delta.new.is_none() {
-                            return false;
-                        }
-                        let key = (delta.prefix, delta.path_id);
-                        let exempt = delta
-                            .local_source
-                            .is_some_and(|source| source.deferral_exempt);
-                        let held = group.table.get(&key.0, key.1).is_some();
-                        let held_exempt = group
-                            .table
-                            .local_export_source(&key.0, key.1)
-                            .is_some_and(|source| source.deferral_exempt);
-                        if exempt {
-                            held && !held_exempt
-                        } else {
-                            held_exempt || withdrawn_exempt.is_some_and(|keys| keys.contains(&key))
-                        }
-                    })
-                    .map(|delta| (delta.prefix, delta.path_id))
-                    .collect()
-            });
             self.record_hold_exempt_replaced(
                 super::super::HoldWithdrawOwner::Group(gid),
-                replaced,
+                std::mem::take(&mut member_slots_met),
                 "group_commit",
             );
         }

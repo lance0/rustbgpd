@@ -5133,54 +5133,50 @@ impl RibManager {
                 rib_out.reserve_rtc_with(additional, &mut || checkpoint());
                 super::replacement_readiness_checkpoint(&readiness, true);
             }
-            // Queued is not delivered: a session ending first leaves an
-            // exempt row it withdrew stale at a GR helper, and this table
-            // will no longer name it. Read its provenance before the commit.
-            let queued_exempt_withdrawals: Vec<(Prefix, u32)> = if hold_active {
-                withdraw
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .filter(|(prefix, path_id)| {
-                        rib_out
-                            .local_export_source(prefix, *path_id)
-                            .is_some_and(|source| source.deferral_exempt)
-                    })
-                    .copied()
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            // Likewise an ordinary row meeting an exempt one at a key: an
-            // exempt row over an ordinary one, or an ordinary row where an
-            // exempt one was or was withdrawn. The peer may hold the ordinary
-            // row there, as delivered or as not yet replaced.
-            let withdrawn_exempt = self
-                .hold_exempt_withdrawn
-                .get(&super::HoldWithdrawOwner::Peer(peer))
-                .map(|ledger| &ledger.withdrawn);
-            let queued_exempt_replacements: Vec<(Prefix, u32)> = if hold_active {
-                announce
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .map(|route| (route.prefix, route.path_id))
-                    .filter(|key| {
-                        let exempt = committed_local_sources
-                            .get(key)
-                            .is_some_and(|source| source.deferral_exempt);
-                        let held = rib_out.get(&key.0, key.1).is_some();
-                        let held_exempt = rib_out
-                            .local_export_source(&key.0, key.1)
-                            .is_some_and(|source| source.deferral_exempt);
-                        if exempt {
-                            held && !held_exempt
-                        } else {
-                            held_exempt || withdrawn_exempt.is_some_and(|keys| keys.contains(key))
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            // Queued is not delivered: a session ending first leaves a row it
+            // withdrew stale at a GR helper, and this table will no longer
+            // name it. Read the provenance before the commit. An exempt row
+            // withdrawn outright is carried; an ordinary one, or an ordinary
+            // row meeting an exempt one at a key (an exempt row over an
+            // ordinary one, or an ordinary row where an exempt one was or was
+            // withdrawn), leaves the key uncertain: the peer may hold the
+            // ordinary row there, as delivered or as not yet replaced.
+            let mut queued_exempt_withdrawals: Vec<(Prefix, u32)> = Vec::new();
+            let mut queued_exempt_replacements: Vec<(Prefix, u32)> = Vec::new();
+            if hold_active {
+                for &(prefix, path_id) in &withdraw {
+                    checkpoint();
+                    if rib_out
+                        .local_export_source(&prefix, path_id)
+                        .is_some_and(|source| source.deferral_exempt)
+                    {
+                        queued_exempt_withdrawals.push((prefix, path_id));
+                    } else if rib_out.get(&prefix, path_id).is_some() {
+                        queued_exempt_replacements.push((prefix, path_id));
+                    }
+                }
+                let withdrawn_exempt = self
+                    .hold_exempt_withdrawn
+                    .get(&super::HoldWithdrawOwner::Peer(peer))
+                    .map(|ledger| &ledger.withdrawn);
+                for key in announce.iter().map(|route| (route.prefix, route.path_id)) {
+                    checkpoint();
+                    let held_exempt = rib_out
+                        .local_export_source(&key.0, key.1)
+                        .is_some_and(|source| source.deferral_exempt);
+                    let met = if committed_local_sources
+                        .get(&key)
+                        .is_some_and(|source| source.deferral_exempt)
+                    {
+                        !held_exempt && rib_out.get(&key.0, key.1).is_some()
+                    } else {
+                        held_exempt || withdrawn_exempt.is_some_and(|keys| keys.contains(&key))
+                    };
+                    if met {
+                        queued_exempt_replacements.push(key);
+                    }
+                }
+            }
             if grouped_unicast_count.is_none() {
                 for (route, action) in announce
                     .iter()

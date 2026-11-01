@@ -2436,8 +2436,9 @@ session's routes stale until End-of-RIB. While End-of-RIB toward it is held,
 by selection deferral or this grace window, rustbgpd withdraws an RTBH or
 host route deleted since then. It keeps one whose prefix still has another
 route, local or received from another peer, even if this peer's export
-policy denies it, when an ordinary route and an RTBH met at that key on the
-ended session, or when the receiver changed update group during the hold.
+policy denies it, when the ended session also had an ordinary route at that
+key, before or after the RTBH, or when the receiver changed update group
+during the hold.
 An RTBH whose ordinary replacement at the same key never reached the helper
 also stays. In both cases the helper keeps the RTBH until an ordinary route
 for the prefix is advertised to it at the same key, or until End-of-RIB,

@@ -2016,11 +2016,13 @@ struct HoldLedger {
     /// withdrawal reaches the peer leaves the row stale at a GR helper, and
     /// the table no longer names it.
     withdrawn: BTreeSet<(Prefix, u32)>,
-    /// Keys where an ordinary row met an exempt one: an exempt row replaced
-    /// an ordinary row, or an ordinary row was committed where an exempt one
-    /// was or was withdrawn. The peer may hold the ordinary row there, as
-    /// delivered or as not yet replaced, so a GR helper's stale row at the
-    /// key may be either.
+    /// Keys where the peer may hold an ordinary row: one was withdrawn, an
+    /// exempt row replaced one, an ordinary row was committed where an
+    /// exempt one was or was withdrawn, or a grouped member's own slot (a
+    /// lane or route-server fallback entry) moved with an exempt entry
+    /// among its candidates. The withdrawal or replacement may not have
+    /// reached the peer, so a GR helper's stale row at the key may be
+    /// either.
     replaced: BTreeSet<(Prefix, u32)>,
     /// Any key may hold an ordinary row: a private receiver's wire moved
     /// between an update group's view and its own, or `replaced` reached

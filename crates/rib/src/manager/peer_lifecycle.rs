@@ -1019,8 +1019,8 @@ impl RibManager {
 
     /// The exempt rows the session holds or may still hold: its table's,
     /// and those withdrawn outright in the hold (`ledger`), which may not
-    /// have reached the peer. A key where an exempt row replaced an
-    /// ordinary one in the hold is uncertain: the flush withdraws none of
+    /// have reached the peer. A key where the peer may hold an ordinary row
+    /// (`HoldLedger::replaced`) is uncertain: the flush withdraws none of
     /// those whose prefix still has a desired row, so an over-carried key
     /// never removes a row the helper rightly keeps.
     fn carry_helper_stale_exempt_owned(&mut self, peer: PeerId, ledger: super::HoldLedger) {
@@ -1102,8 +1102,9 @@ impl RibManager {
         self.record_hold_ledger(owner, stage, |ledger| &mut ledger.withdrawn, keys);
     }
 
-    /// Keep a key where an exempt row replaced an ordinary one in the hold,
-    /// up to the limit, checkpointing under the caller's `stage`.
+    /// Keep a key where the peer may hold an ordinary row instead of an
+    /// exempt one (`HoldLedger::replaced`), up to the limit, checkpointing
+    /// under the caller's `stage`.
     pub(super) fn record_hold_exempt_replaced(
         &mut self,
         owner: super::HoldWithdrawOwner,
@@ -1310,7 +1311,8 @@ impl RibManager {
                     && self.desires_unicast_prefix(peer, prefix))
                 {
                     withdraw.insert((prefix, path_id));
-                    withdrawn.push(key);
+                    // The ledger keeps the key as sent on this session's wire.
+                    withdrawn.push((prefix, path_id));
                     done.push(key);
                 }
             }

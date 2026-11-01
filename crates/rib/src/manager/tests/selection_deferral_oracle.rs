@@ -180,6 +180,11 @@ enum Op {
         kind: RegroupKind,
         on: bool,
     },
+    /// The receiver stops reading its channel (`true`) except on a drain,
+    /// or reads it after every operation again: updates the RIB queued stay
+    /// queued, and a session flap discards them. The next session's peer
+    /// reads its channel again.
+    Lag(bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -308,6 +313,7 @@ fn setup_strategy() -> impl Strategy<Value = Op> {
         6 => intent_strategy(),
         1 => any::<bool>().prop_map(Op::Backpressure),
         1 => Just(Op::Resync),
+        1 => any::<bool>().prop_map(Op::Lag),
         1 => reconnect_strategy(),
     ]
 }
@@ -328,6 +334,7 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
             any::<bool>()
         )
             .prop_map(|(kind, on)| Op::Regroup { kind, on }),
+        1 => any::<bool>().prop_map(Op::Lag),
         2 => reconnect_strategy(),
     ]
 }
@@ -394,12 +401,22 @@ struct Harness {
     /// Keys where an exempt row replaced an ordinary one on the wire: a GR
     /// helper's stale row there may be either, so the RIB may wait.
     ordinary_replaced: HashSet<(Prefix, u32)>,
-    /// Keys whose wire row was exempt while the RIB's committed table held
-    /// an ordinary row there when a session ended: a replacement the peer
-    /// missed or the transport dropped.
-    diverged_at_flap: HashSet<(Prefix, u32)>,
-    /// The receiver moved between an update group's view and its own.
+    /// Keys where the RIB's committed table toward the receiver (its update
+    /// group's, for a grouped one) held an ordinary row: a later exempt row
+    /// there, or the ordinary row's withdrawal, may not have reached the
+    /// peer, and a grouped receiver may have missed the ordinary row itself.
+    committed_ordinary_seen: HashSet<(Prefix, u32)>,
+    /// The receiver moved between an update group's view and its own in the
+    /// current session.
     regrouped: bool,
+    /// A session that moved between views ended with stale exempt rows
+    /// left: while they stay, no session can prove which row a helper keeps.
+    regrouped_carried: bool,
+    /// The receiver reads its channel only on a drain.
+    lagging: bool,
+    /// Updates queued on the channel while the receiver lagged, read before
+    /// any later one: queued before the intent they predate changed.
+    unread: usize,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -446,8 +463,11 @@ impl Harness {
             tags: BTreeSet::new(),
             wire_tag: HashMap::new(),
             ordinary_replaced: HashSet::new(),
-            diverged_at_flap: HashSet::new(),
+            committed_ordinary_seen: HashSet::new(),
             regrouped: false,
+            regrouped_carried: false,
+            lagging: false,
+            unread: 0,
         };
         if !config.late {
             harness.establish();
@@ -537,15 +557,16 @@ impl Harness {
             unreachable!("only a Reconnect flaps the session")
         };
         let observer = peer_v4(OBSERVER);
-        let diverged: Vec<_> = self
-            .wire
-            .iter()
-            .filter(|&(key, &injection)| {
-                self.injections[injection].exempt && self.committed_ordinary(*key)
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        self.diverged_at_flap.extend(diverged);
+        self.note_committed_ordinary();
+        // The ending session's mark travels with its carry; a carry whose
+        // stale exempt rows are all gone is retired with its mark.
+        let carry_left = self.stale.iter().any(|key| {
+            self.wire
+                .get(key)
+                .is_some_and(|&row| self.injections[row].exempt)
+        });
+        let regrouped = std::mem::take(&mut self.regrouped);
+        self.regrouped_carried = (self.regrouped_carried && carry_left) || regrouped;
         // `fsm.rs`: GR retention of the peer's routes needs its GR families
         // and an end that is not a NOTIFICATION teardown.
         if self.gr_families && !notification {
@@ -591,6 +612,10 @@ impl Harness {
         let (tx, rx) = mpsc::channel(4);
         self.tx = tx;
         self.rx = rx;
+        // The new session's peer reads its channel: everything it is sent
+        // is checked against the intent it was built for.
+        self.unread = 0;
+        self.lagging = false;
         self.session += 1000;
         if writer_full {
             let writer = self.tx.clone();
@@ -818,6 +843,7 @@ impl Harness {
                 }
             }
             Op::Backpressure(false) => self.occupied.clear(),
+            Op::Lag(on) => self.lagging = on,
             Op::RefuseProof => {
                 // Freeing the writer starts the dirty retry that is refused.
                 self.occupied.clear();
@@ -851,6 +877,7 @@ impl Harness {
             Op::Drain | Op::Reconnect { .. } => {}
             Op::Regroup { kind, on } => self.regroup(kind, on),
         }
+        self.note_committed_ordinary();
     }
 
     /// Tag the current path at `(index, path)` with BLACKHOLE through the
@@ -921,8 +948,8 @@ impl Harness {
         if !self.config.grouped || !self.registered {
             return;
         }
-        self.regrouped = true;
         let observer = peer_v4(OBSERVER);
+        let before = self.manager.grouped_member_of(observer);
         match kind {
             RegroupKind::Slow => self.manager.handle_update(RibUpdate::PeerSlowState {
                 peer: observer,
@@ -951,6 +978,11 @@ impl Harness {
                 capture.try_recv().unwrap();
             }
         }
+        // Production marks a move between views, not a request that leaves
+        // the receiver where it was.
+        if self.manager.grouped_member_of(observer) != before {
+            self.regrouped = true;
+        }
     }
 
     fn receive(&mut self, announced: Vec<Route>, withdrawn: Vec<(Prefix, u32)>) {
@@ -970,6 +1002,7 @@ impl Harness {
 
     /// Apply what the receiver got; I4 holds for every announcement.
     fn observe(&mut self) -> Result<usize, TestCaseError> {
+        self.note_committed_ordinary();
         // The source and waiter never backpressure: only the receiver
         // retries.
         while self.source.try_recv().is_ok() {}
@@ -994,11 +1027,17 @@ impl Harness {
                     update.refresh_markers
                 );
             }
+            // An update queued while the receiver lagged was built for the
+            // intent before the operations since: the checks against the
+            // current intent (I1, I4 and I6) skip it.
+            let queued = self.unread > 0;
+            self.unread = self.unread.saturating_sub(1);
             // I6: a GR helper rightly keeps the ended session's stale
             // ordinary row until our End-of-RIB; inside the hold only a key
             // whose prefix a fresh session would not advertise at all may
             // leave.
             if self.held
+                && !queued
                 && update.withdraw.iter().any(|key| {
                     self.stale.contains(key)
                         && self
@@ -1035,16 +1074,14 @@ impl Harness {
             // order is possible: apply each part's ordinary rows before its
             // blackholing ones, the worst order, and check the peer's state
             // after the withdrawals and after every announcement.
-            self.apply_announcements(&update)?;
+            self.apply_announcements(&update, queued)?;
             // Our End-of-RIB ends a GR helper's retention: it purges every
             // stale row this session did not re-announce.
             if update.end_of_rib.contains(&FAMILY) && !self.stale.is_empty() {
                 for key in std::mem::take(&mut self.stale) {
                     self.wire.remove(&key);
                 }
-                if self.per_update_i1 {
-                    self.check_blackholed()?;
-                }
+                self.check_blackholed_unless(queued)?;
             }
         }
         Ok(updates)
@@ -1052,7 +1089,7 @@ impl Harness {
 
     /// I4 for every announcement; I1 and I6 after the withdrawals and after
     /// each announcement, in the worst order the transport may send them.
-    fn apply_announcements(&mut self, update: &OutboundRouteUpdate) -> Checked {
+    fn apply_announcements(&mut self, update: &OutboundRouteUpdate, queued: bool) -> Checked {
         /// One part's rows, ordinary before blackholing.
         fn worst(part: &[Route]) -> Vec<&Route> {
             let (exempt, ordinary): (Vec<&Route>, Vec<&Route>) = part.iter().partition(|route| {
@@ -1064,15 +1101,14 @@ impl Harness {
             ordinary.into_iter().chain(exempt).collect()
         }
         self.check_send_limit()?;
-        if self.per_update_i1 {
-            self.check_blackholed()?;
-        }
+        self.check_blackholed_unless(queued)?;
         let (lead, rest) = update
             .announce
             .split_at(update.exempt_announce.min(update.announce.len()));
         for route in worst(lead).into_iter().chain(worst(rest)) {
             let injection = Self::identity(route);
-            let resurrected = self.injections[injection].exempt && !self.injections[injection].live;
+            let resurrected =
+                !queued && self.injections[injection].exempt && !self.injections[injection].live;
             prop_assert!(
                 !resurrected,
                 "I4: removed exempt injection {injection} re-announced at {:?}",
@@ -1096,9 +1132,18 @@ impl Harness {
             );
             self.stale.remove(&key);
             self.check_send_limit()?;
-            if self.per_update_i1 {
-                self.check_blackholed()?;
-            }
+            self.check_blackholed_unless(queued)?;
+        }
+        Ok(())
+    }
+
+    /// I1 per update, except for an update queued while the receiver
+    /// lagged, which only moves the baseline.
+    fn check_blackholed_unless(&mut self, queued: bool) -> Checked {
+        if queued {
+            self.blackholed = self.exempt_rows();
+        } else if self.per_update_i1 {
+            self.check_blackholed()?;
         }
         Ok(())
     }
@@ -1255,28 +1300,27 @@ impl Harness {
         Ok(())
     }
 
-    /// Whether the RIB's committed table toward the receiver holds a
-    /// non-exempt row at `key`.
-    fn committed_ordinary(&self, key: (Prefix, u32)) -> bool {
+    /// Record the keys where the RIB's committed table toward the receiver
+    /// holds a non-exempt row now.
+    fn note_committed_ordinary(&mut self) {
         let observer = peer_v4(OBSERVER);
-        let ordinary = |table: &crate::adj_rib_out::AdjRibOut| {
-            table.get(&key.0, key.1).is_some()
-                && table
-                    .local_export_source(&key.0, key.1)
-                    .is_none_or(|source| !source.deferral_exempt)
+        let table = match self.manager.grouped_member_of(observer) {
+            Some(gid) => self.manager.group_ribs.get(&gid).map(|group| &group.table),
+            None => self.manager.adj_ribs_out.get(&observer),
         };
-        match self.manager.grouped_member_of(observer) {
-            Some(gid) => self
-                .manager
-                .group_ribs
-                .get(&gid)
-                .is_some_and(|group| ordinary(&group.table)),
-            None => self
-                .manager
-                .adj_ribs_out
-                .get(&observer)
-                .is_some_and(ordinary),
-        }
+        let Some(table) = table else {
+            return;
+        };
+        self.committed_ordinary_seen.extend(
+            table
+                .iter()
+                .map(|route| (route.prefix, route.path_id))
+                .filter(|key| {
+                    table
+                        .local_export_source(&key.0, key.1)
+                        .is_none_or(|source| !source.deferral_exempt)
+                }),
+        );
     }
 
     /// A known open defect that explains a deleted exempt row still on the
@@ -1287,11 +1331,13 @@ impl Harness {
         // where the helper may hold that route at the key instead: an exempt
         // row replaced an ordinary one there, the peer missed or the
         // transport dropped an ordinary row replacing the exempt one, or the
-        // receiver's wire moved between views. Keeping a route the helper
-        // rightly holds comes first.
+        // receiver's wire moved between views. The RIB judges from what it
+        // committed, so any ordinary row it committed at the key counts,
+        // delivered or not. Keeping a route the helper rightly holds comes
+        // first.
         let uncertain = self.ordinary_replaced.contains(&key)
-            || self.diverged_at_flap.contains(&key)
-            || self.regrouped;
+            || self.committed_ordinary_seen.contains(&key)
+            || self.regrouped_carried;
         let candidate = (0..PREFIXES)
             .find(|&index| prefix(index) == key.0)
             .is_some_and(|index| {
@@ -1484,8 +1530,16 @@ impl Harness {
         let actual = self
             .manager
             .actual_unicast_advertised_count(peer_v4(OBSERVER));
+        // LAN-2780: a grouped receiver under a prefix limit whose first
+        // session establishes inside the hold behind a full writer keeps a
+        // row deleted in the hold in its count, though not on its wire.
+        let known_count_drift = self.config.grouped
+            && self.config.limit
+            && self.config.late
+            && actual > wire.len()
+            && allowed("LAN-2780").is_some();
         prop_assert!(
-            actual == wire.len(),
+            actual == wire.len() || known_count_drift,
             "I3: actual advertised count {actual} differs from {} wire keys",
             wire.len()
         );
@@ -1498,7 +1552,11 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     harness.observe()?;
     for op in setup {
         harness.apply(op);
-        harness.observe()?;
+        if harness.lagging {
+            harness.unread = harness.rx.len();
+        } else {
+            harness.observe()?;
+        }
     }
     harness.drain()?;
     prop_assert!(
@@ -1530,7 +1588,11 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
             );
         }
         harness.apply(op);
-        harness.observe()?;
+        if harness.lagging {
+            harness.unread = harness.rx.len();
+        } else {
+            harness.observe()?;
+        }
         let drained = matches!(op, Op::Drain);
         if drained {
             harness.drain()?;
@@ -3174,5 +3236,162 @@ fn ordinary_row_after_a_withdrawn_rtbh_stays_at_the_helper() {
         if let Some(reason) = failure(Config { grouped, ..config }, &setup, &hold) {
             panic!("grouped {grouped}: {reason}");
         }
+    }
+}
+
+fn grouped_plain() -> Config {
+    Config {
+        grouped: true,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    }
+}
+
+const ORDINARY_P2: Op = Op::Receive {
+    prefix: 2,
+    path: 0,
+    preference: 0,
+    blackhole: false,
+};
+
+const CLEAN_FLAP_WRITER_FULL: Op = Op::Reconnect {
+    notification: false,
+    helper: true,
+    gr_families: true,
+    writer_full: true,
+};
+
+/// A grouped member misses the group's withdrawal of an ordinary row and the
+/// RTBH announced at the now-empty key, then flaps: the helper keeps the
+/// ordinary row stale. The ordinary route returns inside the hold and the
+/// RTBH is deleted; the flush must leave the ordinary row for our
+/// End-of-RIB (I6).
+#[test]
+fn grouped_ordinary_row_withdrawn_under_a_missed_rtbh_stays_at_the_helper() {
+    let setup = [
+        ORDINARY_P2,
+        Op::Backpressure(true),
+        Op::ReceiveWithdraw { prefix: 2, path: 0 },
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: true,
+        },
+        CLEAN_FLAP_WRITER_FULL,
+        Op::Delete { prefix: 2, path: 0 },
+    ];
+    let hold = [ORDINARY_P2, Op::Resync, Op::Drain];
+    if let Some(reason) = failure(grouped_plain(), &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// The same for a private receiver whose queued updates the flap discards:
+/// the RIB committed the withdrawal and the RTBH, so its table no longer
+/// names the ordinary row the helper keeps.
+#[test]
+fn private_ordinary_row_withdrawn_under_a_dropped_rtbh_stays_at_the_helper() {
+    let config = Config {
+        grouped: false,
+        ..grouped_plain()
+    };
+    let setup = [
+        ORDINARY_P2,
+        Op::Lag(true),
+        Op::ReceiveWithdraw { prefix: 2, path: 0 },
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: true,
+        },
+        CLEAN_FLAP_WRITER_FULL,
+        Op::Delete { prefix: 2, path: 0 },
+    ];
+    let hold = [ORDINARY_P2, Op::Resync, Op::Drain];
+    if let Some(reason) = failure(config, &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// A regroup request that leaves the receiver where it was (`Slow(false)`
+/// on a receiver that is not slow) is no move between views: it neither
+/// marks the receiver nor widens the LAN-2727 allowance, so a routed RTBH
+/// deleted after the next flap must still leave inside the hold (I5).
+#[test]
+fn a_regroup_request_that_moves_nothing_marks_nothing() {
+    let mut harness = Harness::new(grouped_plain());
+    harness.observe().unwrap();
+    let before = harness.manager.grouped_member_of(peer_v4(OBSERVER));
+    harness.apply(&Op::Regroup {
+        kind: RegroupKind::Slow,
+        on: false,
+    });
+    assert_eq!(
+        harness.manager.grouped_member_of(peer_v4(OBSERVER)),
+        before,
+        "membership unchanged"
+    );
+    assert!(
+        !harness.regrouped,
+        "a request that moves nothing marks nothing"
+    );
+    // The RTBH outranks the received route from the start, so no table ever
+    // held an ordinary row at the key.
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: true,
+        },
+        ORDINARY_P2,
+    ];
+    let hold = [
+        Op::Regroup {
+            kind: RegroupKind::Slow,
+            on: false,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: true,
+            gr_families: true,
+            writer_full: false,
+        },
+        Op::Delete { prefix: 2, path: 0 },
+        Op::Drain,
+    ];
+    if let Some(reason) = failure(grouped_plain(), &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// A grouped member misses an ordinary row and then the RTBH over it behind
+/// a full writer, so its wire never holds the ordinary row; the group's
+/// table did, and the RIB cannot tell what the member received. Keeping the
+/// deleted RTBH stale until our End-of-RIB is the conservative outcome the
+/// LAN-2727 allowance covers.
+#[test]
+fn grouped_member_that_missed_the_ordinary_row_may_keep_a_deleted_rtbh() {
+    let setup = [
+        Op::Backpressure(true),
+        ORDINARY_P2,
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 1,
+            blackhole: true,
+        },
+        Op::Resync,
+        CLEAN_FLAP_WRITER_FULL,
+        Op::Delete { prefix: 2, path: 0 },
+    ];
+    let hold = [Op::Resync, Op::Drain];
+    if let Some(reason) = failure(grouped_plain(), &setup, &hold) {
+        panic!("{reason}");
     }
 }
