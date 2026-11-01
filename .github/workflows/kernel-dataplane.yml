@@ -536,6 +536,22 @@ jobs:
           topology: tests/interop/m51-bfd-frr.clab.yml
           script: tests/interop/scripts/test-m51-bfd-frr.sh
 
+  m51b:
+    needs: [prime_dev_image]
+    name: M51b — single-hop BFD for dynamic-range sessions (FRR 10.7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+        id: dataplane
+      - name: Run M51b (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M51b
+          topology: tests/interop/m51b-bfd-dynamic-frr.clab.yml
+          script: tests/interop/scripts/test-m51b-bfd-dynamic-frr.sh
+
   m108:
     needs: [prime_dev_image]
     name: M108 — RFC 5883 multihop BFD + RFC 5882 coupling across two hops (FRR 10.7.1)
@@ -1150,14 +1166,14 @@ jobs:
     if: ${{ always() }}
     needs: [classify_changes, bird3_archive, prime_dev_image, m36_m37_m37-ip_m38,
       m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42_m50_m52_m58,
-      m53, m53b, m53c, m53d, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
+      m53, m53b, m53c, m53d, m51, m51b, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, m121, m123, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
         classify_changes bird3_archive prime_dev_image
         m36_m37_m37-ip_m38 m39
-        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42_m50_m52_m58 m53 m53b m53c m53d m51 m108 m43 m47
+        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42_m50_m52_m58 m53 m53b m53c m53d m51 m51b m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 m121 m123 netns
     steps:
       - name: Aggregate required Kernel Dataplane result

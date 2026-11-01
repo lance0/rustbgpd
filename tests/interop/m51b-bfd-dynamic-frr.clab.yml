@@ -1,0 +1,70 @@
+# Containerlab topology: rustbgpd dynamic range with BFD ↔ two FRR peers
+# (M51b — single-hop BFD for [[dynamic_neighbors]] range sessions)
+#
+# rustbgpd (AS 65001) has no static neighbor, only a `[[dynamic_neighbors]]`
+# range covering 10.0.0.0/16 with `bfd = { profile = "fast" }` (300 ms × 3 ≈
+# 900 ms detection) and a 90 s BGP hold timer. Two FRR peers (AS 65002 and
+# AS 65003), each on its own link and running bfdd, dial in:
+#
+#   * Both accepted sessions reach Established and BFD Up, asserted from both
+#     sides (rustbgpd GetBfdSessions + bfd_session_up, FRR `show bfd peers`).
+#   * Failure: frr1's link silently drops everything frr1 sends (netem loss
+#     100%; carrier stays up). rustbgpd's BFD detects it within the detection time and tears
+#     the frr1 session down with Cease / BFD Down, far under the hold timer;
+#     the session's BFD session and series are removed with it. frr2's BGP and
+#     BFD sessions stay up throughout.
+#   * Recovery: removing the loss lets frr1 dial in again; the new
+#     session registers a new BFD session, which comes Up.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m51b-bfd-dynamic-frr.clab.yml
+#   bash tests/interop/scripts/test-m51b-bfd-dynamic-frr.sh
+#   containerlab destroy -t tests/interop/m51b-bfd-dynamic-frr.clab.yml --cleanup
+
+name: m51b-bfd-dynamic-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m51b-bfd-dynamic.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons-bfd:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m51b-frr1.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons-bfd:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m51b-frr2.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr2:eth1"]
+
+# Network: 10.0.0.0/24 (rustbgpd .1 ↔ frr1 .2) and 10.0.1.0/24 (rustbgpd .1 ↔
+# frr2 .2), both inside the rustbgpd range 10.0.0.0/16.
