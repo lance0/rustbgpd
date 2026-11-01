@@ -44,7 +44,7 @@ pub(in crate::manager) struct EvpnFeedSeal {
     pub(in crate::manager) required_markers: u8,
     /// A sparse renewal's staged keys: the only keys whose admission or
     /// eligibility can differ from the complete feed it renews.
-    sparse_keys: Option<Box<[EvpnRouteKey]>>,
+    sparse_keys: Option<std::sync::Arc<[EvpnRouteKey]>>,
 }
 
 /// A sparse clean diff, consumed once in the operation that moved membership.
@@ -220,6 +220,12 @@ impl RibManager {
         peer: PeerId,
         feed: &mut Option<EvpnCompleteFeed>,
     ) -> bool {
+        // A sparse renewal is verified on its staged keys only; carrying its
+        // revision past an invalidation would skip the full check.
+        debug_assert!(
+            feed.as_ref()
+                .is_none_or(|feed| feed.seal.sparse_keys.is_none())
+        );
         let current = feed
             .as_ref()
             .is_some_and(|feed| self.evpn_feed_seal_is_current(peer, &feed.seal));
@@ -473,17 +479,18 @@ impl RibManager {
         })
     }
 
-    /// Renew a complete feed that was current at `stamp_before`, before this
-    /// operation staged `deltas` onto `group_id`. Only the delta keys changed
-    /// since that admission, so the member's sparse delta payload keeps the
-    /// feed complete; neither inventory is walked again. Verification after
-    /// admission reads only those keys ([`Self::complete_evpn_feed_admitted`]).
+    /// Renew a complete feed that was current at `stamp_before`, before one
+    /// staging moved `group_id` to `stamp_after` over `staged_keys`. Only
+    /// those keys changed since that admission, so the member's sparse delta
+    /// payload keeps the feed complete; neither inventory is walked again.
+    /// Verification after admission reads only those keys
+    /// ([`Self::complete_evpn_feed_admitted`]).
     pub(in crate::manager) fn sparse_evpn_feed_seal(
         &self,
         peer: PeerId,
         group_id: usize,
-        stamp_before: u64,
-        deltas: &[super::update_groups::EvpnGroupDelta],
+        (stamp_before, stamp_after): (u64, u64),
+        staged_keys: &std::sync::Arc<[EvpnRouteKey]>,
     ) -> Option<EvpnFeedSeal> {
         let record = self.evpn_completion_record(peer)?;
         let completion = record.evpn_feed_completion.as_ref()?;
@@ -494,7 +501,8 @@ impl RibManager {
         if !completion.complete
             || completion.revision == 0
             || stamp_before == 0
-            || group.evpn_table_stamp == 0
+            || stamp_after == 0
+            || group.evpn_table_stamp != stamp_after
             || completion.target
                 != (EvpnFeedTarget::Grouped {
                     group_id,
@@ -515,11 +523,11 @@ impl RibManager {
             provenance: completion.provenance,
             target: EvpnFeedTarget::Grouped {
                 group_id,
-                table_stamp: group.evpn_table_stamp,
+                table_stamp: stamp_after,
             },
             revision: completion.revision,
             required_markers: 0,
-            sparse_keys: Some(deltas.iter().map(|delta| delta.key).collect()),
+            sparse_keys: Some(std::sync::Arc::clone(staged_keys)),
         })
     }
 

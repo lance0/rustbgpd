@@ -173,7 +173,9 @@ fn evpn_denial_replacement_checkpoints_retained_and_inserted_rows() {
         ],
         &mut || visits += 1,
     );
-    assert_eq!(visits, routes.len() + 2);
+    // One checkpoint per staged key and per inserted denial; untouched
+    // retained rows are not visited.
+    assert_eq!(visits, keys.len() + 2);
     assert_eq!(group.evpn_policy_denied.len(), 3);
     assert_eq!(group.evpn_policy_denied[&routes[0].key()], replacement);
     assert!(!group.evpn_policy_denied.contains_key(&routes[1].key()));
