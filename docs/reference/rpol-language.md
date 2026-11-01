@@ -2123,10 +2123,9 @@ hit counters — those come free after the rewrite.
 
 ## Migrating from IOS-XR RPL
 
-Most RPL constructs have a direct `.rpol` spelling. Three of them have
+Most RPL constructs have a direct `.rpol` spelling. Four of them have
 different semantics, and a line-by-line port changes routing in those
-places; a fourth, community replacement, ports directly except for a full
-scrub. The RPL behavior below is taken from the
+places. The RPL behavior below is taken from the
 [IOS XR 24.x routing configuration guide for ASR 9000, "Implementing Routing Policy"](https://www.cisco.com/c/en/us/td/docs/routers/asr9000/software/24xx/routing/configuration/guide/b-routing-cg-asr9000-24xx/implementing-routing-policy.html)
 and the
 [Cisco 8000 RPL command reference](https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/routing/cumulative/command/reference/b-routing-cr-cisco8000/m-rpl-commands-1.html)
@@ -2145,13 +2144,13 @@ and the
 | `set local-preference 200` | `set local-pref 200` |
 | `set med 50` | `set med 50` |
 | `set community (65000:100) additive` | `add community 65000:100` |
-| `set community (65000:100)` | `remove community *; add community 65000:100` |
+| `set community (65000:100)` | `remove community *; add community 65000:100`, when nothing earlier on the path added communities (see 4 below) |
 | `delete community all` | `remove community *` |
 | `prepend as-path 65000 3` | `prepend as 65000 3` |
 | `set next-hop self` | `set next-hop self` |
 | `pass` followed by the policy end | `accept`, or nothing when no `default-action reject` is declared |
 | `drop` | `reject` |
-| conditions read the arrived values | the same: reads never observe a staged `set` |
+| conditions read the route's initial data ("comparison operators always run on the initial data in the route", 24.x guide) | the same: reads never observe a staged `set` |
 | `neighbor ... route-policy NAME in` | `import_policy_chain = ["NAME"]` on the neighbor (see [Using policies in the daemon](#using-policies-in-the-daemon)) |
 
 A customer import policy written this way:
@@ -2198,10 +2197,15 @@ test rpki-invalid-is-dropped {
 **1. The default disposition.** RPL drops a route at the end of a policy
 unless the policy passed it or modified an attribute. `.rpol` accepts a
 route that no term decides, unless the policy declares
-`default-action reject`, and a modification never counts as a pass. A
-port that keeps RPL's implicit drop therefore needs `default-action
-reject` *and* an explicit `accept` wherever RPL relied on a `set` to pass
-the route:
+`default-action reject`, and a modification never counts as a pass.
+
+An RPL `set` also does not end the policy: later statements still run, and
+a later `drop` still drops the route. A `.rpol` `accept` ends the policy at
+once. A port that keeps RPL's implicit drop therefore needs
+`default-action reject` and an `accept` at the end of each path on which
+an RPL `set` would have passed the route, after that path's remaining
+checks and modifications. Here the `set` is on the last branch, so the
+`accept` can follow it directly:
 
 ```rpol
 prefix-set customers { 192.0.2.0/24 le 24 }
@@ -2235,6 +2239,73 @@ test explicit-accept-passes {
 test unmatched-route-is-dropped {
     route { prefix 198.51.100.0/24 }
     expect ported == reject
+}
+```
+
+When a later RPL statement can still drop the route, the `accept` goes after
+it. This RPL policy tags customer routes and then drops long paths, so a
+customer route with a long path is dropped:
+
+```text
+route-policy CUSTOMER-IN
+  if destination in CUSTOMERS then
+    set local-preference 200
+  endif
+  if as-path length ge 10 then
+    drop
+  endif
+end-policy
+```
+
+An `accept` next to the `set` would accept that route. The port accepts in
+a final term instead:
+
+```rpol
+prefix-set customers { 192.0.2.0/24 le 24 }
+
+# Wrong: the accept skips the length check that follows.
+policy accept-too-early {
+    default-action reject
+    term tag {
+        if route.prefix in customers { set local-pref 200; accept }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
+    }
+}
+
+# The port: modify, run the remaining checks, accept at the end.
+policy accept-at-end {
+    default-action reject
+    term tag {
+        if route.prefix in customers { set local-pref 200 }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
+    }
+    term pass-customers {
+        if route.prefix in customers { accept }
+    }
+}
+
+test early-accept-skips-the-length-check {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect accept-too-early == accept with local-pref 200
+}
+
+test long-customer-path-is-dropped {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect accept-at-end == reject
+}
+
+test short-customer-path-is-tagged {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect accept-at-end == accept with local-pref 200
+}
+
+test non-customer-is-dropped {
+    route { prefix 198.51.100.0/24; as-path "64500" }
+    expect accept-at-end == reject
 }
 ```
 
@@ -2332,12 +2403,18 @@ test total-count {
 }
 ```
 
-**4. Replacing communities (ports directly).** RPL `set community` without
-`additive` replaces the route's communities but keeps the well-known ones.
+**4. Replacing communities.** RPL `set community` without `additive`
+replaces the route's communities, keeping the well-known ones, and discards
+the communities that earlier statements in the policy added.
 `remove community *` keeps the same RFC 1997 well-known range (see
-"Actions"), so the replace idiom keeps RPL's behavior. Only a full scrub
-that also removes `NO_EXPORT` and the other well-known values needs a
-different form, the loop:
+"Actions"), but it removes only the communities the route arrived with: a
+value that an earlier `add community` in the same policy, or an earlier
+member of the chain, added stays on the route. The replace idiom therefore
+ports directly only when nothing on the path added communities before it.
+When something did, drop those earlier additions from that path, since RPL
+would have discarded them; usually that means replacing first and adding
+afterwards. A full scrub that also removes `NO_EXPORT` and the other
+well-known values is the loop form:
 
 ```rpol
 # RPL `set community (65000:100)`: replace, keeping well-known values.
@@ -2357,10 +2434,37 @@ policy scrub-all {
     }
 }
 
+# A literal port of RPL `set community (65000:1) additive` followed by
+# `set community (65000:100)`: the earlier addition survives.
+policy tag-then-retag {
+    term early { add community 65000:1 }
+    term t {
+        remove community *
+        add community 65000:100
+        accept
+    }
+}
+
+policy tag-only {
+    term t { add community 65000:1 }
+}
+
 test retag-keeps-no-export {
     route { prefix 192.0.2.0/24; communities [NO_EXPORT, 65010:1] }
-    expect retag == accept with removes community 65010:1,
-        not removed community NO_EXPORT, community 65000:100
+    expect retag == accept with only removes community 65010:1,
+        community 65000:100, not removed community NO_EXPORT
+}
+
+test earlier-addition-survives-the-replacement {
+    route { prefix 192.0.2.0/24; communities [65010:1] }
+    expect tag-then-retag == accept with only removes community 65010:1,
+        community 65000:1, community 65000:100
+}
+
+test earlier-chain-member-addition-survives {
+    route { prefix 192.0.2.0/24; communities [65010:1] }
+    expect chain [tag-only, retag] == accept with only removes community 65010:1,
+        community 65000:1, community 65000:100
 }
 
 test scrub-all-removes-no-export {
@@ -2389,8 +2493,15 @@ compiles now:
 - **`$parameter` of a set, address or community type** — parameters are
   `u32` only; write one policy per set, or keep the set content in a
   [dataset](#datasets--external-set-content).
-- **`done`** — `accept` ends the current policy, and the chain continues
-  with the next member.
+- **`done`** — differs. RPL `done` accepts the route and runs no further
+  policy statements. A `.rpol` `accept` ends only the current policy, and
+  the neighbor's chain continues: a later member can still reject the
+  route, a later member's `set` overrides the same attribute, and
+  community additions and removals merge. To keep a `done` decision, put
+  the policy last in the neighbor's configured chain, or keep the later
+  members from rejecting the route or setting the attributes it set. With
+  `honor_graceful_shutdown` or `honor_blackhole`, the daemon's own EBGP
+  import policies still run after the last configured member.
 
 ```rpol
 community-set scrub { 65000:666, 65000:667 }
@@ -2454,6 +2565,25 @@ test neighbor-is-is-boundary-anchored {
 test neighbor-is-ignores-later-asns {
     route { prefix 192.0.2.0/24; as-path "64500 65001" }
     expect from-65001 == accept with without local-pref
+}
+
+# RPL `set local-preference 200` then `done`.
+policy finish {
+    term t { set local-pref 200; accept }
+}
+
+policy later-member {
+    term t { set local-pref 100; accept }
+}
+
+test accept-does-not-stop-the-chain {
+    route { prefix 192.0.2.0/24 }
+    expect chain [finish, later-member] == accept with local-pref 100
+}
+
+test last-in-the-chain-keeps-the-decision {
+    route { prefix 192.0.2.0/24 }
+    expect chain [later-member, finish] == accept with local-pref 200
 }
 ```
 
