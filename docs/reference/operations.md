@@ -4139,12 +4139,14 @@ one `[[fib_tables]]` entry at startup, on Linux); otherwise they fail
 # (eligible / relax_only / none). A prefix with no paths is NOT_FOUND.
 rbgp rib --prefix 203.0.113.0/24 --explain
 
-# Peer-scoped view: same shape, but every candidate the named peer would
-# actually receive gets a non-zero `advertised_path_id` (rank within the
-# peer's effective Add-Path send_max). Filtered candidates (export policy
-# reject, family mismatch, split-horizon, iBGP / RFC 4456 RR suppression,
-# beyond send_max) stay at 0 so the operator can see *why* each isn't
-# advertised.
+# Peer-scoped view: same shape, but every candidate the named Add-Path peer
+# would be sent gets a non-zero `advertised_path_id`: its outbound path ID,
+# within the peer's effective Add-Path send_max. Filtered candidates (family
+# mismatch, split-horizon, iBGP / RFC 4456 RR suppression, RFC 1997,
+# route-server control, LLGR, conditional advertisement, export policy
+# reject, beyond send_max) stay at 0. The peer's ORF prefix filter and
+# refresh gate are not applied; `rbgp rib --prefix P advertised PEER
+# --explain` shows what the peer is actually sent.
 rbgp rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
 ```
 

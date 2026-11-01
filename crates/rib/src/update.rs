@@ -1760,11 +1760,11 @@ pub struct ExplainBestPath {
     /// ORR peer whose vantage has no usable SPF result (which falls back
     /// to the ordinary Loc-RIB best).
     pub orr_vantage: Option<IpAddr>,
-    /// Peer's Add-Path `send_max` when scoped to a peer (`0` =
-    /// single-best send, or global view). When non-zero, the top
-    /// `add_path_send_max` candidates by the effective peer-aware
-    /// best-path preference get a
-    /// non-zero `BestPathCandidate::advertised_path_id`.
+    /// Peer's Add-Path `send_max` when scoped to a peer (`0` = no
+    /// Add-Path send for the family, or global view). When non-zero,
+    /// the top `add_path_send_max` gate-permitted candidates by the
+    /// effective peer-aware best-path preference get a non-zero
+    /// `BestPathCandidate::advertised_path_id`.
     pub add_path_send_max: u32,
     /// The decision step that selected the winner over the runner-up —
     /// the last surviving competitor by best-path order. `None` when
@@ -1790,17 +1790,20 @@ pub struct BestPathCandidate {
     /// How this candidate compares to the best route.
     pub vs_best_ordering: std::cmp::Ordering,
     /// When the explain was scoped to a peer with Add-Path send mode
-    /// (`add_path_send_max > 0`), non-zero = this candidate would be
-    /// advertised at this rank (1-based, capped at
-    /// `add_path_send_max`); zero = filtered out by the peer's
-    /// export policy / family check / split-horizon / iBGP or
-    /// RFC 4456 route-reflector suppression / the source-route gates
-    /// live staging applies (RFC 1997, route-server control, LLGR) /
-    /// conditional advertisement, or beyond `send_max`.
-    /// Always zero in single-best send mode
-    /// (`add_path_send_max == 0`) and on a global-view explain —
-    /// see `ExplainBestPath::add_path_send_max` for why single-best
-    /// can't be expressed through this field.
+    /// (`add_path_send_max > 0`), non-zero = the outbound Add-Path path
+    /// ID this candidate has or would get (a stable key, not a rank);
+    /// zero = filtered out by the peer's family check / split-horizon /
+    /// iBGP or RFC 4456 route-reflector suppression / the source-route
+    /// gates live staging applies (RFC 1997, route-server control,
+    /// LLGR) / conditional advertisement / export policy, or beyond
+    /// `send_max`. The peer's ORF prefix filter and RFC 5291 §6 refresh
+    /// gate are not applied.
+    /// Always zero without Add-Path send (`add_path_send_max == 0`) and
+    /// on a global-view explain: such a peer is sent one path at
+    /// `path_id = 0` — the Loc-RIB best for an ordinary single-best
+    /// peer, the first permitted candidate (possibly non-best) for a
+    /// per-client-best peer. `ExplainAdvertisedRoute` answers what
+    /// those peers are sent.
     pub advertised_path_id: u32,
     /// Compared values behind `vs_best_reason`, candidate's value
     /// first (e.g. `"local_pref 100 < 200"`).

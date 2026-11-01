@@ -3655,15 +3655,16 @@ impl RibManager {
 
         // For the peer-aware path, build the ranked advertised set so
         // each candidate can be tagged with its `advertised_path_id`.
-        // The selection mirrors `distribute_multipath_prefix` exactly:
+        // The selection mirrors `distribute_multipath_prefix`:
         // family check → split-horizon → iBGP/RR suppression → source-route
         // gates (`multipath_candidate_suppressed`: `NO_ADVERTISE`,
         // `NO_EXPORT`, route-server control, LLGR) → conditional
         // advertisement → export policy → modified-route `NO_ADVERTISE` →
-        // top-N by best-path. Mirroring the
-        // contract is deliberate — operators trust explain only if it
-        // produces the same selection that distribution would, modulo state
-        // changes between the two calls.
+        // top-N by best-path. Mirroring the contract is deliberate —
+        // operators trust explain only if it produces the same selection
+        // that distribution would, modulo state changes between the two
+        // calls. Not mirrored: the whole-prefix Address-Prefix ORF filter
+        // and the RFC 5291 §6 refresh gate (tracked separately).
         let mut advertised: Vec<(PeerId, u32, u32)> = Vec::new();
         let mut add_path_send_max: u32 = 0;
         if let Some(peer_addr) = peer {
@@ -3692,19 +3693,16 @@ impl RibManager {
             // for an IPv6 prefix — same answer distribution would
             // produce.
             //
-            // Single-best peers (`effective send_max == 0`) skip the
-            // ranking loop entirely — `distribute_single_best_prefix`
-            // only ever advertises the Loc-RIB best with
-            // `path_id = 0`, never falls back to the next-best
-            // candidate. Marking a non-best candidate as "advertised"
-            // because it sorts first in the export-filtered set would
-            // lie to the operator about what distribution would
-            // actually do (e.g. when the global best is suppressed by
-            // split-horizon). In that mode the operator infers
-            // winner-advertisement from `best_route` plus the export
-            // policy state visible elsewhere; the candidates list
-            // still surfaces the alternatives with
-            // `advertised_path_id = 0`.
+            // Peers without Add-Path send (`effective send_max == 0`)
+            // skip the ranking loop entirely and are sent one path at
+            // `path_id = 0`: `distribute_single_best_prefix` sends only
+            // the Loc-RIB best, never the next-best candidate, while a
+            // per-client-best route-server client is sent the first
+            // candidate its export gates permit, which can be a non-best
+            // one. Neither selection fits this field, so the candidates
+            // list surfaces the alternatives with `advertised_path_id =
+            // 0` and `ExplainAdvertisedRoute` answers what the peer is
+            // sent.
             let family_sendable = sendable.is_some_and(|f| f.contains(&family));
             add_path_send_max = if family_sendable {
                 self.add_path_send_max_for_prefix(peer_addr, &prefix)
