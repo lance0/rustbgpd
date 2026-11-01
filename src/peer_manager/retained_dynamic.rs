@@ -168,8 +168,9 @@ impl PeerManager {
 
     /// Publish what an idle retained neighbor holds, and until when, for
     /// `rbgp doctor` and dashboards; nothing while its reconnect is live or
-    /// once it is gone. Its routes are listed from the first check that
-    /// finds them retained, which carries the RIB's deadline.
+    /// once it is gone. Its routes carry the RIB's deadline from the last
+    /// check that found them retained; until a check answers, their next
+    /// check time.
     fn publish_retained_dynamic(&self, peer: &PeerKey) {
         let Some(retained) = self.retained_dynamic.get(peer) else {
             return;
@@ -182,15 +183,24 @@ impl PeerManager {
         }
         let now = Instant::now();
         let wall_now = std::time::SystemTime::now();
+        // An overdue deadline stays in the past.
         let unix = |at: Instant| {
-            (wall_now + at.saturating_duration_since(now))
-                .duration_since(std::time::UNIX_EPOCH)
+            let wall = if at >= now {
+                wall_now + (at - now)
+            } else {
+                wall_now - (now - at)
+            };
+            wall.duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |since| since.as_secs())
         };
         self.metrics.set_dynamic_neighbor_retention(
             &label,
             &range,
-            retained.theirs_until.filter(|_| retained.theirs).map(unix),
+            retained
+                .theirs_until
+                .or(retained.check_at)
+                .filter(|_| retained.theirs)
+                .map(unix),
             retained.ours_until.filter(|&until| now < until).map(unix),
         );
     }
