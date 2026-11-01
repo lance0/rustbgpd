@@ -2123,9 +2123,10 @@ hit counters — those come free after the rewrite.
 
 ## Migrating from IOS-XR RPL
 
-Most RPL constructs have a direct `.rpol` spelling. Four of them have
+Most RPL constructs have a direct `.rpol` spelling. Three of them have
 different semantics, and a line-by-line port changes routing in those
-places. The RPL behavior below is taken from the
+places; a fourth, community replacement, ports directly except for a full
+scrub. The RPL behavior below is taken from the
 [IOS XR 24.x routing configuration guide for ASR 9000, "Implementing Routing Policy"](https://www.cisco.com/c/en/us/td/docs/routers/asr9000/software/24xx/routing/configuration/guide/b-routing-cg-asr9000-24xx/implementing-routing-policy.html)
 and the
 [Cisco 8000 RPL command reference](https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/routing/cumulative/command/reference/b-routing-cr-cisco8000/m-rpl-commands-1.html)
@@ -2331,11 +2332,12 @@ test total-count {
 }
 ```
 
-**4. Replacing communities.** RPL `set community` without `additive`
-replaces the route's communities but keeps the well-known ones.
+**4. Replacing communities (ports directly).** RPL `set community` without
+`additive` replaces the route's communities but keeps the well-known ones.
 `remove community *` keeps the same RFC 1997 well-known range (see
-"Actions"), so the replace idiom ports directly. A full scrub that also
-removes `NO_EXPORT` and the other well-known values is the loop form:
+"Actions"), so the replace idiom keeps RPL's behavior. Only a full scrub
+that also removes `NO_EXPORT` and the other well-known values needs a
+different form, the loop:
 
 ```rpol
 # RPL `set community (65000:100)`: replace, keeping well-known values.
