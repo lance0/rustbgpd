@@ -1253,11 +1253,8 @@ policy and term, never a per-route runtime surprise.
 
 *Comparison:* FRR's `set as-path prepend last-as N` (prepend the
 neighbor's AS) is its inbound route-map idiom and the model for
-`prepend as peer`; FRR has no `self`/`origin` operands (operators
-write literals). BIRD's `bgp_path.prepend()` takes only explicit ASN
-values — no peer-derived operand exists there at all. Neither
-implementation documents a legitimate outbound use of a
-peer-AS prepend, hence the attach-time rejection.
+`prepend as peer`, which is import-only for that reason (see
+**Direction legality** above).
 
 **Failure is closed.** A computed operand resolves when the matched
 term's action executes. If the value is unknown — no usable
@@ -2013,18 +2010,19 @@ GoBGP/OpenConfig statements.
   use them, terms have names instead of sequence numbers, guards are
   composable boolean expressions rather than implicit ANDs of match
   clauses, and policies take parameters — one `customer-in(peer_lp)`
-  replaces a route-map per peer. Route-maps have no unit tests and no
-  dry run; `.rpol` has both.
+  replaces a route-map per peer. `.rpol` policies also take fixture
+  tests and a dry run.
 - **vs BIRD filters:** BIRD's filter language is a general-purpose
   interpreter — variables, arbitrary control flow, user-defined
   functions. `.rpol` is deliberately smaller: immutable bindings, only
   bounded `for` loops over finite sources, only pure non-recursive
   functions (fully inlined at compile time), no user types — so every
   policy terminates by construction and compiles to an indexed IR (a
-  1,000-member set is one hash probe, not a linear scan). What BIRD can't do: test a candidate policy
-  read-only against the *running* daemon's RIB (`rbgp policy test`),
-  trace which term decided a live route (`rbgp policy explain`), or
-  read per-term live hit counters (`rbgp policy stats`).
+  1,000-member set is one hash probe, not a linear scan). rustbgpd can
+  also test a candidate policy read-only against the *running* daemon's
+  RIB (`rbgp policy test`), trace which term decided a live route
+  (`rbgp policy explain`), and read per-term live hit counters
+  (`rbgp policy stats`).
 - **vs GoBGP/OpenConfig statements (and rustbgpd's own TOML):** the
   same evaluation engine underneath — `.rpol` and TOML policies
   compile to one IR and mix freely in chains — so `.rpol` is a

@@ -381,7 +381,11 @@ member individually.
 | Runtime route injection | Yes | No | No | Yes | No |
 | Config persistence (API mutations) | Yes | No | No | No | No |
 | Hot reconfiguration (no restart) | Yes | Yes | Yes | Yes | Yes |
-| Embeddable library | No | No | No | Yes | No |
+| Embeddable library | Partial[^embed] | No | No | Yes | No |
+
+[^embed]: Published Rust codec, FSM and RPKI components; no published
+    full-daemon library. `rustbgpd-wire`, `rustbgpd-fsm` and `rustbgpd-rpki`
+    are on crates.io; see the [Rust library map](../reference/embedding.md).
 
 ## Operations
 
