@@ -151,7 +151,8 @@ enum Drive {
     /// A capacity-blocked dampening source with a pending inbound collision
     /// candidate is disabled; the candidate's `PeerDown` is sent first.
     DampeningDisable,
-    /// Peer removal queues the RIB's `PeerDeleted` reap marker.
+    /// Peer removal defers the RIB's `PeerDeleted` reap marker behind a full
+    /// mailbox; a session start at the same label then waits for it.
     PeerRemoval,
     /// An unbound interface-only neighbor's reconcile asks the RIB whether
     /// its GR or LLGR routes are still retained.
@@ -867,7 +868,7 @@ const WAIT_SITES: &[WaitSite] = &[
     // constant bounds these waits. Each caller chooses its read admission;
     // a reply, where the update carries one, is awaited separately.
     WaitSite {
-        site: "mod.rs::send_rib_update",
+        site: "mod.rs::flush_deferred_rib_updates",
         awaits: "RibUpdate::PeerDown fence for a replaced unstoppable primary (full RIB channel)",
         drive: Drive::ReplacePrimary,
         rib: RibHold::Capacity,
@@ -881,7 +882,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "mod.rs::send_rib_update",
+        site: "mod.rs::flush_deferred_rib_updates",
         awaits: "RibUpdate::PeerDown fence for a capacity-blocked collision candidate",
         drive: Drive::DampeningDisable,
         rib: RibHold::Capacity,
@@ -895,20 +896,22 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "mod.rs::send_rib_update",
-        awaits: "RibUpdate::PeerDeleted reap marker (full RIB channel)",
+        site: "mod.rs::flush_deferred_rib_updates",
+        awaits: "a deleted neighbor's deferred PeerDeleted and ReleasePeer, before a new \
+                 session at its label starts (full RIB channel)",
         drive: Drive::PeerRemoval,
         rib: RibHold::Capacity,
         session: answer_all,
-        additional_entry: Some("reap_deleted_peer_metric_series_for_key"),
+        additional_entry: Some("admit_deferred_rib_updates_for"),
         window: HELD_FOREVER,
         contract: Contract::Fenced {
-            reason: "the caller's peer removal is only partly applied",
+            reason: "the new session is not installed yet and the deleted neighbor's RIB \
+                     cleanup has not been admitted",
         },
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "mod.rs::send_rib_update",
+        site: "mod.rs::flush_deferred_rib_updates",
         awaits: "RibUpdate::ReplacePeerExportPolicies send (cohort transition, full RIB channel)",
         drive: FORWARD_COHORT,
         rib: RibHold::FullAfter(is_prestage),
@@ -919,7 +922,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::ExportApplied,
     },
     WaitSite {
-        site: "mod.rs::send_rib_update",
+        site: "mod.rs::flush_deferred_rib_updates",
         awaits: "RibUpdate::DiscardPreparedExportPolicyDestination send (full RIB channel)",
         drive: Drive::ForwardCohort {
             import_delta: false,
@@ -1674,9 +1677,8 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         }
         Drive::PeerRemoval => {
             let removed = PeerKey::new(IpAddr::V4(Ipv4Addr::new(10, 39, 0, 9)), None);
-            manager
-                .reap_deleted_peer_metric_series_for_key(&removed)
-                .await;
+            manager.reap_deleted_peer_metric_series_for_key(&removed);
+            manager.admit_deferred_rib_updates_for(&removed).await;
             Ok(())
         }
     }
@@ -2231,6 +2233,25 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
          serves any readiness query",
     ),
     (
+        "mod.rs::run",
+        1,
+        "the deferred-update drain is a run-loop select arm beside the readiness lane, never \
+         awaited inside a transaction",
+    ),
+    (
+        "mod.rs::send_oldest",
+        1,
+        "the deferred-update drain itself: only the run loop and the await_with_readiness \
+         waits poll it, each as a select arm beside the readiness lane",
+    ),
+    (
+        "mod.rs::defer_rib_update",
+        1,
+        "try_send never waits: a full mailbox defers the update, which the run loop sends as a \
+         select branch beside the readiness lane, or the next flush sends under \
+         await_with_readiness",
+    ),
+    (
         "retained_dynamic.rs::check_due_retained_dynamic",
         1,
         "never awaited by the actor: the batched retention query and its reply run in a \
@@ -2251,9 +2272,11 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
     ),
 ];
 
-/// Per function that mentions `rib_tx`, how many RIB waits it holds beyond
-/// its wait-helper calls: the textual shape of a RIB send or round trip
-/// awaited bare. A function's waits are the larger of its `oneshot::channel`
+/// Per function that mentions `rib_tx` or drives a deferred RIB update, how
+/// many RIB waits it holds beyond its wait-helper calls: the textual shape
+/// of a RIB send or round trip awaited bare. A deferred update's drain
+/// (`send_oldest`) or reservation (`poll_reserve`) waits for mailbox room
+/// like a send, without naming `rib_tx`. A function's waits are the larger of its `oneshot::channel`
 /// replies and its direct `rib_tx` sends or reservations (a `rib_tx` line
 /// with `.send(`, `.try_send(` or `.reserve` on it or on the next line).
 /// This is a count, not a pairing. A function may hold more wrapped waits
@@ -2262,12 +2285,16 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
 /// the same function.
 fn bare_rib_wait_fns(file: &str, source: &str) -> BTreeMap<String, usize> {
     const SENDS: [&str; 3] = [".send(", ".try_send(", ".reserve"];
+    const DEFERRED_SENDS: [&str; 2] = [".send_oldest(", ".poll_reserve("];
     let lines = lines_by_fn(source);
     let mut seen: BTreeMap<&str, (bool, usize, usize, usize)> = BTreeMap::new();
     for (index, &(current, line)) in lines.iter().enumerate() {
         let (rib, replies, sends, waits) = seen.entry(current).or_default();
         let next = lines.get(index + 1).map_or("", |&(_, next)| next);
-        if line.contains("rib_tx") {
+        if DEFERRED_SENDS.iter().any(|send| line.contains(send)) {
+            *rib = true;
+            *sends += 1;
+        } else if line.contains("rib_tx") {
             *rib = true;
             if SENDS
                 .iter()
@@ -3305,4 +3332,39 @@ async fn readiness_ping_runs_while_commands_stay_queued() {
     commands.send(PeerManagerCommand::Shutdown).await.unwrap();
     actor.await.unwrap();
     assert_eq!(dispatched.load(Ordering::SeqCst), COMMANDS);
+}
+
+/// No session starts behind a deferred deletion under its label: every
+/// `PeerHandle::spawn*` in the peer manager is preceded, in its function, by
+/// the wait (`admit_deferred_rib_updates_for`) or, on an inbound accept, the
+/// refusal (`refuse_inbound_behind_deferred_cleanup`).
+#[test]
+fn every_session_spawn_is_fenced_behind_deferred_rib_cleanup() {
+    const FENCES: [&str; 2] = [
+        "admit_deferred_rib_updates_for(",
+        "refuse_inbound_behind_deferred_cleanup(",
+    ];
+    let mut spawns = 0;
+    let mut unfenced = Vec::new();
+    for (file, source) in peer_manager_sources() {
+        let mut fenced: BTreeMap<&str, bool> = BTreeMap::new();
+        for (current, line) in lines_by_fn(&source) {
+            let fence = fenced.entry(current).or_default();
+            if FENCES.iter().any(|call| line.contains(call)) && !line.contains("fn ") {
+                *fence = true;
+            }
+            if line.contains("PeerHandle::spawn") {
+                spawns += 1;
+                if !*fence {
+                    unfenced.push(format!("{file}::{current}"));
+                }
+            }
+        }
+    }
+    assert_eq!(spawns, 6, "the scan finds every session spawn site");
+    assert!(
+        unfenced.is_empty(),
+        "a session spawn starts without waiting for, or refusing behind, a deferred deletion \
+         under its label: {unfenced:?}"
+    );
 }

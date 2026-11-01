@@ -1922,7 +1922,13 @@ an interface-only neighbor refused to learn on its interface), `rate_limited` (t
 `dynamic_limit` (slot saturation, counted alongside the legacy counter), and
 `notification_backoff` (a configured neighbor dialled in while its session
 waited out an escalated NOTIFICATION reconnect wait; see
-[Debugging a session that won't establish](#debugging-a-session-that-wont-establish)).
+[Debugging a session that won't establish](#debugging-a-session-that-wont-establish)),
+and `rib_cleanup_pending` (a deleted neighbor's RIB cleanup was still waiting
+for room in a full RIB mailbox: a connection that would create a new RIB
+identity, a new dynamic neighbor or a collision candidate beside one kept for
+graceful restart, is refused until it drains, and so is any connection under
+the deleted neighbor's own `peer` label, including an interface-only neighbor
+learned from an inbound connection; the neighbor reconnects on its own timer).
 There is deliberately no per-source label — source cardinality is unbounded
 exactly under the floods these drops account for.
 The Grafana overview graphs every reason in "Inbound connection drops by
@@ -1941,7 +1947,7 @@ name it.
 | `bgp_dynamic_neighbor_slots_limit` | Effective process-global `dynamic_neighbor_limit` |
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; at zero, a new matching address is rejected unless a retained neighbor kept only because it may hold our routes can be evicted |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
-| `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, or `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait). All four series are exported at 0 from startup |
+| `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait), or `rib_cleanup_pending` (a deleted neighbor's RIB cleanup was waiting for RIB mailbox room). All five series are exported at 0 from startup |
 | `bgp_bmp_identity_conflicts_total{outcome}` | Neighbors admitted at a link-local address another BMP-monitored neighbor holds: `refused` before the session starts, or `excluded` from BMP when every collector sets `on_identity_conflict = "exclude"`. Both series are exported at 0 from startup |
 | `bgp_bmp_identity_excluded_neighbors` | Neighbors whose sessions currently report nothing to BMP for an identity conflict |
 | `bgp_max_prefix_usage{peer,family,stage}` | Live session-actor max-prefix enforcement count. `family` is `aggregate`, `ipv4_unicast`, `ipv6_unicast`, or a non-unicast family (`l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`); `stage` is `accepted` (after import policy) or `received` (before import policy, unicast only). Series are absent while the session is down, and the `received` and non-unicast family series are absent while their bound is unset |

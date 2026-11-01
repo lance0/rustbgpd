@@ -111,7 +111,7 @@ impl PeerManager {
     }
 
     pub(super) async fn provision_new_peer_session(
-        &self,
+        &mut self,
         peer: &PeerKey,
         enabled: bool,
         should_start: bool,
@@ -443,12 +443,16 @@ impl PeerManager {
         outcome
     }
 
+    /// Stop `handle` within the bounded shutdown. The session sends its final
+    /// `PeerDown` while it stops, and this wait does not drive deferred RIB
+    /// admission, so a reservation in progress is given back first.
     pub(super) async fn shutdown_handle_bounded(
-        &self,
+        &mut self,
         address: std::net::IpAddr,
         context: &'static str,
         handle: PeerHandle,
     ) -> PeerShutdownOutcome {
+        self.deferred_rib.release_reservation();
         Self::shutdown_handle_bounded_owned(address, context, handle).await
     }
 
@@ -848,6 +852,7 @@ impl PeerManager {
             self.static_rib_peer_slot(&peer_key, transport.interface_only, replaces_retained);
         transport.rib_peer = rib_peer;
 
+        self.admit_deferred_rib_updates_for(&peer_key).await;
         let session_id = self.allocate_session_id();
         #[cfg(test)]
         if let Some(observations) = &mut self.dataset_generations_at_peer_construction {
@@ -901,7 +906,7 @@ impl PeerManager {
             Ok(handle) => handle,
             Err(error) => {
                 if new_rib_peer && let Some(peer) = transport.rib_peer.get() {
-                    self.release_unused_rib_peer(peer).await;
+                    self.release_unused_rib_peer(peer);
                 }
                 return Err(PeerLifecycleError::Internal(format!(
                     "failed to start peer: {error}"
@@ -910,7 +915,10 @@ impl PeerManager {
         };
 
         if replaces_retained {
-            self.delete_retained_dynamic(&peer_key).await;
+            // The new session has started at the retained neighbor's label:
+            // its deletion reaches the RIB before this add completes.
+            self.delete_retained_dynamic(&peer_key);
+            self.admit_deferred_rib_updates_for(&peer_key).await;
         }
         info!(peer = %address, %remote_asn, "peer added dynamically");
         if bmp_excluded {
@@ -2140,8 +2148,7 @@ impl PeerManager {
         // joins or aborts-and-awaits it, so this runs after the last
         // transport-side emission).
         if reap_metric_series {
-            self.reap_deleted_peer_metric_series_for_key(&peer_for_reap)
-                .await;
+            self.reap_deleted_peer_metric_series_for_key(&peer_for_reap);
         }
         self.recheck_refused_bindings();
         Ok(removed_config)
@@ -2246,16 +2253,11 @@ impl PeerManager {
     }
 
     /// Release a handle the RIB never learned of (a refused add). Queued
-    /// behind anything a session might have sent, like a deletion's release.
-    pub(super) async fn release_unused_rib_peer(&mut self, peer: PeerId) {
+    /// behind anything a session might have sent, like a deletion's release,
+    /// without waiting for mailbox room.
+    pub(super) fn release_unused_rib_peer(&mut self, peer: PeerId) {
         if self
-            .send_rib_update(
-                RibUpdate::ReleasePeer { peer },
-                OperatorReadAdmission::Fenced {
-                    reason: "a refused peer add is releasing its identity",
-                },
-            )
-            .await
+            .defer_rib_update(None, RibUpdate::ReleasePeer { peer })
             .is_err()
         {
             // The RIB is gone, so nothing can still name the handle.
@@ -2271,7 +2273,21 @@ impl PeerManager {
     /// covers them all. Call only after the peer has been removed from
     /// `self.peers` and its session task joined or was aborted and
     /// awaited by bounded shutdown.
-    pub(super) async fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
+    ///
+    /// Never waits for the RIB: a full mailbox defers the deletion's
+    /// `PeerDeleted` and `ReleasePeer`, in order, behind every update queued
+    /// before them. Every later update this actor sends through the ordered
+    /// path goes behind them, and no session starts at the label they reap
+    /// before they are admitted. The direct round trips (policy,
+    /// conditional-advertisement, owner publication, outbound refresh,
+    /// dampening barrier, BMP and retention queries) may be admitted first:
+    /// they name live or retained handles or RIB-wide state. Two come close
+    /// to a deleted handle. The spawned retention query can ask about a
+    /// retained neighbor deleted after it was sent, and
+    /// `finish_retention_pass` drops that answer. An interface-only
+    /// neighbor's handle, kept across endpoints (`keep_series`), is reused
+    /// only after the `RebindPeer` that flushes its deletion.
+    pub(super) fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
         // A deleted neighbor's counters end with it; a re-add starts at 0.
         self.neighbor_counters.remove(peer);
         // A peer installed without a retained slot (a test harness peer)
@@ -2311,31 +2327,20 @@ impl PeerManager {
             // `PeerDown`, so the RIB manager reaps again *after* its
             // own teardown emissions instead of racing them. Send
             // failure means the RIB manager is gone (daemon shutdown).
-            // Reads stay queued: the caller's removal is only partly applied.
-            let _ = self
-                .send_rib_update(
-                    RibUpdate::PeerDeleted {
-                        peer: rib_peer,
-                        label: Some(peer_label.into()),
-                        keep_series,
-                    },
-                    OperatorReadAdmission::Fenced {
-                        reason: "the peer removal is partly applied",
-                    },
-                )
-                .await;
+            let _ = self.defer_rib_update(
+                Some(peer_label.clone()),
+                RibUpdate::PeerDeleted {
+                    peer: rib_peer,
+                    label: Some(peer_label.as_str().into()),
+                    keep_series,
+                },
+            );
             // An interface-only neighbor keeps its handle across endpoints;
             // any other deletion returns it, after the cleanup above, so a
             // re-added neighbor gets a new one and late messages are dropped.
             if !self.unnumbered_holds(rib_peer) {
                 let _ = self
-                    .send_rib_update(
-                        RibUpdate::ReleasePeer { peer: rib_peer },
-                        OperatorReadAdmission::Fenced {
-                            reason: "the peer removal is partly applied",
-                        },
-                    )
-                    .await;
+                    .defer_rib_update(Some(peer_label), RibUpdate::ReleasePeer { peer: rib_peer });
             }
         }
     }

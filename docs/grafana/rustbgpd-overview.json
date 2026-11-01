@@ -3115,7 +3115,7 @@
       "id": 81,
       "type": "timeseries",
       "title": "Inbound connection drops by reason",
-      "description": "Accept-path inbound connection drops by bounded reason: unconfigured source, rate_limited, dynamic_limit, or notification_backoff (a configured neighbor dialled in while its session waited out an escalated reconnect wait after consecutive NOTIFICATION teardowns). Zero-valued series are suppressed.",
+      "description": "Accept-path inbound connection drops by bounded reason: unconfigured source, rate_limited, dynamic_limit, notification_backoff (a configured neighbor dialled in while its session waited out an escalated reconnect wait after consecutive NOTIFICATION teardowns), or rib_cleanup_pending (a deleted neighbor's RIB cleanup was waiting for RIB mailbox room). Zero-valued series are suppressed.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

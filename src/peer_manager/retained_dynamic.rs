@@ -176,7 +176,7 @@ impl PeerManager {
     /// another speaker, whose session took a new handle: what was retained
     /// for the last one is purged and its identity released, as for a
     /// deleted neighbor. The live neighbor keeps the slot.
-    pub(super) async fn retained_dynamic_open_from(&mut self, peer: &PeerKey, peer_asn: u32) {
+    pub(super) fn retained_dynamic_open_from(&mut self, peer: &PeerKey, peer_asn: u32) {
         let Some(retained) = self
             .retained_dynamic
             .get_mut(peer)
@@ -199,12 +199,13 @@ impl PeerManager {
             return;
         };
         info!(peer = %peer, previous_asn, peer_asn, "a reconnect from another AS is another speaker: releasing the retained identity");
-        self.release_side_handle(handle).await;
+        self.release_side_handle(handle);
     }
 
     /// Delete and release a handle the live neighbor does not use, keeping
-    /// the series it shares their label with.
-    async fn release_side_handle(&mut self, handle: PeerId) {
+    /// the series it shares their label with. Never waits for mailbox room:
+    /// no session uses the handle, and the deletion reaps no label.
+    fn release_side_handle(&mut self, handle: PeerId) {
         for update in [
             RibUpdate::PeerDeleted {
                 peer: handle,
@@ -213,14 +214,7 @@ impl PeerManager {
             },
             RibUpdate::ReleasePeer { peer: handle },
         ] {
-            let _ = self
-                .send_rib_update(
-                    update,
-                    super::OperatorReadAdmission::Fenced {
-                        reason: "a retained identity is being released",
-                    },
-                )
-                .await;
+            let _ = self.defer_rib_update(None, update);
         }
     }
 
@@ -322,7 +316,7 @@ impl PeerManager {
 
     /// Release each handle an orphaned slot resolved for itself: not the
     /// retained handle, and not one the live neighbor at its address uses.
-    pub(super) async fn release_orphaned_retained_handles(&mut self) {
+    pub(super) fn release_orphaned_retained_handles(&mut self) {
         let mut released = Vec::new();
         for orphan in std::mem::take(&mut self.retention.orphaned) {
             let Some(handle) = orphan.slot.get() else {
@@ -335,7 +329,7 @@ impl PeerManager {
                 continue;
             }
             released.push(handle);
-            self.release_side_handle(handle).await;
+            self.release_side_handle(handle);
         }
     }
 
@@ -419,7 +413,7 @@ impl PeerManager {
 
     /// Run every due check without waiting: delete what no range admits or
     /// whose hold of ours lapsed, and send one RIB query for the rest.
-    pub(super) async fn check_due_retained_dynamic(&mut self) {
+    pub(super) fn check_due_retained_dynamic(&mut self) {
         if self.retention.pass.is_some() {
             return;
         }
@@ -451,7 +445,7 @@ impl PeerManager {
             }
         }
         for peer in delete {
-            self.delete_retained_dynamic(&peer).await;
+            self.delete_retained_dynamic(&peer);
         }
         if ask.is_empty() {
             return;
@@ -497,7 +491,7 @@ impl PeerManager {
     /// Apply a retention query's answer: re-arm at the RIB's next timer
     /// while it retains a neighbor's routes, then at the end of the hold of
     /// ours, and delete the neighbor once neither holds. No answer backs off.
-    pub(super) async fn finish_retention_pass(&mut self, answer: Option<Vec<PeerRetention>>) {
+    pub(super) fn finish_retention_pass(&mut self, answer: Option<Vec<PeerRetention>>) {
         let Some(pass) = self.retention.pass.take() else {
             return;
         };
@@ -546,13 +540,13 @@ impl PeerManager {
             }
         }
         for peer in delete {
-            self.delete_retained_dynamic(&peer).await;
+            self.delete_retained_dynamic(&peer);
         }
     }
 
     /// Delete every idle retained neighbor no current range admits.
     /// Returns how many went.
-    pub(super) async fn release_unadmitted_retained_dynamic(&mut self) -> usize {
+    pub(super) fn release_unadmitted_retained_dynamic(&mut self) -> usize {
         self.retention.admission_dirty = false;
         let unadmitted: Vec<PeerKey> = self
             .retained_dynamic
@@ -564,7 +558,7 @@ impl PeerManager {
             .map(|(peer, _)| peer.clone())
             .collect();
         for peer in &unadmitted {
-            self.delete_retained_dynamic(peer).await;
+            self.delete_retained_dynamic(peer);
         }
         unadmitted.len()
     }
@@ -572,12 +566,12 @@ impl PeerManager {
     /// At the limit, give a new address the slot of the oldest neighbor kept
     /// only because it may hold our routes. `false` when there is none: a
     /// neighbor whose routes the RIB retains keeps its slot.
-    pub(super) async fn evict_retained_dynamic_for_slot(&mut self) -> bool {
+    pub(super) fn evict_retained_dynamic_for_slot(&mut self) -> bool {
         let Some(peer) = self.oldest_evictable_retained_dynamic() else {
             return false;
         };
         info!(peer = %peer, "dynamic neighbor limit reached: evicting the oldest idle neighbor kept only while it may hold our routes");
-        self.delete_retained_dynamic(&peer).await;
+        self.delete_retained_dynamic(&peer);
         true
     }
 
@@ -595,7 +589,7 @@ impl PeerManager {
 
     /// Delete an idle retained neighbor now, releasing its RIB identity. A
     /// neighbor whose reconnect is live is left to that session.
-    pub(super) async fn delete_retained_dynamic(&mut self, peer: &PeerKey) {
+    pub(super) fn delete_retained_dynamic(&mut self, peer: &PeerKey) {
         if self
             .retained_dynamic
             .get(peer)
@@ -606,7 +600,7 @@ impl PeerManager {
         self.remove_retained_dynamic(peer);
         self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
         self.refresh_dynamic_neighbor_capacity_metrics();
-        self.reap_deleted_peer_metric_series_for_key(peer).await;
+        self.reap_deleted_peer_metric_series_for_key(peer);
         info!(peer = %peer, "retained dynamic peer deleted");
     }
 

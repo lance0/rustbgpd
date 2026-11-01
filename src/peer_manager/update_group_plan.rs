@@ -204,6 +204,14 @@ impl PeerManager {
     pub(super) async fn query_update_group_snapshot(
         &mut self,
     ) -> Result<UpdateGroupSnapshot, String> {
+        // Behind every deferred deletion, so the snapshot never shows a
+        // neighbor the actor has already removed. Planning can be cancelled
+        // (its caller can go away), so the query is not queued itself: a
+        // dropped flush leaves the queue as it was, and a dropped send
+        // leaves nothing behind.
+        self.flush_deferred_rib_updates(OperatorReadAdmission::Served)
+            .await
+            .map_err(|()| "RIB unavailable while planning update-group impact".to_string())?;
         let (reply, recv) = oneshot::channel();
         let rib_tx = self.rib_tx.clone();
         let round_trip = async move {

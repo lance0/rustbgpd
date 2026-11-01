@@ -135,12 +135,12 @@ async fn idle(mgr: &mut PeerManager, end: SessionEndRetention) {
 /// Run the due checks as the run loop does, through each batched query.
 async fn settle(mgr: &mut PeerManager) {
     loop {
-        mgr.check_due_retained_dynamic().await;
+        mgr.check_due_retained_dynamic();
         let Some(pass) = mgr.retention.pass.as_mut() else {
             return;
         };
         let answer = (&mut pass.answer).await.unwrap();
-        mgr.finish_retention_pass(answer).await;
+        mgr.finish_retention_pass(answer);
     }
 }
 
@@ -602,7 +602,7 @@ async fn unretained_member_goes_at_idle_and_a_removed_range_takes_a_retained_one
     let peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
     mgr.delete_dynamic_range("127.0.0.0/8").unwrap();
     assert!(mgr.retention.admission_dirty);
-    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 1);
+    assert_eq!(mgr.release_unadmitted_retained_dynamic(), 1);
     assert_eq!(mgr.dynamic_peer_count, 0);
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 0);
     rib_task.abort();
@@ -644,7 +644,7 @@ async fn staged_ranges_do_not_delete_a_retained_member() {
     // Rollback restores the range; the re-check keeps the member.
     mgr.dynamic_ranges = ranges;
     mgr.config_snapshot_staged = false;
-    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 0);
+    assert_eq!(mgr.release_unadmitted_retained_dynamic(), 0);
     assert_eq!(mgr.dynamic_peer_count, 1);
     rib_task.abort();
 }
@@ -740,7 +740,7 @@ async fn due_members_share_one_query_and_an_unanswered_one_backs_off() {
 
     let mut retry = Duration::from_secs(1);
     for _ in 0..3 {
-        mgr.check_due_retained_dynamic().await;
+        mgr.check_due_retained_dynamic();
         let pass = mgr.retention.pass.as_mut().expect("one pass");
         let mut held_replies = Vec::new();
         let mut queries = 0;
@@ -758,7 +758,7 @@ async fn due_members_share_one_query_and_an_unanswered_one_backs_off() {
         assert_eq!(queries, 1, "one query for every due member");
         let answer = (&mut pass.answer).await.unwrap();
         let unanswered = tokio::time::Instant::now();
-        mgr.finish_retention_pass(answer).await;
+        mgr.finish_retention_pass(answer);
         assert_eq!(mgr.next_retained_dynamic_check(), Some(unanswered + retry));
         tokio::time::sleep_until(unanswered + retry).await;
         retry *= 2;
@@ -781,7 +781,7 @@ async fn an_answer_about_an_earlier_retention_is_ignored() {
         .rib_peer
         .resolve(|| PeerEndpoint::new(MEMBER, None), MEMBER_ASN);
     idle(&mut mgr, THEIRS).await;
-    mgr.check_due_retained_dynamic().await;
+    mgr.check_due_retained_dynamic();
     let reply = loop {
         if let RibUpdate::QueryPeerRetentions { reply, .. } = rib_rx.recv().await.unwrap() {
             break reply;
@@ -798,7 +798,7 @@ async fn an_answer_about_an_earlier_retention_is_ignored() {
     let newer = mgr.retained_dynamic.get_mut(&key(MEMBER)).unwrap();
     newer.retained_at += Duration::from_millis(1);
     let check_at = newer.check_at;
-    mgr.finish_retention_pass(answer).await;
+    mgr.finish_retention_pass(answer);
     let newer = &mgr.retained_dynamic[&key(MEMBER)];
     assert!(newer.theirs, "the newer retention still holds the routes");
     assert_eq!(newer.check_at, check_at);
@@ -1099,7 +1099,7 @@ async fn staged_ranges_do_not_reject_a_retention_at_idle() {
     // Rollback restores the range; the re-check keeps the member.
     mgr.dynamic_ranges = ranges;
     mgr.config_snapshot_staged = false;
-    assert_eq!(mgr.release_unadmitted_retained_dynamic().await, 0);
+    assert_eq!(mgr.release_unadmitted_retained_dynamic(), 0);
     settle(&mut mgr).await;
     assert_eq!(mgr.dynamic_peer_count, 1);
     assert_eq!(retention(&rib_tx, peer).await.stale_routes, 3);
@@ -1192,7 +1192,7 @@ async fn another_as_candidate_winning_after_the_primary_resolved_has_its_own_ide
         }
     }
     mgr.reconcile_retained_dynamic_candidates();
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
 
     let live = &mgr.peers[&key(MEMBER)].transport_config;
     // The winner's session resolves its slot on first use, as here.
@@ -1231,7 +1231,7 @@ async fn rollback_before_the_reconnects_open_is_handled_releases_both_handles() 
         mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
         1
     );
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     assert_eq!(mgr.dynamic_peer_count, 0);
     assert!(mgr.retained_dynamic.is_empty());
     loc_rib_count(&rib_tx).await;
@@ -1289,7 +1289,7 @@ async fn rollback_releases_a_handle_resolved_while_the_reap_stops_the_reconnect(
     );
     let own = resolver.await.unwrap();
     assert_ne!(own, peer);
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     loc_rib_count(&rib_tx).await;
     assert!(!own.is_live(), "the late handle is released");
     assert!(!peer.is_live(), "and the retained one");
@@ -1391,7 +1391,7 @@ async fn primary_handoff_releases_losing_candidate(primary_asn: u32) {
     assert_eq!(mgr.peers[&key(MEMBER)].session_id(), primary_session);
     assert_eq!(mgr.retained_dynamic.is_empty(), primary_asn != MEMBER_ASN);
     mgr.reconcile_retained_dynamic_candidates();
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     assert_eq!(loc_rib_count(&rib_tx).await, 0);
     assert!(
         !candidate_peer.is_live(),
@@ -1402,7 +1402,7 @@ async fn primary_handoff_releases_losing_candidate(primary_asn: u32) {
     // Final dynamic auto-removal sees only the winning primary's slot.
     idle(&mut mgr, HARD_RESET).await;
     mgr.reconcile_retained_dynamic_candidates();
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     assert_eq!(loc_rib_count(&rib_tx).await, 0);
     assert!(!primary_peer.is_live(), "the primary is deleted normally");
     assert!(mgr.retained_dynamic.is_empty());
@@ -1440,11 +1440,195 @@ async fn established_reconnect_idle_releases_attached_candidate_identity() {
     idle(&mut mgr, HARD_RESET).await;
     assert!(mgr.retained_dynamic.is_empty());
     mgr.reconcile_retained_dynamic_candidates();
-    mgr.release_orphaned_retained_handles().await;
+    mgr.release_orphaned_retained_handles();
     assert_eq!(loc_rib_count(&rib_tx).await, 0);
     assert!(
         !candidate_peer.is_live(),
         "the attached candidate's identity is released with the retention"
+    );
+    rib_task.abort();
+}
+
+/// A member auto-removed behind a full RIB mailbox that does not drain
+/// defers its cleanup. Its reconnect, and a new address, are refused at once
+/// and counted rather than waiting for room, so no new identity joins the
+/// queue; once the cleanup is admitted the reconnect is accepted.
+#[tokio::test]
+async fn accepts_behind_a_deferred_cleanup_are_refused_without_waiting() {
+    let other = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10));
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let mut mgr = manager_on(rib_tx.clone());
+    let _client = accept(&mut mgr).await;
+    let peer = open_validated(&mut mgr).await;
+    while rib_rx.try_recv().is_ok() {}
+    rib_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    idle(&mut mgr, NOTHING).await;
+    assert_eq!(
+        mgr.deferred_rib.queue.len(),
+        2,
+        "deferred behind the full mailbox"
+    );
+
+    for addr in [MEMBER, other] {
+        let _client = tokio::time::timeout(Duration::from_secs(5), accept_at(&mut mgr, addr))
+            .await
+            .expect("the accept is refused without waiting for mailbox room");
+        assert!(mgr.peers.is_empty(), "{addr} is refused");
+    }
+    assert_eq!(
+        inbound_drop_metric(&mgr.metrics, "rib_cleanup_pending"),
+        Some(2.0)
+    );
+    assert_eq!(
+        mgr.deferred_rib.queue.len(),
+        2,
+        "no new identity joins the queue"
+    );
+
+    let drain = tokio::spawn(async move {
+        let mut admitted = Vec::new();
+        for _ in 0..3 {
+            admitted.push(rib_rx.recv().await.unwrap());
+        }
+        (admitted, rib_rx)
+    });
+    mgr.flush_deferred_rib_updates(super::OperatorReadAdmission::Served)
+        .await
+        .unwrap();
+    let (admitted, _rib_rx) = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            admitted[1..],
+            [
+                RibUpdate::PeerDeleted { peer: deleted, .. },
+                RibUpdate::ReleasePeer { peer: released },
+            ] if deleted == peer && released == peer
+        ),
+        "the member's cleanup reaches the RIB in order"
+    );
+    let _client = accept(&mut mgr).await;
+}
+
+/// A static neighbor added at a retained member's address starts its session
+/// before the member's identity is deleted. Behind a full RIB mailbox that
+/// deletion is deferred, so the add completes only once it is admitted,
+/// keeping the old identity's label reap ahead of anything the new session
+/// sends.
+#[tokio::test]
+async fn a_static_add_replacing_a_retained_member_waits_for_its_deferred_deletion() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let retained = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let (stalled_tx, mut stalled_rx) = mpsc::channel(1);
+    mgr.rib_tx = stalled_tx.clone();
+    stalled_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    let drain = tokio::spawn(async move {
+        let mut admitted = Vec::new();
+        while let Some(update) = stalled_rx.recv().await {
+            let done = matches!(update, RibUpdate::ReleasePeer { peer } if peer == retained);
+            admitted.push(update);
+            if done {
+                break;
+            }
+        }
+        admitted
+    });
+    mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
+        .await
+        .unwrap();
+    assert!(
+        mgr.deferred_rib.queue.is_empty(),
+        "the add completes only once the retained identity's deletion is admitted"
+    );
+    let admitted = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    let deleted = admitted.iter().position(
+        |update| matches!(update, RibUpdate::PeerDeleted { peer, .. } if *peer == retained),
+    );
+    assert_eq!(
+        deleted,
+        Some(admitted.len() - 2),
+        "PeerDeleted, then ReleasePeer"
+    );
+    rib_task.abort();
+}
+
+/// A member kept for graceful restart reconnects while an unrelated
+/// neighbor's cleanup is deferred: it resumes the identity it kept, so it is
+/// admitted rather than refused until its connect-retry timer, which could
+/// outlast its stale routes.
+#[tokio::test]
+async fn a_retained_reconnect_is_admitted_behind_unrelated_deferred_cleanup() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let _peer = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    let (stalled_tx, _stalled_rx) = mpsc::channel(1);
+    mgr.rib_tx = stalled_tx.clone();
+    stalled_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&PeerKey::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+        None,
+    ));
+    let _client = tokio::time::timeout(Duration::from_secs(5), accept_at(&mut mgr, MEMBER))
+        .await
+        .expect("the reconnect does not wait for mailbox room");
+    assert!(
+        mgr.peers.contains_key(&key(MEMBER)),
+        "the reconnect is admitted"
+    );
+    assert!(mgr.retained_dynamic.contains_key(&key(MEMBER)));
+    assert_eq!(
+        inbound_drop_metric(&mgr.metrics, "rib_cleanup_pending"),
+        Some(0.0)
+    );
+    rib_task.abort();
+}
+
+/// A collision candidate beside a retained reconnect resolves its own RIB
+/// identity, so it is refused while any cleanup is deferred, like a new
+/// dynamic neighbor: no new identity joins the queue.
+#[tokio::test]
+async fn a_candidate_beside_a_retained_reconnect_is_refused_behind_deferred_cleanup() {
+    let (mut mgr, rib_tx, rib_task) = manager_with_rib();
+    let _peer = retained_member(&mut mgr, &rib_tx, OURS).await;
+    let _primary = accept(&mut mgr).await;
+    let (stalled_tx, _stalled_rx) = mpsc::channel(1);
+    mgr.rib_tx = stalled_tx.clone();
+    stalled_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&PeerKey::new(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+        None,
+    ));
+    let _candidate = tokio::time::timeout(Duration::from_secs(5), accept_at(&mut mgr, MEMBER))
+        .await
+        .expect("the candidate does not wait for mailbox room");
+    assert!(
+        mgr.peers[&key(MEMBER)].pending_inbound.is_none(),
+        "the candidate is refused"
+    );
+    assert!(mgr.retained_dynamic[&key(MEMBER)].candidate.is_none());
+    assert_eq!(
+        inbound_drop_metric(&mgr.metrics, "rib_cleanup_pending"),
+        Some(1.0)
     );
     rib_task.abort();
 }
