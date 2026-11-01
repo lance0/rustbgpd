@@ -3,13 +3,12 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.9.0 - Unreleased
+## 0.9.0 - 2026-11-01
 
 - Move to wire `0.27.0` for the direct target-IP FlowSpec actions and typed,
   lossless IPv6 extended communities (attribute 25). There is no independent
   verifier or RTR change. Upgrade crates exchanging public wire types together:
-  wire 0.27, FSM 0.14 and RPKI 0.9. This compatibility line is prepared, not
-  published by this change.
+  wire 0.27, FSM 0.14 and RPKI 0.9.
 
 ## 0.8.1 - 2026-10-24
 

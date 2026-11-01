@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.81.0] — 2026-11-01
+
 ### Security
 
 - Update the protobuf build tooling's `pulldown-cmark` dependency to 0.13.5

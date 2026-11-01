@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract": "rustbgpd-rs-rr-v1",
-  "baseline_release": "v0.80.1",
+  "baseline_release": "v0.81.0",
   "scope": "Narrow route-server, route-reflector and FlowSpec controller product contract; unlisted surfaces are not stable by implication.",
   "roles": [
     {
@@ -729,6 +729,20 @@
       "from_release": "v0.79.0",
       "to_release": "v0.80.0",
       "fixture_directory": "tests/fixtures/v1-stable/v0.79.0/route-server",
+      "source_directory": "examples/route-server",
+      "files": [
+        {"path": "config.toml", "sha256": "243314f80d91fbc7e87e73dfd09afa884de9feb9fb24e363e7f8f727987b94c0"},
+        {"path": "hygiene.rpol", "sha256": "e5516c56c69a1ac33b1fc8d43a6c10236e58be0602ad64131481d4c314a12635"}
+      ],
+      "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
+      "validation_source": "src/config/tests/mod.rs",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
+      "result": "accepted_without_config_migration"
+    },
+    {
+      "from_release": "v0.80.0",
+      "to_release": "v0.81.0",
+      "fixture_directory": "tests/fixtures/v1-stable/v0.80.0/route-server",
       "source_directory": "examples/route-server",
       "files": [
         {"path": "config.toml", "sha256": "243314f80d91fbc7e87e73dfd09afa884de9feb9fb24e363e7f8f727987b94c0"},

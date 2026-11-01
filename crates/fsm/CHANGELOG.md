@@ -3,13 +3,12 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.14.0 - Unreleased
+## 0.14.0 - 2026-11-01
 
 - Move to wire `0.27.0` for the direct target-IP FlowSpec actions and typed,
   lossless IPv6 extended communities (attribute 25). There is no independent
   FSM state-machine change. Upgrade crates exchanging public wire types together:
-  wire 0.27, FSM 0.14 and RPKI 0.9. This compatibility line is prepared, not
-  published by this change.
+  wire 0.27, FSM 0.14 and RPKI 0.9.
 
 ## 0.13.1 - 2026-10-24
 

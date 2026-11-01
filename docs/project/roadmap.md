@@ -248,7 +248,15 @@ regression tests and main CI. The
 tag passes,
 [rescored under the split management gate](../soaks/soak-rs-flagship-24h-2026-10-26.md#amendment-2026-10-26-rescored-under-the-split-management-gate)
 with 1 tolerated availability miss: one `rbgp doctor` health check that
-missed its peer-manager probe deadline during a reload. Under the
+missed its peer-manager probe deadline during a reload. v0.81.0
+(2026-11-01) is a minor release that adds guarded FlowSpec mutations, now in
+the v1 inventory, direct target-IP FlowSpec redirect and copy actions, and a
+per-kind RIB actor turn histogram. It keeps Add-Path path IDs stable across
+rank changes, holds ORF-gated End-of-RIB behind its table toward possible
+stale-route holders, and bounds RIB actor work and serves readiness through
+graceful-restart, LLGR and full-table growth. It publishes wire 0.27.0,
+FSM 0.14.0 and RPKI 0.9.0. It ships on its per-change regression tests and
+main CI; no flagship receipt covers it. Under the
 [release checklist](release-checklist.md#flagship-operating-proof), a
 qualifying 24-hour management-load soak on the selected candidate is what a
 flagship operating claim requires; a release may ship without one when this

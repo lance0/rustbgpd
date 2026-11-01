@@ -10,8 +10,8 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-The source tree prepares wire 0.27, FSM 0.14 and RPKI 0.9; these versions
-are not yet published. Upgrade the three crates together when exchanging
+`rustbgpd-fsm` 0.14.0 moves to wire `0.27.0` with no FSM state-machine
+change. Upgrade wire 0.27, FSM 0.14 and RPKI 0.9 together when exchanging
 public wire types. Attribute 25 now decodes to typed, lossless twenty-octet
 communities, with direct IPv6 target-IP helpers; IPv4 direct targets join
 `FlowSpecAction`. Existing enums are non-exhaustive, but consumers matching
