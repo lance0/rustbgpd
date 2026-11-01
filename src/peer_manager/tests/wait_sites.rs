@@ -2233,10 +2233,21 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
          serves any readiness query",
     ),
     (
+        "mod.rs::drive_while",
+        1,
+        "drives the deferred drain beside a session's bounded shutdown, a wait bounded by \
+         PEER_LIFECYCLE_COMMAND_TIMEOUT that never served the readiness lane",
+    ),
+    (
         "mod.rs::run",
         1,
         "the deferred-update drain is a run-loop select arm beside the readiness lane, never \
          awaited inside a transaction",
+    ),
+    (
+        "mod.rs::send_if_granted",
+        1,
+        "polls the deferred drain once with now_or_never and never waits",
     ),
     (
         "mod.rs::send_oldest",
@@ -2250,6 +2261,12 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
         "try_send never waits: a full mailbox defers the update, which the run loop sends as a \
          select branch beside the readiness lane, or the next flush sends under \
          await_with_readiness",
+    ),
+    (
+        "unnumbered.rs::bind_port",
+        1,
+        "the neighbor's RebindPeer uses try_send and never waits: a full mailbox rolls the \
+         bind back for its caller to retry or refuse",
     ),
     (
         "retained_dynamic.rs::check_due_retained_dynamic",

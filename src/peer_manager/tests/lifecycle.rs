@@ -1226,9 +1226,9 @@ async fn a_probe_flood_does_not_starve_the_deferred_drain_on_the_budget_clock() 
     drain_under_a_probe_flood(true).await;
 }
 
-/// A session's bounded shutdown cannot drive deferred admission, so it gives
-/// a reservation in progress back first: on a capacity-1 mailbox the
-/// session's final `PeerDown` takes the slot the RIB frees, and the session
+/// A session's bounded shutdown drives deferred admission: on a capacity-1
+/// mailbox the deletion whose reservation takes the slot the RIB frees is
+/// sent, the session's final `PeerDown` takes the next one, and the session
 /// is joined instead of timing out beside a slot the actor holds.
 #[tokio::test]
 async fn a_session_shutdown_behind_a_deferred_deletion_gets_the_freed_slot() {
@@ -1262,11 +1262,11 @@ async fn a_session_shutdown_behind_a_deferred_deletion_gets_the_freed_slot() {
         let mut admitted = Vec::new();
         while let Some(update) = rib_rx.recv().await {
             admitted.push(matches!(update, RibUpdate::PeerDown { .. }));
-            if admitted.len() == 2 {
+            if admitted.len() == 3 {
                 break;
             }
         }
-        admitted
+        (admitted, rib_rx)
     });
     let outcome = mgr
         .shutdown_handle_bounded(
@@ -1276,14 +1276,119 @@ async fn a_session_shutdown_behind_a_deferred_deletion_gets_the_freed_slot() {
         )
         .await;
     assert!(outcome.joined(), "the session sent its PeerDown and exited");
+    let (admitted, _rib_rx) = joined(rib).await;
     assert_eq!(
-        joined(rib).await,
-        [false, true],
-        "the filler, then the PeerDown"
+        admitted,
+        [false, false, true],
+        "the filler, the deletion queued first, then the PeerDown"
     );
+}
+
+/// A deferred reservation, then another sender, wait for a full mailbox.
+/// Returns the manager, the RIB end and the other sender's task.
+async fn deferred_ahead_of_another_sender() -> (
+    PeerManager,
+    mpsc::Receiver<RibUpdate>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (rib_tx, rib_rx) = mpsc::channel(1);
+    let mut mgr = test_peer_manager();
+    mgr.rib_tx = rib_tx.clone();
+    rib_tx.try_send(mailbox_filler()).unwrap();
+    mgr.reap_deleted_peer_metric_series_for_key(&key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    tokio::select! {
+        biased;
+        _ = mgr.deferred_rib.send_oldest() => panic!("the mailbox is full"),
+        () = std::future::ready(()) => {}
+    }
+    let other = tokio::spawn(async move {
+        let _ = rib_tx
+            .send(RibUpdate::RetireEorGraceInterface {
+                interface: "eth9".into(),
+            })
+            .await;
+    });
+    // The other sender queues behind the deferred reservation.
+    tokio::task::yield_now().await;
+    (mgr, rib_rx, other)
+}
+
+/// The kinds of the first `n` updates the RIB receives.
+async fn first_admitted(
+    mut rib_rx: mpsc::Receiver<RibUpdate>,
+    n: usize,
+) -> (Vec<&'static str>, mpsc::Receiver<RibUpdate>) {
+    let mut admitted = Vec::new();
+    while admitted.len() < n {
+        let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
+            .await
+            .expect("the RIB receives the update")
+            .unwrap();
+        admitted.push(deletion_trace(std::slice::from_ref(&update))[0].0);
+    }
+    (admitted, rib_rx)
+}
+
+/// A session's bounded shutdown keeps the deferred update's place among
+/// waiting senders: the deletion queued first is admitted first, ahead of a
+/// sender that queued after it, instead of being moved to the back.
+#[tokio::test]
+async fn a_bounded_shutdown_keeps_the_deferred_updates_place() {
+    let (mut mgr, rib_rx, other) = deferred_ahead_of_another_sender().await;
+    let (command_tx, mut command_rx) = mpsc::channel(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            if matches!(command, PeerCommand::Shutdown | PeerCommand::Stop { .. }) {
+                break;
+            }
+        }
+        Ok(())
+    });
+    let rib = tokio::spawn(first_admitted(rib_rx, 4));
+    let outcome = mgr
+        .shutdown_handle_bounded(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+            "test",
+            PeerHandle::from_parts(command_tx, task),
+        )
+        .await;
+    assert!(outcome.joined());
+    mgr.flush_deferred_rib_updates(OperatorReadAdmission::Served)
+        .await
+        .unwrap();
     assert_eq!(
-        mgr.deferred_rib.queue.len(),
-        2,
-        "the deletion is still queued"
+        joined(rib).await.0,
+        [
+            "ReleasePeer",
+            "PeerDeleted",
+            "RetireEorGraceInterface",
+            "ReleasePeer"
+        ],
+        "the filler, the deletion that queued first, the later sender, then the release"
     );
+    other.await.unwrap();
+}
+
+/// Before a BMP tick, a granted reservation is sent and one still waiting
+/// keeps its place among waiting senders, rather than moving to the back.
+#[tokio::test]
+async fn the_bmp_tick_keeps_the_deferred_updates_place() {
+    let (mut mgr, rib_rx, other) = deferred_ahead_of_another_sender().await;
+    mgr.deferred_rib.send_if_granted();
+    assert_eq!(mgr.deferred_rib.queue.len(), 2, "not granted: still queued");
+    let rib = tokio::spawn(first_admitted(rib_rx, 4));
+    mgr.flush_deferred_rib_updates(OperatorReadAdmission::Served)
+        .await
+        .unwrap();
+    assert_eq!(
+        joined(rib).await.0,
+        [
+            "ReleasePeer",
+            "PeerDeleted",
+            "RetireEorGraceInterface",
+            "ReleasePeer"
+        ],
+        "the filler, the deletion that queued first, the later sender, then the release"
+    );
+    other.await.unwrap();
 }
