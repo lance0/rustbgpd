@@ -738,6 +738,21 @@ class PrimerContractTests(unittest.TestCase):
                 [(KERNEL, "        id: m58_teardown\n        if: ${{ !cancelled() && ", "        id: m58_teardown\n        if: ${{ ")],
             ),
             (
+                "scenario guard adds success()",
+                f"{bundle}: M37 run step does not run after an earlier failure",
+                [(KERNEL, "        id: m37\n        if: ${{ !cancelled() && ", "        id: m37\n        if: ${{ !cancelled() && success() && ")],
+            ),
+            (
+                "teardown guard adds success()",
+                f"{fib}: M52 teardown step does not run after an earlier failure",
+                [(KERNEL, "        id: m52_teardown\n        if: ${{ !cancelled() && ", "        id: m52_teardown\n        if: ${{ !cancelled() && success() && ")],
+            ),
+            (
+                "report guard adds success()",
+                f"{bundle}: does not end with its bundled scenario report",
+                [(KERNEL, "      - name: Report bundled scenario results\n        if: ${{ !cancelled() }}\n", "      - name: Report bundled scenario results\n        if: ${{ !cancelled() && success() }}\n")],
+            ),
+            (
                 "teardown check dropped",
                 f"{fib}: M50 is not followed by its teardown check",
                 [(KERNEL, m50_teardown, "")],
@@ -897,8 +912,8 @@ class LabBundleHelperTests(unittest.TestCase):
     STUBS = {
         "sudo": 'exec "$@"',
         "containerlab": 'echo "containerlab $*" >> "$CALLS"',
-        "docker": 'echo "docker $*" >> "$CALLS"\n[ "$1 $2" != "ps -aq" ] || printf %s "${LEAK_CONTAINERS:-}"',
-        "ip": 'echo "ip $*" >> "$CALLS"\n[ "$1 $2" != "netns list" ] || printf %s "${LEAK_NETNS:-}"',
+        "docker": 'echo "docker $*" >> "$CALLS"\n[ "$1 $2" != "ps -aq" ] || { [ -z "${DOCKER_FAILS:-}" ] || exit 1; printf %s "${LEAK_CONTAINERS:-}"; }',
+        "ip": 'echo "ip $*" >> "$CALLS"\n[ "$1 $2" != "netns list" ] || { [ -z "${IP_FAILS:-}" ] || exit 1; printf %s "${LEAK_NETNS:-}"; }',
     }
 
     def run_helper(self, script, *args, **env):
@@ -921,6 +936,16 @@ class LabBundleHelperTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("containerlab destroy -t m36.clab.yml --cleanup", calls)
         self.assertNotIn("rm -f", calls)
+
+    def test_teardown_check_fails_when_an_inventory_cannot_be_read(self):
+        for env, inventory in (
+            ({"DOCKER_FAILS": "1"}, "containerlab containers"),
+            ({"IP_FAILS": "1"}, "network namespaces"),
+        ):
+            with self.subTest(**env):
+                result, _ = self.run_helper("assert-lab-torn-down.sh", "M36", "m36.clab.yml", **env)
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn(f"::error::M36: cannot list {inventory}", result.stdout)
 
     def test_teardown_check_fails_and_clears_leaked_state(self):
         result, calls = self.run_helper(

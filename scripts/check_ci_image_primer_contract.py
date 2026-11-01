@@ -42,6 +42,9 @@ LAB_WORKFLOWS = ("interop.yml", "kernel-dataplane.yml")
 # Workflows whose multi-scenario jobs (named `m36_m37_...`) keep running after a
 # failed scenario; interop.yml's older bundle still stops at the first failure.
 BUNDLE_WORKFLOWS = ("kernel-dataplane.yml",)
+# The exact guard on every bundled run and teardown step: an added `success()`
+# or `failure()` term would bring back stop-at-first-failure.
+BUNDLE_GUARD = "${{ !cancelled() && steps.dataplane.outcome == 'success' }}"
 MANIFEST = ".github/pinned-archives.sha256"
 # External actions are pinned by reviewed version tag: no branch refs and no
 # bare commit SHAs. Adding an action or moving to a new major edits this set.
@@ -169,7 +172,8 @@ def _check_bundle(prefix: str, job: str, errors: list[str]) -> None:
             continue
         teardown = steps[index + 1] if index + 1 < len(steps) else ""
         for kind, body in (("run", step), ("teardown", teardown)):
-            if not re.search(r"(?m)^        if: \$\{\{ !cancelled\(\)", body):
+            guard = re.search(r"(?m)^        if: (.*)$", body)
+            if not guard or " ".join(guard.group(1).split()) != BUNDLE_GUARD:
                 errors.append(f"{prefix}: {label} {kind} step does not run after an earlier failure")
         want = (
             f"        id: {step_id.group(1)}_teardown\n",
