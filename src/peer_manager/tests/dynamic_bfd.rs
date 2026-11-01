@@ -713,3 +713,38 @@ async fn a_session_ending_mid_generation_leaves_no_hold_after_an_abort() {
     assert!(lab.member(MEMBER).is_some(), "the reconnect registers");
     assert!(!lab.mgr.bfd_withholding(&MEMBER), "and starts clean");
 }
+
+/// A session that ends while a generation stages its first BFD attachment,
+/// before the commit, leaves no member, desired entry or actor session.
+#[tokio::test]
+async fn a_session_ending_before_its_first_bfd_commit_leaves_nothing() {
+    let mut plain = range_bfd_config();
+    plain.dynamic_neighbors[0].bfd = None;
+    let mut lab = lab(plain);
+    lab.accept(MEMBER).await;
+    lab.assert_unregistered(MEMBER);
+    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight =
+        Some(Ok(Some(crate::bfd_runtime::PreparedRuntime::default())));
+    let prepared = lab.mgr.prepare_bfd_reload(&range_bfd_config()).unwrap();
+    assert!(
+        !lab.mgr
+            .bfd_coupling
+            .as_ref()
+            .unwrap()
+            .bound
+            .contains(&MEMBER),
+        "staged only"
+    );
+    lab.idle(MEMBER, ENDED).await;
+    // Mutation-red: releasing only bound members lets the commit bind it.
+    lab.mgr.commit_bfd_reload(prepared).await.unwrap();
+    let taken = lab
+        .applied
+        .try_recv()
+        .expect("the commit reached the actor");
+    assert!(
+        !taken.sessions.iter().any(|params| params.peer == MEMBER),
+        "no actor session"
+    );
+    lab.assert_unregistered(MEMBER);
+}

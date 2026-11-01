@@ -403,7 +403,14 @@ impl PeerManager {
         let Some(coupling) = self.bfd_coupling.as_mut() else {
             return;
         };
-        if !coupling.bound.remove(&peer) {
+        // A generation that first gives the session BFD stages it only in
+        // `pending_bound`; its member must not outlive the session either.
+        // (`pending_probes` holds range placeholders, not sessions.)
+        let staged = coupling
+            .pending_bound
+            .as_mut()
+            .is_some_and(|pending| pending.remove(&peer));
+        if !coupling.bound.remove(&peer) && !staged {
             return;
         }
         coupling.configured.remove(&peer);
@@ -415,9 +422,6 @@ impl PeerManager {
         coupling.prior_initially_withheld.remove(&peer);
         // A change staged now settles without it too.
         if let Some(pending) = coupling.pending.as_mut() {
-            pending.remove(&peer);
-        }
-        if let Some(pending) = coupling.pending_bound.as_mut() {
             pending.remove(&peer);
         }
         self.republish_bfd_desired();
