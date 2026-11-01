@@ -2265,8 +2265,8 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
     (
         "unnumbered.rs::bind_port",
         1,
-        "the neighbor's RebindPeer uses try_send and never waits: a full mailbox rolls the \
-         bind back for its caller to retry or refuse",
+        "the neighbor's RebindPeer uses try_send before any other side effect and never \
+         waits: a full mailbox returns with nothing applied, for its caller to retry or refuse",
     ),
     (
         "retained_dynamic.rs::check_due_retained_dynamic",
