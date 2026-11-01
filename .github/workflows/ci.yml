@@ -803,7 +803,7 @@ jobs:
           load: true
           tags: rustbgpd-netns-tests:latest
           cache-from: type=gha,scope=evpn-bum-kernel
-          cache-to: type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true' || '' }}
 
       - name: Wait before retrying the netns image build
         if: steps.netns_image.outcome == 'failure'
@@ -818,7 +818,7 @@ jobs:
           load: true
           tags: rustbgpd-netns-tests:latest
           cache-from: type=gha,scope=evpn-bum-kernel
-          cache-to: type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=evpn-bum-kernel,mode=max,ignore-error=true' || '' }}
 
       - name: Run BUM-filter primitive validation
         # The helper handles cap flags + bind-mounts. We pre-built
