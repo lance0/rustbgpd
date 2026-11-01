@@ -2425,9 +2425,10 @@ value that an earlier `add community` in the same policy, or an earlier
 member of the chain, added stays on the route unless the route arrived with
 it; an arrived value is removed even when it was added earlier. The replace
 idiom therefore ports directly only when nothing on the path added a
-community the route did not arrive with. When something did, drop those
-earlier additions from that path, since RPL would have discarded them;
-usually that means replacing first and adding afterwards. A full scrub that
+community the route did not arrive with. When something did, the faithful
+port omits those additions on that path, because RPL discards them. Moving
+an `add community` after the replacement does not help: the value then
+stays on the route as well. A full scrub that
 also removes `NO_EXPORT` and the other well-known values is the loop form,
 which, like any loop over a route attribute, denies a route carrying more
 than 4,096 standard communities:
@@ -2451,12 +2452,23 @@ policy scrub-all {
 }
 
 # A literal port of RPL `set community (65000:1) additive` followed by
-# `set community (65000:100)`: the earlier addition survives.
+# `set community (65000:100)`: the earlier addition survives, where RPL
+# discards it. The faithful port is `retag` above, without the addition.
 policy tag-then-retag {
     term early { add community 65000:1 }
     term t {
         remove community *
         add community 65000:100
+        accept
+    }
+}
+
+# Reordering is not a port: 65000:1 still ends up on the route.
+policy retag-then-tag {
+    term t {
+        remove community *
+        add community 65000:100
+        add community 65000:1
         accept
     }
 }
@@ -2474,6 +2486,18 @@ test retag-keeps-no-export {
 test earlier-addition-survives-the-replacement {
     route { prefix 192.0.2.0/24; communities [65010:1] }
     expect tag-then-retag == accept with only removes community 65010:1,
+        community 65000:1, community 65000:100
+}
+
+test faithful-port-omits-the-discarded-addition {
+    route { prefix 192.0.2.0/24; communities [65010:1] }
+    expect retag == accept with only removes community 65010:1,
+        community 65000:100
+}
+
+test reordering-keeps-the-addition {
+    route { prefix 192.0.2.0/24; communities [65010:1] }
+    expect retag-then-tag == accept with only removes community 65010:1,
         community 65000:1, community 65000:100
 }
 
@@ -2508,8 +2532,14 @@ compiles now:
   route with more than 4,096 standard communities is denied (the loop's
   iteration cap).
 - **`if ... then ... elseif ... endif` and nested `if`** — one term per
-  branch. Terms are first-match, so the first branch that accepts
-  decides (see "Deliberate V1 exclusions").
+  branch reproduces `elseif` only when every branch ends the policy with
+  `accept` or `reject`, because the first deciding term wins. A branch that
+  only modifies falls through to the later branch terms, and adding an
+  `accept` to it skips the policy's later checks. For branches that must
+  continue, guard each later branch with the negation of the earlier
+  branch conditions, write a nested `if` as one guard joined with `&&`,
+  and defer the `accept` to a final term after the remaining checks (see
+  "Deliberate V1 exclusions").
 - **`as-path neighbor-is '65001'`**, with one ASN —
   `route.as-path matches "^65001_"`. `_` matches a space, a brace or either
   end of the rendered path, so the pattern matches a path whose first ASN
@@ -2517,8 +2547,13 @@ compiles now:
   `AS_SET`.
 - **`apply NAME` as a statement** — `.rpol` `apply(p)` is a predicate,
   and the applied policy's actions do not run (see "`apply` — policy as
-  predicate"). To run another policy's actions, list both policies in
-  the neighbor's policy chain.
+  predicate"). A chain `[caller, child]` runs the child unconditionally,
+  after all of the caller's actions, so it matches only an unconditional
+  call at the end of the caller whose dispositions compose under the
+  chain rules. For a conditional call, or one followed by more of the
+  caller's statements, inline the callee's logic at the guarded call
+  site, or split the caller so that the guards, the action order and the
+  dispositions stay as they were.
 - **`$parameter` of a set, address or community type** — parameters are
   `u32` only; write one policy per set, or keep the set content in a
   [dataset](#datasets--external-set-content).
@@ -2548,14 +2583,34 @@ policy delete-in-set {
     }
 }
 
-# RPL `if ... then ... elseif ... then ... endif`: one term per branch,
-# first match wins.
+# RPL `if ... then ... elseif ... then ... endif` where every branch
+# accepts: one term per branch, first match wins.
 policy tiers {
     term gold {
         if route.communities has 65000:1 { set local-pref 300; accept }
     }
     term silver {
         if route.communities has 65000:2 { set local-pref 200; accept }
+    }
+    term rest { accept }
+}
+
+# RPL `if gold then set local-preference 300 elseif silver then set
+# local-preference 200 endif`, then `if as-path length ge 10 then drop
+# endif`, then `pass`: the branches continue, so the later branch is
+# guarded by the negated earlier condition and the accept comes last.
+community-set gold { 65000:1 }
+community-set silver { 65000:2 }
+
+policy tiers-then-check {
+    term gold {
+        if route.communities in gold { set local-pref 300 }
+    }
+    term silver {
+        if route.communities in silver && !(route.communities in gold) { set local-pref 200 }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
     }
     term rest { accept }
 }
@@ -2582,6 +2637,21 @@ test first-matching-tier-wins {
 test second-tier {
     route { prefix 192.0.2.0/24; communities [65000:2] }
     expect tiers == accept with local-pref 200
+}
+
+test first-branch-wins-over-a-later-branch {
+    route { prefix 192.0.2.0/24; communities [65000:1, 65000:2] }
+    expect tiers-then-check == accept with only local-pref 300
+}
+
+test later-check-runs-after-a-modifying-branch {
+    route { prefix 192.0.2.0/24; communities [65000:1]; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect tiers-then-check == reject
+}
+
+test second-branch-applies-alone {
+    route { prefix 192.0.2.0/24; communities [65000:2] }
+    expect tiers-then-check == accept with only local-pref 200
 }
 
 test neighbor-is-matches-first-asn {
