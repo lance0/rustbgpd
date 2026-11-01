@@ -2144,7 +2144,7 @@ and the
 | `set local-preference 200` | `set local-pref 200` |
 | `set med 50` | `set med 50` |
 | `set community (65000:100) additive` | `add community 65000:100` |
-| `set community (65000:100)` | `remove community *; add community 65000:100`, when nothing earlier on the path added communities (see 4 below) |
+| `set community (65000:100)` | `remove community *; add community 65000:100`, when nothing earlier on the path added a community the route did not arrive with (see 4 below) |
 | `delete community all` | `remove community *` |
 | `prepend as-path 65000 3` | `prepend as 65000 3` |
 | `set next-hop self` | `set next-hop self` |
@@ -2374,8 +2374,12 @@ test ceiling-at-max {
 
 **3. Repeated prepends.** RPL accumulates every `prepend as-path` in a
 policy. In `.rpol` a prepend is one scalar slot, so a later prepend
-replaces an earlier one (see "Actions"). Fold the counts into one
-prepend:
+replaces an earlier one, in the same policy or in a later member of the
+chain (see "Actions"). When every prepend on a path uses the same ASN and
+the counts total 255 or less, fold them into one prepend; the compiler
+rejects a count above 255. Prepends of different ASNs, such as 65000 once
+and then 65001 twice, have no `.rpol` equivalent: only the last prepend
+takes effect.
 
 ```rpol
 # A literal port of two RPL prepends: the second replaces the first.
@@ -2401,20 +2405,32 @@ test total-count {
     route { prefix 192.0.2.0/24; as-path "65010" }
     expect prepend-total == accept with only prepend as 65000 3
 }
+
+# Mixed ASNs: the second prepend replaces the first, here across a chain.
+policy prepend-65000 { term t { prepend as 65000 1 } }
+policy prepend-65001 { term t { prepend as 65001 2 } }
+
+test mixed-asn-prepends-keep-only-the-last {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect chain [prepend-65000, prepend-65001] == accept with only prepend as 65001 2
+}
 ```
 
 **4. Replacing communities.** RPL `set community` without `additive`
 replaces the route's communities, keeping the well-known ones, and discards
 the communities that earlier statements in the policy added.
 `remove community *` keeps the same RFC 1997 well-known range (see
-"Actions"), but it removes only the communities the route arrived with: a
+"Actions"), but it removes only the communities the route arrived with. A
 value that an earlier `add community` in the same policy, or an earlier
-member of the chain, added stays on the route. The replace idiom therefore
-ports directly only when nothing on the path added communities before it.
-When something did, drop those earlier additions from that path, since RPL
-would have discarded them; usually that means replacing first and adding
-afterwards. A full scrub that also removes `NO_EXPORT` and the other
-well-known values is the loop form:
+member of the chain, added stays on the route unless the route arrived with
+it; an arrived value is removed even when it was added earlier. The replace
+idiom therefore ports directly only when nothing on the path added a
+community the route did not arrive with. When something did, drop those
+earlier additions from that path, since RPL would have discarded them;
+usually that means replacing first and adding afterwards. A full scrub that
+also removes `NO_EXPORT` and the other well-known values is the loop form,
+which, like any loop over a route attribute, denies a route carrying more
+than 4,096 standard communities:
 
 ```rpol
 # RPL `set community (65000:100)`: replace, keeping well-known values.
@@ -2461,6 +2477,12 @@ test earlier-addition-survives-the-replacement {
         community 65000:1, community 65000:100
 }
 
+test arrived-value-added-earlier-is-removed {
+    route { prefix 192.0.2.0/24; communities [65000:1, 65010:1] }
+    expect tag-then-retag == accept with only removes community 65000:1,
+        removes community 65010:1, community 65000:100
+}
+
 test earlier-chain-member-addition-survives {
     route { prefix 192.0.2.0/24; communities [65010:1] }
     expect chain [tag-only, retag] == accept with only removes community 65010:1,
@@ -2479,13 +2501,20 @@ test scrub-all-removes-no-export {
 These RPL constructs have no `.rpol` spelling today. Each has a form that
 compiles now:
 
-- **`delete community in NAME`** — loop over the route's communities and
-  remove the members of the set.
+- **`delete community in NAME`** — loop over the route's standard
+  communities and remove those in the set. The loop variable is a standard
+  community, so the set's large and extended members never match it; a
+  named removal also removes a well-known member such as `NO_EXPORT`; and a
+  route with more than 4,096 standard communities is denied (the loop's
+  iteration cap).
 - **`if ... then ... elseif ... endif` and nested `if`** — one term per
   branch. Terms are first-match, so the first branch that accepts
   decides (see "Deliberate V1 exclusions").
-- **`as-path neighbor-is '65001'`** — `route.as-path matches "^65001_"`,
-  where `_` is a boundary anchor.
+- **`as-path neighbor-is '65001'`**, with one ASN —
+  `route.as-path matches "^65001_"`. `_` matches a space, a brace or either
+  end of the rendered path, so the pattern matches a path whose first ASN
+  is 65001, including a one-ASN path, and never a path that starts with an
+  `AS_SET`.
 - **`apply NAME` as a statement** — `.rpol` `apply(p)` is a predicate,
   and the applied policy's actions do not run (see "`apply` — policy as
   predicate"). To run another policy's actions, list both policies in
@@ -2495,11 +2524,14 @@ compiles now:
   [dataset](#datasets--external-set-content).
 - **`done`** — differs. RPL `done` accepts the route and runs no further
   policy statements. A `.rpol` `accept` ends only the current policy, and
-  the neighbor's chain continues: a later member can still reject the
-  route, a later member's `set` overrides the same attribute, and
-  community additions and removals merge. To keep a `done` decision, put
-  the policy last in the neighbor's configured chain, or keep the later
-  members from rejecting the route or setting the attributes it set. With
+  the neighbor's chain continues: a later member's `set` overrides the
+  same attribute, community additions and removals merge, and a rejection
+  by any member ends the chain with a rejection whatever its position.
+  Putting the policy last in the configured chain keeps its scalar writes
+  when the earlier members permit, but it cannot stop another member from
+  rejecting. To skip later checks on the `done` path, keep those checks in
+  later terms of the same policy, after a guarded `accept`, or make their
+  chain members permit that path without modifying it. With
   `honor_graceful_shutdown` or `honor_blackhole`, the daemon's own EBGP
   import policies still run after the last configured member.
 
@@ -2562,6 +2594,11 @@ test neighbor-is-is-boundary-anchored {
     expect from-65001 == accept with without local-pref
 }
 
+test neighbor-is-matches-a-one-asn-path {
+    route { prefix 192.0.2.0/24; as-path "65001" }
+    expect from-65001 == accept with local-pref 150
+}
+
 test neighbor-is-ignores-later-asns {
     route { prefix 192.0.2.0/24; as-path "64500 65001" }
     expect from-65001 == accept with without local-pref
@@ -2576,14 +2613,44 @@ policy later-member {
     term t { set local-pref 100; accept }
 }
 
+policy reject-long {
+    term t { if route.as-path.len >= 10 { reject } }
+}
+
+# The `done` path skips the length check that a later term holds.
+policy done-then-checks {
+    term done-path {
+        if route.communities has 65000:1 { set local-pref 200; accept }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
+    }
+}
+
 test accept-does-not-stop-the-chain {
     route { prefix 192.0.2.0/24 }
     expect chain [finish, later-member] == accept with local-pref 100
 }
 
-test last-in-the-chain-keeps-the-decision {
+test last-in-the-chain-keeps-its-scalar-write {
     route { prefix 192.0.2.0/24 }
     expect chain [later-member, finish] == accept with local-pref 200
+}
+
+test a-rejection-wins-in-either-order {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect chain [reject-long, finish] == reject
+    expect chain [finish, reject-long] == reject
+}
+
+test done-path-skips-the-later-check {
+    route { prefix 192.0.2.0/24; communities [65000:1]; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect done-then-checks == accept with local-pref 200
+}
+
+test other-paths-still-run-the-check {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect done-then-checks == reject
 }
 ```
 
