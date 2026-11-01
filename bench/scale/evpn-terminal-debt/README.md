@@ -7,8 +7,11 @@ Production EVPN group ownership remains disabled. This receipt cannot authorize
 activation, replace a soak, or qualify RTC or enhanced route refresh.
 
 The harness is independent of the qualification branch. Its required input is
-the clean qualification commit `a5da4df26898b3658511babd3cb919e130b7fc40`
-from [the qualification PR](https://github.com/lance0/rustbgpd/pull/3440).
+one explicit clean commit. The 2026-10-27 receipt used qualification commit
+`a5da4df26898b3658511babd3cb919e130b7fc40` from
+[the qualification PR](https://github.com/lance0/rustbgpd/pull/3440). The current
+input, `855273b18efff364f398ae5d099cb64d69c4f680`, merges that commit into the owned-feed renewal fix
+`09de11b4222611e264bfeb4accc96e60b345f6e4`; it changes no product file of the fix.
 Preparation archives that input and this harness separately, records both source
 commits and archive hashes, and derives two independent source exports. Verification
 compares every export input with both archives and the reviewed derivations.
@@ -38,13 +41,13 @@ python3 -B bench/scale/evpn-terminal-debt/terminal.py prepare "$CAMPAIGN" \
   --qualification-source "$QUALIFICATION_SOURCE" \
   --base 110dd43f9be38901fc7826eb74673b7c6d2bc0d6 \
   --daemon-cpus 24-27,56-59 --harness-cpus 28-31,60-63
-taskset -c 24-31,56-63 python3 -B bench/scale/evpn-terminal-debt/terminal.py build "$CAMPAIGN"
+taskset -c 0-23,32-55 python3 -B bench/scale/evpn-terminal-debt/terminal.py build "$CAMPAIGN"
 python3 "$CAMPAIGN/sources/candidate/bench/scale/evpn-terminal-debt/terminal.py" verify "$CAMPAIGN" --built
 bench/scale/evpn-terminal-debt/run.sh "$CAMPAIGN" --correctness-only
 ```
 
 Coordinate build capacity first: the build command runs one Cargo process at a
-time, pinned to CPUs 24–31,56–63 with eight jobs. Candidate and private daemons use
+time, pinned to CPUs 0–23,32–55 with eight jobs. Candidate and private daemons use
 separate targets and must have different binary hashes. Both private exports use
 the same instrumentation and real socket settings. No actor state, queue size,
 timer, or selection-deferral state is synthesized or changed.
@@ -95,6 +98,8 @@ dispatch:
   projection-completeness walks, the current inventory walk, the OLD inventory
   and delta walk, and successful proof projection. Include actual data rows,
   data admissions and terminal admissions from the actual distribution root.
+  A current feed renewed from its member delta payload counts its sparse seal and
+  staged-key verification instead; a root with neither renewal path is INVALID.
   After a complete current feed is admitted, the repeated full-inventory visit
   bar is **zero**. The pinned implementation is expected to breach this bar;
   source evidence is not a substitute for the retained live receipt.

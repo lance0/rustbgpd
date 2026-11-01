@@ -11,12 +11,15 @@ import tarfile
 
 import patches
 
-PINNED = "a5da4df26898b3658511babd3cb919e130b7fc40"
+# Qualification a5da4df merged into the owned-feed renewal fix 09de11b42;
+# the 2026-10-27 receipt used a5da4df26898b3658511babd3cb919e130b7fc40 itself.
+PINNED = "855273b18efff364f398ae5d099cb64d69c4f680"
 BASE = "110dd43f9be38901fc7826eb74673b7c6d2bc0d6"
 PREFIX = "bench/scale/evpn-terminal-debt/"
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-CPUS = "24-31,56-63"
+# Builds use the rustbgpd share of the host; placement does not change the binaries.
+BUILD_CPUS = "0-23,32-55"
 DAEMON_CPUS = "24-27,56-59"
 HARNESS_CPUS = "28-31,60-63"
 
@@ -174,7 +177,7 @@ def build(args):
         # serial, pinned, and uses a separate target for each measured arm.
         env["CARGO_TARGET_DIR"] = str(output / f"target-{arm}")
         label = arm if target == "rustbgpd" else "driver"
-        command = ["taskset", "-c", CPUS, "cargo", "build", "--locked", "--release",
+        command = ["taskset", "-c", BUILD_CPUS, "cargo", "build", "--locked", "--release",
                    "-p", package, "--bin", target, "-j", "8"]
         if target == "rustbgpd":
             command += ["--features", "rustbgpd-transport/bench-internals"]

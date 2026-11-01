@@ -44,6 +44,9 @@ struct Work {
     data_admissions: u64,
     data_rows: u64,
     terminal_admissions: u64,
+    sparse_seals: u64,
+    sparse_walks: u64,
+    sparse_rows: u64,
 }
 
 pub(super) fn wall_us() -> u128 {
@@ -89,6 +92,9 @@ pub(super) fn count(kind: &str, rows: usize) {
                 "data_admission" => &mut work.data_admissions,
                 "data_rows" => &mut work.data_rows,
                 "terminal_admission" => &mut work.terminal_admissions,
+                "sparse_seal" => &mut work.sparse_seals,
+                "sparse_walk" => &mut work.sparse_walks,
+                "sparse" => &mut work.sparse_rows,
                 _ => panic!("unknown private terminal counter"),
             };
             *value += rows as u64;
@@ -155,7 +161,8 @@ impl Drop for Scope {
                 "\"prepare_attempts\":{},\"projection_walks\":{},\"projection_rows\":{},",
                 "\"current_walks\":{},\"current_rows\":{},\"old_walks\":{},\"old_rows\":{},",
                 "\"old_delta_rows\":{},\"success_walks\":{},\"success_rows\":{},",
-                "\"data_admissions\":{},\"data_rows\":{},\"terminal_admissions\":{},\"elapsed_us\":{}}}"
+                "\"data_admissions\":{},\"data_rows\":{},\"terminal_admissions\":{},",
+                "\"sparse_seals\":{},\"sparse_walks\":{},\"sparse_rows\":{},\"elapsed_us\":{}}}"
             ),
             wall_us(),
             work.id,
@@ -177,6 +184,9 @@ impl Drop for Scope {
             work.data_admissions,
             work.data_rows,
             work.terminal_admissions,
+            work.sparse_seals,
+            work.sparse_walks,
+            work.sparse_rows,
             self.0.elapsed().as_micros()
         );
     }

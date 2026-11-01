@@ -148,7 +148,9 @@ def socket_roster(daemon, receivers, peers):
 
 COUNTERS = ("stage_rows", "delta_rows", "prepare_attempts", "projection_walks", "projection_rows",
             "current_walks", "current_rows", "old_walks", "old_rows", "old_delta_rows",
-            "success_walks", "success_rows", "data_admissions", "data_rows", "terminal_admissions")
+            "success_walks", "success_rows", "data_admissions", "data_rows", "terminal_admissions",
+            "sparse_seals", "sparse_walks", "sparse_rows")
+INVENTORY_ROWS = ("projection_rows", "current_rows", "old_rows", "old_delta_rows", "success_rows")
 
 
 def work_receipt(rows, root_ids):
@@ -156,19 +158,26 @@ def work_receipt(rows, root_ids):
     require(selected and {row["id"] for row in selected} == set(root_ids), "missing actual root producer work")
     require(len(selected) == len(root_ids), "duplicate root work receipt")
     for row in selected:
-        require(all(type(row[name]) is int and row[name] >= 0 for name in COUNTERS), "malformed work counter")
-        attempts = row["prepare_attempts"]
+        require(all(type(row.get(name)) is int and row[name] >= 0 for name in COUNTERS),
+                "missing or malformed work counter")
+        attempts, sparse = row["prepare_attempts"], row["sparse_seals"]
+        # Each root renews through the full producer or a sparse delta seal;
+        # a root with neither has uncounted producer work.
         require(row["debtors_before"] > 0 and row["keys"] > 0 and row["stage_rows"] >= row["keys"]
-                and row["delta_rows"] >= row["keys"] and attempts > 0,
+                and row["delta_rows"] >= row["keys"] and attempts + sparse > 0,
                 "root work omitted staging, delta or complete producer")
         require(row["projection_walks"] == 2 * attempts and row["current_walks"] == attempts
                 and row["old_walks"] == attempts and row["success_walks"] == attempts,
                 "root work omitted a producer/proof inventory pass")
-        require(all(row[name] > 0 for name in ("projection_rows", "current_rows", "old_rows", "old_delta_rows", "success_rows")),
+        require(all((row[name] > 0) == (attempts > 0) for name in INVENTORY_ROWS),
                 "root work omitted visited inventory/delta rows")
+        require(row["sparse_walks"] <= sparse and (row["sparse_rows"] > 0) == (row["sparse_walks"] > 0),
+                "sparse renewal verification is inconsistent with its seals")
     total = sum(row[name] for row in selected for name in ("projection_rows", "current_rows", "old_rows", "success_rows"))
     return {"calls": len(selected), "inventory_visits": total,
             "delta_visits": sum(row["delta_rows"] + row["old_delta_rows"] for row in selected),
+            "sparse_seals": sum(row["sparse_seals"] for row in selected),
+            "sparse_key_visits": sum(row["sparse_rows"] for row in selected),
             "producer_elapsed_us": sum(row["elapsed_us"] for row in selected)}
 
 

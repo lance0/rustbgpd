@@ -40,6 +40,12 @@ def instrument(files, here):
                 "            self.bench_terminal_event(*peer, \"root_before\", 0);\n        }\n"
                 "        let mut stage = self.stage_group_evpn_keys(gid, keys);\n"
                 "        for peer in members {\n            checkpoint();")
+    # A current feed renewed from its delta payload walks no inventory; count
+    # the renewal so a root without the full producer is still accounted for.
+    root = once(root, "            let complete = if let Some(seal) = sparse {",
+                "            if sparse.is_some() {\n"
+                "                super::super::terminal_debt::count(\"sparse_seal\", 1);\n            }\n"
+                "            let complete = if let Some(seal) = sparse {")
     after = once(after, "        for key in keys {\n            checkpoint();",
                  "        for key in keys {\n            super::super::terminal_debt::count(\"stage\", 1);\n            checkpoint();")
     files[path] = (before + "    fn distribute_owned_evpn_group(" + root +
@@ -75,6 +81,10 @@ def instrument(files, here):
     edit(path, "        let table_stamp = self\n            .group_ribs\n            .get(&destination)",
          "        super::terminal_debt::count(\"prepare\", 1);\n"
          "        let table_stamp = self\n            .group_ribs\n            .get(&destination)")
+    edit(path, "        keys.iter().all(|key| {\n            self.replacement_checkpoint(false);",
+         "        super::terminal_debt::count(\"sparse_walk\", 1);\n"
+         "        keys.iter().all(|key| {\n            super::terminal_debt::count(\"sparse\", 1);\n"
+         "            self.replacement_checkpoint(false);")
     edit(path, "        for route in group.table.iter_evpn() {\n            checkpoint();",
          "        super::terminal_debt::count(\"current_walk\", 1);\n"
          "        for route in group.table.iter_evpn() {\n            super::terminal_debt::count(\"current\", 1);\n            checkpoint();")
@@ -86,7 +96,7 @@ def instrument(files, here):
     edit(path, "        enqueue_outbound_update(\n            permit,",
          "        let terminal_rows = evpn_announce.len() + evpn_withdraw.len();\n"
          "        enqueue_outbound_update(\n            permit,")
-    edit(path, "        if owns_refresh_prior\n            && !self.dirty_peers.contains(&peer)",
+    edit(path, "        if owns_refresh_prior\n",
          "        if terminal_rows != 0 {\n"
          "            super::terminal_debt::count(\"data_admission\", 1);\n"
          "            super::terminal_debt::count(\"data_rows\", terminal_rows);\n"
@@ -96,7 +106,7 @@ def instrument(files, here):
          "            super::terminal_debt::count(\"terminal_admission\", 1);\n"
          "            self.bench_terminal_event(peer, \"terminal_admitted\", 0);\n"
          "        }\n"
-         "        if owns_refresh_prior\n            && !self.dirty_peers.contains(&peer)")
+         "        if owns_refresh_prior\n")
     path = manager + "route_refresh.rs"
     # Count every standalone terminal-marker try_send site: deferred-EoR flush,
     # the timer retry and the initial-table EoR. A batch-carried marker shares

@@ -16,7 +16,8 @@ def fixture():
              feed("data_admitted", 300, root=1, rows=4, stamp=11), feed("sample", 500, stamp=11)]
     work = {name: 4 for name in check.COUNTERS}
     work.update(id=1, wall_us=320, keys=4, debtors_before=2, prepare_attempts=2, projection_walks=4,
-                current_walks=2, old_walks=2, success_walks=2, elapsed_us=17)
+                current_walks=2, old_walks=2, success_walks=2, elapsed_us=17,
+                sparse_seals=0, sparse_walks=0, sparse_rows=0)
     sockets = [{"peer": "127.1.0.2", "cookie": 17, "send_buffer": 8192, "notsent_lowat": 4096}]
     writes = [{"event": "pending", "id": 55, "cookie": 17, "started_us": 101, "wall_us": 110},
               {"event": "complete", "id": 55, "cookie": 17, "started_us": 101, "wall_us": 600}]
@@ -101,6 +102,30 @@ class DebtChecks(unittest.TestCase):
                 args[1][0][field] = 0
                 with self.assertRaises(ValueError):
                     check.debt_receipt(*args)
+
+    def test_sparse_renewal_root_reports_zero_inventory_work(self):
+        args = fixture()
+        sparse = {name: 0 for name in ("prepare_attempts", "projection_walks", "projection_rows", "current_walks",
+                                       "current_rows", "old_walks", "old_rows", "old_delta_rows", "success_walks",
+                                       "success_rows")}
+        args[1][0].update(sparse, sparse_seals=2, sparse_walks=2, sparse_rows=8)
+        result = check.debt_receipt(*args)
+        self.assertEqual(result["work"]["inventory_visits"], 0)
+        self.assertEqual((result["work"]["sparse_seals"], result["work"]["sparse_key_visits"]), (2, 8))
+        for change, reason in (({"sparse_seals": 0, "sparse_walks": 0, "sparse_rows": 0},
+                                "omitted staging, delta or complete producer"),
+                               ({"old_rows": 5}, "omitted visited inventory"),
+                               ({"sparse_walks": 3}, "sparse renewal verification"),
+                               ({"sparse_rows": 0}, "sparse renewal verification")):
+            with self.subTest(change=change):
+                broken = copy.deepcopy(args)
+                broken[1][0].update(change)
+                with self.assertRaisesRegex(ValueError, reason):
+                    check.debt_receipt(*broken)
+        broken = copy.deepcopy(args)
+        del broken[1][0]["sparse_seals"]
+        with self.assertRaisesRegex(ValueError, "missing or malformed work counter"):
+            check.debt_receipt(*broken)
 
     def test_pause_notsent_or_pending_alone_is_not_kernel_pressure(self):
         for mode in ("no-increase", "wrong-cookie", "pending-after-samples", "completed-before-samples", "outside-debt",
