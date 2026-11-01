@@ -193,10 +193,15 @@ impl PeerSession {
     /// Enqueue one plain ROUTE-REFRESH for a negotiated family.
     /// A request while one for the family is still queued is not queued
     /// again: the queued request reaches the peer after whatever prompted
-    /// both, so at most one per family is queued.
+    /// both, so at most one per family is queued. Only a live writer's claim
+    /// counts: once the writer is gone the request fails as before.
     pub(super) fn send_route_refresh(&mut self, afi: Afi, safi: Safi) -> Result<(), String> {
         let family = (afi as u16, safi as u8);
-        let pending = self.writer_refresh_pending.clone();
+        let writer_open = self
+            .writer_priority_tx
+            .as_ref()
+            .is_some_and(|tx| !tx.is_closed());
+        let pending = self.writer_refresh_pending.clone().filter(|_| writer_open);
         if pending
             .as_ref()
             .is_some_and(|pending| !pending.claim(family))

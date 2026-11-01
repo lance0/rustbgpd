@@ -270,8 +270,9 @@ pub(crate) struct PeerSession {
     outbound_admission_timer: Option<Pin<Box<Sleep>>>,
     replay_eor_suppressed: bool,
     /// Unbounded priority channel handed to the writer task. Carries
-    /// OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH commands,
-    /// and the `Cease/8` we emit on a local Out-of-Resources teardown.
+    /// OPEN, KEEPALIVE, NOTIFICATION, normal ROUTE-REFRESH requests (at
+    /// most one queued per family, see `writer_refresh_pending`), and the
+    /// `Cease/8` we emit on a local Out-of-Resources teardown.
     writer_priority_tx: Option<mpsc::UnboundedSender<Bytes>>,
     /// The current writer's queued normal ROUTE-REFRESH requests, by family.
     writer_refresh_pending: Option<writer::RefreshPending>,

@@ -483,13 +483,15 @@ pub fn session_notification_channel(
 ) -> (SessionNotificationSender, SessionNotificationReceiver) {
     // Unbounded: a bounded `send().await` from a session would deadlock with
     // the peer manager's synchronous `QueryState` during collision
-    // resolution. Bounded by state instead: per session, one notification
-    // on entering OpenConfirm and one on falling back to Idle (each FSM
-    // cycle is paced by the connect-retry and reconnect backoff), one
-    // max-prefix breach (which latches the session down), and at most one
-    // queued warning per max-prefix scope, which counts any crossings made
-    // while it waits (`send_max_prefix_warning`). The reservation accounting
-    // exports the queued depth's high-water mark.
+    // resolution. Per session: one max-prefix breach (which latches the
+    // session down) and at most one queued warning per max-prefix scope,
+    // which counts any crossings made while it waits
+    // (`send_max_prefix_warning`), are bounded by state. The OpenConfirm and
+    // BackToIdle notifications are bounded by rate instead: one pair per
+    // FSM cycle, and a session waits at least the 5 s connect-retry before
+    // its next cycle, so they accumulate only while the peer manager is
+    // stalled. The reservation accounting exports the queued depth's
+    // high-water mark.
     let (sender, receiver) = mpsc::unbounded_channel();
     (
         SessionNotificationSender {

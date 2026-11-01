@@ -199,7 +199,7 @@ impl PeerSession {
     }
 
     /// Encode `msg` and enqueue it on the writer's **priority** channel
-    /// (OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH command,
+    /// (OPEN, KEEPALIVE, NOTIFICATION, normal ROUTE-REFRESH request,
     /// collision-dump Cease, saturation Cease/8). The priority channel
     /// is unbounded so this only ever reports `WriterClosed` when the
     /// session has no active TCP connection — same effect as today's

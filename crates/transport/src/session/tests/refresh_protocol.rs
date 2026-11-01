@@ -471,3 +471,63 @@ async fn queued_route_refresh_requests_coalesce_per_family_while_the_writer_stal
     assert!(rest.is_empty(), "whole frames only");
     assert_eq!(refreshes, vec![(1, 1), (2, 1)]);
 }
+
+/// Once the writer has taken a family's request, the family's claim is
+/// released: each later request is queued and reaches the peer.
+#[tokio::test]
+async fn refresh_claim_is_released_after_the_writer_takes_the_frame() {
+    let (mut session, _rib_rx, _bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    for round in 0..3 {
+        session
+            .send_route_refresh(Afi::Ipv4, Safi::Unicast)
+            .unwrap();
+        let rr = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Message::RouteRefresh(rr) = read_single_bgp_message(&mut server).await {
+                    break rr;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("round {round}: the request never reached the peer"));
+        assert_eq!((rr.afi_raw, rr.safi_raw, rr.subtype_raw), (1, 1, 0));
+    }
+}
+
+/// A claim held by a writer that died before taking its frame does not make
+/// a later request look queued: the request reports the closed writer.
+#[tokio::test]
+async fn refresh_request_after_the_writer_died_reports_the_closed_writer() {
+    let (mut session, _rib_rx, _bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    // Hold the writer behind a backlog so the request stays queued, claimed.
+    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
+    session
+        .writer_priority_tx
+        .as_ref()
+        .unwrap()
+        .send(Bytes::from(keepalive.repeat(1 << 20)))
+        .unwrap();
+    session
+        .send_route_refresh(Afi::Ipv4, Safi::Unicast)
+        .unwrap();
+    let join = session.writer_join.take().unwrap();
+    join.abort();
+    let _ = join.await;
+    assert!(
+        session
+            .send_route_refresh(Afi::Ipv4, Safi::Unicast)
+            .is_err(),
+        "a claimed family reports the closed writer"
+    );
+    assert!(
+        session
+            .send_route_refresh(Afi::Ipv6, Safi::Unicast)
+            .is_err()
+    );
+}
