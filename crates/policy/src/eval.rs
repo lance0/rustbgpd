@@ -33,7 +33,7 @@ use crate::ir::{
     DatasetProbe, ForEachNode, LoopSource, MatchExpr, Term, TermAction, TermActionView,
     ValidationDimension, ValueCmpOp, ValueExpr, ValueField, is_well_known_community,
 };
-use crate::sets::prefix_entry_matches;
+use crate::sets::{CommunitySet, prefix_entry_matches};
 
 /// The per-walk dataset pin frame (LAN-305, ADR-0103 Decision 8.5):
 /// slot `i` holds the snapshot pinned for the chain's `DatasetId(i)`.
@@ -743,23 +743,6 @@ pub(crate) fn exec_remove_all_communities(
     ctx: &RouteContext<'_>,
     continued: &mut Option<RouteModifications>,
 ) -> bool {
-    fn stage<T: Copy + Eq + std::hash::Hash>(
-        arrived: &[T],
-        staged: &[T],
-        keep: impl Fn(T) -> bool,
-        out: &mut Vec<T>,
-    ) {
-        if arrived.is_empty() {
-            return;
-        }
-        let mut seen: HashSet<T> = staged.iter().copied().collect();
-        out.extend(
-            arrived
-                .iter()
-                .copied()
-                .filter(|value| !keep(*value) && seen.insert(*value)),
-        );
-    }
     let arrived = |attribute| match attribute {
         CommunityAttribute::Standard => ctx.communities.len(),
         CommunityAttribute::Extended => ctx.extended_communities.len(),
@@ -773,7 +756,7 @@ pub(crate) fn exec_remove_all_communities(
     let staged = continued.as_ref();
     let mut mods = RouteModifications::default();
     if attributes.standard {
-        stage(
+        stage_removals(
             ctx.communities,
             staged.map_or(&[], |mods| &mods.communities_remove),
             is_well_known_community,
@@ -781,7 +764,7 @@ pub(crate) fn exec_remove_all_communities(
         );
     }
     if attributes.extended {
-        stage(
+        stage_removals(
             ctx.extended_communities,
             staged.map_or(&[], |mods| &mods.extended_communities_remove),
             |_| false,
@@ -789,12 +772,94 @@ pub(crate) fn exec_remove_all_communities(
         );
     }
     if attributes.large {
-        stage(
+        stage_removals(
             ctx.large_communities,
             staged.map_or(&[], |mods| &mods.large_communities_remove),
             |_| false,
             &mut mods.large_communities_remove,
         );
+    }
+    if !mods.is_empty() {
+        continued
+            .get_or_insert_with(RouteModifications::default)
+            .merge_from(mods);
+    }
+    true
+}
+
+/// Append to `out` every arrived value that `keep` rejects and that is not
+/// already staged or appended: one pass over `arrived`, allocating only the
+/// dedup set of staged removals.
+fn stage_removals<T: Copy + Eq + std::hash::Hash>(
+    arrived: &[T],
+    staged: &[T],
+    keep: impl Fn(T) -> bool,
+    out: &mut Vec<T>,
+) {
+    if arrived.is_empty() {
+        return;
+    }
+    let mut seen: HashSet<T> = staged.iter().copied().collect();
+    out.extend(
+        arrived
+            .iter()
+            .copied()
+            .filter(|value| !keep(*value) && seen.insert(*value)),
+    );
+}
+
+/// Stage a removal of every arrived value of `attribute` that is a member
+/// of `set` (or, with `negate`, is not), skipping values already staged.
+/// A well-known standard community is removed only by `in` and only when
+/// the set names it as an exact member: patterns never name one, and an
+/// allow-list `not in` scrub cannot strip `NO_EXPORT`. A route carrying more
+/// values of the attribute than its wire bound fails closed (`false`)
+/// before any scan, so the compile-time pre-payment holds. Each value costs
+/// one exact probe plus at most
+/// [`MAX_COMMUNITY_PATTERN_SCAN`](crate::sets::MAX_COMMUNITY_PATTERN_SCAN)
+/// pattern comparisons.
+pub(crate) fn exec_remove_communities_in_set(
+    attribute: CommunityAttribute,
+    set: &CommunitySet,
+    negate: bool,
+    ctx: &RouteContext<'_>,
+    continued: &mut Option<RouteModifications>,
+) -> bool {
+    let arrived = match attribute {
+        CommunityAttribute::Standard => ctx.communities.len(),
+        CommunityAttribute::Extended => ctx.extended_communities.len(),
+        CommunityAttribute::Large => ctx.large_communities.len(),
+    };
+    if u64::try_from(arrived).unwrap_or(u64::MAX) > max_communities_per_route(attribute) {
+        return false;
+    }
+    let staged = continued.as_ref();
+    let mut mods = RouteModifications::default();
+    match attribute {
+        CommunityAttribute::Standard => stage_removals(
+            ctx.communities,
+            staged.map_or(&[], |mods| &mods.communities_remove),
+            |value| {
+                if is_well_known_community(value) {
+                    negate || !set.contains_standard_exact(value)
+                } else {
+                    set.contains_standard(value) == negate
+                }
+            },
+            &mut mods.communities_remove,
+        ),
+        CommunityAttribute::Extended => stage_removals(
+            ctx.extended_communities,
+            staged.map_or(&[], |mods| &mods.extended_communities_remove),
+            |value| set.contains_ext(&value) == negate,
+            &mut mods.extended_communities_remove,
+        ),
+        CommunityAttribute::Large => stage_removals(
+            ctx.large_communities,
+            staged.map_or(&[], |mods| &mods.large_communities_remove),
+            |value| set.contains_large(&value) == negate,
+            &mut mods.large_communities_remove,
+        ),
     }
     if !mods.is_empty() {
         continued
@@ -1345,6 +1410,22 @@ impl CompiledChain {
                                 break;
                             }
                         }
+                        TermActionView::RemoveCommunitiesInSet {
+                            attribute,
+                            set,
+                            negate,
+                        } => {
+                            if !exec_remove_communities_in_set(
+                                attribute,
+                                &self.community_sets[set.0 as usize],
+                                negate,
+                                ctx,
+                                &mut continued,
+                            ) {
+                                denied = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1542,6 +1623,23 @@ impl CompiledChain {
                             };
                         }
                     }
+                    TermActionView::RemoveCommunitiesInSet {
+                        attribute,
+                        set,
+                        negate,
+                    } => {
+                        if !exec_remove_communities_in_set(
+                            attribute,
+                            &self.community_sets[set.0 as usize],
+                            negate,
+                            ctx,
+                            &mut continued,
+                        ) {
+                            return PolicyDecision::Deny {
+                                term_index: Some(term_index),
+                            };
+                        }
+                    }
                 }
             }
         }
@@ -1675,6 +1773,25 @@ impl CompiledChain {
                     }
                     TermAction::RemoveAllCommunities { attributes } => {
                         if !exec_remove_all_communities(*attributes, ctx, continued) {
+                            return Ok(LoopOutcome {
+                                iterations,
+                                decided_at: Some(iterations - 1),
+                                flow: LoopFlow::Deny,
+                            });
+                        }
+                    }
+                    TermAction::RemoveCommunitiesInSet {
+                        attribute,
+                        set,
+                        negate,
+                    } => {
+                        if !exec_remove_communities_in_set(
+                            *attribute,
+                            &self.community_sets[set.0 as usize],
+                            *negate,
+                            ctx,
+                            continued,
+                        ) {
                             return Ok(LoopOutcome {
                                 iterations,
                                 decided_at: Some(iterations - 1),

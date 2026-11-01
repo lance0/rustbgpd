@@ -535,6 +535,16 @@ pub enum CommunityArg {
     /// A `let`/loop binding or policy parameter (standard communities
     /// only; parameters resolve to literals at compile time).
     Var(Spanned<String>),
+    /// `remove <kind> in SET` / `remove <kind> not in SET` — every arrived
+    /// value of the action's kind that is (or, with `not in`, is not) a
+    /// member of the community-set. Removal-only; well-known standard
+    /// communities are removed only when the set names them exactly.
+    InSet {
+        /// The community-set.
+        set: Spanned<String>,
+        /// True for `not in`.
+        negate: bool,
+    },
 }
 
 /// `set next-hop` operand.

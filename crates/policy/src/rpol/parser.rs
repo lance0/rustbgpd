@@ -1217,6 +1217,26 @@ impl Parser<'_> {
                 // is purely additive (a non-well-known identifier was a
                 // parse error before).
                 let arg = match self.peek() {
+                    // `in SET` / `not in SET`: `in` never followed an
+                    // action's kind keyword before, and a binding named
+                    // `not` cannot be followed by `in` (no statement begins
+                    // with it), so both forms are additive.
+                    Some(word)
+                        if word.kind == Tok::InKw
+                            || (word.kind == Tok::Ident
+                                && self.text(word) == "not"
+                                && self.peek_nth(1).map(|t| t.kind) == Some(Tok::InKw)) =>
+                    {
+                        let negate = word.kind == Tok::Ident;
+                        if negate {
+                            self.bump();
+                        }
+                        self.bump();
+                        CommunityArg::InSet {
+                            set: self.expect_ident("a community-set name")?,
+                            negate,
+                        }
+                    }
                     Some(wildcard) if wildcard.kind == Tok::LargeCommunityWildcard => {
                         CommunityArg::LargeAdminWildcard(self.large_admin_wildcard()?)
                     }
@@ -1237,7 +1257,7 @@ impl Parser<'_> {
                     CommunityArg::Lit(lit) => lit.span,
                     CommunityArg::LargeAdminWildcard(global) => global.span,
                     CommunityArg::All(span) => *span,
-                    CommunityArg::Var(name) => name.span,
+                    CommunityArg::Var(name) | CommunityArg::InSet { set: name, .. } => name.span,
                 };
                 let span = token.span.to(end);
                 Ok(ActionStmt::Community {

@@ -1093,6 +1093,12 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                 }
             }
+            ActionStmt::Community {
+                add,
+                kind,
+                arg: CommunityArg::InSet { set, negate },
+                ..
+            } => self.check_remove_in_set(*add, *kind, set, *negate),
             ActionStmt::Prepend { asn, count, .. } => {
                 // A computed operand (`self`/`peer`, or an `origin`/`path-first`
                 // identifier that is not a declared parameter —
@@ -1904,6 +1910,94 @@ impl<'a> Checker<'a> {
             Some("asn-set")
         } else {
             None
+        }
+    }
+
+    /// `remove <kind> in SET` / `not in SET`: removal-only, against a
+    /// community-set (not a dataset) that has members of the action's kind
+    /// — otherwise `in` removes nothing and `not in` removes everything.
+    fn check_remove_in_set(
+        &mut self,
+        add: bool,
+        kind: CommunityKind,
+        set: &Spanned<String>,
+        negate: bool,
+    ) {
+        let keyword = kind_keyword(kind);
+        let form = if negate { "not in" } else { "in" };
+        if add {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    set.span,
+                    format!("`add {keyword} {form}` is not an action"),
+                    "set membership selects arrived values to remove",
+                )
+                .with_note(format!("use `remove {keyword} {form} {}`", set.node)),
+            );
+            return;
+        }
+        if let Some(def) = self
+            .file
+            .community_sets
+            .iter()
+            .find(|s| s.name.node == set.node)
+        {
+            if !def
+                .entries
+                .iter()
+                .any(|entry| member_kind(&entry.node) == kind)
+            {
+                let effect = if negate {
+                    format!("removes every arrived {}", kind_describe(kind))
+                } else {
+                    "never removes anything".to_string()
+                };
+                let mut diag = Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    set.span,
+                    format!(
+                        "community-set `{}` has no {} members, so `remove {keyword} {form} {}` {effect}",
+                        set.node,
+                        kind_describe(kind),
+                        set.node,
+                    ),
+                    format!("no {} member", kind_describe(kind)),
+                )
+                .with_label(def.name.span, format!("`{}` is defined here", set.node));
+                if negate {
+                    diag = diag.with_note(format!(
+                        "to strip every {}, write `{}`",
+                        kind_describe(kind),
+                        community_attribute(kind).remove_all_str()
+                    ));
+                }
+                self.diags.push(diag);
+            }
+        } else if self.dataset_of(&set.node).is_some() {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    set.span,
+                    format!(
+                        "`remove {keyword} {form}` takes a community-set; `{}` is a dataset",
+                        set.node
+                    ),
+                    "datasets are not supported here",
+                )
+                .with_note(format!(
+                    "probe the dataset in a guard (`route.communities in {}`), or define \
+                     the members as a community-set",
+                    set.node
+                )),
+            );
+        } else {
+            self.check_set_reference(
+                set,
+                "community-set",
+                "removal by membership needs a community-set",
+                self.file.community_sets.iter().map(|s| &s.name),
+            );
         }
     }
 
@@ -2722,9 +2816,12 @@ fn action_value_cost(action: &ActionStmt, fns: &HashMap<&str, FnCost>) -> u64 {
             arg: CommunityArg::LargeAdminWildcard(_),
             ..
         } => crate::eval::MAX_LARGE_COMMUNITIES_PER_ROUTE,
+        // One step per arrived value of the kind, as for the strip-all form.
+        // A step probes the set: one exact hash probe plus at most
+        // `MAX_COMMUNITY_PATTERN_SCAN` pattern comparisons.
         ActionStmt::Community {
             kind,
-            arg: CommunityArg::All(_),
+            arg: CommunityArg::All(_) | CommunityArg::InSet { .. },
             ..
         } => crate::eval::max_communities_per_route(community_attribute(*kind)),
         _ => 0,
@@ -3099,6 +3196,24 @@ fn kind_describe(kind: CommunityKind) -> &'static str {
         CommunityKind::Standard => "standard-community",
         CommunityKind::Large => "large-community",
         CommunityKind::Ext => "extended-community",
+    }
+}
+
+/// The community kind of a set member.
+fn member_kind(member: &crate::sets::CommunityMember) -> CommunityKind {
+    use crate::engine::CommunityMatch;
+    use crate::sets::{CommunityMember, CommunityPattern};
+    match member {
+        CommunityMember::Exact(CommunityMatch::Standard { .. }) => CommunityKind::Standard,
+        CommunityMember::Exact(CommunityMatch::LargeCommunity { .. }) => CommunityKind::Large,
+        CommunityMember::Exact(_) => CommunityKind::Ext,
+        CommunityMember::Pattern(pattern) => match **pattern {
+            CommunityPattern::Standard { .. } => CommunityKind::Standard,
+            CommunityPattern::Large { .. } => CommunityKind::Large,
+            CommunityPattern::RouteTarget { .. } | CommunityPattern::RouteOrigin { .. } => {
+                CommunityKind::Ext
+            }
+        },
     }
 }
 

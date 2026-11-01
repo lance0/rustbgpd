@@ -91,7 +91,8 @@ impl ChainNodeBudget {
                     | TermAction::ContinueLoop
                     | TermAction::CommunityVar { .. }
                     | TermAction::RemoveLargeCommunityAdmin { .. }
-                    | TermAction::RemoveAllCommunities { .. } => false,
+                    | TermAction::RemoveAllCommunities { .. }
+                    | TermAction::RemoveCommunitiesInSet { .. } => false,
                 }
         })
     }
@@ -283,6 +284,21 @@ fn remap_terms(terms: &[Term], donor: &CompiledChain, sets: &mut ChainSets) -> V
                     var: node.var.clone(),
                     body: remap_terms(&node.body, donor, sets),
                 })),
+                TermAction::RemoveCommunitiesInSet {
+                    attribute,
+                    set,
+                    negate,
+                } => {
+                    let index = set.0 as usize;
+                    TermAction::RemoveCommunitiesInSet {
+                        attribute: *attribute,
+                        set: sets.community_set_id(
+                            donor.community_sets[index].clone(),
+                            donor.community_set_names.get(index).cloned().flatten(),
+                        ),
+                        negate: *negate,
+                    }
+                }
                 other => other.clone(),
             },
         })
