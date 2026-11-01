@@ -2121,6 +2121,609 @@ policy. What has no equivalent to migrate: the in-file `test` blocks,
 `rbgp policy test` dry runs against the live RIB, and per-term live
 hit counters — those come free after the rewrite.
 
+## Migrating from IOS-XR RPL
+
+Most RPL constructs have a direct `.rpol` spelling. Four of them have
+different semantics, and a line-by-line port changes routing in those
+places. The RPL behavior below is taken from the
+[IOS XR 24.x routing configuration guide for ASR 9000, "Implementing Routing Policy"](https://www.cisco.com/c/en/us/td/docs/routers/asr9000/software/24xx/routing/configuration/guide/b-routing-cg-asr9000-24xx/implementing-routing-policy.html)
+and the
+[Cisco 8000 RPL command reference](https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/routing/cumulative/command/reference/b-routing-cr-cisco8000/m-rpl-commands-1.html)
+(updated 2022-10-25).
+
+### Construct mapping
+
+| RPL | `.rpol` |
+|---|---|
+| `prefix-set NAME` with `ge`/`le`, `destination in NAME` | `prefix-set NAME { ... }`, `route.prefix in NAME` |
+| `as-path originates-from '64500'` | `route.origin-as == 64500`, or `route.origin-as in <asn-set>` for many ASNs |
+| `as-path length ge 50` | `route.as-path.len >= 50` |
+| `as-path in (ios-regex '...')` | `route.as-path matches "..."` |
+| `community matches-any NAME` | `route.communities in NAME` |
+| `validation-state is invalid` | `route.rpki == invalid` |
+| `set local-preference 200` | `set local-pref 200` |
+| `set med 50` | `set med 50` |
+| `set community (65000:100) additive` | `add community 65000:100` |
+| `set community (65000:100)` | `remove community *; add community 65000:100`, when nothing earlier on the path added a community the route did not arrive with (see 4 below) |
+| `delete community all` | `remove community *` |
+| `prepend as-path 65000 3` | `prepend as 65000 3` |
+| `set next-hop self` | `set next-hop self` |
+| `pass` followed by the policy end | `accept`, or nothing when no `default-action reject` is declared |
+| `drop` | `reject` |
+| conditions read the route's initial data ("comparison operators always run on the initial data in the route", 24.x guide) | the same: reads never observe a staged `set` |
+| `neighbor ... route-policy NAME in` | `import_policy_chain = ["NAME"]` on the neighbor (see [Using policies in the daemon](#using-policies-in-the-daemon)) |
+
+A customer import policy written this way:
+
+```rpol
+prefix-set customer-prefixes { 192.0.2.0/24 le 26, 2001:db8:100::/40 le 48 }
+asn-set customer-asns { 64500, 64501 }
+
+policy customer-in {
+    term too-long {
+        if route.as-path.len >= 50 { reject }
+    }
+    term rpki-invalid {
+        if route.rpki == invalid { reject }
+    }
+    term customer {
+        if route.prefix in customer-prefixes && route.origin-as in customer-asns {
+            set local-pref 200
+            add community 65000:100
+            accept
+        }
+    }
+    term rest { reject }
+}
+
+test customer-route-is-tagged {
+    route { prefix 192.0.2.0/24; as-path "64500"; rpki valid }
+    expect customer-in == accept with local-pref 200, community 65000:100
+}
+
+test foreign-origin-is-dropped {
+    route { prefix 192.0.2.0/24; as-path "64999" }
+    expect customer-in == reject
+}
+
+test rpki-invalid-is-dropped {
+    route { prefix 192.0.2.0/24; as-path "64500"; rpki invalid }
+    expect customer-in == reject
+}
+```
+
+### Behavior that differs
+
+**1. The default disposition.** RPL drops a route at the end of a policy
+unless the policy passed it or modified an attribute. `.rpol` accepts a
+route that no term decides, unless the policy declares
+`default-action reject`, and a modification never counts as a pass.
+
+An RPL `set` also does not end the policy: later statements still run, and
+a later `drop` still drops the route. A `.rpol` `accept` ends the policy at
+once. A port that keeps RPL's implicit drop therefore needs
+`default-action reject` and an `accept` at the end of each path on which
+an RPL `set` would have passed the route, after that path's remaining
+checks and modifications. Here the `set` is on the last branch, so the
+`accept` can follow it directly:
+
+```rpol
+prefix-set customers { 192.0.2.0/24 le 24 }
+
+# A literal port: the term only modifies, as an RPL `set` would.
+policy literal-port {
+    default-action reject
+    term tag {
+        if route.prefix in customers { set local-pref 200 }
+    }
+}
+
+# The port that keeps RPL's outcome: accept where RPL's `set` passed.
+policy ported {
+    default-action reject
+    term tag {
+        if route.prefix in customers { set local-pref 200; accept }
+    }
+}
+
+test modifying-does-not-pass {
+    route { prefix 192.0.2.0/24 }
+    expect literal-port == reject
+}
+
+test explicit-accept-passes {
+    route { prefix 192.0.2.0/24 }
+    expect ported == accept with local-pref 200
+}
+
+test unmatched-route-is-dropped {
+    route { prefix 198.51.100.0/24 }
+    expect ported == reject
+}
+```
+
+When a later RPL statement can still drop the route, the `accept` goes after
+it. This RPL policy tags customer routes and then drops long paths, so a
+customer route with a long path is dropped:
+
+```text
+route-policy CUSTOMER-IN
+  if destination in CUSTOMERS then
+    set local-preference 200
+  endif
+  if as-path length ge 10 then
+    drop
+  endif
+end-policy
+```
+
+An `accept` next to the `set` would accept that route. The port accepts in
+a final term instead:
+
+```rpol
+prefix-set customers { 192.0.2.0/24 le 24 }
+
+# Wrong: the accept skips the length check that follows.
+policy accept-too-early {
+    default-action reject
+    term tag {
+        if route.prefix in customers { set local-pref 200; accept }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
+    }
+}
+
+# The port: modify, run the remaining checks, accept at the end.
+policy accept-at-end {
+    default-action reject
+    term tag {
+        if route.prefix in customers { set local-pref 200 }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
+    }
+    term pass-customers {
+        if route.prefix in customers { accept }
+    }
+}
+
+test early-accept-skips-the-length-check {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect accept-too-early == accept with local-pref 200
+}
+
+test long-customer-path-is-dropped {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect accept-at-end == reject
+}
+
+test short-customer-path-is-tagged {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect accept-at-end == accept with local-pref 200
+}
+
+test non-customer-is-dropped {
+    route { prefix 198.51.100.0/24; as-path "64500" }
+    expect accept-at-end == reject
+}
+```
+
+Without `default-action reject`, the routes RPL would have dropped are
+accepted instead:
+
+```rpol
+prefix-set customers { 192.0.2.0/24 le 24 }
+
+# No default-action: a route no term decides is accepted.
+policy no-default {
+    term tag {
+        if route.prefix in customers { set local-pref 200 }
+    }
+}
+
+test unmatched-route-is-accepted {
+    route { prefix 198.51.100.0/24 }
+    expect no-default == accept with without local-pref
+}
+```
+
+**2. `set med +N` and `set med -N`.** RPL saturates: a subtraction that
+would go below zero sets 0, and an addition that would exceed
+4294967295 sets 4294967295. `.rpol` arithmetic is checked, so
+`set med route.med - 10` on a route with MED 4 is an evaluation error and
+the route is denied (see "Checked u32 value expressions"). Write the
+saturation out:
+
+```rpol
+# A literal port of `set med -10`.
+policy med-minus-literal {
+    term t { set med route.med - 10; accept }
+}
+
+# RPL's floor at zero, written out.
+policy med-minus {
+    term t { set med max(route.med, 10) - 10; accept }
+}
+
+# RPL's ceiling at 4294967295, written out for `set med +10`.
+policy med-plus {
+    term t { set med min(route.med, 4294967285) + 10; accept }
+}
+
+test literal-underflow-denies {
+    route { prefix 192.0.2.0/24; med 4 }
+    expect med-minus-literal == error underflow
+}
+
+test floor-at-zero {
+    route { prefix 192.0.2.0/24; med 4 }
+    expect med-minus == accept with med 0
+}
+
+test ordinary-subtraction {
+    route { prefix 192.0.2.0/24; med 50 }
+    expect med-minus == accept with med 40
+}
+
+test ceiling-at-max {
+    route { prefix 192.0.2.0/24; med 4294967290 }
+    expect med-plus == accept with med 4294967295
+}
+```
+
+**3. Repeated prepends.** RPL accumulates every `prepend as-path` in a
+policy. In `.rpol` a prepend is one scalar slot, so a later prepend
+replaces an earlier one, in the same policy or in a later member of the
+chain (see "Actions"). When every prepend on a path uses the same ASN and
+the counts total 255 or less, fold them into one prepend; the compiler
+rejects a count above 255. Prepends of different ASNs, such as 65000 once
+and then 65001 twice, have no `.rpol` equivalent: only the last prepend
+takes effect.
+
+```rpol
+# A literal port of two RPL prepends: the second replaces the first.
+policy prepend-literal {
+    term t {
+        prepend as 65000 1
+        prepend as 65000 2
+        accept
+    }
+}
+
+# One prepend with the total count.
+policy prepend-total {
+    term t { prepend as 65000 3; accept }
+}
+
+test later-prepend-replaces {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect prepend-literal == accept with only prepend as 65000 2
+}
+
+test total-count {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect prepend-total == accept with only prepend as 65000 3
+}
+
+# Mixed ASNs: the second prepend replaces the first, here across a chain.
+policy prepend-65000 { term t { prepend as 65000 1 } }
+policy prepend-65001 { term t { prepend as 65001 2 } }
+
+test mixed-asn-prepends-keep-only-the-last {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect chain [prepend-65000, prepend-65001] == accept with only prepend as 65001 2
+}
+```
+
+**4. Replacing communities.** RPL `set community` without `additive`
+replaces the route's communities, keeping the well-known ones, and discards
+the communities that earlier statements in the policy added.
+`remove community *` keeps the same RFC 1997 well-known range (see
+"Actions"), but it removes only the communities the route arrived with. A
+value that an earlier `add community` in the same policy, or an earlier
+member of the chain, added stays on the route unless the route arrived with
+it; an arrived value is removed even when it was added earlier. The replace
+idiom therefore ports directly only when nothing on the path added a
+community the route did not arrive with. When something did, the faithful
+port omits those additions on that path, because RPL discards them. Moving
+an `add community` after the replacement does not help: the value then
+stays on the route as well. A full scrub that
+also removes `NO_EXPORT` and the other well-known values is the loop form,
+which, like any loop over a route attribute, denies a route carrying more
+than 4,096 standard communities:
+
+```rpol
+# RPL `set community (65000:100)`: replace, keeping well-known values.
+policy retag {
+    term t {
+        remove community *
+        add community 65000:100
+        accept
+    }
+}
+
+# Remove every standard community, well-known values included.
+policy scrub-all {
+    term t {
+        for c in route.communities { remove community c }
+        accept
+    }
+}
+
+# A literal port of RPL `set community (65000:1) additive` followed by
+# `set community (65000:100)`: the earlier addition survives, where RPL
+# discards it. The faithful port is `retag` above, without the addition.
+policy tag-then-retag {
+    term early { add community 65000:1 }
+    term t {
+        remove community *
+        add community 65000:100
+        accept
+    }
+}
+
+# Reordering is not a port: 65000:1 still ends up on the route.
+policy retag-then-tag {
+    term t {
+        remove community *
+        add community 65000:100
+        add community 65000:1
+        accept
+    }
+}
+
+policy tag-only {
+    term t { add community 65000:1 }
+}
+
+test retag-keeps-no-export {
+    route { prefix 192.0.2.0/24; communities [NO_EXPORT, 65010:1] }
+    expect retag == accept with only removes community 65010:1,
+        community 65000:100, not removed community NO_EXPORT
+}
+
+test earlier-addition-survives-the-replacement {
+    route { prefix 192.0.2.0/24; communities [65010:1] }
+    expect tag-then-retag == accept with only removes community 65010:1,
+        community 65000:1, community 65000:100
+}
+
+test faithful-port-omits-the-discarded-addition {
+    route { prefix 192.0.2.0/24; communities [65010:1] }
+    expect retag == accept with only removes community 65010:1,
+        community 65000:100
+}
+
+test reordering-keeps-the-addition {
+    route { prefix 192.0.2.0/24; communities [65010:1] }
+    expect retag-then-tag == accept with only removes community 65010:1,
+        community 65000:1, community 65000:100
+}
+
+test arrived-value-added-earlier-is-removed {
+    route { prefix 192.0.2.0/24; communities [65000:1, 65010:1] }
+    expect tag-then-retag == accept with only removes community 65000:1,
+        removes community 65010:1, community 65000:100
+}
+
+test earlier-chain-member-addition-survives {
+    route { prefix 192.0.2.0/24; communities [65010:1] }
+    expect chain [tag-only, retag] == accept with only removes community 65010:1,
+        community 65000:1, community 65000:100
+}
+
+test scrub-all-removes-no-export {
+    route { prefix 192.0.2.0/24; communities [NO_EXPORT, 65010:1] }
+    expect scrub-all == accept with removes community NO_EXPORT,
+        removes community 65010:1
+}
+```
+
+### Constructs without a direct equivalent
+
+These RPL constructs have no `.rpol` spelling today. Each has a form that
+compiles now:
+
+- **`delete community in NAME`** — loop over the route's standard
+  communities and remove those in the set. The loop variable is a standard
+  community, so the set's large and extended members never match it; a
+  named removal also removes a well-known member such as `NO_EXPORT`; and a
+  route with more than 4,096 standard communities is denied (the loop's
+  iteration cap).
+- **`if ... then ... elseif ... endif` and nested `if`** — one term per
+  branch reproduces `elseif` only when every branch ends the policy with
+  `accept` or `reject`, because the first deciding term wins. A branch that
+  only modifies falls through to the later branch terms, and adding an
+  `accept` to it skips the policy's later checks. For branches that must
+  continue, guard each later branch with the negation of the earlier
+  branch conditions, write a nested `if` as one guard joined with `&&`,
+  and defer the `accept` to a final term after the remaining checks (see
+  "Deliberate V1 exclusions").
+- **`as-path neighbor-is '65001'`**, with one ASN —
+  `route.as-path matches "^65001_"`. `_` matches a space, a brace or either
+  end of the rendered path, so the pattern matches a path whose first ASN
+  is 65001, including a one-ASN path, and never a path that starts with an
+  `AS_SET`.
+- **`apply NAME` as a statement** — `.rpol` `apply(p)` is a predicate,
+  and the applied policy's actions do not run (see "`apply` — policy as
+  predicate"). A chain `[caller, child]` runs the child unconditionally,
+  after all of the caller's actions, so it matches only an unconditional
+  call at the end of the caller whose dispositions compose under the
+  chain rules. For a conditional call, or one followed by more of the
+  caller's statements, inline the callee's logic at the guarded call
+  site, or split the caller so that the guards, the action order and the
+  dispositions stay as they were.
+- **`$parameter` of a set, address or community type** — parameters are
+  `u32` only; write one policy per set, or keep the set content in a
+  [dataset](#datasets--external-set-content).
+- **`done`** — differs. RPL `done` accepts the route and runs no further
+  policy statements. A `.rpol` `accept` ends only the current policy, and
+  the neighbor's chain continues: a later member's `set` overrides the
+  same attribute, community additions and removals merge, and a rejection
+  by any member ends the chain with a rejection whatever its position.
+  Putting the policy last in the configured chain keeps its scalar writes
+  when the earlier members permit, but it cannot stop another member from
+  rejecting. To skip later checks on the `done` path, keep those checks in
+  later terms of the same policy, after a guarded `accept`, or make their
+  chain members permit that path without modifying it. With
+  `honor_graceful_shutdown` or `honor_blackhole`, the daemon's own EBGP
+  import policies still run after the last configured member.
+
+```rpol
+community-set scrub { 65000:666, 65000:667 }
+
+# RPL `delete community in scrub`.
+policy delete-in-set {
+    term t {
+        for c in route.communities {
+            if c in scrub { remove community c }
+        }
+        accept
+    }
+}
+
+# RPL `if ... then ... elseif ... then ... endif` where every branch
+# accepts: one term per branch, first match wins.
+policy tiers {
+    term gold {
+        if route.communities has 65000:1 { set local-pref 300; accept }
+    }
+    term silver {
+        if route.communities has 65000:2 { set local-pref 200; accept }
+    }
+    term rest { accept }
+}
+
+# RPL `if gold then set local-preference 300 elseif silver then set
+# local-preference 200 endif`, then `if as-path length ge 10 then drop
+# endif`, then `pass`: the branches continue, so the later branch is
+# guarded by the negated earlier condition and the accept comes last.
+community-set gold { 65000:1 }
+community-set silver { 65000:2 }
+
+policy tiers-then-check {
+    term gold {
+        if route.communities in gold { set local-pref 300 }
+    }
+    term silver {
+        if route.communities in silver && !(route.communities in gold) { set local-pref 200 }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
+    }
+    term rest { accept }
+}
+
+# RPL `as-path neighbor-is '65001'`.
+policy from-65001 {
+    term t {
+        if route.as-path matches "^65001_" { set local-pref 150; accept }
+    }
+    term rest { accept }
+}
+
+test delete-in-set-removes-members-only {
+    route { prefix 192.0.2.0/24; communities [65000:666, 65010:1] }
+    expect delete-in-set == accept with removes community 65000:666,
+        not removed community 65010:1
+}
+
+test first-matching-tier-wins {
+    route { prefix 192.0.2.0/24; communities [65000:1, 65000:2] }
+    expect tiers == accept with local-pref 300
+}
+
+test second-tier {
+    route { prefix 192.0.2.0/24; communities [65000:2] }
+    expect tiers == accept with local-pref 200
+}
+
+test first-branch-wins-over-a-later-branch {
+    route { prefix 192.0.2.0/24; communities [65000:1, 65000:2] }
+    expect tiers-then-check == accept with only local-pref 300
+}
+
+test later-check-runs-after-a-modifying-branch {
+    route { prefix 192.0.2.0/24; communities [65000:1]; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect tiers-then-check == reject
+}
+
+test second-branch-applies-alone {
+    route { prefix 192.0.2.0/24; communities [65000:2] }
+    expect tiers-then-check == accept with only local-pref 200
+}
+
+test neighbor-is-matches-first-asn {
+    route { prefix 192.0.2.0/24; as-path "65001 64500" }
+    expect from-65001 == accept with local-pref 150
+}
+
+test neighbor-is-is-boundary-anchored {
+    route { prefix 192.0.2.0/24; as-path "650011 64500" }
+    expect from-65001 == accept with without local-pref
+}
+
+test neighbor-is-matches-a-one-asn-path {
+    route { prefix 192.0.2.0/24; as-path "65001" }
+    expect from-65001 == accept with local-pref 150
+}
+
+test neighbor-is-ignores-later-asns {
+    route { prefix 192.0.2.0/24; as-path "64500 65001" }
+    expect from-65001 == accept with without local-pref
+}
+
+# RPL `set local-preference 200` then `done`.
+policy finish {
+    term t { set local-pref 200; accept }
+}
+
+policy later-member {
+    term t { set local-pref 100; accept }
+}
+
+policy reject-long {
+    term t { if route.as-path.len >= 10 { reject } }
+}
+
+# The `done` path skips the length check that a later term holds.
+policy done-then-checks {
+    term done-path {
+        if route.communities has 65000:1 { set local-pref 200; accept }
+    }
+    term too-long {
+        if route.as-path.len >= 10 { reject }
+    }
+}
+
+test accept-does-not-stop-the-chain {
+    route { prefix 192.0.2.0/24 }
+    expect chain [finish, later-member] == accept with local-pref 100
+}
+
+test last-in-the-chain-keeps-its-scalar-write {
+    route { prefix 192.0.2.0/24 }
+    expect chain [later-member, finish] == accept with local-pref 200
+}
+
+test a-rejection-wins-in-either-order {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect chain [reject-long, finish] == reject
+    expect chain [finish, reject-long] == reject
+}
+
+test done-path-skips-the-later-check {
+    route { prefix 192.0.2.0/24; communities [65000:1]; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect done-then-checks == accept with local-pref 200
+}
+
+test other-paths-still-run-the-check {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504 64505 64506 64507 64508 64509" }
+    expect done-then-checks == reject
+}
+```
+
 ## Deliberate V1 exclusions
 
 No `while` and no unbounded iteration of any kind — `for`
