@@ -273,6 +273,8 @@ pub(crate) struct PeerSession {
     /// OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH commands,
     /// and the `Cease/8` we emit on a local Out-of-Resources teardown.
     writer_priority_tx: Option<mpsc::UnboundedSender<Bytes>>,
+    /// The current writer's queued normal ROUTE-REFRESH requests, by family.
+    writer_refresh_pending: Option<writer::RefreshPending>,
     /// KEEPALIVE cadence control for the writer task (ADR-0078). The
     /// session sends `Some(interval)` when the FSM starts the keepalive
     /// timer and `None` when it stops it; dropping the sender (TCP
@@ -519,6 +521,11 @@ pub(crate) struct PeerSession {
     /// Per-scope warning latch: set when usage crosses the warning threshold,
     /// cleared when it falls back under, so each crossing warns once.
     max_prefix_warned: [bool; MaxPrefixScope::ALL.len()],
+    /// Per-scope warning crossings queued for the peer manager and not yet
+    /// received: a crossing while one is queued adds to it, so at most one
+    /// warning per scope is queued.
+    max_prefix_warning_crossings:
+        [crate::handle::MaxPrefixWarningCrossings; MaxPrefixScope::ALL.len()],
     /// Per-scope blocking episode under `MaxPrefixAction::Block`: set by the
     /// first dropped net-new prefix, cleared when usage falls back under the
     /// bound (which also requests one route refresh so the peer replays what
@@ -1259,16 +1266,20 @@ impl PeerSession {
                         scope.stage(),
                     );
                     if let Some(ref notify_tx) = self.session_notify_tx
-                        && let Err(error) = notify_tx.send(SessionNotification::MaxPrefixWarning {
-                            session_id: self.session_identity.id,
-                            role: self.session_identity.role,
-                            peer_addr: self.peer_ip,
-                            family: scope.family_label(),
-                            stage: scope.stage(),
-                            usage,
-                            bound,
-                            percent,
-                        })
+                        && let Err(error) = notify_tx.send_max_prefix_warning(
+                            SessionNotification::MaxPrefixWarning {
+                                session_id: self.session_identity.id,
+                                role: self.session_identity.role,
+                                peer_addr: self.peer_ip,
+                                family: scope.family_label(),
+                                stage: scope.stage(),
+                                usage,
+                                bound,
+                                percent,
+                                crossings: 1,
+                            },
+                            &self.max_prefix_warning_crossings[index],
+                        )
                     {
                         warn!(
                             peer = %self.peer_label,
@@ -2204,6 +2215,7 @@ impl PeerSession {
             writer_bulk_tx,
             writer_completed,
             writer_priority_tx,
+            writer_refresh_pending,
             writer_keepalive_tx,
             writer_teardown_tx,
             writer_close_started,
@@ -2223,13 +2235,14 @@ impl PeerSession {
                     Some(writer_handle.bulk_tx),
                     Some(writer_handle.completed),
                     Some(writer_handle.priority_tx),
+                    Some(writer_handle.refresh_pending),
                     Some(writer_handle.keepalive_tx),
                     Some(writer_handle.teardown_tx),
                     Some(writer_handle.close_started),
                     Some(writer_handle.join),
                 )
             }
-            None => (None, None, None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None, None, None),
         };
         let connection = read_half
             .as_ref()
@@ -2241,6 +2254,7 @@ impl PeerSession {
             writer_bulk_tx,
             writer_completed,
             writer_priority_tx,
+            writer_refresh_pending,
             writer_keepalive_tx,
             writer_teardown_tx,
             writer_close_started,
@@ -2314,6 +2328,7 @@ impl PeerSession {
             rejected_only_v4: 0,
             rejected_only_v6: 0,
             max_prefix_warned: [false; MaxPrefixScope::ALL.len()],
+            max_prefix_warning_crossings: Default::default(),
             max_prefix_blocking: [false; MaxPrefixScope::ALL.len()],
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
@@ -3004,6 +3019,7 @@ impl PeerSession {
                             self.writer_completed = Some(handle.completed);
                             self.writer_bulk_tx = Some(handle.bulk_tx);
                             self.writer_priority_tx = Some(handle.priority_tx);
+                            self.writer_refresh_pending = Some(handle.refresh_pending);
                             self.writer_keepalive_tx = Some(handle.keepalive_tx);
                             self.writer_teardown_tx = Some(handle.teardown_tx);
                             self.writer_close_started = Some(handle.close_started);
@@ -3071,6 +3087,7 @@ impl PeerSession {
         self.writer_completed = Some(handle.completed);
         self.writer_bulk_tx = Some(handle.bulk_tx);
         self.writer_priority_tx = Some(handle.priority_tx);
+        self.writer_refresh_pending = Some(handle.refresh_pending);
         self.writer_keepalive_tx = Some(handle.keepalive_tx);
         self.writer_teardown_tx = Some(handle.teardown_tx);
         self.writer_close_started = Some(handle.close_started);

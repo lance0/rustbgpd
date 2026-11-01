@@ -479,6 +479,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   most one binding change and one conflict per interface, and keeps the
   latest binding and every conflict count. Learned and expired candidates
   are logged by discovery itself and are no longer queued.
+- Bound two per-session queues that a peer could grow. A connection whose
+  peer stopped reading queued one ROUTE-REFRESH request per max-prefix
+  block episode that ended, with no limit when `send_hold_time = 0`. It now
+  queues at most one request per address family; a later request for a
+  family whose request is still queued is not sent again. A peer moving
+  across a max-prefix warning threshold while the peer manager was busy
+  queued one notification per crossing. Each scope now queues one, which
+  carries the crossing count, and the peer manager still publishes one
+  `MaxPrefixWarning` event per crossing.
 
 ### Documentation
 

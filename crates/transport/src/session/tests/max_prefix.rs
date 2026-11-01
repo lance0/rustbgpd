@@ -1876,6 +1876,61 @@ async fn warning_threshold_warns_once_per_crossing_and_never_tears_down() {
     assert!(!session.stop_requested);
 }
 
+/// While the peer manager receives nothing, a peer oscillating around the
+/// warning threshold queues one warning for the scope, which carries every
+/// crossing. The next crossing after it is received queues a new one.
+#[tokio::test]
+async fn warning_crossings_coalesce_while_the_peer_manager_is_behind() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Shutdown);
+    config.max_prefixes_ipv4 = Some(4);
+    config.max_prefix_warning_percent = Some(50);
+    let (mut session, mut rib_rx, mut notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, false);
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    let oscillations: u32 = 200;
+    for _ in 0..oscillations {
+        // 2 of 4 crosses the 50% threshold; 1 of 4 re-arms it.
+        session
+            .process_update(ipv4_announce(v4_prefix(2), 0, false))
+            .await;
+        session
+            .process_update(ipv4_withdraw(v4_prefix(2), 0, false))
+            .await;
+        while rib_rx.try_recv().is_ok() {}
+    }
+    assert_eq!(
+        counter_value(
+            &session.metrics,
+            "bgp_max_prefix_warning_total",
+            &session.peer_label,
+            "ipv4_unicast"
+        ),
+        Some(f64::from(oscillations))
+    );
+    let queued: Vec<_> = std::iter::from_fn(|| notify_rx.try_recv().ok()).collect();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert!(
+        matches!(
+            queued[0],
+            SessionNotification::MaxPrefixWarning {
+                usage: 2,
+                crossings,
+                ..
+            } if crossings == u64::from(oscillations)
+        ),
+        "{queued:?}"
+    );
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert!(matches!(
+        notify_rx.try_recv(),
+        Ok(SessionNotification::MaxPrefixWarning { crossings: 1, .. })
+    ));
+}
+
 /// Mutant: treating `warning` as `shutdown` tears down at the second
 /// prefix; defaulting the threshold to 0 warns before the bound is reached.
 #[tokio::test]

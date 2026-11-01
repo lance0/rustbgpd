@@ -491,9 +491,11 @@ impl PeerManager {
                 usage,
                 bound,
                 percent,
+                crossings,
             } => {
                 // Informational: nothing is latched. One durable session event
-                // per crossing so operators can alert on it without a log tail.
+                // per crossing so operators can alert on it without a log tail,
+                // including crossings coalesced while this one was queued.
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
                     debug!(peer = %peer_addr, session_id, ?role, "ignoring max-prefix warning from unknown session");
                     return;
@@ -510,18 +512,20 @@ impl PeerManager {
                     return;
                 }
                 let rendered_peer = peer_key.label();
-                self.publish_lifecycle_event(rustbgpd_api::peer_types::SessionLifecycleEvent {
-                    event_type: rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
-                    peer: peer_addr,
-                    peer_label: Some(rendered_peer.clone()),
-                    timestamp_unix_ms: Self::session_event_timestamp(),
-                    old_state: None,
-                    new_state: None,
-                    session_role: Some(Self::session_role_label(role).to_string()),
-                    reason: format!(
-                        "max-prefix warning for peer {rendered_peer}: family {family} stage {stage} usage {usage} of bound {bound} (threshold {percent}%)"
-                    ),
-                });
+                for _ in 0..crossings {
+                    self.publish_lifecycle_event(rustbgpd_api::peer_types::SessionLifecycleEvent {
+                        event_type: rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
+                        peer: peer_addr,
+                        peer_label: Some(rendered_peer.clone()),
+                        timestamp_unix_ms: Self::session_event_timestamp(),
+                        old_state: None,
+                        new_state: None,
+                        session_role: Some(Self::session_role_label(role).to_string()),
+                        reason: format!(
+                            "max-prefix warning for peer {rendered_peer}: family {family} stage {stage} usage {usage} of bound {bound} (threshold {percent}%)"
+                        ),
+                    });
+                }
             }
             SessionNotification::MaxPrefixExceeded {
                 session_id,

@@ -191,9 +191,26 @@ impl PeerSession {
     }
 
     /// Enqueue one plain ROUTE-REFRESH for a negotiated family.
+    /// A request while one for the family is still queued is not queued
+    /// again: the queued request reaches the peer after whatever prompted
+    /// both, so at most one per family is queued.
     pub(super) fn send_route_refresh(&mut self, afi: Afi, safi: Safi) -> Result<(), String> {
+        let family = (afi as u16, safi as u8);
+        let pending = self.writer_refresh_pending.clone();
+        if pending
+            .as_ref()
+            .is_some_and(|pending| !pending.claim(family))
+        {
+            debug!(peer = %self.peer_label, ?afi, ?safi, "ROUTE-REFRESH already queued");
+            return Ok(());
+        }
         let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
-        self.enqueue_priority(&msg).map_err(|e| e.to_string())?;
+        if let Err(error) = self.enqueue_priority(&msg) {
+            if let Some(pending) = pending {
+                pending.release(family);
+            }
+            return Err(error.to_string());
+        }
         info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH");
         self.metrics
             .record_message_sent(&self.peer_label, "route_refresh");

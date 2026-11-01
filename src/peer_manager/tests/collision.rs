@@ -1202,10 +1202,23 @@ async fn max_prefix_warning_event_names_the_metric_family_and_stage() {
         usage: 80,
         bound: 100,
         percent: 80,
+        crossings: 2,
     })
     .await;
 
-    let event = live_events.try_recv().expect("the warning is published");
+    // A warning coalesced from two crossings publishes one event for each.
+    let first = live_events.try_recv().expect("the warning is published");
+    let event = live_events
+        .try_recv()
+        .expect("the second crossing is published");
+    assert!(live_events.try_recv().is_err(), "one event per crossing");
+    let rustbgpd_api::peer_types::SessionEvent::Lifecycle(first) = first.as_ref() else {
+        panic!("expected a lifecycle event, got {first:?}");
+    };
+    assert_eq!(
+        first.event_type,
+        SessionLifecycleEventType::MaxPrefixWarning
+    );
     let rustbgpd_api::peer_types::SessionEvent::Lifecycle(event) = event.as_ref() else {
         panic!("expected a lifecycle event, got {event:?}");
     };
@@ -1246,6 +1259,7 @@ async fn stale_max_prefix_warnings_are_not_published() {
             usage: 80,
             bound: 100,
             percent: 80,
+            crossings: 1,
         })
         .await;
     }
@@ -2864,6 +2878,7 @@ async fn nested_drain_defers_same_address_peer_on_another_interface() {
         usage: 1,
         bound: 2,
         percent: 50,
+        crossings: 1,
     })
     .await;
     assert!(mgr.deferred_session_notifications.is_empty());

@@ -343,19 +343,30 @@ pub enum SessionNotification {
         bound: u32,
         /// Threshold percentage that was crossed.
         percent: u8,
+        /// Crossings this notification stands for, at least one. A crossing
+        /// while an earlier one for the same scope is still queued adds to
+        /// that one instead of queueing another; the other fields describe
+        /// the first.
+        crossings: u64,
     },
 }
 
 /// Release accounting with the queued value, including when Tokio destroys it
 /// after receiver cleanup races with an already-admitted synchronous send.
+/// A coalesced warning also carries its scope's pending-crossing count.
 #[derive(Debug)]
-struct SessionNotificationReservation(BgpMetrics);
+struct SessionNotificationReservation(BgpMetrics, Option<MaxPrefixWarningCrossings>);
 
 impl Drop for SessionNotificationReservation {
     fn drop(&mut self) {
         self.0.release_session_notification();
     }
 }
+
+/// One session scope's max-prefix warning crossings not yet received by the
+/// peer manager. Nonzero while that scope's warning is queued.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MaxPrefixWarningCrossings(Arc<AtomicU64>);
 
 /// Lossless, nonblocking sender for peer-session coordination notifications.
 #[derive(Debug, Clone)]
@@ -374,14 +385,53 @@ impl SessionNotificationSender {
         &self,
         notification: SessionNotification,
     ) -> Result<(), mpsc::error::SendError<SessionNotification>> {
+        self.send_with(notification, None)
+    }
+
+    /// Send a [`SessionNotification::MaxPrefixWarning`] unless one for the
+    /// same scope is still queued, in which case the crossing is added to
+    /// that one. At most one warning per scope is queued.
+    pub(crate) fn send_max_prefix_warning(
+        &self,
+        notification: SessionNotification,
+        crossings: &MaxPrefixWarningCrossings,
+    ) -> Result<(), mpsc::error::SendError<SessionNotification>> {
+        if crossings.0.fetch_add(1, Ordering::AcqRel) > 0 {
+            return Ok(());
+        }
+        let result = self.send_with(notification, Some(crossings.clone()));
+        if result.is_err() {
+            crossings.0.store(0, Ordering::Release);
+        }
+        result
+    }
+
+    fn send_with(
+        &self,
+        notification: SessionNotification,
+        crossings: Option<MaxPrefixWarningCrossings>,
+    ) -> Result<(), mpsc::error::SendError<SessionNotification>> {
         self.metrics.reserve_session_notification();
         self.inner
             .send((
                 notification,
-                SessionNotificationReservation(self.metrics.clone()),
+                SessionNotificationReservation(self.metrics.clone(), crossings),
             ))
             .map_err(|error| mpsc::error::SendError(error.0.0))
     }
+}
+
+/// A dequeued notification, with a coalesced warning's crossing count taken
+/// so the scope's next crossing queues a new one.
+fn dequeued(
+    (mut notification, reservation): (SessionNotification, SessionNotificationReservation),
+) -> SessionNotification {
+    if let (Some(pending), SessionNotification::MaxPrefixWarning { crossings, .. }) =
+        (&reservation.1, &mut notification)
+    {
+        *crossings = pending.0.swap(0, Ordering::AcqRel).max(1);
+    }
+    notification
 }
 
 /// Receiver half of the lossless session-notification channel.
@@ -393,10 +443,7 @@ pub struct SessionNotificationReceiver {
 impl SessionNotificationReceiver {
     /// Receive one notification, releasing its reservation only after dequeue.
     pub async fn recv(&mut self) -> Option<SessionNotification> {
-        self.inner
-            .recv()
-            .await
-            .map(|(notification, _reservation)| notification)
+        self.inner.recv().await.map(dequeued)
     }
 
     /// Try to receive one notification without waiting.
@@ -406,9 +453,7 @@ impl SessionNotificationReceiver {
     /// Returns `Empty` when no notification is queued and `Disconnected` when
     /// every sender has closed and the queue is drained.
     pub fn try_recv(&mut self) -> Result<SessionNotification, mpsc::error::TryRecvError> {
-        self.inner
-            .try_recv()
-            .map(|(notification, _reservation)| notification)
+        self.inner.try_recv().map(dequeued)
     }
 }
 
@@ -438,10 +483,13 @@ pub fn session_notification_channel(
 ) -> (SessionNotificationSender, SessionNotificationReceiver) {
     // Unbounded: a bounded `send().await` from a session would deadlock with
     // the peer manager's synchronous `QueryState` during collision
-    // resolution. Each session sends one notification on entering
-    // OpenConfirm, one on falling back to Idle, one max-prefix breach (which
-    // latches it down) and one per warning-threshold crossing. The
-    // reservation accounting exports the queued depth's high-water mark.
+    // resolution. Bounded by state instead: per session, one notification
+    // on entering OpenConfirm and one on falling back to Idle (each FSM
+    // cycle is paced by the connect-retry and reconnect backoff), one
+    // max-prefix breach (which latches the session down), and at most one
+    // queued warning per max-prefix scope, which counts any crossings made
+    // while it waits (`send_max_prefix_warning`). The reservation accounting
+    // exports the queued depth's high-water mark.
     let (sender, receiver) = mpsc::unbounded_channel();
     (
         SessionNotificationSender {

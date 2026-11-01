@@ -421,3 +421,53 @@ async fn valid_err_markers_still_reach_rib() {
     ));
     assert_eq!(session.fsm.state(), SessionState::Established);
 }
+
+/// While the writer is stalled behind a peer that reads nothing, repeated
+/// requests for a family queue one ROUTE-REFRESH, so the peer receives
+/// exactly one per family once it reads.
+#[tokio::test]
+async fn queued_route_refresh_requests_coalesce_per_family_while_the_writer_stalls() {
+    use tokio::io::AsyncReadExt;
+
+    let (mut session, _rib_rx, _bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    // A KEEPALIVE backlog larger than both socket buffers, queued ahead of
+    // the requests: the writer blocks on it until the peer reads.
+    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
+    let backlog = Bytes::from(keepalive.repeat(1 << 20));
+    session
+        .writer_priority_tx
+        .as_ref()
+        .unwrap()
+        .send(backlog)
+        .unwrap();
+    for _ in 0..1000 {
+        session
+            .send_route_refresh(Afi::Ipv4, Safi::Unicast)
+            .unwrap();
+        session
+            .send_route_refresh(Afi::Ipv6, Safi::Unicast)
+            .unwrap();
+    }
+    // Close the queues; the writer sends what is queued, then the FIN.
+    session.writer_priority_tx = None;
+    session.writer_bulk_tx = None;
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), server.read_to_end(&mut wire))
+        .await
+        .expect("the writer drains once the peer reads")
+        .unwrap();
+    let mut refreshes = Vec::new();
+    let mut rest = wire.as_slice();
+    while rest.len() >= 19 {
+        let len = usize::from(u16::from_be_bytes([rest[16], rest[17]]));
+        if rest[18] == 5 {
+            refreshes.push((u16::from_be_bytes([rest[19], rest[20]]), rest[22]));
+        }
+        rest = &rest[len..];
+    }
+    assert!(rest.is_empty(), "whole frames only");
+    assert_eq!(refreshes, vec![(1, 1), (2, 1)]);
+}
