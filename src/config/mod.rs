@@ -5089,7 +5089,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let mut dynamic_reload_new = new.clone();
     pin_dynamic_tcp_ao_startup_only(&mut dynamic_reload_new, old);
     let dynamic_neighbors_reload_applied_changed =
-        old.dynamic_neighbors != dynamic_reload_new.dynamic_neighbors;
+        dynamic_ranges_changed_apart_from_bfd(old, &dynamic_reload_new);
     let tcp_mss_changed = tcp_mss_restart_required_changed(old, new);
     let bfd_changed = !bfd_profiles_equal(&old.bfd_profiles, &new.bfd_profiles);
     let bfd_members_changed = bfd_member_attachments_changed(old, new);
@@ -5346,7 +5346,42 @@ pub(crate) fn bfd_member_attachments_changed(old: &Config, new: &Config) -> bool
             })
             .collect()
     };
-    groups(old) != groups(new) || members(old) != members(new)
+    // A range's `bfd` registers and removes its running sessions' BFD
+    // sessions and may open a socket family: it settles with the generation,
+    // like any member change.
+    let ranges = |config: &Config| -> BTreeMap<_, _> {
+        config
+            .dynamic_neighbors
+            .iter()
+            .filter_map(|range| {
+                let bfd = range.bfd.clone()?;
+                Some((
+                    (
+                        effective_prefix_str(&range.prefix),
+                        range.peer_group.clone(),
+                    ),
+                    bfd,
+                ))
+            })
+            .collect()
+    };
+    groups(old) != groups(new) || members(old) != members(new) || ranges(old) != ranges(new)
+}
+
+/// Whether the `[[dynamic_neighbors]]` records changed apart from their
+/// `bfd`, which [`bfd_member_attachments_changed`] classifies.
+pub(crate) fn dynamic_ranges_changed_apart_from_bfd(old: &Config, new: &Config) -> bool {
+    let without_bfd = |config: &Config| {
+        config
+            .dynamic_neighbors
+            .iter()
+            .map(|range| DynamicNeighborConfig {
+                bfd: None,
+                ..range.clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    without_bfd(old) != without_bfd(new)
 }
 
 type StaticNeighborKey = (String, Option<String>);

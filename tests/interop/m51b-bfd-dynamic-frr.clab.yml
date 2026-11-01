@@ -8,12 +8,12 @@
 #
 #   * Both accepted sessions reach Established and BFD Up, asserted from both
 #     sides (rustbgpd GetBfdSessions + bfd_session_up, FRR `show bfd peers`).
-#   * Failure: frr1's link silently drops everything frr1 sends (netem loss
-#     100%; carrier stays up). rustbgpd's BFD detects it within the detection time and tears
+#   * Failure: frr1 is frozen (`docker pause`), so its bfdd stops sending
+#     while the link stays up. rustbgpd's BFD detects it within the detection time and tears
 #     the frr1 session down with Cease / BFD Down, far under the hold timer;
 #     the session's BFD session and series are removed with it. frr2's BGP and
 #     BFD sessions stay up throughout.
-#   * Recovery: removing the loss lets frr1 dial in again; the new
+#   * Recovery: unpausing frr1 lets it dial in again; the new
 #     session registers a new BFD session, which comes Up.
 #
 # Usage:

@@ -513,6 +513,9 @@ impl PeerManager {
                 let bfd = match self.dynamic_bfd_admission(&accepted_dynamic_range, peer_ip) {
                     Ok(bfd) => bfd,
                     Err(error) => {
+                        self.metrics.record_inbound_connection_drop(
+                            InboundConnectionDropReason::BfdUnavailable,
+                        );
                         warn!(
                             peer = %peer_ip,
                             %error,

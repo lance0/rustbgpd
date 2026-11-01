@@ -890,3 +890,51 @@ fn dynamic_neighbor_limit_diff_marks_reload_applied() {
     );
     assert!(text.contains("[global] dynamic_neighbor_limit updated"));
 }
+
+/// A range's `bfd` is a BFD member change: on its own it takes the
+/// generation route, whose preflight and fence settle it. With any other
+/// range change it is rejected, since range edits cannot share a generation.
+#[test]
+fn a_range_bfd_edit_reloads_through_the_generation() {
+    let route = |old: &str, new: &str| {
+        let (old, new) = (parse(old).unwrap(), parse(new).unwrap());
+        classify_sighup_reload(SighupReloadFamilies::from_diff(&diff_config(&old, &new)))
+    };
+    let with_bfd = format!("{RANGE_BFD_BASE}bfd = {{ profile = \"fast\" }}\n");
+    let disabled = format!("{RANGE_BFD_BASE}bfd = {{ profile = \"fast\", enabled = false }}\n");
+    // Mutation-red: ignoring ranges in the member comparison routes these
+    // sequentially, outside any BFD settlement.
+    for (old, new) in [
+        (RANGE_BFD_BASE, with_bfd.as_str()),
+        (with_bfd.as_str(), RANGE_BFD_BASE),
+        (with_bfd.as_str(), disabled.as_str()),
+    ] {
+        assert_eq!(route(old, new), SighupReloadRoute::Generation, "{new}");
+    }
+    let described = with_bfd.replace(
+        "peer_group = \"ix-members\"\n",
+        "peer_group = \"ix-members\"\ndescription = \"leaves\"\n",
+    );
+    let new_range = format!(
+        "{RANGE_BFD_BASE}\n[[dynamic_neighbors]]\nprefix = \"10.1.0.0/24\"\n\
+         peer_group = \"ix-members\"\nbfd = {{ profile = \"fast\" }}\n"
+    );
+    for new in [described.as_str(), new_range.as_str()] {
+        assert!(
+            matches!(
+                route(RANGE_BFD_BASE, new),
+                SighupReloadRoute::Rejected { .. }
+            ),
+            "{new}"
+        );
+    }
+    // A range edit that leaves `bfd` alone stays on the sequential route.
+    let other_asn = with_bfd.replace(
+        "peer_group = \"ix-members\"\n",
+        "peer_group = \"ix-members\"\nremote_asn = 65010\n",
+    );
+    assert!(matches!(
+        route(&with_bfd, &other_asn),
+        SighupReloadRoute::Sequential { .. }
+    ));
+}

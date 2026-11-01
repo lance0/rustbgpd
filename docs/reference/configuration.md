@@ -2237,7 +2237,9 @@ bfd = { profile = "fast" }
   registers again), and when a rolled-back config transaction reaps it. A
   connection refused at `dynamic_neighbor_limit` registers nothing. The
   registration never waits on the BFD actor; a connection that arrives while
-  a BFD membership change is in progress is dropped, and the peer retries.
+  a BFD membership change is in progress is dropped, and the peer retries;
+  it is counted in
+  `bgp_inbound_connections_dropped_total{reason="bfd_unavailable"}`.
 - **BFD Down.** A detection timeout or a remote-signaled `Down` tears the
   session down with Cease/10 (RFC 9384) before the hold timer, exactly as for a
   non-strict static neighbor, including the purge of routes retained for
@@ -2245,14 +2247,21 @@ bfd = { profile = "fast" }
   hold that keeps a static neighbor down until BFD is Up again does not carry
   over: the peer's next connection is accepted as a new session and registers
   a new BFD session.
-- **Reload.** On SIGHUP, a `bfd` edit applies to the running sessions: adding
-  it registers their BFD sessions, changing the profile replaces them, and
-  removing it, or removing the range, removes them without resetting BGP. The
-  first range to run BFD in an address family opens that family's BFD socket
-  during startup or the reload, never when a connection is accepted.
-  Runtime range CRUD cannot add BFD to a range or delete a range that runs
-  it, and config transactions cannot change a range's `bfd`; edit the file
-  and use SIGHUP.
+- **Reload.** A range's `bfd` is a BFD member attachment: on SIGHUP it is
+  applied by the reload generation, like a static neighbor's `bfd`, and
+  reaches the running sessions without resetting BGP. Adding it registers
+  their BFD sessions and changing the profile replaces them; removing it
+  removes them. The first range to run BFD in an address family opens that
+  family's BFD socket in the generation's preflight, never when a connection
+  is accepted. A preflight failure rejects the reload with no effect, and an
+  unacknowledged BFD change fences it, as for any BFD member change.
+  Because `[[dynamic_neighbors]]` record edits cannot share a reload with a
+  generation, a candidate that changes a range's `bfd` together with any
+  other range change, including adding or removing a range that runs BFD,
+  is rejected: reload the two parts separately (for example, remove the
+  range's `bfd`, then the range). Runtime range CRUD cannot add BFD to a
+  range or delete a range that runs it, and config transactions cannot
+  change a range's `bfd`; edit the file and use SIGHUP.
 - **Status.** Each session appears in `GetBfdSessions` and `rbgp bfd` under
   its source address, and in `bfd_session_up` / `bfd_session_flaps_total`
   with the bare address as the `peer` label. The series are removed with the
@@ -3237,7 +3246,9 @@ Drops are counted in
 drop sites and are recorded even while the limiter is disabled, and
 `notification_backoff` counts the NOTIFICATION reconnect-backoff hold, and
 `rib_cleanup_pending` counts connections refused while a deleted neighbor's
-RIB cleanup waits for RIB mailbox room. See
+RIB cleanup waits for RIB mailbox room, and `bfd_unavailable` counts
+dynamic-range connections refused because their BFD session could not be
+registered without waiting. See
 `docs/reference/operations.md` for the metric reference.
 
 ---

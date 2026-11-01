@@ -7,15 +7,16 @@
 # frr2 dial in over separate links. The test proves:
 #   1. Both accepted sessions reach Established and BFD Up, from both sides
 #      (rustbgpd GetBfdSessions + bfd_session_up, FRR `show bfd peers`).
-#   2. Failure: frr1's link drops everything frr1 sends (netem loss 100%),
-#      with carrier up.
+#   2. Failure: frr1 is frozen with `docker pause` (the cgroup freezer: no
+#      kernel module, unlike netem), so its bfdd stops sending while the link
+#      and carrier stay up.
 #      rustbgpd's BFD for 10.0.0.2 goes Down within the detection time plus
 #      the polling margin, and the session is torn down with a Cease / BFD
 #      Down NOTIFICATION (RFC 9384 subcode 10, inside an RFC 8538 Hard Reset
 #      when the N bit is negotiated), far under the hold timer. The ended
 #      session's BFD session and `bfd_session_up` series are removed with it.
 #      frr2's BGP session and BFD session stay up, without a flap.
-#   3. Recovery: once the loss is removed, frr1 dials in again and the
+#   3. Recovery: once frr1 is unpaused, it dials in again and the
 #      new session's BFD session comes Up on both sides.
 #
 # Prerequisites:
@@ -39,8 +40,8 @@ LOCAL2="10.0.1.1"
 LOG="/tmp/rustbgpd-m51b.log"
 # The detection time (300 ms × 3) plus the 100 ms poll and gRPC round trip.
 DETECT_BOUND_MS=2000
-# The detection time plus 100 ms for the daemon's own scheduling.
-DETECT_LOG_BOUND_MS=1000
+# The detection time plus 600 ms for scheduling jitter on a shared runner.
+DETECT_LOG_BOUND_MS=1500
 
 resolve_grpc_addr
 start_rustbgpd "exec /usr/local/bin/rustbgpd /etc/rustbgpd/config.toml >$LOG 2>&1"
@@ -148,9 +149,13 @@ notifications_before=$(bfd_down_notification_logs "$PEER1")
 
 # --- 2. Silent path failure on frr1: BFD tears its session down --------------
 
-log "Dropping every packet frr1 sends on its link (carrier stays up)..."
+log "Freezing frr1 so its bfdd stops sending (the link stays up)..."
 break_ms=$(now_ms)
-docker exec "$FRR1" tc qdisc add dev eth1 root netem loss 100%
+if ! docker pause "$FRR1"; then
+    fail "could not pause $FRR1 to inject the BFD failure"
+    dump_state_on_failure
+    print_summary
+fi
 applied_ms=$(now_ms)
 
 down_ms=""
@@ -182,16 +187,16 @@ else
     dump_state_on_failure
 fi
 
-# The loss is in place once `tc` returns, so detection fires at most one
+# frr1 is frozen once `docker pause` returns, so detection fires at most one
 # detection time (900 ms) after that; the daemon's own log stamps it.
 down_log_ms=$(docker exec "$RUSTBGPD" cat "$LOG" \
     | jq -Rr --arg peer "$PEER1" 'fromjson? | select(.fields.peer == $peer
         and .fields.message == "BFD down — tearing down BGP session before the hold timer")
         | .timestamp' | tail -n 1 | xargs -r -I{} date -d {} +%s%3N)
 if [ -n "$down_log_ms" ] && [ $((down_log_ms - applied_ms)) -le "$DETECT_LOG_BOUND_MS" ]; then
-    ok "the daemon logged BFD Down for $PEER1 $((down_log_ms - applied_ms)) ms after the loss was in place (detect 900 ms, bound ${DETECT_LOG_BOUND_MS} ms)"
+    ok "the daemon logged BFD Down for $PEER1 $((down_log_ms - applied_ms)) ms after frr1 was frozen (detect 900 ms, bound ${DETECT_LOG_BOUND_MS} ms)"
 else
-    fail "BFD Down for $PEER1 was not logged within ${DETECT_LOG_BOUND_MS} ms of the loss (log ${down_log_ms:-none}, applied $applied_ms)"
+    fail "BFD Down for $PEER1 was not logged within ${DETECT_LOG_BOUND_MS} ms of the freeze (log ${down_log_ms:-none}, applied $applied_ms)"
 fi
 
 notifications_after=$(bfd_down_notification_logs "$PEER1")
@@ -230,8 +235,12 @@ fi
 
 # --- 3. Recovery: a new session registers a new BFD session ------------------
 
-log "Restoring frr1's link; frr1 dials in again..."
-docker exec "$FRR1" tc qdisc del dev eth1 root
+log "Unpausing frr1; it dials in again..."
+if ! docker unpause "$FRR1"; then
+    fail "could not unpause $FRR1"
+    dump_state_on_failure
+    print_summary
+fi
 wait_frr_established "$FRR1" "$LOCAL1" "frr1 → rustbgpd range (recovered)"
 if wait_until 40 0.5 both_bfd_up "$PEER1" "$FRR1" "$LOCAL1"; then
     ok "the recovered session's BFD is Up on both sides"

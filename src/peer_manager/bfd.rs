@@ -52,6 +52,10 @@ pub(super) struct BfdCoupling {
     pub(super) registering: bool,
     #[cfg(test)]
     pub(super) desired_publications: usize,
+    /// Fail the next reload's socket preflight with this error, as a family
+    /// that cannot open.
+    #[cfg(test)]
+    pub(super) socket_preflight_error: Option<&'static str>,
     /// Inner compensation must read accepted strict settings without losing
     /// the candidate needed to fence an uncertain rollback.
     rollback_lookup: bool,
@@ -128,6 +132,8 @@ impl PeerManager {
             registering: false,
             #[cfg(test)]
             desired_publications: 0,
+            #[cfg(test)]
+            socket_preflight_error: None,
             rollback_lookup: false,
             retries: BTreeMap::new(),
             retry_at: None,
@@ -200,8 +206,16 @@ impl PeerManager {
                 .chain(probes.clone())
                 .collect(),
         };
-        let prepared = prepare_reload(&sockets, &coupling.opened)
-            .map_err(|error| format!("BFD socket preflight: {error}"))?;
+        #[cfg(test)]
+        let injected = coupling.socket_preflight_error.take();
+        #[cfg(not(test))]
+        let injected: Option<&str> = None;
+        let prepared = if let Some(error) = injected {
+            Err(std::io::Error::other(error))
+        } else {
+            prepare_reload(&sockets, &coupling.opened)
+        }
+        .map_err(|error| format!("BFD socket preflight: {error}"))?;
         coupling.prior_held.clone_from(&coupling.held_down);
         coupling
             .prior_initially_withheld
@@ -345,92 +359,6 @@ impl PeerManager {
             pending.remove(&peer);
         }
         self.republish_bfd_desired();
-    }
-
-    /// Bring every live dynamic session's BFD session in line with the
-    /// accepted ranges after a reload swapped them in: register, replace or
-    /// remove each. A change that needs a new socket family goes through the
-    /// acknowledged replacement path; a reload owns this step, so it may wait.
-    pub(super) async fn resync_dynamic_bfd(&mut self) {
-        let Some(coupling) = self.bfd_coupling.as_ref() else {
-            return;
-        };
-        if coupling.reloading {
-            warn!("dynamic-range BFD resync skipped: a BFD membership change is in progress");
-            return;
-        }
-        let built = self.rebuild_dynamic_bfd_sessions(&self.current_config);
-        let probes = crate::bfd_runtime::dynamic_range_socket_probes(&self.current_config)
-            .map_err(|error| error.to_string());
-        let (desired, probes) = match (built, probes) {
-            (Ok(desired), Ok(probes)) => (desired, probes),
-            (Err(error), _) | (_, Err(error)) => {
-                warn!(%error, "dynamic-range BFD resync failed; sessions keep their BFD state");
-                return;
-            }
-        };
-        let live: HashSet<IpAddr> = self
-            .peers
-            .iter()
-            .filter(|(_, managed)| managed.is_dynamic)
-            .map(|(key, _)| key.address)
-            .collect();
-        let coupling = self.bfd_coupling.as_mut().expect("checked above");
-        let mut configured = coupling.configured.clone();
-        let mut bound = coupling.bound.clone();
-        let wanted: HashSet<IpAddr> = desired.iter().map(|params| params.peer).collect();
-        for peer in coupling.bound.iter().filter(|peer| live.contains(peer)) {
-            if !wanted.contains(peer) {
-                configured.remove(peer);
-                bound.remove(peer);
-            }
-        }
-        for mut params in desired {
-            if let Some(old) = configured.get(&params.peer) {
-                params.revision = old.revision;
-                if *old == params {
-                    continue;
-                }
-            }
-            params.revision = coupling.next_revision;
-            coupling.next_revision = coupling.next_revision.saturating_add(1);
-            bound.insert(params.peer);
-            configured.insert(params.peer, params);
-        }
-        let sockets = BfdRuntimeConfig {
-            sessions: configured.values().cloned().chain(probes.clone()).collect(),
-        };
-        let prepared = match prepare_reload(&sockets, &coupling.opened) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                warn!(%error, "dynamic-range BFD socket preflight failed; sessions keep their BFD state");
-                return;
-            }
-        };
-        if configured == coupling.configured && prepared.is_none() {
-            return;
-        }
-        let removed: Vec<IpAddr> = coupling
-            .configured
-            .keys()
-            .filter(|peer| !configured.contains_key(peer))
-            .copied()
-            .collect();
-        coupling.prior_held.clone_from(&coupling.held_down);
-        coupling
-            .prior_initially_withheld
-            .clone_from(&coupling.initially_withheld);
-        coupling.pending = Some(configured);
-        coupling.pending_bound = Some(bound);
-        coupling.pending_probes = probes;
-        coupling.reloading = true;
-        coupling.rollback_lookup = false;
-        for peer in removed {
-            self.cancel_bfd_retry(peer, None);
-        }
-        if let Err(error) = self.commit_bfd_reload(prepared).await {
-            warn!(%error, "dynamic-range BFD membership change was not acknowledged");
-        }
     }
 
     /// Restore strict lookup before rollback re-adds peers, but keep publication suspended.

@@ -2472,7 +2472,8 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         datasets: dataset_commit_pending || dataset_events_pending,
         dataset_bindings: policy_diff.datasets_changed
             || current.policy.dataset_bindings != new_config.policy.dataset_bindings,
-        dynamic_ranges: dynamic_neighbors_changed,
+        // A range's `bfd` is a BFD member change, settled by the generation.
+        dynamic_ranges: config::dynamic_ranges_changed_apart_from_bfd(current, &new_config),
         evpn_runtime: evpn_runtime_pending,
         fib_tables: fib_tables_changed,
         honor_knobs: honor_graceful_shutdown_changed || honor_blackhole_changed,
