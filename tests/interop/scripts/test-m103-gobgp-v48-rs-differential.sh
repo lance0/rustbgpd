@@ -37,6 +37,10 @@ V47_GOLDEN="crates/cli/tests/fixtures/ribsnap/gobgp-v47-m92.expected.ndjson"
 V48_RAW="crates/cli/tests/fixtures/ribsnap/gobgp-v48-m103-adjout.json"
 V48_GOLDEN="crates/cli/tests/fixtures/ribsnap/gobgp-v48-m103.expected.ndjson"
 TARGET_ADDR="192.0.2.11"
+# stop_capture's sentinel: one SYN from the target to this closed port on the
+# rustbgpd node, captured alongside the BGP session traffic.
+SENTINEL_ADDR="192.0.2.9"
+SENTINEL_PORT=9
 CONTROL_PREFIX="2001:db8:92ff::/48"
 WORK=""
 BASE_CONFIG_SHA=""
@@ -380,7 +384,7 @@ assert_source_inventory() {
 start_target_capture() {
     docker exec "$TARGET" sh -c 'rm -f /tmp/m103.pcap'
     docker exec -d "$TARGET" sh -c \
-        'tshark -i eth1 -w /tmp/m103.pcap tcp port 179 >/tmp/m103-tshark.log 2>&1'
+        "tshark -i eth1 -w /tmp/m103.pcap 'tcp port 179 or (tcp port $SENTINEL_PORT and host $SENTINEL_ADDR)' >/tmp/m103-tshark.log 2>&1"
     wait_capture_ready "$TARGET" /tmp/m103.pcap /tmp/m103-tshark.log
     docker exec -d "$TARGET" sh -c \
         'bird -d -c /config/bird.conf >/tmp/m103-bird.log 2>&1'
@@ -409,7 +413,29 @@ bird_inventory() {
     fi
 }
 
+capture_holds_sentinel() {
+    [ -n "$(docker exec "$TARGET" tshark -r /tmp/m103.pcap \
+        -Y "ip.src == $TARGET_ADDR && tcp.dstport == $SENTINEL_PORT" 2>/dev/null)" ]
+}
+
 stop_capture() {
+    # A SIGINT within a few hundred milliseconds of the last BGP frame can end
+    # the capture before the kernel hands those frames to dumpcap. The pcap is
+    # then complete and readable but lacks UPDATEs that BIRD has already
+    # processed (LAN-2773). Frames reach the file in capture order, so send one
+    # sentinel SYN after the inventory polls and stop only once the live pcap
+    # holds it: everything BIRD saw before it is then in the file too.
+    docker exec "$TARGET" timeout 2 bash -c \
+        "exec 3<>/dev/tcp/$SENTINEL_ADDR/$SENTINEL_PORT" >/dev/null 2>&1 || true
+    local deadline=$((SECONDS + 10))
+    until capture_holds_sentinel; do
+        if ((SECONDS >= deadline)); then
+            echo "ERROR: capture did not record the stop sentinel within 10s" >&2
+            capture_summary "$TARGET" /tmp/m103.pcap
+            return 1
+        fi
+        sleep 0.2
+    done
     docker exec "$TARGET" sh -c '
         for file in /proc/[0-9]*/comm; do
             [ "$(cat "$file" 2>/dev/null)" = tshark ] || continue
@@ -418,17 +444,19 @@ stop_capture() {
     '
     # grep reads to EOF (no -q): -q's early exit can SIGPIPE the docker
     # exec writer, and under pipefail a still-running tshark would then
-    # read as a false "terminated" verdict (LAN-1039).
+    # read as a false "terminated" verdict (LAN-1039). dumpcap is tshark's
+    # capture child and the pcap's writer, so wait for both.
     for _ in $(seq 1 10); do
         if ! docker exec "$TARGET" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
-            | grep -x tshark >/dev/null; then
+            | grep -xE 'tshark|dumpcap' >/dev/null; then
             docker exec "$TARGET" test -s /tmp/m103.pcap
             docker exec "$TARGET" tshark -r /tmp/m103.pcap -c 1 >/dev/null
+            capture_holds_sentinel
             return
         fi
         sleep 1
     done
-    echo "ERROR: tshark did not flush and exit within 10s" >&2
+    echo "ERROR: tshark/dumpcap did not flush and exit within 10s" >&2
     return 1
 }
 
@@ -654,8 +682,12 @@ run_completeness_negative() {
     stop_capture
     export_pdml 192.0.2.10 "$WORK/negative-incumbent.pdml"
     export_pdml 192.0.2.9 "$WORK/negative-candidate.pdml"
-    check_eor_order "$WORK/negative-candidate.pdml" \
-        >"$WORK/negative-candidate-verifier.txt"
+    if ! check_eor_order "$WORK/negative-candidate.pdml" \
+        >"$WORK/negative-candidate-verifier.txt"; then
+        cat "$WORK/negative-candidate-verifier.txt" >&2
+        capture_summary "$TARGET" /tmp/m103.pcap
+        exit 1
+    fi
     ok "negative: rustbgpd EoR authority remains complete"
     if check_eor_order "$WORK/negative-incumbent.pdml" \
         >"$WORK/negative-incumbent-verifier.txt" 2>&1; then

@@ -2712,6 +2712,27 @@ fn m103_gobgp48_differential_is_exact_and_reuses_m92_inputs() {
     assert!(!negative.contains("run_diff"));
     assert!(!negative.contains("capture_incumbent"));
     assert!(negative.contains("v4_eor=0 v6_eor=0"));
+    // A SIGINT right after the last UPDATE can end the capture before the
+    // kernel hands those frames over; stop only once a later sentinel frame
+    // is in the live pcap, and capture that sentinel at all.
+    assert!(script.contains(
+        "-w /tmp/m103.pcap 'tcp port 179 or (tcp port $SENTINEL_PORT and host $SENTINEL_ADDR)'"
+    ));
+    let stop = script
+        .split_once("stop_capture() {")
+        .unwrap()
+        .1
+        .split_once("export_pdml() {")
+        .unwrap()
+        .0;
+    let sentinel = stop.find("/dev/tcp/$SENTINEL_ADDR/$SENTINEL_PORT").unwrap();
+    let waited = stop.find("until capture_holds_sentinel; do").unwrap();
+    let interrupt = stop.find("kill -INT").unwrap();
+    assert!(
+        sentinel < waited && waited < interrupt,
+        "M103 must see its stop sentinel in the live pcap before interrupting tshark"
+    );
+    assert!(stop.contains("grep -xE 'tshark|dumpcap'"));
     let summary = main.find("print_summary").unwrap();
     let ledger = main.find("write_ledger").unwrap();
     let export = main.find("export_success_artifacts").unwrap();
