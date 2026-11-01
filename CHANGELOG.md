@@ -11,6 +11,537 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Update the protobuf build tooling's `pulldown-cmark` dependency to 0.13.5
+  for RUSTSEC-2026-0414.
+
+### Added
+
+- Export route explain responses and `rbgp rib advertised --explain` expose
+  validation-state codes for the deciding export-policy deny term.
+- FlowSpec injection and read-back accept direct target-IP redirect/copy
+  actions for IPv4 and IPv6, distinct from the existing VRF redirect action.
+  The IPv6 target uses path attribute 25, with lossless 20-octet raw values
+  exposed in `ipv6_extended_communities`; `rbgp flowspec` renders the typed
+  targets and includes nonempty raw values in JSON. Ordinary eBGP export
+  filters non-transitive 20-octet values under the existing community policy,
+  preserving received Partial flags; empty attribute 25 values cannot be
+  encoded. BMP unicast snapshots retain attribute 25 in `unknown_attrs`,
+  preserving value order, duplicates and received Partial flags. See the
+  [API contract](docs/reference/api.md#list-flowspec-routes) and
+  [ADR-0143](docs/adr/0143-flowspec-direct-ip-actions.md). Controllers need
+  an implementing daemon release; an older server may ignore new fields.
+  This does not add bounded lease mutations, qualify router forwarding, or
+  enable a scrubber controller.
+- Guarded FlowSpec mutations
+  ([ADR-0144](docs/adr/0144-guarded-flowspec-mutations.md)):
+  `InjectionService` gains `IssueMutationWindow`, `AddGuardedFlowSpec`,
+  `DeleteGuardedFlowSpec` and `RenewGuardedLease`. A guarded add or renewal
+  commits only inside a server-issued mutation window (at most 120 s; 64
+  live windows per owner). A guarded add never shortens the owner's lease:
+  it caps any extension at its window and keeps a later deadline set under
+  another window. A guarded renewal sets the lease to exactly
+  `now + lease_seconds`, capped at its window, so it can shorten the lease
+  of every rule the owner holds. The owner's lease
+  never outlives the latest-expiring window it used, so a request delayed
+  before its handler, in the RIB queue or behind RIB work cannot revive a
+  diversion after the owner's windows end; a controller reads the deadline
+  back rather than inferring it from one window. Each guarded add carries
+  a nonzero revision, and a guarded delete removes the rule only at its
+  revision, so a late delete cannot remove a newer admission of the same
+  key. Guarded owners live in their own namespace, reported as
+  `guarded:<owner>`, which the leased and unleased methods cannot reach;
+  `DeleteFlowSpec` with `override_owner` stays the break-glass. Read-back
+  adds `admission_revision` to `FlowSpecRouteEntry` and `LeasedKey`, and
+  `ListLeasedKeys` accepts a guarded owner name. All four methods are
+  `operator_only`; successful window issues and guarded renewals audit at
+  INFO. The methods and fields are outside the v1 contract; see
+  [guarded FlowSpec mutations](docs/reference/api.md#guarded-flowspec-mutations).
+- `bgp_rib_actor_turn_duration_seconds{kind}` times every RIB actor turn,
+  the synchronous handling of one inbound RIB message, labelled by message
+  kind (`routes`, `peer_up`, `peer_down`, `query`, and nine more). Every
+  series is exported at zero from startup, and a new message type cannot
+  build until it is assigned a kind. A turn of 200 ms or longer logs one
+  `slow RIB actor turn` WARN with the kind, duration, and the peer, route
+  or member count where one applies, at most once per 10 seconds with a
+  count of suppressed turns. See the
+  [operations reference](docs/reference/operations.md#key-metrics-to-watch).
+
+### Changed
+
+- FlowSpec rules injected through `AddFlowSpec` or `AddLeasedFlowSpec` are
+  now selected and sent to Established peers at once after a planned
+  restart, instead of waiting out RFC 4724 selection deferral. A configured
+  neighbor that has not re-established a session does not hold selection.
+  Received FlowSpec rules and the FlowSpec End-of-RIB still wait for the
+  deferral to release; when it releases, the ordinary best-path order decides
+  between a local and a received rule with the same key. Locally injected
+  IPv4 `/32`, IPv6 `/128` and BLACKHOLE unicast routes also bypass selection
+  deferral; other unicast injections remain deferred while the gate is active.
+  See the
+  [ADR-0141 amendment](docs/adr/0141-injection-owner-lease.md#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).
+  The v1 contract and the End-of-RIB grace window documentation now describe
+  the unicast deferral window and state that `MarkReplayComplete` does not
+  shorten it.
+- After a planned restart, Graceful Restart selection deferral waits only
+  for eligible peers that have re-established a session. A configured
+  neighbor that stays down no longer holds selection for the full restart
+  window. The existing marker-derived upper bound remains.
+- Activating a hold preserves each current session's admitted routes while
+  RTBH updates continue. Missing initial routes replay before End-of-RIB
+  after release, and conditional advertisement settling restarts with its
+  full interval. Controller replay grace remains a separate completion gate.
+- Neighbor diagnostics distinguish dormant startup rosters from released
+  selection-deferral families.
+- Limit the unicast Graceful Restart selection-deferral bypass to locally
+  injected IPv4 `/32`, IPv6 `/128` or BLACKHOLE `65535:666` routes. Untagged
+  defaults, aggregates and other non-host injections wait with received
+  candidates. Removing BLACKHOLE from a non-host injection withdraws its old
+  advertisement without exposing a received fallback before selection resumes.
+  The existing injected FlowSpec exemption is unchanged. See the
+  [injection contract](docs/reference/api.md#unicast-injection-contract).
+- Clean VPN update-group members with identical announcement views share one
+  payload and UPDATE encoding. Source and RT-Constrain exceptions, recovery
+  and differing transport profiles retain per-member delivery. VPN labels,
+  next hops, withdrawal order and terminal markers are preserved.
+- Outbound Add-Path path IDs for unicast now stay with a path while it is
+  sent, instead of following rank order. A new path takes the lowest free
+  ID, and rank decides only which paths fit `send_max`. A rank change no
+  longer re-announces every path below it. Received paths keep their
+  source peer's IDs, lowest first in rank order; when one peer contributes
+  several paths, one leaving can still move a survivor to that peer's
+  lowest ID, and two of its paths swapping rank swap their IDs.
+- The guarded FlowSpec mutation contract
+  ([ADR-0144](docs/adr/0144-guarded-flowspec-mutations.md)) moves into the
+  v1 inventory: `IssueMutationWindow`, `AddGuardedFlowSpec`,
+  `DeleteGuardedFlowSpec` and `RenewGuardedLease`, the `admission_revision`
+  read-back on `FlowSpecRouteEntry` and `LeasedKey`, and the
+  `guarded:<owner>` name in lease listings. They were outside the v1
+  inventory when added. The contract pins window-checked commits, the
+  window cap on the lease deadline, revision-fenced adds and deletes, the
+  guarded owner namespace and the definitive refusal statuses. Like the
+  FlowSpec controller boundary, it pins the API shape only; forwarding,
+  timing after controller loss and GR/LLGR retention stay outside the
+  guarantee. See the
+  [v1 contract](docs/reference/v1-stable-contract.md#guarded-flowspec-mutations).
+- Published crates: `rustbgpd-wire` 0.26.1 → 0.27.0 (breaking),
+  `rustbgpd-fsm` 0.13.1 → 0.14.0 and `rustbgpd-rpki` 0.8.1 → 0.9.0. Wire adds
+  the IPv4 direct target-IP `FlowSpecAction::RedirectToIp` and the lossless
+  twenty-octet `Ipv6ExtendedCommunity` with IPv6 target-IP helpers, and
+  decodes path attribute 25 as `Ipv6ExtendedCommunities` or
+  `Ipv6ExtendedCommunitiesPartial` instead of `Unknown`. FSM and RPKI move to
+  wire 0.27 with no other API change.
+
+### Fixed
+
+- An Add-Path receiver no longer briefly loses an RTBH path when a
+  blackholing path that its session cannot send replaces it in the same
+  pass as one it can. An example is a path whose attributes push a single
+  UPDATE past a 4096-byte receiver's message ceiling. The unsendable path
+  could take over the departing RTBH path's ID. The rejection then withdrew
+  that ID before the sendable path's announcement. Path ID planning now
+  checks such paths with the session's encoder whenever the prefix already
+  has a blackholing row on the wire. A path the encoder rejects never keeps
+  or takes a blackhole path ID, so the sendable path replaces the RTBH path
+  in place. Prefixes with no blackholing row do no extra work.
+- An Add-Path receiver no longer briefly loses an RTBH path when another
+  path for the same prefix is announced above it or deleted. Path IDs
+  followed rank order, so these changes renumbered the RTBH path, and the
+  transport's withdraw-first UPDATE order or a separate re-announcement
+  left a window with no blackhole for that prefix. Each Add-Path update now
+  also sends its blackholing rows before any ordinary row, so a receiver
+  that kept our routes across a session flap never sees an ordinary path
+  replace its RTBH path first. A path that starts carrying BLACKHOLE (a
+  received update or export policy) in the same pass as an RTBH path is
+  deleted takes over that path's ID in place.
+- Service RIB readiness queries while constructing and replacing inbound
+  Enhanced Route Refresh stale inventories. Bound inventory growth by hash
+  shard while preserving family isolation and exact stale-route counts.
+- Allow metrics snapshots up to 64 MiB in `rbgp doctor`, `metrics`, `top`,
+  and `evpn diagnose`, so per-peer metrics above gRPC's default 4 MiB limit
+  remain available. Doctor retains the full metrics file in its diagnostic
+  bundle and explicitly marks the system section partial if collection fails.
+- `ListPathExportDispositions` and `ExplainAdvertisedRoute` now compare a
+  route-server client's advertised route in that client's own form, after
+  its route-server control communities are scrubbed and any prepend
+  applied, for grouped members and per-client-best peers. An unchanged
+  route that carries a control community reads `COMMITTED` instead of
+  `not_yet_committed`, including a route frozen during Graceful Restart
+  selection deferral. During deferral, explain reports an ORF installed
+  during the hold that would filter a frozen injection as
+  `selection_deferred` rather than `orf_filtered`. In each such
+  explanation, `selection_deferred` is the single deciding stop and reason;
+  the gate that would apply after release is named only in its detail. See
+  the [injection contract](docs/reference/api.md#unicast-injection-contract).
+- Reject superseded-session route updates and completion markers while an
+  established peer's outbound registration is still deferred. The current
+  session's received routes remain authoritative before its initial table is
+  sent. An older session's teardown preserves that current state without a
+  reset or replay request. Unregistered legacy emitters retain their existing
+  behavior.
+- Keep an idle `[[dynamic_neighbors]]` peer's RIB identity, and its
+  `dynamic_neighbor_limit` slot, while graceful restart may still hold routes
+  on either side: the GR or LLGR stale routes we retain for it, and, when its
+  last session made it our helper (any GR capability, including a
+  helper-only one listing no family), ours it may retain, for our restart time
+  plus our LLGR stale time when both sides advertised LLGR, plus a hold time.
+  A session that ended with a Hard Reset, or a NOTIFICATION without the
+  RFC 8538 N bit, leaves nothing of ours held. Its automatic removal used to
+  delete it at once, which purged the retained routes and gave a reconnect a
+  new identity: the reconnect no longer resumed the restart, and its
+  ORF-gated initial End-of-RIB went out before the gated table, so the peer
+  dropped the routes it kept. A reconnect from the address now becomes the
+  same neighbor once an OPEN from the same AS validates, without a second
+  `PEER_ADDED`. An ordinary failed reconnect that never reaches Established
+  leaves the retention unchanged. An administrative reset or BFD Down can
+  still purge the routes rustbgpd retains before Established if the reconnect
+  has already resumed the old neighbor identity. A neighbor that never
+  returns is deleted, with `PEER_REMOVED`, once both retentions lapse.
+  Retention checks share one RIB query and never wait in the peer manager.
+  At the limit, a neighbor kept only while it may hold our routes gives its
+  slot to a new address. Removing its range, a rollback
+  without the range, or a static neighbor at the address still deletes it,
+  and a staged transaction's ranges wait for its commit or rollback.
+- A reconnect to a retained dynamic neighbor whose OPEN comes from a
+  different AS is a new speaker: it gets a new RIB identity, and the GR or
+  LLGR routes retained for the last one, and that one's hold of ours, are
+  purged with the old identity. Its counters start afresh; a reconnect from
+  the same AS continues them.
+- An interface-only neighbor's binding retirement no longer forgets that the
+  ended session may still hold our routes stale, so a rebind to the same
+  endpoint keeps its ORF-gated End-of-RIB behind the table.
+- Bound the RIB actor's work for one received EVPN UPDATE on a route
+  reflector. The UPDATE's private EVPN fanout to every receiving peer now
+  pauses at a peer boundary once it has used its 25 ms share and resumes on
+  the next actor turn, before any later UPDATE is applied; while any receiver
+  is in an owned EVPN update group the fanout still runs in one step.
+  Previously, peers that learn the same table resized their advertised EVPN
+  tables in the same step: with 75 clients learning 37,500 EVPN routes one
+  step held the actor for about 300 ms, and with 150 clients learning 75,000
+  routes for about 1.2 s.
+- Answer `/readyz` during private EVPN route distribution. One received EVPN
+  UPDATE is committed to every receiving peer's Adj-RIB-Out in a single RIB
+  actor step, and receivers that learn the same table resize their EVPN route
+  maps in the same step. With 75 route-reflector clients learning 37,500 EVPN
+  routes, one step held the actor for over 300 ms and `/readyz` returned 503
+  (`rib_timeout`) during initial load. The readiness lane is now served at each
+  receiver boundary, as VPN and unicast distribution already do.
+- During Graceful Restart selection deferral, `ExplainAdvertisedRoute` no
+  longer reports `selection_deferred` for an RTBH route admitted before the
+  hold whose injection has since become ordinary. Deferral lets that route's
+  withdrawal go out; while the withdrawal waits on the session writer,
+  explain now describes the pending export instead of claiming the peer
+  keeps the row until release.
+- An identical FlowSpec re-add through `AddFlowSpec`, `AddLeasedFlowSpec` or
+  `AddGuardedFlowSpec` returns `UNCHANGED` without re-inserting or
+  re-selecting the rule, as unicast injection already did. With FlowSpec
+  validation disabled, each such re-add previously rescanned every FlowSpec
+  row, so a controller reconciling N rules did O(N²) work in the RIB actor.
+  Leased re-adds still join and extend the owner's lease, and nothing is sent
+  to peers in either case.
+- During Graceful Restart selection deferral, an ordinary injected unicast
+  route that a peer already held before the hold now reads back as
+  `COMMITTED` in `ListPathExportDispositions`, and `ExplainAdvertisedRoute`
+  explains that frozen row in every export mode instead of `no_best_route`,
+  a candidate-less ORR or per-client result, or a denied RTBH sibling. A
+  route not yet admitted, or changed since, still reports
+  `selection_deferred`; explain reports such a change as deferred rather
+  than as a pending announcement or a denial. When a held receiver's
+  recovery proof is refused, an export-policy change that denies a
+  still-injected RTBH route now withdraws it, as delete, expiry and
+  BLACKHOLE removal already did; an RTBH path that only moves to another
+  Add-Path rank stays advertised. See the
+  [injection contract](docs/reference/api.md#unicast-injection-contract).
+- Bound the table resizes that can land inside one UPDATE while a full table
+  is learned in other families too. The selected unicast, labeled-unicast and
+  EVPN route maps, the received labeled-unicast key index, the per-route
+  advertised next-hop overrides and the global attribute intern set now split
+  into 16 hash shards past 16,384 entries, as the VPN maps already did, so a
+  resize rehashes one shard instead of the whole table. Previously one insert
+  near a million unicast prefixes rehashed the whole selected-route map and
+  held the RIB actor for that time.
+- Withdraw an RTBH or host route deleted during a graceful-restart selection
+  hold from a GR-capable peer whose session ended cleanly before the hold
+  armed, once its new session is caught up. Previously the peer kept the
+  deleted route as stale until End-of-RIB reached it or its own stale-route
+  timer expired, when its new session had not sent its table and End-of-RIB
+  before the hold armed. A deleted route whose prefix still has another
+  candidate follows the [GR-helper RTBH limitation](docs/reference/known-issues.md#open-issues);
+  selection release is not a withdrawal deadline.
+- Withdraw an RTBH or host route that a GR-capable peer kept stale across a
+  clean session end while replay grace holds our End-of-RIB toward it, even
+  after the selection hold released or when the session ended outside any
+  hold. Previously the peer could keep a route deleted while the session was
+  down until End-of-RIB reached it or its own stale-route timer expired. A
+  deleted route whose prefix still has another candidate follows the
+  [GR-helper RTBH limitation](docs/reference/known-issues.md#open-issues).
+  The grace window's end is not a withdrawal deadline: an ORF hold, a queued
+  refresh, or outbound backpressure can extend the wait for End-of-RIB.
+- Withdraw an RTBH or host route deleted during a graceful-restart selection
+  hold from a GR-capable peer whose session ended cleanly, once its new
+  session has resent its table. Previously the peer kept the deleted route as
+  stale until End-of-RIB reached it or its own stale-route timer expired. A
+  deleted route whose prefix still has another candidate can remain until a
+  replacement reaches the same key, End-of-RIB reaches the peer, or its
+  stale-route timer expires. Selection release is not a withdrawal deadline;
+  see the [GR-helper RTBH limitation](docs/reference/known-issues.md#open-issues).
+- Service RIB readiness queries throughout graceful-restart entry, End-of-RIB
+  stale resolution (from both the GR and the LLGR phase) and GR expiry
+  without LLGR. Marking, clearing and purging retained routes, re-selection,
+  distribution and attribute reclamation now run under the same readiness
+  owner as LLGR promotion and expiry, instead of holding readiness until the
+  whole table had been walked.
+- Keep `GetHealth` (and so `rbgp doctor`'s `daemon.healthy` check) inside its
+  200 ms deadline on a CPU-starved daemon right after a reload. `GetHealth`
+  counted Established peers by sending a state query to every session and
+  joining the replies. With 1,000 route-server clients on four threads, the
+  task joining those replies could still be waiting when the deadline passed,
+  up to two seconds after a reload settled, and the RPC failed with
+  `peer manager probe timed out (200ms deadline)`. Each session now publishes
+  whether it is Established on every FSM transition and clears it when it
+  ends, and the peer manager counts from that published state without querying
+  any session. The deadline is unchanged.
+- Use one 200 ms deadline for the core probes in `GetHealth` (and so
+  `rbgp doctor`'s `daemon.healthy` check) and `/readyz` while sessions deliver
+  a reload's new exports. Previously `GetHealth` queried each session through
+  the peer manager, delaying readiness pings behind that work, and the RIB
+  probe waited for the peer-manager probe before starting. The two core
+  probes now run concurrently under the shared deadline.
+- When Graceful Restart selection deferral starts, an Add-Path receiver
+  that already holds an RTBH path and an ordinary path for one prefix keeps
+  both at their path IDs. Previously the RTBH path was renumbered in one
+  update whose withdrawal went out before its re-announcement, briefly
+  leaving the prefix without a blackhole, and the ordinary path was
+  overwritten before selection resumed. During the hold, Add-Path path IDs
+  stay put; a new RTBH path reuses a departing path's ID or, at the send
+  limit, takes over a held ordinary path's ID.
+- Prevent debug daemon worker stack exhaustion during inbound session
+  establishment by keeping owned policy-change state out of the command
+  dispatcher.
+- Reloading `local_ipv6_nexthop` avoids a second table encode when only an
+  IPv6-unicast unlock needs exporting. Changes affecting already-sendable
+  routes, including scoped IPv4 Extended Next Hop, still refresh them.
+- Bound the actor stall when one receiver's advertised EVPN or labeled-unicast
+  table grows past about 115k routes. The table now splits into shards instead
+  of rehashing every route inside one insert. The worst single insert at 1M
+  routes falls from about 190 ms to about 26 ms. Smaller tables keep their
+  previous layout and memory use.
+- Service RIB readiness queries throughout LLGR stale-time expiry: the purge,
+  selection, distribution, ORR rebuild and attribute reclamation now run under
+  the same readiness owner as LLGR promotion, instead of holding readiness
+  until the whole sweep finished. This covers Add-Path path-list scans while
+  removing many paths of one prefix, the selection sets of FlowSpec, EVPN,
+  BGP-LS, VPN, labeled-unicast and RT-Constrain recomputes, and RT-Constrain
+  membership matching when a re-established VPN group member's membership is
+  rebuilt.
+- Service RIB readiness queries throughout LLGR promotion, non-LLGR family
+  cleanup, selection and attribute reclamation. Bound local stale-tag growth
+  by hash shard and reserve affected-route inventories before filling them,
+  while preserving route counts, local community ownership and family timers.
+  When ORR is configured, the BGP-LS topology rebuild, SPF and replaced-state
+  cleanup also service readiness queries.
+- Skip shared wire-payload construction for a memberless export-policy
+  destination during churn. Its staged routes and reconciliation journal
+  remain current for the later transition, without changing actor scheduling
+  or reply deadlines.
+- An Address-Prefix ORF update with When-to-refresh `DEFER` no longer lifts
+  the RFC 5291 §6 initial-advertisement gate. Only a plain ROUTE-REFRESH or an
+  `IMMEDIATE` ORF opens a gated family, so selection release and outbound
+  churn no longer send a table the peer has not asked for.
+- A family withheld from an ORF peer now gets its empty End-of-RIB at
+  selection release instead of waiting for that family's ROUTE-REFRESH. When
+  a withheld ORF-gated family becomes sendable on a fresh non-GR peer, the
+  empty End-of-RIB queued at session start is the only initial marker, however
+  full the outbound queue was; the table follows the peer's refresh.
+- Hold an Address Prefix ORF family's initial End-of-RIB behind its gated
+  table toward a peer whose previous session advertised Graceful Restart, so
+  it does not delete the routes it kept stale from that session before the
+  peer's ROUTE-REFRESH brings them back. Previously the End-of-RIB went out at
+  once and the peer dropped every stale route of the family, RTBH routes
+  included, until the filtered table arrived. Peers that are neither GR
+  restarters nor possible stale-route holders keep immediate End-of-RIB
+  unless another hold applies.
+- Keep each pending initial End-of-RIB behind its own ORF-gated table during
+  selection release and dirty recovery. A refresh or recovery for another
+  address family no longer completes it early.
+- Keep an owed initial End-of-RIB behind its family's ORF gate when a
+  negotiated family becomes sendable during selection or replay grace.
+  Its own ROUTE-REFRESH sends the table before completing that family.
+- Service RIB readiness queries while installing outbound prefix limits on
+  existing update-group members. The admitted-prefix inventory reserves its
+  family capacity before filling and releases old entries between checkpoints,
+  preserving the existing advertised routes and prefix accounting.
+- Export-policy reloads refresh each member's retained policy-rejection
+  history from the smaller of the reload scope and that history, instead of
+  probing every table prefix once per member. A dirty resync now revisits
+  prefixes with retained rejection history, so a denied route withdrawn while
+  its target's resync waited on a full channel, or while its send failed,
+  emits a new `PolicyFiltered` event when it is denied again. A prefix with
+  one retained denial no longer allocates a set.
+- Clean incremental distribution again runs synchronously and opens a RIB
+  readiness owner only for members with replay or policy-rejection work.
+  Readiness queries served during clean ingest are recorded under the
+  `actor_loop` seam of `bgp_rib_readiness_query_wait_seconds` again, rather
+  than `policy_transition_fence`.
+- Bound temporary export-policy rejection inventories by candidate identities
+  during initial export, refresh, incremental distribution and policy replay.
+  Dedicated RIB readiness queries can run between candidate transfers, set
+  rebuilds and cleanup while route counts and rejected-path events stay exact.
+- Avoid rescanning unrelated export-policy rejections when individual routes
+  change, while preserving rejection events and their source/path identities.
+- Keep advertised counts and listings accurate across late graceful-restart
+  activation for private peers, and preserve old withdrawal ownership when
+  recovery proof allocation is refused.
+- Release the outbound updates still queued for a session when it goes down
+  through the same paced release as its active update, one slice per step on
+  a separate task. Before, the teardown dropped the whole queue in one
+  session turn, so a slow peer left holding the last reference to a queued
+  full-table inventory freed every route at once. The close drain keeps its
+  250 ms budget, and the queued updates are still discarded unsent. The
+  paced release now also covers FlowSpec, BGP-LS and RT-Constrain payloads
+  and OTC-blocked routes, which were previously freed in one step after the
+  last slice.
+- When a held receiver's Graceful Restart recovery proof is refused,
+  deleting the higher-ranked of two Add-Path RTBH paths on one prefix now
+  withdraws the deleted path immediately instead of leaving it advertised
+  until selection resumes. The surviving RTBH path stays on its existing
+  path ID until release. A single-best RTBH replacement still keeps the
+  previous route advertised, so the prefix is never left without a
+  blackhole.
+- During a GR selection hold, a private receiver whose recovery proof was
+  refused in the same retry that advertised an RTBH route now counts that
+  route. Its advertised count, the prefix limiter and the public advertised
+  counts no longer report one row short for the rest of the hold, and an
+  RTBH route deleted through the API is withdrawn inside the hold instead of
+  dropping traffic until the hold released.
+- Build the release tarballs and the `.deb` and `.rpm` packages from the
+  shipped packages only (`rustbgpd`, `rbgp`, `rs-config-render`,
+  `birdwatcher-adapter`) instead of the whole workspace. The workspace build
+  also selected the scale benchmark harnesses, and Cargo feature unification
+  compiled the shipped daemon with the RIB's benchmark instrumentation. A
+  release gate and a pull-request check now fail if the release build
+  resolves the `bench-internals` feature for any package.
+- A SIGHUP reload or config transaction that keeps every configured neighbor
+  and starts no session no longer waits for a RIB acknowledgement before it
+  settles. That acknowledgement queued behind the reload's own post-commit
+  export work: in a 200-peer, 100,000-prefix policy reload it held settlement
+  for 34–46 ms after `config reload complete`, and larger tables queue more
+  work ahead of it. Reloads that add, remove or re-key a neighbor, or start a
+  session, still wait for the RIB.
+- Remove deleted, expired or BLACKHOLE-demoted RTBH advertisements during
+  Graceful Restart selection deferral even when recovery-proof allocation
+  fails. Other pending advertisements and End-of-RIB remain held. If
+  incomplete Add-Path state cannot prove the last path at a prefix left,
+  outbound capacity remains unknown until recovery completes.
+- Config diagnostics identify an IPv6 link-local neighbor by interface and
+  point at the matching record when neighbors share an address.
+- Service RIB readiness while retaining selection-deferral identities for all
+  route families, including EVPN and RT-Constrain. Sharded identity storage
+  bounds each insertion's resize work while preserving duplicate accounting,
+  retained-key limits, overflow fallback and family release ordering.
+- Release a completed or torn-down unicast, VPN or EVPN update-group payload
+  in bounded batches on the session that holds its last reference, instead of
+  dropping the whole inventory in one session turn. Members completing at
+  the same moment hand the inventory to exactly one of them. A session that
+  shuts down or is removed hands what remains to a separate paced release, so
+  its exit neither waits for nor performs the whole drop. At about one
+  million routes the single drop measured up to about 60 ms (unicast) and
+  96 ms (VPN) when the payload owned its attribute sets.
+- Expire graceful-restart, long-lived graceful-restart, enhanced
+  route-refresh, ORF and RT-Constrain End-of-RIB and conditional
+  advertisement timers one deadline at a time. When the work queued at one
+  peer's deadline took long enough to drain that a second peer's later
+  deadline passed, the second peer was expired in the same turn, before its
+  own End-of-RIB, re-advertisement or ROUTE-REFRESH queued ahead of its
+  deadline was processed. The peer's routes were then withdrawn and
+  announced again, or an End-of-RIB went out ahead of its table. A timer
+  now expires only the deadlines that had passed when it was first seen
+  due, once the work queued by then drains; a later deadline drains the
+  work queued when it is first seen due before it expires.
+- Avoid scanning every admitted sibling when a unicast Add-Path initial
+  table inserts increasing path IDs. Existing route and next-hop-action
+  identities remain exact through replacement, withdrawal and slot reuse.
+- Bound hash-table growth in update-group source attributes, runner-up routes,
+  policy-denial residue, export memoization and policy-transition inventories.
+  Route storage in Adj-RIB-In, Adj-RIB-Out and update-group tables now grows
+  in fixed segments instead of copying the whole table when it doubles; at
+  full-table size each copy stalled the RIB actor. This matters most for a
+  group whose members are up before the feed arrives.
+  Regroup snapshots reserve next-hop override storage sized to the overrides
+  they can hold, and VPN denial updates visit the changed keys instead of
+  scanning all denials.
+
+### Documentation
+
+- Correct the benchmark overview's default Cargo build membership and
+  distinguish it from release tarball and container image contents.
+- Clarify that Graceful Restart hold expiry does not guarantee End-of-RIB
+  delivery or remote RTBH removal, and align the stable health description
+  with published Established-state counting.
+
+### Upgrade notes
+
+- The release tarball, `.deb` and `.rpm` binaries of 0.74.0 through 0.80.1
+  were built with the RIB and transport benchmark instrumentation enabled.
+  Those daemons run extra bookkeeping during RIB replacement work and log
+  additional INFO lines from it, such as `replacement readiness scope
+  finished` and `replacement capacity maximum`. Upgrade to a release built
+  without it. The container image was built from the shipped packages only
+  and is unaffected.
+- `.rpol` `remove community *` now keeps standard communities in the RFC 1997
+  well-known range, `65535:0` through `65535:65535`: `NO_EXPORT`,
+  `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`, `NOPEER`, `BLACKHOLE`,
+  `GRACEFUL_SHUTDOWN` and the rest. Previously it removed them, so the replace
+  idiom `remove community *; add community X` dropped `NO_EXPORT` and could
+  advertise a route beyond the scope its sender set. IOS-XR RPL `delete
+  community all` also keeps well-known communities. A policy that relied on
+  the scrub to remove a well-known value must now name it, for example
+  `remove community BLACKHOLE`; `for c in route.communities { remove
+  community c }` still removes every value. The `removes community *` test
+  assertion now checks only the values outside that range. `remove
+  large-community *:*:*` and `remove ext-community *` are unchanged.
+  [Actions](docs/reference/rpol-language.md#actions) has the details.
+- Controllers adopting the guarded FlowSpec methods treat
+  `DEADLINE_EXCEEDED`, `UNAVAILABLE` or a dropped connection as an unknown
+  outcome and resolve it by reading the admission revision back, never by
+  retrying through the leased or unleased methods.
+- During Graceful Restart selection deferral after a planned restart,
+  `ListFlowSpecRoutes` reads a FlowSpec rule re-injected through `AddFlowSpec`
+  or `AddLeasedFlowSpec` as `selected: true`, and
+  `ListFlowSpecExportDispositions` reports it `COMMITTED` rather than
+  `PENDING`/`selection_deferred`.
+- Outbound unicast Add-Path path IDs now stay with a path while it is sent
+  instead of following rank order. Advertised-route readback and best-path
+  explain show these IDs, so path ID 1 is no longer always the best path.
+- `GetHealth` `active_peers` counts a session that is Established but busy
+  writing exports, even when its `ListNeighbors` observation is unavailable.
+  It previously excluded a session that did not answer its state query within
+  100 ms, so the count could dip during a reload.
+- Every End-of-RIB held for an ORF-gated table now has a 60-second ORF hold
+  cap. At that cap, a family for which no plain ROUTE-REFRESH or IMMEDIATE ORF
+  request has arrived releases its marker to the ordinary pending queue.
+  Selection deferral or replay grace may still hold it. A family whose table
+  refresh is already queued keeps its marker behind that refresh's table, even
+  past the cap. Queued updates and pending resynchronization can delay
+  transmission after every hold ends, so the cap is not a deadline for
+  End-of-RIB delivery or remote stale-route removal. See the
+  [GR-helper RTBH limitation](docs/reference/known-issues.md#open-issues).
+- A RIB actor turn of 200 ms or longer now logs a `slow RIB actor turn` WARN,
+  at most once per 10 seconds. The per-kind p50 and p99 of
+  `bgp_rib_actor_turn_duration_seconds{kind}` show which message kind holds
+  the actor, for example serial peer-down teardown, without matching log
+  timestamps.
+- Embedders of the published crates: `rustbgpd-wire` 0.27.0 decodes path
+  attribute 25 as `Ipv6ExtendedCommunities` or
+  `Ipv6ExtendedCommunitiesPartial` where 0.26 returned `Unknown`, and adds
+  `FlowSpecAction::RedirectToIp`. Both enums are non-exhaustive, but code that
+  matches exact decoded variants must account for the new ones.
+  `rustbgpd-fsm` 0.14.0 and `rustbgpd-rpki` 0.9.0 move to wire 0.27 with no
+  other API change; upgrade the three together.
+- This release ships on its per-change regression tests and main CI; no new
+  24-hour route-server flagship soak receipt covers it.
+
 ## [0.80.1] — 2026-10-25
 
 ### Fixed
