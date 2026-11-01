@@ -265,6 +265,7 @@ records.
 
 | Document | Date stated | Workload or shape | Establishes | Does not establish |
 |---|---|---|---|---|
+| [EVPN core-isolation transition loss](evpn-core-isolation-loss-2026-10-20.md) | 2026-10-19 and 2026-10-20 | M121 all-active EVPN lab on one quiet host, one UDP flow at 2,000 frames/s, uplink carrier cut; 48 valid action-arm A/B cycles across two builds on 2026-10-20, plus one action and one control arm on 2026-10-19 | With `[evpn_core_isolation]` enabled the loss window had a median of about 15 ms (worst 35.5 ms); with it disabled every valid cycle lost the flow for the whole 8 s post-cut window | A hardware NIC, ASIC or line-rate bound, another probe rate, or isolation detected only by EVPN session loss |
 | [Full-table dataset reload](dataset-reload-full-table-2026-10-17.md) | 2026-10-17 | Hosted daemon, 1.23M dual-stack keys × 12 receivers, UC/VPN; 1% content-only dataset swap and revert by SIGHUP; delta and group-level full-pass cells; two earlier full-pass runs retained as FAIL | No exit, exact fold and readiness 200 in all three cells; affected-keys pass 63–509 ms, group-level full pass 4.4–4.6 s with no unchanged re-sends | Hosted VPN full pass, per-member fallback families, other receiver counts or policies, or release qualification |
 | [Shared VPN recovery capture scans](update-group-recovery-vpn-capture-scans-2026-10-16.md) | 2026-10-16 | Component capture scans, 1.23M-key full-uc/full-vpn and 37.5k EVPN keys, sorted and shuffled, 6 cells × 4 ABBA legs per profile/order; one earlier run retained as FAIL | Shared unicast and VPN capture pass the 1.5× flat bar: full-uc ≤ 1.10×, full-vpn 0.243–0.275× including churned pools | Daemon memory, fleet readiness, wire delivery, release qualification or EVPN activation |
 | [Peer-teardown cleanup readiness at `7ff33596`](peer-teardown-cleanup-readiness-7ff33596-2026-10-16.md) | 2026-10-16 | Full 1.23M dual-stack keys, UC and VPN, 6 retirement cells × 2 arms × 2 legs (48 invocations) | Instrumented component readiness bars pass: checkpoint interval ≤ 9.16 ms (limit 25 ms), RIB reply ≤ 81.3 ms (limit 200 ms), productive overlap in every full cell | Uninstrumented cost, real attribute diversity, `/readyz` HTTP or wire-driven qualification, release qualification |
@@ -578,13 +579,10 @@ from that file; a directory name does not fill a missing date.
 
 ## Metadata gaps
 
-The index covers 166 of the 170 Markdown files: 70 primary records and 96
-supporting records. Four older files are not indexed yet:
-[`ixp-initial-export-readiness-2026-09.md`](ixp-initial-export-readiness-2026-09.md),
-[`ixp-membership-churn-2026-09.md`](ixp-membership-churn-2026-09.md),
-[`ixp-membership-churn-qualified-2026-09.md`](ixp-membership-churn-qualified-2026-09.md),
-and
-[`artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md`](artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md).
+Every top-level receipt has a primary record. Some files under `artifacts/`
+have no row of their own, such as
+[`artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md`](artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md);
+reach them through their parent receipt.
 Supporting artifacts often rely on their parent receipt for context; this
 index deliberately leaves their own missing metadata as `Unstated` instead of
 copying it down.
@@ -597,10 +595,9 @@ state a date:
 - [`vpn-rib-query-occupancy-method.md`][vpn-rib-query-occupancy-method.md]
 
 Every primary record states a claim and claim boundary. In the supporting
-table, 66 files do not state their own date, four do not state an independent
-claim, and 55 do not state an independent claim boundary. Those gaps appear as
-`Unstated` in the affected row; every supporting file states at least its role
-or workload.
+table, a file that does not state its own date, an independent claim, or an
+independent claim boundary shows `Unstated` in the affected field; every
+supporting file states at least its role or workload.
 
 Both tables derive every field from the linked record rather than treating a
 filename, parent directory, or neighboring receipt as evidence.

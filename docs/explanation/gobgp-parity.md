@@ -209,7 +209,7 @@ releases rather than carried forward from older measurements.
 | Lowest peer tiebreaker | Yes | Yes | |
 | Stale route demotion | Yes | Yes | GR step 0 |
 | RPKI preference | Yes | Yes | Step 0.5: Valid > NotFound > Invalid |
-| Optimal Route Reflection (RFC 9107) | No | **Yes** | Per-client interior-cost tiebreak from a configured vantage, SPF over the BGP-LS-sourced topology (ADR-0095, M76). No open-source daemon ships this |
+| Optimal Route Reflection (RFC 9107) | No | **Yes** | Per-client interior-cost tiebreak from a configured vantage, SPF over the BGP-LS-sourced topology (ADR-0095, M76) |
 | AIGP | Yes | No | |
 | Multipath/ECMP | Yes | Yes | Classic unicast FIB ECMP ships via ADR-0066: `[[fib_tables]].maximum_paths`, per-class `maximum_paths_ebgp` / `maximum_paths_ibgp`, homogeneous eBGP or iBGP groups, and kernel `RTA_MULTIPATH` install. `[global].multipath_relax` provides FRR-style AS_PATH-length grouping; ADR-0068 adds Link Bandwidth weighted multipath. Add-Path multi-path send and EVPN aliasing ECMP also ship |
 
@@ -248,7 +248,7 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Advantages Over GoBGP
 
-- **Unsafe confined to three reviewed modules** — `deny(unsafe_code)` at every crate root; the Linux socket-option, BFD receive-TTL, and watchdog-exit sites are the scoped exceptions ([SECURITY.md](../../SECURITY.md))
+- **Unsafe confined to four reviewed modules** — `deny(unsafe_code)` at every crate root; the Linux socket-option, BFD receive-TTL, watchdog-exit, and RA-discovery ICMPv6 filter / `AsyncFd` registration sites are the scoped exceptions ([SECURITY.md](../../SECURITY.md))
 - **Property testing** — `proptest` suites in the wire, FSM, RIB, and BFD crates; GoBGP's tests are table-driven and its `go.mod` pulls in no property-testing library
 - **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
 - **ASPA path verification** — RTR v2, BGP-Role-selected upstream/downstream

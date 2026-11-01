@@ -10,13 +10,10 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-`rustbgpd-fsm` 0.14.0 moves to wire `0.27.0` with no FSM state-machine
-change. Upgrade wire 0.27, FSM 0.14 and RPKI 0.9 together when exchanging
-public wire types. Attribute 25 now decodes to typed, lossless twenty-octet
-communities, with direct IPv6 target-IP helpers; IPv4 direct targets join
-`FlowSpecAction`. Existing enums are non-exhaustive, but consumers matching
-exact decoded variants must account for the new variants. See the
-[wire changelog](../wire/CHANGELOG.md).
+`rustbgpd-fsm` 0.14.0 moves to wire `0.27.0` with no FSM API or
+state-machine change. Upgrade wire 0.27, FSM 0.14 and RPKI 0.9 together when
+exchanging public wire types. The
+[wire changelog](../wire/CHANGELOG.md) describes the new wire types and decoded variants.
 
 `rustbgpd-fsm` 0.13.1 adds `PeerConfig::remote_asn_external` (default false).
 When set, OPEN validation accepts any peer ASN except `local_asn`, refuses the

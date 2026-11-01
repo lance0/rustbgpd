@@ -409,6 +409,7 @@ later registry additions land without a breaking release.
 | 5292 | Address-Prefix ORF-Type (64), with the legacy pre-standard type (128) decoded for interoperability |
 | 5492 | BGP capabilities |
 | 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
+| 5701 | IPv6 Address Specific Extended Community attribute (type 25): typed, lossless `Ipv6ExtendedCommunities` or the received Partial-preserving `Ipv6ExtendedCommunitiesPartial` variant over twenty-octet `Ipv6ExtendedCommunity` values, retaining unknown types and reserved bits; empty or non-multiple-of-20 payloads are malformed |
 | 6396 §4.3.4 | MRT `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder (`mrt` module): accepts the reduced next-hop-only form and the full RFC 4760 form collectors also write; rejects malformed next-hop lengths, truncation, AFI/length mismatches, and trailing octets. Codec only — record framing and the peer index table live in the reader |
 | 6514 §5 | PMSI Tunnel attribute (path attribute type 22): base tunnel-type and identifier semantics, with canonical `PmsiTunnel` and received Partial-preserving `PmsiTunnelPartial` variants. The EVPN-VXLAN ingress-replication form encodes the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
 | 6793 | 4-octet AS numbers, including canonical type 2/17 and type 7/18 ingress normalization plus capability-specific egress projection |
@@ -449,6 +450,7 @@ later registry additions land without a breaking release.
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
+| draft-ietf-idr-flowspec-redirect-ip-16 | Experimental direct target-IP FlowSpec redirect: IPv4 `FlowSpecAction::RedirectToIp { addr, copy }` (extended community type 0x010c with the copy bit) and the IPv6 form in attribute 25 through `Ipv6ExtendedCommunity::as_flowspec_redirect_to_ip` / `from_flowspec_redirect_to_ip` (type 0x000c). Originated reserved bits are zero; received bits are retained. Distinct from the RFC 7674 route-target redirect |
 | draft-ietf-idr-linklocal-capability-06 | Experimental Link-Local Next Hop capability (`Capability::LinkLocalNextHop`, code 77, empty value) plus context-dependent link-local unicast next-hop validation through `UpdateValidationOptions::link_local_next_hop`; the caller supplies negotiation and interface-scope context |
 
 ## Usage
@@ -576,7 +578,7 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   attributes; build from a slice with `UpdateMessage::try_build` or from one
   ordered pass over borrowed attributes with
   `UpdateMessage::try_build_from_attribute_iter`
-- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, canonical/Partial pairs `Communities` / `CommunitiesPartial`, `ExtendedCommunities` / `ExtendedCommunitiesPartial`, `LargeCommunities` / `LargeCommunitiesPartial`, and `PmsiTunnel` / `PmsiTunnelPartial`, plus boxed `MpReachNlri` / `MpUnreachNlri` payloads (boxed since 0.22.0, so the enum is sized by its largest stored attribute rather than MP framing) and canonical/Partial `OnlyToCustomer` (RFC 9234)
+- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, canonical/Partial pairs `Communities` / `CommunitiesPartial`, `ExtendedCommunities` / `ExtendedCommunitiesPartial`, `Ipv6ExtendedCommunities` / `Ipv6ExtendedCommunitiesPartial` (RFC 5701, attribute 25), `LargeCommunities` / `LargeCommunitiesPartial`, and `PmsiTunnel` / `PmsiTunnelPartial`, plus boxed `MpReachNlri` / `MpUnreachNlri` payloads (boxed since 0.22.0, so the enum is sized by its largest stored attribute rather than MP framing) and canonical/Partial `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
 - **`RpkiValidation` / `AspaValidation` / `AspaValidationContext`** — shared
   routing-domain validation state and ASPA session context used by rustbgpd's
@@ -587,6 +589,14 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   code 77), graceful restart, Outbound Route Filtering, etc.
 - **ORF types** (`orf` module, RFC 5291/5292) — `OrfCapEntry` (capability blocks), `OrfPayload` / `OrfEntryGroup` / `OrfEntries` (the Route Refresh ORF section), and `AddressPrefixOrf` (one Address-Prefix entry: action, match, sequence, min/max length, prefix). `RouteRefreshMessage::orf` carries the decoded section; a malformed IPv4/IPv6 unicast Address-Prefix group decodes to `OrfEntries::Malformed` (RFC 5291 §6 reset) rather than failing the message, while non-unicast / future-family Address-Prefix groups are preserved as raw bytes until those family encodings are implemented. Adding `orf` to `RouteRefreshMessage` made that struct `Clone` rather than `Copy` (0.11.0)
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
+- **`FlowSpecAction`** — FlowSpec traffic actions, converted with
+  `ExtendedCommunity::as_flowspec_action` / `from_flowspec_action`; includes
+  the direct target-IP `RedirectToIp { addr, copy }` (IPv4, type 0x010c),
+  distinct from the RFC 7674 route-target redirect
+- **`Ipv6ExtendedCommunity`** — one RFC 5701 twenty-octet value, retained
+  losslessly (`new` / `as_bytes`); `as_flowspec_redirect_to_ip` /
+  `from_flowspec_redirect_to_ip` read and originate the IPv6 direct
+  target-IP redirect (type 0x000c)
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–6) with
   full payloads (RFC 7432, RFC 9136, RFC 9251); `EvpnRouteKey` implements `Ord` for
   deterministic keyed collections

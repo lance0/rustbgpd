@@ -99,8 +99,8 @@ description = "rr client fleet"
 If clients in different IGP regions should each get *their* closest
 exit (not the RR's), add a BGP-LS topology source and pin clients to
 vantages. Per-vantage best paths are computed via SPF over the
-BGP-LS-sourced topology ([ADR-0095](../adr/0095-optimal-route-reflection.md))
-— a capability no other open-source BGP daemon ships. M76 proves
+BGP-LS-sourced topology ([ADR-0095](../adr/0095-optimal-route-reflection.md)).
+M76 proves
 divergent per-vantage bests and a topology-driven flip against GoBGP.
 
 ```toml

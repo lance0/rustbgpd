@@ -12,8 +12,9 @@ lives in the source — `neighbor_runtime_equal()`, `config_field_impact()`,
 `neighbor_change_hot_applicable()`, `classify_sighup_reload()`,
 `plan_reload_peer_actions()`, and `ConfigDiff` (in
 `src/config/mod.rs`), `reload.rs` (the route dispatch, the sequential
-changed-neighbor hot/rebuild partition, `pin_unreconciled_daemon_runtime_fields`, and the
+changed-neighbor hot/rebuild partition, and the
 per-section error/warn arms) together with the pinning helpers
+`pin_unreconciled_daemon_runtime_fields` /
 `pin_tcp_ao_startup_only_runtime` / `pin_bfd_startup_only_runtime` /
 `pin_rfc8212_posture_startup_only` it
 invokes from `src/config/mod.rs`, and
@@ -57,8 +58,8 @@ which cannot carry the config-file-only group fields: `admin_down`,
 the per-family and received prefix limits, `max_prefix_action`,
 `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
 `rs_control_communities`, `send_non_transitive_extended_communities`,
-`fast_external_failover`, `log_level`, `route_flap_dampening`, and
-`conditional_advertisements`. A sequential candidate that adds or changes one of them is
+`fast_external_failover`, `log_level`, `route_flap_dampening`,
+`gr_eor_grace_time`, and `conditional_advertisements`. A sequential candidate that adds or changes one of them is
 rejected, and the reason names the group and field, for example
 `peer group "edge" strict_role changed together with listener inbound
 MD5/GTSM inventory`. Split the reload: apply the TCP-AO or listener change
@@ -417,7 +418,7 @@ static neighbors.
 | `gr_restart_time` | live (effective next session) | |
 | `gr_peer_restart_time_max` | live | Inherited local helper cap. An all-`live` SIGHUP or targeted peer-group RPC swaps the cap in place on static and dynamic members alike; a change set that also moves a session-reset field rebuilds static members and leaves accepted dynamic members on their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
 | `gr_stale_routes_time` | live | |
-| `gr_eor_grace_time` | live | Inherited by static members only; dynamic members never take part in a planned restart. |
+| `gr_eor_grace_time` | live | Inherited by static members only; dynamic members never take part in a planned restart. Config-file-only: `SetPeerGroup` does not carry it, and the sequential route rejects a candidate that changes it (see above). |
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |
 | `route_reflector_client` | live (effective next session) | Same as neighbor; a toggle session-resets the inheriting static members. |
