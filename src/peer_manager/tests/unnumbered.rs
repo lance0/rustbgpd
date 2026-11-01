@@ -5014,7 +5014,9 @@ async fn an_interface_only_neighbors_series_follow_the_interface_across_endpoint
 }
 
 /// A second router on the link is counted for the neighbor, from a Router
-/// Advertisement and from an inbound connection alike.
+/// Advertisement and from an inbound connection alike. One discovery record
+/// counts every conflict it stands for.
+/// Mutation-red: counting a record once ignores its held returns.
 #[tokio::test]
 async fn second_routers_on_the_link_are_counted_for_the_neighbor() {
     let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
@@ -5023,6 +5025,7 @@ async fn second_routers_on_the_link_are_counted_for_the_neighbor() {
         interface: "swp1".into(),
         bound: ll(2),
         other: ll(9),
+        count: 100_000,
     });
     let _client = inbound(&mut h, 9, 7).await;
     assert_eq!(
@@ -5031,7 +5034,7 @@ async fn second_routers_on_the_link_are_counted_for_the_neighbor() {
             "bgp_unnumbered_ra_conflicts_total",
             &[("peer", "interface:swp1")]
         ),
-        Some(2.0)
+        Some(100_001.0)
     );
 }
 
@@ -6057,6 +6060,7 @@ async fn an_rpc_delete_reaps_the_neighbors_interface_labelled_series() {
         interface: "swp1".into(),
         bound: ll(2),
         other: ll(9),
+        count: 1,
     });
     for label in ["interface:swp1", "interface:swp2"] {
         assert!(
@@ -6748,6 +6752,7 @@ async fn a_late_conflict_for_a_deleted_neighbor_recreates_no_series() {
         interface: "swp1".into(),
         bound: ll(2),
         other: ll(9),
+        count: 1,
     });
     // Mutation-red: counting it recreates `ra_conflicts{peer="interface:swp1"}`.
     assert_eq!(series_for(&h, "interface:swp1"), Vec::<String>::new());
@@ -6755,6 +6760,7 @@ async fn a_late_conflict_for_a_deleted_neighbor_recreates_no_series() {
         interface: "swp2".into(),
         bound: ll(3),
         other: ll(9),
+        count: 1,
     });
     assert_eq!(
         sample(

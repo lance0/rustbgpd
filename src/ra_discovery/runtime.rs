@@ -51,13 +51,12 @@ enum EventKey {
     Conflict(String),
 }
 
-/// Events waiting for the neighbor owner: per key the latest event and how
-/// many times to deliver it, served round-robin so a key with many
-/// deliveries cannot hold back the others.
+/// Events waiting for the neighbor owner: per key the latest event, served
+/// in the order the keys were first queued.
 #[derive(Default)]
 struct PendingEvents {
     order: VecDeque<EventKey>,
-    events: HashMap<EventKey, (DiscoveryEvent, u64)>,
+    events: HashMap<EventKey, DiscoveryEvent>,
 }
 
 /// Create the discovery → neighbor owner event queue.
@@ -68,9 +67,9 @@ struct PendingEvents {
 /// - the latest binding change, which replaces a pending one: the owner's
 ///   reconcile is level-triggered on `current`, so a binding discovery has
 ///   already dropped is never applied;
-/// - the latest conflict, with the number of conflicts it stands for, each
-///   delivered, so engine conflicts are counted exactly. The deliveries
-///   carry the latest `bound` and `other`.
+/// - the latest conflict, whose `count` is the sum of every conflict it
+///   replaced, delivered once, so engine conflicts are counted exactly. It
+///   carries the latest `bound` and `other`.
 ///
 /// Discovery raises every conflict itself, so the counts do not depend on how
 /// far the owner falls behind. The owner reports the Established peer's
@@ -81,8 +80,9 @@ struct PendingEvents {
 /// it, or one named only beside another foreign router, which that conflict
 /// counted instead.
 ///
-/// Keys are served round-robin, so a conflict can be delivered ahead of a
-/// binding change queued between two conflicts. Learned and expired
+/// Keys are served in the order they were first queued, so a conflict can
+/// be delivered ahead of a binding change queued between two conflicts.
+/// Learned and expired
 /// candidates are only logged; the actor logs them itself and never queues
 /// them.
 pub(crate) fn event_channel() -> (EventSender, DiscoveryEvents) {
@@ -109,7 +109,7 @@ pub(crate) struct EventSender {
 }
 
 impl EventSender {
-    pub(crate) fn send(&self, event: DiscoveryEvent) {
+    pub(crate) fn send(&self, mut event: DiscoveryEvent) {
         let key = match &event {
             DiscoveryEvent::BindingChanged { interface, .. } => {
                 EventKey::Binding(interface.clone())
@@ -124,15 +124,19 @@ impl EventSender {
             let pending = &mut *pending;
             match pending.events.entry(key) {
                 Entry::Occupied(mut slot) => {
-                    let (latest, count) = slot.get_mut();
-                    if matches!(event, DiscoveryEvent::Conflict { .. }) {
-                        *count += 1;
+                    let latest = slot.get_mut();
+                    if let (
+                        DiscoveryEvent::Conflict { count: queued, .. },
+                        DiscoveryEvent::Conflict { count, .. },
+                    ) = (&*latest, &mut event)
+                    {
+                        *count = count.saturating_add(*queued);
                     }
                     *latest = event;
                 }
                 Entry::Vacant(slot) => {
                     pending.order.push_back(slot.key().clone());
-                    slot.insert((event, 1));
+                    slot.insert(event);
                 }
             }
         }
@@ -163,7 +167,7 @@ impl DiscoveryEvents {
     /// event was received.
     pub async fn recv(&mut self) -> Option<DiscoveryEvent> {
         loop {
-            // A counted backlog never waits on the wake channel, so spend the
+            // A pending backlog never waits on the wake channel, so spend the
             // task's cooperative budget here, before anything is taken: the
             // owner yields to other tasks, and a recv cancelled at this
             // await loses nothing.
@@ -175,23 +179,14 @@ impl DiscoveryEvents {
         }
     }
 
-    /// Deliver from the front entry, then move it to the back if it has more.
+    /// Deliver the front entry.
     fn pop(&self) -> Option<DiscoveryEvent> {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let pending = &mut *pending;
         let key = pending.order.pop_front()?;
-        let Some((latest, count)) = pending.events.get_mut(&key) else {
-            debug_assert!(false, "a queued key has no pending event");
-            return None;
-        };
-        *count -= 1;
-        let event = latest.clone();
-        if *count > 0 {
-            pending.order.push_back(key);
-        } else {
-            pending.events.remove(&key);
-        }
-        Some(event)
+        let event = pending.events.remove(&key);
+        debug_assert!(event.is_some(), "a queued key has no pending event");
+        event
     }
 }
 
@@ -1309,7 +1304,7 @@ mod tests {
     /// RAs that keep moving the binding or raising conflicts, while the
     /// neighbor owner is not reading, leave at most one binding change and
     /// one conflict queued for the interface. The owner then receives the
-    /// final binding and every conflict.
+    /// final binding and one conflict counting every one.
     #[tokio::test]
     async fn discovery_events_stay_bounded_while_the_owner_stalls() {
         use crate::ra_discovery::{DiscoveryEvent, Endpoint};
@@ -1380,47 +1375,41 @@ mod tests {
             interface: "x".into(),
             bound,
             other: last_other,
+            count: u64::from(conflicts),
         };
         assert_eq!(
             delivered.iter().filter(|event| **event == conflict).count(),
-            usize::from(conflicts)
+            1
         );
-        assert_eq!(delivered.len(), 1 + usize::from(conflicts));
+        assert_eq!(delivered.len(), 2);
     }
 
-    /// Draining a large counted backlog yields to other tasks on the same
-    /// thread: receiving never waits on the wake channel, so without the
-    /// cooperative budget the owner would replay it all in one poll.
+    /// A conflict backlog reaches the owner as one record whose count is the
+    /// sum of every queued record's, a held-returns record's included, so
+    /// the owner's work does not grow with the backlog.
+    /// Mutation-red: keeping only the latest record's count drops the rest.
     #[tokio::test]
-    async fn receiving_a_counted_backlog_lets_other_tasks_run() {
+    async fn a_conflict_backlog_is_delivered_as_one_counted_record() {
         use crate::ra_discovery::DiscoveryEvent;
-        use std::sync::atomic::AtomicBool;
 
         let (sender, mut events) = super::event_channel();
-        let backlog = 10_000;
-        for _ in 0..backlog {
-            sender.send(DiscoveryEvent::Conflict {
-                interface: "a".into(),
-                bound: "fe80::1".parse().unwrap(),
-                other: "fe80::2".parse().unwrap(),
-            });
+        let conflict = |count| DiscoveryEvent::Conflict {
+            interface: "a".into(),
+            bound: "fe80::1".parse().unwrap(),
+            other: "fe80::2".parse().unwrap(),
+            count,
+        };
+        sender.send(conflict(100_000));
+        for _ in 0..10_000 {
+            sender.send(conflict(1));
         }
-        let ran = Arc::new(AtomicBool::new(false));
-        let other = Arc::clone(&ran);
-        let _other = tokio::spawn(async move { other.store(true, Ordering::Relaxed) });
-        let mut received = 0;
-        while !ran.load(Ordering::Relaxed) {
-            assert!(
-                received < backlog,
-                "the whole backlog was received before another task ran"
-            );
-            events.recv().await.unwrap();
-            received += 1;
-        }
+        drop(sender);
+        assert_eq!(events.recv().await, Some(conflict(110_000)));
+        assert_eq!(events.recv().await, None);
     }
 
     /// A conflict storm on one interface cannot hold back another
-    /// interface's binding change: slots are served round-robin.
+    /// interface's binding change: slots are served in queue order.
     #[tokio::test]
     async fn a_conflict_storm_does_not_starve_other_interfaces() {
         use crate::ra_discovery::{DiscoveryEvent, Endpoint};
@@ -1430,6 +1419,7 @@ mod tests {
             interface: "a".into(),
             bound: "fe80::1".parse().unwrap(),
             other: Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 2, other),
+            count: 1,
         };
         for other in 0..1000 {
             sender.send(conflict(other));
@@ -1462,11 +1452,13 @@ mod tests {
         use crate::ra_discovery::DiscoveryEvent;
 
         let (sender, mut events) = super::event_channel();
-        let conflict = |other: &str| DiscoveryEvent::Conflict {
+        let counted = |other: &str, count| DiscoveryEvent::Conflict {
             interface: "x".into(),
             bound: "fe80::1".parse().unwrap(),
             other: other.parse().unwrap(),
+            count,
         };
+        let conflict = |other: &str| counted(other, 1);
         let waiting = tokio::spawn(async move {
             let first = events.recv().await;
             (first, events)
@@ -1489,8 +1481,7 @@ mod tests {
                 .await
                 .expect("a queued event needs no further wake")
         };
-        assert_eq!(recv().await, Some(conflict("fe80::4")));
-        assert_eq!(recv().await, Some(conflict("fe80::4")));
+        assert_eq!(recv().await, Some(counted("fe80::4", 2)));
         drop(sender);
         assert_eq!(recv().await, None);
     }

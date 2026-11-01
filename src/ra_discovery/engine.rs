@@ -140,6 +140,9 @@ pub enum DiscoveryEvent {
         interface: String,
         bound: Ipv6Addr,
         other: Ipv6Addr,
+        /// Conflicts this record stands for, at least one: the report names
+        /// a source's held returns in one record.
+        count: u64,
     },
 }
 
@@ -411,6 +414,7 @@ impl Engine {
                 interface: name.clone(),
                 bound,
                 other: source,
+                count: 1,
             });
         }
         Ok(())
@@ -479,6 +483,7 @@ impl Engine {
                 interface: name.to_owned(),
                 bound: peer,
                 other: address,
+                count: 1,
             });
         }
         if !named.is_empty()
@@ -492,16 +497,16 @@ impl Engine {
         for (&(low, high), [held_low, held_high]) in &mut iface.named_pairs {
             for (address, held) in [(low, held_low), (high, held_high)] {
                 let returns = std::mem::take(held);
-                if address == peer {
+                if address == peer || returns == 0 {
                     continue;
                 }
-                for _ in 0..returns {
-                    self.events.push(DiscoveryEvent::Conflict {
-                        interface: name.to_owned(),
-                        bound: peer,
-                        other: address,
-                    });
-                }
+                // One record however many returns were held.
+                self.events.push(DiscoveryEvent::Conflict {
+                    interface: name.to_owned(),
+                    bound: peer,
+                    other: address,
+                    count: u64::from(returns),
+                });
             }
         }
     }

@@ -2975,7 +2975,7 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `unnumbered: peer address learned from an inbound connection` | INFO | An interface-only neighbor bound the source of a connection that arrived on its interface |
 | `unnumbered: peer address changed` | INFO | An interface-only neighbor was bound to a new address (`previous`, `address`); counted in `bgp_unnumbered_address_changes_total` |
 | `unnumbered: ending the bound session` | INFO | An interface-only neighbor's endpoint is retired; `reason` is `peer_address_changed`, `link_down`, `interface_removed`, `session_exited`, `binding_expired` (no binding left and nothing retained) or `neighbor_reconfigured` (a bind-time setting changed). The `PeerRemoved` and `PeerAdded` session events carry the same reason |
-| `unnumbered: a second router advertises on an interface-only link` | WARN | `reason = "multiple_routers_on_link"`: another router advertises on a link that has one peer. The inbound-connection variants log the same reason. Counted in `bgp_unnumbered_ra_conflicts_total` |
+| `unnumbered: a second router advertises on an interface-only link` | WARN | `reason = "multiple_routers_on_link"`: another router advertises on a link that has one peer. One record can stand for several conflicts queued together, given by `conflicts`. The inbound-connection variants log the same reason. Counted in `bgp_unnumbered_ra_conflicts_total` |
 | `cannot open RA socket` | WARN | The interface's discovery socket could not be opened; retried with backoff and counted in `bgp_unnumbered_ra_socket_open_failures_total` |
 
 Later socket or task retries in the same failed-connect episode stay at DEBUG

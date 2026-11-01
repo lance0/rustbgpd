@@ -424,6 +424,7 @@ impl PeerManager {
                 interface,
                 bound,
                 other,
+                count,
             } => {
                 // Queued before the neighbor was deleted: counting it would
                 // recreate the series its removal reaped.
@@ -431,13 +432,16 @@ impl PeerManager {
                     debug!(%interface, "unnumbered: conflict for a removed neighbor, ignored");
                     return;
                 }
+                // One record stands for `count` conflicts: logged once and
+                // counted in one increment, however large its backlog.
                 warn!(
-                    %interface, %bound, %other,
+                    %interface, %bound, %other, conflicts = count,
                     reason = "multiple_routers_on_link",
                     "unnumbered: a second router advertises on an interface-only link"
                 );
-                self.metrics.record_unnumbered_ra_conflict(
+                self.metrics.record_unnumbered_ra_conflicts(
                     &rustbgpd_telemetry::interface_peer_label(&interface),
+                    count,
                 );
             }
         }
@@ -1915,7 +1919,7 @@ impl PeerManager {
     /// bound session is Established is one, with or without an RA binding.
     fn refuse_second_router(&self, name: &str) -> Option<PeerKey> {
         self.metrics
-            .record_unnumbered_ra_conflict(&rustbgpd_telemetry::interface_peer_label(name));
+            .record_unnumbered_ra_conflicts(&rustbgpd_telemetry::interface_peer_label(name), 1);
         self.refuse_inbound()
     }
 

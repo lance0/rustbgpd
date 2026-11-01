@@ -182,7 +182,8 @@ fn first_source_binds_and_second_is_a_sticky_conflict() {
             DiscoveryEvent::Conflict {
                 interface: IF.into(),
                 bound: ll(5),
-                other: ll(1)
+                other: ll(1),
+                count: 1
             },
         ]
     );
@@ -325,7 +326,8 @@ fn discovery_never_moves_an_established_binding() {
     assert!(events.contains(&DiscoveryEvent::Conflict {
         interface: IF.into(),
         bound: ll(5),
-        other: ll(1)
+        other: ll(1),
+        count: 1
     }));
     assert!(events.contains(&DiscoveryEvent::CandidateExpired {
         interface: IF.into(),
@@ -708,6 +710,7 @@ async fn binding_wait_fails_when_the_stream_closes_or_times_out() {
         interface: IF.into(),
         bound: ll(2),
         other: ll(1),
+        count: 1,
     };
     tx.send(unrelated.clone());
     assert_eq!(
@@ -1124,7 +1127,49 @@ fn conflicts_with_report(ras: &Ras, report_at: u64, early: bool) -> usize {
     if !early {
         e.session_established(IF, ll(2), t0 + Duration::from_secs(report_at));
     }
-    conflicts(&mut e).len()
+    let total: u64 = counted_conflicts(&mut e)
+        .iter()
+        .map(|(_, count)| count)
+        .sum();
+    usize::try_from(total).unwrap()
+}
+
+/// The (other, count) of the conflicts raised since the last drain.
+fn counted_conflicts(e: &mut Engine) -> Vec<(Ipv6Addr, u64)> {
+    e.events
+        .drain(..)
+        .filter_map(|ev| match ev {
+            DiscoveryEvent::Conflict { other, count, .. } => Some((other, count)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A long wait for the Established report holds many returns of one pair:
+/// the report names them in one record carrying their number, not one
+/// record each.
+/// Mutation-red: one record per held return emits 100 000 records.
+#[test]
+fn held_returns_are_named_in_one_record_per_source() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    let returns: u32 = 100_000;
+    let mut at = t0;
+    ra(&mut e, 9, 60, at).unwrap();
+    ra(&mut e, 5, 1, at).unwrap();
+    for _ in 0..returns {
+        // fe80::9 stays the binding; fe80::5 lapses and returns.
+        at += Duration::from_secs(2);
+        ra(&mut e, 9, 60, at).unwrap();
+        ra(&mut e, 5, 1, at).unwrap();
+    }
+    assert_eq!(counted_conflicts(&mut e), [(ll(5), 1)]);
+    e.session_established(IF, ll(2), at);
+    assert_eq!(
+        counted_conflicts(&mut e),
+        [(ll(5), u64::from(returns))],
+        "one record for every held return"
+    );
 }
 
 /// A source whose candidate lapses and returns beside a binding a conflict

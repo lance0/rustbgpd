@@ -20,4 +20,7 @@
   peer, provided one of the two addresses is still advertising then; a
   return is never counted if no session reaches Established. A foreign
   router that stays live is no longer counted a second time when the peer's
-  RAs lapse and return first.
+  RAs lapse and return first. Conflicts queued together reach the peer
+  manager as one `multiple_routers_on_link` log record, whose `conflicts`
+  field gives how many it stands for, and are added to the counter in one
+  step.
