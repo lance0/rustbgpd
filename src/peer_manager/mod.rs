@@ -864,6 +864,10 @@ pub struct PeerManager {
     /// Per-peer count of `deferred_session_notifications`, so a fence scans
     /// the queue only when its own peer has an entry there.
     deferred_session_notification_counts: HashMap<PeerKey, usize>,
+    /// Crossings of each deferred max-prefix warning by its scope (session,
+    /// family, stage), so a later warning for that scope merges without a
+    /// queue scan. The warning carries the total when it is released.
+    deferred_warning_crossings: HashMap<(u64, &'static str, &'static str), u64>,
     session_lifecycle_tx: mpsc::Sender<SessionLifecycleNotification>,
     session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
@@ -1722,6 +1726,7 @@ impl PeerManager {
             session_notification_depth: 0,
             deferred_session_notifications: VecDeque::new(),
             deferred_session_notification_counts: HashMap::new(),
+            deferred_warning_crossings: HashMap::new(),
             session_lifecycle_tx,
             session_lifecycle_rx,
             session_notification_event_tx,

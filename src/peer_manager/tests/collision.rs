@@ -2892,11 +2892,16 @@ async fn nested_drain_coalesces_deferred_max_prefix_warnings_per_scope() {
         .iter()
         .map(|(owner, notification)| match notification {
             SessionNotification::MaxPrefixWarning {
+                session_id,
                 family,
                 stage,
-                crossings,
                 ..
-            } => (owner.clone(), *family, *stage, *crossings),
+            } => (
+                owner.clone(),
+                *family,
+                *stage,
+                mgr.deferred_warning_crossings[&(*session_id, *family, *stage)],
+            ),
             other => panic!("unexpected deferred notification {other:?}"),
         })
         .collect();
@@ -2919,11 +2924,21 @@ async fn nested_drain_coalesces_deferred_max_prefix_warnings_per_scope() {
         Some(&1)
     );
 
-    // Each peer's own fence takes its warnings back.
+    // Each peer's own fence takes its warnings back, each carrying its
+    // scope's crossings.
+    let mut live_events = mgr.session_events_tx.subscribe();
     mgr.drain_ready_session_notifications(Some(&eth2)).await;
     mgr.drain_ready_session_notifications(Some(&eth1)).await;
     assert!(mgr.deferred_session_notifications.is_empty());
     assert!(mgr.deferred_session_notification_counts.is_empty());
+    assert!(mgr.deferred_warning_crossings.is_empty());
+    let events: Vec<String> = std::iter::from_fn(|| live_events.try_recv().ok())
+        .map(|event| format!("{event:?}"))
+        .collect();
+    let crossings = |n| format!("(threshold 50%); {n} threshold crossings");
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert!(events[0].contains(&crossings(3)), "{events:?}");
+    assert!(events[1].contains(&crossings(4)), "{events:?}");
 }
 
 /// Link-local neighbors on different interfaces share an address. A fence
