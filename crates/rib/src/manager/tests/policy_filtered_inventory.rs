@@ -102,6 +102,7 @@ fn register_target(
         peer,
         session_id: 0,
         context: Arc::new(crate::update::PeerSourceContext {
+            exact_export_families: Vec::new(),
             dampening_admission: None,
             peer_interface: Some("target-interface".into()),
             accepted_dynamic_range: None,

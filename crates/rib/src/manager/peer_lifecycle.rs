@@ -2378,15 +2378,6 @@ impl RibManager {
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
         self.export_chains.insert(peer, export_policy);
-        // The session seeded these zero series when it started; an earlier
-        // identity's deletion handled since then reaped them with the rest of
-        // the label's exact-export series, so seed them again in RIB order.
-        self.metrics.initialize_exact_export_rejection_series(
-            &peer.label(),
-            sendable_families
-                .iter()
-                .filter_map(|&(afi, safi)| rustbgpd_wire::family_label(afi, safi)),
-        );
         self.peer_sendable_families.insert(peer, sendable_families);
         self.outbound_roster_generation = self.outbound_roster_generation.wrapping_add(1);
         self.peer_advertised_llgr_families

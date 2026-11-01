@@ -1532,42 +1532,51 @@ async fn accepts_behind_a_deferred_cleanup_are_refused_without_waiting() {
 
 /// A static neighbor added at a retained member's address retires the member
 /// once its session has started. Behind a full RIB mailbox the member's
-/// deletion is deferred and the add does not wait for it: the deletion keeps
-/// the label's series, which are the new neighbor's, and its handle is
-/// superseded so its teardown leaves the label's gauges to that neighbor.
-/// Red proof: deleting the member as an ordinary neighbor deletion leaves
-/// its handle unsuperseded and queues a label-reaping `PeerDeleted`.
+/// deletion is deferred, so the add completes only once it is admitted,
+/// ahead of the new session's registration. The deletion keeps the label's
+/// series, which are the new neighbor's, and its handle is superseded. Red
+/// proof: completing the add without admitting the deletion leaves it
+/// queued, where the new session's registration can overtake it.
 #[tokio::test]
-async fn a_static_add_replacing_a_retained_member_defers_its_deletion_without_waiting() {
+async fn a_static_add_replacing_a_retained_member_waits_for_its_deferred_deletion() {
     let (mut mgr, rib_tx, rib_task) = manager_with_rib();
     let retained = retained_member(&mut mgr, &rib_tx, THEIRS).await;
-    let (stalled_tx, _stalled_rx) = mpsc::channel(1);
+    let (stalled_tx, mut stalled_rx) = mpsc::channel(1);
     mgr.rib_tx = stalled_tx.clone();
     stalled_tx
         .try_send(RibUpdate::ReleasePeer {
             peer: PeerId::UNASSIGNED,
         })
         .unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false),
-    )
-    .await
-    .expect("the add does not wait for mailbox room")
-    .unwrap();
+    let drain = tokio::spawn(async move {
+        let mut admitted = Vec::new();
+        while let Some(update) = stalled_rx.recv().await {
+            let done = matches!(update, RibUpdate::ReleasePeer { peer } if peer == retained);
+            admitted.push(update);
+            if done {
+                break;
+            }
+        }
+        admitted
+    });
+    mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
+        .await
+        .unwrap();
+    assert!(
+        mgr.deferred_rib.queue.is_empty(),
+        "the add completes only once the member's deletion is admitted"
+    );
     assert!(retained.is_superseded());
-    let queued: Vec<_> = mgr
-        .deferred_rib
-        .queue
-        .iter()
-        .map(|(reaps, update)| (reaps.clone(), update))
-        .collect();
+    let admitted = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         matches!(
-            queued.as_slice(),
+            &admitted[admitted.len() - 2..],
             [
-                (None, RibUpdate::PeerDeleted { peer: deleted, keep_series: true, .. }),
-                (None, RibUpdate::ReleasePeer { peer: released }),
+                RibUpdate::PeerDeleted { peer: deleted, keep_series: true, .. },
+                RibUpdate::ReleasePeer { peer: released },
             ] if *deleted == retained && *released == retained
         ),
         "the member's deletion keeps the label's series, then its release"
@@ -2116,8 +2125,9 @@ async fn a_re_added_static_neighbor_keeps_its_series_through_the_old_cleanup() {
     let before = member_series(&metrics);
     release_held(&mut held, &rib_tx).await;
     // The new session registers in the RIB, after the deletion.
-    let (tx, _rx) = mpsc::channel(16);
     let new = mgr.rib_peer_of(&key(MEMBER));
+    send_all(&rib_tx, [source_context(new, 3, vec![FAMILY])]).await;
+    let (tx, _rx) = mpsc::channel(16);
     send_all(
         &rib_tx,
         session(new, 3, MEMBER_ASN, false, false, false, tx),
@@ -2168,6 +2178,7 @@ async fn a_dynamic_reconnect_keeps_its_series_through_the_deleted_members_cleanu
     let before = member_series(&metrics);
     release_held(&mut held, &rib_tx).await;
     // The reconnect's session registers in the RIB, after the deletion.
+    send_all(&rib_tx, [source_context(new, 2, vec![FAMILY])]).await;
     let (tx, _rx) = mpsc::channel(16);
     send_all(
         &rib_tx,
@@ -2304,8 +2315,8 @@ async fn a_successor_restarting_before_its_first_update_keeps_its_gr_gauge() {
     rib_task.abort();
 }
 
-/// The member label's exact-export rejection count for one reason.
-fn member_export_rejections(metrics: &BgpMetrics, reason: &str) -> Option<f64> {
+/// The member label's exact-export rejection count for one family and reason.
+fn member_export_rejections(metrics: &BgpMetrics, family: &str, reason: &str) -> Option<f64> {
     let member = MEMBER.to_string();
     metrics
         .registry()
@@ -2321,7 +2332,7 @@ fn member_export_rejections(metrics: &BgpMetrics, reason: &str) -> Option<f64> {
                     .iter()
                     .any(|label| label.name() == name && label.value() == value)
             };
-            has("peer", &member) && has("family", "ipv4_unicast") && has("reason", reason)
+            has("peer", &member) && has("family", family) && has("reason", reason)
         })
         .map(|metric| metric.get_counter().get_value())
 }
@@ -2330,9 +2341,11 @@ fn member_export_rejections(metrics: &BgpMetrics, reason: &str) -> Option<f64> {
 /// rejection after the peer manager's reap and after the re-added neighbor's
 /// session seeded its zero series under the same label. Once the RIB has
 /// handled the deletion and registered the new session, the new neighbor's
-/// zero series are there and none of the old count is. Red proof: reaping
+/// zero series are there for every family it is configured for, including
+/// one it does not send, and none of the old count is. Red proofs: reaping
 /// only the nonzero series the RIB incremented, without seeding at
-/// registration, loses that zero series.
+/// registration, loses the incremented zero series; seeding only the
+/// families the session sends loses IPv6 unicast's.
 #[tokio::test]
 async fn a_re_added_neighbor_keeps_its_zero_export_rejection_series() {
     let (mut mgr, rib_tx, metrics, rib_task) = manager_sharing_metrics_with_rib();
@@ -2345,7 +2358,7 @@ async fn a_re_added_neighbor_keeps_its_zero_export_rejection_series() {
         .await
         .unwrap();
     assert_eq!(
-        member_export_rejections(&metrics, "message_too_long"),
+        member_export_rejections(&metrics, "ipv4_unicast", "message_too_long"),
         Some(0.0)
     );
     metrics.record_exact_export_rejection(
@@ -2355,7 +2368,26 @@ async fn a_re_added_neighbor_keeps_its_zero_export_rejection_series() {
     );
 
     release_held(&mut held, &rib_tx).await;
+    // The new session registers in the RIB: its source context names the
+    // families it is configured for, IPv6 unicast included, though it sends
+    // only IPv4 unicast.
     let new = mgr.rib_peer_of(&key(MEMBER));
+    let context = rustbgpd_rib::update::PeerSourceContext {
+        dampening_admission: None,
+        peer_interface: None,
+        accepted_dynamic_range: None,
+        route_server_client: false,
+        exact_export_families: vec![FAMILY, (Afi::Ipv6, Safi::Unicast)],
+    };
+    send_all(
+        &rib_tx,
+        [RibUpdate::SetPeerSourceContext {
+            peer: new,
+            session_id: 3,
+            context: std::sync::Arc::new(context),
+        }],
+    )
+    .await;
     let (tx, _rx) = mpsc::channel(16);
     send_all(
         &rib_tx,
@@ -2363,11 +2395,15 @@ async fn a_re_added_neighbor_keeps_its_zero_export_rejection_series() {
     )
     .await;
     loc_rib_count(&rib_tx).await;
-    for reason in ["message_too_long", "encoding"] {
+    for (family, reason) in [
+        ("ipv4_unicast", "message_too_long"),
+        ("ipv4_unicast", "encoding"),
+        ("ipv6_unicast", "message_too_long"),
+    ] {
         assert_eq!(
-            member_export_rejections(&metrics, reason),
+            member_export_rejections(&metrics, family, reason),
             Some(0.0),
-            "the new neighbor's {reason} series"
+            "the new neighbor's {family} {reason} series"
         );
     }
     rib_task.abort();
@@ -2393,4 +2429,100 @@ async fn a_replaced_members_rib_series_go_when_no_successor_reached_the_rib() {
     assert_eq!(member_gr_gauges(&metrics), [None, None, None]);
     assert_new_neighbor_series(&metrics);
     rib_task.abort();
+}
+
+/// A static neighbor replaces a retained member that has a nonzero RIB
+/// counter under the address, behind a full RIB mailbox. The member's
+/// deletion is admitted before the add completes, so it reaches the RIB
+/// ahead of the new session's registration: the RIB, finding no successor,
+/// reaps the member's RIB series, and the new neighbor's count starts at
+/// zero. Red proof: completing the add without admitting the deletion lets
+/// the new session's registration reach the RIB first, and the member's
+/// count carries over to the new neighbor.
+#[tokio::test]
+async fn a_static_replacement_inherits_none_of_the_members_rib_counts() {
+    let (mut mgr, rib_tx, metrics, rib_task) = manager_sharing_metrics_with_rib();
+    let old = retained_member(&mut mgr, &rib_tx, THEIRS).await;
+    // A count the RIB kept for the member.
+    metrics.record_exact_export_rejection(
+        &MEMBER.to_string(),
+        "ipv4_unicast",
+        rustbgpd_telemetry::reason_labels::ExactExportReason::MessageTooLong,
+    );
+    let (stalled_tx, mut stalled_rx) = mpsc::channel(1);
+    mgr.rib_tx = stalled_tx.clone();
+    stalled_tx
+        .try_send(RibUpdate::ReleasePeer {
+            peer: PeerId::UNASSIGNED,
+        })
+        .unwrap();
+    // The mailbox drains into the RIB in admission order.
+    let forward = rib_tx.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(update) = stalled_rx.recv().await {
+            let done = matches!(update, RibUpdate::ReleasePeer { peer } if peer == old);
+            forward.send(update).await.unwrap();
+            if done {
+                break;
+            }
+        }
+    });
+    mgr.add_peer(make_config(MEMBER, MEMBER_ASN), false)
+        .await
+        .unwrap();
+
+    // The new session registers in the RIB.
+    let new = mgr.rib_peer_of(&key(MEMBER));
+    let context = rustbgpd_rib::update::PeerSourceContext {
+        dampening_admission: None,
+        peer_interface: None,
+        accepted_dynamic_range: None,
+        route_server_client: false,
+        exact_export_families: vec![FAMILY],
+    };
+    send_all(
+        &rib_tx,
+        [RibUpdate::SetPeerSourceContext {
+            peer: new,
+            session_id: 7,
+            context: std::sync::Arc::new(context),
+        }],
+    )
+    .await;
+    let (tx, _rx) = mpsc::channel(16);
+    send_all(
+        &rib_tx,
+        session(new, 7, MEMBER_ASN, false, false, false, tx),
+    )
+    .await;
+    // Whatever is still queued goes now.
+    mgr.admit_deferred_rib_updates_for(&key(MEMBER)).await;
+    tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    loc_rib_count(&rib_tx).await;
+    assert!(!old.is_live(), "the member is released");
+    assert_eq!(
+        member_export_rejections(&metrics, "ipv4_unicast", "message_too_long"),
+        Some(0.0),
+        "the new neighbor's count starts at zero"
+    );
+    rib_task.abort();
+}
+
+/// The source context a session stages before `PeerUp`, configured for
+/// `families`.
+fn source_context(peer: PeerId, session_id: u64, families: Vec<(Afi, Safi)>) -> RibUpdate {
+    RibUpdate::SetPeerSourceContext {
+        peer,
+        session_id,
+        context: std::sync::Arc::new(rustbgpd_rib::update::PeerSourceContext {
+            dampening_admission: None,
+            peer_interface: None,
+            accepted_dynamic_range: None,
+            route_server_client: false,
+            exact_export_families: families,
+        }),
+    }
 }

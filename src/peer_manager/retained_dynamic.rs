@@ -667,11 +667,12 @@ impl PeerManager {
 
     /// A static neighbor at an idle retained member's address has started
     /// its session: delete the member and release its identity. The member's
-    /// series were reaped before that session spawned, and the label's series
-    /// are now the static neighbor's, so the member is retired the way a
-    /// replaced speaker is (`release_side_handle`): its deletion keeps the
-    /// label's series, and its teardown leaves the label's gauges to the new
-    /// neighbor.
+    /// peer-manager and session series were reaped before that session
+    /// spawned; the label's are now the static neighbor's. The deletion keeps
+    /// them, its handle is superseded, and it is queued under the label so
+    /// the add admits it before completing, ahead of the new session's
+    /// registration. The RIB then finds no successor and reaps the member's
+    /// RIB series, so none of its counts carry over to the new neighbor.
     pub(super) fn retire_replaced_retained_dynamic(&mut self, peer: &PeerKey) {
         if self
             .retained_dynamic
@@ -691,7 +692,18 @@ impl PeerManager {
             format!("peer {peer} removed"),
         );
         if let Some(handle) = retained.slot.get() {
-            self.release_side_handle(handle);
+            handle.supersede();
+            let label = self.peer_metric_label(peer);
+            for update in [
+                RibUpdate::PeerDeleted {
+                    peer: handle,
+                    label: None,
+                    keep_series: true,
+                },
+                RibUpdate::ReleasePeer { peer: handle },
+            ] {
+                let _ = self.defer_rib_update(Some(label.clone()), update);
+            }
         }
         info!(peer = %peer, "retained dynamic peer replaced by a static neighbor");
     }

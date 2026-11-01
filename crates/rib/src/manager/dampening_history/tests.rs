@@ -43,6 +43,7 @@ fn source(peer: u8, session_id: u64, asn: u32, owner: &Arc<DampeningOwner>) -> R
         session_id,
         peer_asn: Some(asn),
         context: Some(Arc::new(PeerSourceContext {
+            exact_export_families: Vec::new(),
             peer_interface: None,
             accepted_dynamic_range: None,
             route_server_client: false,

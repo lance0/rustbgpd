@@ -4723,6 +4723,16 @@ impl RibManager {
                 session_id,
                 context,
             } => {
+                // The session seeded these zero series when it started; an
+                // earlier identity's deletion handled since then reaped them
+                // with the rest of the label's exact-export series.
+                self.metrics.initialize_exact_export_rejection_series(
+                    &peer.label(),
+                    context
+                        .exact_export_families
+                        .iter()
+                        .filter_map(|&(afi, safi)| rustbgpd_wire::family_label(afi, safi)),
+                );
                 self.pending_peer_source_context
                     .insert((peer, session_id), context);
             }

@@ -943,7 +943,12 @@ impl PeerManager {
         };
 
         if replaces_retained {
+            // The member's deletion is admitted before this add completes.
+            // The new session sends the RIB nothing until it is Established,
+            // a BGP handshake later, so the deletion reaches the RIB first
+            // unless older queued cleanup holds its admission that long.
             self.retire_replaced_retained_dynamic(&peer_key);
+            self.admit_deferred_rib_updates_for(&peer_key).await;
         }
         info!(peer = %address, %remote_asn, "peer added dynamically");
         if bmp_excluded {

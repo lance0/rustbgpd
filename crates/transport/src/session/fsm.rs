@@ -1227,6 +1227,7 @@ impl PeerSession {
                                 peer_interface: self.config.peer_interface.clone(),
                                 accepted_dynamic_range: self.config.accepted_dynamic_range.clone(),
                                 route_server_client: self.config.route_server_client,
+                                exact_export_families: self.config.peer.effective_families(),
                             }),
                         })
                         .await;

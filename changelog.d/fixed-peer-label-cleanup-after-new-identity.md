@@ -9,7 +9,8 @@
   `peer`-labelled series, such as `bgp_peer_admin_enabled`, `bgp_peer_info`
   and its session state. It now removes only the series the RIB itself
   writes, and the new neighbor's zero `bgp_exact_export_rejections_total`
-  series are seeded again when its session is registered. A dynamic neighbor
+  series are seeded again, for every family it is configured for, when its
+  session is registered. A dynamic neighbor
   kept for graceful restart that reconnected from another AS had a related
   problem: tearing down the kept identity, or its restart timer expiring
   first, set `bgp_rib_prefixes`, `bgp_rib_adj_out_prefixes` and the
@@ -18,6 +19,7 @@
   series, while the new session was up or itself restarting. The address's
   series now stay the new session's. A static neighbor that replaces a kept
   dynamic neighbor also keeps the series it seeds at start, and the kept
-  neighbor is deleted only once the new session has started: a static add
-  whose session fails to start leaves the kept neighbor, its retained routes
-  and its RIB gauges in place.
+  neighbor is deleted only once the new session has started, before the add
+  completes, so none of its RIB counts carry over to the new neighbor. A
+  static add whose session fails to start leaves the kept neighbor, its
+  retained routes and its RIB gauges in place.

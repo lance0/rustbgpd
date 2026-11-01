@@ -188,6 +188,7 @@ impl PeerManager {
             session_id: managed.session_id(),
             peer_asn: Some(asn),
             context: Some(Arc::new(PeerSourceContext {
+                exact_export_families: Vec::new(),
                 dampening_admission: Some(admission.clone()),
                 peer_interface: managed.transport_config.peer_interface.clone(),
                 accepted_dynamic_range: managed.transport_config.accepted_dynamic_range.clone(),
