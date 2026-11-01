@@ -357,10 +357,16 @@ impl RibManager {
                     let prior_fallback = (!group.rs_fallback.is_empty())
                         .then(|| group.rs_fallback.get(prefix))
                         .flatten();
+                    let winner_delta = out.deltas[deltas_before..]
+                        .iter()
+                        .any(|delta| delta.path_id == 0);
+                    // A winner delta over an old or new fallback list may
+                    // move an rs-control member's next-hop action on its
+                    // fallback slot: keep the action-equivalence check on.
+                    out.has_next_hop_actions |=
+                        winner_delta && (prior_fallback.is_some() || stage.rs_fallback.is_some());
                     if (prior_fallback.is_some() || stage.rs_fallback.is_some())
-                        && !out.deltas[deltas_before..]
-                            .iter()
-                            .any(|delta| delta.path_id == 0)
+                        && !winner_delta
                         && (rs_view_moved
                             || !super::payload::rs_fallback_equal(
                                 prior_fallback.map(|fallback| &**fallback),

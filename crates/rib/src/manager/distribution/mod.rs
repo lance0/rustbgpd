@@ -6392,6 +6392,7 @@ impl RibManager {
             receipt.emits_attempted += 1;
             match self.prepare_batched_member_envelopes(
                 peer,
+                source,
                 destination,
                 &inventory,
                 shared_encode.as_ref(),
@@ -6595,6 +6596,7 @@ impl RibManager {
     fn prepare_batched_member_envelopes(
         &mut self,
         peer: PeerId,
+        source: usize,
         destination: usize,
         inventory: &super::update_groups::BatchedTransitionInventory,
         shared_encode: Option<&Arc<crate::update::SharedGroupEncode>>,
@@ -6625,10 +6627,20 @@ impl RibManager {
         }
         let supplement = inventory.supplements.get(&peer);
         let supplement_announce = supplement.map_or(0, |entry| entry.announce.len());
+        // A key leaving the table is withdrawn only from members that held
+        // it in the source group, which is still authoritative here: never
+        // from its own source (split horizon) or from an rs-control member
+        // it was suppressed toward.
+        let rs_control = self.rs_control_context(peer);
+        let source_group = self.group_ribs.get(&source);
         let mut supplement_withdraw: Vec<(Prefix, u32)> = inventory
             .withdraw
             .iter()
             .inspect(|_| checkpoint())
+            .filter(|(prefix, path_id)| {
+                source_group
+                    .is_none_or(|group| group.member_retains(peer, prefix, *path_id, rs_control))
+            })
             .copied()
             .chain(
                 supplement
