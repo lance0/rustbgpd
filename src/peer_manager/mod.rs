@@ -335,10 +335,10 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Admission is not processing: a new session under a reaped label starts
 /// once the deletion is admitted, so it can emit before the RIB handles that
-/// deletion. `reaping` keeps each label-reaping deletion's handle until the
-/// RIB releases it; a new identity starting under the label supersedes it
-/// first (`supersede_label_reaps`), and the RIB then reaps nothing under the
-/// label for it.
+/// deletion. That is safe because the RIB reaps only the families it writes
+/// (`BgpMetrics::reap_rib_peer_series`), whose new series come after the
+/// deletion in its order; this actor reaped the rest when it deleted the
+/// neighbor.
 ///
 /// The queue never leaves the actor; only `sender` moves into a flush's
 /// wait, so a dropped flush loses nothing but its reservation, which the run
@@ -353,9 +353,6 @@ struct DeferredRibUpdates {
     /// a flush has moved it into its wait. A reservation in progress survives
     /// a dropped wait, so the update keeps its place among waiting senders.
     sender: Option<tokio_util::sync::PollSender<RibUpdate>>,
-    /// Sent or queued deletions that reap a label, with the deleted handle,
-    /// until the RIB releases the handle or a new identity supersedes it.
-    reaping: Vec<(String, rustbgpd_rib::PeerId)>,
 }
 
 impl DeferredRibUpdates {
@@ -999,6 +996,10 @@ pub struct PeerManager {
     inject_reconfigure_failures: std::collections::BTreeMap<PeerKey, u32>,
     #[cfg(test)]
     dataset_generations_at_peer_construction: Option<Vec<(PeerKey, String, u64)>>,
+    /// Fail the next new session's start, as a session that exits before it
+    /// accepts the command does.
+    #[cfg(test)]
+    fail_next_peer_start: bool,
     /// The same deterministic fault injection for the in-place applier
     /// (`hot_update_peer_in_place`), so the peer-group hot path's
     /// mid-cohort failure and rollback contract can be exercised.
@@ -1549,18 +1550,6 @@ impl PeerManager {
     /// emit before the RIB has handled it. Fails only once the RIB has
     /// exited.
     fn defer_rib_update(&mut self, label: Option<String>, update: RibUpdate) -> Result<(), ()> {
-        if let (
-            Some(label),
-            RibUpdate::PeerDeleted {
-                peer,
-                keep_series: false,
-                ..
-            },
-        ) = (&label, &update)
-        {
-            self.deferred_rib.reaping.retain(|(_, peer)| peer.is_live());
-            self.deferred_rib.reaping.push((label.clone(), *peer));
-        }
         if self.deferred_rib.queue.is_empty() {
             match self.rib_tx.try_send(update) {
                 Ok(()) => return Ok(()),
@@ -1627,22 +1616,6 @@ impl PeerManager {
                 })
                 .await;
         }
-        self.supersede_label_reaps(peer);
-    }
-
-    /// A new identity is about to emit under `peer`'s metric label: mark
-    /// each deleted handle whose cleanup reaps that label, and which the RIB
-    /// may not have handled yet, as superseded, so the RIB leaves the label
-    /// to the new identity. Call before its session starts.
-    pub(super) fn supersede_label_reaps(&mut self, peer: &PeerKey) {
-        let label = self.peer_metric_label(peer);
-        self.deferred_rib.reaping.retain(|(reaped, handle)| {
-            if *reaped == label {
-                handle.supersede();
-                return false;
-            }
-            handle.is_live()
-        });
     }
 
     /// Refuse an inbound connection rather than wait for mailbox room while a
@@ -1811,6 +1784,8 @@ impl PeerManager {
             inject_reconfigure_failures: debug_reconfigure_failures(),
             #[cfg(test)]
             dataset_generations_at_peer_construction: None,
+            #[cfg(test)]
+            fail_next_peer_start: false,
             #[cfg(test)]
             inject_hot_update_failures: std::collections::BTreeMap::new(),
             #[cfg(test)]

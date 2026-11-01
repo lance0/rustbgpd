@@ -1573,6 +1573,7 @@ mod ready_drain;
 mod refresh;
 mod refresh_snapshot;
 mod replay;
+mod rib_series_reap;
 mod rpki;
 mod rs_control;
 mod rtc;

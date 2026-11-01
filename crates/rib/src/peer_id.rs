@@ -390,13 +390,12 @@ impl PeerId {
         self.pinned_v4().is_none() && write(|slots| slots.release(self))
     }
 
-    /// Mark a deleted neighbor's handle whose `peer` label a newer identity
-    /// now uses: a neighbor re-added at its address, or the speaker that
-    /// replaced a retained one. The RIB processes the old handle's cleanup
-    /// after the newer identity has begun emitting under the label, so that
-    /// cleanup must neither reap the label ([`Self::unless_superseded`]) nor
-    /// zero what the newer identity publishes there. A no-op for a pinned or
-    /// stale handle.
+    /// Mark a live handle whose `peer` label a newer identity now uses: a
+    /// retained speaker replaced by a reconnect from another AS, or by a
+    /// static neighbor at its address. The RIB handles the old handle's
+    /// deletion after the newer identity may have published under the label,
+    /// so that teardown leaves the label's gauges to the newer identity. A
+    /// no-op for a pinned, released or stale handle.
     pub fn supersede(self) {
         if self.pinned_v4().is_some() {
             return;
@@ -404,7 +403,7 @@ impl PeerId {
         if let Some(slot) = lock()
             .entries
             .get_mut(self.index as usize)
-            .filter(|slot| slot.generation == self.generation)
+            .filter(|slot| slot.generation == self.generation && slot.state == SlotState::Live)
         {
             slot.superseded = true;
         }
@@ -414,18 +413,6 @@ impl PeerId {
     #[must_use]
     pub fn is_superseded(self) -> bool {
         self.pinned_v4().is_none() && lock().slot(self).is_some_and(|slot| slot.superseded)
-    }
-
-    /// Run `f` unless the handle is superseded, holding the table's writer
-    /// lock throughout, so a [`Self::supersede`] made before a newer identity
-    /// starts emitting either lands first (and `f` does not run) or waits for
-    /// `f` to finish.
-    pub fn unless_superseded(self, f: impl FnOnce()) {
-        let slots = lock();
-        if self.pinned_v4().is_some() || slots.slot(self).is_none_or(|slot| !slot.superseded) {
-            f();
-        }
-        drop(slots);
     }
 
     /// Move a live neighbor to a new endpoint (an interface-only neighbor
@@ -772,6 +759,24 @@ mod tests {
         assert_eq!(scoped.label(), "fe80::1%swp2");
         assert!(fabric.release());
         assert!(scoped.release());
+    }
+
+    /// Only a live allocated handle can be superseded: a pinned identity,
+    /// IPv4 or IPv6, names no neighbor a newer one replaces, and a mark on it
+    /// would hold for the life of the process. Red proof: marking any slot
+    /// whose generation matches marks the pinned IPv6 identity.
+    #[test]
+    fn only_a_live_allocated_handle_is_superseded() {
+        let live = PeerId::allocate(endpoint("2001:db8::77", None));
+        let pinned_v6 = PeerId::from_addr("2001:db8::78".parse().unwrap());
+        let pinned_v4 = PeerId::from_ipv4(Ipv4Addr::new(192, 0, 2, 78));
+        for peer in [live, pinned_v6, pinned_v4] {
+            peer.supersede();
+        }
+        assert!(live.is_superseded());
+        assert!(!pinned_v6.is_superseded(), "a pinned IPv6 identity");
+        assert!(!pinned_v4.is_superseded(), "a pinned IPv4 identity");
+        assert!(live.release());
     }
 
     #[test]

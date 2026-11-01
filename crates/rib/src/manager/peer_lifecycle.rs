@@ -416,7 +416,7 @@ impl RibManager {
         // bounded, swept on End-of-RIB or expiry).
         if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
             self.clear_policy_filtered_routes_for_peer(peer);
-            self.clear_peer_adj_rib_in(peer);
+            self.clear_peer_adj_rib_in(peer, self.label_successor(peer));
         }
         self.clear_outbound_peer_state(peer);
         self.register_active_session(peer, ActiveSessionRegistration::CollisionFailback);
@@ -592,7 +592,7 @@ impl RibManager {
             self.clear_gr_gauges(peer, successor);
         }
 
-        self.clear_peer_adj_rib_in(peer);
+        self.clear_peer_adj_rib_in(peer, successor);
 
         self.clear_outbound_peer_state(peer);
         self.peer_asn.remove(&peer);
@@ -611,7 +611,7 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "peer teardown keeps recomputation and exact-identity consumers before the detached retirement and following attribute GC"
     )]
-    fn clear_peer_adj_rib_in(&mut self, peer: PeerId) {
+    fn clear_peer_adj_rib_in(&mut self, peer: PeerId, successor: Option<PeerId>) {
         // The discarded routes no longer back any session's End-of-RIB; only
         // a later marker on the replayed feed may report it synced again.
         for record in self.live_sessions.get_mut(&peer).into_iter().flatten() {
@@ -622,8 +622,7 @@ impl RibManager {
             return;
         };
         // The label's gauges show its successor's routes, if it has one.
-        let published = self
-            .label_successor(peer)
+        let published = successor
             .and_then(|successor| self.ribs.get(&successor))
             .map_or(([0, 0], 0, [0, 0]), |successor| {
                 (
@@ -859,8 +858,9 @@ impl RibManager {
         self.peer_down_teardown(peer);
         // An interface-only neighbor's retired endpoint keeps its handle
         // (`keep_series`): a rebind to a new endpoint forgets the carry,
-        // and a return to the same endpoint is the same speaker's.
-        if !keep_series {
+        // and a return to the same endpoint is the same speaker's. A
+        // superseded handle is released next and returns to nobody.
+        if !keep_series || peer.is_superseded() {
             self.forget_helper_stale_exempt(peer);
         }
         self.eor_grace_peer_deleted(peer, keep_series);
@@ -892,13 +892,13 @@ impl RibManager {
                 selection.peer_deleted(peer, &self.metrics)
             });
         self.apply_selection_deferral_transitions(transitions, "peer deleted from configuration");
-        // A newer identity under the label (a re-added neighbor, or a
-        // reconnect at the address) may already emit there: its series are
-        // not this deletion's to reap. What this handle emitted after the
-        // peer manager's own reap stays for the newer identity to overwrite.
+        // Only the families the RIB writes: the peer manager reaped the rest
+        // when it deleted the neighbor, and a neighbor re-added at the
+        // address may already emit them.
         if !keep_series {
-            let label = label.map_or_else(|| peer.label(), |label| label.to_string());
-            peer.unless_superseded(|| self.metrics.reap_peer_series(&label));
+            self.metrics.reap_rib_peer_series(
+                &label.map_or_else(|| peer.label(), |label| label.to_string()),
+            );
         }
     }
 
@@ -917,7 +917,7 @@ impl RibManager {
             .keys()
             .chain(self.ribs.keys())
             .copied()
-            .find(|&other| other != peer && other.label() == label)
+            .find(|&other| other != peer && other.label() == label && !other.is_superseded())
     }
 
     /// Whether `peer` holds Graceful Restart or LLGR retention, whose gauges
@@ -1505,6 +1505,10 @@ impl RibManager {
         reason = "outbound teardown keeps per-registration cleanup and detached table retirement in their existing ownership order"
     )]
     pub(super) fn clear_outbound_peer_state(&mut self, peer: PeerId) {
+        // A superseded handle's outbound series under the shared label are
+        // its successor's: Adj-RIB-Out sizes, prefix capacity, update group
+        // and refresh state are left as the successor last published them.
+        let keeps_label = self.label_successor(peer).is_none();
         self.invalidate_evpn_feed_completion(peer);
         self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
@@ -1577,9 +1581,11 @@ impl RibManager {
         // the hold window; this series carries what we would actually
         // re-advertise, which is nothing until the peer returns.
         let peer_label = peer.label();
-        for &(family, _, _) in rustbgpd_wire::CONFIGURED_FAMILIES {
-            self.metrics
-                .set_adj_rib_out_prefixes(&peer_label, family, 0);
+        if keeps_label {
+            for &(family, _, _) in rustbgpd_wire::CONFIGURED_FAMILIES {
+                self.metrics
+                    .set_adj_rib_out_prefixes(&peer_label, family, 0);
+            }
         }
         // Outbound prefix admission is per-registration (ADR-0113): the
         // admitted set and its blocking latch describe what the departing
@@ -1588,7 +1594,9 @@ impl RibManager {
         // consume a new generation's capacity nor clear its episode.
         self.outbound_prefix_limits.remove(&peer);
         self.outbound_limit_control.reap_peer(peer);
-        self.metrics.reap_outbound_prefix_capacity(&peer.label());
+        if keeps_label {
+            self.metrics.reap_outbound_prefix_capacity(&peer_label);
+        }
         self.export_chains.remove(&peer);
         if self.peer_sendable_families.remove(&peer).is_some() {
             self.outbound_roster_generation = self.outbound_roster_generation.wrapping_add(1);
@@ -1700,6 +1708,9 @@ impl RibManager {
         self.pending_extra_withdraws.remove(&peer);
         self.release_group_admitted_keys(peer);
         self.remove_update_group_member(peer);
+        if keeps_label {
+            self.metrics.remove_peer_update_group(&peer_label);
+        }
         // After leaving the group, which hands the group's hold ledger to
         // the peer's.
         self.hold_exempt_withdrawn
@@ -1709,7 +1720,9 @@ impl RibManager {
         self.refresh_group_residue_gauge();
         // Zero the per-family refresh gauges while `refresh_in_progress`
         // still lists the families; the map-driven clear below drops them.
-        self.clear_peer_refresh_metrics(peer);
+        if keeps_label {
+            self.clear_peer_refresh_metrics(peer);
+        }
         self.clear_peer_refresh_state(peer);
     }
 
@@ -1777,7 +1790,7 @@ impl RibManager {
             }
             if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
                 self.clear_policy_filtered_routes_for_peer(peer);
-                self.clear_peer_adj_rib_in(peer);
+                self.clear_peer_adj_rib_in(peer, self.label_successor(peer));
             }
             // Transport recreates the outbound channel whenever a session
             // ends, so one connection never registers twice.

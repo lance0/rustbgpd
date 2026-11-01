@@ -171,7 +171,7 @@ impl PeerManager {
     /// once it is gone. Its routes carry the RIB's deadline from the last
     /// check that found them retained; until a check answers, their next
     /// check time.
-    fn publish_retained_dynamic(&self, peer: &PeerKey) {
+    pub(super) fn publish_retained_dynamic(&self, peer: &PeerKey) {
         let Some(retained) = self.retained_dynamic.get(peer) else {
             return;
         };
@@ -663,6 +663,37 @@ impl PeerManager {
         self.refresh_dynamic_neighbor_capacity_metrics();
         self.reap_deleted_peer_metric_series_for_key(peer);
         info!(peer = %peer, "retained dynamic peer deleted");
+    }
+
+    /// A static neighbor at an idle retained member's address has started
+    /// its session: delete the member and release its identity. The member's
+    /// series were reaped before that session spawned, and the label's series
+    /// are now the static neighbor's, so the member is retired the way a
+    /// replaced speaker is (`release_side_handle`): its deletion keeps the
+    /// label's series, and its teardown leaves the label's gauges to the new
+    /// neighbor.
+    pub(super) fn retire_replaced_retained_dynamic(&mut self, peer: &PeerKey) {
+        if self
+            .retained_dynamic
+            .get(peer)
+            .is_none_or(|retained| retained.check_at.is_none())
+        {
+            return;
+        }
+        let Some(retained) = self.remove_retained_dynamic(peer) else {
+            return;
+        };
+        self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+        self.refresh_dynamic_neighbor_capacity_metrics();
+        self.publish_peer_lifecycle_event(
+            peer,
+            rustbgpd_api::peer_types::SessionLifecycleEventType::PeerRemoved,
+            format!("peer {peer} removed"),
+        );
+        if let Some(handle) = retained.slot.get() {
+            self.release_side_handle(handle);
+        }
+        info!(peer = %peer, "retained dynamic peer replaced by a static neighbor");
     }
 
     fn set_retained_check(&mut self, peer: &PeerKey, at: Option<Instant>) {

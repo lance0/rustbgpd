@@ -919,7 +919,8 @@ struct BgpMetricsInner {
 ///
 /// **Adding a `peer`-labeled Vec metric?** Add it to the reap list in
 /// [`Self::reap_peer_series`] too, so the series are removed when the
-/// peer is deleted. Families without a `peer` label are process-global
+/// peer is deleted. If the RIB writes it, add it to
+/// [`Self::reap_rib_peer_series`] as well. Families without a `peer` label are process-global
 /// (or keyed by another identity such as VNI or VRF) and are
 /// intentionally not reaped — except `collector`-labeled BMP families,
 /// which [`Self::reap_bmp_collector_series`] and
@@ -4387,6 +4388,67 @@ impl BgpMetrics {
         }
     }
 
+    /// Remove the series of `peer` that the RIB writes, and only those.
+    ///
+    /// The RIB calls this when it handles a deleted neighbor's
+    /// `PeerDeleted`, after its own teardown emissions. The peer manager has
+    /// already reaped every family with [`Self::reap_peer_series`] when it
+    /// deleted the neighbor, after joining its session. By the time the RIB
+    /// handles the deletion, a new neighbor at the same address may have
+    /// started and emitted its own peer-manager and session series, so this
+    /// reap leaves those families alone. The new neighbor's RIB series come
+    /// after the deletion in the RIB's order, so reaping these families
+    /// cannot remove them.
+    ///
+    /// Two families have a second writer. The session counts
+    /// `direction="import"` policy routes and the RIB `direction="export"`.
+    /// The session seeds zero `bgp_exact_export_rejections_total` series and
+    /// the RIB only increments them, so only the nonzero series are the
+    /// RIB's.
+    ///
+    /// RIB REAP LIST: a `peer`-labelled family the RIB writes belongs here as
+    /// well as in [`Self::reap_peer_series`]. The RIB crate's census test
+    /// fails when the two drift.
+    pub fn reap_rib_peer_series(&self, peer: &str) {
+        let inner = &self.0;
+        Self::reap_peer_series_from_vec(&inner.rib_prefixes, peer);
+        Self::reap_peer_series_from_vec(&inner.rib_adj_out_prefixes, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_update_group, peer);
+        Self::reap_peer_series_from_vec(&inner.gr_active_peers, peer);
+        Self::reap_peer_series_from_vec(&inner.gr_stale_routes, peer);
+        Self::reap_peer_series_from_vec(&inner.gr_timer_expired, peer);
+        Self::reap_peer_series_from_vec(&inner.gr_eor_grace_released, peer);
+        Self::reap_peer_series_from_vec(&inner.route_refresh_in_progress, peer);
+        Self::reap_peer_series_from_vec(&inner.route_refresh_stale_entries, peer);
+        Self::reap_peer_series_from_vec(&inner.outbound_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&inner.outbound_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&inner.outbound_prefix_headroom, peer);
+        Self::reap_peer_series_from_vec(&inner.outbound_prefix_blocking, peer);
+        Self::reap_peer_series_from_vec(&inner.outbound_prefix_blocked, peer);
+        Self::reap_peer_series_from_vec(&inner.orf_capacity_rejections, peer);
+        Self::reap_peer_series_from_vec(&inner.outbound_route_drops, peer);
+        Self::reap_peer_series_from_vec(&inner.outbound_eor_deferrals, peer);
+        Self::reap_peer_series_from_vec(&inner.outbound_commit_refusals, peer);
+        Self::reap_peer_series_from_vec(&inner.rib_outbound_registration_replaced, peer);
+        Self::reap_peer_series_from_vec(&inner.rib_outbound_registration_failover, peer);
+        Self::reap_peer_series_from_vec(&inner.rib_stale_peer_down_ignored, peer);
+        Self::reap_peer_series_from_vec(&inner.rib_stale_session_message_ignored, peer);
+        Self::reap_label_series_from_vec_where(
+            &inner.exact_export_rejections,
+            &[("peer", peer)],
+            |metric| metric.get_counter().get_value() > 0.0,
+        );
+        // As in `reap_peer_series`: invalidate memoized handles after the
+        // removal.
+        if Self::reap_label_series_from_vec(
+            &inner.policy_routes,
+            &[("peer", peer), ("direction", "export")],
+        ) > 0
+        {
+            POLICY_ROUTES_REAP_EPOCH.fetch_add(1, Ordering::Release);
+        }
+    }
+
     /// Retire policy-route counter identities that selected installed scopes
     /// can no longer emit.
     ///
@@ -4509,6 +4571,16 @@ impl BgpMetrics {
         vec: &prometheus::core::MetricVec<T>,
         matches: &[(&str, &str)],
     ) -> usize {
+        Self::reap_label_series_from_vec_where(vec, matches, |_| true)
+    }
+
+    /// [`Self::reap_label_series_from_vec`], removing only the matching
+    /// series `select` accepts.
+    fn reap_label_series_from_vec_where<T: prometheus::core::MetricVecBuilder>(
+        vec: &prometheus::core::MetricVec<T>,
+        matches: &[(&str, &str)],
+        select: impl Fn(&prometheus::proto::Metric) -> bool,
+    ) -> usize {
         use prometheus::core::Collector;
 
         let descs = vec.desc();
@@ -4525,7 +4597,8 @@ impl BgpMetrics {
                     labels
                         .iter()
                         .any(|pair| pair.name() == *label && pair.value() == *value)
-                }) {
+                }) || !select(metric)
+                {
                     continue;
                 }
                 // Every declared variable label must be present on the

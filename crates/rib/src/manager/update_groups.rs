@@ -3643,7 +3643,8 @@ impl RibManager {
 
     /// Drop a departing peer's membership and group state (the
     /// `clear_outbound_peer_state` seam — `PeerDown`, `PeerDeleted`, GR
-    /// teardown, and collision replacement all route through it).
+    /// teardown, and collision replacement all route through it). The seam
+    /// removes the peer's `bgp_peer_update_group` series.
     pub(super) fn remove_update_group_member(&mut self, peer: PeerId) {
         if let Some(membership) = self.update_groups.members.remove(&peer) {
             if let GroupMembership::Grouped(gid) = membership {
@@ -3651,7 +3652,6 @@ impl RibManager {
             }
             self.refresh_update_group_gauges();
         }
-        self.metrics.remove_peer_update_group(&peer.label());
     }
 
     /// Apply a transport slow-peer flag change (LAN-470,

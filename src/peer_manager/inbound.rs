@@ -621,9 +621,6 @@ impl PeerManager {
                 {
                     return;
                 }
-                // A deleted neighbor's admitted cleanup may still reap the
-                // label this session is about to emit under.
-                self.supersede_label_reaps(&dynamic_peer_key);
                 let session_id = self.allocate_session_id();
                 let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
                     transport.clone(),
