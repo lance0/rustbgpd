@@ -1554,6 +1554,13 @@ impl PeerManager {
             self.refuse_learned_address(name, endpoint.address, reason, &detail);
             return;
         }
+        if self.bind_would_wait(name) {
+            // Retried on the timer, like a failed bind, until the deferred
+            // RIB updates ahead of it are admitted.
+            debug!(interface = %name, address = %endpoint.address, deferred = self.deferred_rib.queue.len(), "unnumbered: binding waits for deferred RIB updates; retrying");
+            self.arm_unnumbered_retry();
+            return;
+        }
         let port = self.port_mut(name);
         port.refused = None;
         port.refusal = None;
@@ -2006,11 +2013,11 @@ impl PeerManager {
         if self.inbound_address_held(name, address) {
             return None;
         }
-        // Binding would wait for a deleted endpoint's RIB cleanup under the
-        // interface's label; refuse the connection instead (the remote
-        // retries), here and again after a retirement queues one.
+        // Binding would wait behind deferred RIB updates (`bind_would_wait`);
+        // refuse the connection instead (the remote retries), here and again
+        // after a retirement queues its cleanup.
         let learned = PeerKey::new(IpAddr::V6(address), Some(name.to_string()));
-        if self.refuse_inbound_behind_deferred_cleanup(&learned, false) {
+        if self.refuse_inbound_behind_deferred_cleanup(&learned, self.port_holds_rib_peer(name)) {
             return None;
         }
         if let Some(key) = bound {
@@ -2073,7 +2080,7 @@ impl PeerManager {
         // The same atomic admission step as an RA binding: no input runs
         // between this check and the insertion in `bind_port`.
         if self.inbound_address_held(name, address)
-            || self.refuse_inbound_behind_deferred_cleanup(&learned, false)
+            || self.refuse_inbound_behind_deferred_cleanup(&learned, self.port_holds_rib_peer(name))
         {
             return None;
         }
@@ -2224,6 +2231,27 @@ impl PeerManager {
         Ok(true)
     }
 
+    /// Whether the interface-only neighbor on `name` keeps a RIB handle
+    /// across endpoints, which its next binding moves with `RebindPeer`.
+    fn port_holds_rib_peer(&self, name: &str) -> bool {
+        self.unnumbered
+            .as_ref()
+            .and_then(|unnumbered| unnumbered.ports.get(name))
+            .is_some_and(|port| port.rib_peer.is_some())
+    }
+
+    /// Whether binding `name` now would wait in the actor behind deferred RIB
+    /// updates: its `RebindPeer` goes behind every one of them, and its
+    /// session starts only after a cleanup under the interface's label. Its
+    /// callers retry or refuse instead, so no bind waits with no owner.
+    fn bind_would_wait(&self, name: &str) -> bool {
+        !self.deferred_rib.queue.is_empty()
+            && (self.port_holds_rib_peer(name)
+                || self
+                    .deferred_rib
+                    .reaps(&rustbgpd_telemetry::interface_peer_label(name)))
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "binding admission and rollback share the held neighbor state and must preserve side-effect ordering"
@@ -2233,6 +2261,10 @@ impl PeerManager {
         name: &str,
         endpoint: Endpoint,
     ) -> Result<(), PeerLifecycleError> {
+        debug_assert!(
+            !self.bind_would_wait(name),
+            "a bind of {name} would wait behind deferred RIB updates"
+        );
         if self.port_mut(name).bfd_removal_unsettled {
             self.arm_unnumbered_retry();
             return Err(PeerLifecycleError::Internal(

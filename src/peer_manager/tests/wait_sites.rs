@@ -2233,10 +2233,21 @@ const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
          serves any readiness query",
     ),
     (
+        "mod.rs::drive_while",
+        1,
+        "drives the deferred drain beside a session's bounded shutdown, a wait bounded by \
+         PEER_LIFECYCLE_COMMAND_TIMEOUT that never served the readiness lane",
+    ),
+    (
         "mod.rs::run",
         1,
         "the deferred-update drain is a run-loop select arm beside the readiness lane, never \
          awaited inside a transaction",
+    ),
+    (
+        "mod.rs::send_if_granted",
+        1,
+        "polls the deferred drain once with now_or_never and never waits",
     ),
     (
         "mod.rs::send_oldest",

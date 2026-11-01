@@ -615,6 +615,12 @@ impl PeerManager {
                         .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
                     return;
                 }
+                // An eviction behind a full mailbox defers the evicted
+                // identity's cleanup: the new identity waits for it too.
+                if at_limit && self.refuse_inbound_behind_deferred_cleanup(&dynamic_peer_key, true)
+                {
+                    return;
+                }
                 let session_id = self.allocate_session_id();
                 let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
                     transport.clone(),

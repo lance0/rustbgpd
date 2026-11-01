@@ -444,16 +444,20 @@ impl PeerManager {
     }
 
     /// Stop `handle` within the bounded shutdown. The session sends its final
-    /// `PeerDown` while it stops, and this wait does not drive deferred RIB
-    /// admission, so a reservation in progress is given back first.
+    /// `PeerDown` while it stops, so the wait drives deferred RIB admission:
+    /// a granted reservation is sent rather than holding the slot that
+    /// `PeerDown` needs, and the deferred update keeps its place in line.
     pub(super) async fn shutdown_handle_bounded(
         &mut self,
         address: std::net::IpAddr,
         context: &'static str,
         handle: PeerHandle,
     ) -> PeerShutdownOutcome {
-        self.deferred_rib.release_reservation();
-        Self::shutdown_handle_bounded_owned(address, context, handle).await
+        self.deferred_rib
+            .drive_while(Self::shutdown_handle_bounded_owned(
+                address, context, handle,
+            ))
+            .await
     }
 
     pub(super) async fn shutdown_handle_bounded_owned(
