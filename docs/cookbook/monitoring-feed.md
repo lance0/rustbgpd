@@ -243,7 +243,7 @@ what each view contains.
 
 ## Watch
 
-Import the overview dashboard per [`GRAFANA.md`](../how-to/grafana.md); the
+Import the overview dashboard per [the Grafana guide](../how-to/grafana.md); the
 BMP and event-streaming row is populated once the features above are
 configured. Key series:
 

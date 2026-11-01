@@ -9,11 +9,8 @@ newer. Release-by-release crate changes are recorded in the
 
 `rustbgpd-rpki` 0.9.0 moves to wire `0.27.0`; verifier and RTR signatures
 are unchanged. Upgrade wire 0.27, FSM 0.14 and RPKI 0.9 together when
-exchanging public wire types. Attribute 25 now decodes to typed, lossless twenty-octet
-communities, with direct IPv6 target-IP helpers; IPv4 direct targets join
-`FlowSpecAction`. Existing enums are non-exhaustive, but consumers matching
-exact decoded variants must account for the new variants. See the
-[wire changelog](../wire/CHANGELOG.md).
+exchanging public wire types. The
+[wire changelog](../wire/CHANGELOG.md) describes the new wire types and decoded variants.
 
 `rustbgpd-rpki` 0.8.1 is a documentation-only patch on wire `0.26` with no
 public item or behavior change.
@@ -195,7 +192,8 @@ The first `0.1.x` line used wire `0.19`; `0.2.x` used wire `0.20`. The
 `0.3.x` line uses wire `0.21` and adopts the enum policy below. The
 `0.4.x` line moves the public wire dependency to `0.22`, the `0.5.x` line
 moves it to `0.23`, the `0.6.x` line moves it to `0.24`, the `0.7.x` line
-moves it to `0.25`, and the `0.8.x` line moves it to `0.26`, each with
+moves it to `0.25`, the `0.8.x` line moves it to `0.26`, and the `0.9.x`
+line moves it to `0.27`, each with
 verifier and RTR method signatures unchanged.
 
 ## Enum exhaustiveness

@@ -260,7 +260,7 @@ fn start_session() -> Result<Session, Box<dyn std::error::Error>> {
 }
 ```
 
-The FSM does not touch the network. It is `(State, Event) -> (State, Vec<Action>)`.
+The FSM does not touch the network. It is `Session::handle_event(&mut self, Event) -> Vec<Action>`.
 This makes it trivially testable and lets a sidecar plug in any transport
 (TCP, TLS, a Unix socket for tests, a virtual link in a simulator).
 

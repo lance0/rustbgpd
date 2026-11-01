@@ -265,6 +265,7 @@ records.
 
 | Document | Date stated | Workload or shape | Establishes | Does not establish |
 |---|---|---|---|---|
+| [EVPN core-isolation transition loss](evpn-core-isolation-loss-2026-10-20.md) | 2026-10-19 and 2026-10-20 | M121 all-active EVPN lab on one quiet host, one UDP flow at 2,000 frames/s, uplink carrier cut; 48 valid action-arm A/B cycles across two builds on 2026-10-20, plus one action and one control arm on 2026-10-19 | With `[evpn_core_isolation]` enabled the loss window had a median of about 15 ms (worst 35.5 ms); with it disabled every valid cycle lost the flow for the whole 8 s post-cut window | A hardware NIC, ASIC or line-rate bound, another probe rate, or isolation detected only by EVPN session loss |
 | [Full-table dataset reload](dataset-reload-full-table-2026-10-17.md) | 2026-10-17 | Hosted daemon, 1.23M dual-stack keys × 12 receivers, UC/VPN; 1% content-only dataset swap and revert by SIGHUP; delta and group-level full-pass cells; two earlier full-pass runs retained as FAIL | No exit, exact fold and readiness 200 in all three cells; affected-keys pass 63–509 ms, group-level full pass 4.4–4.6 s with no unchanged re-sends | Hosted VPN full pass, per-member fallback families, other receiver counts or policies, or release qualification |
 | [Shared VPN recovery capture scans](update-group-recovery-vpn-capture-scans-2026-10-16.md) | 2026-10-16 | Component capture scans, 1.23M-key full-uc/full-vpn and 37.5k EVPN keys, sorted and shuffled, 6 cells × 4 ABBA legs per profile/order; one earlier run retained as FAIL | Shared unicast and VPN capture pass the 1.5× flat bar: full-uc ≤ 1.10×, full-vpn 0.243–0.275× including churned pools | Daemon memory, fleet readiness, wire delivery, release qualification or EVPN activation |
 | [Peer-teardown cleanup readiness at `7ff33596`](peer-teardown-cleanup-readiness-7ff33596-2026-10-16.md) | 2026-10-16 | Full 1.23M dual-stack keys, UC and VPN, 6 retirement cells × 2 arms × 2 legs (48 invocations) | Instrumented component readiness bars pass: checkpoint interval ≤ 9.16 ms (limit 25 ms), RIB reply ≤ 81.3 ms (limit 200 ms), productive overlap in every full cell | Uninstrumented cost, real attribute diversity, `/readyz` HTTP or wire-driven qualification, release qualification |
@@ -316,6 +317,7 @@ records.
 | [`grouped-withdrawal-probe-skip-2026-07.md`][grouped-withdrawal-probe-skip-2026-07.md] | July 2026 | Fixed 64-route withdrawal at 64, 256, and 1,000 members | Exact-probe skip improved measured medians by 6.80–9.33% | A result outside the fixed withdrawal shape |
 | [GR EoR attribution](gr-eor-attribution-2026-10.md) | 2026-10-02 | Zero-change 1.2M-route EoRs with one and 148,667 synthetic live attribute sets | About 1.3 ms live-set GC and 2.8 ms exact stale counting in the diverse cell; unicast totals above 10 ms | A speedup, MRT/DFZ distribution, or post-withdrawal reclamation |
 | [GR EoR stale-resolution attribution](gr-eor-stale-resolution-attribution-2026-10.md) | 2026-10-02 | Same zero-change 1.2M-route fixture with GR stale-sweep and clear timers | About 5.6–5.7 ms unicast stale sweeping, 3.0–3.5 ms stale clearing, and 2.8 ms exact counting | A safe scan removal, total EoR fix, or speedup claim |
+| [`headline-refresh-jemalloc-2026-10.md`](headline-refresh-jemalloc-2026-10.md) | 2026-10-03 | IXP-700 S1/S2/S3 and IRR reload at 0% overlap, main (`481e0187d`) against the same-night harness-fix control (`370e211b9`), alternating, three runs per cell per arm, with the `reloadstall` harness linked against jemalloc in both arms | First headline rows free of the harness allocator artefact; S2 RIB transition faster on main (median 490 against 579 ms) without moving the reload clock; S1, S3 and IRR 0% harness completion within spread | Attribution of any delta to one change, a released-tree comparison, comparator daemons, RR1000, or IRR 10%/50% overlap |
 | [`headline-refresh-v0730-2026-09.md`](headline-refresh-v0730-2026-09.md) | 2026-09-28 | IXP-700 S1/S2/S3, IRR reload at 0% overlap, and RR1000 on v0.73.0, v0.72.0 and v0.68.0, alternating, three or more runs per arm, plus a cross-harness v0.68.0 arm | v0.73.0 against the same-night v0.72.0 control; v0.68.0 reproduces its 2026-08-30 rows, so the v0.72.0 slowdown lies between the releases | IRR 10%/50% overlap, comparator daemons, or attribution of any delta to one change |
 | [`headline-refresh-v0720-2026-09.md`](headline-refresh-v0720-2026-09.md) | 2026-09-26 | IXP-700 S1/S2/S3, IRR reload at 0% overlap, and RR1000 on v0.72.0 and current main, alternating, three or more runs per build | Main within run-to-run spread of the same-day v0.72.0 control, except consistently slower session establishment (about +0.1 s, unattributed) and small RR1000 shifts | IRR 10%/50% overlap, comparator daemons, or attribution of the gap to the August v0.68.0 rows |
 | [`high-n-route-server-v0680-2026-08.md`][high-n-route-server-v0680-2026-08.md] | 2026-08-30 | Exact-source 2,500- and 5,000-peer route-server runs | Both high-N runs completed their session and route-count gates | A scaling law, interpolation, or extrapolation |
@@ -359,8 +361,11 @@ records.
 | [`readiness-checkpoint-clock-2026-10.md`][readiness-checkpoint-clock-2026-10.md] | 2026-10-03 | S2: 700 changed peers × 400,400 prefixes, ABBAABBA, four legs × four reloads per arm; main `aae915bb4` against #2920 head `5fedc3499` | Skipping the idle readiness-checkpoint clock read lowered the daemon's median SIGHUP → reload complete from 1,137.15 to 959.15 ms, and the RIB transition by about 129 ms, with separate per-reload ranges; deferred refresh dispatch rose by about 48 ms | Other shapes, operator-read latency, the merged build, a memory change, statistical significance |
 | [`rebaseline-2026-07.md`][rebaseline-2026-07.md] | 2026-07 | Manager-direct RR fanout reconstruction and memory attribution | Post-update-group manager-phase and allocation breakdown | Transport, encode, writer, network, or backpressure cost |
 | [`reload-authoritative-batch-discriminator-2026-08.md`][reload-authoritative-batch-discriminator-2026-08.md] | August 2026 | Two identical 320-member, 183,040-prefix roots on one candidate | Localized later-reload growth to registration/membership, with a negative adjudicator result | A mechanism, improvement, or authorization to optimize |
+| [`reload-boundary-attribution-2026-10.md`](reload-boundary-attribution-2026-10.md) | October 2026 | 700 peers × 400,400 prefixes, all peers changed, four reloads per process, three control/probe pairs in AB/BA/AB order | FAIL: the probe raised changed-gap p50 by 26.81% (primary) and 23.84% (pooled) against the 2% overhead bar, so its phase measurements do not qualify | Production-tail attribution, the cause of the overhead, or any runtime change |
+| [`reload-cpu-phases-2026-10.md`](reload-cpu-phases-2026-10.md) | October 2026 (offline; traces measured 2026-10-06) | Retained S2 traces from the export-probe delta receipt: 700 peers × 400,400 prefixes, four reloads, six legs in ABBAAB order, no new run | Most same-binary CPU variation lies outside reload windows: 17.800 of 18.205 extra CPU-seconds for 05-A | The cause of the variation, a mode classifier, a corrected arm effect, or a CPU regression or improvement |
 | [`reload-flush-envelope-2026-07.md`][reload-flush-envelope-2026-07.md] | 2026-07 | 100-peer fleets with 100k, 300k, and 500k tables | Reload-flush depooling tracked fleet shape more than route volume | A fitted coefficient or fully orthogonalized peer-axis result |
 | [`reload-generation-phase-attribution-2026-08.md`][reload-generation-phase-attribution-2026-08.md] | August 2026 | Two 320-member, 183,040-prefix roots with four SIGHUP reloads | Localized later-reload latency inside the synchronous authoritative RIB transition | A mechanism, latency improvement, or sufficient basis for a fix |
+| [`reload-observer-tail-2026-10-06.md`](reload-observer-tail-2026-10-06.md) | 2026-10-06 | Native-loopback diagnostic, 700 peers × 400,400 prefixes, four reloads, one control and one probe process | Places most first-write tail time outside the sampled write future: matched writes took at most 0.194 ms; larger intervals were consumer entry to first admission and writer start to the observer event | Clean production tail estimates (the probe raised median maximum-gap p50 by about 5.38%), stable overhead, or any optimization or causal speedup |
 | [`reload-stall-2026-07.md`][reload-stall-2026-07.md] | Initial campaign 2026-07-11; latest campaign 2026-07-16 | 700 clients, 400,400 routes, live churn, four reloads | Dated reload stall and completion observations | A settled RSS plateau from four cycles |
 | [`revised-update-duplicate-table-2026-07.md`][revised-update-duplicate-table-2026-07.md] | 2026-07 | One clean UPDATE through the eBGP disposition branch | Fixed-table duplicate detection improved the measured parser fixture | A causal 21.73% speedup after the biased control |
 | [`rib-criterion-noise-floor-2026-07.md`][rib-criterion-noise-floor-2026-07.md] | 2026-07 | Same-SHA controls plus isolated LLGR tag-lookup row | Establishes the host noise floor and one scoped CPU improvement | Convergence, pipeline, other sizes, or other hosts |
@@ -578,13 +583,11 @@ from that file; a directory name does not fill a missing date.
 
 ## Metadata gaps
 
-The index covers 166 of the 170 Markdown files: 70 primary records and 96
-supporting records. Four older files are not indexed yet:
-[`ixp-initial-export-readiness-2026-09.md`](ixp-initial-export-readiness-2026-09.md),
-[`ixp-membership-churn-2026-09.md`](ixp-membership-churn-2026-09.md),
-[`ixp-membership-churn-qualified-2026-09.md`](ixp-membership-churn-qualified-2026-09.md),
-and
-[`artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md`](artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md).
+Every top-level Markdown file in this directory other than this index,
+methodology pages included, has a primary record. Some files under
+`artifacts/` have no row of their own, such as
+[`artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md`](artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md);
+reach them through their parent receipt.
 Supporting artifacts often rely on their parent receipt for context; this
 index deliberately leaves their own missing metadata as `Unstated` instead of
 copying it down.
@@ -597,10 +600,9 @@ state a date:
 - [`vpn-rib-query-occupancy-method.md`][vpn-rib-query-occupancy-method.md]
 
 Every primary record states a claim and claim boundary. In the supporting
-table, 66 files do not state their own date, four do not state an independent
-claim, and 55 do not state an independent claim boundary. Those gaps appear as
-`Unstated` in the affected row; every supporting file states at least its role
-or workload.
+table, a file that does not state its own date, an independent claim, or an
+independent claim boundary shows `Unstated` in the affected field; every
+supporting file states at least its role or workload.
 
 Both tables derive every field from the linked record rather than treating a
 filename, parent directory, or neighboring receipt as evidence.

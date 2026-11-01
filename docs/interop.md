@@ -199,7 +199,7 @@ support manual dispatch. Neither workflow has a scheduled trigger.
   **M73**, **M74**,
   **M75**, **M76**, **M77**, **M78**, **M79**, **M89**, **M116**, and
   global-table SRv6 reflection from FRR 10.7.1 to GoBGP: **M125**.
-- **Operational + security** — BMP, transport security, FlowSpec: **M22**, **M24**, **M25**, the BMP trio + BMPv4 receipt **M81**, and FastNetMon RTBH through the GoBGP bridge: **M126**.
+- **Operational + security** — BMP, transport security, FlowSpec: **M22**, **M24**, **M25**, and the BMP trio + BMPv4 receipt **M81**.
 - **Protocol resilience + validation** — max-prefix Cease, RTR v2 ASPA
   validation (roleless and role-aware), dynamic-neighbor admission, RFC 7606
   malformed-UPDATE dispositions, the released-daemon Partial-flag receiver

@@ -836,7 +836,7 @@ a non-TTY.
 | Received routes | `rbgp rib received <peer>` or `rbgp rib recv <peer>` |
 | Advertised routes | `rbgp rib advertised <peer>` or `rbgp rib sent <peer>` |
 | Count matching best/received/advertised routes | add `--count` to the corresponding command |
-| Longest-prefix match for an address or CIDR | `rbgp rib lookup <IP|CIDR>` |
+| Longest-prefix match for an address or CIDR | `rbgp rib lookup <IP\|CIDR>` |
 | Explain best path | `rbgp rib --prefix <cidr> --explain` |
 | Explain export policy / gates | `rbgp rib --prefix <cidr> advertised <peer> --explain` |
 | Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr> --direction import` |

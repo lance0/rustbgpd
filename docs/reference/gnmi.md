@@ -19,7 +19,7 @@ candidate TOML before using the same plan/apply/persist/rollback path as native
 config transactions.
 
 Design details live in [ADR-0070](../adr/0070-gnmi-openconfig-telemetry.md). The
-complete native gRPC reference remains [API.md](api.md).
+complete native gRPC surface is in the [native gRPC API reference](api.md).
 
 ## Listener Setup
 
@@ -303,7 +303,7 @@ contain that neighbor emits no update for the cycle; sync still completes and
 POLL/STREAM remain live for later appearances. Concrete neighbor `Get` returns
 `NOT_FOUND` for an unknown neighbor, except during startup: until the
 configured-peer roster is installed it returns retryable `UNAVAILABLE` (see
-[API.md](api.md#unknown-peers-in-peer-scoped-views)). Peer-snapshot failures
+[native gRPC API reference](api.md#unknown-peers-in-peer-scoped-views)). Peer-snapshot failures
 remain `UNAVAILABLE`.
 
 ## Dial-out (device-initiated push)

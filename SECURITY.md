@@ -91,9 +91,12 @@ with on-demand ClusterFuzzLite campaigns (see [Fuzzing](#fuzzing)).
 - **No panics on malformed input.** Every input from the network is
   untrusted. A panic on malformed BGP data is a denial-of-service
   vulnerability.
-- **No unbounded allocations.** All channels are bounded. Per-peer
-  prefix limits enforced at insertion. UPDATE attribute sizes enforced
-  at decode time.
+- **No unbounded allocations.** State-owning channels are bounded; the
+  small documented set of intentional unbounded channels is listed in
+  Design Invariant #3 of
+  [the architecture guide](docs/explanation/architecture.md). Per-peer
+  prefix limits are enforced at insertion. UPDATE attribute sizes are
+  enforced at decode time.
 - **Commit-confirm state is authenticated local authority.** Production writes
   v3 in durability order: secret-bearing normalized configuration at
   `<runtime_state_dir>/commit-confirm-v3-prior.toml`, confidential provenance
@@ -110,9 +113,9 @@ with on-demand ClusterFuzzLite campaigns (see [Fuzzing](#fuzzing)).
   Locator absence carries no v3 authority. A retired v2 locator or locator-free
   v1/v2 journal makes v0.65.0 and every later release refuse boot before
   candidate mutation, and remains untouched for recovery with rustbgpd v0.64.0.
-- **No `unsafe` code in shipped paths outside three scoped modules.** Every
+- **No `unsafe` code in shipped paths outside four scoped modules.** Every
   workspace crate root carries `#![deny(unsafe_code)]`, so `unsafe` cannot enter
-  a crate without a visible, reviewed opt-out. Three modules hold one:
+  a crate without a visible, reviewed opt-out. Four modules hold one:
   - `crates/transport`'s `socket_opts` module, opted out by a module-level
     `#[allow(unsafe_code)]` in the crate root and a per-function
     `#[allow(unsafe_code, reason = ...)]` on each site inside it. Every site is
@@ -133,11 +136,18 @@ with on-demand ClusterFuzzLite campaigns (see [Fuzzing](#fuzzing)).
     `IP_RECVTTL` / `IPV6_RECVHOPLIMIT`, which `socket2` does not expose. BFD
     needs the received TTL delivered as ancillary data to enforce the RFC 5881
     exact-255 receive check.
+  - The daemon binary's `ra_discovery::runtime` module: two per-function
+    `#[allow(unsafe_code, reason = ...)]` sites on the raw ICMPv6 socket used for
+    Router Advertisement discovery. One `setsockopt` installs the `ICMP6_FILTER`
+    that passes only Router Solicitation and Router Advertisement, which
+    `socket2`, `nix` and `libc` do not wrap; the other is tokio's
+    `AsyncFd::register`, which exposes reactor registration only as an `unsafe`
+    I/O-safety contract.
 
   The daemon binary carries the same unconditional crate-root deny with its
   default `jemalloc`, opt-in `dhat-heap`, and no-default-feature configurations.
   Registering either dependency-provided allocator introduces no `unsafe` block
-  or `unsafe impl` in this crate. The three shipped boundaries above remain
+  or `unsafe impl` in this crate. The four shipped boundaries above remain
   visible, reviewed opt-outs with recorded reasons.
 
   Test and benchmark targets are separate compilation units and are not covered

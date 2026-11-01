@@ -417,7 +417,7 @@ default `unix:///var/lib/rustbgpd/grpc.sock`.
 
 Because the state directory now *is* the mounted volume, a `docker restart`
 keeps the gRPC socket path, `config-history/`, the graceful-restart marker,
-crash reports, and the event DB — not just the copied `config.toml`.
+and crash reports, not just the copied `config.toml`.
 
 The config is seeded from a read-only template into the writable state volume
 rather than bind-mounted in place. Config persistence rewrites the file with a
