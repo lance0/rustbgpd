@@ -330,6 +330,11 @@ impl RibManager {
                     base.vpn.capacity(),
                 );
             }
+            // The member's wire moves to another view: which row a GR helper
+            // keeps at a key is no longer provable from either table.
+            if baseline.is_some() {
+                self.record_hold_regrouped(peer);
+            }
             if let Some(gid) = prev_gid {
                 self.leave_group(gid, peer);
             } else if previous.is_some() {

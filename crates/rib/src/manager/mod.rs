@@ -1208,15 +1208,14 @@ pub struct RibManager {
     /// intersects these with the member's actual admitted-key proof. Cleared
     /// on resync success.
     pending_extra_withdraws: HashMap<PeerId, update_groups::ExtraWithdraws>,
-    /// Exempt (RTBH or host) unicast keys withdrawn outright while our
-    /// End-of-RIB may be held (a selection gate or replay grace): per update
-    /// group, and per private receiver once its withdrawal is queued. A
-    /// session that ends before its queued withdrawal reaches the peer
-    /// leaves that row stale at a GR helper, and the group table or
-    /// Adj-RIB-Out no longer names it. Bounded per owner by
-    /// [`HELPER_STALE_EXEMPT_LIMIT`]; retired once nothing can hold that
-    /// End-of-RIB.
-    hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, BTreeSet<(Prefix, u32)>>,
+    /// What each update group, and each private receiver once its update is
+    /// queued, may hold of exempt (RTBH or host) unicast rows that its
+    /// committed table no longer proves, while our End-of-RIB may be held (a
+    /// selection gate or replay grace). Every hold starts with the RIB, so
+    /// this covers every commit that a held End-of-RIB can leave stale at a
+    /// GR helper. Bounded per owner and set by [`HELPER_STALE_EXEMPT_LIMIT`];
+    /// retired once nothing can hold that End-of-RIB.
+    hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, HoldLedger>,
     /// Hold sources (a selection family, a grace window) that went away
     /// since the last retirement pass; nonzero means a carry or ledger may
     /// have become retirable.
@@ -2010,6 +2009,31 @@ enum HoldWithdrawOwner {
     Peer(PeerId),
 }
 
+/// One owner's [`RibManager::hold_exempt_withdrawn`] entry.
+#[derive(Debug, Default)]
+struct HoldLedger {
+    /// Exempt rows withdrawn outright. A session that ends before the
+    /// withdrawal reaches the peer leaves the row stale at a GR helper, and
+    /// the table no longer names it.
+    withdrawn: BTreeSet<(Prefix, u32)>,
+    /// Keys where an ordinary row met an exempt one: an exempt row replaced
+    /// an ordinary row, or an ordinary row was committed where an exempt one
+    /// was or was withdrawn. The peer may hold the ordinary row there, as
+    /// delivered or as not yet replaced, so a GR helper's stale row at the
+    /// key may be either.
+    replaced: BTreeSet<(Prefix, u32)>,
+    /// Any key may hold an ordinary row: a private receiver's wire moved
+    /// between an update group's view and its own, or `replaced` reached
+    /// its limit.
+    all_uncertain: bool,
+}
+
+impl HoldLedger {
+    fn is_empty(&self) -> bool {
+        self.withdrawn.is_empty() && self.replaced.is_empty() && !self.all_uncertain
+    }
+}
+
 /// Exempt keys a GR-capable peer may hold stale from an ended session.
 #[derive(Debug)]
 struct HelperStaleExempt {
@@ -2031,6 +2055,14 @@ struct HelperStaleExempt {
     /// End-of-RIB for them was neither held nor sent: their keys wait for
     /// it to be held (a gate arms) or to go out.
     gate_blocked: Vec<(Afi, Safi)>,
+    /// Carried keys at which the peer may hold an ordinary row instead of
+    /// the exempt one: an ordinary row met an exempt one there in the hold.
+    /// Only these wait while their prefix has another route; at the rest
+    /// the peer can only hold a stale exempt row.
+    uncertain: BTreeSet<(Prefix, u32)>,
+    /// Every carried key is uncertain: the ended session's wire moved
+    /// between views in the hold, or `uncertain` reached its limit.
+    all_uncertain: bool,
 }
 
 #[derive(Clone, Debug, Default)]

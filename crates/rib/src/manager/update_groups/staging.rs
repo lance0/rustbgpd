@@ -518,6 +518,44 @@ impl RibManager {
                 withdrawn,
                 "group_commit",
             );
+            // An ordinary row meeting an exempt one at a key: an exempt row
+            // over an ordinary one, or an ordinary row where an exempt one
+            // was or was withdrawn. A member may hold the ordinary row there.
+            let withdrawn_exempt = self
+                .hold_exempt_withdrawn
+                .get(&super::super::HoldWithdrawOwner::Group(gid))
+                .map(|ledger| &ledger.withdrawn);
+            let replaced: Vec<_> = self.group_ribs.get(&gid).map_or_else(Vec::new, |group| {
+                out.deltas
+                    .iter()
+                    .inspect(|_| self.replacement_checkpoint(false))
+                    .filter(|delta| {
+                        if delta.new.is_none() {
+                            return false;
+                        }
+                        let key = (delta.prefix, delta.path_id);
+                        let exempt = delta
+                            .local_source
+                            .is_some_and(|source| source.deferral_exempt);
+                        let held = group.table.get(&key.0, key.1).is_some();
+                        let held_exempt = group
+                            .table
+                            .local_export_source(&key.0, key.1)
+                            .is_some_and(|source| source.deferral_exempt);
+                        if exempt {
+                            held && !held_exempt
+                        } else {
+                            held_exempt || withdrawn_exempt.is_some_and(|keys| keys.contains(&key))
+                        }
+                    })
+                    .map(|delta| (delta.prefix, delta.path_id))
+                    .collect()
+            });
+            self.record_hold_exempt_replaced(
+                super::super::HoldWithdrawOwner::Group(gid),
+                replaced,
+                "group_commit",
+            );
         }
         let readiness = &self.replacement_readiness;
         let mut checkpoint = || replacement_readiness_checkpoint(readiness, false);

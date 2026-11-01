@@ -2434,11 +2434,14 @@ operator decision.
 **A helper that flaps during the hold.** The helper keeps the ended
 session's routes stale until End-of-RIB. While End-of-RIB toward it is held,
 by selection deferral or this grace window, rustbgpd withdraws an RTBH or
-host route deleted since then, but not one whose prefix still has another
+host route deleted since then. It keeps one whose prefix still has another
 route, local or received from another peer, even if this peer's export
-policy denies it. The helper keeps that RTBH until an ordinary route for the
-prefix is advertised to it at the same key, or until End-of-RIB, whichever
-comes first. An RTBH controller that replaces a blackhole with an ordinary
+policy denies it, when an ordinary route and an RTBH met at that key on the
+ended session, or when the receiver changed update group during the hold.
+An RTBH whose ordinary replacement at the same key never reached the helper
+also stays. In both cases the helper keeps the RTBH until an ordinary route
+for the prefix is advertised to it at the same key, or until End-of-RIB,
+whichever comes first. An RTBH controller that replaces a blackhole with an ordinary
 route at the same prefix should expect the RTBH to stay while that
 replacement is export-denied, held by selection deferral or an ORF gate, or
 advertised to an Add-Path receiver under a different path ID, and should keep

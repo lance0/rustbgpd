@@ -193,6 +193,29 @@ fn assert_deleted_exempt_leaves_helper_within_hold(
     new_session: u64,
     aggregate: bool,
 ) {
+    let rtbh = Rtbh {
+        aggregate,
+        routed: false,
+    };
+    assert_deleted_exempt_leaves_helper(grouped, stuck_withdraw, new_session, rtbh);
+}
+
+/// The deleted RTBH: a BLACKHOLE aggregate or a host, and with `routed` an
+/// ordinary route for its prefix throughout the hold, which the hold defers
+/// so it never reaches the wire.
+#[derive(Clone, Copy)]
+struct Rtbh {
+    aggregate: bool,
+    routed: bool,
+}
+
+/// [`assert_deleted_exempt_leaves_helper_within_hold`] for any [`Rtbh`].
+fn assert_deleted_exempt_leaves_helper(
+    grouped: bool,
+    stuck_withdraw: bool,
+    new_session: u64,
+    Rtbh { aggregate, routed }: Rtbh,
+) {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let (old_tx, mut old_rx, _) = register(&mut manager, 82, grouped, false);
@@ -207,6 +230,9 @@ fn assert_deleted_exempt_leaves_helper_within_hold(
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32)
     };
     let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    if routed {
+        announce(&mut manager, [rtbh]);
+    }
     inject_rtbh(&mut manager, rtbh);
     inject_rtbh(&mut manager, kept);
     apply(&mut old_rx, &mut peer_rib, None);
@@ -270,11 +296,11 @@ fn assert_deleted_exempt_leaves_helper_within_hold(
     }
     assert!(!manager.selection_deferred(FAMILY));
     assert_eq!(markers, 1, "release sends the deferred End-of-RIB once");
-    assert_eq!(
-        peer_rib.into_iter().collect::<Vec<_>>(),
-        [(kept_key, false)],
-        "the peer converges on the live table"
-    );
+    // Released, the prefix's ordinary route is advertised at the key.
+    let live: PeerRib = std::iter::once((kept_key, false))
+        .chain(routed.then_some((key, false)))
+        .collect();
+    assert_eq!(peer_rib, live, "the peer converges on the live table");
 }
 
 #[test]
@@ -539,9 +565,21 @@ fn queued_rtbh_withdrawal_dropped_at_session_end_is_resent() {
 /// desired-prefix check the flush withdraws it.
 #[test]
 fn private_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh() {
+    assert_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh(false);
+}
+
+/// The grouped receiver's twin: the RTBH replaces the ordinary row in the
+/// group's table. Red proof: without recording the group's replacement the
+/// flush withdraws the stale ordinary row.
+#[test]
+fn grouped_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh() {
+    assert_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh(true);
+}
+
+fn assert_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh(grouped: bool) {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
-    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, grouped, false);
     let mut rib = PeerRib::new();
     apply(&mut old_rx, &mut rib, None);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
@@ -566,7 +604,7 @@ fn private_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh() {
         "the queued RTBH's key is carried"
     );
     delete(&mut manager, prefix);
-    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, false, false);
+    let (_new_tx, mut new_rx, _) = register(&mut manager, 182, grouped, false);
     for _ in 0..4 {
         manager.resync_dirty_peers_bounded();
         apply(&mut new_rx, &mut rib, Some(key));
@@ -814,20 +852,21 @@ fn host(block: u8, index: usize) -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(10, block, high, low), 32)
 }
 
-/// `8 * size` deleted RTBH keys wait at a helper because each prefix still
-/// has an ordinary route the hold defers; then `size` updates change other
-/// prefixes. A settled set is re-checked only for the prefixes a pass
+/// `8 * size` deleted RTBH keys wait at a helper because each RTBH replaced
+/// an ordinary route on the wire and its prefix still has that route, which
+/// the hold defers; then `size` updates change other prefixes. A settled set is re-checked only for the prefixes a pass
 /// changed, so the flush work grows with keys plus passes, not their
 /// product.
 fn settled_helper_flush(size: usize) -> super::work_scaling::Work {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 4096, false, false);
     let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
-    let _waiter = connect(&mut manager, WAITER, 64, true, false);
-    assert!(manager.selection_deferred(FAMILY));
     let keys = 8 * size;
     announce(&mut manager, (0..keys).map(|index| host(1, index)));
     let mut peer_rib = PeerRib::new();
+    apply(&mut old_rx, &mut peer_rib, None);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
     for index in 0..keys {
         inject_rtbh(&mut manager, host(1, index));
         apply(&mut old_rx, &mut peer_rib, None);
@@ -916,9 +955,10 @@ fn assert_timer_withdraws(
     }
 }
 
-/// A private receiver whose carried RTBH key waits because a received
-/// ordinary route the hold defers still covers its prefix; the set is
-/// settled. Returns the live RTBH kept on the wire.
+/// A private receiver whose carried RTBH key waits: the RTBH replaced a
+/// received ordinary route on the wire, which still covers its prefix and
+/// which the hold defers. The set is settled. Returns the live RTBH kept on
+/// the wire.
 fn settled_waiting_key() -> (
     RibManager,
     PeerRib,
@@ -931,12 +971,12 @@ fn settled_waiting_key() -> (
     let source = connect(&mut manager, SOURCE, 64, false, false);
     let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
     let mut rib = PeerRib::new();
-    apply(&mut old_rx, &mut rib, None);
-    let waiter = connect(&mut manager, WAITER, 64, true, false);
-    assert!(manager.selection_deferred(FAMILY));
     let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
     let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
     announce(&mut manager, [rtbh]);
+    apply(&mut old_rx, &mut rib, None);
+    let waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
     inject_rtbh(&mut manager, rtbh);
     inject_rtbh(&mut manager, kept);
     apply(&mut old_rx, &mut rib, None);
@@ -1578,7 +1618,7 @@ fn pre_hold_flap_into_deferred_registration(grouped: bool, deleted: PreHoldDelet
                 manager
                     .hold_exempt_withdrawn
                     .get(&super::super::HoldWithdrawOwner::Peer(observer))
-                    .is_some_and(|ledger| ledger.contains(&(Prefix::V4(rtbh), 0))),
+                    .is_some_and(|ledger| ledger.withdrawn.contains(&(Prefix::V4(rtbh), 0))),
                 "the queued withdrawal is in the ledger"
             );
             inject_rtbh(&mut manager, rtbh);
@@ -2144,9 +2184,10 @@ fn queued_unheld_end_of_rib_keeps_the_carry_for_the_hold() {
     assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
 }
 
-/// A carried IPv4 key waits under replay grace because its prefix still has
-/// a candidate route, one this receiver's export policy denies, while an
-/// unrelated IPv6 selection gate stays dormant. Grace then ends and our
+/// A carried IPv4 key waits under replay grace: the RTBH replaced an eBGP
+/// route on the ended session's wire, and that route still covers its
+/// prefix, though the new session's export policy denies it. An unrelated
+/// IPv6 selection gate stays dormant. Grace then ends and our
 /// IPv4 End-of-RIB goes out, purging the helper's stale row. The settled
 /// carry must retire that key then, without a withdrawal. Red proof:
 /// without re-walking a set whose family retired, the obsolete key stays
@@ -2177,15 +2218,15 @@ fn settled_carry_retires_its_family_once_its_end_of_rib_goes_out() {
     let observer = peer_v4(OBSERVER);
     let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
     let key = (Prefix::V4(rtbh), 0);
-    // The receiver never gets the eBGP route at the RTBH's prefix.
+    // The new session never gets the eBGP route at the RTBH's prefix.
     let mut deny_external = deny_prefixes_chain(&[Prefix::V4(rtbh)]);
     deny_external.policies[0].policy.entries[0].match_route_type =
         Some(rustbgpd_policy::RouteType::External);
-    let (_old_tx, mut old_rx) =
-        register_dual_stack_with(&mut manager, 82, 64, false, Some(deny_external.clone()));
-    announce(&mut manager, [rtbh]);
-    inject_rtbh(&mut manager, rtbh);
+    let (_old_tx, mut old_rx) = register_dual_stack_with(&mut manager, 82, 64, false, None);
     let mut rib = PeerRib::new();
+    announce(&mut manager, [rtbh]);
+    apply(&mut old_rx, &mut rib, None);
+    inject_rtbh(&mut manager, rtbh);
     apply(&mut old_rx, &mut rib, None);
     assert!(rib.contains_key(&key));
     clean_end(&mut manager, 82);
@@ -2642,5 +2683,37 @@ fn rs_client_fallback_rtbh_deleted_while_away_leaves_the_helper_in_the_hold() {
             "grouped={grouped}: the deleted RTBH fallback leaves the helper inside the hold; \
              peer {peer_rib:?}"
         );
+    }
+}
+
+/// A deleted BLACKHOLE aggregate whose prefix keeps its owner's ordinary
+/// route throughout the hold leaves the helper inside the hold: that route
+/// was never on the wire, so the helper's row at the key can only be the
+/// stale aggregate. Private and grouped receivers, both flap orders. Red
+/// proof: waiting on every carried key whose prefix has another route keeps
+/// the aggregate until release.
+#[test]
+fn helper_drops_a_routed_rtbh_aggregate_inside_the_hold() {
+    for grouped in [false, true] {
+        for stuck_withdraw in [true, false] {
+            let rtbh = Rtbh {
+                aggregate: true,
+                routed: true,
+            };
+            assert_deleted_exempt_leaves_helper(grouped, stuck_withdraw, 182, rtbh);
+        }
+    }
+}
+
+/// The same for a host RTBH whose prefix has an ordinary route the hold
+/// defers.
+#[test]
+fn helper_drops_a_routed_host_rtbh_inside_the_hold() {
+    for grouped in [false, true] {
+        let rtbh = Rtbh {
+            aggregate: false,
+            routed: true,
+        };
+        assert_deleted_exempt_leaves_helper(grouped, true, 182, rtbh);
     }
 }

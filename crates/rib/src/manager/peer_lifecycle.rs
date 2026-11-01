@@ -1018,15 +1018,17 @@ impl RibManager {
     }
 
     /// The exempt rows the session holds or may still hold: its table's,
-    /// and those withdrawn outright in the hold (`keys`), which may not have
-    /// reached the peer. The flush withdraws none whose key still has a
-    /// desired row, so an over-carried key never removes a row the helper
-    /// rightly keeps.
-    fn carry_helper_stale_exempt_owned(
-        &mut self,
-        peer: PeerId,
-        mut keys: std::collections::BTreeSet<(Prefix, u32)>,
-    ) {
+    /// and those withdrawn outright in the hold (`ledger`), which may not
+    /// have reached the peer. A key where an exempt row replaced an
+    /// ordinary one in the hold is uncertain: the flush withdraws none of
+    /// those whose prefix still has a desired row, so an over-carried key
+    /// never removes a row the helper rightly keeps.
+    fn carry_helper_stale_exempt_owned(&mut self, peer: PeerId, ledger: super::HoldLedger) {
+        let super::HoldLedger {
+            withdrawn: mut keys,
+            replaced: mut uncertain,
+            mut all_uncertain,
+        } = ledger;
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || {
             super::replacement_readiness_checkpoint_at(&readiness, "helper_stale_carry", false);
@@ -1036,7 +1038,13 @@ impl RibManager {
             self.hold_exempt_withdrawn
                 .get(&super::HoldWithdrawOwner::Group(gid))
         }) {
-            insert_bounded(&mut keys, group.iter().copied(), &mut checkpoint);
+            insert_bounded(&mut keys, group.withdrawn.iter().copied(), &mut checkpoint);
+            insert_bounded(
+                &mut uncertain,
+                group.replaced.iter().copied(),
+                &mut checkpoint,
+            );
+            all_uncertain |= group.all_uncertain;
         }
         // A grouped member's wire also records its own admitted provenance:
         // an rs-control member may hold a local exempt route below a winner
@@ -1068,11 +1076,17 @@ impl RibManager {
                         settled: false,
                         orf_blocked: Vec::new(),
                         gate_blocked: Vec::new(),
+                        uncertain: std::collections::BTreeSet::new(),
+                        all_uncertain: false,
                     });
             carried.ended = ended;
             carried.settled = false;
             carried.orf_blocked.clear();
             carried.gate_blocked.clear();
+            insert_bounded(&mut carried.uncertain, uncertain, &mut checkpoint);
+            // A key past the uncertain set's limit may be uncertain.
+            carried.all_uncertain |=
+                all_uncertain || carried.uncertain.len() >= super::HELPER_STALE_EXEMPT_LIMIT;
             insert_bounded(&mut carried.keys, keys, &mut checkpoint);
         }
     }
@@ -1085,13 +1099,52 @@ impl RibManager {
         keys: impl IntoIterator<Item = (Prefix, u32)>,
         stage: &'static str,
     ) {
+        self.record_hold_ledger(owner, stage, |ledger| &mut ledger.withdrawn, keys);
+    }
+
+    /// Keep a key where an exempt row replaced an ordinary one in the hold,
+    /// up to the limit, checkpointing under the caller's `stage`.
+    pub(super) fn record_hold_exempt_replaced(
+        &mut self,
+        owner: super::HoldWithdrawOwner,
+        keys: impl IntoIterator<Item = (Prefix, u32)>,
+        stage: &'static str,
+    ) {
+        self.record_hold_ledger(owner, stage, |ledger| &mut ledger.replaced, keys);
+        // A replacement past the limit is not recorded: every key may hold
+        // an ordinary row.
+        if let Some(ledger) = self.hold_exempt_withdrawn.get_mut(&owner)
+            && ledger.replaced.len() >= super::HELPER_STALE_EXEMPT_LIMIT
+        {
+            ledger.all_uncertain = true;
+        }
+    }
+
+    fn record_hold_ledger(
+        &mut self,
+        owner: super::HoldWithdrawOwner,
+        stage: &'static str,
+        set: impl FnOnce(&mut super::HoldLedger) -> &mut std::collections::BTreeSet<(Prefix, u32)>,
+        keys: impl IntoIterator<Item = (Prefix, u32)>,
+    ) {
         let readiness = self.replacement_readiness.clone();
         let ledger = self.hold_exempt_withdrawn.entry(owner).or_default();
-        insert_bounded(ledger, keys, &mut || {
+        insert_bounded(set(ledger), keys, &mut || {
             super::replacement_readiness_checkpoint_at(&readiness, stage, false);
         });
         if ledger.is_empty() {
             self.hold_exempt_withdrawn.remove(&owner);
+        }
+    }
+
+    /// A private receiver's wire moved between an update group's view and
+    /// its own while our End-of-RIB may be held.
+    pub(super) fn record_hold_regrouped(&mut self, peer: PeerId) {
+        if self.helper_stale_may_hold_any() {
+            self.hold_exempt_withdrawn
+                .entry(super::HoldWithdrawOwner::Peer(peer))
+                .or_default()
+                .all_uncertain = true;
         }
     }
 
@@ -1129,6 +1182,14 @@ impl RibManager {
                         .get(&source)
                         .is_some_and(|rib| rib.iter_prefix(&prefix).next().is_some())
             })
+    }
+
+    /// Whether the peer may hold an ordinary row at the carried `key`
+    /// instead of the stale exempt one.
+    fn helper_stale_uncertain(&self, peer: PeerId, key: (Prefix, u32)) -> bool {
+        self.helper_stale_exempt
+            .get(&peer)
+            .is_none_or(|carried| carried.all_uncertain || carried.uncertain.contains(&key))
     }
 
     /// The carried keys this peer can withdraw now: not in a family whose
@@ -1201,8 +1262,9 @@ impl RibManager {
             let add_path = self.peer_add_path_send_families.get(&peer);
             // Keys follow the current session's Add-Path mode: without it,
             // every path of the ended session is the prefix's one key. A key
-            // the session advertises is its own now. One whose prefix still
-            // has a route, or whose family an ORF gate holds, waits.
+            // the session advertises is its own now. An uncertain one whose
+            // prefix still has a route, or one whose family an ORF gate
+            // holds, waits.
             let mut withdraw = std::collections::BTreeSet::new();
             let mut withdrawn = Vec::new();
             let mut done = Vec::new();
@@ -1244,7 +1306,9 @@ impl RibManager {
                     if !orf_blocked.contains(&family) {
                         orf_blocked.push(family);
                     }
-                } else if !self.desires_unicast_prefix(peer, prefix) {
+                } else if !(self.helper_stale_uncertain(peer, key)
+                    && self.desires_unicast_prefix(peer, prefix))
+                {
                     withdraw.insert((prefix, path_id));
                     withdrawn.push(key);
                     done.push(key);
@@ -1283,6 +1347,7 @@ impl RibManager {
             };
             for key in &done {
                 carried.keys.remove(key);
+                carried.uncertain.remove(key);
             }
             if carried.keys.is_empty() {
                 self.helper_stale_exempt.remove(&peer);

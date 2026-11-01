@@ -5150,6 +5150,37 @@ impl RibManager {
             } else {
                 Vec::new()
             };
+            // Likewise an ordinary row meeting an exempt one at a key: an
+            // exempt row over an ordinary one, or an ordinary row where an
+            // exempt one was or was withdrawn. The peer may hold the ordinary
+            // row there, as delivered or as not yet replaced.
+            let withdrawn_exempt = self
+                .hold_exempt_withdrawn
+                .get(&super::HoldWithdrawOwner::Peer(peer))
+                .map(|ledger| &ledger.withdrawn);
+            let queued_exempt_replacements: Vec<(Prefix, u32)> = if hold_active {
+                announce
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .map(|route| (route.prefix, route.path_id))
+                    .filter(|key| {
+                        let exempt = committed_local_sources
+                            .get(key)
+                            .is_some_and(|source| source.deferral_exempt);
+                        let held = rib_out.get(&key.0, key.1).is_some();
+                        let held_exempt = rib_out
+                            .local_export_source(&key.0, key.1)
+                            .is_some_and(|source| source.deferral_exempt);
+                        if exempt {
+                            held && !held_exempt
+                        } else {
+                            held_exempt || withdrawn_exempt.is_some_and(|keys| keys.contains(key))
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             if grouped_unicast_count.is_none() {
                 for (route, action) in announce
                     .iter()
@@ -5223,6 +5254,13 @@ impl RibManager {
                 self.record_hold_exempt_withdrawn(
                     super::HoldWithdrawOwner::Peer(peer),
                     queued_exempt_withdrawals,
+                    "family_commit",
+                );
+            }
+            if !queued_exempt_replacements.is_empty() {
+                self.record_hold_exempt_replaced(
+                    super::HoldWithdrawOwner::Peer(peer),
+                    queued_exempt_replacements,
                     "family_commit",
                 );
             }

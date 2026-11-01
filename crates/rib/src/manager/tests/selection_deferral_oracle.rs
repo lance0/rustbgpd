@@ -391,6 +391,15 @@ struct Harness {
     tags: BTreeSet<(usize, u32)>,
     /// Whether each key's row, as last announced, carried BLACKHOLE.
     wire_tag: HashMap<(Prefix, u32), bool>,
+    /// Keys where an exempt row replaced an ordinary one on the wire: a GR
+    /// helper's stale row there may be either, so the RIB may wait.
+    ordinary_replaced: HashSet<(Prefix, u32)>,
+    /// Keys whose wire row was exempt while the RIB's committed table held
+    /// an ordinary row there when a session ended: a replacement the peer
+    /// missed or the transport dropped.
+    diverged_at_flap: HashSet<(Prefix, u32)>,
+    /// The receiver moved between an update group's view and its own.
+    regrouped: bool,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -436,6 +445,9 @@ impl Harness {
             peer_policy: false,
             tags: BTreeSet::new(),
             wire_tag: HashMap::new(),
+            ordinary_replaced: HashSet::new(),
+            diverged_at_flap: HashSet::new(),
+            regrouped: false,
         };
         if !config.late {
             harness.establish();
@@ -525,6 +537,15 @@ impl Harness {
             unreachable!("only a Reconnect flaps the session")
         };
         let observer = peer_v4(OBSERVER);
+        let diverged: Vec<_> = self
+            .wire
+            .iter()
+            .filter(|&(key, &injection)| {
+                self.injections[injection].exempt && self.committed_ordinary(*key)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        self.diverged_at_flap.extend(diverged);
         // `fsm.rs`: GR retention of the peer's routes needs its GR families
         // and an end that is not a NOTIFICATION teardown.
         if self.gr_families && !notification {
@@ -900,6 +921,7 @@ impl Harness {
         if !self.config.grouped || !self.registered {
             return;
         }
+        self.regrouped = true;
         let observer = peer_v4(OBSERVER);
         match kind {
             RegroupKind::Slow => self.manager.handle_update(RibUpdate::PeerSlowState {
@@ -1057,6 +1079,14 @@ impl Harness {
                 (route.prefix, route.path_id)
             );
             let key = (route.prefix, route.path_id);
+            if self.injections[injection].exempt
+                && self
+                    .wire
+                    .get(&key)
+                    .is_some_and(|&old| !self.injections[old].exempt)
+            {
+                self.ordinary_replaced.insert(key);
+            }
             self.wire.insert(key, injection);
             self.wire_tag.insert(
                 key,
@@ -1225,13 +1255,43 @@ impl Harness {
         Ok(())
     }
 
+    /// Whether the RIB's committed table toward the receiver holds a
+    /// non-exempt row at `key`.
+    fn committed_ordinary(&self, key: (Prefix, u32)) -> bool {
+        let observer = peer_v4(OBSERVER);
+        let ordinary = |table: &crate::adj_rib_out::AdjRibOut| {
+            table.get(&key.0, key.1).is_some()
+                && table
+                    .local_export_source(&key.0, key.1)
+                    .is_none_or(|source| !source.deferral_exempt)
+        };
+        match self.manager.grouped_member_of(observer) {
+            Some(gid) => self
+                .manager
+                .group_ribs
+                .get(&gid)
+                .is_some_and(|group| ordinary(&group.table)),
+            None => self
+                .manager
+                .adj_ribs_out
+                .get(&observer)
+                .is_some_and(ordinary),
+        }
+    }
+
     /// A known open defect that explains a deleted exempt row still on the
     /// wire after a drain in the hold, or `None`.
     fn known_stale_blackhole(&self, key: (Prefix, u32)) -> Option<&'static str> {
         // LAN-2727: a GR helper keeps the ended session's deleted RTBH
-        // stale until release while its prefix still has another route:
-        // the helper may hold that route at the key instead, and keeping a
-        // route it rightly holds comes first.
+        // stale until release while its prefix still has another route,
+        // where the helper may hold that route at the key instead: an exempt
+        // row replaced an ordinary one there, the peer missed or the
+        // transport dropped an ordinary row replacing the exempt one, or the
+        // receiver's wire moved between views. Keeping a route the helper
+        // rightly holds comes first.
+        let uncertain = self.ordinary_replaced.contains(&key)
+            || self.diverged_at_flap.contains(&key)
+            || self.regrouped;
         let candidate = (0..PREFIXES)
             .find(|&index| prefix(index) == key.0)
             .is_some_and(|index| {
@@ -1245,7 +1305,7 @@ impl Harness {
                         .next()
                         .is_some()
             });
-        if self.stale.contains(&key) && candidate {
+        if self.stale.contains(&key) && candidate && uncertain {
             return allowed("LAN-2727");
         }
         None
@@ -3067,5 +3127,52 @@ fn release_tick_sends_the_end_of_rib_that_purges_a_stale_row() {
     ];
     if let Some(reason) = failure(config, &setup, &[]) {
         panic!("{reason}");
+    }
+}
+
+/// I6 against a key carried only because its exempt row was withdrawn: the
+/// host RTBH is injected and deleted, a received ordinary route at the same
+/// host then reaches the wire, and the session flaps toward a GR helper.
+/// The carried key never had an exempt row replace an ordinary one, but an
+/// ordinary row followed the withdrawn exempt row there, so the helper's
+/// stale row at it is that ordinary route and must stay. Red proof:
+/// treating only an exempt row over an ordinary one as uncertain withdraws
+/// it.
+#[test]
+fn ordinary_row_after_a_withdrawn_rtbh_stays_at_the_helper() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = [
+        Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Delete { prefix: 0, path: 0 },
+        Op::Receive {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: true,
+        },
+    ];
+    let hold = [Op::Resync];
+    for grouped in [false, true] {
+        if let Some(reason) = failure(Config { grouped, ..config }, &setup, &hold) {
+            panic!("grouped {grouped}: {reason}");
+        }
     }
 }

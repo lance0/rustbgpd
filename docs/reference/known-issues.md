@@ -55,16 +55,22 @@ resolved.
   our End-of-RIB. rustbgpd carries the ended session's RTBH and host
   (deferral-exempt) keys to the next session and, while End-of-RIB toward
   the helper is held by selection deferral or the replay grace window,
-  withdraws each one that was deleted and whose prefix has no other route.
-  It deliberately does not withdraw a deleted RTBH whose prefix still has
-  another candidate: a local route, or one received from another peer.
-  Queued updates are discarded when a session ends, so the RIB cannot
-  tell whether the helper holds the stale RTBH at that key or an ordinary
-  route that was never replaced; withdrawing it could remove a route the
-  helper rightly keeps. The candidate counts even when this peer's export
-  policy denies it. The helper therefore keeps that RTBH until whichever
-  comes first: an ordinary route for the prefix is advertised to it at the
-  same key, implicitly replacing the stale row, or End-of-RIB reaches it.
+  withdraws each one that was deleted. It deliberately does not withdraw a
+  deleted RTBH whose prefix still has another candidate, a local route or
+  one received from another peer, when an ordinary route and an RTBH met at
+  that key on the ended session: an RTBH replaced an ordinary route there,
+  or an ordinary route was sent where an RTBH had been. Queued updates are
+  discarded when a session ends, so the RIB cannot then tell whether the
+  helper holds the stale RTBH at that key or the ordinary route; withdrawing
+  it could remove a route the helper rightly keeps. The same applies to
+  every key of a receiver that moved between update groups during the hold.
+  The candidate counts even when this peer's export policy denies it.
+  Separately, an RTBH that an ordinary route replaced at the same key stays
+  at the helper when that replacement never reached it: it was still queued
+  when the session ended, or the receiver had not caught up with its update
+  group. In these cases the helper keeps the RTBH until whichever comes
+  first: an ordinary route for the prefix is advertised to it at the same
+  key, implicitly replacing the stale row, or End-of-RIB reaches it.
   Selection release distributes routes while the grace window still holds
   End-of-RIB, so an exportable replacement normally reaches the helper at
   release. The RTBH stays until End-of-RIB only while no replacement is
@@ -98,7 +104,9 @@ resolved.
   limited to 65,536 carried keys per helper peer, and 65,536
   withdrawn-in-hold keys per peer or update group; keys past that limit are
   not recorded, so a deleted RTBH among them stays at the helper until
-  End-of-RIB.
+  End-of-RIB. The keys where an ordinary route met an RTBH have the same
+  limit per peer or update group; past it, every carried key of that peer
+  is treated as one of them.
   Mitigations: keep `gr_eor_grace_time` short; an RTBH controller that
   replaces a blackhole with an ordinary route at the same prefix should
   expect the old RTBH to stay at a flapped helper until that replacement is

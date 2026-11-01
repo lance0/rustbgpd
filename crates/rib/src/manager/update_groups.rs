@@ -3723,15 +3723,24 @@ impl RibManager {
                 .get(&super::HoldWithdrawOwner::Group(gid))
         {
             let keys: Vec<_> = group_ledger
+                .withdrawn
                 .iter()
                 .inspect(|_| checkpoint())
                 .copied()
                 .collect();
-            self.record_hold_exempt_withdrawn(
-                super::HoldWithdrawOwner::Peer(peer),
-                keys,
-                "group_leave",
-            );
+            let replaced: Vec<_> = group_ledger
+                .replaced
+                .iter()
+                .inspect(|_| checkpoint())
+                .copied()
+                .collect();
+            let all_uncertain = group_ledger.all_uncertain;
+            let owner = super::HoldWithdrawOwner::Peer(peer);
+            self.record_hold_exempt_withdrawn(owner, keys, "group_leave");
+            self.record_hold_exempt_replaced(owner, replaced, "group_leave");
+            if all_uncertain {
+                self.record_hold_regrouped(peer);
+            }
         }
         let Some(group) = self.group_ribs.get_mut(&gid) else {
             return;
