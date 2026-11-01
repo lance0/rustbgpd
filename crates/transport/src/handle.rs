@@ -403,11 +403,9 @@ impl SessionNotificationSender {
         if crossings.0.fetch_add(1, Ordering::AcqRel) > 0 && !self.inner.is_closed() {
             return Ok(());
         }
-        let result = self.send_with(notification, Some(crossings.clone()));
-        if result.is_err() {
-            crossings.0.store(0, Ordering::Release);
-        }
-        result
+        // A failed send leaves the count nonzero; the channel stays closed,
+        // so every later crossing still reaches this send.
+        self.send_with(notification, Some(crossings.clone()))
     }
 
     fn send_with(

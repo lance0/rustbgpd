@@ -263,7 +263,7 @@ fn session_failure_after_unpolled_expiry_still_rebinds() {
     let mut e = engine(false, t0);
     ra(&mut e, 5, 10, t0).unwrap();
     ra(&mut e, 1, 60, t0).unwrap();
-    e.session_established(IF, ll(5));
+    e.session_established(IF, ll(5), t0);
     e.events.clear();
     e.session_failed(IF, t0 + Duration::from_secs(11));
     assert_eq!(bindings(&mut e), vec![(Some(ep(5)), Some(ep(1)))]);
@@ -320,7 +320,7 @@ fn discovery_never_moves_an_established_binding() {
     let t0 = Instant::now();
     let mut e = engine(false, t0);
     ra(&mut e, 5, 10, t0).unwrap();
-    e.session_established(IF, ll(5));
+    e.session_established(IF, ll(5), t0);
     e.events.clear();
     ra(&mut e, 1, 60, t0).unwrap();
     e.poll(t0 + Duration::from_secs(10));
@@ -351,7 +351,7 @@ fn established_binding_with_no_replacement_unbinds_only_after_failure() {
     let t0 = Instant::now();
     let mut e = engine(false, t0);
     ra(&mut e, 5, 10, t0).unwrap();
-    e.session_established(IF, ll(5));
+    e.session_established(IF, ll(5), t0);
     e.events.clear();
     e.poll(t0 + Duration::from_secs(10));
     assert_eq!(bindings(&mut e), vec![]);
@@ -373,7 +373,7 @@ fn session_failure_keeps_a_live_binding() {
     let mut e = engine(false, t0);
     ra(&mut e, 5, 30, t0).unwrap();
     ra(&mut e, 1, 30, t0).unwrap();
-    e.session_established(IF, ll(5));
+    e.session_established(IF, ll(5), t0);
     e.session_failed(IF, t0);
     assert_eq!(
         bindings(&mut e),
@@ -387,7 +387,7 @@ fn unknown_link_state_clears_nothing() {
     let t0 = Instant::now();
     let mut e = engine(true, t0);
     ra(&mut e, 1, 30, t0).unwrap();
-    e.session_established(IF, ll(1));
+    e.session_established(IF, ll(1), t0);
     e.events.clear();
     e.on_link(&link(LinkState::Unknown, IDX), t0);
     e.on_link(&link(LinkState::Unknown, IDX + 1), t0);
@@ -407,7 +407,7 @@ fn carrier_down_and_removal_clear_candidates_and_binding() {
         let mut e = engine(false, t0);
         ra(&mut e, 1, 30, t0).unwrap();
         ra(&mut e, 2, 30, t0).unwrap();
-        e.session_established(IF, ll(1));
+        e.session_established(IF, ll(1), t0);
         e.events.clear();
         e.on_link(&link(state, IDX), t0);
         assert_eq!(
@@ -1024,6 +1024,74 @@ mod netns {
     }
 }
 
+/// The (bound, other) pairs of the conflicts raised since the last drain.
+fn conflicts(e: &mut Engine) -> Vec<(Ipv6Addr, Ipv6Addr)> {
+    e.events
+        .drain(..)
+        .filter_map(|ev| match ev {
+            DiscoveryEvent::Conflict { bound, other, .. } => Some((bound, other)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A foreign router whose RA arrives before the Established report became
+/// the binding with nothing to compare it with. The report counts it once;
+/// its refreshes and repeated reports do not count it again.
+/// Mutation-red: setting the peer without checking the live sources leaves
+/// it uncounted.
+#[test]
+fn a_source_learned_before_the_established_report_is_counted_once() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    ra(&mut e, 9, 30, t0).unwrap();
+    assert_eq!(conflicts(&mut e), []);
+    e.session_established(IF, ll(2), t0);
+    assert_eq!(conflicts(&mut e), [(ll(2), ll(9))]);
+    ra(&mut e, 9, 30, t0).unwrap();
+    ra(&mut e, 2, 30, t0).unwrap();
+    e.session_established(IF, ll(2), t0);
+    assert_eq!(conflicts(&mut e), [], "counted once");
+
+    // Already counted beside an earlier binding, which then expired.
+    let mut e = engine(false, t0);
+    ra(&mut e, 3, 10, t0).unwrap();
+    ra(&mut e, 9, 60, t0).unwrap();
+    assert_eq!(conflicts(&mut e), [(ll(3), ll(9))]);
+    e.session_established(IF, ll(2), t0 + Duration::from_secs(10));
+    assert_eq!(conflicts(&mut e), [], "fe80::9 was counted when learned");
+
+    // The peer's own RA was reported beside the foreign binding before the
+    // report: that pair is one router, already counted.
+    let mut e = engine(false, t0);
+    ra(&mut e, 9, 30, t0).unwrap();
+    ra(&mut e, 2, 30, t0).unwrap();
+    assert_eq!(conflicts(&mut e), [(ll(9), ll(2))]);
+    e.session_established(IF, ll(2), t0);
+    assert_eq!(conflicts(&mut e), []);
+
+    // A source that came and expired before the report is not counted.
+    let mut e = engine(false, t0);
+    ra(&mut e, 9, 10, t0).unwrap();
+    e.session_established(IF, ll(2), t0 + Duration::from_secs(10));
+    assert_eq!(conflicts(&mut e), []);
+}
+
+/// Carrier loss forgets the Established peer: after the link returns, the
+/// first RA is an ordinary first binding, not a conflict with the old peer.
+/// Mutation-red: keeping the peer across the loss reports `fe80::9` against
+/// `fe80::2`.
+#[test]
+fn carrier_loss_forgets_the_established_peer() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    e.session_established(IF, ll(2), t0);
+    e.on_link(&link(LinkState::Down, IDX), t0);
+    e.on_link(&link(LinkState::Up, IDX), t0);
+    ra(&mut e, 9, 30, t0).unwrap();
+    assert_eq!(conflicts(&mut e), []);
+}
+
 /// An Established peer the owner learned from an inbound connection has no
 /// binding here, so a foreign router's RA becomes the first binding. It is
 /// still a conflict with that peer, and the peer's own RA is not; once the
@@ -1034,16 +1102,7 @@ mod netns {
 fn a_first_binding_beside_an_inbound_learned_peer_is_a_conflict() {
     let t0 = Instant::now();
     let mut e = engine(false, t0);
-    e.session_established(IF, ll(2));
-    let conflicts = |e: &mut Engine| -> Vec<(Ipv6Addr, Ipv6Addr)> {
-        e.events
-            .drain(..)
-            .filter_map(|ev| match ev {
-                DiscoveryEvent::Conflict { bound, other, .. } => Some((bound, other)),
-                _ => None,
-            })
-            .collect()
-    };
+    e.session_established(IF, ll(2), t0);
     ra(&mut e, 9, 30, t0).unwrap();
     assert_eq!(conflicts(&mut e), [(ll(2), ll(9))]);
     ra(&mut e, 2, 30, t0).unwrap();
@@ -1072,7 +1131,7 @@ fn a_late_established_report_after_carrier_loss_does_not_freeze_discovery() {
     e.on_link(&link(LinkState::Down, IDX), t0);
     assert_eq!(bindings(&mut e), [(Some(ep(2)), None)]);
     // Mutation-red: accepting it freezes reselection with nothing bound.
-    e.session_established(IF, ll(2));
+    e.session_established(IF, ll(2), t0);
     e.on_link(&link(LinkState::Up, IDX), t0);
     ra(&mut e, 2, 30, t0).unwrap();
     assert_eq!(bindings(&mut e), [(None, Some(ep(2)))], "rebinds after Up");

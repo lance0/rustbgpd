@@ -1897,7 +1897,7 @@ families:
 |--------|------|--------|---------|
 | `bgp_unnumbered_peer_address_info` | gauge | `peer`, `interface`, `address` | Always 1; one series while an address is bound, naming it. Absent while the neighbor is unbound |
 | `bgp_unnumbered_address_changes_total` | counter | `peer` | Times the neighbor was bound to a different peer address than the one it last used |
-| `bgp_unnumbered_ra_conflicts_total` | counter | `peer` | A second router seen on the link while another address holds the binding, from a Router Advertisement or an inbound connection (`multiple_routers_on_link` in the log) |
+| `bgp_unnumbered_ra_conflicts_total` | counter | `peer` | A second router seen on the link: an address other than the Established peer's, or, with no Established peer, than the bound address, from a Router Advertisement or an inbound connection (`multiple_routers_on_link` in the log) |
 | `bgp_unnumbered_ra_dropped_total` | counter | `reason` | Router Solicitations and Advertisements discarded by discovery: `hop_limit`, `source_not_link_local`, `non_zero_code`, `too_short`, `malformed_option`, `unspecified_source_with_link_layer_address`, `unexpected_type`, `own_address`, `candidate_limit`, `stale_link`, `address_inventory_unavailable` |
 | `bgp_unnumbered_ra_socket_open_failures_total` | counter | — | Failed opens of an interface's raw ICMPv6 discovery socket; each is retried with backoff up to 60 s |
 

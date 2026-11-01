@@ -139,7 +139,8 @@ pub(super) enum StreamTerminal {
 #[derive(Default)]
 struct ProgressiveStateInner {
     // ponytail: unlike the route inventory, retirement does not pace these
-    // chunks; the envelope's last cell reference drops them in one turn.
+    // chunks; whichever holds the cell's last reference drops them in one
+    // turn: the last envelope, or the RIB's staged update-group pass.
     // Measured with release jemalloc dropping 1M chunks: 10.6 ms at one
     // allocation each, 18.8 ms with an extra shared header each, 0.1 ms as
     // 2,500 grouped 4 KiB chunks, all under the 50 ms stall bar. Release

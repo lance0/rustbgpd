@@ -48,6 +48,14 @@ use crate::ra_discovery::{
 
 use super::PeerManager;
 
+/// Tell discovery that `key`'s session on `name` is Established. An
+/// interface-only peer's key is always built from a link-local IPv6 address.
+fn report_established(discovery: &RaDiscovery, name: &str, key: &PeerKey) {
+    if let IpAddr::V6(address) = key.address {
+        discovery.session_established(name, address);
+    }
+}
+
 /// How long reconciliation waits for a bound session, or the RIB, to answer.
 const BOUND_STATE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// How soon a reconcile is retried after a bound session did not answer.
@@ -455,7 +463,7 @@ impl PeerManager {
         };
         if new == SessionState::Established {
             port.established = true;
-            unnumbered.discovery.session_established(name, peer.address);
+            report_established(&unnumbered.discovery, name, peer);
         } else if old == SessionState::Established {
             port.established = false;
             unnumbered.discovery.session_failed(name);
@@ -571,7 +579,7 @@ impl PeerManager {
             Ok(false) => {
                 info!(interface = %name, peer = %key, "unnumbered: bound session became Established; keeping it");
                 if let Some(unnumbered) = self.unnumbered.as_mut() {
-                    unnumbered.discovery.session_established(name, key.address);
+                    report_established(&unnumbered.discovery, name, key);
                 }
                 self.port_mut(name).established = true;
                 false
@@ -1610,7 +1618,7 @@ impl PeerManager {
         match self.bound_session_established(key).await {
             Some(true) => {
                 if let Some(unnumbered) = self.unnumbered.as_mut() {
-                    unnumbered.discovery.session_established(name, key.address);
+                    report_established(&unnumbered.discovery, name, key);
                 }
                 self.port_mut(name).established = true;
                 false
@@ -1672,7 +1680,7 @@ impl PeerManager {
             rustbgpd_transport::StateQueryOutcome::State(state) => match state.fsm_state {
                 SessionState::Established => {
                     if let Some(unnumbered) = self.unnumbered.as_mut() {
-                        unnumbered.discovery.session_established(name, key.address);
+                        report_established(&unnumbered.discovery, name, key);
                     }
                     self.port_mut(name).established = true;
                     false

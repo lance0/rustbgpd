@@ -1017,8 +1017,8 @@ struct AcceptedTransport {
 }
 
 /// A dropped session must not free a whole outbound inventory in that one
-/// turn, whether its task returned from `run()` or was cancelled mid-turn
-/// (`abort_for_transport_safety`, a `shutdown_timeout` expiry): the remainder
+/// turn, whether its task returned from `run()` or was cancelled at an await
+/// point (`abort_for_transport_safety`, a `shutdown_timeout` expiry): the remainder
 /// goes to the paced release task. Skipped without a runtime, where
 /// `tokio::spawn` would panic and nothing could run the release, and while
 /// unwinding. A runtime that is shutting down cancels the spawned task at

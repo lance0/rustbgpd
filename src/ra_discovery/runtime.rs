@@ -72,11 +72,12 @@ struct PendingEvents {
 ///   delivered, so engine conflicts are counted exactly. The deliveries
 ///   carry the latest `bound` and `other`.
 ///
-/// Discovery raises every conflict itself, including a foreign router's
-/// first binding beside an Established peer the owner learned from an
-/// inbound connection (the owner reports that peer's address with
-/// `session_established`), so the counts stay exact however far the owner
-/// falls behind.
+/// Discovery raises every conflict itself, so the counts do not depend on how
+/// far the owner falls behind: the owner reports the Established peer's
+/// address with `session_established`, and discovery counts each other live
+/// source once, including one learned before that report. A foreign router
+/// that arrives and expires before the report reaches discovery is not
+/// counted.
 ///
 /// Keys are served round-robin, so a conflict can be delivered ahead of a
 /// binding change queued between two conflicts. Learned and expired
@@ -348,14 +349,8 @@ impl RaDiscovery {
     }
 
     /// The interface's session with `peer` reached Established; discovery
-    /// stops moving its binding and reports any other new source as a
-    /// conflict. Interface-only peers are link-local IPv6; an IPv4 `peer`
-    /// is mapped and so never matches an RA source.
-    pub fn session_established(&self, interface: &str, peer: std::net::IpAddr) {
-        let peer = match peer {
-            std::net::IpAddr::V6(address) => address,
-            std::net::IpAddr::V4(address) => address.to_ipv6_mapped(),
-        };
+    /// stops moving its binding and reports any other source as a conflict.
+    pub fn session_established(&self, interface: &str, peer: Ipv6Addr) {
         let _ = self
             .commands
             .send(Command::SessionEstablished(interface.to_owned(), peer));
@@ -726,7 +721,7 @@ impl Actor {
             Command::Stop(name) => self.engine.stop(&name),
             Command::Link(event) => self.engine.on_link(&event, now),
             Command::SessionEstablished(name, peer) => {
-                self.engine.session_established(&name, peer);
+                self.engine.session_established(&name, peer, now);
             }
             Command::SessionFailed(name) => self.engine.session_failed(&name, now),
         }

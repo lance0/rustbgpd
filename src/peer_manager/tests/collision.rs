@@ -2850,15 +2850,19 @@ async fn nested_drain_coalesces_deferred_max_prefix_warnings_per_scope() {
         None,
     );
     let addr: IpAddr = "fe80::2".parse().unwrap();
-    let (eth0, eth1) = (scoped_key(addr, "eth0"), scoped_key(addr, "eth1"));
-    for (peer_key, candidate) in [(&eth0, 11), (&eth1, 12)] {
+    let (eth0, eth1, eth2) = (
+        scoped_key(addr, "eth0"),
+        scoped_key(addr, "eth1"),
+        scoped_key(addr, "eth2"),
+    );
+    for (peer_key, candidate) in [(&eth0, 11), (&eth1, 12), (&eth2, 13)] {
         insert_active_peer_with_candidate(&mut mgr, peer_key, candidate);
     }
-    let warning = |stage, crossings| SessionNotification::MaxPrefixWarning {
-        session_id: 12,
+    let warning = |session_id, family, stage, crossings| SessionNotification::MaxPrefixWarning {
+        session_id,
         role: rustbgpd_transport::SessionRole::InboundCandidate,
         peer_addr: addr,
-        family: "aggregate",
+        family,
         stage,
         usage: 1,
         bound: 2,
@@ -2866,42 +2870,57 @@ async fn nested_drain_coalesces_deferred_max_prefix_warnings_per_scope() {
         crossings,
     };
 
-    // Inside a handler, fencing eth0: each drain dequeues eth1's warning,
-    // freeing its slot before the session's next crossing queues another.
+    // Inside a handler, fencing eth0: each drain dequeues the other peers'
+    // warnings, freeing each scope's slot before its next crossing queues
+    // another. A scope is the session, family and stage together.
     mgr.session_notification_depth = 1;
-    for crossings in [1, 2, 1] {
-        mgr.session_notify_tx
-            .send(warning("accepted", crossings))
-            .unwrap();
+    for queued in [
+        warning(12, "aggregate", "accepted", 1),
+        warning(12, "aggregate", "accepted", 2),
+        warning(12, "aggregate", "received", 1),
+        warning(12, "ipv4_unicast", "accepted", 1),
+        warning(13, "aggregate", "accepted", 1),
+        warning(12, "aggregate", "accepted", 1),
+        warning(13, "aggregate", "accepted", 2),
+    ] {
+        mgr.session_notify_tx.send(queued).unwrap();
         mgr.drain_ready_session_notifications(Some(&eth0)).await;
     }
-    mgr.session_notify_tx.send(warning("received", 1)).unwrap();
-    mgr.drain_ready_session_notifications(Some(&eth0)).await;
 
     let deferred: Vec<_> = mgr
         .deferred_session_notifications
         .iter()
         .map(|(owner, notification)| match notification {
             SessionNotification::MaxPrefixWarning {
-                stage, crossings, ..
-            } => (owner.clone(), *stage, *crossings),
+                family,
+                stage,
+                crossings,
+                ..
+            } => (owner.clone(), *family, *stage, *crossings),
             other => panic!("unexpected deferred notification {other:?}"),
         })
         .collect();
     assert_eq!(
         deferred,
         [
-            (Some(eth1.clone()), "accepted", 4),
-            (Some(eth1.clone()), "received", 1),
+            (Some(eth1.clone()), "aggregate", "accepted", 4),
+            (Some(eth1.clone()), "aggregate", "received", 1),
+            (Some(eth1.clone()), "ipv4_unicast", "accepted", 1),
+            (Some(eth2.clone()), "aggregate", "accepted", 3),
         ],
         "one deferred warning per session scope, counting every crossing"
     );
     assert_eq!(
         mgr.deferred_session_notification_counts.get(&eth1),
-        Some(&2)
+        Some(&3)
+    );
+    assert_eq!(
+        mgr.deferred_session_notification_counts.get(&eth2),
+        Some(&1)
     );
 
-    // eth1's own fence takes both back.
+    // Each peer's own fence takes its warnings back.
+    mgr.drain_ready_session_notifications(Some(&eth2)).await;
     mgr.drain_ready_session_notifications(Some(&eth1)).await;
     assert!(mgr.deferred_session_notifications.is_empty());
     assert!(mgr.deferred_session_notification_counts.is_empty());

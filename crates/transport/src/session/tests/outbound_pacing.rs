@@ -123,9 +123,9 @@ async fn outbound_pacing_full_writer_services_snapshot_and_shutdown() {
 }
 
 /// Terminal shutdown with the session as last owner of a large unsent
-/// inventory: the session task exits without waiting for the release, the
-/// session it drops owns none of it, and the remainder is freed one slice per
-/// step off the session turn.
+/// inventory: the session task exits without waiting for the release, and
+/// dropping the session hands the remainder to the paced release, which
+/// frees it one slice per step off the session turn.
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_session_exit_hands_inventory_to_paced_release() {
     const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
@@ -197,38 +197,100 @@ async fn outbound_pacing_session_exit_hands_inventory_to_paced_release() {
     );
 }
 
-/// An aborted session task never returns from `run()`, as on the
-/// transport-safety abort and a shutdown deadline's expiry. Dropping its
-/// session still hands a large unsent inventory to the paced release.
-/// Mutation-red: handing off only when `run()` returns frees it all in the
-/// abort's turn.
-#[tokio::test(start_paused = true)]
-async fn outbound_pacing_aborted_session_hands_inventory_to_paced_release() {
-    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
-    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
-    let (client, _server) = connected_stream_pair().await;
+/// An Established session whose full writer queue keeps `total` routes
+/// unsent, each sharing `held`, with what keeps its channels open.
+struct Parked {
+    session: PeerSession,
+    _commands: mpsc::Sender<PeerCommand>,
+    _rib_rx: mpsc::Receiver<RibUpdate>,
+    _server: TcpStream,
+    _held_rx: mpsc::Receiver<Bytes>,
+}
+
+async fn parked_session(held: &Arc<AttrSet>, total: usize) -> Parked {
+    let (mut session, commands, rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     session.timers.hold = None;
     session.writer_join.take().unwrap().abort();
-    // A full one-slot writer queue keeps every route unsent.
-    let (bulk, _held) = mpsc::channel(1);
+    let (bulk, held_rx) = mpsc::channel(1);
     bulk.try_send(Bytes::from_static(b"held")).unwrap();
     session.writer_bulk_tx = Some(bulk);
-    let held = make_route(100).attributes;
-    let base = Arc::strong_count(&held);
-    let live = || Arc::strong_count(&held) - base;
-    let total = 5 * SLICE;
     let routes = (0..u32::try_from(total).unwrap())
         .map(|index| Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32)),
-            attributes: Arc::clone(&held),
+            attributes: Arc::clone(held),
             ..make_route(100)
         })
         .collect();
     session
         .handle_outbound_route_update(pacing_update(&session, routes))
         .await;
+    Parked {
+        session,
+        _commands: commands,
+        _rib_rx: rib_rx,
+        _server: server,
+        _held_rx: held_rx,
+    }
+}
+
+/// An aborted session task never returns from `run()`, as on the
+/// transport-safety abort and a shutdown deadline's expiry. Dropping its
+/// session still hands a large unsent inventory to the paced release.
+/// Mutation-red: handing off only when `run()` returns frees it all in the
+/// abort's turn.
+/// A session dropped while its task unwinds skips the hand-off, so the drop
+/// cannot panic again mid-unwind; the inventory is freed in that turn.
+/// Mutation-red: handing off while panicking leaves the routes alive after
+/// the join, held by the release task.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_unwinding_session_skips_the_hand_off() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let held = make_route(100).attributes;
+    let base = Arc::strong_count(&held);
+    let parked = parked_session(&held, 5 * SLICE).await;
+    let (fail, failure) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        let _parked = parked;
+        failure.await.unwrap();
+        panic!("session owner panicked");
+    });
+    tokio::task::yield_now().await;
+    fail.send(()).unwrap();
+    assert!(task.await.unwrap_err().is_panic());
+    assert_eq!(Arc::strong_count(&held) - base, 0);
+}
+
+/// A session dropped on a thread without a runtime cannot spawn the paced
+/// release; it frees the inventory in that turn instead of panicking.
+/// Mutation-red: handing off without a runtime panics in `tokio::spawn`.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_session_dropped_off_runtime_does_not_panic() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let held = make_route(100).attributes;
+    let base = Arc::strong_count(&held);
+    let parked = parked_session(&held, 5 * SLICE).await;
+    let joined = std::thread::spawn(move || drop(parked)).join();
+    assert!(joined.is_ok(), "dropping off the runtime must not panic");
+    assert_eq!(Arc::strong_count(&held) - base, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_aborted_session_hands_inventory_to_paced_release() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let held = make_route(100).attributes;
+    let base = Arc::strong_count(&held);
+    let live = || Arc::strong_count(&held) - base;
+    let total = 5 * SLICE;
+    let Parked {
+        mut session,
+        _commands,
+        _rib_rx,
+        _server,
+        _held_rx,
+    } = parked_session(&held, total).await;
     assert_eq!(live(), total, "nothing was sent");
 
     // Cancel the way an abort does: drop the parked `run()` future, then the
