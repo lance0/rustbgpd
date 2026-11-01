@@ -140,69 +140,75 @@ jobs:
       - name: Prime rustbgpd:dev build cache
         uses: ./.github/actions/prime-rustbgpd-dev-cache
 
-  m36:
+  m36_m37_m37-ip_m38:
     needs: [prime_dev_image]
-    name: M36 — EVPN VTEP receive FDB programming (FRR 10.7.1)
+    name: M36/M37/M37+IP/M38 — EVPN VTEP receive, MAC and MAC/IP origination, DF election (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
+      # One runner, several short scenarios. A failed scenario does not stop
+      # the next one; each scenario's teardown is checked before the next
+      # deploys, and the last step names every scenario that failed.
       - name: Run M36 (deploy + test + destroy with retry)
+        id: m36
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M36
           topology: tests/interop/m36-evpn-vtep-smoke.clab.yml
           script: tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
-
-  m37:
-    needs: [prime_dev_image]
-    name: M37 — EVPN local MAC origination (FRR 10.7.1)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-dataplane-host
-        id: dataplane
+      - name: Verify M36 lab teardown
+        id: m36_teardown
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M36' tests/interop/m36-evpn-vtep-smoke.clab.yml
       - name: Run M37 (deploy + test + destroy with retry)
+        id: m37
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M37
           topology: tests/interop/m37-evpn-local-origination.clab.yml
           script: tests/interop/scripts/test-m37-evpn-local-origination.sh
-
-  m37-ip:
-    needs: [prime_dev_image]
-    name: M37+IP — EVPN local MAC/IP origination (FRR 10.7.1)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-dataplane-host
-        id: dataplane
+      - name: Verify M37 lab teardown
+        id: m37_teardown
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M37' tests/interop/m37-evpn-local-origination.clab.yml
       - name: Run M37+IP (deploy + test + destroy with retry)
+        id: m37_ip
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M37+IP
           topology: tests/interop/m37-evpn-mac-ip-origination.clab.yml
           script: tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
-
-  m38:
-    needs: [prime_dev_image]
-    name: M38 — EVPN DF election + Type 1/4 origination
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-dataplane-host
-        id: dataplane
+      - name: Verify M37+IP lab teardown
+        id: m37_ip_teardown
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M37+IP' tests/interop/m37-evpn-mac-ip-origination.clab.yml
       - name: Run M38 (deploy + test + destroy with retry)
+        id: m38
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M38
           topology: tests/interop/m38-evpn-df-election.clab.yml
           script: tests/interop/scripts/test-m38-evpn-df-election.sh
+      - name: Verify M38 lab teardown
+        id: m38_teardown
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M38' tests/interop/m38-evpn-df-election.clab.yml
+      - name: Report bundled scenario results
+        if: ${{ !cancelled() }}
+        env:
+          RESULTS: >-
+            M36=${{ steps.m36.outcome }}/${{ steps.m36_teardown.outcome }}
+            M37=${{ steps.m37.outcome }}/${{ steps.m37_teardown.outcome }}
+            M37+IP=${{ steps.m37_ip.outcome }}/${{ steps.m37_ip_teardown.outcome }}
+            M38=${{ steps.m38.outcome }}/${{ steps.m38_teardown.outcome }}
+        run: .github/scripts/report-bundled-scenarios.sh
 
   m39:
     needs: [prime_dev_image]
@@ -370,69 +376,75 @@ jobs:
           topology: tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
           script: tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
 
-  m42:
+  m42_m50_m52_m58:
     needs: [prime_dev_image]
-    name: M42 — ADR-0061 configured-table unicast FIB runtime (FRR 10.7.1)
+    name: M42/M50/M52/M58 — ADR-0061/0066 unicast FIB runtime, ECMP, multipath-relax, table CRUD (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
+      # One runner, several short scenarios. A failed scenario does not stop
+      # the next one; each scenario's teardown is checked before the next
+      # deploys, and the last step names every scenario that failed.
       - name: Run M42 (deploy + test + destroy with retry)
+        id: m42
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M42
           topology: tests/interop/m42-fib-runtime-frr.clab.yml
           script: tests/interop/scripts/test-m42-fib-runtime-frr.sh
-
-  m50:
-    needs: [prime_dev_image]
-    name: M50 — ADR-0066 unicast multipath/ECMP FIB install (FRR 10.7.1)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-dataplane-host
-        id: dataplane
+      - name: Verify M42 lab teardown
+        id: m42_teardown
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M42' tests/interop/m42-fib-runtime-frr.clab.yml
       - name: Run M50 (deploy + test + destroy with retry)
+        id: m50
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M50
           topology: tests/interop/m50-fib-ecmp-frr.clab.yml
           script: tests/interop/scripts/test-m50-fib-ecmp-frr.sh
-
-  m52:
-    needs: [prime_dev_image]
-    name: M52 — ADR-0066 multipath-relax (FRR 10.7.1, mixed ASes)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-dataplane-host
-        id: dataplane
+      - name: Verify M50 lab teardown
+        id: m50_teardown
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M50' tests/interop/m50-fib-ecmp-frr.clab.yml
       - name: Run M52 (deploy + test + destroy with retry)
+        id: m52
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M52
           topology: tests/interop/m52-fib-ecmp-relax-frr.clab.yml
           script: tests/interop/scripts/test-m52-fib-ecmp-relax-frr.sh
-
-  m58:
-    needs: [prime_dev_image]
-    name: M58 — ADR-0061 FIB-table runtime CRUD (FRR 10.7.1)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-dataplane-host
-        id: dataplane
+      - name: Verify M52 lab teardown
+        id: m52_teardown
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M52' tests/interop/m52-fib-ecmp-relax-frr.clab.yml
       - name: Run M58 (deploy + test + destroy with retry)
+        id: m58
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
         uses: ./.github/actions/run-interop-test
         with:
           label: M58
           topology: tests/interop/m58-fib-table-crud-frr.clab.yml
           script: tests/interop/scripts/test-m58-fib-table-crud-frr.sh
+      - name: Verify M58 lab teardown
+        id: m58_teardown
+        if: ${{ !cancelled() && steps.dataplane.outcome == 'success' }}
+        run: .github/scripts/assert-lab-torn-down.sh 'M58' tests/interop/m58-fib-table-crud-frr.clab.yml
+      - name: Report bundled scenario results
+        if: ${{ !cancelled() }}
+        env:
+          RESULTS: >-
+            M42=${{ steps.m42.outcome }}/${{ steps.m42_teardown.outcome }}
+            M50=${{ steps.m50.outcome }}/${{ steps.m50_teardown.outcome }}
+            M52=${{ steps.m52.outcome }}/${{ steps.m52_teardown.outcome }}
+            M58=${{ steps.m58.outcome }}/${{ steps.m58_teardown.outcome }}
+        run: .github/scripts/report-bundled-scenarios.sh
 
   m53:
     needs: [prime_dev_image]
@@ -1136,16 +1148,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [classify_changes, bird3_archive, prime_dev_image, m36,
-      m37, m37-ip, m38, m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42, m50, m52,
-      m58, m53, m53b, m53c, m53d, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
+    needs: [classify_changes, bird3_archive, prime_dev_image, m36_m37_m37-ip_m38,
+      m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42_m50_m52_m58,
+      m53, m53b, m53c, m53d, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, m121, m123, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
         classify_changes bird3_archive prime_dev_image
-        m36 m37 m37-ip m38 m39
-        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m53b m53c m53d m51 m108 m43 m47
+        m36_m37_m37-ip_m38 m39
+        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42_m50_m52_m58 m53 m53b m53c m53d m51 m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 m121 m123 netns
     steps:
       - name: Aggregate required Kernel Dataplane result
