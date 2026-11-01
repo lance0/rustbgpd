@@ -475,18 +475,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scanning all denials.
 - Bound the queue from Router Advertisement discovery to the neighbor owner.
   While the owner was busy, a link that kept changing its advertising
-  sources queued one event per change without limit. The queue now holds at
-  most one binding change and one conflict per interface, served in turn,
-  so a conflict can arrive ahead of a binding change queued between two
-  conflicts. It keeps the latest binding, each conflict (reported with the
-  latest addresses), and each first binding that a later change replaced
-  while it was queued, which the owner still checks against a peer learned
-  from an inbound connection. The resulting conflict count is exact up to 16
-  distinct first-binding addresses per backlog on one interface and
-  approximate beyond that, which takes 17 or more routers on an
-  interface-only point-to-point link while the owner is stalled. Learned and
-  expired candidates are no longer queued: discovery logs them itself, so
-  those two log lines now come from the `rustbgpd::ra_discovery` target.
+  sources queued one event per change without limit. The queue now holds,
+  per interface, the latest binding change and the latest conflict with the
+  number of conflicts it stands for, served in turn, so a conflict can
+  arrive ahead of a binding change queued between two conflicts. Coalesced
+  conflicts report the latest addresses, and every conflict discovery
+  raises is delivered. `bgp_unnumbered_ra_conflicts_total` is exact while
+  the peer manager keeps up. If it falls behind by more than a candidate
+  lifetime, a foreign router's first binding beside an Established peer
+  learned from an inbound connection can be replaced before delivery and go
+  uncounted. Learned and expired candidates are no longer queued:
+  discovery logs them itself, so those two log lines now come from the
+  `rustbgpd::ra_discovery::runtime` target.
 - Bound two per-session queues that a peer could grow. A connection whose
   peer stopped reading queued one ROUTE-REFRESH request per max-prefix
   block episode that ended, with no limit when `send_hold_time = 0`. It now

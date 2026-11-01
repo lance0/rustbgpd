@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
-use super::engine::{DiscoveryConfig, DiscoveryEvent, Endpoint, Engine, LinkEvent, Transmit};
+use super::engine::{DiscoveryConfig, DiscoveryEvent, Engine, LinkEvent, Transmit};
 use super::packet::{self, DropReason, NdMessage};
 
 const ALL_NODES: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
@@ -51,130 +51,37 @@ enum EventKey {
     Conflict(String),
 }
 
-/// Distinct addresses a binding slot keeps replaced first bindings for. The
-/// owner tells them apart only by whether each is its inbound-learned peer,
-/// which discovery does not know. Up to this many distinct first-binding
-/// addresses per backlog on one interface the owner's conflict count is
-/// exact; beyond it the rest share the last entry kept, and the count is
-/// approximate. Reaching it takes 17 or more distinct routers advertising on
-/// an interface-only point-to-point link while the owner is stalled.
-const OBSERVED_FIRST_BINDINGS: usize = super::engine::MAX_CANDIDATES_PER_INTERFACE;
-
-/// One key's coalesced events.
-enum Slot {
-    /// The latest binding change, after the first bindings
-    /// (`previous: None`) that later changes replaced while queued, counted
-    /// per address: the owner checks each first binding against an
-    /// Established peer learned inbound.
-    Binding {
-        observed: VecDeque<(Endpoint, u64)>,
-        latest: DiscoveryEvent,
-    },
-    /// The latest conflict, delivered `count` times.
-    Conflict { latest: DiscoveryEvent, count: u64 },
-}
-
-impl Slot {
-    fn new(event: DiscoveryEvent) -> Self {
-        match event {
-            DiscoveryEvent::Conflict { .. } => Self::Conflict {
-                latest: event,
-                count: 1,
-            },
-            _ => Self::Binding {
-                observed: VecDeque::new(),
-                latest: event,
-            },
-        }
-    }
-
-    fn merge(&mut self, event: DiscoveryEvent) {
-        match self {
-            Self::Binding { observed, latest } => {
-                if let DiscoveryEvent::BindingChanged {
-                    previous: None,
-                    current: Some(first),
-                    ..
-                } = latest
-                {
-                    if let Some(entry) = observed.iter_mut().find(|(seen, _)| seen == first) {
-                        entry.1 += 1;
-                    } else if observed.len() < OBSERVED_FIRST_BINDINGS {
-                        observed.push_back((*first, 1));
-                    } else if let Some(last) = observed.back_mut() {
-                        last.1 += 1;
-                    }
-                }
-                *latest = event;
-            }
-            Self::Conflict { latest, count } => {
-                *latest = event;
-                *count += 1;
-            }
-        }
-    }
-
-    /// The next event to deliver, and whether this slot has more.
-    fn take(&mut self) -> (DiscoveryEvent, bool) {
-        match self {
-            Self::Binding { observed, latest } => match observed.front_mut() {
-                Some((first, count)) => {
-                    let (DiscoveryEvent::BindingChanged { interface, .. }
-                    | DiscoveryEvent::Conflict { interface, .. }
-                    | DiscoveryEvent::CandidateLearned { interface, .. }
-                    | DiscoveryEvent::CandidateExpired { interface, .. }) = &*latest;
-                    let event = DiscoveryEvent::BindingChanged {
-                        interface: interface.clone(),
-                        previous: None,
-                        current: Some(*first),
-                    };
-                    *count -= 1;
-                    if *count == 0 {
-                        observed.pop_front();
-                    }
-                    (event, true)
-                }
-                None => (latest.clone(), false),
-            },
-            Self::Conflict { latest, count } => {
-                *count -= 1;
-                (latest.clone(), *count > 0)
-            }
-        }
-    }
-}
-
-/// Events waiting for the neighbor owner: at most one binding slot and one
-/// conflict slot per interface, delivered round-robin so a slot with many
-/// events to deliver cannot hold back the others.
+/// Events waiting for the neighbor owner: per key the latest event and how
+/// many times to deliver it, served round-robin so a key with many
+/// deliveries cannot hold back the others.
 #[derive(Default)]
 struct PendingEvents {
     order: VecDeque<EventKey>,
-    events: HashMap<EventKey, Slot>,
+    events: HashMap<EventKey, (DiscoveryEvent, u64)>,
 }
 
 /// Create the discovery → neighbor owner event queue.
 ///
 /// Its RA input is untrusted link traffic, and the owner can be busy, so the
-/// queue coalesces instead of growing per event. What the owner acts on
-/// survives the merge:
-/// - A binding change replaces a pending one for the same interface: the
-///   owner's reconcile is level-triggered on the latest `current`. A first
-///   binding (`previous: None`) that a later change replaced is still
-///   delivered ahead of the latest change, counted per address, because the
-///   owner checks each one against an Established peer learned inbound and
-///   counts a conflict when the address differs. That count is exact up to
-///   [`OBSERVED_FIRST_BINDINGS`] distinct first-binding addresses per
-///   backlog on one interface; beyond that the rest are reported under the
-///   last address kept, so it is approximate.
-/// - A conflict replaces a pending one for the same interface and adds to
-///   its count, so every engine conflict is delivered; the coalesced
-///   deliveries carry the latest `bound` and `other`.
+/// queue coalesces instead of growing per event. It holds at most one entry
+/// per interface for each kind:
+/// - the latest binding change, which replaces a pending one: the owner's
+///   reconcile is level-triggered on `current`, so a binding discovery has
+///   already dropped is never applied;
+/// - the latest conflict, with the number of conflicts it stands for, each
+///   delivered, so engine conflicts are counted exactly. The deliveries
+///   carry the latest `bound` and `other`.
 ///
-/// Slots are served round-robin, so a conflict can be delivered ahead of a
+/// One count is exact only while the owner keeps up: the owner also counts
+/// a conflict when a first binding (`previous: None`) names a router other
+/// than an Established peer it learned from an inbound connection. If the
+/// owner falls behind by more than a candidate lifetime, such a first
+/// binding can be replaced before it is delivered and go uncounted.
+///
+/// Keys are served round-robin, so a conflict can be delivered ahead of a
 /// binding change queued between two conflicts. Learned and expired
 /// candidates are only logged; the actor logs them itself and never queues
-/// them. Depth: two slots per interface.
+/// them.
 pub(crate) fn event_channel() -> (EventSender, DiscoveryEvents) {
     let pending = Arc::new(Mutex::new(PendingEvents::default()));
     // One wake token covers every pending entry: the receiver drains the map
@@ -213,10 +120,16 @@ impl EventSender {
             let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
             let pending = &mut *pending;
             match pending.events.entry(key) {
-                Entry::Occupied(mut slot) => slot.get_mut().merge(event),
+                Entry::Occupied(mut slot) => {
+                    let (latest, count) = slot.get_mut();
+                    if matches!(event, DiscoveryEvent::Conflict { .. }) {
+                        *count += 1;
+                    }
+                    *latest = event;
+                }
                 Entry::Vacant(slot) => {
                     pending.order.push_back(slot.key().clone());
-                    slot.insert(Slot::new(event));
+                    slot.insert((event, 1));
                 }
             }
         }
@@ -225,7 +138,7 @@ impl EventSender {
         let _ = self.wake.try_send(());
     }
 
-    /// Slots waiting for the owner.
+    /// Entries waiting for the owner.
     #[cfg(test)]
     fn pending(&self) -> usize {
         self.pending
@@ -259,13 +172,18 @@ impl DiscoveryEvents {
         }
     }
 
-    /// Deliver from the front slot, then move it to the back if it has more.
+    /// Deliver from the front entry, then move it to the back if it has more.
     fn pop(&self) -> Option<DiscoveryEvent> {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let pending = &mut *pending;
         let key = pending.order.pop_front()?;
-        let (event, more) = pending.events.get_mut(&key)?.take();
-        if more {
+        let Some((latest, count)) = pending.events.get_mut(&key) else {
+            debug_assert!(false, "a queued key has no pending event");
+            return None;
+        };
+        *count -= 1;
+        let event = latest.clone();
+        if *count > 0 {
             pending.order.push_back(key);
         } else {
             pending.events.remove(&key);
@@ -1439,40 +1357,19 @@ mod tests {
             address,
             ifindex: 9,
         };
+        // Only the final binding: the churned ones were dropped by discovery
+        // before the owner read them, so applying them would only churn.
         let bindings: Vec<_> = delivered
             .iter()
             .filter(|event| matches!(event, DiscoveryEvent::BindingChanged { .. }))
             .collect();
-        // Every replaced first binding is still delivered: the first
-        // `OBSERVED_FIRST_BINDINGS` addresses by name, the rest under the
-        // last of those. Then the final binding.
-        let churned = |i| endpoint(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 2, i));
-        let kept = u16::try_from(super::OBSERVED_FIRST_BINDINGS).unwrap();
-        let expected = (0..kept - 1)
-            .map(churned)
-            .chain(std::iter::repeat_n(
-                churned(kept - 1),
-                usize::from(501 - kept),
-            ))
-            .map(|current| DiscoveryEvent::BindingChanged {
-                interface: "x".into(),
-                previous: None,
-                current: Some(current),
-            });
-        assert_eq!(bindings.len(), 501);
-        assert!(
-            bindings[..500]
-                .iter()
-                .copied()
-                .eq(expected.collect::<Vec<_>>().iter())
-        );
         assert_eq!(
-            *bindings[500],
-            DiscoveryEvent::BindingChanged {
+            bindings,
+            [&DiscoveryEvent::BindingChanged {
                 interface: "x".into(),
                 previous: None,
                 current: Some(endpoint(bound)),
-            }
+            }]
         );
         let conflict = DiscoveryEvent::Conflict {
             interface: "x".into(),
@@ -1483,33 +1380,7 @@ mod tests {
             delivered.iter().filter(|event| **event == conflict).count(),
             usize::from(conflicts)
         );
-        assert_eq!(delivered.len(), 501 + usize::from(conflicts));
-    }
-
-    /// A first binding that expires before the owner reads it is still
-    /// delivered: with an Established peer learned inbound, it is the only
-    /// sign that a second router advertised.
-    #[tokio::test]
-    async fn a_first_binding_replaced_while_queued_is_still_delivered() {
-        use crate::ra_discovery::{DiscoveryEvent, Endpoint};
-
-        let (sender, mut events) = super::event_channel();
-        let foreign = Some(Endpoint {
-            address: "fe80::f".parse().unwrap(),
-            ifindex: 9,
-        });
-        let change = |previous, current| DiscoveryEvent::BindingChanged {
-            interface: "x".into(),
-            previous,
-            current,
-        };
-        sender.send(change(None, foreign));
-        sender.send(change(foreign, None));
-        assert_eq!(sender.pending(), 1);
-        drop(sender);
-        assert_eq!(events.recv().await, Some(change(None, foreign)));
-        assert_eq!(events.recv().await, Some(change(foreign, None)));
-        assert_eq!(events.recv().await, None);
+        assert_eq!(delivered.len(), 1 + usize::from(conflicts));
     }
 
     /// Draining a large counted backlog yields to other tasks on the same
@@ -1541,40 +1412,6 @@ mod tests {
             events.recv().await.unwrap();
             received += 1;
         }
-    }
-
-    /// Up to `OBSERVED_FIRST_BINDINGS` distinct first-binding addresses
-    /// replaced while queued are each delivered under their own address, so
-    /// the owner's own-versus-foreign check stays exact.
-    #[tokio::test]
-    async fn replaced_first_bindings_keep_their_addresses_up_to_the_cap() {
-        use crate::ra_discovery::{DiscoveryEvent, Endpoint};
-
-        let (sender, mut events) = super::event_channel();
-        let at = |last: u16| {
-            Some(Endpoint {
-                address: Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 2, last),
-                ifindex: 9,
-            })
-        };
-        let change = |previous, current| DiscoveryEvent::BindingChanged {
-            interface: "x".into(),
-            previous,
-            current,
-        };
-        let cap = u16::try_from(super::OBSERVED_FIRST_BINDINGS).unwrap();
-        for last in 0..cap {
-            sender.send(change(None, at(last)));
-            sender.send(change(at(last), None));
-        }
-        drop(sender);
-        let mut delivered = Vec::new();
-        while let Some(event) = events.recv().await {
-            delivered.push(event);
-        }
-        let mut expected: Vec<_> = (0..cap).map(|last| change(None, at(last))).collect();
-        expected.push(change(at(cap - 1), None));
-        assert_eq!(delivered, expected);
     }
 
     /// A conflict storm on one interface cannot hold back another
