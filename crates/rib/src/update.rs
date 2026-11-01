@@ -1792,12 +1792,11 @@ pub struct BestPathCandidate {
     /// When the explain was scoped to a peer with Add-Path send mode
     /// (`add_path_send_max > 0`), non-zero = the outbound Add-Path path
     /// ID this candidate has or would get (a stable key, not a rank);
-    /// zero = filtered out by the peer's family check / split-horizon /
-    /// iBGP or RFC 4456 route-reflector suppression / the source-route
-    /// gates live staging applies (RFC 1997, route-server control,
-    /// LLGR) / conditional advertisement / export policy, or beyond
-    /// `send_max`. The peer's ORF prefix filter and RFC 5291 §6 refresh
-    /// gate are not applied.
+    /// zero = filtered out by the peer's RFC 5291 §6 refresh gate /
+    /// family check / Address-Prefix ORF filter / split-horizon / iBGP
+    /// or RFC 4456 route-reflector suppression / the source-route gates
+    /// live staging applies (RFC 1997, route-server control, LLGR) /
+    /// conditional advertisement / export policy, or beyond `send_max`.
     /// Always zero without Add-Path send (`add_path_send_max == 0`) and
     /// on a global-view explain: such a peer is sent one path at
     /// `path_id = 0` — the Loc-RIB best for an ordinary single-best

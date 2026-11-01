@@ -3656,15 +3656,15 @@ impl RibManager {
         // For the peer-aware path, build the ranked advertised set so
         // each candidate can be tagged with its `advertised_path_id`.
         // The selection mirrors `distribute_multipath_prefix`:
-        // family check → split-horizon → iBGP/RR suppression → source-route
+        // RFC 5291 §6 refresh gate → family check → Address-Prefix ORF
+        // filter → split-horizon → iBGP/RR suppression → source-route
         // gates (`multipath_candidate_suppressed`: `NO_ADVERTISE`,
         // `NO_EXPORT`, route-server control, LLGR) → conditional
         // advertisement → export policy → modified-route `NO_ADVERTISE` →
         // top-N by best-path. Mirroring the contract is deliberate —
         // operators trust explain only if it produces the same selection
         // that distribution would, modulo state changes between the two
-        // calls. Not mirrored: the whole-prefix Address-Prefix ORF filter
-        // and the RFC 5291 §6 refresh gate (tracked separately).
+        // calls.
         let mut advertised: Vec<(PeerId, u32, u32)> = Vec::new();
         let mut add_path_send_max: u32 = 0;
         if let Some(peer_addr) = peer {
@@ -3709,7 +3709,21 @@ impl RibManager {
             } else {
                 0
             };
-            if add_path_send_max > 0 {
+            // RFC 5291, whole-prefix like live staging: a family still
+            // waiting on the peer's first ROUTE-REFRESH (§6) stages nothing,
+            // and the session's Adj-RIB-Out starts empty when the gate arms;
+            // a prefix the peer's Address-Prefix ORF denies is withdrawn on
+            // every path ID. Either way no candidate holds a path ID.
+            let orf_withheld = self
+                .peer_orf_pending
+                .get(&peer_addr)
+                .is_some_and(|gated| gated.contains(&family))
+                || self
+                    .peer_orf_filters
+                    .get(&peer_addr)
+                    .and_then(|filters| filters.get(&family))
+                    .is_some_and(|filter| !filter.permits(&prefix));
+            if add_path_send_max > 0 && !orf_withheld {
                 let export_pol = self.export_policy_for(peer_addr);
                 let rs_control = self
                     .peer_rs_control

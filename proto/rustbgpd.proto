@@ -2954,14 +2954,14 @@ message ExplainBestPathRequest {
   // Loc-RIB best and `candidates` lists every non-best route the RIB
   // knows for the prefix. The winner is never repeated in candidates.
   // A peer scope also tags Add-Path advertisement: every candidate
-  // that passes the peer's sendable-family check, split-horizon /
-  // RR suppression, RFC 1997 `NO_ADVERTISE` / `NO_EXPORT`,
+  // that passes the peer's RFC 5291 §6 refresh gate, sendable-family
+  // check, Address-Prefix ORF filter, split-horizon / RR
+  // suppression, RFC 1997 `NO_ADVERTISE` / `NO_EXPORT`,
   // route-server control, LLGR export restriction, conditional
   // advertisement and export policy, and falls within the peer's
   // effective `add_path_send_max`, gets a non-zero
   // `advertised_path_id`: the outbound Add-Path path ID the peer
-  // has or would get. The peer's Address-Prefix ORF filter and the
-  // RFC 5291 §6 refresh gate are not applied here. A path keeps its ID while it is sent, so IDs
+  // has or would get. A path keeps its ID while it is sent, so IDs
   // follow no rank order and need not be contiguous; the selected
   // winner (in `best_route`) is not repeated in `candidates`, so
   // its ID is absent from that list.
@@ -3009,7 +3009,8 @@ message BestPathCandidate {
   // Set on responses scoped to a peer with Add-Path send mode
   // (`add_path_send_max > 0`). Non-zero = the outbound Add-Path
   // path ID this candidate has or would get (a stable key, not a
-  // rank). Zero = filtered (family mismatch, split-horizon, iBGP /
+  // rank). Zero = filtered (RFC 5291 §6 refresh gate, family
+  // mismatch, Address-Prefix ORF filter, split-horizon, iBGP /
   // RFC 4456 route-reflector suppression, RFC 1997, route-server
   // control, LLGR export restriction, conditional advertisement,
   // export policy reject) or beyond `send_max`. Always zero
