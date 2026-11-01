@@ -696,12 +696,12 @@ pub(in crate::manager) struct GroupRibOut {
     /// ([`Self::adv_entry_post_backstop_for`]) may differ from `adv(m)`: a
     /// winner or lane entry with a suppression-form community, or a
     /// fallback list. Maintained only while `rs_members` is non-empty.
-    rs_tagged: FastMap<(Prefix, u32), RsTargets>,
+    rs_tagged: ShardedMap<(Prefix, u32), RsTargets>,
     /// [`Self::rs_tagged`] keys by the ASN their targets name, so seeding a
     /// joining member resolves only the keys that can name it.
-    rs_named: FastMap<u32, crate::fast_hash::FastSet<(Prefix, u32)>>,
+    rs_named: FastMap<u32, ShardedMap<(Prefix, u32), ()>>,
     /// [`Self::rs_tagged`] keys carrying the announce-to-none large form.
-    rs_all: crate::fast_hash::FastSet<(Prefix, u32)>,
+    rs_all: ShardedMap<(Prefix, u32), ()>,
     /// Per rs-control member, the per-family `[v4, v6]` difference between
     /// its wire slots and `adv(m)` over `rs_tagged`: the correction the O(1)
     /// count synthesis adds for that member.
@@ -835,9 +835,7 @@ impl GroupRibOut {
         crate::adj_rib_out::release_sharded_map(&mut self.runner_up, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.rs_fallback, checkpoint);
         release_hash_map(&mut self.rs_members, checkpoint);
-        release_hash_map(&mut self.rs_tagged, checkpoint);
-        release_hash_map(&mut self.rs_named, checkpoint);
-        crate::manager::retire_hash_set(&mut self.rs_all, checkpoint);
+        self.clear_rs_index(checkpoint);
         release_hash_map(&mut self.rs_count_adjust, checkpoint);
         release_hash_map(&mut self.lane_counts, checkpoint);
         for _ in self.tombstones.drain() {
@@ -910,9 +908,9 @@ impl GroupRibOut {
             runner_up: ShardedMap::default(),
             rs_fallback: ShardedMap::default(),
             rs_members: AddrMap::default(),
-            rs_tagged: FastMap::default(),
+            rs_tagged: ShardedMap::default(),
             rs_named: FastMap::default(),
-            rs_all: crate::fast_hash::FastSet::default(),
+            rs_all: ShardedMap::default(),
             rs_count_adjust: AddrMap::default(),
             lane_counts: AddrMap::default(),
             export_chain,
@@ -1366,31 +1364,75 @@ impl GroupRibOut {
         }
         if let Some(targets) = targets {
             for &asn in &targets.asns {
-                self.rs_named.entry(asn).or_default().insert(key);
+                self.rs_named.entry(asn).or_default().insert(key, ());
             }
             if targets.all {
-                self.rs_all.insert(key);
+                self.rs_all.insert(key, ());
             }
             self.rs_tagged.insert(key, targets);
         }
     }
 
-    fn clear_rs_index(&mut self) {
-        self.rs_tagged.clear();
-        self.rs_named.clear();
-        self.rs_all.clear();
+    /// Retire the control index, one checkpoint per entry: at a full-table
+    /// tagging it is as large as the table.
+    fn clear_rs_index(&mut self, checkpoint: &mut impl FnMut()) {
+        use crate::adj_rib_out::{release_hash_map, release_sharded_map};
+        release_sharded_map(&mut self.rs_tagged, checkpoint);
+        for keys in self.rs_named.values_mut() {
+            release_sharded_map(keys, checkpoint);
+        }
+        release_hash_map(&mut self.rs_named, checkpoint);
+        release_sharded_map(&mut self.rs_all, checkpoint);
     }
 
     /// `member`'s wire slot at `key` minus its `adv(m)` slot, both after
-    /// the RFC 9234 backstop: `-1`, `0` or `1`.
+    /// the RFC 9234 backstop: `-1`, `0` or `1`. The presence of
+    /// [`Self::adv_entry_post_backstop_for`] minus that of
+    /// [`Self::adv_entry_post_backstop`], from one lookup of each input:
+    /// seeding runs this once per member per key that names it.
     fn rs_slot_adjust(&self, member: PeerId, rs_control: (u32, u32), key: (Prefix, u32)) -> i64 {
-        i64::from(
-            self.adv_entry_post_backstop_for(member, &key.0, key.1, Some(rs_control))
-                .is_some(),
-        ) - i64::from(
-            self.adv_entry_post_backstop(member, &key.0, key.1)
-                .is_some(),
-        )
+        let Some(staged) = self.table.get(&key.0, key.1) else {
+            return 0;
+        };
+        // Presence only: the slot's next-hop and local-source residue
+        // never decide it.
+        let winner = AdvEntry {
+            route: staged,
+            local_source: None,
+            nh: None,
+            source_attrs: if self.source_control_passthrough {
+                None
+            } else {
+                self.source_attrs.get(&key)
+            },
+            policy_label: None,
+        };
+        let lane = self
+            .per_client_best
+            .then(|| self.runner_up.get(&key.0))
+            .flatten();
+        let fallback = (self.per_client_best && key.1 == 0)
+            .then(|| self.rs_fallback.get(&key.0).map(|fallback| &**fallback))
+            .flatten();
+        let resolved = payload::resolve_member_slot(
+            member,
+            Some(rs_control),
+            winner,
+            lane,
+            fallback,
+            |entry| self.source_control_for_route(entry.route, entry.source_attrs),
+        );
+        let raw = if staged.peer == member {
+            lane.map(RunnerUp::adv_entry)
+        } else {
+            Some(winner)
+        };
+        let delivered = |slot: Option<AdvEntry<'_>>| {
+            slot.is_some_and(|entry| {
+                !super::distribution::otc_egress_blocked(entry.route, self.local_role)
+            })
+        };
+        i64::from(delivered(resolved)) - i64::from(delivered(raw))
     }
 
     /// Add (`sign` = 1) or remove (`-1`) the rs-control count correction of
@@ -1464,7 +1506,7 @@ impl GroupRibOut {
         checkpoint: &mut impl FnMut(),
     ) {
         if self.rs_members.is_empty() {
-            self.clear_rs_index();
+            self.clear_rs_index(checkpoint);
             let keys: Vec<(Prefix, u32)> = self
                 .table
                 .iter()
@@ -1484,7 +1526,7 @@ impl GroupRibOut {
         // keys, then keys naming its ASN, then keys naming the route
         // server's ASN (`0:RS`).
         let (rs_asn, member_asn) = rs_control;
-        let empty = crate::fast_hash::FastSet::default();
+        let empty = ShardedMap::default();
         let by_member = self.rs_named.get(&member_asn).unwrap_or(&empty);
         let by_rs = if rs_asn == member_asn {
             &empty
@@ -1493,12 +1535,16 @@ impl GroupRibOut {
         };
         let keys: Vec<(Prefix, u32)> = self
             .rs_all
-            .iter()
-            .chain(by_member.iter().filter(|key| !self.rs_all.contains(*key)))
+            .keys()
+            .chain(
+                by_member
+                    .keys()
+                    .filter(|key| !self.rs_all.contains_key(*key)),
+            )
             .chain(
                 by_rs
-                    .iter()
-                    .filter(|key| !self.rs_all.contains(*key) && !by_member.contains(*key)),
+                    .keys()
+                    .filter(|key| !self.rs_all.contains_key(*key) && !by_member.contains_key(*key)),
             )
             .copied()
             .collect();
@@ -1515,12 +1561,16 @@ impl GroupRibOut {
     }
 
     /// Drop a leaving member's rs-control state; the last one stops the
-    /// index maintenance.
-    pub(in crate::manager) fn remove_rs_member(&mut self, member: PeerId) {
+    /// index maintenance and retires the index.
+    pub(in crate::manager) fn remove_rs_member(
+        &mut self,
+        member: PeerId,
+        checkpoint: &mut impl FnMut(),
+    ) {
         self.rs_members.remove(&member);
         self.rs_count_adjust.remove(&member);
         if self.rs_members.is_empty() {
-            self.clear_rs_index();
+            self.clear_rs_index(checkpoint);
         }
     }
 
@@ -1765,6 +1815,14 @@ impl GroupRibOut {
     /// pass through the backstop itself. A plain group's staged
     /// entries are never blocked (its in-walk gate rejects them), so
     /// this reduces to `adv_entry` there.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the definitional slot the count fold tests check; \
+                      `rs_slot_adjust` inlines it to share its lookups"
+        )
+    )]
     pub(in crate::manager) fn adv_entry_post_backstop(
         &self,
         member: PeerId,
@@ -4018,7 +4076,7 @@ impl RibManager {
             return;
         };
         group.members.remove(&peer);
-        group.remove_rs_member(peer);
+        group.remove_rs_member(peer, &mut || checkpoint());
         group.vpn_member_counts.remove(&peer);
         group.dirty_members.remove(&peer);
         if group.dirty_members.is_empty() {
