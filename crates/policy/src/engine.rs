@@ -1766,6 +1766,14 @@ impl PolicyChain {
         for (index, set) in compiled.community_sets.iter().enumerate() {
             writeln!(canonical, "community-set[{index}]={:?}", set.criteria())
                 .expect("writing canonical policy identity to String cannot fail");
+            if !set.patterns().is_empty() {
+                writeln!(
+                    canonical,
+                    "community-set[{index}].patterns={:?}",
+                    set.patterns()
+                )
+                .expect("writing canonical policy identity to String cannot fail");
+            }
         }
         for (index, set) in compiled.asn_sets.iter().enumerate() {
             writeln!(canonical, "asn-set[{index}]={:?}", set.asns())

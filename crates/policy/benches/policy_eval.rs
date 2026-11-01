@@ -29,6 +29,10 @@
 //! - `set_heavy` — the ADR-0096 set-index claim measured in-repo: a
 //!   1,000-prefix list as a statement chain (IR term walk) vs one
 //!   indexed `PrefixInSet` IR term. See `bench_set_heavy`.
+//! - `community_set` — one `.rpol` community-set probe over a route with
+//!   all three community kinds: the exact-member hit and miss that pin
+//!   the hash-probe path, and the same set with 40 patterns added. See
+//!   `bench_community_set`.
 //!
 //! Run: `cargo bench -p rustbgpd-policy --bench policy_eval`
 //! Compare across refs: `bench/compare-criterion.sh --package
@@ -463,6 +467,92 @@ fn bench_set_heavy(c: &mut Criterion) {
     group.finish();
 }
 
+/// A `.rpol` community-set probe (`route.communities in tags`) against a
+/// route carrying 30 standard, 5 large and 5 route-target communities.
+/// The exact set holds 200 standard, 20 large and 20 RT members. `miss`
+/// probes every route community of every kind; `hit` matches on the last
+/// standard community. The `pattern_*` arms, registered only on builds
+/// that accept community patterns, add 40 patterns to the same
+/// set: 16 bucketed by ASN, 8 by value, 4 unbucketed standard patterns, 8
+/// large and 4 RT patterns bucketed by global administrator.
+fn bench_community_set(c: &mut Criterion) {
+    use rustbgpd_wire::{ExtendedCommunity, LargeCommunity};
+
+    let exact: Vec<String> = (0..200)
+        .map(|i| format!("64500:{i}"))
+        .chain((0..20).map(|i| format!("64500:{i}:1")))
+        .chain((0..20).map(|i| format!("RT:64500:{i}")))
+        .collect();
+    let compile = |members: &[String]| {
+        rustbgpd_policy::rpol::compile_rpol(
+            &format!(
+                "community-set tags {{ {} }}
+                 policy p {{ term t {{ if route.communities in tags {{ reject }} }} term r {{ accept }} }}",
+                members.join(", ")
+            ),
+            &mut SetStore::new(),
+        )
+    };
+    let exact_chain = compile(&exact).expect("compiles");
+    let mut patterned = exact.clone();
+    patterned.extend((0..16).map(|i| format!("{}:*", 64_600 + i)));
+    patterned.extend((0..8).map(|i| format!("*:{}", 600 + i)));
+    patterned.extend((0..4).map(|i| format!("PRIVATE_AS:{}..{}", 1_000 + 10 * i, 1_009 + 10 * i)));
+    patterned.extend((0..8).map(|i| format!("{}:1..9:*", 64_600 + i)));
+    patterned.extend((0..4).map(|i| format!("RT:{}:*", 64_600 + i)));
+    // Builds that predate community patterns reject the source, so the
+    // same file runs there with only the exact arms (an A/B control).
+    let pattern_chain = compile(&patterned).ok();
+
+    let miss: Vec<u32> = (0..30).map(|i| (65_010 << 16) | i).collect();
+    let mut hit = miss.clone();
+    *hit.last_mut().unwrap() = (64_500 << 16) | 199;
+    let mut pattern_hit = miss.clone();
+    *pattern_hit.last_mut().unwrap() = (64_615 << 16) | 7;
+    let large: Vec<LargeCommunity> = (0..5).map(|i| LargeCommunity::new(65_010, i, 1)).collect();
+    let ext: Vec<ExtendedCommunity> = (0..5u64)
+        .map(|i| ExtendedCommunity::new((0x02 << 48) | (65_010 << 32) | i))
+        .collect();
+    let as_path_str = String::new();
+    let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let route = |communities| RouteContext {
+        large_communities: &large,
+        extended_communities: &ext,
+        ..predicate_ctx(matching_prefix(), communities, &as_path_str, peer_ip)
+    };
+    let (miss_ctx, hit_ctx) = (route(&miss), route(&hit));
+    let pattern_hit_ctx = route(&pattern_hit);
+    assert_eq!(exact_chain.evaluate(&miss_ctx).action, PolicyAction::Permit);
+    assert_eq!(exact_chain.evaluate(&hit_ctx).action, PolicyAction::Deny);
+    let mut arms = vec![
+        ("exact_miss", &exact_chain, &miss_ctx),
+        ("exact_hit", &exact_chain, &hit_ctx),
+    ];
+    if let Some(pattern_chain) = &pattern_chain {
+        assert_eq!(
+            pattern_chain.evaluate(&miss_ctx).action,
+            PolicyAction::Permit
+        );
+        assert_eq!(
+            pattern_chain.evaluate(&pattern_hit_ctx).action,
+            PolicyAction::Deny
+        );
+        arms.push(("pattern_miss", pattern_chain, &miss_ctx));
+        arms.push(("pattern_hit", pattern_chain, &pattern_hit_ctx));
+    }
+
+    let mut group = c.benchmark_group("community_set");
+    for (label, chain, ctx) in arms {
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                let r = std::hint::black_box(chain).evaluate(ctx);
+                std::hint::black_box(r);
+            });
+        });
+    }
+    group.finish();
+}
+
 /// LAN-299 value expressions: the arithmetic cost itself, and the
 /// constant-action contrast proving chains that use NO arithmetic keep
 /// their cost (constant expressions fold to the same IR as literals,
@@ -861,6 +951,7 @@ criterion_group!(
     bench_policy_eval,
     bench_policy_predicate_eval,
     bench_set_heavy,
+    bench_community_set,
     bench_value_expr,
     bench_loop_eval,
     bench_fn_eval,

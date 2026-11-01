@@ -7691,3 +7691,572 @@ fn chain_expect_members_retain_only_referenced_tables() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Community patterns in sets: `*`, `a..b`, `PRIVATE_AS`
+// ─────────────────────────────────────────────────────────────────────
+
+mod community_patterns {
+    use std::fmt::Write as _;
+
+    use super::super::{format_rpol, parse_dataset_text, run_rpol_tests};
+    use super::{compile_ok, diagnostics_of, route_ctx, v4};
+    use crate::datasets::{DatasetData, DatasetKind};
+    use crate::engine::{CommunityMatch, PolicyAction};
+    use crate::sets::{CommunityField, CommunityPattern};
+    use rustbgpd_wire::RpkiValidation;
+
+    const SETS: &str = r"
+community-set std {
+    64496:*, *:666, 64497:100..199, PRIVATE_AS:7, 64498:PRIVATE_AS, 64499:1
+}
+community-set large {
+    64496:*:*, 64497:1:*, 64498:1..9:*, PRIVATE_AS:*:*, *:7:*,
+    65536:4294967294..4294967295:*, LC:65537:*:0..4294967295
+}
+community-set ext {
+    RT:64496:*, RT:*:666, RO:64497:10..20, RT:PRIVATE_AS:1, RT:192.0.2.1:*
+}
+
+policy std-in { term t { if route.communities in std { accept } } term rest { reject } }
+policy large-in {
+    term t { if route.large-communities in large { accept } }
+    term rest { reject }
+}
+policy ext-in { term t { if route.ext-communities in ext { accept } } term rest { reject } }
+";
+
+    /// One `test` block per `(policy, fixture field, value, verdict)`.
+    fn cases(cases: &[(&str, &str, &str, bool)]) -> String {
+        let mut source = SETS.to_string();
+        for (index, (policy, field, value, accept)) in cases.iter().enumerate() {
+            let verdict = if *accept { "accept" } else { "reject" };
+            writeln!(
+                source,
+                "test case-{index} {{ route {{ prefix 192.0.2.0/24; {field} [{value}] }} \
+                 expect {policy} == {verdict} }}"
+            )
+            .unwrap();
+        }
+        source
+    }
+
+    fn run_cases(table: &[(&str, &str, &str, bool)]) {
+        let report = run_rpol_tests(&cases(table)).expect("compiles");
+        assert_eq!(report.total, table.len());
+        let failed: Vec<String> = report
+            .failures
+            .iter()
+            .map(|failure| {
+                let index: usize = failure.name["case-".len()..].parse().unwrap();
+                format!("{:?}: {}", table[index], failure.message)
+            })
+            .collect();
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[test]
+    fn standard_patterns_match_at_every_boundary() {
+        let c = |value, accept| ("std-in", "communities", value, accept);
+        run_cases(&[
+            // `64496:*`: the whole low half, nothing beside it.
+            c("64496:0", true),
+            c("64496:65535", true),
+            c("64495:65535", false),
+            c("64500:0", false),
+            // `*:666`: any ASN half.
+            c("0:666", true),
+            c("65535:666", true),
+            c("1:665", false),
+            c("1:667", false),
+            // `64497:100..199`: inclusive ends.
+            c("64497:99", false),
+            c("64497:100", true),
+            c("64497:199", true),
+            c("64497:200", false),
+            // `PRIVATE_AS:7`: 64512..=65534 only.
+            c("64511:7", false),
+            c("64512:7", true),
+            c("65534:7", true),
+            c("65535:7", false),
+            c("64512:8", false),
+            // `64498:PRIVATE_AS` in the low half.
+            c("64498:64511", false),
+            c("64498:64512", true),
+            c("64498:65534", true),
+            c("64498:65535", false),
+            // The exact member next to the patterns.
+            c("64499:1", true),
+            c("64499:2", false),
+        ]);
+    }
+
+    #[test]
+    fn large_patterns_match_at_every_boundary() {
+        let c = |value, accept| ("large-in", "large-communities", value, accept);
+        run_cases(&[
+            c("64496:0:0", true),
+            c("64496:4294967295:4294967295", true),
+            // `64497:1:*`
+            c("64497:1:0", true),
+            c("64497:1:4294967295", true),
+            c("64497:0:1", false),
+            c("64497:2:1", false),
+            // `64498:1..9:*`
+            c("64498:0:1", false),
+            c("64498:1:1", true),
+            c("64498:9:1", true),
+            c("64498:10:1", false),
+            // `PRIVATE_AS:*:*`: both private ranges of a 32-bit field.
+            c("64511:0:0", false),
+            c("64512:0:0", true),
+            c("65534:0:0", true),
+            c("65535:0:0", false),
+            c("4199999999:0:0", false),
+            c("4200000000:0:0", true),
+            c("4294967294:0:0", true),
+            c("4294967295:0:0", false),
+            // `*:7:*`: unbucketed.
+            c("1:7:1", true),
+            c("1:8:1", false),
+            // A 32-bit range ending at u32::MAX.
+            c("65536:4294967293:0", false),
+            c("65536:4294967294:0", true),
+            c("65536:4294967295:0", true),
+            // A full-range local part written as a range.
+            c("65537:5:4294967295", true),
+            c("65538:5:4294967295", false),
+        ]);
+    }
+
+    #[test]
+    fn extended_patterns_match_route_targets_and_origins() {
+        let c = |value, accept| ("ext-in", "ext-communities", value, accept);
+        run_cases(&[
+            c("RT:64496:0", true),
+            c("RT:64496:4294967295", true),
+            c("RO:64496:5", false),
+            // `RT:*:666`, across 2-octet and 4-octet ASN encodings.
+            c("RT:1:666", true),
+            c("RT:200000:666", true),
+            c("RT:1:667", false),
+            c("RO:1:666", false),
+            // `RO:64497:10..20`
+            c("RO:64497:9", false),
+            c("RO:64497:10", true),
+            c("RO:64497:20", true),
+            c("RO:64497:21", false),
+            c("RT:64497:15", false),
+            // `RT:PRIVATE_AS:1`
+            c("RT:64511:1", false),
+            c("RT:64512:1", true),
+            c("RT:65534:1", true),
+            c("RT:65535:1", false),
+            c("RT:4200000000:1", true),
+            c("RT:4294967295:1", false),
+            // An IPv4 global administrator.
+            c("RT:192.0.2.1:7", true),
+            c("RT:192.0.2.2:7", false),
+        ]);
+    }
+
+    /// A mixed set matches through any kind, and an exact-only member
+    /// list beside patterns of other kinds keeps matching exactly.
+    #[test]
+    fn mixed_sets_match_any_kind() {
+        let source = r"
+community-set mixed { 65000:1, 64496:*, 64497:1:*, RT:64498:*, 65001:2:3 }
+policy p { term t { if route.communities in mixed { reject } } term rest { accept } }
+test exact-standard { route { prefix 192.0.2.0/24; communities [65000:1] } expect p == reject }
+test std-pattern { route { prefix 192.0.2.0/24; communities [64496:9] } expect p == reject }
+test large-pattern {
+    route { prefix 192.0.2.0/24; large-communities [64497:1:9] }
+    expect p == reject
+}
+test ext-pattern { route { prefix 192.0.2.0/24; ext-communities [RT:64498:9] } expect p == reject }
+test exact-large {
+    route { prefix 192.0.2.0/24; large-communities [65001:2:3] }
+    expect p == reject
+}
+test miss {
+    route {
+        prefix 192.0.2.0/24; communities [65000:2]; large-communities [64497:2:9, 65001:2:4]
+        ext-communities [RT:64499:9, RO:64498:9]
+    }
+    expect p == accept
+}
+";
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, 6);
+        assert!(report.all_passed(), "{:?}", report.failures);
+    }
+
+    /// The binding forms probe the standard patterns: the RPL
+    /// `delete community in` port, and a parameter folded at compile time.
+    #[test]
+    fn binding_and_parameter_probes_use_standard_patterns() {
+        let source = r"
+community-set scrub { 64496:*, 64497:100..199, 64498:1:* }
+policy delete-in {
+    term t { for c in route.communities { if c in scrub { remove community c } } accept }
+}
+policy by-param(x: u32) { term t { if x in scrub { reject } } term rest { accept } }
+test scrubbed {
+    route { prefix 192.0.2.0/24; communities [64496:1, 64497:150, 64497:200, NO_EXPORT] }
+    expect delete-in == accept with only removes community 64496:1,
+        removes community 64497:150, not removed community 64497:200,
+        not removed community NO_EXPORT
+}
+test param-hit { route { prefix 192.0.2.0/24 } expect by-param(4226875492) == reject }
+test param-miss { route { prefix 192.0.2.0/24 } expect by-param(4226941128) == accept }
+";
+        // 4226875492 = 64497:100; 4226941128 = 64498:200 (only a large
+        // pattern names 64498, and a binding is a standard community).
+        assert_eq!((64_497u32 << 16) + 100, 4_226_875_492);
+        assert_eq!((64_498u32 << 16) + 200, 4_226_941_128);
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, 3);
+        assert!(report.all_passed(), "{:?}", report.failures);
+    }
+
+    #[test]
+    fn invalid_patterns_are_rejected_with_their_reason() {
+        for (source, reason) in [
+            ("community-set s { 64496:200..100 }", "is empty"),
+            ("community-set s { 64496:5..4:* }", "is empty"),
+            ("community-set s { RT:64496:9..1 }", "is empty"),
+            ("community-set s { 65536:* }", "exceeds 65535"),
+            ("community-set s { 64496:1..65536 }", "exceeds 65535"),
+            ("community-set s { *:65536 }", "exceeds 65535"),
+            ("community-set s { 4294967296:*:* }", "does not fit in u32"),
+            (
+                "community-set s { 1:4294967295..4294967296:* }",
+                "does not fit in u32",
+            ),
+            ("community-set s { RT:4294967296:* }", "does not fit in u32"),
+            // RFC 4360: a 4-octet-AS or IPv4 global carries a 2-octet local,
+            // as for the exact literal.
+            (
+                "community-set s { RT:4200000000:70000..70000 }",
+                "exceeds 65535 for a 4-octet-AS global admin",
+            ),
+            (
+                "community-set s { RO:65536..70000:70000..4294967295 }",
+                "exceeds 65535 for a 4-octet-AS global admin",
+            ),
+            (
+                "community-set s { RT:192.0.2.1:70000..70000 }",
+                "exceeds 65535 for an IPv4 global admin",
+            ),
+            (
+                "community-set s { RT:192.0.2.1:70000..80000 }",
+                "exceeds 65535 for an IPv4 global admin",
+            ),
+        ] {
+            let (_, rendered) = diagnostics_of(source);
+            assert!(rendered.contains(reason), "{source}: {rendered}");
+        }
+        // A global that admits a 2-octet ASN, or a local that reaches
+        // 65535, can still match.
+        compile_ok(
+            "community-set s { RT:*:70000, RT:PRIVATE_AS:70000, RT:4200000000:1..70000, \
+             RT:192.0.2.1:*, RT:64496:70000..70000 } \
+             policy p { term t { if route.ext-communities in s { reject } } }",
+        );
+    }
+
+    /// Standard patterns under one ASN cost one bucket each, not two.
+    #[test]
+    fn standard_ranges_under_one_asn_count_once() {
+        let ranges = |n: u32| {
+            (0..n)
+                .map(|i| format!("65000:{}..{}", 2 * i, 2 * i + 1))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let policy = "policy p { term t { if route.communities in s { reject } } }";
+        compile_ok(&format!("community-set s {{ {} }} {policy}", ranges(64)));
+        let (_, rendered) =
+            diagnostics_of(&format!("community-set s {{ {} }} {policy}", ranges(65)));
+        assert!(
+            rendered.contains("compared against 65 patterns"),
+            "{rendered}"
+        );
+    }
+
+    /// Patterns match values; they are not values. Every value position
+    /// rejects them with the same explanation.
+    #[test]
+    fn patterns_are_rejected_outside_set_members() {
+        for body in [
+            "add community 64496:*",
+            "add large-community 64496:1:*",
+            "add ext-community RT:64496:*",
+            "remove community 64496:*",
+            "remove community 64496:1..9",
+            "remove ext-community RT:*:1",
+            "if route.communities has 64496:* { accept }",
+        ] {
+            let (_, rendered) = diagnostics_of(&format!("policy p {{ term t {{ {body} }} }}"));
+            assert!(
+                rendered.contains("is not a community value") && rendered.contains("community-set"),
+                "{body}: {rendered}"
+            );
+        }
+        let (_, rendered) = diagnostics_of(
+            "policy p { term t { accept } } \
+             test t { route { prefix 192.0.2.0/24; communities [64496:*] } expect p == accept }",
+        );
+        assert!(rendered.contains("is not a community value"), "{rendered}");
+    }
+
+    #[test]
+    fn pattern_scan_bound_is_enforced_for_source_and_test_datasets() {
+        let members = |n: u32| {
+            (0..n)
+                .map(|i| format!("64496:{i}:*"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let set = |n| {
+            format!(
+                "community-set s {{ {} }} \
+                 policy p {{ term t {{ if route.large-communities in s {{ reject }} }} }}",
+                members(n)
+            )
+        };
+        compile_ok(&set(64));
+        let (_, rendered) = diagnostics_of(&set(65));
+        assert!(rendered.contains("has too many patterns"), "{rendered}");
+
+        let dataset = |n| {
+            format!(
+                "dataset community-set tags \
+                 policy p {{ term t {{ if route.communities in tags {{ reject }} }} }} \
+                 test t {{ dataset tags {{ {} }} route {{ prefix 192.0.2.0/24 }} expect p == accept }}",
+                members(n)
+            )
+        };
+        assert!(run_rpol_tests(&dataset(64)).expect("compiles").all_passed());
+        let (_, rendered) = diagnostics_of(&dataset(65));
+        assert!(rendered.contains("has too many patterns"), "{rendered}");
+    }
+
+    #[test]
+    fn test_block_datasets_accept_patterns() {
+        let source = r"
+dataset community-set tags
+policy p { term t { if route.communities in tags { reject } } term rest { accept } }
+test hit {
+    dataset tags { 65000:*, 64496:1..9:* }
+    route { prefix 192.0.2.0/24; large-communities [64496:9:1] }
+    expect p == reject
+}
+test miss {
+    dataset tags { 65000:*, 64496:1..9:* }
+    route { prefix 192.0.2.0/24; communities [65001:1]; large-communities [64496:10:1] }
+    expect p == accept
+}
+";
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, 2);
+        assert!(report.all_passed(), "{:?}", report.failures);
+    }
+
+    #[test]
+    fn dataset_files_parse_patterns_and_report_bad_lines() {
+        let text =
+            "# tags\n65000:*\n*:666   # any ASN\n64496:1..9:*\nRT:64497:*\nPRIVATE_AS:*\n65001:1\n";
+        let DatasetData::Community(set) =
+            parse_dataset_text(text, DatasetKind::Community).expect("valid snapshot")
+        else {
+            panic!("community data");
+        };
+        assert_eq!((set.criteria().len(), set.patterns().len()), (1, 5));
+        assert!(set.contains_standard((65_000 << 16) | 9));
+        assert!(set.contains_standard((1 << 16) + 666));
+        assert!(set.contains_standard((64_512 << 16) | 2));
+        assert!(set.contains_standard((65_001 << 16) | 1));
+        assert!(!set.contains_standard((64_499 << 16) | 2));
+
+        let err = parse_dataset_text("65000:1\n65000:9..1\n", DatasetKind::Community)
+            .expect_err("empty range");
+        assert!(
+            err.starts_with("line 2: invalid community pattern"),
+            "{err}"
+        );
+        let err = parse_dataset_text("65000:* 65001:*\n", DatasetKind::Community)
+            .expect_err("two entries");
+        assert!(err.contains("one entry per line"), "{err}");
+
+        let lines = |n: u32| {
+            (0..n)
+                .map(|i| format!("64496:{i}:*"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let crowded = lines(65);
+        let err = parse_dataset_text(&crowded, DatasetKind::Community).expect_err("bound");
+        assert!(err.contains("compared against 65 patterns"), "{err}");
+        let fits = lines(64);
+        parse_dataset_text(&fits, DatasetKind::Community).expect("at the bound");
+    }
+
+    /// The SIGHUP path: a snapshot file with patterns loads, a changed
+    /// file swaps the installed chain's verdict, and a bad file keeps
+    /// the prior snapshot.
+    #[test]
+    fn dataset_reload_swaps_pattern_snapshots() {
+        use std::sync::Arc;
+
+        use crate::datasets::{DatasetBindings, DatasetHandle, load_dataset_file_captured};
+        use crate::sets::SetStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tags.list");
+        let load = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            load_dataset_file_captured(&path, DatasetKind::Community).map(|(data, _)| data)
+        };
+        let handle = Arc::new(DatasetHandle::new(
+            "tags",
+            DatasetKind::Community,
+            load("64496:*\n").expect("loads"),
+        ));
+        let mut bindings = DatasetBindings::new();
+        bindings.insert(Arc::clone(&handle));
+        let file = super::super::RpolFile::parse(
+            "dataset community-set tags \
+             policy p { term t { if route.communities in tags { reject } } term rest { accept } }",
+        )
+        .expect("clean");
+        let chain = file
+            .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+            .expect("policy")
+            .expect("bound");
+        let ctx = route_ctx(
+            v4(192, 0, 2, 0, 24),
+            &[(64_497 << 16) + 150],
+            RpkiValidation::NotFound,
+        );
+        assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+
+        handle
+            .refresh(load("64496:*\n64497:100..199\n").expect("loads"))
+            .expect("content changed");
+        assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+
+        let (reason, _) = load("64497:199..100\n").expect_err("empty range");
+        assert!(
+            reason.contains("line 1: invalid community pattern"),
+            "{reason}"
+        );
+        assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+    }
+
+    /// `fmt` keeps a pattern token whole, the result is idempotent, and
+    /// explain names the kind the set's members belong to.
+    /// Patterns are part of a set's identity: chains that differ only in
+    /// a pattern are unequal and have different warm-checkpoint identities,
+    /// while an exact-only set keeps the identity text it had before.
+    #[test]
+    fn patterns_take_part_in_set_identity() {
+        let chain = |members: &str| {
+            crate::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+                "p".into(),
+                std::sync::Arc::new(compile_ok(&format!(
+                    "community-set s {{ {members} }} \
+                     policy p {{ term t {{ if route.communities in s {{ reject }} }} }}"
+                ))),
+            )])
+        };
+        let identity = |members: &str| chain(members).warm_checkpoint_identity_v1().unwrap();
+        assert_ne!(identity("65000:1, 64496:*"), identity("65000:1, 64497:*"));
+        assert_ne!(
+            compile_ok(
+                "community-set s { 64496:* } policy p { term t { if route.communities in s { reject } } }"
+            ),
+            compile_ok(
+                "community-set s { 64496:1..9 } policy p { term t { if route.communities in s { reject } } }"
+            ),
+        );
+        let exact = String::from_utf8(identity("65000:1")).unwrap();
+        assert!(!exact.contains("patterns"), "{exact}");
+    }
+
+    #[test]
+    fn fmt_and_explain_render_patterns() {
+        let source = "community-set   lc{64496:1..9:*,PRIVATE_AS:*:*}\n\
+                      community-set std {64496:*, *:666, RT:64497:*}\n\
+                      policy p{term t{if route.large-communities in lc {reject}}}\n";
+        let formatted = format_rpol(source).expect("formats");
+        assert!(
+            formatted.contains("community-set lc { 64496:1..9:*, PRIVATE_AS:*:* }"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("community-set std { 64496:*, *:666, RT:64497:* }"),
+            "{formatted}"
+        );
+        assert_eq!(format_rpol(&formatted).expect("reformats"), formatted);
+
+        let chain = crate::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+            "p".into(),
+            std::sync::Arc::new(compile_ok(source)),
+        )]);
+        let lc = [rustbgpd_wire::LargeCommunity::new(64_496, 9, 1)];
+        let ctx = crate::RouteContext {
+            large_communities: &lc,
+            ..route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound)
+        };
+        let trace = crate::explain_chain_statements(Some(&chain), &ctx);
+        assert_eq!(trace.action, PolicyAction::Deny);
+        assert!(
+            trace.steps[0]
+                .term_traces
+                .iter()
+                .any(|line| line.contains("route.large-communities in lc")),
+            "{:?}",
+            trace.steps[0].term_traces
+        );
+    }
+
+    /// Lowered members: patterns keep their fields, all-exact spellings
+    /// lower to the exact variants, and `*` spans the field's width.
+    #[test]
+    fn patterns_lower_to_their_fields() {
+        let chain = compile_ok(
+            "community-set s { 64496:*, 64496:5..5, LC:64496:*:*, RT:PRIVATE_AS:1..9 } \
+             policy p { term t { if route.communities in s { reject } } }",
+        );
+        let set = &chain.community_sets[0];
+        assert_eq!(
+            set.criteria(),
+            [CommunityMatch::Standard {
+                value: (64_496 << 16) | 5
+            }]
+        );
+        let any32 = CommunityField::Range {
+            lo: 0,
+            hi: u32::MAX,
+        };
+        assert_eq!(
+            set.patterns(),
+            [
+                CommunityPattern::Standard {
+                    asn: CommunityField::exact(64_496),
+                    value: CommunityField::Range { lo: 0, hi: 0xFFFF },
+                },
+                CommunityPattern::Large {
+                    global_admin: CommunityField::exact(64_496),
+                    local_data1: any32,
+                    local_data2: any32,
+                },
+                CommunityPattern::RouteTarget {
+                    global: CommunityField::PrivateAs,
+                    local: CommunityField::Range { lo: 1, hi: 9 },
+                },
+            ]
+        );
+    }
+}
