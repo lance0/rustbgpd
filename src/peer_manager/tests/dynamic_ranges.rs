@@ -259,6 +259,7 @@ fn add_dynamic_range_rejects_overlap_with_md5_protected_range() {
             remote_asn: 0,
             description: None,
             tcp_ao: None,
+            bfd: None,
         });
     let err = mgr
         .add_dynamic_range("10.8.4.0/24".into(), "ix-members".into(), 0, None)
@@ -392,6 +393,7 @@ fn delete_dynamic_range_rejects_listener_enforced_group_auth() {
                 remote_asn: 0,
                 description: None,
                 tcp_ao: None,
+                bfd: None,
             });
         mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&mgr.current_config);
         let err = mgr
@@ -440,6 +442,7 @@ async fn delete_peer_group_referenced_by_md5_dynamic_range_is_refused() {
             remote_asn: 0,
             description: None,
             tcp_ao: None,
+            bfd: None,
         });
     let err = mgr
         .apply_peer_group_change(
@@ -654,6 +657,7 @@ async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
         remote_asn: 65010,
         description: Some("reload range".to_string()),
         tcp_ao: None,
+        bfd: None,
     }];
 
     let manager = PeerManager::new_with_config(

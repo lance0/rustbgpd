@@ -822,6 +822,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                         remote_asn: *remote_asn,
                         description: description.clone(),
                         tcp_ao: None,
+                        bfd: None,
                     });
             }
         }
@@ -1670,6 +1671,7 @@ peer_group = "edge"
                 remote_asn: 0,
                 description: None,
                 tcp_ao: None,
+                bfd: None,
             });
 
         let refs = peer_group_references(&config, "fabric");

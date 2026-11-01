@@ -1176,6 +1176,7 @@ fn chain_node_budget_inline_and_dynamic_attachment() {
         remote_asn: 65002,
         description: None,
         tcp_ao: None,
+        bfd: None,
     });
     assert!(
         config

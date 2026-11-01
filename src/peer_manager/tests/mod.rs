@@ -291,6 +291,7 @@ fn make_dynamic_manager_config() -> Config {
             remote_asn: 0,
             description: Some("ix-auto".to_string()),
             tcp_ao: None,
+            bfd: None,
         }],
         flowspec: crate::config::FlowSpecConfig::default(),
         rpki: None,
@@ -1860,6 +1861,7 @@ mod config_mutation;
 mod config_transaction;
 mod configured_owners;
 mod dampening_control;
+mod dynamic_bfd;
 mod dynamic_ranges;
 mod dynamic_retention;
 mod events;

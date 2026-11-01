@@ -45,6 +45,20 @@ pub enum Tok {
     /// `65000:100` — standard-community literal.
     #[regex(r"[0-9]+:[0-9]+")]
     StdCommunityLit,
+    /// `65000:*`, `*:666`, `65000:100..199`, `PRIVATE_AS:*`,
+    /// `65000:1..9:*`, `RT:65000:*` — a community-set member pattern.
+    /// Every field is a number, `*`, `a..b` or `PRIVATE_AS`. The lowest
+    /// priority hands an all-number spelling, `65000:*:*` and `*:*:*` to
+    /// the tokens above, so existing sources lex unchanged; every other
+    /// match was a lex or parse error before (ADR-0103 Decision 2.3).
+    /// `PRIVATE_AS` must end its field: `65000:PRIVATE_ASX` is a lex
+    /// error, not a pattern followed by an identifier.
+    #[regex(
+        r"((LC:)?(\*|PRIVATE_AS[A-Za-z0-9_]*(-[A-Za-z0-9_]+)*|[0-9]+(\.\.[0-9]+)?):(\*|PRIVATE_AS[A-Za-z0-9_]*(-[A-Za-z0-9_]+)*|[0-9]+(\.\.[0-9]+)?):(\*|PRIVATE_AS[A-Za-z0-9_]*(-[A-Za-z0-9_]+)*|[0-9]+(\.\.[0-9]+)?)|(\*|PRIVATE_AS[A-Za-z0-9_]*(-[A-Za-z0-9_]+)*|[0-9]+(\.\.[0-9]+)?):(\*|PRIVATE_AS[A-Za-z0-9_]*(-[A-Za-z0-9_]+)*|[0-9]+(\.\.[0-9]+)?)|(RT|RO):(\*|PRIVATE_AS[A-Za-z0-9_]*(-[A-Za-z0-9_]+)*|[0-9]+(\.\.[0-9]+)?|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):(\*|PRIVATE_AS[A-Za-z0-9_]*(-[A-Za-z0-9_]+)*|[0-9]+(\.\.[0-9]+)?))",
+        exact_private_as,
+        priority = 1
+    )]
+    CommunityPattern,
     /// `10.0.0.0/8`, `2001:db8::/32` — prefix literal.
     #[regex(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+")]
     #[regex(r"[0-9A-Fa-f:]*::[0-9A-Fa-f:.]*/[0-9]+")]
@@ -241,6 +255,16 @@ pub enum Tok {
     Arrow,
 }
 
+/// Accept a pattern token only when every `PRIVATE_AS…` field is exactly
+/// `PRIVATE_AS`. The token regex extends that spelling over identifier
+/// characters, so a longer name is one rejected token rather than a
+/// pattern followed by an identifier.
+fn exact_private_as(lex: &logos::Lexer<'_, Tok>) -> bool {
+    lex.slice()
+        .split(':')
+        .all(|field| !field.starts_with("PRIVATE_AS") || field == "PRIVATE_AS")
+}
+
 impl Tok {
     /// Human-readable token description for error messages.
     #[must_use]
@@ -251,6 +275,7 @@ impl Tok {
             Tok::LargeCommunityAllWildcard => "`*:*:*`",
             Tok::LargeCommunityLit => "large-community literal",
             Tok::StdCommunityLit => "community literal",
+            Tok::CommunityPattern => "community pattern",
             Tok::PrefixLit => "prefix literal",
             Tok::Ipv4Lit | Tok::Ipv6Lit => "IP address literal",
             Tok::Int => "integer",
@@ -381,6 +406,54 @@ mod tests {
         assert_eq!(kinds("42"), vec![Tok::Int]);
     }
 
+    /// Community-set patterns are one token; the all-number spellings and
+    /// the two existing large-community wildcards keep their tokens.
+    #[test]
+    fn community_patterns_lex_as_one_token_without_stealing_literals() {
+        for pattern in [
+            "65000:*",
+            "*:666",
+            "*:*",
+            "65000:100..199",
+            "100..199:5",
+            "PRIVATE_AS:*",
+            "65000:PRIVATE_AS",
+            "65000:1:*",
+            "65000:1..9:*",
+            "*:1:*",
+            "PRIVATE_AS:*:*",
+            "LC:65000:*:*",
+            "RT:65000:*",
+            "RO:*:7",
+            "RT:192.0.2.1:*",
+            "RT:PRIVATE_AS:1..9",
+            "65000:5..5",
+        ] {
+            assert_eq!(kinds(pattern), vec![Tok::CommunityPattern], "{pattern}");
+        }
+        assert_eq!(kinds("65000:100"), vec![Tok::StdCommunityLit]);
+        assert_eq!(kinds("65000:1:2"), vec![Tok::LargeCommunityLit]);
+        assert_eq!(kinds("RT:65000:1"), vec![Tok::ExtCommunityLit]);
+        assert_eq!(kinds("65000:*:*"), vec![Tok::LargeCommunityWildcard]);
+        assert_eq!(kinds("*:*:*"), vec![Tok::LargeCommunityAllWildcard]);
+        assert_eq!(kinds("*"), vec![Tok::Star]);
+        assert_eq!(kinds("PRIVATE_AS"), vec![Tok::Ident]);
+        // `PRIVATE_AS` ends its field.
+        for bad in [
+            "65000:PRIVATE_ASX",
+            "PRIVATE_AS_1:*",
+            "65000:PRIVATE_AS-x",
+            "RT:PRIVATE_ASN:1",
+        ] {
+            let (_, diags) = lex(bad, 0);
+            assert_eq!(diags.len(), 1, "{bad} must be a lex error");
+        }
+        // Spaced forms stay separate tokens.
+        assert_eq!(kinds("65000 : *"), vec![Tok::Int, Tok::Colon, Tok::Star]);
+        assert_eq!(kinds("x: u32"), vec![Tok::Ident, Tok::Colon, Tok::U32Kw]);
+        assert_eq!(kinds("med * 2"), vec![Tok::Ident, Tok::Star, Tok::Int]);
+    }
+
     /// LAN-299 / ADR-0103 Decision 2.1: kebab-case maximal munch is
     /// permanent — `med-1` is one identifier; binary `-` needs
     /// whitespace. The other operators cannot collide with names.
@@ -450,6 +523,107 @@ mod tests {
         assert_eq!(
             tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
             vec![Tok::PolicyKw, Tok::Ident]
+        );
+    }
+
+    /// ADR-0103 Decision 2 rules 3 and 4: every `.rpol` source in the tree
+    /// lexes to the token stream it had before the grammar slices that
+    /// followed it. `lex_corpus.golden` holds one line per file: its path,
+    /// token count and a digest of every token's kind and span (lex errors
+    /// included). A new token that re-lexes an existing source changes
+    /// that file's digest.
+    ///
+    /// After an intentional fixture edit, rewrite the golden with
+    /// `RPOL_LEX_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib
+    /// existing_rpol_sources_lex_unchanged` and review the diff: a changed
+    /// line for a file you did not edit is a lexer regression.
+    #[test]
+    fn existing_rpol_sources_lex_unchanged() {
+        use std::fmt::Write as _;
+        use std::path::{Path, PathBuf};
+
+        use sha2::{Digest, Sha256};
+
+        fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if path.is_dir() {
+                    if !name.starts_with('.') && name != "target" {
+                        collect(&path, out);
+                    }
+                } else if name.ends_with(".rpol") {
+                    out.push(path);
+                }
+            }
+        }
+
+        fn digest(source: &str) -> (usize, String) {
+            let (tokens, diags) = lex(source, 0);
+            let mut stream = String::new();
+            for token in &tokens {
+                let range = token.span.range();
+                writeln!(stream, "{:?} {} {}", token.kind, range.start, range.end).unwrap();
+            }
+            for diag in &diags {
+                let range = diag.labels[0].0.range();
+                writeln!(stream, "lex-error {} {}", range.start, range.end).unwrap();
+            }
+            let hash = Sha256::digest(stream.as_bytes());
+            let prefix = u64::from_be_bytes(hash[..8].try_into().unwrap());
+            (tokens.len(), format!("{prefix:016x}"))
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let golden_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rpol/lex_corpus.golden");
+        if std::env::var_os("RPOL_LEX_GOLDEN_BLESS").is_some() {
+            let mut files = Vec::new();
+            collect(&root, &mut files);
+            let mut lines: Vec<String> = files
+                .iter()
+                .map(|path| {
+                    let source = std::fs::read_to_string(path).unwrap();
+                    let (count, hex) = digest(&source);
+                    let rel = path
+                        .strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    format!("{rel} {count} {hex}")
+                })
+                .collect();
+            lines.sort();
+            std::fs::write(&golden_path, lines.join("\n") + "\n").unwrap();
+            return;
+        }
+
+        let golden = std::fs::read_to_string(&golden_path).unwrap();
+        let mut checked = 0usize;
+        let mut changed = Vec::new();
+        for line in golden.lines() {
+            let mut parts = line.rsplitn(3, ' ');
+            let (hex, count, rel) = (
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+            );
+            let source = std::fs::read_to_string(root.join(rel))
+                .unwrap_or_else(|err| panic!("{rel}: {err} (re-bless after removing a fixture)"));
+            let (now_count, now_hex) = digest(&source);
+            if now_count.to_string() != count || now_hex != hex {
+                changed.push(format!("{rel}: {count} {hex} -> {now_count} {now_hex}"));
+            }
+            checked += 1;
+        }
+        assert!(checked >= 200, "only {checked} golden sources");
+        assert!(
+            changed.is_empty(),
+            "sources lex differently:\n{}",
+            changed.join("\n")
         );
     }
 }

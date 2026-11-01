@@ -911,7 +911,7 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
         MatchExpr::CommunityContains(cm) => {
             format!(
                 "{} has {}",
-                community_field(&[*cm]),
+                community_field(&[*cm], &[]),
                 fmt_community_match(cm)
             )
         }
@@ -919,7 +919,9 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
             let field = tables
                 .community_sets
                 .get(id.0 as usize)
-                .map_or("route.communities", |set| community_field(set.criteria()));
+                .map_or("route.communities", |set| {
+                    community_field(set.criteria(), set.patterns())
+                });
             format!(
                 "{field} in {}",
                 set_label(&tables.community_set_names, id.0, "community-set")
@@ -1100,14 +1102,26 @@ fn render_cmp(field: &str, cmp: Cmp) -> String {
 /// `route.communities`, all-large → `route.large-communities`,
 /// all-RT/RO → `route.ext-communities`, mixed → the generic
 /// `route.communities`.
-fn community_field(criteria: &[CommunityMatch]) -> &'static str {
-    let mut fields = criteria.iter().map(|cm| match cm {
+fn community_field(
+    criteria: &[CommunityMatch],
+    patterns: &[crate::sets::CommunityPattern],
+) -> &'static str {
+    use crate::sets::CommunityPattern;
+    let exact = criteria.iter().map(|cm| match cm {
         CommunityMatch::Standard { .. } => "route.communities",
         CommunityMatch::LargeCommunity { .. } => "route.large-communities",
         CommunityMatch::RouteTarget { .. }
         | CommunityMatch::RouteOrigin { .. }
         | CommunityMatch::ExactExt(_) => "route.ext-communities",
     });
+    let patterns = patterns.iter().map(|pattern| match pattern {
+        CommunityPattern::Standard { .. } => "route.communities",
+        CommunityPattern::Large { .. } => "route.large-communities",
+        CommunityPattern::RouteTarget { .. } | CommunityPattern::RouteOrigin { .. } => {
+            "route.ext-communities"
+        }
+    });
+    let mut fields = exact.chain(patterns);
     let Some(first) = fields.next() else {
         return "route.communities";
     };

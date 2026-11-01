@@ -4550,7 +4550,16 @@ async fn run<T>(
     let bfd_initial = bfd_runtime::BfdRuntimeConfig::from_config(&config).unwrap_or_else(|error| {
         fatal_startup_error("failed to resolve configured BFD sessions", error);
     });
-    let bfd_prepared = bfd_runtime::prepare_runtime(&bfd_initial).unwrap_or_else(|error| {
+    // A `[[dynamic_neighbors]]` range with BFD has no session until a
+    // connection is accepted; its socket family is opened here, never on
+    // that network-triggered path.
+    let mut bfd_sockets = bfd_initial.clone();
+    bfd_sockets.sessions.extend(
+        bfd_runtime::dynamic_range_socket_probes(&config).unwrap_or_else(|error| {
+            fatal_startup_error("failed to resolve dynamic-range BFD sessions", error);
+        }),
+    );
+    let bfd_prepared = bfd_runtime::prepare_runtime(&bfd_sockets).unwrap_or_else(|error| {
         fatal_startup_error(
             "failed to acquire sockets for configured BFD sessions",
             error,
@@ -8265,7 +8274,7 @@ mod tests {
             "config.resolve_evpn_ip_vrfs()",
             "config.resolve_managed_netdevs()",
             ".resolve_ethernet_segments_with(&evpn_auto_lacp_esis)",
-            "bfd_runtime::prepare_runtime(&bfd_initial)",
+            "bfd_runtime::prepare_runtime(&bfd_sockets)",
             "let listener_result =",
             "metrics_server::MetricsListener::bind(prometheus_addr)",
         ] {
@@ -11017,6 +11026,7 @@ ttl_security = true
                 }
                 .into(),
             ),
+            bfd: None,
         };
 
         let v4 = tcp_ao_listener_key_for_dynamic_range(&range("192.0.2.0/24")).unwrap();

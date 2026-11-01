@@ -919,6 +919,7 @@ fn validation_policy_posture_resolves_prospective_ranges_and_caps_before_resolut
         remote_asn,
         description: None,
         tcp_ao: None,
+        bfd: None,
     };
     let mut manager = dynamic_test_manager();
     manager.current_config.global.ebgp_requires_policy = Some(true);

@@ -1,0 +1,39 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+# 300 ms × 3 ≈ 900 ms detection, far under the 90 s BGP hold timer.
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 300
+min_rx_interval = 300
+multiplier = 3
+
+# The group carries no `bfd`: a range never inherits it from its group.
+[peer_groups.fabric]
+hold_time = 90
+
+# No static neighbor: both FRR peers are accepted through this range, and
+# each accepted session runs the range's single-hop BFD.
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/16"
+peer_group = "fabric"
+remote_asn = 0
+description = "fabric leaves"
+bfd = { profile = "fast" }
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

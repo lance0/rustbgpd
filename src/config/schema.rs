@@ -482,6 +482,15 @@ pub struct DynamicNeighborConfig {
     /// authentication from their peer group.
     #[serde(default)]
     pub tcp_ao: Option<TcpAoKeyringConfig>,
+    /// Single-hop BFD (RFC 5881) run by every session accepted through this
+    /// range, to the session's source address, with the referenced
+    /// `[[bfd_profiles]]` timers. Ranges never inherit `bfd` from their peer
+    /// group; `strict` and `multihop` are rejected here. Each session
+    /// registers its BFD session when it is accepted and removes it when it
+    /// ends. Applies on SIGHUP to running sessions; runtime range CRUD and
+    /// config transactions cannot change it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bfd: Option<BfdConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2593,9 +2602,10 @@ pub struct AddPathConfig {
 ///
 /// The presence of this block enables asynchronous BFD for the neighbor —
 /// single-hop (RFC 5881) by default, multihop (RFC 5883) with `multihop = true`;
-/// it references a `[[bfd_profiles]]` entry for the timers. Static neighbors
-/// only — dynamic-neighbor BFD is deferred (see ADR-0067). Attachments apply
-/// on SIGHUP; profile definitions remain restart-required.
+/// it references a `[[bfd_profiles]]` entry for the timers. A
+/// `[[dynamic_neighbors]]` range takes the same block, single-hop and
+/// non-strict only. Attachments apply on SIGHUP; profile definitions remain
+/// restart-required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BfdConfig {

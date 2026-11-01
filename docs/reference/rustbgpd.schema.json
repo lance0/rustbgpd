@@ -270,7 +270,7 @@
       ]
     },
     "BfdConfig": {
-      "description": "Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881/5883, ADR-0067).\n\nThe presence of this block enables asynchronous BFD for the neighbor —\nsingle-hop (RFC 5881) by default, multihop (RFC 5883) with `multihop = true`;\nit references a `[[bfd_profiles]]` entry for the timers. Static neighbors\nonly — dynamic-neighbor BFD is deferred (see ADR-0067). Attachments apply\non SIGHUP; profile definitions remain restart-required.",
+      "description": "Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881/5883, ADR-0067).\n\nThe presence of this block enables asynchronous BFD for the neighbor —\nsingle-hop (RFC 5881) by default, multihop (RFC 5883) with `multihop = true`;\nit references a `[[bfd_profiles]]` entry for the timers. A\n`[[dynamic_neighbors]]` range takes the same block, single-hop and\nnon-strict only. Attachments apply on SIGHUP; profile definitions remain\nrestart-required.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -652,6 +652,17 @@
       "description": "Prefix-based dynamic neighbor range. Inbound connections from IPs\nwithin `prefix` are automatically accepted and inherit configuration\nfrom the referenced `peer_group`.",
       "type": "object",
       "properties": {
+        "bfd": {
+          "description": "Single-hop BFD (RFC 5881) run by every session accepted through this\nrange, to the session's source address, with the referenced\n`[[bfd_profiles]]` timers. Ranges never inherit `bfd` from their peer\ngroup; `strict` and `multihop` are rejected here. Each session\nregisters its BFD session when it is accepted and removes it when it\nends. Applies on SIGHUP to running sessions; runtime range CRUD and\nconfig transactions cannot change it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BfdConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "description": {
           "description": "Description applied to dynamic peers from this range.",
           "type": [
