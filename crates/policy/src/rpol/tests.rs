@@ -8893,4 +8893,70 @@ test miss {
             ]
         );
     }
+
+    /// Pattern-set guards in an `else if` chain keep first-match semantics:
+    /// a later branch runs only where every earlier pattern guard missed,
+    /// including through a nested `if` and the negation a modify-only
+    /// branch carries forward.
+    #[test]
+    fn pattern_guards_in_else_if_chains_keep_first_match() {
+        let source = r"
+community-set exact { 64496:1 }
+community-set pats { 64496:*, 64497:100..199 }
+community-set priv { PRIVATE_AS:* }
+
+policy p {
+    term t {
+        if route.communities in exact { set local-pref 300 }
+        else if route.communities in pats {
+            if route.communities in priv { set local-pref 250 } else { set local-pref 200 }
+        }
+        else if route.communities in priv { reject }
+        else { set local-pref 100 }
+        accept
+    }
+}
+
+test exact-wins { route { prefix 192.0.2.0/24; communities [64496:1] } expect p == accept with local-pref 300 }
+test pattern { route { prefix 192.0.2.0/24; communities [64496:7] } expect p == accept with local-pref 200 }
+test range { route { prefix 192.0.2.0/24; communities [64497:150] } expect p == accept with local-pref 200 }
+test nested { route { prefix 192.0.2.0/24; communities [64497:150, 64600:1] } expect p == accept with local-pref 250 }
+test private-only { route { prefix 192.0.2.0/24; communities [64600:1] } expect p == reject }
+test range-edge { route { prefix 192.0.2.0/24; communities [64497:200] } expect p == accept with local-pref 100 }
+";
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, 6);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// A pattern-set `in` guard costs what a literal-set guard costs in the
+    /// size model: a modify-only chain of either kind fits the budget at the
+    /// same length and is rejected one link later.
+    #[test]
+    fn pattern_set_guards_cost_like_literal_sets_in_chains() {
+        let chain = |set: &str, links: usize| {
+            let body = (0..links)
+                .map(|n| format!("if route.communities in {set} {{ set med {n} }}"))
+                .collect::<Vec<_>>()
+                .join(" else ");
+            format!(
+                "community-set lit {{ 64496:1 }}\n\
+                 community-set pat {{ 64496:*, 64497:100..199, PRIVATE_AS:* }}\n\
+                 policy p {{ term t {{ {body} }} }}\n\
+                 policy q {{ term t {{ if route.communities in lit {{ accept }} \
+                 if route.communities in pat {{ accept }} }} }}\n"
+            )
+        };
+        let fits = |set: &str, links: usize| {
+            let mut store = crate::sets::SetStore::new();
+            super::super::compile_rpol(&chain(set, links), &mut store).is_ok()
+        };
+        let longest = (1..2_000).take_while(|&n| fits("lit", n)).last().unwrap();
+        assert!(longest > 100, "{longest}");
+        assert!(fits("pat", longest));
+        assert!(!fits("pat", longest + 1));
+        let (_, rendered) = diagnostics_of(&chain("pat", longest + 1));
+        assert!(rendered.contains("IR nodes"), "{rendered}");
+        compile_ok(&chain("pat", longest));
+    }
 }
