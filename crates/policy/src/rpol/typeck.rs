@@ -18,9 +18,9 @@ use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith};
 use crate::ir::ValueField;
 
 use super::ast::{
-    ActionStmt, CallArg, CmpOp, CommunityArg, CommunityKind, DatasetDecl, DatasetEntryAst, Expr,
-    FieldPath, FieldRoot, FnDef, ForSource, ForStmt, IfStmt, NextHopArg, ParamType, PolicyDef,
-    PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, DatasetDecl,
+    DatasetEntryAst, Expr, FieldPath, FieldRoot, FnDef, ForSource, ForStmt, IfStmt, NextHopArg,
+    ParamType, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned, closest};
 
@@ -720,8 +720,16 @@ impl<'a> Checker<'a> {
     /// exactly — must fit the register file. Deep call chains × locals
     /// exceed it at compile time, never at the lowerer's assert.
     fn check_policy_frames(&mut self, policy: &PolicyDef, fns: &HashMap<&'a str, FnCost>) {
+        let file = self.file;
+        let mut frames = HashMap::new();
         for term in &policy.terms {
-            let hw = stmts_slot_high_water(&term.stmts, 0, fns);
+            let mut frame_of = |callee: &str| {
+                file.policies
+                    .iter()
+                    .find(|p| p.name.node == callee)
+                    .map_or(0, |p| policy_frame(file, &p.name.node, fns, &mut frames, 1))
+            };
+            let hw = stmts_slot_high_water(&term.stmts, 0, fns, &mut frame_of);
             let frame = crate::eval::LOCAL_FRAME_SLOTS as u64;
             if hw > frame {
                 self.diags.push(
@@ -825,6 +833,7 @@ impl<'a> Checker<'a> {
                     Stmt::If(if_stmt) => if_stmt.span(),
                     Stmt::Action(action) => action.span(),
                     Stmt::For(for_stmt) => for_stmt.span,
+                    Stmt::Call(call) => call.span,
                 };
                 self.diags.push(
                     Diagnostic::coded(
@@ -861,6 +870,7 @@ impl<'a> Checker<'a> {
                 }
                 Stmt::If(if_stmt) => self.check_if(if_stmt, scope, loop_depth, 0),
                 Stmt::For(for_stmt) => self.check_for(for_stmt, scope, loop_depth),
+                Stmt::Call(call) => self.check_call_stmt(call, scope),
             }
         }
         scope.lets.truncate(mark);
@@ -1079,6 +1089,11 @@ impl<'a> Checker<'a> {
                         "unreachable action",
                         "this action can never execute",
                     ),
+                    Stmt::Call(call) => (
+                        call.span,
+                        "unreachable statement",
+                        "this statement can never execute",
+                    ),
                     Stmt::If(if_stmt) => (
                         if_stmt.span(),
                         "unreachable statement",
@@ -1100,6 +1115,10 @@ impl<'a> Checker<'a> {
                 Stmt::Action(action) => action,
                 Stmt::If(if_stmt) => {
                     self.check_if(if_stmt, scope, loop_depth, if_depth);
+                    continue;
+                }
+                Stmt::Call(call) => {
+                    self.check_call_stmt(call, scope);
                     continue;
                 }
                 // The parser admits no loop in an `if` body.
@@ -1677,6 +1696,77 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A policy reference (`apply(p(...))` or `apply p(...)`): the policy
+    /// exists, and its arguments match its parameters in number and type.
+    /// Returns the referenced policy when it exists.
+    fn check_policy_ref(
+        &mut self,
+        policy: &Spanned<String>,
+        args: &[Spanned<CallArg>],
+        span: Span,
+        scope: &Scope<'_>,
+    ) -> Option<&'a PolicyDef> {
+        // Borrow the target through the file field directly so its
+        // lifetime is independent of `self` (diagnostics below need
+        // `&mut self`).
+        let file = self.file;
+        let Some(target) = file.policies.iter().find(|p| p.name.node == policy.node) else {
+            let mut diag = Diagnostic::coded(
+                DiagnosticCode::Typecheck,
+                policy.span,
+                format!("unknown policy `{}`", policy.node),
+                "no policy with this name",
+            );
+            if let Some((kind, span)) = self.symbol_def_of(&policy.node) {
+                diag = diag
+                    .with_note(format!(
+                        "`{}` is {} {kind}, not a policy — `apply` composes policies",
+                        policy.node,
+                        article(kind)
+                    ))
+                    .with_label(span, format!("`{}` is defined here", policy.node));
+            } else {
+                diag = with_suggestion(
+                    diag,
+                    &policy.node,
+                    self.file
+                        .policies
+                        .iter()
+                        .map(|p| (p.name.node.as_str(), Some(p.name.span))),
+                );
+            }
+            self.diags.push(diag);
+            return None;
+        };
+        self.check_call_args(target, args, Some(scope));
+        if target.params.len() != args.len() {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    span,
+                    format!(
+                        "policy `{}` takes {} argument{} but {} {} supplied",
+                        policy.node,
+                        target.params.len(),
+                        if target.params.len() == 1 { "" } else { "s" },
+                        args.len(),
+                        if args.len() == 1 { "was" } else { "were" },
+                    ),
+                    "wrong number of arguments",
+                )
+                .with_label(target.name.span, "policy defined here"),
+            );
+        }
+        Some(target)
+    }
+
+    /// `apply p(args)` as a statement: the callee runs in place, so unlike
+    /// `apply(p)` it may hold `let`, `for`, function calls and its own
+    /// calls. Cycles and depth are checked over the whole `apply` graph.
+    fn check_call_stmt(&mut self, call: &CallStmt, scope: &Scope<'_>) {
+        self.check_policy_ref(&call.policy, &call.args, call.span, scope);
+    }
+
     /// The arguments of a policy reference against the callee's parameter
     /// types. `scope` is the caller's inside `apply`, where a name may be
     /// one of its parameters; `None` in a test `expect`.
@@ -1949,55 +2039,27 @@ impl<'a> Checker<'a> {
                 self.check_u32_arg(asn, scope);
             }
             Expr::Apply { policy, args, span } => {
-                // Borrow the target through the file field directly so
-                // its lifetime is independent of `self` (diagnostics
-                // below need `&mut self`).
-                let file = self.file;
-                let Some(target) = file.policies.iter().find(|p| p.name.node == policy.node) else {
-                    let mut diag = Diagnostic::coded(
-                        DiagnosticCode::Typecheck,
-                        policy.span,
-                        format!("unknown policy `{}`", policy.node),
-                        "no policy with this name",
-                    );
-                    if let Some((kind, span)) = self.symbol_def_of(&policy.node) {
-                        diag = diag
-                            .with_note(format!(
-                                "`{}` is {} {kind}, not a policy — `apply` composes policies",
-                                policy.node,
-                                article(kind)
-                            ))
-                            .with_label(span, format!("`{}` is defined here", policy.node));
-                    } else {
-                        diag = with_suggestion(
-                            diag,
-                            &policy.node,
-                            self.file
-                                .policies
-                                .iter()
-                                .map(|p| (p.name.node.as_str(), Some(p.name.span))),
-                        );
-                    }
-                    self.diags.push(diag);
+                let Some(target) = self.check_policy_ref(policy, args, *span, scope) else {
                     return;
                 };
-                self.check_call_args(target, args, Some(scope));
-                if target.params.len() != args.len() {
+                // A policy with an `apply` statement runs another policy's
+                // terms, which a pure predicate cannot.
+                if let Some(call_span) = first_call_stmt(target) {
                     self.diags.push(
                         Diagnostic::coded(
                             DiagnosticCode::Typecheck,
                             *span,
                             format!(
-                                "policy `{}` takes {} argument{} but {} {} supplied",
-                                policy.node,
-                                target.params.len(),
-                                if target.params.len() == 1 { "" } else { "s" },
-                                args.len(),
-                                if args.len() == 1 { "was" } else { "were" },
+                                "cannot `apply(...)` policy `{}`: it runs another policy",
+                                policy.node
                             ),
-                            "wrong number of arguments",
+                            "`apply(...)` targets cannot hold `apply` statements",
                         )
-                        .with_label(target.name.span, "policy defined here"),
+                        .with_label(call_span, "first `apply` statement is here")
+                        .with_note(
+                            "`apply(...)` inlines the target as a pure predicate, with no term \
+                             walk to run a called policy in; test the called policy directly",
+                        ),
                     );
                 }
                 // LAN-302: `apply` inlines its target as a pure
@@ -2620,6 +2682,7 @@ impl<'a> Checker<'a> {
             .collect();
         let mut depth: HashMap<&str, u32> = HashMap::new();
         let mut pred_cost: HashMap<&str, u64> = HashMap::new();
+        let mut calls: HashMap<&str, InlineCost> = HashMap::new();
         let mut poisoned: HashSet<&str> = HashSet::new();
         while let Some(name) = ready.pop_front() {
             if let Some(diag) = bound_policy(
@@ -2629,6 +2692,7 @@ impl<'a> Checker<'a> {
                 fns,
                 &mut depth,
                 &mut pred_cost,
+                &mut calls,
                 &mut poisoned,
             ) {
                 self.diags.push(diag);
@@ -2908,6 +2972,7 @@ fn apply_edges(file: &SourceFile) -> HashMap<&str, Vec<(&str, Span)>> {
     fn walk_stmts<'a>(stmts: &'a [Stmt], targets: &mut Vec<(&'a str, Span)>) {
         for stmt in stmts {
             match stmt {
+                Stmt::Call(call) => targets.push((&call.policy.node, call.span)),
                 Stmt::If(if_stmt) => {
                     for branch in &if_stmt.branches {
                         collect_applies(&branch.cond, targets);
@@ -2957,6 +3022,10 @@ fn poison_policy<'a>(
     clippy::too_many_lines,
     reason = "one DP pass over every statement kind; splitting would scatter the budget model"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the DP's memo tables travel together through one Kahn pass"
+)]
 fn bound_policy<'a>(
     def: &'a PolicyDef,
     targets: &[(&'a str, Span)],
@@ -2964,6 +3033,7 @@ fn bound_policy<'a>(
     fns: &HashMap<&'a str, FnCost>,
     depth: &mut HashMap<&'a str, u32>,
     pred_cost: &mut HashMap<&'a str, u64>,
+    calls: &mut HashMap<&'a str, InlineCost>,
     poisoned: &mut HashSet<&'a str>,
 ) -> Option<Diagnostic> {
     let name = def.name.node.as_str();
@@ -3015,6 +3085,7 @@ fn bound_policy<'a>(
                         if_stmt,
                         PathCost::default(),
                         pred_cost,
+                        calls,
                         fns,
                         &mut |guard, terms, action| {
                             push_arms(&mut arms, guard, terms);
@@ -3030,6 +3101,9 @@ fn bound_policy<'a>(
                     push_arms(&mut arms, 1, terms);
                     action_cost = action_cost.saturating_add(action_value_cost(action, fns));
                 }
+                Stmt::Call(call) => {
+                    push_arms(&mut arms, call_cost(call, PathCost::default(), calls), 1);
+                }
                 // LAN-303: one IR term for the loop itself; the body
                 // charges the eval-cost budget at bound × per-iteration
                 // steps — multiplicative for nested loops, which is
@@ -3038,7 +3112,7 @@ fn bound_policy<'a>(
                 // rather than metering it per route.
                 Stmt::For(for_stmt) => {
                     arms.push(1);
-                    let (nodes, steps) = for_costs(for_stmt, pred_cost, file, fns);
+                    let (nodes, steps) = for_costs(for_stmt, pred_cost, calls, file, fns);
                     loop_nodes = loop_nodes.saturating_add(nodes);
                     action_cost = action_cost.saturating_add(steps);
                 }
@@ -3095,6 +3169,17 @@ fn bound_policy<'a>(
     // first-match-faithful — arm i carries every prior decision arm's
     // guard negated — so it is a quadratic prefix sum over arm costs
     // (the trailing `prior` is the default-permit arm).
+    calls.insert(
+        name,
+        InlineCost {
+            steps: lowered.saturating_add(action_cost),
+            terms: arms.len() as u64,
+            returns: count_accepts(&def.terms),
+            loop_returns: def.terms.iter().fold(0, |acc, term| {
+                acc.saturating_add(loop_return_steps(&term.stmts, file))
+            }),
+        },
+    );
     let mut prior: u64 = 0;
     let mut total: u64 = 1; // the Or node
     for &g in &arms {
@@ -3154,21 +3239,29 @@ impl<'a> ValueUses<'a> {
 /// the recursion within the depth limit, since this runs before the
 /// composition checks.
 pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> ValueUses<'a> {
-    fn exprs<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    /// A reference to another policy and its arguments: an `apply(...)`
+    /// condition or an `apply` statement.
+    type Reference<'a> = (&'a str, &'a [Spanned<CallArg>]);
+    fn exprs<'a>(expr: &'a Expr, out: &mut Vec<Reference<'a>>) {
         match expr {
             Expr::And(lhs, rhs) | Expr::Or(lhs, rhs) => {
                 exprs(lhs, out);
                 exprs(rhs, out);
             }
             Expr::Not(inner, _) => exprs(inner, out),
-            Expr::Apply { .. } => out.push(expr),
+            Expr::Apply { policy, args, .. } => out.push((&policy.node, args)),
             _ => {}
         }
     }
-    fn walk<'a>(stmts: &'a [Stmt], actions: &mut Vec<&'a ActionStmt>, applies: &mut Vec<&'a Expr>) {
+    fn walk<'a>(
+        stmts: &'a [Stmt],
+        actions: &mut Vec<&'a ActionStmt>,
+        applies: &mut Vec<Reference<'a>>,
+    ) {
         for stmt in stmts {
             match stmt {
                 Stmt::Action(action) => actions.push(action),
+                Stmt::Call(call) => applies.push((&call.policy.node, &call.args)),
                 Stmt::If(if_stmt) => {
                     for branch in &if_stmt.branches {
                         exprs(&branch.cond, applies);
@@ -3205,11 +3298,8 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
         for action in actions {
             out.record(action);
         }
-        for apply in applies {
-            let Expr::Apply { policy, args, .. } = apply else {
-                continue;
-            };
-            let Some(callee) = file.policies.iter().find(|p| p.name.node == policy.node) else {
+        for (policy, args) in applies {
+            let Some(callee) = file.policies.iter().find(|p| p.name.node == policy) else {
                 continue;
             };
             let inner = uses(file, callee, depth + 1, memo);
@@ -3398,6 +3488,104 @@ fn push_arms(arms: &mut Vec<u64>, guard: u64, terms: u64) {
     arms.extend((0..terms.min(room)).map(|_| guard));
 }
 
+/// IR nodes of the `flag == n` check a call adds to each inlined term: the
+/// comparison, the flag slot read and the constant.
+const CALL_FLAG_NODES: u64 = 3;
+
+/// What inlining a policy at a call site costs, recorded once per policy
+/// in the Kahn-ordered DP (ADR-0096 amendment, 2026-11-01). Saturating
+/// totals only: nothing is allocated per inlined term.
+#[derive(Clone, Copy)]
+struct InlineCost {
+    /// The policy's own worst-case evaluation steps, which also bound its
+    /// IR nodes: guards, actions, loops and its own calls.
+    steps: u64,
+    /// Its IR terms outside loop bodies, each of which gains the call-site
+    /// path and the flag check.
+    terms: u64,
+    /// Its `accept`s outside loops, each adding a flag `Bind` and a
+    /// `Continue`.
+    returns: u64,
+    /// The flag terms a return from inside its loops adds, multiplied by
+    /// the loop bounds.
+    loop_returns: u64,
+}
+
+/// The size and per-route step charge of one `apply` statement under
+/// `path`: the callee's own cost, plus the call-site path and the flag
+/// check on every inlined term, plus the entry, return and fall-through
+/// terms. One saturating number, charged as one arm.
+fn call_cost(call: &CallStmt, path: PathCost, calls: &HashMap<&str, InlineCost>) -> u64 {
+    let Some(callee) = calls.get(call.policy.node.as_str()) else {
+        // Unknown or on a diagnosed cycle: the file already has errors.
+        return 1;
+    };
+    // Entry clear, a fall-through deny, and each return's extra term.
+    let terms = callee
+        .terms
+        .saturating_add(callee.returns)
+        .saturating_add(2);
+    let per_term = path.with(CALL_FLAG_NODES).cost().saturating_add(1);
+    callee
+        .steps
+        .saturating_add(terms.saturating_mul(per_term))
+        .saturating_add(callee.loop_returns)
+}
+
+/// The `accept` statements of `terms` outside loop bodies.
+fn count_accepts(terms: &[super::ast::TermDef]) -> u64 {
+    fn in_stmts(stmts: &[Stmt]) -> u64 {
+        stmts
+            .iter()
+            .map(|stmt| match stmt {
+                Stmt::Action(ActionStmt::Accept(_)) => 1,
+                Stmt::If(if_stmt) => if_stmt.bodies().map(in_stmts).fold(0, u64::saturating_add),
+                Stmt::Action(_) | Stmt::For(_) | Stmt::Call(_) => 0,
+            })
+            .fold(0, u64::saturating_add)
+    }
+    terms
+        .iter()
+        .map(|term| in_stmts(&term.stmts))
+        .fold(0, u64::saturating_add)
+}
+
+/// The steps a return from inside loops adds when the policy is called:
+/// per `accept` in a loop body, a flag `Bind`, a `Continue` and a `Break`;
+/// per inner loop, a `Break` on the flag. Each runs up to the loop bound,
+/// and nested loops multiply.
+fn loop_return_steps(stmts: &[Stmt], file: &SourceFile) -> u64 {
+    fn in_body(stmts: &[Stmt], file: &SourceFile) -> u64 {
+        let per_term = CALL_FLAG_NODES.saturating_add(2);
+        stmts
+            .iter()
+            .map(|stmt| match stmt {
+                Stmt::Action(ActionStmt::Accept(_)) => per_term.saturating_mul(3),
+                Stmt::If(if_stmt) => if_stmt
+                    .bodies()
+                    .map(|body| in_body(body, file))
+                    .fold(0, u64::saturating_add),
+                Stmt::For(inner) => loop_steps(inner, file).saturating_add(per_term),
+                Stmt::Action(_) | Stmt::Call(_) => 0,
+            })
+            .fold(0, u64::saturating_add)
+    }
+    fn loop_steps(for_stmt: &ForStmt, file: &SourceFile) -> u64 {
+        loop_iteration_bound(&for_stmt.source, file).saturating_mul(in_body(&for_stmt.body, file))
+    }
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            Stmt::For(for_stmt) => loop_steps(for_stmt, file),
+            Stmt::If(if_stmt) => if_stmt
+                .bodies()
+                .map(|body| loop_return_steps(body, file))
+                .fold(0, u64::saturating_add),
+            Stmt::Action(_) | Stmt::Call(_) => 0,
+        })
+        .fold(0, u64::saturating_add)
+}
+
 /// One loop's `(body IR nodes, worst-case evaluation steps)` for the
 /// cost DP (LAN-303): nodes count once toward compiled size; steps are
 /// the static iteration bound × per-iteration body cost — nested loops
@@ -3406,6 +3594,7 @@ fn push_arms(arms: &mut Vec<u64>, guard: u64, terms: u64) {
 fn for_costs(
     for_stmt: &ForStmt,
     pred_cost: &HashMap<&str, u64>,
+    calls: &HashMap<&str, InlineCost>,
     file: &SourceFile,
     fns: &HashMap<&str, FnCost>,
 ) -> (u64, u64) {
@@ -3421,6 +3610,7 @@ fn for_costs(
                     if_stmt,
                     PathCost::default(),
                     pred_cost,
+                    calls,
                     fns,
                     &mut |guard, terms, action| {
                         let guards = guard.saturating_mul(terms);
@@ -3443,9 +3633,15 @@ fn for_costs(
                     .saturating_add(action_value_cost(action, fns));
             }
             Stmt::For(inner) => {
-                let (inner_nodes, inner_steps) = for_costs(inner, pred_cost, file, fns);
+                let (inner_nodes, inner_steps) = for_costs(inner, pred_cost, calls, file, fns);
                 nodes = nodes.saturating_add(inner_nodes);
                 body_steps = body_steps.saturating_add(inner_steps);
+            }
+            // The whole inlined callee, per iteration.
+            Stmt::Call(call) => {
+                let cost = call_cost(call, PathCost::default(), calls);
+                nodes = nodes.saturating_add(cost);
+                body_steps = body_steps.saturating_add(cost);
             }
         }
     }
@@ -3504,6 +3700,7 @@ fn if_terms<'a>(
     if_stmt: &'a IfStmt,
     path: PathCost,
     pred_cost: &HashMap<&str, u64>,
+    calls: &HashMap<&str, InlineCost>,
     fns: &HashMap<&str, FnCost>,
     out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>),
 ) {
@@ -3511,6 +3708,7 @@ fn if_terms<'a>(
         body: &'a [Stmt],
         path: PathCost,
         pred_cost: &HashMap<&str, u64>,
+        calls: &HashMap<&str, InlineCost>,
         fns: &HashMap<&str, FnCost>,
         out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>),
     ) {
@@ -3524,7 +3722,8 @@ fn if_terms<'a>(
                     guarded_action_terms(std::slice::from_ref(action), fns),
                     Some(action),
                 ),
-                Stmt::If(inner) => if_terms(inner, path, pred_cost, fns, out),
+                Stmt::If(inner) => if_terms(inner, path, pred_cost, calls, fns, out),
+                Stmt::Call(call) => out(call_cost(call, path, calls), 1, None),
                 // Rejected by the typechecker; nothing lowers.
                 Stmt::For(_) => {}
             }
@@ -3540,7 +3739,7 @@ fn if_terms<'a>(
         if binds != 0 {
             out(prefix.cost(), binds, None);
         }
-        body_terms(&branch.body, prefix.with(guard), pred_cost, fns, out);
+        body_terms(&branch.body, prefix.with(guard), pred_cost, calls, fns, out);
         // A flat `if` whose body only binds still gates its `else` with a
         // placeholder term after the binds.
         if flat
@@ -3558,7 +3757,7 @@ fn if_terms<'a>(
         }
     }
     if let Some(else_body) = &if_stmt.else_body {
-        body_terms(&else_body.body, prefix, pred_cost, fns, out);
+        body_terms(&else_body.body, prefix, pred_cost, calls, fns, out);
     }
 }
 
@@ -3611,6 +3810,20 @@ fn first_let(def: &PolicyDef) -> Option<Span> {
     fn in_stmts(stmts: &[Stmt]) -> Option<Span> {
         stmts.iter().find_map(|stmt| match stmt {
             Stmt::Action(ActionStmt::Let { span, .. }) => Some(*span),
+            Stmt::Action(_) | Stmt::Call(_) => None,
+            Stmt::If(if_stmt) => if_stmt.bodies().find_map(in_stmts),
+            Stmt::For(for_stmt) => in_stmts(&for_stmt.body),
+        })
+    }
+    def.terms.iter().find_map(|term| in_stmts(&term.stmts))
+}
+
+/// Span of the first `apply` statement anywhere in a policy, or `None`.
+/// Backs the rejection of such a policy as an `apply(...)` target.
+fn first_call_stmt(def: &PolicyDef) -> Option<Span> {
+    fn in_stmts(stmts: &[Stmt]) -> Option<Span> {
+        stmts.iter().find_map(|stmt| match stmt {
+            Stmt::Call(call) => Some(call.span),
             Stmt::Action(_) => None,
             Stmt::If(if_stmt) => if_stmt.bodies().find_map(in_stmts),
             Stmt::For(for_stmt) => in_stmts(&for_stmt.body),
@@ -3679,6 +3892,7 @@ fn first_fn_call(def: &PolicyDef, file: &SourceFile) -> Option<Span> {
                 .find_map(|branch| in_expr(&branch.cond, file))
                 .or_else(|| if_stmt.bodies().find_map(|body| in_stmts(body, file))),
             Stmt::For(for_stmt) => in_stmts(&for_stmt.body, file),
+            Stmt::Call(_) => None,
         })
     }
     def.terms
@@ -3749,11 +3963,24 @@ fn guard_call_slots(expr: &Expr, fns: &HashMap<&str, FnCost>) -> u64 {
 /// their initializer call binds) persist for the rest of the term;
 /// `if`/`else` and loop bodies mark/reset, so sibling scopes reuse
 /// slots (their readers execute before the sibling's binds — LAN-302).
-fn stmts_slot_high_water(stmts: &[Stmt], base: u64, fns: &HashMap<&str, FnCost>) -> u64 {
+/// An `apply` statement takes one flag slot above the live slots and the
+/// callee's frame above that (`frame_of` gives a callee's frame).
+fn stmts_slot_high_water(
+    stmts: &[Stmt],
+    base: u64,
+    fns: &HashMap<&str, FnCost>,
+    frame_of: &mut dyn FnMut(&str) -> u64,
+) -> u64 {
     let mut cur = base;
     let mut high = base;
     for stmt in stmts {
         match stmt {
+            Stmt::Call(call) => {
+                high = high.max(
+                    cur.saturating_add(1)
+                        .saturating_add(frame_of(&call.policy.node)),
+                );
+            }
             Stmt::Action(ActionStmt::Let { init, .. }) => {
                 cur = cur.saturating_add(call_slots(init, fns)).saturating_add(1);
             }
@@ -3766,10 +3993,10 @@ fn stmts_slot_high_water(stmts: &[Stmt], base: u64, fns: &HashMap<&str, FnCost>)
             Stmt::If(if_stmt) => {
                 for branch in &if_stmt.branches {
                     cur = cur.saturating_add(guard_call_slots(&branch.cond, fns));
-                    high = high.max(stmts_slot_high_water(&branch.body, cur, fns));
+                    high = high.max(stmts_slot_high_water(&branch.body, cur, fns, frame_of));
                 }
                 if let Some(else_body) = &if_stmt.else_body {
-                    high = high.max(stmts_slot_high_water(&else_body.body, cur, fns));
+                    high = high.max(stmts_slot_high_water(&else_body.body, cur, fns, frame_of));
                 }
             }
             // Loop variable + body in a nested scope, reset on exit.
@@ -3778,12 +4005,52 @@ fn stmts_slot_high_water(stmts: &[Stmt], base: u64, fns: &HashMap<&str, FnCost>)
                     &for_stmt.body,
                     cur.saturating_add(1),
                     fns,
+                    frame_of,
                 ));
             }
         }
         high = high.max(cur);
     }
     high
+}
+
+/// The frame a policy needs when called: the largest high-water mark of
+/// its terms, its own calls included. Each policy is computed once; a
+/// cycle, or a chain past [`MAX_APPLY_DEPTH`], contributes nothing here
+/// and is rejected on its own.
+fn policy_frame<'a>(
+    file: &'a SourceFile,
+    name: &'a str,
+    fns: &HashMap<&str, FnCost>,
+    memo: &mut HashMap<&'a str, Option<u64>>,
+    depth: u32,
+) -> u64 {
+    if depth > MAX_APPLY_DEPTH {
+        return 0;
+    }
+    match memo.get(name) {
+        Some(Some(frame)) => return *frame,
+        Some(None) => return 0,
+        None => {}
+    }
+    let Some(def) = file.policies.iter().find(|p| p.name.node == name) else {
+        return 0;
+    };
+    memo.insert(name, None);
+    let mut frame = 0;
+    for term in &def.terms {
+        let mut frame_of = |callee: &str| {
+            file.policies
+                .iter()
+                .find(|p| p.name.node == callee)
+                .map_or(0, |p| {
+                    policy_frame(file, &p.name.node, fns, memo, depth + 1)
+                })
+        };
+        frame = frame.max(stmts_slot_high_water(&term.stmts, 0, fns, &mut frame_of));
+    }
+    memo.insert(name, Some(frame));
+    frame
 }
 
 /// Worst-case evaluation steps of a value expression (LAN-299): one

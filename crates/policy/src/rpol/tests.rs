@@ -11030,3 +11030,164 @@ mod typed_parameter_round_three {
         }
     }
 }
+
+// ─── `apply p(args)` as a statement ────────────────────────────────
+
+mod callable_policies {
+    use super::super::run_rpol_tests;
+    use super::diagnostics_of;
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(report.total, total, "test count");
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// A callee `reject` denies, its `accept` returns so the caller's
+    /// later statements and terms run, and fall-through applies its
+    /// `default-action`.
+    #[test]
+    fn callee_verdicts_reject_return_and_fall_through() {
+        passes(
+            "policy guard {
+                 term bad { if route.med >= 100 { reject } }
+                 term good { if route.med >= 50 { set local-pref 300; accept } }
+                 term tag { add community 65000:1 }
+             }
+             policy strict {
+                 default-action reject
+                 term ok { if route.med <= 10 { accept } }
+             }
+             policy caller {
+                 term t { apply guard; set med 7 }
+                 term rest { add community 65000:2; accept }
+             }
+             policy strict-caller { term t { apply strict; accept } }
+             test denied { route { prefix 192.0.2.0/24; med 150 } expect caller == reject }
+             test returned {
+                 route { prefix 192.0.2.0/24; med 60 }
+                 expect caller == accept with local-pref 300, med 7, community 65000:2,
+                     without community 65000:1
+             }
+             test fell-through {
+                 route { prefix 192.0.2.0/24; med 20 }
+                 expect caller == accept with med 7, community 65000:1, community 65000:2
+             }
+             test default-reject { route { prefix 192.0.2.0/24; med 20 } expect strict-caller == reject }
+             test default-pass { route { prefix 192.0.2.0/24; med 5 } expect strict-caller == accept }",
+            5,
+        );
+    }
+
+    /// Callee writes reach the outcome, a later caller write overrides
+    /// them, and every condition reads the route as received.
+    #[test]
+    fn callee_writes_stage_and_conditions_read_the_original_route() {
+        passes(
+            "policy setter { term t { set med 500; set local-pref 200 } }
+             policy caller {
+                 term t {
+                     apply setter
+                     if route.med >= 400 { set local-pref 999 }
+                     set med 42
+                     accept
+                 }
+             }
+             test original-med {
+                 route { prefix 192.0.2.0/24; med 10 }
+                 expect caller == accept with med 42, local-pref 200
+             }",
+            1,
+        );
+    }
+
+    /// A returning callee term's guard reads a binding whose slot a later
+    /// callee term reuses; a later `reject` must still fire for a route
+    /// that does not return, across terms and across sibling `if` scopes.
+    #[test]
+    fn a_later_binding_cannot_flip_an_earlier_return() {
+        passes(
+            "policy lib {
+                 term first { let x = route.med + 1; if x >= 100 { accept } }
+                 term second { let y = 1000; if y >= 1 { set local-pref 5 } }
+                 term siblings {
+                     if route.local-pref >= 1 { let a = route.med; if a >= 200 { accept } }
+                     else { let b = 7; set med b }
+                 }
+                 term last { if route.med <= 50 { reject } }
+             }
+             policy caller { term t { apply lib; accept } }
+             test returns { route { prefix 192.0.2.0/24; med 150 } expect caller == accept }
+             test rejects { route { prefix 192.0.2.0/24; med 20 } expect caller == reject }",
+            2,
+        );
+    }
+
+    /// Nested calls, a call inside an `else if` branch, an `accept` inside
+    /// a callee loop, and a call inside a caller loop.
+    #[test]
+    fn nested_calls_branches_and_loops() {
+        passes(
+            "community-set marks { 65000:9 }
+             policy inner { term t { if route.med >= 10 { set local-pref 10; accept } } term u { set local-pref 1 } }
+             policy middle { term t { apply inner; add community 65000:5 } }
+             policy finder {
+                 term t { for c in route.communities { if c in marks { set med 99; accept } } }
+                 term none { set med 1 }
+             }
+             policy branchy {
+                 term t {
+                     if route.med >= 1000 { reject }
+                     else if route.med >= 10 { apply inner }
+                     else if route.med >= 5 { set local-pref 55 }
+                     accept
+                 }
+             }
+             policy looper {
+                 term t { for c in route.communities { apply tagger } accept }
+             }
+             policy tagger { term t { add community 65000:7 } }
+             test nested { route { prefix 192.0.2.0/24; med 20 } expect middle == accept with local-pref 10, community 65000:5 }
+             test found {
+                 route { prefix 192.0.2.0/24; communities [65000:9] }
+                 expect finder == accept with med 99
+             }
+             test not-found { route { prefix 192.0.2.0/24; communities [65000:8] } expect finder == accept with med 1 }
+             test branch-returned {
+                 route { prefix 192.0.2.0/24; med 20 }
+                 expect branchy == accept with local-pref 10
+             }
+             test loop-call {
+                 route { prefix 192.0.2.0/24; communities [65000:1, 65000:2] }
+                 expect looper == accept with community 65000:7
+             }",
+            5,
+        );
+    }
+
+    /// Cycles through statement calls, and through a statement call and a
+    /// predicate, are rejected; a policy with an `apply` statement is not
+    /// a predicate target; `apply(...)` in statement position is a
+    /// condition, not a call.
+    #[test]
+    fn composition_rules() {
+        let (_, rendered) =
+            diagnostics_of("policy a { term t { apply b } } policy b { term t { apply a } }");
+        assert!(rendered.contains("`apply` cycle"), "{rendered}");
+        let (_, rendered) = diagnostics_of(
+            "policy a { term t { apply b } } policy b { term t { if apply(a) { accept } } }",
+        );
+        assert!(rendered.contains("`apply` cycle"), "{rendered}");
+        let (_, rendered) = diagnostics_of(
+            "policy lib { term t { accept } } policy runs { term t { apply lib } }
+             policy test-it { term t { if apply(runs) { accept } } }",
+        );
+        assert!(rendered.contains("it runs another policy"), "{rendered}");
+        let (_, rendered) =
+            diagnostics_of("policy lib { term t { accept } } policy p { term t { apply(lib) } }");
+        assert!(
+            rendered.contains("is a condition, not a statement"),
+            "{rendered}"
+        );
+    }
+}

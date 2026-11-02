@@ -262,6 +262,22 @@ pub enum Stmt {
     /// bodies and (nested, depth-capped) in loop bodies; `if` bodies
     /// hold actions, `let` and nested `if` only.
     For(ForStmt),
+    /// `apply <policy>[(args)]`: run another policy's terms in place
+    /// (ADR-0096 amendment, 2026-11-01). Its `reject` denies the route,
+    /// its `accept` or fall-through returns here, and its writes stage
+    /// into this policy.
+    Call(CallStmt),
+}
+
+/// `apply <policy>[(args)]` in statement position.
+#[derive(Debug)]
+pub struct CallStmt {
+    /// The called policy.
+    pub policy: Spanned<String>,
+    /// Arguments, checked against the callee's parameter types.
+    pub args: Vec<Spanned<CallArg>>,
+    /// The whole statement, `apply` included.
+    pub span: Span,
 }
 
 /// `for <var> in <source> { body }` — a bounded loop (LAN-303). `for`

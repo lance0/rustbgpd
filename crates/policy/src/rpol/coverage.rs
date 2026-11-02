@@ -388,6 +388,7 @@ fn collect_stmt_applies<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a str>) {
                 }
             }
             Stmt::For(for_stmt) => collect_stmt_applies(&for_stmt.body, out),
+            Stmt::Call(call) => out.push(&call.policy.node),
             Stmt::Action(_) => {}
         }
     }
@@ -619,7 +620,8 @@ fn term_always_decides(term: &TermDef) -> bool {
 pub(super) fn body_decides(body: &[Stmt]) -> bool {
     body.iter().any(|stmt| match stmt {
         Stmt::Action(action) => matches!(action, ActionStmt::Accept(_) | ActionStmt::Reject(_)),
-        Stmt::For(_) => false,
+        // A callee may return, so a call never decides on its own.
+        Stmt::For(_) | Stmt::Call(_) => false,
         Stmt::If(if_stmt) => if_decides(if_stmt),
     })
 }
@@ -653,7 +655,7 @@ fn if_decides(if_stmt: &IfStmt) -> bool {
 fn unreachable_branches(stmts: &[Stmt], policy: &str, out: &mut Vec<Lint>) {
     for stmt in stmts {
         match stmt {
-            Stmt::Action(_) => {}
+            Stmt::Action(_) | Stmt::Call(_) => {}
             Stmt::For(for_stmt) => unreachable_branches(&for_stmt.body, policy, out),
             Stmt::If(if_stmt) => {
                 let mut decided = false;
@@ -773,6 +775,10 @@ impl<'a> Refs<'a> {
     fn stmts(&mut self, stmts: &'a [Stmt]) {
         for stmt in stmts {
             match stmt {
+                Stmt::Call(call) => {
+                    self.policies.insert(&call.policy.node);
+                    self.call_args(&call.args);
+                }
                 Stmt::If(if_stmt) => {
                     for branch in &if_stmt.branches {
                         self.expr(&branch.cond);

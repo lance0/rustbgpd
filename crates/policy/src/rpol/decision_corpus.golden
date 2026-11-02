@@ -1,24 +1,25 @@
-# rpol decision corpus: 263 programs, 1645 cases. Regenerate with
+# rpol decision corpus: 263 programs, 1668 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 29
-ast.stmt.if 507
+ast.stmt.if 510
 ast.stmt.else-if 18
 ast.stmt.else 27
 ast.stmt.nested-if 13
 ast.stmt.for 75
+ast.stmt.call 13
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1135
-ast.action.reject 382
-ast.action.set-local-pref 117
-ast.action.set-med 186
+ast.action.accept 1146
+ast.action.reject 384
+ast.action.set-local-pref 118
+ast.action.set-med 199
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.set-next-hop-parameter 1
-ast.action.community-literal 511
+ast.action.community-literal 518
 ast.action.large-community-admin-wildcard 11
 ast.action.community-all 46
 ast.action.community-binding 43
@@ -31,7 +32,7 @@ ast.action.continue 22
 ast.expr.or 9
 ast.expr.and 20
 ast.expr.not 5
-ast.expr.cmp 220
+ast.expr.cmp 223
 ast.expr.in 107
 ast.expr.ident-in 42
 ast.expr.has 4
@@ -41,12 +42,12 @@ ast.expr.matches 37
 ast.expr.contains 5
 ast.expr.value-cmp 116
 ast.expr.apply 1
-ast.value.literal 337
+ast.value.literal 351
 ast.value.identifier 106
 ast.value.field 148
 ast.value.arithmetic 128
 ast.value.call 72
-ir.guard.true 1179
+ir.guard.true 1199
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
@@ -59,7 +60,7 @@ ir.guard.origin-as-ne 9
 ir.guard.origin-as-in-set 52
 ir.guard.peer-as-in-set 8
 ir.guard.local-pref 16
-ir.guard.med 68
+ir.guard.med 91
 ir.guard.next-hop-eq 13
 ir.guard.next-hop-eq-peer 12
 ir.guard.next-hop-ne 11
@@ -74,25 +75,25 @@ ir.guard.family-is 50
 ir.guard.family-ne 12
 ir.guard.rpki-is 52
 ir.guard.aspa-is 76
-ir.guard.value-cmp 146
+ir.guard.value-cmp 159
 ir.guard.exists 12
 ir.guard.local-in-asn-set 22
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 5
-ir.guard.and 127
+ir.guard.and 140
 ir.guard.or 15
 ir.guard.not 64
-ir.value.const 204
+ir.value.const 217
 ir.value.field 170
-ir.value.local 107
+ir.value.local 120
 ir.value.binary 171
 ir.value.min 50
 ir.value.max 21
 ir.value.clamp 9
-ir.action.permit 1114
-ir.action.deny 343
-ir.action.continue 167
-ir.action.bind 84
+ir.action.permit 1125
+ir.action.deny 348
+ir.action.continue 184
+ir.action.bind 97
 ir.action.for-each 75
 ir.action.break 33
 ir.action.continue-loop 22
@@ -100,14 +101,14 @@ ir.action.community-var 43
 ir.action.remove-large-community-admin 11
 ir.action.remove-all-communities 46
 ir.action.remove-communities-in-set 23
-ir.mod.set-local-pref 99
+ir.mod.set-local-pref 102
 ir.mod.set-local-pref-computed 18
-ir.mod.set-med 68
+ir.mod.set-med 78
 ir.mod.set-med-computed 99
 ir.mod.set-next-hop 13
 ir.mod.prepend 43
 ir.mod.prepend-computed 11
-ir.mod.community-add 437
+ir.mod.community-add 452
 ir.mod.community-remove 33
 ir.mod.large-community-add 11
 ir.mod.large-community-remove 17
@@ -586,6 +587,9 @@ crates/policy/tests/decision_corpus/control-flow.rpol | test tiers-else | tiers 
 crates/policy/tests/decision_corpus/control-flow.rpol | test early-reject | early-verdicts => deny
 crates/policy/tests/decision_corpus/control-flow.rpol | test early-accept | early-verdicts => permit with set local-pref 150
 crates/policy/tests/decision_corpus/control-flow.rpol | test fall-through | early-verdicts => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | test call-denied | calls-guard => deny
+crates/policy/tests/decision_corpus/control-flow.rpol | test call-returned | calls-guard => permit with set local-pref 300; set med 7
+crates/policy/tests/decision_corpus/control-flow.rpol | test call-fell-through | calls-guard => permit with set med 7; add community 65000:1
 crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m01-v4-transit => permit with remove community 65000:100; remove community 64500:1
 crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m02-v4-invalid-long => permit with remove community 65000:666; remove community 65535:666; remove community 64512:7
 crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m03-v6-tagged => permit with remove community 65535:65281; remove community 65000:200; remove community 65001:999
@@ -616,6 +620,26 @@ crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m07-def
 crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m08-host-routes => deny
 crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m09-evpn => permit with add community 65000:8
 crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m10-v6-bogon => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m01-v4-transit => permit with set local-pref 300
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m02-v4-invalid-long => deny
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m03-v6-tagged => permit with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m04-bare => permit with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m05-internal => permit with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m06-local-as-set => permit with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m07-default => permit with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m08-host-routes => deny
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m09-evpn => permit with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | m10-v6-bogon => permit with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m01-v4-transit => permit with set local-pref 300; set med 7
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m02-v4-invalid-long => deny
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m03-v6-tagged => permit with set med 7; add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m04-bare => permit with set med 7; add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m05-internal => permit with set med 7; add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m06-local-as-set => permit with set med 7; add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m07-default => permit with set med 7; add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m08-host-routes => deny
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m09-evpn => permit with set med 7; add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | m10-v6-bogon => permit with set med 7; add community 65000:1
 crates/policy/tests/decision_corpus/guards.rpol | test prefix-ne | not-bogon => permit
 crates/policy/tests/decision_corpus/guards.rpol | test prefix-ne-bogon | not-bogon => deny
 crates/policy/tests/decision_corpus/guards.rpol | test origin-eq | origin-lock => permit with set local-pref 200

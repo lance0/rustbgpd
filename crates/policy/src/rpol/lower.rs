@@ -96,6 +96,15 @@ struct LetEnv {
 }
 
 impl LetEnv {
+    /// An empty scope whose first binding takes slot `next_slot`: a called
+    /// policy's slots sit above its caller's live slots and return flag.
+    fn starting_at(next_slot: u16) -> Self {
+        Self {
+            lets: Vec::new(),
+            next_slot,
+        }
+    }
+
     /// The slot of the innermost visible binding named `name`.
     fn lookup(&self, name: &str) -> Option<u8> {
         self.lets
@@ -255,6 +264,10 @@ pub(super) struct Lowerer<'a> {
     /// parameter types, innermost last (`apply` lowers its target inside
     /// its caller). `u32` arguments ride the `env` map instead.
     typed_frames: Vec<HashMap<String, (PolicyArg, ParamType)>>,
+    /// The first frame slot of the policy being lowered: 0 for a chain
+    /// member, above the caller's live slots and return flag for a policy
+    /// lowered at an `apply` statement.
+    slot_base: u16,
 }
 
 /// The interned set data of one source file: every defined
@@ -387,6 +400,7 @@ impl<'a> Lowerer<'a> {
             bindings: DatasetBindings::new(),
             missing_datasets: Vec::new(),
             typed_frames: Vec::new(),
+            slot_base: 0,
         };
         for (index, def) in file.prefix_sets.iter().enumerate() {
             let id = SetId(u32::try_from(index).expect("fits u32"));
@@ -688,7 +702,7 @@ impl<'a> Lowerer<'a> {
         store: &mut SetStore,
     ) -> Vec<(MatchExpr, TermAction)> {
         // Slots reset per source term: bindings never cross terms.
-        let mut lets = LetEnv::default();
+        let mut lets = LetEnv::starting_at(self.slot_base);
         self.lower_stmts(&term.stmts, env, &mut lets, store)
     }
 
@@ -873,6 +887,10 @@ impl<'a> Lowerer<'a> {
                             body,
                         })),
                     ));
+                }
+                Stmt::Call(call) => {
+                    flush_pending(&mut out, &mut pending);
+                    self.lower_call(call, env, lets, store, &mut out);
                 }
             }
         }
@@ -1219,20 +1237,7 @@ impl<'a> Lowerer<'a> {
                 // A name is the caller's own parameter (passed through
                 // with its bound value) or a set, as the typechecker
                 // resolved it.
-                let args: Vec<PolicyArg> = args
-                    .iter()
-                    .map(|arg| match &arg.node {
-                        CallArg::Name(name) => env.get(name.as_str()).map_or_else(
-                            || {
-                                self.bound(name)
-                                    .cloned()
-                                    .unwrap_or_else(|| PolicyArg::Set(name.clone()))
-                            },
-                            |value| PolicyArg::U32(*value),
-                        ),
-                        literal => PolicyArg::from_literal(literal),
-                    })
-                    .collect();
+                let args = self.reference_args(args, env);
                 let def = self
                     .file
                     .policies
@@ -1265,6 +1270,84 @@ impl<'a> Lowerer<'a> {
         {
             Some((_, ty)) => *ty == ParamType::AsnSet,
             None => self.asn_set_ids.contains_key(&bound.node),
+        }
+    }
+
+    /// A reference's arguments for instantiation. A name is the caller's
+    /// own parameter, passed through with its bound value, or a set, as
+    /// the typechecker resolved it.
+    fn reference_args(
+        &self,
+        args: &[Spanned<CallArg>],
+        env: &HashMap<&str, u32>,
+    ) -> Vec<PolicyArg> {
+        args.iter()
+            .map(|arg| match &arg.node {
+                CallArg::Name(name) => env.get(name.as_str()).map_or_else(
+                    || {
+                        self.bound(name)
+                            .cloned()
+                            .unwrap_or_else(|| PolicyArg::Set(name.clone()))
+                    },
+                    |value| PolicyArg::U32(*value),
+                ),
+                literal => PolicyArg::from_literal(literal),
+            })
+            .collect()
+    }
+
+    /// `apply p(args)` as a statement (ADR-0096 amendment, 2026-11-01).
+    /// The callee lowers on its own, its slots above the caller's live
+    /// slots and one return-flag slot, and its terms are emitted here:
+    /// - a `Bind` clearing the flag;
+    /// - each callee term behind "flag is clear", so nothing after a
+    ///   return runs;
+    /// - an `accept` (`Permit`) as a flag `Bind` of that term's ordinal,
+    ///   then its modifications behind "flag is that ordinal";
+    /// - for a callee falling through to `default-action reject`, a final
+    ///   `Deny` behind "flag is clear".
+    ///
+    /// No callee guard is evaluated again after its own term, so the plain
+    /// slot offset is sound (the amendment's frame rule).
+    fn lower_call(
+        &mut self,
+        call: &super::ast::CallStmt,
+        env: &HashMap<&str, u32>,
+        lets: &mut LetEnv,
+        store: &mut SetStore,
+        out: &mut Vec<(MatchExpr, TermAction)>,
+    ) {
+        let args = self.reference_args(&call.args, env);
+        let def = self
+            .file
+            .policies
+            .iter()
+            .find(|p| p.name.node == call.policy.node)
+            .expect("typechecked: called policy exists");
+        let scope = lets.mark();
+        let flag = lets.declare(RETURN_FLAG);
+        let outer_base = self.slot_base;
+        self.slot_base = lets.next_slot;
+        let callee = self.lower_policy(def, &args, store);
+        self.slot_base = outer_base;
+        lets.reset(scope);
+
+        out.push((
+            MatchExpr::True,
+            TermAction::Bind {
+                slot: flag,
+                name: RETURN_FLAG.into(),
+                expr: ValueExpr::Const(0),
+            },
+        ));
+        let mut ordinal: u32 = 0;
+        for term in callee.terms {
+            let guard = conjoin(Some(&flag_is(flag, 0)), term.guard);
+            ordinal += 1;
+            emit_returning(flag, ordinal, guard, term.action, out);
+        }
+        if callee.default_action == PolicyAction::Deny {
+            out.push((flag_is(flag, 0), TermAction::Deny));
         }
     }
 
@@ -1538,6 +1621,106 @@ fn lower_cmp(
     }
 }
 
+/// The binding name of a call's return flag, shown in explain traces. No
+/// source identifier can spell it, so no binding can shadow it.
+const RETURN_FLAG: &str = "#return";
+
+/// `flag == value`, the guard a call puts on its inlined terms.
+fn flag_is(flag: u8, value: u32) -> MatchExpr {
+    MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+        op: ValueCmpOp::Eq,
+        lhs: ValueExpr::Local {
+            slot: flag,
+            name: RETURN_FLAG.into(),
+        },
+        rhs: ValueExpr::Const(value),
+    }))
+}
+
+/// One callee term emitted into its caller under `guard`. A `Permit` sets
+/// the flag to `ordinal` and applies its modifications behind "flag is
+/// `ordinal`". A loop body gets the same treatment, with a `Break` after
+/// each return and after each inner loop whose body returned.
+fn emit_returning(
+    flag: u8,
+    ordinal: u32,
+    guard: MatchExpr,
+    action: TermAction,
+    out: &mut Vec<(MatchExpr, TermAction)>,
+) {
+    match action {
+        TermAction::Permit(mods) => {
+            out.push((
+                guard,
+                TermAction::Bind {
+                    slot: flag,
+                    name: RETURN_FLAG.into(),
+                    expr: ValueExpr::Const(ordinal),
+                },
+            ));
+            out.push((flag_is(flag, ordinal), TermAction::Continue(mods)));
+        }
+        TermAction::ForEach(mut node) => {
+            node.body = loop_body_returning(flag, ordinal, std::mem::take(&mut node.body));
+            out.push((guard, TermAction::ForEach(node)));
+        }
+        other => out.push((guard, other)),
+    }
+}
+
+/// A callee loop body with its returns rewritten: an `accept` sets the
+/// flag, applies its modifications and leaves the loop; an inner loop is
+/// followed by a `Break` when the flag is set. The loop body's own walk
+/// order is unchanged otherwise.
+fn loop_body_returning(flag: u8, ordinal: u32, body: Vec<Term>) -> Vec<Term> {
+    let mut out = Vec::with_capacity(body.len());
+    for term in body {
+        match term.action {
+            TermAction::Permit(mods) => {
+                out.push(Term {
+                    name: term.name.clone(),
+                    guard: term.guard,
+                    action: TermAction::Bind {
+                        slot: flag,
+                        name: RETURN_FLAG.into(),
+                        expr: ValueExpr::Const(ordinal),
+                    },
+                });
+                out.push(Term {
+                    name: term.name.clone(),
+                    guard: flag_is(flag, ordinal),
+                    action: TermAction::Continue(mods),
+                });
+                out.push(Term {
+                    name: term.name,
+                    guard: flag_is(flag, ordinal),
+                    action: TermAction::Break,
+                });
+            }
+            TermAction::ForEach(mut node) => {
+                node.body = loop_body_returning(flag, ordinal, std::mem::take(&mut node.body));
+                let name = term.name.clone();
+                out.push(Term {
+                    name: term.name,
+                    guard: term.guard,
+                    action: TermAction::ForEach(node),
+                });
+                out.push(Term {
+                    name,
+                    guard: MatchExpr::Not(Box::new(flag_is(flag, 0))),
+                    action: TermAction::Break,
+                });
+            }
+            action => out.push(Term {
+                name: term.name,
+                guard: term.guard,
+                action,
+            }),
+        }
+    }
+    out
+}
+
 /// `path && inner`, as one flat `And` with the path's conditions first,
 /// in order and never re-sorted: `And` evaluates its children in order and
 /// stops at the first miss, so `inner` runs only where the path holds (a
@@ -1593,7 +1776,7 @@ impl Lowerer<'_> {
         // Flat bodies only (the caller checked `IfStmt::is_flat`).
         let actions = body.iter().filter_map(|stmt| match stmt {
             Stmt::Action(action) => Some(action),
-            Stmt::If(_) | Stmt::For(_) => None,
+            Stmt::If(_) | Stmt::For(_) | Stmt::Call(_) => None,
         });
         let mut binds = Vec::new();
         let mut tail: Vec<TermAction> = Vec::new();
