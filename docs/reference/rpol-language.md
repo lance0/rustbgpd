@@ -1003,9 +1003,10 @@ at that iteration, exactly as in an `if` body; staged modifications
 from earlier iterations merge under an `accept` and are discarded by a
 `reject`, the ordinary rules.
 
-**Iterated collections cannot change mid-loop.** Reads always see the
-route as it arrived — staged modifications are never read back
-(ADR-0103 Decision 2) — so `add community` inside a
+**Iterated collections cannot change mid-loop.** Conditions and loop
+sources always read the route as it arrived — staged modifications are
+never read back there (ADR-0103 Decision 2); only a community scan consults
+the staged additions it cancels — so `add community` inside a
 `for c in route.communities` body cannot extend its own iteration
 (pinned by test).
 
@@ -1045,12 +1046,21 @@ and evaluation enforce the following bounds:
   1,000,000-step worst-case budget (`MAX_EVAL_COST`), not metered per
   route. Nest small set loops, or restructure with membership probes.
 - **Runtime fuel.** Every evaluation starts with `MAX_EVAL_COST` fuel,
-  decremented **only at loop iteration steps** — straight-line code is
-  pre-paid by the compile-time bound, so a chain with no loops pays
-  exactly zero (fuel is one register write, never read again).
-  Exhaustion — reachable only by compounding data-dependent iteration
-  across a chain — is an evaluation error on the same uniform-Deny
-  rail (`fuel-exhausted` in the error counters and explain traces).
+  decremented at loop iteration steps and for the staged community
+  entries that work traverses: a community scan pays one step per staged
+  addition and removal of its kind, and merging a community action into
+  the staged modifications pays one step per staged entry of the opposite
+  operation it checks for cancellation. Staged entries have no
+  compile-time bound — loops stage one per iteration and chain members
+  carry them forward — so this is the work the compile-time bound cannot
+  pre-pay. Other straight-line code is pre-paid, so a chain with no loops
+  pays only for the few staged entries its community actions traverse.
+  The trade-off is quadratic staging: a policy that loops removals over
+  the route's n communities and then loops re-adding them pays roughly
+  n²/2 steps, so it fails closed above about 1,400 communities.
+  Exhaustion — reachable only by compounding data-dependent iteration or
+  staging — is an evaluation error on the same uniform-Deny rail
+  (`fuel-exhausted` in the error counters and explain traces).
 
 **Explain.** Traces render a bounded loop summary — iteration count
 plus the deciding iteration (`loop reject at iteration 3 of 3`), never
@@ -1290,10 +1300,14 @@ the daemon evaluates routes with it; a computed operand that evaluates to 0
 denies the route, and the wire encoder also rejects AS 0 under RFC 7607.
 
 The kind keyword must match the literal's kind (`add community
-RT:...` is a compile error pointing at `add ext-community`). Within a
-policy, later `set`s of the same attribute win; across a chain, the
-existing merge semantics apply (later policy wins scalars, add/remove
-lists merge with later-policy-wins cancellation). Literal and computed
+RT:...` is a compile error pointing at `add ext-community`).
+
+**Actions apply in statement order,** within a term, across terms and
+across the members of a chain: each chain member starts from the
+modifications the earlier members staged. For a community value the later
+operation wins: `add community X; remove community X` leaves X absent and
+`remove community X; add community X` leaves it present. Later `set`s of the
+same attribute win. Literal and computed
 prepends share one scalar slot: a later prepend of either form
 replaces an earlier one of either form; computed `set` values share
 their attribute's slot the same way. A computed `set` value resolves
@@ -1304,17 +1318,20 @@ route; see "Value expressions").
 
 The large-community wildcard is deliberately removal-only and accepts exactly
 one decimal `u32` global administrator followed by `:*:*`, with no spaces or
-prefix. It scans only the arrived route, preserves foreign administrators, and
-stages concrete, first-seen deduplicated removals. An input with more than 5,461
+prefix. It removes the arrived values with that administrator as concrete,
+first-seen deduplicated removals, cancels the earlier staged additions with that
+administrator (statement order), and preserves foreign administrators. An input
+with more than 5,461
 arrived large communities fails the route closed before scanning; the compiler
 pre-pays that same conservative wire-derived bound.
 
 The strip-all forms follow the same rules: removal-only, `*` for standard and
-extended communities and `*:*:*` for large communities, arrived route only,
-concrete deduplicated removals. A later `add` of an arrived value, in the same
-policy or a later chain member, cancels its removal under the merge rule above;
-a value added earlier and absent from the arrived route is kept. On a route
-without the attribute they do nothing. Each fails the route closed above its
+extended communities and `*:*:*` for large communities, concrete deduplicated
+removals of the arrived values. In statement order they also cancel every
+addition of the kind that an earlier statement or chain member staged, except a
+well-known standard community: `add community NO_EXPORT; remove community *`
+keeps `NO_EXPORT`. A later `add`, in the same policy or a later chain member,
+stays. On a route without the attribute they remove nothing. Each fails the route closed above its
 wire-derived bound (16,383 standard, 8,191 extended, 5,461 large communities),
 and the compiler pre-pays that scan.
 
@@ -1403,17 +1420,24 @@ test scrubbed {
   every value, and both are compile errors. For `ext-community not in` the
   set needs a route-target or route-origin member. Datasets are not accepted
   here yet; probe a dataset in a guard instead.
-- **Removal only, arrived route only.** `add <kind> in` is a compile error.
-  The scan reads the route as it arrived and stages concrete, deduplicated
-  removals; values staged by earlier actions are not staged again. As with
-  the strip-all forms, a later `add` of an arrived value cancels its removal.
+- **Removal only, in statement order.** `add <kind> in` is a compile error.
+  The scan stages concrete, deduplicated removals of the arrived values it
+  selects, and cancels the earlier staged additions it selects by the same
+  rule, including those of earlier chain members; values staged for removal
+  by earlier actions are not staged again. As with the strip-all forms, a
+  later `add` stays.
 - **Cost.** One pass over the route's arrived values of the kind, bounded by
   the wire (16,383 standard, 8,191 extended, 5,461 large communities); a route
   carrying more fails closed before the scan. The compiler pre-pays one
   evaluation step per value, as for `remove community *`. Each step is one
   exact-member hash probe plus at most 64 pattern comparisons, so a set at
   the pattern limit costs up to about 1.05 million comparisons per route for
-  one standard-community scan.
+  one standard-community scan. The scan also visits the earlier staged
+  additions and removals of its kind: it probes the additions the same way
+  and skips values already staged for removal. Staged entries have no
+  compile-time bound, so each costs one step of the evaluation's runtime
+  budget, and a route that exhausts it fails closed on the evaluation-error
+  rail.
 
 ### Routes that carry too many communities
 
@@ -2377,9 +2401,10 @@ hit counters — those come free after the rewrite.
 
 ## Migrating from IOS-XR RPL
 
-Most RPL constructs have a direct `.rpol` spelling. Four of them have
+Most RPL constructs have a direct `.rpol` spelling. Three of them have
 different semantics, and a line-by-line port changes routing in those
-places. The RPL behavior below is taken from the
+places (1 to 3 below); replacing communities, which once differed too, now
+ports directly (4). The RPL behavior below is taken from the
 [IOS XR 24.x routing configuration guide for ASR 9000, "Implementing Routing Policy"](https://www.cisco.com/c/en/us/td/docs/routers/asr9000/software/24xx/routing/configuration/guide/b-routing-cg-asr9000-24xx/implementing-routing-policy.html)
 and the
 [Cisco 8000 RPL command reference](https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/routing/cumulative/command/reference/b-routing-cr-cisco8000/m-rpl-commands-1.html)
@@ -2399,7 +2424,7 @@ and the
 | `set local-preference 200` | `set local-pref 200` |
 | `set med 50` | `set med 50` |
 | `set community (65000:100) additive` | `add community 65000:100` |
-| `set community (65000:100)` | `remove community *; add community 65000:100`, when nothing earlier on the path added a community the route did not arrive with (see 4 below) |
+| `set community (65000:100)` | `remove community *; add community 65000:100` (see 4 below) |
 | `delete community all` | `remove community *` |
 | `delete community in NAME` / `delete community not in NAME` | `remove community in NAME` / `remove community not in NAME` (well-known values: see [Removing by set membership](#removing-by-set-membership)) |
 | `delete extcommunity rt in NAME` / `delete extcommunity rt not in NAME` | `remove ext-community in NAME` / `remove ext-community not in NAME`; `not in` acts on route targets and route origins only, so other extended communities stay |
@@ -2663,20 +2688,15 @@ test mixed-asn-prepends-keep-only-the-last {
 
 **4. Replacing communities.** RPL `set community` without `additive`
 replaces the route's communities, keeping the well-known ones, and discards
-the communities that earlier statements in the policy added.
-`remove community *` keeps the same RFC 1997 well-known range (see
-"Actions"), but it removes only the communities the route arrived with. A
-value that an earlier `add community` in the same policy, or an earlier
-member of the chain, added stays on the route unless the route arrived with
-it; an arrived value is removed even when it was added earlier. The replace
-idiom therefore ports directly only when nothing on the path added a
-community the route did not arrive with. When something did, the faithful
-port omits those additions on that path, because RPL discards them. Moving
-an `add community` after the replacement does not help: the value then
-stays on the route as well. A full scrub that
-also removes `NO_EXPORT` and the other well-known values is the loop form,
-which, like any loop over a route attribute, denies a route carrying more
-than 4,096 standard communities:
+the communities that earlier statements in the policy added. `.rpol` does the
+same: actions apply in statement order, and `remove community *` removes every
+non-well-known community the route arrived with and cancels every addition an
+earlier statement, or an earlier member of the chain, staged (see "Actions").
+`remove community *; add community 65000:100` is therefore the port, and an
+`add community` after the replacement stays on the route, as in RPL. A full
+scrub that also removes `NO_EXPORT` and the other well-known values is the
+loop form, which, like any loop over a route attribute, denies a route
+carrying more than 4,096 standard communities:
 
 ```rpol
 # RPL `set community (65000:100)`: replace, keeping well-known values.
@@ -2696,9 +2716,9 @@ policy scrub-all {
     }
 }
 
-# A literal port of RPL `set community (65000:1) additive` followed by
-# `set community (65000:100)`: the earlier addition survives, where RPL
-# discards it. The faithful port is `retag` above, without the addition.
+# RPL `set community (65000:1) additive` followed by
+# `set community (65000:100)`: the replacement discards the earlier
+# addition, as in RPL.
 policy tag-then-retag {
     term early { add community 65000:1 }
     term t {
@@ -2708,7 +2728,7 @@ policy tag-then-retag {
     }
 }
 
-# Reordering is not a port: 65000:1 still ends up on the route.
+# An addition after the replacement stays, as in RPL.
 policy retag-then-tag {
     term t {
         remove community *
@@ -2728,19 +2748,13 @@ test retag-keeps-no-export {
         community 65000:100, not removed community NO_EXPORT
 }
 
-test earlier-addition-survives-the-replacement {
+test the-replacement-discards-an-earlier-addition {
     route { prefix 192.0.2.0/24; communities [65010:1] }
     expect tag-then-retag == accept with only removes community 65010:1,
-        community 65000:1, community 65000:100
+        community 65000:100, without community 65000:1
 }
 
-test faithful-port-omits-the-discarded-addition {
-    route { prefix 192.0.2.0/24; communities [65010:1] }
-    expect retag == accept with only removes community 65010:1,
-        community 65000:100
-}
-
-test reordering-keeps-the-addition {
+test a-later-addition-stays {
     route { prefix 192.0.2.0/24; communities [65010:1] }
     expect retag-then-tag == accept with only removes community 65010:1,
         community 65000:1, community 65000:100
@@ -2752,10 +2766,10 @@ test arrived-value-added-earlier-is-removed {
         removes community 65010:1, community 65000:100
 }
 
-test earlier-chain-member-addition-survives {
+test the-replacement-discards-an-earlier-chain-member-addition {
     route { prefix 192.0.2.0/24; communities [65010:1] }
     expect chain [tag-only, retag] == accept with only removes community 65010:1,
-        community 65000:1, community 65000:100
+        community 65000:100, without community 65000:1
 }
 
 test scrub-all-removes-no-export {
