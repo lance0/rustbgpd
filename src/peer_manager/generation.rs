@@ -161,7 +161,8 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
                                     &compiled.prefix_sets,
                                     &compiled.prefix_set_names,
                                 ),
-                                MatchExpr::CommunityInSet(id) => !community_named(*id),
+                                MatchExpr::CommunityInSet(id)
+                                | MatchExpr::CommunityKindInSet(id, _) => !community_named(*id),
                                 MatchExpr::OriginAsInSet(id) | MatchExpr::PeerAsInSet(id) => {
                                     !retains_set_name(
                                         *id,

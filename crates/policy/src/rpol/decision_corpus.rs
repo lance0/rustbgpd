@@ -622,6 +622,7 @@ const CONSTRUCTS: &[&str] = &[
     "ast.expr.value-cmp",
     "ast.expr.apply",
     "ast.value.literal",
+    "ast.value.community",
     "ast.value.identifier",
     "ast.value.field",
     "ast.value.arithmetic",
@@ -632,6 +633,7 @@ const CONSTRUCTS: &[&str] = &[
     "ir.guard.prefix-ne",
     "ir.guard.community-contains",
     "ir.guard.community-in-set",
+    "ir.guard.community-kind-in-set",
     "ir.guard.as-path-matches",
     "ir.guard.as-path-len",
     "ir.guard.origin-as-eq",
@@ -663,6 +665,7 @@ const CONSTRUCTS: &[&str] = &[
     "ir.guard.or",
     "ir.guard.not",
     "ir.value.const",
+    "ir.value.community",
     "ir.value.field",
     "ir.value.local",
     "ir.value.binary",
@@ -806,6 +809,7 @@ fn ast_expr(expr: &Expr, seen: &mut std::collections::BTreeSet<&'static str>) {
 fn ast_value(value: &ValueExprAst, seen: &mut std::collections::BTreeSet<&'static str>) {
     let name = match value {
         ValueExprAst::Lit(..) => "ast.value.literal",
+        ValueExprAst::Community(..) => "ast.value.community",
         ValueExprAst::Ident(_) => "ast.value.identifier",
         ValueExprAst::Field(_) => "ast.value.field",
         ValueExprAst::Binary { lhs, rhs, .. } => {
@@ -968,6 +972,7 @@ fn ir_guard(expr: &MatchExpr, seen: &mut std::collections::BTreeSet<&'static str
         MatchExpr::PrefixNe { .. } => "ir.guard.prefix-ne",
         MatchExpr::CommunityContains(_) => "ir.guard.community-contains",
         MatchExpr::CommunityInSet(_) => "ir.guard.community-in-set",
+        MatchExpr::CommunityKindInSet(..) => "ir.guard.community-kind-in-set",
         MatchExpr::AsPathMatches(_) => "ir.guard.as-path-matches",
         MatchExpr::AsPathLen(_) => "ir.guard.as-path-len",
         MatchExpr::OriginAsEq(_) => "ir.guard.origin-as-eq",
@@ -1020,6 +1025,7 @@ fn ir_guard(expr: &MatchExpr, seen: &mut std::collections::BTreeSet<&'static str
 fn ir_value(expr: &ValueExpr, seen: &mut std::collections::BTreeSet<&'static str>) {
     let name = match expr {
         ValueExpr::Const(_) => "ir.value.const",
+        ValueExpr::Community(_) => "ir.value.community",
         ValueExpr::Field(_) => "ir.value.field",
         ValueExpr::Local { .. } => "ir.value.local",
         ValueExpr::Binary { lhs, rhs, .. } => {

@@ -323,6 +323,16 @@ fn remap_expr(expr: &MatchExpr, donor: &CompiledChain, sets: &mut ChainSets) -> 
                 donor.community_set_names.get(index).cloned().flatten(),
             ))
         }
+        MatchExpr::CommunityKindInSet(id, kind) => {
+            let index = id.0 as usize;
+            MatchExpr::CommunityKindInSet(
+                sets.community_set_id(
+                    donor.community_sets[index].clone(),
+                    donor.community_set_names.get(index).cloned().flatten(),
+                ),
+                *kind,
+            )
+        }
         MatchExpr::OriginAsInSet(id) => {
             let index = id.0 as usize;
             MatchExpr::OriginAsInSet(sets.asn_set_id(

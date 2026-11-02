@@ -1,0 +1,23 @@
+# A route server publishes each action community as standard and large
+# twins; one set holds both, and `any-community` probes and removes either.
+community-set rs-no-export { 0:65010, 65000:0:65010 }
+
+policy twins {
+    term action {
+        if route.any-community in rs-no-export {
+            remove any-community in rs-no-export;
+            set local-pref 50;
+            accept
+        }
+    }
+}
+
+test standard-twin {
+    route { prefix 192.0.2.0/24; communities [0:65010] }
+    expect twins == accept with local-pref 50, removes community 0:65010
+}
+
+test large-twin {
+    route { prefix 192.0.2.0/24; large-communities [65000:0:65010] }
+    expect twins == accept with local-pref 50, removes large-community 65000:0:65010
+}

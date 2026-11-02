@@ -1090,8 +1090,12 @@ fn owned_late_full_queue_captures_actual_displaced_old_before_delta_retirement()
     assert_eq!(resets.load(Ordering::SeqCst), 0);
 }
 
+/// An owned refresh replays the full inventory, and the terminal markers it
+/// stripped from the data follow right behind it once the admission has
+/// verified complete coverage, with no wait for the resync tick. A failed
+/// verification never releases them.
 #[test]
-fn owned_refresh_replays_announcements_but_terminal_waits_for_current_completion() {
+fn owned_refresh_sends_terminal_markers_right_after_verified_coverage() {
     for late_fault in [false, true] {
         let (mut manager, peer, gid, mut output) = fixture();
         let route = received(100);
@@ -1111,14 +1115,15 @@ fn owned_refresh_replays_announcements_but_terminal_waits_for_current_completion
             [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
         );
         assert!(!data.end_of_rib.contains(&EVPN));
-        assert!(output.try_recv().is_err());
         assert_eq!(manager.evpn_admitted_count(peer), 1);
         let builds = manager.adj_rib_out_commit_stats.resync_builds;
-        manager.retry_evpn_feed_markers_bounded();
         if late_fault {
+            assert!(output.try_recv().is_err());
+            manager.retry_evpn_feed_markers_bounded();
             assert!(output.try_recv().is_err());
             assert!(manager.evpn_recovery_reset_pending(peer));
         } else {
+            // No resync tick has run: the markers came with the refresh.
             let marker = output.try_recv().unwrap();
             assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
             assert_eq!(marker.end_of_rib, [EVPN]);
@@ -1127,6 +1132,7 @@ fn owned_refresh_replays_announcements_but_terminal_waits_for_current_completion
                 [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
             );
             assert!(!manager.has_evpn_feed_completion(peer));
+            assert!(output.try_recv().is_err());
         }
         assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
     }
@@ -2221,4 +2227,514 @@ fn review2_private_selection_resync_does_not_duplicate_its_terminal() {
 #[test]
 fn review2_dirty_owned_selection_resync_does_not_recreate_its_terminal_debt() {
     assert_review2_selection_resync_terminal(false);
+}
+
+/// Readiness checkpoints of one incremental update to a group whose member
+/// holds `untouched + 1` admitted routes in a complete, current feed with an
+/// End-of-RIB still owed: a one-route attribute change, or the withdrawal of
+/// the first and the last route in key order. The churn renews the feed from
+/// its delta alone.
+fn owned_debt_churn_checkpoints(untouched: u32, withdraw_ends: bool) -> usize {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    let mut routes = vec![route.clone()];
+    for tag in 0..untouched {
+        let mut other = received(300);
+        if let EvpnRoute::Imet(ref mut imet) = other.route {
+            imet.ethernet_tag = EthernetTagId(tag + 2);
+        } else {
+            panic!("IMET fixture");
+        }
+        routes.push(other);
+    }
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, routes.clone());
+    assert_eq!(output.try_recv().unwrap().evpn_announce.len(), routes.len());
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+        .unwrap();
+    assert!(feed.announce.is_empty() && feed.withdraw.is_empty());
+    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    assert!(output.try_recv().is_err());
+    manager
+        .rtc_eor_hold
+        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    let rib = manager
+        .ribs
+        .entry(route.peer)
+        .or_insert_with(|| AdjRibIn::new(route.peer));
+    for route in &routes {
+        rib.insert_evpn(route.clone());
+    }
+    let resets = count_reset_attempts(&mut manager);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let changed = received(200);
+    let mut ends: Vec<_> = routes.iter().map(EvpnRibRoute::key).collect();
+    ends.sort_unstable();
+    let ends = vec![ends[0], ends[ends.len() - 1]];
+    let work = super::work_scaling::checkpoints_in(|| {
+        if withdraw_ends {
+            manager.process_evpn_withdraw_chunk(route.peer, ends.clone());
+        } else {
+            manager.process_evpn_announce_chunk(changed.peer, vec![changed.clone()]);
+        }
+    });
+    let update = output.try_recv().unwrap();
+    if withdraw_ends {
+        let mut withdrawn = update.evpn_withdraw.clone();
+        withdrawn.sort_unstable();
+        assert_eq!(withdrawn, ends);
+        assert!(update.evpn_announce.is_empty());
+    } else {
+        assert_eq!(update.evpn_announce.len(), 1);
+        assert_eq!(update.evpn_announce[0].key(), changed.key());
+        assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+    }
+    assert!(!update.end_of_rib.contains(&EVPN));
+    assert!(output.try_recv().is_err());
+    assert_eq!(
+        manager.evpn_admitted_count(peer),
+        routes.len() - if withdraw_ends { 2 } else { 0 }
+    );
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+    // The renewed feed still settles on its owed marker.
+    manager.rtc_eor_hold.remove(&peer);
+    manager.retry_evpn_feed_markers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert!(marker.evpn_announce.is_empty() && marker.end_of_rib == vec![EVPN]);
+    assert!(
+        manager
+            .evpn_recovery
+            .is_dormant(manager.evpn_recovery_handle(peer).unwrap())
+    );
+    work["checkpoints"]
+}
+
+/// Churn while a complete feed owes its End-of-RIB costs the delta, not the
+/// member's inventory: across a 16x larger table the work stays within 2x,
+/// for a change and for withdrawals at both ends of the admitted key order.
+/// Re-walking the projections (about five visits per route) grows ~12x.
+#[test]
+fn owned_debt_churn_work_scales_with_the_delta_not_the_inventory() {
+    for withdraw_ends in [false, true] {
+        let small = owned_debt_churn_checkpoints(64, withdraw_ends);
+        let large = owned_debt_churn_checkpoints(1024, withdraw_ends);
+        assert!(
+            large <= small * 2,
+            "churn under terminal debt (withdraw_ends={withdraw_ends}) took {small} \
+             checkpoints at 65 routes and {large} at 1025"
+        );
+    }
+}
+
+/// A member with a complete feed current at the group's stamp and an End-of-RIB
+/// owed, before any further staging.
+fn current_feed_owing_eor() -> (
+    RibManager,
+    PeerId,
+    usize,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    output.try_recv().unwrap();
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+        .unwrap();
+    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    assert!(manager.evpn_feed_is_current(peer));
+    (manager, peer, gid, output)
+}
+
+fn imet_with_tag(tag: u32) -> EvpnRibRoute {
+    let mut route = received(300);
+    if let EvpnRoute::Imet(ref mut imet) = route.route {
+        imet.ethernet_tag = EthernetTagId(tag);
+    } else {
+        panic!("IMET fixture");
+    }
+    route
+}
+
+/// The staged keys of one staging, as the distribution root shares them.
+fn staged_keys(
+    staged: &crate::manager::update_groups::EvpnGroupStageOutput,
+) -> std::sync::Arc<[rustbgpd_wire::EvpnRouteKey]> {
+    staged.deltas.iter().map(|delta| delta.key).collect()
+}
+
+/// A sparse renewal is verified on its delta keys: renewing over a staged
+/// key the member never admitted fails, invalidating the feed instead of
+/// marking it complete.
+#[test]
+fn sparse_renewal_without_the_delta_admission_fails_verification() {
+    let (mut manager, peer, gid, _output) = current_feed_owing_eor();
+    let stamp_before = manager.group_ribs[&gid].evpn_table_stamp;
+    let staged = stage(&mut manager, gid, &imet_with_tag(9));
+    let stamp_after = manager.group_ribs[&gid].evpn_table_stamp;
+    let seal = manager
+        .sparse_evpn_feed_seal(
+            peer,
+            gid,
+            (stamp_before, stamp_after),
+            &staged_keys(&staged),
+        )
+        .expect("current before staging");
+    assert!(!manager.complete_evpn_feed_admitted(peer, seal, 0));
+    assert!(!manager.evpn_feed_is_current(peer));
+}
+
+/// Only the staging that moved a current feed's stamp may renew it: a
+/// second, unadmitted staging in between needs the full producer, whichever
+/// stamps the caller names.
+#[test]
+fn sparse_renewal_requires_the_feed_current_at_the_pre_stage_stamp() {
+    let (mut manager, peer, gid, _output) = current_feed_owing_eor();
+    let stamp_before = manager.group_ribs[&gid].evpn_table_stamp;
+    let first = stage(&mut manager, gid, &imet_with_tag(9));
+    let after_first = manager.group_ribs[&gid].evpn_table_stamp;
+    let second = stage(&mut manager, gid, &imet_with_tag(10));
+    let after_second = manager.group_ribs[&gid].evpn_table_stamp;
+    assert!(
+        manager
+            .sparse_evpn_feed_seal(
+                peer,
+                gid,
+                (after_first, after_second),
+                &staged_keys(&second)
+            )
+            .is_none(),
+        "the feed was never current at the first staging's stamp"
+    );
+    assert!(
+        manager
+            .sparse_evpn_feed_seal(peer, gid, (stamp_before, after_first), &staged_keys(&first))
+            .is_none(),
+        "the group moved past the first staging"
+    );
+}
+
+/// A member's exact-export rejection of a row the group still stages
+/// survives the source's withdrawal while the Loc-RIB keeps the row (as an
+/// armed selection deferral does), so a later sparse renewal still sees the
+/// row as rejected and never claims it was sent.
+#[test]
+fn exact_rejection_outlives_its_source_while_the_loc_rib_keeps_the_row() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let rejected = imet_with_tag(1);
+    let kept = imet_with_tag(2);
+    let encoder = MockExactExportEncoder::accepting(10);
+    encoder.set_profile(11, [crate::update::ExactExportKey::Evpn(rejected.key())]);
+    manager.peer_export_encoders.insert(peer, encoder);
+    manager
+        .ribs
+        .insert(rejected.peer, AdjRibIn::new(rejected.peer));
+    manager.process_evpn_announce_chunk(rejected.peer, vec![rejected.clone(), kept.clone()]);
+    while output.try_recv().is_ok() {}
+    let overlay = |manager: &RibManager| {
+        manager
+            .peer_unexportable
+            .get(&peer)
+            .is_some_and(|keys| keys.contains(&crate::update::ExactExportKey::Evpn(rejected.key())))
+    };
+    assert!(overlay(&manager));
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+        .unwrap();
+    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
+    manager
+        .rtc_eor_hold
+        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: feed.announce.into(),
+                    evpn_withdraw: feed.withdraw,
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    while output.try_recv().is_ok() {}
+    let resets = count_reset_attempts(&mut manager);
+    // The Loc-RIB still holds the row while its only source withdraws it;
+    // the distribution window then retires withdrawn identities.
+    assert!(
+        manager
+            .ribs
+            .get_mut(&rejected.peer)
+            .unwrap()
+            .withdraw_evpn(&rejected.key())
+    );
+    manager.retire_exact_export_rejections([crate::update::ExactExportKey::Evpn(rejected.key())]);
+    assert!(overlay(&manager), "the staged row is still rejected");
+    manager
+        .ribs
+        .get_mut(&rejected.peer)
+        .unwrap()
+        .insert_evpn(rejected.clone());
+    let mut changed = kept.clone();
+    changed.attributes = received(200).attributes;
+    manager.process_evpn_announce_chunk(changed.peer, vec![changed]);
+    while output.try_recv().is_ok() {}
+    assert!(manager.evpn_feed_is_current(peer));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    // The renewed feed's view is exactly what the member was sent.
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    let mut proof = manager.evpn_recovery.proof_keys(handle).unwrap().unwrap();
+    proof.sort_unstable();
+    let mut projection: Vec<_> = manager.group_ribs[&gid]
+        .evpn_member_projection(
+            peer,
+            manager.cluster_id,
+            None,
+            manager.peer_unexportable.get(&peer),
+        )
+        .map(EvpnRibRoute::key)
+        .collect();
+    projection.sort_unstable();
+    assert_eq!(projection, proof);
+    assert_eq!(proof, vec![kept.key()]);
+}
+
+/// A sparse renewal whose delta the member's encoder rejects keeps the feed
+/// current: the rejection is part of the verified projection.
+#[test]
+fn sparse_renewal_respects_a_rejected_delta() {
+    let (mut manager, peer, _gid, mut output) = current_feed_owing_eor();
+    let resets = count_reset_attempts(&mut manager);
+    let changed = imet_with_tag(5);
+    let encoder = MockExactExportEncoder::accepting(10);
+    encoder.set_profile(11, [crate::update::ExactExportKey::Evpn(changed.key())]);
+    manager.peer_export_encoders.insert(peer, encoder);
+    manager.process_evpn_announce_chunk(changed.peer, vec![changed.clone()]);
+    while output.try_recv().is_ok() {}
+    assert!(manager.peer_unexportable.get(&peer).is_some_and(|keys| {
+        keys.contains(&crate::update::ExactExportKey::Evpn(changed.key()))
+    }));
+    assert!(manager.evpn_feed_is_current(peer));
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+}
+
+/// An owned refresh whose data takes the last free outbound slot cannot send
+/// its markers right behind it: the feed keeps owing them without going
+/// dirty, and the resync tick sends them once the queue drains.
+#[test]
+fn refused_refresh_marker_falls_back_to_the_resync_tick() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.capacity() > 1 {
+        sender.try_send(OutboundRouteUpdate::default()).unwrap();
+    }
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    assert_eq!(sender.capacity(), 0);
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.resync_tick_pending());
+    let mut updates = Vec::new();
+    while let Ok(update) = output.try_recv() {
+        updates.push(update);
+    }
+    let data = updates.pop().unwrap();
+    assert_eq!(data.evpn_announce.len(), 1);
+    assert_eq!(
+        data.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
+    );
+    manager.retry_evpn_feed_markers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(
+        marker.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+    );
+    assert!(!manager.has_evpn_feed_completion(peer));
+}
+
+/// A sparse renewal inherits the End-of-RIB-for-refresh its feed still owes
+/// (owed only through the completion): the churn's data goes out, the marker
+/// stays owed, and the resync tick sends it after that data.
+#[test]
+fn sparse_renewal_inherits_the_owed_marker_behind_its_data() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    output.try_recv().unwrap();
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+        .unwrap();
+    feed.seal.required_markers =
+        RibManager::evpn_admitted_marker_bits(&[], &[(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(!manager.pending_eor.contains_key(&peer));
+    while output.try_recv().is_ok() {}
+    let changed = imet_with_tag(5);
+    manager.process_evpn_announce_chunk(changed.peer, vec![changed.clone()]);
+    let data = output.try_recv().unwrap();
+    assert_eq!(data.evpn_announce.len(), 1);
+    assert_eq!(data.evpn_announce[0].key(), changed.key());
+    assert!(output.try_recv().is_err());
+    assert!(
+        manager.evpn_feed_is_current(peer),
+        "the renewal kept the owed marker"
+    );
+    manager.retry_evpn_feed_markers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert_eq!(
+        marker.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+    );
+    assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert_eq!(manager.evpn_admitted_count(peer), 2);
+}
+
+/// Every update one dump produced, in order.
+fn drain_all(output: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<OutboundRouteUpdate> {
+    let mut updates = Vec::new();
+    while let Ok(update) = output.try_recv() {
+        updates.push(update);
+    }
+    updates
+}
+
+/// An owned initial dump sends its EVPN End-of-RIB exactly once, leaves
+/// nothing pending, and releases the group-admitted proof; a following
+/// refresh still carries its BoRR/EoRR demarcation.
+#[test]
+fn owned_initial_dump_settles_its_marker_once_and_refresh_keeps_demarcation() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    stage(&mut manager, gid, &route);
+    assert!(manager.capture_private_evpn_admitted(peer));
+    manager.send_initial_table(peer);
+    let updates = drain_all(&mut output);
+    let eors = updates
+        .iter()
+        .filter(|update| update.end_of_rib.contains(&EVPN))
+        .count();
+    assert_eq!(eors, 1, "exactly one EVPN End-of-RIB");
+    assert!(
+        !manager
+            .pending_eor
+            .get(&peer)
+            .is_some_and(|families| families.contains(&EVPN))
+    );
+    assert!(!manager.pending_group_admitted.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    manager.retry_evpn_feed_markers_bounded();
+    let refresh = drain_all(&mut output);
+    let has = |subtype| {
+        refresh
+            .iter()
+            .any(|update| update.refresh_markers.contains(&(EVPN.0, EVPN.1, subtype)))
+    };
+    assert!(has(RouteRefreshSubtype::BoRR) && has(RouteRefreshSubtype::EoRR));
+}
+
+/// A private-handoff initial dump sends its EVPN End-of-RIB once, and the
+/// resync tick does not send it again.
+#[test]
+fn private_handoff_initial_dump_sends_one_marker() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    stage(&mut manager, gid, &route);
+    assert!(manager.capture_private_evpn_admitted(peer));
+    assert!(manager.begin_private_evpn_handoff(peer));
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(false);
+    assert!(manager.has_private_evpn_handoff(peer));
+    manager.send_initial_table(peer);
+    let mut updates = drain_all(&mut output);
+    manager.retry_evpn_feed_markers_bounded();
+    updates.extend(drain_all(&mut output));
+    let eors = updates
+        .iter()
+        .filter(|update| update.end_of_rib.contains(&EVPN))
+        .count();
+    assert_eq!(eors, 1, "exactly one EVPN End-of-RIB");
+}
+
+/// The refresh tail sends EVPN's own owed markers only: another family's
+/// ready pending End-of-RIB stays pending for its own flush and hooks.
+#[test]
+fn evpn_refresh_markers_leave_other_families_pending_eor() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    manager.pending_eor.insert(peer, HashSet::from([unicast]));
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    let updates = drain_all(&mut output);
+    let marker = updates.last().unwrap();
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(
+        marker.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+    );
+    assert!(
+        updates
+            .iter()
+            .all(|update| !update.end_of_rib.contains(&unicast))
+    );
+    assert!(manager.pending_eor[&peer].contains(&unicast));
+    assert!(!manager.has_evpn_feed_completion(peer));
 }
