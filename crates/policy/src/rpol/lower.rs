@@ -16,9 +16,10 @@
 //!   modifications are dropped — a denied route has no attributes to
 //!   modify); a body with no verdict lowers to `Continue` — matched
 //!   modifications apply and evaluation falls through to the next term.
-//! - When a `.rpol` term produces multiple IR terms they are named
-//!   `<term>.<n>` (1-based); a single IR term keeps the plain term
-//!   name. Explain surfaces (PR-4) render these names.
+//! - IR terms are named after the source statement they execute
+//!   (`<term>.<statement>[.<k>]`, see [`term_names`]); one row of the
+//!   final statement keeps the plain term name. Explain,
+//!   test term hits and policy stats render these names.
 //!
 //! End of policy uses its declared `default-action`, or `Permit` when
 //! omitted. Permit raises no objection and chain evaluation continues;
@@ -673,19 +674,8 @@ impl<'a> Lowerer<'a> {
         let mut terms = Vec::new();
         for term_def in &def.terms {
             let lowered = self.lower_term(term_def, env, store);
-            // A term inlined at a call is always numbered, so the name
-            // keeps its caller term even when the call emits a single term.
-            let multi =
-                lowered.len() > 1 || lowered.0.iter().any(|(_, _, suffix)| suffix.is_some());
-            for (index, (guard, action, suffix)) in lowered.into_iter().enumerate() {
-                let mut name = if multi {
-                    format!("{}.{}", term_def.name.node, index + 1)
-                } else {
-                    term_def.name.node.clone()
-                };
-                if let Some(suffix) = suffix {
-                    name.push_str(&suffix);
-                }
+            let names = term_names(&term_def.name.node, term_def.stmts.len(), &lowered.terms);
+            for ((guard, action, _, _), name) in lowered.terms.into_iter().zip(names) {
                 terms.push(Term {
                     name: Some(name),
                     guard,
@@ -758,7 +748,8 @@ impl<'a> Lowerer<'a> {
     ) -> Lowered {
         let mut out = Lowered::default();
         let mut pending = RouteModifications::default();
-        for stmt in stmts {
+        for (index, stmt) in stmts.iter().enumerate() {
+            out.stmt = index + 1;
             match stmt {
                 Stmt::Action(ActionStmt::Accept(_)) => {
                     out.push((
@@ -840,11 +831,17 @@ impl<'a> Lowerer<'a> {
                 }) => {
                     flush_pending(&mut out, &mut pending);
                     let attribute = community_attribute(*kind);
+                    let stmt = out.stmt;
                     match out.last_mut() {
                         Some((
                             MatchExpr::True,
                             TermAction::RemoveAllCommunities { attributes },
-                        )) => attributes.insert(attribute),
+                            anchor,
+                        )) => {
+                            // The merged term now executes this statement too.
+                            *anchor = stmt;
+                            attributes.insert(attribute);
+                        }
                         _ => out.push((
                             MatchExpr::True,
                             TermAction::RemoveAllCommunities {
@@ -876,6 +873,7 @@ impl<'a> Lowerer<'a> {
                         for bind in call_binds {
                             out.push((MatchExpr::True, bind));
                         }
+                        out.staged = out.stmt;
                     }
                 }
                 Stmt::Action(action) => {
@@ -884,6 +882,7 @@ impl<'a> Lowerer<'a> {
                     for bind in call_binds {
                         out.push((MatchExpr::True, bind));
                     }
+                    out.staged = out.stmt;
                 }
                 Stmt::If(if_stmt) => {
                     flush_pending(&mut out, &mut pending);
@@ -904,8 +903,9 @@ impl<'a> Lowerer<'a> {
                     let slot = lets.declare(&for_stmt.var.node);
                     let body = self
                         .lower_stmts(&for_stmt.body, env, lets, store)
+                        .terms
                         .into_iter()
-                        .map(|(guard, action, _)| Term {
+                        .map(|(guard, action, _, _)| Term {
                             name: None,
                             guard,
                             action,
@@ -928,9 +928,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        if !pending.is_empty() {
-            out.push((MatchExpr::True, TermAction::Continue(pending)));
-        }
+        flush_pending(&mut out, &mut pending);
         out
     }
 
@@ -1069,12 +1067,12 @@ impl<'a> Lowerer<'a> {
                 TermAction::Continue(RouteModifications::default()),
             ));
         }
-        for (guard, action, suffix) in terms {
+        for (guard, action, suffix, _) in terms.terms {
             let guard = match guard {
                 MatchExpr::True => path_or_true(),
                 inner => conjoin(path, inner),
             };
-            out.0.push((guard, action, suffix));
+            out.terms.push((guard, action, suffix, out.stmt));
         }
     }
 
@@ -1690,42 +1688,93 @@ fn lower_cmp(
     }
 }
 
-/// Lowered IR terms of one source term, in walk order, before naming. A
-/// term inlined at an `apply` statement carries its name under the call
-/// (`/<call>:<callee-term>`); every other term is named by position.
+/// Lowered IR terms of one source term, in walk order, before naming. Each
+/// carries the name suffix of a term inlined at an `apply` statement
+/// (`/<call>:<callee-term>`) and the 1-based term-body statement it is
+/// anchored to (see [`term_names`]).
 #[derive(Default)]
-struct Lowered(Vec<(MatchExpr, TermAction, Option<String>)>);
+struct Lowered {
+    terms: Vec<(MatchExpr, TermAction, Option<String>, usize)>,
+    /// The statement being lowered: the anchor of every term pushed.
+    stmt: usize,
+    /// The last statement that staged a modification: the anchor of the
+    /// staged run's flushed term.
+    staged: usize,
+}
 
 impl Lowered {
     fn push(&mut self, (guard, action): (MatchExpr, TermAction)) {
-        self.0.push((guard, action, None));
+        self.terms.push((guard, action, None, self.stmt));
     }
 
     /// A term with its name suffix under a call site.
     fn push_named(&mut self, guard: MatchExpr, action: TermAction, suffix: String) {
-        self.0.push((guard, action, Some(suffix)));
+        self.terms.push((guard, action, Some(suffix), self.stmt));
     }
 
-    fn last_mut(&mut self) -> Option<(&mut MatchExpr, &mut TermAction)> {
-        self.0.last_mut().map(|(guard, action, _)| (guard, action))
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
+    fn last_mut(&mut self) -> Option<(&mut MatchExpr, &mut TermAction, &mut usize)> {
+        self.terms
+            .last_mut()
+            .map(|(guard, action, _, anchor)| (guard, action, anchor))
     }
 
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.terms.is_empty()
     }
 }
 
-impl IntoIterator for Lowered {
-    type Item = (MatchExpr, TermAction, Option<String>);
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+/// The names of one source term's IR terms. Each row is anchored to the
+/// 1-based term-body statement it executes (a staged run of modifications
+/// to its last statement). One row of the final statement owns the bare
+/// term name: its last row holding its own `accept` or `reject` (a row
+/// inlined from a called policy is not its own), else its last row. Every
+/// other row is `<term>.<statement>` (`.<statement>` omitted when the body
+/// has one statement), then `.<k>`, its 1-based position among its
+/// statement's rows, when that statement lowers to more than one row, then
+/// any call suffix. A lowering change to one statement can renumber only
+/// that statement's `.<k>` rows, and one that splits a staged run off the
+/// final row adds an earlier row: the bare row keeps its name.
+fn term_names(
+    term: &str,
+    statements: usize,
+    lowered: &[(MatchExpr, TermAction, Option<String>, usize)],
+) -> Vec<String> {
+    let mut group_sizes: HashMap<usize, usize> = HashMap::new();
+    for (.., anchor) in lowered {
+        *group_sizes.entry(*anchor).or_default() += 1;
     }
+    let final_rows = || (0..lowered.len()).filter(|&i| lowered[i].3 == statements);
+    let bare = final_rows()
+        .rev()
+        .find(|&i| {
+            lowered[i].2.is_none()
+                && matches!(lowered[i].1, TermAction::Permit(_) | TermAction::Deny)
+        })
+        .or_else(|| final_rows().next_back());
+    let mut ordinals: HashMap<usize, usize> = HashMap::new();
+    lowered
+        .iter()
+        .enumerate()
+        .map(|(index, (_, _, suffix, anchor))| {
+            let ordinal = ordinals.entry(*anchor).or_default();
+            *ordinal += 1;
+            let suffix = suffix.as_deref().unwrap_or_default();
+            if bare == Some(index) {
+                return format!("{term}{suffix}");
+            }
+            let statement = if statements > 1 {
+                format!(".{anchor}")
+            } else {
+                String::new()
+            };
+            let ordinal = if group_sizes[anchor] > 1 {
+                format!(".{ordinal}")
+            } else {
+                String::new()
+            };
+            format!("{term}{statement}{ordinal}{suffix}")
+        })
+        .collect()
 }
 
 /// The binding name of a call's return flag, shown in explain traces. No
@@ -1875,11 +1924,16 @@ fn conjoin(path: Option<&MatchExpr>, inner: MatchExpr) -> MatchExpr {
 /// [`TermAction::Continue`] term, preserving execution order around
 /// terms that must stand alone (`if` blocks, loops, loop control,
 /// binding-valued community actions).
+///
+/// The flushed term is anchored to the last statement that staged into it
+/// (see [`term_names`]).
 fn flush_pending(out: &mut Lowered, pending: &mut RouteModifications) {
     if !pending.is_empty() {
-        out.push((
+        out.terms.push((
             MatchExpr::True,
             TermAction::Continue(std::mem::take(pending)),
+            None,
+            out.staged,
         ));
     }
 }

@@ -552,7 +552,7 @@ fn u32_equality_lowers_to_ge_and_le() {
 #[test]
 fn term_fallthrough_encoding() {
     // A bare modification run + an if with a verdictless body + a
-    // final verdict term: exercises Continue flushing and `<term>.<n>`
+    // final verdict term: exercises Continue flushing and statement
     // naming.
     let chain = compile_ok(
         "policy p {
@@ -571,7 +571,7 @@ fn term_fallthrough_encoding() {
         panic!("bare mods flush as Continue, got {:?}", terms[0].action)
     };
     assert_eq!(mods.set_med, Some(10));
-    assert_eq!(terms[1].name.as_deref(), Some("shape.2"));
+    assert_eq!(terms[1].name.as_deref(), Some("shape"));
     let TermAction::Continue(mods) = &terms[1].action else {
         panic!("verdictless if body is Continue, got {:?}", terms[1].action)
     };
@@ -601,6 +601,112 @@ fn term_fallthrough_encoding() {
     let result = chain.evaluate(&ctx);
     assert_eq!(result.modifications.set_med, Some(10));
     assert_eq!(result.modifications.communities_add.len(), 0);
+}
+
+/// IR term names are anchored to the source statement they execute, and
+/// each name is pinned with what its row holds. A statement that lowers to
+/// more rows renumbers only its own rows, so the `if` row of a later
+/// statement keeps its name (`t`). One row of the final statement owns the
+/// bare name: its last row holding its own `accept` or `reject` (`v`, `w`,
+/// and `q`, where the `reject` row is not the last), else its last row
+/// (`z`, and `y`, a staged run that reaches the end). A staged run is named
+/// after its last statement, so a modify-then-accept term stays `u` and a
+/// split-off staged run could only add `u.2`. A final statement with no row
+/// leaves no bare row (`x.1`). Merged strip-all removals form one row named
+/// after the later statement (`f.2`, and the bare `e`), a chain's last own
+/// verdict beats an earlier one and a trailing modification (`cv`), and a
+/// called policy's rows are not the calling statement's verdict (`c/lib:tag`).
+/// `crates/policy/tests/decision_corpus/term-names.rpol` pins the same shapes
+/// in the decision corpus.
+#[test]
+fn term_names_are_anchored_to_source_statements() {
+    let rows = |members: &str, remove: &str| -> Vec<String> {
+        let chain = compile_ok(&format!(
+            "community-set s {{ {members} }}
+             policy p {{
+                 term t {{ set med 1; {remove} in s; if route.med >= 5 {{ accept }} }}
+                 term u {{ set med 2; add community 65000:2; accept }}
+                 term v {{ if route.med >= 9 {{ set med 3; accept }} else {{ reject }} }}
+                 term w {{ set med 4; if route.med >= 9 {{ accept }} else {{ reject }} }}
+                 term q {{ set med 7; if route.med >= 9 {{ reject }} else {{ set med 8 }} }}
+                 term z {{ if route.med >= 9 {{ set med 1 }} else {{ set med 2 }} }}
+                 term x {{ set med 5; if route.med >= 9 {{ }} }}
+                 term y {{ set med 6; add community 65000:6 }}
+                 term f {{ remove community *; remove large-community *:*:*; accept }}
+                 term e {{ remove community *; remove large-community *:*:* }}
+                 term cv {{
+                     if route.med >= 1000 {{ accept }}
+                     else if route.med >= 100 {{ reject }}
+                     else {{ set med 1 }}
+                 }}
+                 term c {{ apply lib }}
+             }}
+             policy lib {{
+                 term bad {{ if route.med >= 1000 {{ reject }} }}
+                 term tag {{ add community 65000:9 }}
+             }}"
+        ));
+        chain.policies[0]
+            .terms
+            .iter()
+            .map(|term| {
+                let contents = super::decision_corpus::row_contents(&term.action, &chain);
+                format!("{} = {contents}", term.name.as_deref().unwrap())
+            })
+            .collect()
+    };
+    let tail = [
+        "u = accept with set med 2; add community 65000:2",
+        "v.1 = accept with set med 3",
+        "v = reject",
+        "w.1 = continue with set med 4",
+        "w.2.1 = accept",
+        "w = reject",
+        "q.1 = continue with set med 7",
+        "q = reject",
+        "q.2.2 = continue with set med 8",
+        "z.1 = continue with set med 1",
+        "z = continue with set med 2",
+        "x.1 = continue with set med 5",
+        "y = continue with set med 6; add community 65000:6",
+        "f.2 = remove community *; remove large-community *:*:*",
+        "f = accept",
+        "e = remove community *; remove large-community *:*:*",
+        "cv.1 = accept",
+        "cv = reject",
+        "cv.3 = continue with set med 1",
+        "c.1/lib:#enter = let #return = 0",
+        "c.2/lib:bad = reject",
+        "c/lib:tag = continue with add community 65000:9",
+    ];
+    let head = [
+        "t.1 = continue with set med 1",
+        "t.2 = remove community in s",
+        "t = accept",
+    ];
+    assert_eq!(
+        rows("65000:1", "remove community"),
+        [&head[..], &tail].concat()
+    );
+    let head = [
+        "t.1 = continue with set med 1",
+        "t.2.1 = remove community in s",
+        "t.2.2 = remove large-community in s",
+        "t = accept",
+    ];
+    assert_eq!(
+        rows("65000:1, 65000:1:1", "remove any-community"),
+        [&head[..], &tail].concat()
+    );
+}
+
+/// A source term name cannot contain `.`, so no source term can take a
+/// generated row name such as `tag.1`.
+#[test]
+fn term_names_cannot_contain_a_dot() {
+    let (diags, rendered) =
+        diagnostics_of("policy p { term tag.1 { accept } term tag { reject } }");
+    assert!(!diags.is_empty(), "{rendered}");
 }
 
 #[test]
@@ -6183,16 +6289,20 @@ fn fn_peer_argument_sets_requires_peer_context() {
 fn fn_explain_renders_call_source_level() {
     let chain = compile_ok(FN_EXAMPLE);
     let terms = &chain.policies[0].terms;
-    // The source term `t` lowers to bind terms + the guard term, all
-    // named `t.<n>` — term identity stays a function of the source.
+    // The source term `t` lowers to bind terms named `t.<n>` and the
+    // guard term holding the verdict, which keeps the bare name — term
+    // identity stays a function of the source.
     let guard_term = terms
         .iter()
         .find(|term| matches!(term.guard, MatchExpr::ValueCmp(_)))
         .expect("the comparison term");
+    assert_eq!(guard_term.name.as_deref(), Some("t"));
     assert!(
-        guard_term.name.as_deref().unwrap_or("").starts_with("t."),
-        "{:?}",
-        guard_term.name
+        terms
+            .iter()
+            .filter(|term| matches!(term.action, TermAction::Bind { .. }))
+            .all(|term| term.name.as_deref().unwrap_or("").starts_with("t.")),
+        "{terms:?}"
     );
     let rendered = crate::engine::explain::render_expr(&guard_term.guard, &chain);
     assert_eq!(rendered, "penalty(route.as-path.len, 10) >= route.med");
@@ -8153,7 +8263,7 @@ fn med_lp_ctx(med: Option<u32>, local_pref: Option<u32>) -> RouteContext<'static
 /// in the compiled form. Every branch here decides, so first-match alone
 /// keeps the walk from reaching a later term after an earlier branch
 /// matched: each branch is guarded by its own guard only, and the `else` is
-/// unconditional. Explain names them `t.1`, `t.2`, ...
+/// unconditional. Explain names them `t.1`, `t.2` and, for the `else`, `t`.
 #[test]
 fn else_if_chain_lowers_to_first_match_terms() {
     use crate::engine::PolicyChain;
@@ -8170,7 +8280,7 @@ fn else_if_chain_lowers_to_first_match_terms() {
     );
     let terms = &compiled.policies[0].terms;
     let names: Vec<_> = terms.iter().map(|term| term.name.as_deref()).collect();
-    assert_eq!(names, [Some("t.1"), Some("t.2"), Some("t.3")]);
+    assert_eq!(names, [Some("t.1"), Some("t.2"), Some("t")]);
     for term in &terms[..2] {
         assert!(
             !matches!(term.guard, MatchExpr::And(_) | MatchExpr::Not(_)),
@@ -8188,7 +8298,7 @@ fn else_if_chain_lowers_to_first_match_terms() {
     for (med, action, local_pref, term) in [
         (120, PolicyAction::Permit, Some(10), "t.1"),
         (60, PolicyAction::Permit, Some(20), "t.2"),
-        (10, PolicyAction::Deny, None, "t.3"),
+        (10, PolicyAction::Deny, None, "t"),
     ] {
         let ctx = med_lp_ctx(Some(med), None);
         let result = chain.evaluate(&ctx);
@@ -11768,37 +11878,38 @@ mod callable_policies_naming {
             .collect()
     }
 
-    /// Inlined terms are named under the call site,
-    /// `<term>.<n>/<call>:<callee-term>`, with the flag's own terms as
-    /// `:#enter`, `:#return` and `:#default`, and nested calls compose.
+    /// Inlined terms are named under the call statement,
+    /// `<term>.<statement>.<k>/<call>:<callee-term>`, with the flag's own
+    /// terms as `:#enter`, `:#return` and `:#default`, and nested calls
+    /// compose.
     #[test]
     fn inlined_terms_are_named_under_the_call() {
         assert_eq!(
             names("caller"),
             [
-                "t.1/lib:#enter",
-                "t.2/lib:bad",
-                "t.3/lib:good",
-                "t.4/lib:good:#return",
-                "t.5/lib:tag",
-                "t.6/strict:#enter",
-                "t.7/strict:ok",
-                "t.8/strict:ok:#return",
-                "t.9/strict:#default",
-                "t.10",
+                "t.1.1/lib:#enter",
+                "t.1.2/lib:bad",
+                "t.1.3/lib:good",
+                "t.1.4/lib:good:#return",
+                "t.1.5/lib:tag",
+                "t.2.1/strict:#enter",
+                "t.2.2/strict:ok",
+                "t.2.3/strict:ok:#return",
+                "t.2.4/strict:#default",
+                "t",
             ]
         );
         assert_eq!(
             names("outer"),
             [
-                "o.1/middle:#enter",
-                "o.2/middle:t.1/lib:#enter",
-                "o.3/middle:t.2/lib:bad",
-                "o.4/middle:t.3/lib:good",
-                "o.5/middle:t.4/lib:good:#return",
-                "o.6/middle:t.5/lib:tag",
-                "o.7/middle:t.6",
-                "o.8",
+                "o.1.1/middle:#enter",
+                "o.1.2/middle:t.1.1/lib:#enter",
+                "o.1.3/middle:t.1.2/lib:bad",
+                "o.1.4/middle:t.1.3/lib:good",
+                "o.1.5/middle:t.1.4/lib:good:#return",
+                "o.1.6/middle:t.1.5/lib:tag",
+                "o.1.7/middle:t",
+                "o",
             ]
         );
     }
@@ -11823,7 +11934,7 @@ mod callable_policies_naming {
             .iter()
             .filter_map(|s| s.term_name.clone())
             .collect();
-        assert!(names.iter().any(|n| n == "t.2/lib:bad"), "{names:?}");
+        assert!(names.iter().any(|n| n == "t.1.2/lib:bad"), "{names:?}");
         // The return flag is bookkeeping: no trace line binds it.
         let lines: Vec<&String> = trace.steps.iter().flat_map(|s| &s.term_traces).collect();
         assert_ne!(lines.len(), 0);
@@ -12025,7 +12136,7 @@ mod callable_policies_review_one {
     }
 
     /// A call whose callee emits no term of its own still names the
-    /// caller's term by position, so the caller keeps its coverage.
+    /// caller's term, so the caller keeps its coverage.
     #[test]
     fn a_lone_call_keeps_the_caller_attribution() {
         let source = "policy empty { }
@@ -12044,7 +12155,7 @@ mod callable_policies_review_one {
             .unwrap();
         assert_eq!(
             caller.terms[0].name.as_deref(),
-            Some("t.1/empty:#enter"),
+            Some("t/empty:#enter"),
             "{:?}",
             caller
                 .terms

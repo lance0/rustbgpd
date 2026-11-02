@@ -496,7 +496,15 @@ and series. Metrics fall into three classes:
 - **rpol:** grammar additions must keep existing v1 programs parseable and
   preserve the golden decision corpus. A change to an existing program's
   accept/reject result or emitted modifications is breaking even if it still
-  parses.
+  parses. The construct inventory in the `rpol` section of the machine
+  inventory decides which constructs are frozen: `v1` constructs are, and
+  the internal `ir.*` compiled kinds are outside v1, though changes to them
+  must still preserve the corpus. Lowered term names, which explain, test
+  term hits, policy stats and `GetPolicyStats` rows show, are frozen under
+  the scoped promise in the
+  [term-name rulings](rpol-language.md#term-name-rulings): a lowering change
+  that keeps the source term and its final statement never renames the
+  bare row or another statement's rows.
 - **Metrics:** stable names and metric types remain; existing label names and
   meanings are not removed or reinterpreted. New bounded labels and metrics
   are additive. Diagnostic series are exempt.
