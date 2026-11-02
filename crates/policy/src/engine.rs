@@ -415,10 +415,11 @@ impl PrependAs {
 }
 
 /// The most ASNs one evaluation prepends to a route's `AS_PATH`: one wire
-/// `AS_SEQUENCE` segment's worth. `.rpol` enforces it statically, summing
-/// every prepend times its enclosing loop bounds per policy at compile
-/// time and across the chain when the chain attaches; evaluation fails
-/// the route closed above it as defence in depth.
+/// `AS_SEQUENCE` segment's worth. `.rpol` enforces it statically: per
+/// policy at compile time, the largest total of the prepends along any
+/// path to an `accept` (loops counted once per iteration), and across the
+/// chain when the chain attaches; evaluation fails the route closed above
+/// it as defence in depth.
 pub const MAX_PREPEND_ASNS: usize = 255;
 
 /// The ASN one prepend action places: a fixed ASN, or a computed operand

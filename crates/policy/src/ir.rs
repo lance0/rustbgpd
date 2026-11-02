@@ -1351,39 +1351,58 @@ impl CompiledChain {
     }
 
     /// The most ASNs one evaluation of `policy` (a policy of this chain)
-    /// can prepend: every prepend action's count, a loop body's times the
-    /// loop's static iteration bound (the member count of an asn-set in
-    /// this chain's tables, the per-loop cap for a route attribute). The
+    /// can prepend: walking its terms in order, `continue` terms add their
+    /// prepends to a running total, a `permit` term's total ends a path, and
+    /// a loop adds its body's prepends times its static iteration bound (the
+    /// member count of an asn-set in this chain's tables, the per-loop cap
+    /// for a route attribute); the bound is the largest total. The
     /// typechecker's bound with parameter arguments substituted; at most
     /// [`crate::engine::MAX_PREPEND_ASNS`] is accepted.
     #[must_use]
     pub fn prepend_bound(&self, policy: &CompiledPolicy) -> u64 {
-        fn terms_bound(chain: &CompiledChain, terms: &[Term]) -> u64 {
-            terms
-                .iter()
-                .map(|term| match &term.action {
-                    TermAction::Permit(mods) | TermAction::Continue(mods) => {
-                        mods.prepend_len() as u64
-                    }
-                    TermAction::ForEach(node) => {
-                        let bound = match node.source {
-                            LoopSource::AsnSet(id) => chain
-                                .asn_sets
-                                .get(id.0 as usize)
-                                .map_or(u64::from(crate::eval::MAX_LOOP_ITERATIONS), |set| {
-                                    set.asns().len() as u64
-                                }),
-                            LoopSource::Communities | LoopSource::AsPath => {
-                                u64::from(crate::eval::MAX_LOOP_ITERATIONS)
-                            }
-                        };
-                        bound.saturating_mul(terms_bound(chain, &node.body))
-                    }
-                    _ => 0,
-                })
-                .fold(0, u64::saturating_add)
+        let (mut running, mut peak): (u64, u64) = (0, 0);
+        for term in &policy.terms {
+            match &term.action {
+                TermAction::Permit(mods) => {
+                    peak = peak.max(running.saturating_add(mods.prepend_len() as u64));
+                }
+                TermAction::Continue(mods) => {
+                    running = running.saturating_add(mods.prepend_len() as u64);
+                }
+                TermAction::ForEach(node) => {
+                    running = running.saturating_add(self.loop_prepends(node));
+                    peak = peak.max(running);
+                }
+                _ => {}
+            }
         }
-        terms_bound(self, &policy.terms)
+        peak.max(running)
+    }
+
+    /// Every ASN one run of a loop can prepend: its body's prepends, nested
+    /// loops multiplied in, times its static iteration bound.
+    fn loop_prepends(&self, node: &ForEachNode) -> u64 {
+        let bound = match node.source {
+            LoopSource::AsnSet(id) => self
+                .asn_sets
+                .get(id.0 as usize)
+                .map_or(u64::from(crate::eval::MAX_LOOP_ITERATIONS), |set| {
+                    set.asns().len() as u64
+                }),
+            LoopSource::Communities | LoopSource::AsPath => {
+                u64::from(crate::eval::MAX_LOOP_ITERATIONS)
+            }
+        };
+        let body = node
+            .body
+            .iter()
+            .map(|term| match &term.action {
+                TermAction::Permit(mods) | TermAction::Continue(mods) => mods.prepend_len() as u64,
+                TermAction::ForEach(inner) => self.loop_prepends(inner),
+                _ => 0,
+            })
+            .fold(0, u64::saturating_add);
+        bound.saturating_mul(body)
     }
 
     /// The first `prepend as peer` action in the chain, as the owning

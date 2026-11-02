@@ -1046,10 +1046,13 @@ and evaluation enforce the following bounds:
   1,000,000-step worst-case budget (`MAX_EVAL_COST`), not metered per
   route. Nest small set loops, or restructure with membership probes.
 - **At most 255 prepended ASNs per route** (`MAX_PREPEND_ASNS`, one wire
-  `AS_SEQUENCE` segment). The bound sums every prepend's count, each `if`
-  branch included, and multiplies a prepend inside a loop by the loop's
-  iteration bound: an asn-set's member count, or 4,096 for a route
-  attribute, so a loop over a route attribute cannot prepend. The
+  `AS_SEQUENCE` segment). The bound is the largest total any path through
+  the policy can reach: prepends add up along a path in term order and an
+  `accept` ends one, so branches or terms that each prepend and accept
+  count one at a time; `if` branches that fall through add up together,
+  as if every guard matched; and a prepend inside a loop counts once per
+  iteration of the loop's bound, an asn-set's member count or 4,096 for a
+  route attribute, so a loop over a route attribute cannot prepend. The
   typechecker checks it with a parameter count at its smallest value, 1;
   instantiation rechecks with the argument, and chain attachment (and a
   test's `expect chain`) adds the members' bounds. A chain composed
@@ -2659,11 +2662,12 @@ test ceiling-at-max {
 each to the left of the last, and so does `.rpol`, across terms and chain
 members. A literal port keeps RPL's result. The one difference is a
 bound: one evaluation prepends at most 255 ASNs, the most one wire
-`AS_SEQUENCE` segment holds. The compiler adds up every prepend, each
-`if` branch included, and multiplies a prepend inside a loop by the
-loop's iteration bound, so a policy, or a chain when it is attached, that
-could exceed 255 is rejected; a prepend inside a loop over a route
-attribute can never fit. RPL has no such static limit.
+`AS_SEQUENCE` segment holds. The compiler adds up the prepends along
+every path to an `accept`, counting `if` branches that fall through
+together and a prepend inside a loop once per iteration, so a policy, or
+a chain when it is attached, that could exceed 255 is rejected; a prepend
+inside a loop over a route attribute can never fit. RPL has no such
+static limit.
 
 ```rpol
 # RPL's documented example, `prepend as-path 2.5 3` then

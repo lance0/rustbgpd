@@ -11725,9 +11725,11 @@ test only-the-first {
     }
 
     /// The typechecker bound: 255 fits, 256 does not, whether in one
-    /// prepend, across terms, across `if` branches or through a loop's
-    /// iteration bound; any prepend in a loop over a route attribute
-    /// exceeds it.
+    /// prepend, across terms, across `if` branches that fall through or
+    /// through a loop's iteration bound; any prepend in a loop over a route
+    /// attribute exceeds it. An `accept` ends a path, so branches and terms
+    /// that each prepend and accept count one at a time, as IXP route-server
+    /// receive policies are generated.
     #[test]
     fn the_static_cap_is_255_at_compile_time() {
         let fits = [
@@ -11735,6 +11737,16 @@ test only-the-first {
             "policy p { term a { prepend as 65000 200 } term b { prepend as 65001 55; accept } }",
             "asn-set three { 1, 2, 3 }
              policy p { term t { for a in three { prepend as 65000 85 } accept } }",
+            "policy p { term t {
+                 if route.med == 1 { prepend as 65000 255; accept }
+                 else { prepend as 65001 255; accept }
+             } }",
+            "policy p {
+                 term a { if route.med == 1 { prepend as 65000 255; accept } }
+                 term b { if route.med == 2 { prepend as 65001 255; accept } }
+                 term c { prepend as 65002 255; accept }
+             }",
+            "policy p { term a { prepend as 65000 100 } term b { if route.med == 1 { prepend as 65001 155; accept } } }",
         ];
         for source in fits {
             compile_ok(source);
@@ -11759,6 +11771,10 @@ test only-the-first {
             (
                 "policy p { term t { for c in route.communities { prepend as 65000 1 } accept } }",
                 4096,
+            ),
+            (
+                "policy p { term a { prepend as 65000 100 } term b { if route.med == 1 { prepend as 65001 156; accept } } }",
+                256,
             ),
         ];
         for (source, bound) in exceeds {
