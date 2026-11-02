@@ -794,7 +794,285 @@ fn rpol_agreement_chains() -> Vec<(&'static str, PolicyChain)> {
             "rpol_then_toml",
             PolicyChain::from_named(vec![rpol_member(200), toml_deny()]),
         ),
+        (
+            "tag_then_strip",
+            PolicyChain::from_named(vec![seeded_member("tag"), seeded_member("strip")]),
+        ),
     ]
+}
+
+/// Chain members whose scans act on what earlier members staged.
+const SEEDED_RPOL: &str = r"
+community-set own { 65000:1 }
+policy tag { term t { add community 65000:7 } }
+policy strip { term t { remove community *; accept } }
+policy stage { term t { for c in route.communities { add community c } } }
+policy scan { term t { remove community in own; accept } }
+policy unstage { term t { for c in route.communities { remove community c } } }
+policy readd { term t { for c in route.communities { add community c } } }
+policy tag-continue { term t { add community 65000:1 } }
+policy tag-accept { term t { add community 65000:2; accept } }
+policy tag-ab { term t { add community 65000:1; add community 65000:2 } }
+policy readd-a {
+    term r { remove community 65000:1 }
+    term a { add community 65000:1; accept }
+}
+policy tag-x { term t { add community 65000:3 } }
+policy strip-readd-x { term t { remove community *; add community 65000:3; accept } }
+policy med-a { term t { let x = route.med + 1; set med x; accept } }
+policy med-b { term t { let x = route.med + 2; set med x; accept } }
+policy prepend-200 { term t { prepend as 65000 200 } }
+policy prepend-56 { term t { prepend as 65001 56; accept } }
+policy prepend-55 { term t { prepend as 65001 55; accept } }
+";
+
+fn seeded_member(name: &str) -> NamedPolicy {
+    let file = crate::rpol::RpolFile::parse(SEEDED_RPOL).expect("clean rpol");
+    let mut store = crate::sets::SetStore::new();
+    let compiled = file
+        .compile_policy(name, &[], &mut store)
+        .expect("policy exists");
+    NamedPolicy::from_rpol(name.to_owned(), std::sync::Arc::new(compiled))
+}
+
+/// Explain walks each member from what the earlier members staged, like
+/// the live walk: the scanning member's line shows the earlier addition it
+/// cancelled, which is why the value is absent from the result.
+#[test]
+fn explain_shows_a_later_scan_cancelling_an_earlier_addition() {
+    let chain = PolicyChain::from_named(vec![seeded_member("tag"), seeded_member("strip")]);
+    let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    let live = chain.compiled().evaluate(&ctx);
+    assert_eq!(live.action, PolicyAction::Permit);
+    assert_eq!(live.modifications.communities_add, Vec::<u32>::new());
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(trace.steps[0].modifications, ["community + 65000:7"]);
+    assert_eq!(
+        trace.steps[1].modifications,
+        ["community - 65000:7 (cancels an earlier addition)"]
+    );
+}
+
+/// Explain renders logical presence: removing and re-adding an earlier
+/// addition is no change, so the member renders nothing for it, in neither
+/// order.
+#[test]
+fn explain_renders_no_change_for_a_removed_and_re_added_value() {
+    let chain = PolicyChain::from_named(vec![seeded_member("tag-ab"), seeded_member("readd-a")]);
+    let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    let live = chain.compiled().evaluate(&ctx);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(
+        trace.steps[0].modifications,
+        ["community + 65000:1", "community + 65000:2"]
+    );
+    assert_eq!(trace.steps[1].modifications, Vec::<String>::new());
+}
+
+/// A strip that cancels repeated earlier additions of a value the member
+/// then adds back leaves the value present: no cancellation line.
+#[test]
+fn explain_keeps_a_value_present_when_a_strip_re_adds_it() {
+    let chain = PolicyChain::from_named(vec![
+        seeded_member("tag-x"),
+        seeded_member("tag-x"),
+        seeded_member("strip-readd-x"),
+    ]);
+    let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    let live = chain.compiled().evaluate(&ctx);
+    assert!(
+        live.modifications
+            .communities_add
+            .contains(&((65_000 << 16) + 3)),
+        "{:?}",
+        live.modifications
+    );
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(trace.steps[2].modifications, Vec::<String>::new());
+}
+
+/// The delta is linear in the staged entries: 204,800 carried additions of
+/// one value cancelled beside 4,096 new removals cost a bounded number of
+/// probes and visits, not their product.
+#[test]
+fn explain_delta_is_linear_in_the_staged_entries() {
+    let carried = vec![(65_000_u32 << 16) + 9; 204_800];
+    let removals: Vec<u32> = (0..4096).collect();
+    super::super::explain::DELTA_STEPS.with(|steps| steps.set(0));
+    let delta =
+        super::super::explain::presence_delta((&carried[..], &[][..]), (&[][..], &removals[..]));
+    let steps = super::super::explain::DELTA_STEPS.with(std::cell::Cell::get);
+    assert_eq!(delta.cancelled_adds, [(65_000 << 16) + 9]);
+    assert_eq!(delta.removed, removals);
+    assert!(delta.added.is_empty() && delta.cancelled_removes.is_empty());
+    let entries = u64::try_from(carried.len() + removals.len()).expect("fits");
+    assert!(steps <= 4 * entries, "{steps} steps for {entries} entries");
+
+    // Distinct values on every side: each probe hits a large set, so a
+    // probe that is not constant-time breaks the bound.
+    let earlier: Vec<u32> = (0..8192).collect();
+    let later: Vec<u32> = (4096..12_288).collect();
+    super::super::explain::DELTA_STEPS.with(|steps| steps.set(0));
+    let delta = super::super::explain::presence_delta(
+        (&earlier[..], &later[..]),
+        (&later[..], &earlier[..]),
+    );
+    let steps = super::super::explain::DELTA_STEPS.with(std::cell::Cell::get);
+    assert_eq!(delta.cancelled_adds.len(), 4096);
+    assert_eq!(delta.cancelled_removes.len(), 4096);
+    let entries = 4 * 8192;
+    assert!(steps <= 4 * entries, "{steps} steps for {entries} entries");
+}
+
+/// Explain seeds the next member with resolved scalar values: two members
+/// that each `set med x` with a different `x` render their own updates, and
+/// the last one is the live result.
+#[test]
+fn explain_resolves_scalars_before_seeding_the_next_member() {
+    let chain = PolicyChain::from_named(vec![seeded_member("med-a"), seeded_member("med-b")]);
+    let ctx = RouteContext {
+        med: Some(10),
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let live = chain.compiled().evaluate(&ctx);
+    assert_eq!(live.modifications.set_med, Some(12));
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(trace.steps[0].modifications.len(), 1);
+    assert!(
+        trace.steps[0].modifications[0].ends_with("= 11"),
+        "{:?}",
+        trace.steps[0].modifications
+    );
+    assert_eq!(trace.steps[1].modifications.len(), 1);
+    assert!(
+        trace.steps[1].modifications[0].ends_with("= 12"),
+        "{:?}",
+        trace.steps[1].modifications
+    );
+}
+
+/// A chain assembled without the attach-time check fails closed above 255
+/// prepended ASNs in the live walk, and explain agrees; one ASN fewer
+/// passes in both.
+#[test]
+fn explain_agrees_with_live_on_the_prepend_cap() {
+    let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    let over = PolicyChain::from_named(vec![
+        seeded_member("prepend-200"),
+        seeded_member("prepend-56"),
+    ]);
+    let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&over), &ctx);
+    assert_eq!(live.action, PolicyAction::Deny);
+    assert_eq!(
+        evaluation.eval_error.map(|error| error.kind),
+        Some(crate::eval::EvalErrorKind::PrependLimitExceeded)
+    );
+    assert_eq!(
+        explain_chain_statements(Some(&over), &ctx).action,
+        PolicyAction::Deny
+    );
+    let fits = PolicyChain::from_named(vec![
+        seeded_member("prepend-200"),
+        seeded_member("prepend-55"),
+    ]);
+    let live = fits.compiled().evaluate(&ctx);
+    assert_eq!(live.action, PolicyAction::Permit);
+    assert_eq!(live.modifications.prepend_len(), 255);
+    assert_eq!(
+        explain_chain_statements(Some(&fits), &ctx).action,
+        PolicyAction::Permit
+    );
+}
+
+/// Explain meters merges into the staged total like the live walk: a loop
+/// whose per-iteration merges traverse removals carried in from earlier
+/// members exhausts the fuel in both.
+#[test]
+fn explain_agrees_with_live_when_carried_removals_exhaust_merge_fuel() {
+    let mut members: Vec<NamedPolicy> = (0..10).map(|_| seeded_member("unstage")).collect();
+    members.push(seeded_member("readd"));
+    let chain = PolicyChain::from_named(members);
+    let communities: Vec<u32> = (0..4096u32).collect();
+    let ctx = RouteContext {
+        communities: &communities,
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&chain), &ctx);
+    assert_eq!(live.action, PolicyAction::Deny);
+    let error = evaluation
+        .eval_error
+        .expect("fuel exhaustion is an evaluation error");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::FuelExhausted);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    let last = trace.steps.last().expect("steps");
+    assert_eq!(last.policy_name, error.policy);
+    let trace_line = last.term_traces.last().expect("trace line");
+    assert!(trace_line.contains("fuel exhausted"), "{trace_line}");
+}
+
+/// The same for the merges of each member's own `continue` and `accept`
+/// terms: 26 members each merge an addition across 40,960 carried removals.
+#[test]
+fn explain_agrees_with_live_when_term_merges_exhaust_fuel() {
+    let mut members: Vec<NamedPolicy> = (0..10).map(|_| seeded_member("unstage")).collect();
+    for _ in 0..13 {
+        members.push(seeded_member("tag-continue"));
+        members.push(seeded_member("tag-accept"));
+    }
+    let chain = PolicyChain::from_named(members);
+    let communities: Vec<u32> = (0..4096u32).collect();
+    let ctx = RouteContext {
+        communities: &communities,
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&chain), &ctx);
+    assert_eq!(live.action, PolicyAction::Deny);
+    let error = evaluation
+        .eval_error
+        .expect("fuel exhaustion is an evaluation error");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::FuelExhausted);
+    let compiled = chain.compiled();
+    let mut hits = compiled.zero_term_hits();
+    assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    let last = trace.steps.last().expect("steps");
+    assert_eq!(last.policy_name, error.policy);
+}
+
+/// Explain meters the staged additions an earlier member carried in, like
+/// the live walk: a chain whose scans exhaust the fuel only through them is
+/// a fail-closed evaluation error in both.
+#[test]
+fn explain_agrees_with_live_when_carried_additions_exhaust_fuel() {
+    let mut members = vec![seeded_member("stage")];
+    members.extend((0..250).map(|_| seeded_member("scan")));
+    let chain = PolicyChain::from_named(members);
+    let communities: Vec<u32> = (0..4096u32).collect();
+    let ctx = RouteContext {
+        communities: &communities,
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&chain), &ctx);
+    assert_eq!(live.action, PolicyAction::Deny);
+    let error = evaluation
+        .eval_error
+        .expect("fuel exhaustion is an evaluation error");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::FuelExhausted);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    let last = trace.steps.last().expect("steps");
+    assert_eq!(last.policy_name, error.policy);
+    let trace_line = last.term_traces.last().expect("trace line");
+    assert!(
+        trace_line.contains("evaluation error") && trace_line.contains("fuel exhausted"),
+        "{trace_line}"
+    );
 }
 
 fn rpol_agreement_contexts() -> Vec<(&'static str, RouteContext<'static>)> {

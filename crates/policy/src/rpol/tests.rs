@@ -645,7 +645,15 @@ fn large_community_admin_wildcard_is_route_only_and_concrete_end_to_end() {
         live.modifications.large_communities_remove,
         vec![own_a, own_b]
     );
-    assert_eq!(live.modifications.large_communities_add, vec![staged]);
+    // Statement order: the scan cancels the earlier staged add it matches.
+    assert_eq!(live.modifications.large_communities_add, vec![]);
+    let later = compile_ok(
+        "policy scrub { term remove-own { remove large-community 65501:*:* } term stage { add large-community 65501:9:9 } term allow { accept } }",
+    );
+    assert_eq!(
+        later.evaluate(&ctx).modifications.large_communities_add,
+        vec![staged]
+    );
     let mut hits = compiled.zero_term_hits();
     assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
     let oversized = vec![own_a; 5_462];
@@ -657,7 +665,7 @@ fn large_community_admin_wildcard_is_route_only_and_concrete_end_to_end() {
     assert_eq!(dry, crate::PolicyResult::deny());
     let mut attrs = vec![PathAttribute::LargeCommunities(communities.to_vec())];
     apply_modifications(&mut attrs, &live.modifications);
-    let expected = vec![PathAttribute::LargeCommunities(vec![foreign, staged])];
+    let expected = vec![PathAttribute::LargeCommunities(vec![foreign])];
     assert_eq!(attrs, expected);
 
     compiled.policies[0].terms.remove(0);
@@ -815,9 +823,9 @@ fn community_counts_compare_and_strip_at_exact_boundaries() {
     }
 }
 
-/// Strip-all stages concrete removals from the arrived route only: an
-/// earlier add of a value the route lacks survives, a later add of an
-/// arrived value cancels its removal (same term or a later chain member),
+/// Strip-all stages concrete removals from the arrived route and cancels
+/// the earlier staged adds (statement order), a later add of an arrived
+/// value cancels its removal (same term or a later chain member),
 /// an empty list is a no-op, the scan fails closed above each wire bound,
 /// and nothing reads peer context.
 #[test]
@@ -845,10 +853,7 @@ fn strip_all_communities_are_route_only_concrete_and_bounded() {
     );
     let live = compiled.evaluate(&ctx);
     assert_eq!(live.modifications.communities_remove, vec![0xFDE8_0001]);
-    assert_eq!(
-        live.modifications.communities_add,
-        vec![0xFDE8_0009, 0xFDE8_0002]
-    );
+    assert_eq!(live.modifications.communities_add, vec![0xFDE8_0002]);
     assert_eq!(live.modifications.large_communities_remove, large.to_vec());
     assert_eq!(live.modifications.extended_communities_remove, ext.to_vec());
     let mut hits = compiled.zero_term_hits();
@@ -858,10 +863,7 @@ fn strip_all_communities_are_route_only_concrete_and_bounded() {
         PathAttribute::LargeCommunities(large.to_vec()),
     ];
     apply_modifications(&mut attrs, &live.modifications);
-    assert_eq!(
-        attrs,
-        vec![PathAttribute::Communities(vec![0xFDE8_0002, 0xFDE8_0009])]
-    );
+    assert_eq!(attrs, vec![PathAttribute::Communities(vec![0xFDE8_0002])]);
 
     // An empty route stages nothing.
     let empty = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
@@ -1442,6 +1444,13 @@ fn route_community_actions_lower_to_exact_rfc_bytes() {
                  add ext-community RT:192.0.2.1:100;
                  add ext-community RO:192.0.2.1:200;
                  add ext-community RT:65535:70000;
+                 accept
+             }
+         }",
+    );
+    let removing = compile_ok(
+        "policy p {
+             term t {
                  remove ext-community RT:65001:100;
                  remove ext-community RO:65001:200;
                  remove ext-community RT:100000:100;
@@ -1470,7 +1479,10 @@ fn route_community_actions_lower_to_exact_rfc_bytes() {
         .iter()
         .map(|community| community.as_u64())
         .collect();
-    let removed: Vec<u64> = mods
+    let TermAction::Permit(removing) = &removing.policies[0].terms[0].action else {
+        panic!("expected permit")
+    };
+    let removed: Vec<u64> = removing
         .extended_communities_remove
         .iter()
         .map(|community| community.as_u64())
@@ -7845,7 +7857,7 @@ fn exact_assertions_compile_and_format_without_ordering_community_sets() {
 policy p { term t {
     set local-pref 200; set med 5; set next-hop self; prepend as 65000 2
     add community 65000:1; add community 65000:2; remove community 65000:3
-    add large-community 65000:1:2; remove large-community 65000:*:*
+    remove large-community 65000:*:*; add large-community 65000:1:2
     add ext-community RT:65000:1; remove ext-community OV_VALID; accept
 } }
 test exact { route { large-communities [65000:3:4, 65000:5:6, 65001:7:8] }
@@ -11185,6 +11197,394 @@ mod typed_parameter_round_three {
                 );
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Community actions apply in statement order
+// ─────────────────────────────────────────────────────────────────────
+
+mod statement_order {
+    use super::super::run_rpol_tests;
+    use super::{compile_ok, route_ctx, v4};
+    use rustbgpd_wire::RpkiValidation;
+
+    fn assert_passes(source: &str, tests: usize) {
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, tests);
+        assert!(report.all_passed(), "{:#?}", report.failures);
+    }
+
+    /// Within a term the later operation on a value wins, for every kind,
+    /// with extended communities compared by their decoded identity: an
+    /// IPv4-admin and a 2-octet-AS route target with the same administrator
+    /// value are one community.
+    #[test]
+    fn the_later_operation_wins_within_a_term() {
+        assert_passes(
+            r"
+policy add-then-remove {
+    term t {
+        add community 65000:1; remove community 65000:1
+        add large-community 65000:1:1; remove large-community 65000:1:1
+        add ext-community RT:65000:1; remove ext-community RT:65000:1
+        add ext-community RT:0.0.253.232:2; remove ext-community RT:65000:2
+        accept
+    }
+}
+policy remove-then-add {
+    term t {
+        remove community 65000:1; add community 65000:1
+        remove large-community 65000:1:1; add large-community 65000:1:1
+        remove ext-community RT:65000:1; add ext-community RT:65000:1
+        remove ext-community RT:0.0.253.232:2; add ext-community RT:65000:2
+        accept
+    }
+}
+test add-then-remove {
+    route { prefix 192.0.2.0/24; communities [65000:1]; large-communities [65000:1:1]
+        ext-communities [RT:65000:1, RT:65000:2] }
+    expect add-then-remove == accept with only removes community 65000:1,
+        removes large-community 65000:1:1, removes ext-community RT:65000:1,
+        removes ext-community RT:65000:2
+}
+test remove-then-add {
+    route { prefix 192.0.2.0/24 }
+    expect remove-then-add == accept with only community 65000:1,
+        large-community 65000:1:1, ext-community RT:65000:1, ext-community RT:65000:2
+}
+",
+            2,
+        );
+    }
+
+    /// Across terms and across chain members, a scan cancels the earlier
+    /// staged additions it selects, while a later addition stays. The
+    /// well-known range survives `remove community *` even when just added.
+    #[test]
+    fn scans_cancel_earlier_additions_across_terms_and_chain_members() {
+        assert_passes(
+            r"
+community-set own { 65000:* }
+community-set allow { 65001:* }
+policy tag { term t { add community 65000:7; add community 65001:7; add community NO_EXPORT } }
+policy tag-large { term t { add large-community 65000:1:1; add large-community 64496:1:1 } }
+policy tag-ext { term t { add ext-community RT:65000:1 } }
+policy strip { term t { remove community *; accept } }
+policy strip-large-own { term t { remove large-community 65000:*:*; accept } }
+policy strip-ext { term t { remove ext-community *; accept } }
+policy scrub-own { term t { remove community in own; accept } }
+policy keep-allowed { term t { remove community not in allow; accept } }
+policy strip-then-tag {
+    term s { remove community * }
+    term t { add community 65000:7; accept }
+}
+test strip-cancels-an-earlier-member {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, strip] == accept with only community NO_EXPORT,
+        without community 65000:7, without community 65001:7
+}
+test in-set-cancels-what-it-selects {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, scrub-own] == accept with only community 65001:7,
+        community NO_EXPORT, without community 65000:7
+}
+test not-in-cancels-the-rest-but-not-well-known {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, keep-allowed] == accept with only community 65001:7,
+        community NO_EXPORT
+}
+test admin-wildcard-cancels-its-administrator {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-large, strip-large-own] == accept with only
+        large-community 64496:1:1
+}
+test ext-strip-cancels {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-ext, strip-ext] == accept with only without ext-community RT:65000:1
+}
+test a-later-addition-stays {
+    route { prefix 192.0.2.0/24; communities [65000:7] }
+    expect strip-then-tag == accept with only community 65000:7
+}
+",
+            6,
+        );
+    }
+
+    /// A later chain member's literal removal of an earlier member's
+    /// addition, and the reverse, follow the same rule. This holds through
+    /// the later-wins chain merge alone; the scan tests above are the ones
+    /// that need each member seeded with the earlier members' staging.
+    #[test]
+    fn chain_members_merge_literal_operations_later_wins() {
+        assert_passes(
+            r"
+policy add-it { term t { add community 65000:1 } }
+policy remove-it { term t { remove community 65000:1 } }
+test add-then-remove {
+    route { prefix 192.0.2.0/24 }
+    expect chain [add-it, remove-it] == accept with only removes community 65000:1
+}
+test remove-then-add {
+    route { prefix 192.0.2.0/24 }
+    expect chain [remove-it, add-it] == accept with only community 65000:1
+}
+",
+            2,
+        );
+    }
+
+    /// The extended and large scans cancel the earlier staged adds they
+    /// select, and only those: `in` by set membership, `not in` over route
+    /// targets and route origins only, and the large strip-all form.
+    #[test]
+    fn extended_and_large_scans_cancel_what_they_select() {
+        assert_passes(
+            r"
+community-set ext { RT:64496:* }
+community-set big { 65000:*:* }
+policy tag-ext { term t { add ext-community RT:64496:1; add ext-community RT:65000:1; add ext-community OV_VALID } }
+policy tag-large { term t { add large-community 65000:1:1; add large-community 64496:1:1 } }
+policy scrub-ext { term t { remove ext-community in ext; accept } }
+policy keep-ext { term t { remove ext-community not in ext; accept } }
+policy scrub-big { term t { remove large-community in big; accept } }
+policy strip-large { term t { remove large-community *:*:*; accept } }
+test ext-in-cancels-what-it-selects {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-ext, scrub-ext] == accept with only ext-community RT:65000:1,
+        ext-community OV_VALID, without ext-community RT:64496:1
+}
+test ext-not-in-keeps-staged-non-rt-ro {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-ext, keep-ext] == accept with only ext-community RT:64496:1,
+        ext-community OV_VALID, without ext-community RT:65000:1
+}
+test large-in-cancels-what-it-selects {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-large, scrub-big] == accept with only large-community 64496:1:1,
+        without large-community 65000:1:1
+}
+test large-strip-all-cancels {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-large, strip-large] == accept with only
+        without large-community 65000:1:1, without large-community 64496:1:1
+}
+",
+            4,
+        );
+    }
+
+    /// The coverage walk behind the live-RIB dry run and the installed-vs-
+    /// candidate diff seeds each chain member like the live walk, so a later
+    /// member's scan cancels an earlier member's add there too.
+    #[test]
+    fn the_coverage_walk_seeds_chain_members_like_the_live_walk() {
+        let chain = compile_ok(
+            "policy tag { term t { add community 65000:7 } } \
+             policy strip { term t { remove community *; accept } }",
+        );
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound);
+        let live = chain.evaluate(&ctx);
+        assert_eq!(live.action, crate::PolicyAction::Permit);
+        assert!(
+            live.modifications.communities_add.is_empty(),
+            "the strip cancels the earlier member's add: {:?}",
+            live.modifications
+        );
+        let mut hits = chain.zero_term_hits();
+        assert_eq!(chain.evaluate_recording_hits(&ctx, &mut hits), live);
+    }
+
+    /// A scan pays one fuel step per staged add it visits: those adds have
+    /// no compile-time bound, so repeated scans over many staged adds hit the
+    /// evaluation budget and fail closed instead of running unmetered.
+    #[test]
+    fn scans_pay_fuel_for_the_staged_adds_they_visit() {
+        use crate::eval::{MAX_EVAL_COST, PolicyHitCounters};
+        use std::fmt::Write as _;
+        let stage = "community-set own { 65000:1 } \
+             policy stage { term t { for c in route.communities { add community c } } }";
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+
+        // Exact accounting: 4096 loop iterations, then one scan over the
+        // 4096 staged adds it keeps.
+        let one = compile_ok(&format!(
+            "{stage} policy scan {{ term t {{ remove community in own; accept }} }}"
+        ));
+        let (result, consumed) = one.evaluate_measuring_fuel(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_add.len(), 4096);
+        assert_eq!(consumed, 4096 + 4096);
+
+        // 250 scans over the same 4096 staged adds exceed the budget.
+        let mut source = stage.to_owned();
+        for i in 0..250 {
+            let _ = write!(
+                source,
+                " policy scan{i} {{ term t {{ remove community in own; accept }} }}"
+            );
+        }
+        let many = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&many);
+        assert_eq!(
+            many.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "scan fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+        let mut hits = many.zero_term_hits();
+        assert_eq!(
+            many.evaluate_recording_hits(&ctx, &mut hits),
+            crate::PolicyResult::deny(),
+            "the dry run is metered identically"
+        );
+        let (_, consumed) = many.evaluate_measuring_fuel(&ctx);
+        assert!(consumed <= MAX_EVAL_COST);
+    }
+
+    /// A scan also pays for the staged removals of its kind it dedups its
+    /// own against: loops append removals without deduplication, so chain
+    /// members can carry hundreds of thousands of them into later scans.
+    #[test]
+    fn scans_pay_fuel_for_carried_staged_removals() {
+        use crate::eval::PolicyHitCounters;
+        use std::fmt::Write as _;
+        let unstage = |i: usize| {
+            format!(
+                " policy unstage{i} {{ term t {{ for c in route.communities {{ remove community c }} }} }}"
+            )
+        };
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+
+        // Exact accounting: 4096 loop iterations, then one scan over the
+        // 4096 staged removals.
+        let one = compile_ok(&format!(
+            "community-set own {{ 65000:1 }}{} policy scan {{ term t {{ remove community in own; accept }} }}",
+            unstage(0)
+        ));
+        let (result, consumed) = one.evaluate_measuring_fuel(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_remove.len(), 4096);
+        assert_eq!(consumed, 4096 + 4096);
+
+        // 50 loops stage 204,800 removals; four scans over them exceed the
+        // budget, though the loops alone spend about a fifth of it.
+        let mut source = "community-set own { 65000:1 }".to_owned();
+        for i in 0..50 {
+            source.push_str(&unstage(i));
+        }
+        for i in 0..4 {
+            let _ = write!(
+                source,
+                " policy scan{i} {{ term t {{ remove community in own; accept }} }}"
+            );
+        }
+        let many = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&many);
+        assert_eq!(
+            many.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "scan fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+    }
+
+    /// Merging an addition into the staged modifications cancels a staged
+    /// removal of the same value, a pass over the staged removals. That pass
+    /// pays fuel per entry: chain members carry removals forward and a loop
+    /// merges once per iteration, so the work would otherwise grow with
+    /// iterations times carried entries.
+    #[test]
+    fn merges_pay_fuel_for_the_staged_entries_they_traverse() {
+        use crate::eval::PolicyHitCounters;
+        let unstage = |i: usize| {
+            format!(
+                " policy unstage{i} {{ term t {{ for c in route.communities {{ remove community c }} }} }}"
+            )
+        };
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+
+        // Exact accounting: 4096 loop iterations, then one literal addition
+        // merged across the 4096 staged removals.
+        let one = compile_ok(&format!(
+            "{} policy tag {{ term t {{ add community 65000:1 }} }}",
+            unstage(0)
+        ));
+        let (result, consumed) = one.evaluate_measuring_fuel(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(consumed, 4096 + 4096);
+
+        // Ten loops carry 40,960 removals into a loop that adds each route
+        // community back: each iteration's merge traverses them.
+        let mut source = String::new();
+        for i in 0..10 {
+            source.push_str(&unstage(i));
+        }
+        source.push_str(
+            " policy readd { term t { for c in route.communities { add community c } } }",
+        );
+        let many = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&many);
+        assert_eq!(
+            many.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "merge fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+        let mut hits = many.zero_term_hits();
+        assert_eq!(
+            many.evaluate_recording_hits(&ctx, &mut hits),
+            crate::PolicyResult::deny(),
+            "the dry run is metered identically"
+        );
+    }
+
+    /// Fifty members carry 204,800 additions into a loop that removes a
+    /// value none of them added: each iteration's merge still traverses the
+    /// carried additions to look for one to cancel, so the loop exhausts the
+    /// fuel instead of doing about 839 million unmetered comparisons.
+    #[test]
+    fn merges_pay_fuel_for_carried_additions_a_loop_traverses() {
+        use crate::eval::PolicyHitCounters;
+        use std::fmt::Write as _;
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+        let mut source = String::new();
+        for i in 0..50 {
+            let _ = write!(
+                source,
+                " policy stage{i} {{ term t {{ for c in route.communities {{ add community c }} }} }}"
+            );
+        }
+        source.push_str(
+            " policy absent { term t { for c in route.communities { remove community 65000:9 } } }",
+        );
+        let carried = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&carried);
+        assert_eq!(
+            carried.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "merge fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+    }
+
+    /// Conditions read the route as received: a later term's guard does not
+    /// see an earlier term's addition.
+    #[test]
+    fn conditions_read_the_received_route() {
+        let compiled = compile_ok(
+            "policy p { term t { add community 65000:1 } \
+             term u { if route.communities has 65000:1 { reject } } term r { accept } }",
+        );
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound);
+        let result = compiled.evaluate(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_add, [(65_000 << 16) + 1]);
     }
 }
 
