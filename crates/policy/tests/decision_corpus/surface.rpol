@@ -1,0 +1,117 @@
+# Decision-corpus programs for the v1 construct inventory: fields, families,
+# operands, parameter types, set members and test forms no other program
+# exercises. `decision_corpus.golden` records every case.
+
+community-set tags { RT:65000:1, RO:64510:5, OV_INVALID, RO:65000:10..20, RT:PRIVATE_AS:* }
+asn-set transit { 64500, 64501 }
+prefix-set docs { 192.0.2.0/24, 198.51.100.0/24 }
+dataset community-set feed
+
+policy communities-by-kind {
+    term large { if route.large-communities has 65000:1:2 { set med 1; accept } }
+    term ext { if route.ext-communities in tags { set med 2; accept } }
+    term fed { if route.communities in feed { reject } }
+    term rest { accept }
+}
+
+policy community-counts {
+    term few { if route.communities.len <= 1 { set med 1 } }
+    term large { if route.large-communities.len >= 1 { set med 2 } }
+    term ext { if route.ext-communities.len >= 2 { set med 3 } }
+    term rest { accept }
+}
+
+policy from-transit {
+    term peer-asn { if peer.asn == 64500 { set local-pref 50; accept } }
+    term rest { accept }
+}
+
+policy by-family {
+    term v4lu { if route.family == ipv4-labeled-unicast { set med 1; accept } }
+    term v6lu { if route.family == ipv6-labeled-unicast { set med 2; accept } }
+    term v4vpn { if route.family == vpnv4 { set med 3; accept } }
+    term v6vpn { if route.family == vpnv6 { set med 4; accept } }
+    term v4fs { if route.family == ipv4-flowspec { set med 5; accept } }
+    term v6fs { if route.family == ipv6-flowspec { set med 6; accept } }
+    term evpn { if route.family == evpn { set med 7; accept } }
+    term rtc { if route.family == rtc { set med 8; accept } }
+    term ls { if route.family == bgp-ls { set med 9; accept } }
+    term lsvpn { if route.family == bgp-ls-vpn { set med 10; accept } }
+    term rest { accept }
+}
+
+policy computed-prepends {
+    term pad { prepend as self 1; prepend as origin 1; prepend as path-first 1; accept }
+}
+
+policy only-prefixes(pfx: prefix-set, origins: asn-set) {
+    term listed { if route.prefix in pfx && route.origin-as in origins { accept } }
+    term rest { reject }
+}
+
+policy scrub {
+    term large { remove large-community 65000:*:* }
+    term all { remove community *; accept }
+}
+
+test labeled {
+    route { prefix 192.0.2.0/24; family ipv4-labeled-unicast }
+    expect by-family == accept with med 1
+}
+
+test evpn-family {
+    route { prefix 192.0.2.0/24; family evpn; evpn-route-type 2 }
+    expect by-family == accept with med 7
+}
+
+test flowspec-v6 {
+    route { prefix 2001:db8::/32; family ipv6-flowspec }
+    expect by-family == accept with med 6
+}
+
+test link-state-vpn {
+    route { prefix 192.0.2.0/24; family bgp-ls-vpn }
+    expect by-family == accept with med 10
+}
+
+test fed-tag {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; communities [65000:666] }
+    expect communities-by-kind == reject
+}
+
+test large-tagged {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; large-communities [65000:1:2] }
+    expect communities-by-kind == accept with med 1
+}
+
+test ext-tagged {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [RO:65000:15] }
+    expect communities-by-kind == accept with med 2
+}
+
+test prepends {
+    route { prefix 192.0.2.0/24; as-path "64500 64501" }
+    peer { address 198.51.100.1; asn 64500; local-as 65000 }
+    expect computed-prepends == accept with prepend "64501 64501 65000"
+}
+
+test listed {
+    route { prefix 192.0.2.0/24; as-path "64501" }
+    expect only-prefixes(docs, transit) == accept
+}
+
+test unlisted {
+    route { prefix 203.0.113.0/24; as-path "64501" }
+    expect only-prefixes(docs, transit) == reject
+}
+
+test scrubbed {
+    route {
+        prefix 192.0.2.0/24; communities [65000:1, NO_EXPORT]
+        large-communities [65000:7:7, 64999:1:1]
+    }
+    expect scrub == accept with removes large-community 65000:*:*, removes community *
+}

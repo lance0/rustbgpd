@@ -546,10 +546,18 @@ to one or more IR terms:
   evaluate the initializer and write its frame slot. Like `Continue`
   it never decides; body bindings re-evaluate the branch guard, which
   is pure and cannot diverge.
-- When one `.rpol` term produces multiple IR terms they are named
-  `<term>.<n>` (1-based); a lone IR term keeps the plain term name.
-  Explain traces, `rbgp policy test` term hits, and `rbgp policy stats`
-  render these names.
+- IR terms are named after the source statement they execute. The name is
+  the term name, then `.<statement>`, the 1-based position of the statement
+  in the term body (omitted when the body has one statement), then `.<k>`
+  when that statement lowers to more than one IR term. A run of
+  modifications flushed as one `Continue` term is named after its last
+  statement, and an `accept` that carries staged modifications after the
+  `accept`: `term tag { add community 65000:1; accept }` lowers to `tag.2`,
+  and `term t { if A { accept } else { reject } }` to `t.1` and `t.2`. A
+  change to how one statement lowers can renumber only that statement's
+  `.<k>` rows; every other row keeps its name. Explain traces,
+  `rbgp policy test` term hits, and `rbgp policy stats` render these names,
+  and the [decision corpus](#compatibility) pins them.
 
 ### Parameters
 
@@ -1210,10 +1218,10 @@ Consequences:
   when an argument has none (an absent `route.origin-as` or `peer.asn`),
   like a `let`: a condition on it is false, and an action that needs it
   denies the route on the uniform eval-error rail.
-- **Term identity survives.** The inlined binds become `<term>.<n>`
-  IR terms of the *calling* term (the established multi-term split
-  naming), so the counter grid and trace skeleton stay a function of
-  the source; per-function hit counting is explicitly out of scope
+- **Term identity survives.** The inlined binds become IR terms of the
+  *calling* statement, named like any statement that lowers to several
+  terms (`<term>.<statement>.<k>`), so the counter grid and trace skeleton
+  stay a function of the source; per-function hit counting is explicitly out of scope
   (Decision 6.3 — it would need runtime call frames).
 - **Attribution names both sides.** A body's bindings render with the
   calling term's name and the qualified binding, e.g.
@@ -1413,8 +1421,10 @@ parameterized policy is charged per call, because each call instantiates
 it. The caller's frame must hold its live bindings, the flag and the called
 policy's frame.
 
-**Names.** Inlined terms are named under the call:
-`<term>.<n>/<call>:<called-term>`, for example `common.3/customer-common(200):tag`.
+**Names.** Inlined terms are named under the call statement, as the
+[lowering](#lowering-into-the-ir-normative) names any statement that lowers
+to several IR terms: `<term>[.<statement>].<k>/<call>:<called-term>`, for
+example `common.3/customer-common(200):tag.1`.
 Nested calls compose, and the flag's own terms are named `:#enter`,
 `:#return` and `:#default` (`#` cannot begin a term name, so no source term
 can collide with them). A `:#return` term follows each called loop that
@@ -3110,9 +3120,253 @@ in `crates/policy/src/rpol/` hold the line: `lex_corpus.golden` pins how
 every `.rpol` file in the tree lexes, and `decision_corpus.golden` pins the
 verdict and exact staged modifications of every tracked `.rpol` file and
 every `rpol` block in the repository's Markdown, run against their own `test` blocks and a fixed
-route matrix, together with a case count for every language construct. A
-change to `decision_corpus.golden` is a behaviour change; justify it in the
-PR.
+route matrix, together with a case count for every language construct and
+the term names every policy lowers to. A change to `decision_corpus.golden`
+is a behaviour change; justify it in the PR.
+
+### v1 construct inventory
+
+The `rpol` section of [`v1-stable-surface.json`](v1-stable-surface.json)
+classifies every construct the decision corpus names: the statements,
+actions, expressions, fields, operators, operands, parameter types,
+families, declarations, set members and test forms a program can use, and
+the compiled IR kinds they lower to. A `v1` construct is part of the frozen
+language: programs that use it keep parsing and keep their decisions.
+`outside_v1` makes no promise of its own. The IR kinds are internal: a
+lowering change may split, merge or rename them, as long as every pinned
+decision holds. `scripts/check-v1-stable-surface.py` fails when the corpus
+names a construct the inventory does not classify, when the inventory names
+one that no longer exists, and when this table differs from the inventory.
+
+<!-- rpol-construct-inventory:start -->
+| Construct | Class | Source form or reason |
+|---|---|---|
+| `ast.policy.default-action` | v1 | `default-action accept\|reject` policy fallback |
+| `ast.policy.parameters` | v1 | parameterized policy `policy p(x: T)`, monomorphized per use |
+| `ast.stmt.if` | v1 | `if <cond> { ... }` |
+| `ast.stmt.else-if` | v1 | `else if` chain, first match wins |
+| `ast.stmt.else` | v1 | final `else` branch |
+| `ast.stmt.nested-if` | v1 | `if` inside an `if` body, at most four levels |
+| `ast.stmt.for` | v1 | bounded `for <var> in <source>` loop |
+| `ast.stmt.call` | v1 | `apply p(args)` statement: run a policy in place |
+| `ast.for.field` | v1 | loop over `route.communities` or `route.as-path` |
+| `ast.for.set` | v1 | loop over an `asn-set` |
+| `ast.action.accept` | v1 | `accept` verdict |
+| `ast.action.reject` | v1 | `reject` verdict |
+| `ast.action.set-local-pref` | v1 | `set local-pref <value>` |
+| `ast.action.set-med` | v1 | `set med <value>` |
+| `ast.action.set-next-hop-self` | v1 | `set next-hop self` |
+| `ast.action.set-next-hop-address` | v1 | `set next-hop <ip>` |
+| `ast.action.set-next-hop-parameter` | v1 | `set next-hop <ip parameter>` |
+| `ast.action.community-literal` | v1 | `add\|remove <kind> <literal>` |
+| `ast.action.large-community-admin-wildcard` | v1 | `remove large-community <global>:*:*` |
+| `ast.action.community-all` | v1 | `remove <kind> *`, keeping well-known standard values |
+| `ast.action.community-binding` | v1 | `add\|remove community <binding>` |
+| `ast.action.community-in-set` | v1 | `remove <kind> in <set>` |
+| `ast.action.community-not-in-set` | v1 | `remove <kind> not in <set>` |
+| `ast.action.prepend` | v1 | `prepend as <asn\|parameter> <count>` |
+| `ast.action.let` | v1 | immutable `let` binding |
+| `ast.action.break` | v1 | `break` out of a loop |
+| `ast.action.continue` | v1 | `continue` to the next loop iteration |
+| `ast.expr.or` | v1 | `a \|\| b` |
+| `ast.expr.and` | v1 | `a && b` |
+| `ast.expr.not` | v1 | `!a` |
+| `ast.expr.cmp` | v1 | `<field> ==\|!=\|>=\|<= <operand>` |
+| `ast.expr.in` | v1 | `<field> in <set or dataset>` |
+| `ast.expr.ident-in` | v1 | `<binding> in <set>` |
+| `ast.expr.has` | v1 | `<community field> has <literal>` |
+| `ast.expr.has-parameter` | v1 | `route.communities has <community parameter>` |
+| `ast.expr.exists` | v1 | `exists <optional field>` |
+| `ast.expr.matches` | v1 | `route.as-path matches "<regex>"` |
+| `ast.expr.contains` | v1 | `route.as-path contains <asn>` |
+| `ast.expr.value-cmp` | v1 | comparison with arithmetic or a call on either side |
+| `ast.expr.apply` | v1 | `apply(p)` predicate: would `p` accept |
+| `ast.value.literal` | v1 | integer literal in a value position |
+| `ast.value.community` | v1 | standard community literal as a value |
+| `ast.value.identifier` | v1 | parameter or binding reference |
+| `ast.value.field` | v1 | u32 field read in a value position |
+| `ast.value.arithmetic` | v1 | saturating arithmetic expression |
+| `ast.value.call` | v1 | `min`/`max`/`clamp` or user `fn` call |
+| `ast.arith.add` | v1 | `+`, saturating |
+| `ast.arith.sub` | v1 | `-`, saturating at 0 |
+| `ast.arith.mul` | v1 | `*`, saturating |
+| `ast.arith.div` | v1 | `/` by a non-zero divisor |
+| `ast.arith.rem` | v1 | `%` by a non-zero divisor |
+| `ast.cmp.eq` | v1 | `==` |
+| `ast.cmp.ne` | v1 | `!=` |
+| `ast.cmp.ge` | v1 | `>=` |
+| `ast.cmp.le` | v1 | `<=` |
+| `ast.field.route.prefix` | v1 | `route.prefix` field |
+| `ast.field.route.communities` | v1 | `route.communities` field |
+| `ast.field.route.large-communities` | v1 | `route.large-communities` field |
+| `ast.field.route.ext-communities` | v1 | `route.ext-communities` field |
+| `ast.field.route.any-community` | v1 | `route.any-community in <set>`, every kind |
+| `ast.field.route.as-path` | v1 | `route.as-path` field |
+| `ast.field.route.as-path.len` | v1 | `route.as-path.len` |
+| `ast.field.route.communities.len` | v1 | `route.communities.len` |
+| `ast.field.route.large-communities.len` | v1 | `route.large-communities.len` |
+| `ast.field.route.ext-communities.len` | v1 | `route.ext-communities.len` |
+| `ast.field.route.origin-as` | v1 | `route.origin-as` field |
+| `ast.field.route.local-pref` | v1 | `route.local-pref` field |
+| `ast.field.route.med` | v1 | `route.med` field |
+| `ast.field.route.next-hop` | v1 | `route.next-hop` field |
+| `ast.field.route.rpki` | v1 | `route.rpki` field |
+| `ast.field.route.aspa` | v1 | `route.aspa` field |
+| `ast.field.route.route-type` | v1 | `route.route-type` field |
+| `ast.field.route.evpn-route-type` | v1 | `route.evpn-route-type`, for the scoped EVPN reflector role |
+| `ast.field.route.family` | v1 | `route.family` field |
+| `ast.field.peer.address` | v1 | `peer.address` field |
+| `ast.field.peer.asn` | v1 | `peer.asn` field |
+| `ast.field.peer.group` | v1 | `peer.group` field |
+| `ast.family.ipv4-unicast` | v1 | `route.family == ipv4-unicast` |
+| `ast.family.ipv6-unicast` | v1 | `route.family == ipv6-unicast` |
+| `ast.family.ipv4-labeled-unicast` | v1 | `route.family == ipv4-labeled-unicast` |
+| `ast.family.ipv6-labeled-unicast` | v1 | `route.family == ipv6-labeled-unicast` |
+| `ast.family.vpnv4` | v1 | `route.family == vpnv4` |
+| `ast.family.vpnv6` | v1 | `route.family == vpnv6` |
+| `ast.family.ipv4-flowspec` | v1 | `route.family == ipv4-flowspec` |
+| `ast.family.ipv6-flowspec` | v1 | `route.family == ipv6-flowspec` |
+| `ast.family.evpn` | v1 | `route.family == evpn`, for the scoped EVPN reflector role |
+| `ast.family.rtc` | v1 | `route.family == rtc` |
+| `ast.family.bgp-ls` | v1 | `route.family == bgp-ls` |
+| `ast.family.bgp-ls-vpn` | v1 | `route.family == bgp-ls-vpn` |
+| `ast.prepend.self` | v1 | `prepend as self <count>` |
+| `ast.prepend.peer` | v1 | `prepend as peer <count>` |
+| `ast.prepend.origin` | v1 | `prepend as origin <count>` |
+| `ast.prepend.path-first` | v1 | `prepend as path-first <count>` |
+| `ast.param.u32` | v1 | `u32` parameter type |
+| `ast.param.prefix-set` | v1 | `prefix-set` parameter type |
+| `ast.param.community-set` | v1 | `community-set` parameter type |
+| `ast.param.asn-set` | v1 | `asn-set` parameter type |
+| `ast.param.community` | v1 | `community` parameter type |
+| `ast.param.ip` | v1 | `ip` parameter type |
+| `ast.decl.import` | v1 | `import "path"` module import |
+| `ast.decl.prefix-set` | v1 | `prefix-set` definition |
+| `ast.decl.prefix-set.ge-le` | v1 | prefix-set entry `ge`/`le` bounds |
+| `ast.decl.community-set` | v1 | `community-set` definition |
+| `ast.decl.asn-set` | v1 | `asn-set` definition |
+| `ast.decl.dataset.prefix-set` | v1 | `dataset prefix-set` declaration |
+| `ast.decl.dataset.asn-set` | v1 | `dataset asn-set` declaration |
+| `ast.decl.dataset.community-set` | v1 | `dataset community-set` declaration |
+| `ast.decl.fn` | v1 | pure `fn` definition |
+| `ast.decl.fn.let` | v1 | `let` inside a `fn` body |
+| `ast.decl.test` | v1 | in-language `test` block |
+| `ast.set.community.standard` | v1 | standard community member or well-known name |
+| `ast.set.community.large` | v1 | large community member |
+| `ast.set.community.route-target` | v1 | `RT:` member |
+| `ast.set.community.route-origin` | v1 | `RO:` member |
+| `ast.set.community.well-known-ext` | v1 | `OV_VALID`/`OV_NOT_FOUND`/`OV_INVALID` member |
+| `ast.set.pattern.standard` | v1 | standard community pattern, `65000:*` |
+| `ast.set.pattern.large` | v1 | large community pattern, `65000:1:*` |
+| `ast.set.pattern.route-target` | v1 | `RT:` pattern |
+| `ast.set.pattern.route-origin` | v1 | `RO:` pattern |
+| `ast.set.pattern-field.range` | v1 | pattern field `*` or `a..b` |
+| `ast.set.pattern-field.private-as` | v1 | pattern field `PRIVATE_AS` |
+| `ast.test.dataset-override` | v1 | `dataset NAME { ... }` content in a test |
+| `ast.test.route.prefix` | v1 | `route { prefix ... }` test fixture field |
+| `ast.test.route.communities` | v1 | `route { communities ... }` test fixture field |
+| `ast.test.route.large-communities` | v1 | `route { large-communities ... }` test fixture field |
+| `ast.test.route.ext-communities` | v1 | `route { ext-communities ... }` test fixture field |
+| `ast.test.route.as-path` | v1 | `route { as-path ... }` test fixture field |
+| `ast.test.route.next-hop` | v1 | `route { next-hop ... }` test fixture field |
+| `ast.test.route.local-pref` | v1 | `route { local-pref ... }` test fixture field |
+| `ast.test.route.med` | v1 | `route { med ... }` test fixture field |
+| `ast.test.route.rpki` | v1 | `route { rpki ... }` test fixture field |
+| `ast.test.route.aspa` | v1 | `route { aspa ... }` test fixture field |
+| `ast.test.route.route-type` | v1 | `route { route-type ... }` test fixture field |
+| `ast.test.route.evpn-route-type` | v1 | `route { evpn-route-type ... }` test fixture field |
+| `ast.test.route.family` | v1 | `route { family ... }` test fixture field |
+| `ast.test.peer.address` | v1 | `peer { address ... }` test fixture field |
+| `ast.test.peer.asn` | v1 | `peer { asn ... }` test fixture field |
+| `ast.test.peer.local-as` | v1 | `peer { local-as ... }` test fixture field |
+| `ast.test.peer.group` | v1 | `peer { group ... }` test fixture field |
+| `ast.test.expect.chain` | v1 | `expect chain [p, q] == ...` |
+| `ast.test.expect.with-only` | v1 | `with only` assertion list |
+| `ast.test.expect.accept` | v1 | `expect p == accept` |
+| `ast.test.expect.reject` | v1 | `expect p == reject` |
+| `ast.test.expect.error` | v1 | `expect p == error [kind]` |
+| `ast.test.with.local-pref` | v1 | `with local-pref N` |
+| `ast.test.with.med` | v1 | `with med N` |
+| `ast.test.with.next-hop` | v1 | `with next-hop <ip\|self>` |
+| `ast.test.with.community` | v1 | `with <kind> <literal>` |
+| `ast.test.with.prepend` | v1 | `with prepend as A N` |
+| `ast.test.with.prepend-path` | v1 | `with prepend "A B"` |
+| `ast.test.with.removes` | v1 | `with removes <kind> <literal>` |
+| `ast.test.with.removes-large-admin` | v1 | `with removes large-community G:*:*` |
+| `ast.test.with.removes-all` | v1 | `with removes <kind> *` |
+| `ast.test.with.not-removed` | v1 | `with not removed <kind> <literal>` |
+| `ast.test.with.without-community` | v1 | `with without <kind> <literal>` |
+| `ast.test.with.without` | v1 | `with without local-pref\|med\|next-hop\|prepend` |
+| `ir.guard.true` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.prefix-in-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.prefix-eq` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.prefix-ne` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.community-contains` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.community-in-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.community-kind-in-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.as-path-matches` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.as-path-len` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.origin-as-eq` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.origin-as-ne` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.origin-as-in-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.peer-as-in-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.local-pref` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.med` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.next-hop-eq` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.next-hop-eq-peer` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.next-hop-ne` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.next-hop-ne-peer` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.neighbor-in` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.neighbor-ne` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.route-type-is` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.route-type-ne` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.evpn-route-type-is` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.evpn-route-type-ne` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.family-is` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.family-ne` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.rpki-is` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.aspa-is` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.value-cmp` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.exists` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.local-in-asn-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.local-in-community-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.in-dataset` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.and` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.or` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.guard.not` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.value.const` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.value.community` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.value.field` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.value.local` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.value.binary` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.value.min` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.value.max` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.value.clamp` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.permit` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.deny` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.continue` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.bind` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.for-each` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.break` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.continue-loop` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.community-var` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.remove-large-community-admin` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.remove-all-communities` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.action.remove-communities-in-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.set-local-pref` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.set-local-pref-computed` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.set-med` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.set-med-computed` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.set-next-hop` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.prepend` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.prepend-computed` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.community-add` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.community-remove` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.large-community-add` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.large-community-remove` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.ext-community-add` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+| `ir.mod.ext-community-remove` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
+<!-- rpol-construct-inventory:end -->
 
 ## Deliberate V1 exclusions
 

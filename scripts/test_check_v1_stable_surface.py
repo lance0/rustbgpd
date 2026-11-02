@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import io
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -954,6 +955,94 @@ class CliExitCodeContractTests(unittest.TestCase):
         self.assertEqual(
             checker.rust_str_const(source, "X"), "Exit codes:\n  64 usage\n  doctor  0 a / 2 b"
         )
+
+
+class RpolInventoryTests(unittest.TestCase):
+    """The rpol construct inventory follows the decision corpus's names."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.inventory = checker.load_json(checker.INVENTORY_PATH)
+        cls.source = checker.RPOL_CORPUS_PATH.read_text()
+        cls.golden = checker.RPOL_GOLDEN_PATH.read_text()
+        cls.docs = checker.RPOL_DOCS_PATH.read_text()
+
+    def run_check(self, inventory=None, source=None, golden=None, docs=None):
+        checker.check_rpol_inventory(
+            inventory or self.inventory,
+            source or self.source,
+            golden or self.golden,
+            docs or self.docs,
+        )
+
+    def rejected(self, expected, **inputs):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            self.run_check(**inputs)
+        self.assertIn(expected, stderr.getvalue())
+
+    def with_new_construct(self, name):
+        """The corpus source and golden as they read once a new enum
+        variant is named in its arm and listed in CONSTRUCTS."""
+        last = '    "ir.mod.ext-community-remove",\n];'
+        self.assertIn(last, self.source)
+        source = self.source.replace(last, f'    "ir.mod.ext-community-remove",\n    "{name}",\n];')
+        source += f'\nfn probe() -> &\'static str {{ "{name}" }}\n'
+        golden = re.sub(
+            r"(\nir\.mod\.ext-community-remove \d+\n)", rf"\g<1>{name} 1\n", self.golden, count=1
+        )
+        self.assertEqual(checker.rpol_golden_constructs(golden)[-1], name)
+        return source, golden
+
+    def test_live_inventory_passes(self):
+        self.run_check()
+
+    def test_named_variant_must_join_constructs(self):
+        source = self.source + '\nfn probe() -> &\'static str { "ast.stmt.while" }\n'
+        self.rejected("names constructs missing from CONSTRUCTS: ['ast.stmt.while']", source=source)
+
+    def test_unlisted_construct_fails(self):
+        source, golden = self.with_new_construct("ast.stmt.while")
+        self.rejected(
+            "rpol constructs missing from the inventory: ['ast.stmt.while']",
+            source=source,
+            golden=golden,
+        )
+
+    def test_unblessed_golden_fails(self):
+        source, _ = self.with_new_construct("ast.stmt.while")
+        self.rejected("constructs differ from CONSTRUCTS; re-bless", source=source)
+
+    def test_stale_entry_fails(self):
+        inventory = copy.deepcopy(self.inventory)
+        inventory["rpol"]["constructs"].append(
+            {"construct": "ast.stmt.goto", "classification": "v1", "reason": "removed"}
+        )
+        self.rejected(
+            "rpol inventory names constructs that no longer exist: ['ast.stmt.goto']",
+            inventory=inventory,
+        )
+
+    def test_classification_and_reason_are_required(self):
+        inventory = copy.deepcopy(self.inventory)
+        inventory["rpol"]["constructs"][0]["classification"] = "stable"
+        self.rejected("use one of ['outside_v1', 'v1']", inventory=inventory)
+        inventory = copy.deepcopy(self.inventory)
+        inventory["rpol"]["constructs"][0]["reason"] = " "
+        self.rejected("needs a one-line reason", inventory=inventory)
+
+    def test_docs_table_mirrors_the_inventory(self):
+        row = checker.rpol_table_row(self.inventory["rpol"]["constructs"][0])
+        self.assertIn(row, self.docs)
+        changed = self.docs.replace(row, row.replace("| v1 |", "| outside_v1 |"), 1)
+        self.rejected("differs from the inventory at row 1", docs=changed)
+        dropped = self.docs.replace(row + "\n", "", 1)
+        self.rejected("differs from the inventory at row 1", docs=dropped)
+        inventory = copy.deepcopy(self.inventory)
+        inventory["rpol"]["constructs"][-1]["reason"] += " (edited)"
+        count = len(inventory["rpol"]["constructs"])
+        self.rejected(f"differs from the inventory at row {count}", inventory=inventory)
+
 
 if __name__ == "__main__":
     unittest.main()

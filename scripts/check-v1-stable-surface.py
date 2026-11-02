@@ -2709,6 +2709,120 @@ def check_evidence_index(inventory: dict) -> None:
         )
 
 
+RPOL_CORPUS_PATH = ROOT / "crates/policy/src/rpol/decision_corpus.rs"
+RPOL_GOLDEN_PATH = ROOT / "crates/policy/src/rpol/decision_corpus.golden"
+RPOL_DOCS_PATH = ROOT / "docs/reference/rpol-language.md"
+RPOL_CONSTRUCTS_RE = re.compile(r"const CONSTRUCTS: &\[&str\] = &\[(.*?)\];", re.DOTALL)
+RPOL_NAME_RE = re.compile(r'"((?:ast|ir)\.[a-z0-9.-]+)"')
+RPOL_CLASSIFICATIONS = {"v1", "outside_v1"}
+RPOL_TABLE_START = "<!-- rpol-construct-inventory:start -->"
+RPOL_TABLE_END = "<!-- rpol-construct-inventory:end -->"
+
+
+def rpol_corpus_constructs(source: str) -> list[str]:
+    """The decision corpus's exhaustive construct list, in `CONSTRUCTS` order.
+
+    The corpus names constructs in match arms that list every enum variant
+    without a wildcard, so a new variant does not compile until it is named;
+    every name an arm returns must also be in `CONSTRUCTS`.
+    """
+    block = RPOL_CONSTRUCTS_RE.search(source)
+    if block is None:
+        fail(f"cannot find CONSTRUCTS in {RPOL_CORPUS_PATH.relative_to(ROOT)}")
+    listed = RPOL_NAME_RE.findall(block.group(1))
+    if len(listed) != len(set(listed)):
+        fail("decision corpus CONSTRUCTS repeats a construct")
+    named = set(RPOL_NAME_RE.findall(source[: block.start()] + source[block.end() :]))
+    unlisted = sorted(named - set(listed))
+    if unlisted:
+        fail(f"decision corpus names constructs missing from CONSTRUCTS: {unlisted}")
+    unnamed = sorted(set(listed) - named)
+    if unnamed:
+        fail(f"decision corpus CONSTRUCTS lists constructs no name function returns: {unnamed}")
+    return listed
+
+
+def rpol_golden_constructs(golden: str) -> list[str]:
+    section = golden.split("## constructs", 1)
+    if len(section) != 2:
+        fail(f"cannot find the constructs section of {RPOL_GOLDEN_PATH.relative_to(ROOT)}")
+    names = []
+    for line in section[1].splitlines()[1:]:
+        if not line.strip():
+            break
+        names.append(line.split()[0])
+    return names
+
+
+def rpol_table_row(entry: dict) -> str:
+    reason = entry["reason"].replace("|", "\\|")
+    return f"| `{entry['construct']}` | {entry['classification']} | {reason} |"
+
+
+def check_rpol_inventory(inventory: dict, source: str, golden: str, docs: str) -> None:
+    """Every corpus construct is classified once, and the docs table mirrors it."""
+    constructs = rpol_corpus_constructs(source)
+    if rpol_golden_constructs(golden) != constructs:
+        fail(
+            "decision_corpus.golden constructs differ from CONSTRUCTS; re-bless with "
+            "RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib "
+            "corpus_decisions_are_pinned"
+        )
+    section = inventory.get("rpol")
+    if not isinstance(section, dict) or set(section) != {"purpose", "source", "docs", "constructs"}:
+        fail("rpol must be an object with exactly 'purpose', 'source', 'docs' and 'constructs'")
+    entries = section["constructs"]
+    if not isinstance(entries, list):
+        fail("rpol.constructs must be a list")
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"construct", "classification", "reason"}:
+            fail(f"rpol construct entries need exactly construct, classification, reason: {entry!r}")
+        if entry["classification"] not in RPOL_CLASSIFICATIONS:
+            fail(
+                f"rpol construct {entry['construct']!r} has classification "
+                f"{entry['classification']!r}; use one of {sorted(RPOL_CLASSIFICATIONS)}"
+            )
+        reason = entry["reason"]
+        if not isinstance(reason, str) or not reason.strip() or "\n" in reason:
+            fail(f"rpol construct {entry['construct']!r} needs a one-line reason")
+    listed = [entry["construct"] for entry in entries]
+    if len(listed) != len(set(listed)):
+        fail("rpol inventory repeats a construct")
+    missing = [name for name in constructs if name not in set(listed)]
+    if missing:
+        fail(f"rpol constructs missing from the inventory: {missing}")
+    stale = [name for name in listed if name not in set(constructs)]
+    if stale:
+        fail(f"rpol inventory names constructs that no longer exist: {stale}")
+    if listed != constructs:
+        fail("rpol inventory must list constructs in CONSTRUCTS order")
+    if docs.count(RPOL_TABLE_START) != 1 or docs.count(RPOL_TABLE_END) != 1:
+        fail(f"{RPOL_DOCS_PATH.relative_to(ROOT)} needs one rpol construct inventory table")
+    table = docs.split(RPOL_TABLE_START, 1)[1].split(RPOL_TABLE_END, 1)[0]
+    rows = [line for line in table.splitlines() if line.startswith("| `")]
+    expected = [rpol_table_row(entry) for entry in entries]
+    if rows != expected:
+        position = next(
+            (i for i, (row, want) in enumerate(zip(rows, expected)) if row != want),
+            min(len(rows), len(expected)),
+        )
+        want = expected[position] if position < len(expected) else "(no row)"
+        fail(
+            f"rpol construct table in {RPOL_DOCS_PATH.relative_to(ROOT)} differs from the "
+            f"inventory at row {position + 1}; expected {want!r}"
+        )
+
+
+def check_rpol(inventory: dict) -> None:
+    try:
+        source = RPOL_CORPUS_PATH.read_text()
+        golden = RPOL_GOLDEN_PATH.read_text()
+        docs = RPOL_DOCS_PATH.read_text()
+    except OSError as error:
+        fail(f"cannot read the rpol inventory inputs: {error}")
+    check_rpol_inventory(inventory, source, golden, docs)
+
+
 def main() -> None:
     check_release_line_selftests()
     check_stable_config_object_shape_regressions()
@@ -2717,6 +2831,7 @@ def main() -> None:
     if inventory.get("schema_version") != 1 or inventory.get("contract") != "rustbgpd-rs-rr-v1":
         fail("unexpected inventory schema or contract id")
     check_policy(inventory)
+    check_rpol(inventory)
     check_config(inventory, load_json(SCHEMA_PATH))
     check_grpc(inventory)
     check_metrics(inventory)

@@ -603,6 +603,38 @@ fn term_fallthrough_encoding() {
     assert_eq!(result.modifications.communities_add.len(), 0);
 }
 
+/// IR term names are anchored to the source statement they execute: a
+/// statement that lowers to more IR terms renumbers only its own rows, so
+/// the `if` row of a later statement keeps its explain and stats name. A
+/// staged run is named after its last statement, so a verdict that carries
+/// staged modifications keeps the verdict statement's name.
+#[test]
+fn term_names_are_anchored_to_source_statements() {
+    let names = |members: &str, remove: &str| -> Vec<String> {
+        let chain = compile_ok(&format!(
+            "community-set s {{ {members} }}
+             policy p {{
+                 term t {{ set med 1; {remove} in s; if route.med >= 5 {{ accept }} }}
+                 term u {{ set med 2; add community 65000:2; accept }}
+                 term v {{ if route.med >= 9 {{ set med 3; accept }} else {{ reject }} }}
+             }}"
+        ));
+        chain.policies[0]
+            .terms
+            .iter()
+            .map(|term| term.name.clone().unwrap())
+            .collect()
+    };
+    assert_eq!(
+        names("65000:1", "remove community"),
+        ["t.1", "t.2", "t.3", "u.3", "v.1", "v.2"]
+    );
+    assert_eq!(
+        names("65000:1, 65000:1:1", "remove any-community"),
+        ["t.1", "t.2.1", "t.2.2", "t.3", "u.3", "v.1", "v.2"]
+    );
+}
+
 #[test]
 fn else_lowers_to_negated_guard() {
     let chain = compile_ok(
@@ -3749,8 +3781,8 @@ fn eval_error_denies_discards_mods_and_counts() {
         crate::eval::EvalErrorKind::AbsentField(crate::ir::ValueField::OriginAs)
     );
     assert_eq!(last.policy.as_deref(), Some("p"));
-    assert_eq!(last.term.as_deref(), Some("guard"));
-    assert_eq!(last.to_string(), "absent-operand in policy p term guard");
+    assert_eq!(last.term.as_deref(), Some("guard.2"));
+    assert_eq!(last.to_string(), "absent-operand in policy p term guard.2");
 
     // The recording walk (dry runs) agrees on the verdict.
     let mut hits = chain.zero_term_hits();
@@ -3980,10 +4012,10 @@ fn eval_error_explain_renders_and_agrees() {
     assert_eq!(trace.action, chain.evaluate(&ctx).action);
     assert_eq!(trace.action, PolicyAction::Deny);
     let step = &trace.steps[0];
-    assert_eq!(step.term_name.as_deref(), Some("no-origin"));
+    assert_eq!(step.term_name.as_deref(), Some("no-origin.2"));
     assert!(
         step.term_traces.iter().any(|line| line
-            .contains("term no-origin: evaluation error: `route.origin-as` has no value")
+            .contains("term no-origin.2: evaluation error: `route.origin-as` has no value")
             && line.contains("fail closed")),
         "error renders in place of a verdict: {:?}",
         step.term_traces
@@ -4483,7 +4515,7 @@ fn evaluation_carries_eval_error_on_the_error_rail_only() {
         crate::eval::EvalErrorKind::AbsentField(crate::ir::ValueField::OriginAs)
     );
     assert_eq!(error.policy.as_deref(), Some("p"));
-    assert_eq!(error.term.as_deref(), Some("guard"));
+    assert_eq!(error.term.as_deref(), Some("guard.2"));
 
     ctx.origin_asn = Some(64500);
     let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
@@ -11768,37 +11800,38 @@ mod callable_policies_naming {
             .collect()
     }
 
-    /// Inlined terms are named under the call site,
-    /// `<term>.<n>/<call>:<callee-term>`, with the flag's own terms as
-    /// `:#enter`, `:#return` and `:#default`, and nested calls compose.
+    /// Inlined terms are named under the call statement,
+    /// `<term>.<statement>.<k>/<call>:<callee-term>`, with the flag's own
+    /// terms as `:#enter`, `:#return` and `:#default`, and nested calls
+    /// compose.
     #[test]
     fn inlined_terms_are_named_under_the_call() {
         assert_eq!(
             names("caller"),
             [
-                "t.1/lib:#enter",
-                "t.2/lib:bad",
-                "t.3/lib:good",
-                "t.4/lib:good:#return",
-                "t.5/lib:tag",
-                "t.6/strict:#enter",
-                "t.7/strict:ok",
-                "t.8/strict:ok:#return",
-                "t.9/strict:#default",
-                "t.10",
+                "t.1.1/lib:#enter",
+                "t.1.2/lib:bad",
+                "t.1.3/lib:good",
+                "t.1.4/lib:good:#return",
+                "t.1.5/lib:tag",
+                "t.2.1/strict:#enter",
+                "t.2.2/strict:ok",
+                "t.2.3/strict:ok:#return",
+                "t.2.4/strict:#default",
+                "t.3",
             ]
         );
         assert_eq!(
             names("outer"),
             [
-                "o.1/middle:#enter",
-                "o.2/middle:t.1/lib:#enter",
-                "o.3/middle:t.2/lib:bad",
-                "o.4/middle:t.3/lib:good",
-                "o.5/middle:t.4/lib:good:#return",
-                "o.6/middle:t.5/lib:tag",
-                "o.7/middle:t.6",
-                "o.8",
+                "o.1.1/middle:#enter",
+                "o.1.2/middle:t.1.1/lib:#enter",
+                "o.1.3/middle:t.1.2/lib:bad",
+                "o.1.4/middle:t.1.3/lib:good",
+                "o.1.5/middle:t.1.4/lib:good:#return",
+                "o.1.6/middle:t.1.5/lib:tag",
+                "o.1.7/middle:t.2",
+                "o.2",
             ]
         );
     }
@@ -11823,7 +11856,7 @@ mod callable_policies_naming {
             .iter()
             .filter_map(|s| s.term_name.clone())
             .collect();
-        assert!(names.iter().any(|n| n == "t.2/lib:bad"), "{names:?}");
+        assert!(names.iter().any(|n| n == "t.1.2/lib:bad"), "{names:?}");
         // The return flag is bookkeeping: no trace line binds it.
         let lines: Vec<&String> = trace.steps.iter().flat_map(|s| &s.term_traces).collect();
         assert_ne!(lines.len(), 0);
@@ -12025,7 +12058,7 @@ mod callable_policies_review_one {
     }
 
     /// A call whose callee emits no term of its own still names the
-    /// caller's term by position, so the caller keeps its coverage.
+    /// caller's term, so the caller keeps its coverage.
     #[test]
     fn a_lone_call_keeps_the_caller_attribution() {
         let source = "policy empty { }
@@ -12044,7 +12077,7 @@ mod callable_policies_review_one {
             .unwrap();
         assert_eq!(
             caller.terms[0].name.as_deref(),
-            Some("t.1/empty:#enter"),
+            Some("t/empty:#enter"),
             "{:?}",
             caller
                 .terms

@@ -608,9 +608,11 @@ fn own_guard_is_true(guard: &MatchExpr) -> bool {
 }
 
 /// Does IR term name `ir` belong to source term `src`? Either the name
-/// itself or the `<src>.<n>` multi-lowered form.
+/// itself, a statement-numbered `<src>.<n>` form, or a term inlined under a
+/// call, `<src>/<call>:...`.
 fn belongs(ir: &str, src: &str) -> bool {
-    ir == src || (ir.len() > src.len() && ir.starts_with(src) && ir.as_bytes()[src.len()] == b'.')
+    ir.strip_prefix(src)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '/']))
 }
 
 /// `let` bindings in scope whose value can be missing, with the optional

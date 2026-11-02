@@ -14,7 +14,16 @@
 //! case executes fails the test. Programs are identified by their
 //! entrypoint and resolved imports. An evaluation error is recorded with
 //! its outcome, which must be a deny with no modifications, and extended
-//! communities carry their exact wire value.
+//! communities carry their exact wire value. The golden also pins the IR
+//! term names every instantiation lowers to, the names explain, test term
+//! hits and policy stats show, so a lowering change that renames a row
+//! fails like a decision change.
+//!
+//! [`CONSTRUCTS`] is the exhaustive construct list: the name functions
+//! below match every AST, IR and declaration enum without a wildcard, so a
+//! new variant does not compile until it is named. The v1 construct
+//! inventory in `docs/reference/v1-stable-surface.json` classifies every
+//! name, and `scripts/check-v1-stable-surface.py` checks the two agree.
 //!
 //! A change to `decision_corpus.golden` is a behaviour change; justify it
 //! in the PR. After an intentional change, rewrite the golden with
@@ -27,14 +36,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::ast::{
-    ActionStmt, CommunityArg, Expr, ForSource, NextHopArg, PolicyDef, Stmt, ValueExprAst,
+    ActionStmt, CmpOp, CommunityArg, DatasetEntryAst, ExpectVerdict, Expr, FieldPath, ForSource,
+    NextHopArg, ParamType, PeerField, PolicyDef, Rhs, RouteField, Stmt, ValueExprAst,
+    WithAssertion,
 };
 use super::testing::{Fixture, override_data, render_expect};
+use super::typeck::{Field, resolve_field};
 use super::{RpolFile, lower};
-use crate::datasets::{DatasetBindings, DatasetHandle};
-use crate::engine::{NextHopAction, PolicyAction, RouteModifications};
-use crate::ir::{CompiledChain, MatchExpr, Term, TermAction, ValueExpr};
-use crate::sets::SetStore;
+use crate::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
+use crate::engine::{
+    CommunityMatch, NextHopAction, PolicyAction, PrependAs, RouteFamily, RouteModifications,
+};
+use crate::ir::{ArithOp, CompiledChain, MatchExpr, Term, TermAction, ValueExpr};
+use crate::sets::{CommunityField, CommunityMember, CommunityPattern, SetStore};
 
 /// The curated programs that give every construct a case.
 const CURATED: &str = "crates/policy/tests/decision_corpus/";
@@ -139,6 +153,9 @@ struct Corpus {
     cases: Vec<String>,
     skipped: Vec<String>,
     counts: BTreeMap<&'static str, usize>,
+    /// The IR term names each instantiation lowers to: the names explain,
+    /// test term hits and policy stats show, pinned like decisions.
+    names: BTreeMap<String, String>,
 }
 
 /// One program of the corpus.
@@ -157,16 +174,36 @@ fn content_id(text: &str) -> String {
 }
 
 impl Corpus {
+    /// Record the term names of every member of `chain` under `key`.
+    fn record_names(&mut self, key: &str, chain: &CompiledChain) {
+        let members: Vec<String> = chain
+            .policies
+            .iter()
+            .map(|policy| {
+                let names: Vec<&str> = policy
+                    .terms
+                    .iter()
+                    .map(|term| term.name.as_deref().unwrap_or("-"))
+                    .collect();
+                names.join(" ")
+            })
+            .collect();
+        self.names.insert(key.to_string(), members.join(" ; "));
+    }
+
     /// Credit one case to every construct its evaluation of `ctx` reached:
     /// the guards of the IR terms it evaluated, the actions of the terms
     /// whose guard matched, and the AST statements of the source terms
     /// with a matched IR term. Loop bodies are credited whole when their
     /// loop term runs; the evaluator does not report body-term reachability.
+    /// `declared` holds the program's declaration and test constructs
+    /// ([`declared_constructs`]), credited to every case it runs.
     fn count(
         &mut self,
         chain: &CompiledChain,
         policies: &[&PolicyDef],
         ctx: &crate::RouteContext<'_>,
+        declared: &Seen,
     ) {
         let mut evaluated = chain.zero_term_hits();
         let mut matched = chain.zero_term_hits();
@@ -204,7 +241,11 @@ impl Corpus {
             if !def.params.is_empty() {
                 seen.insert("ast.policy.parameters");
             }
+            for ty in &def.param_types {
+                seen.insert(param_type_name(*ty));
+            }
         }
+        seen.extend(declared);
         for name in seen {
             assert!(
                 CONSTRUCTS.contains(&name),
@@ -366,6 +407,7 @@ fn run_source(
     let mut store = SetStore::new();
     let mut lowerer = lower::Lowerer::from_tables(&file.file, file.tables());
     let policy_def = |name: &str| file.file.policies.iter().find(|p| p.name.node == name);
+    let declared = declared_constructs(file);
 
     // The program's own in-language expectations.
     for test in &file.file.tests {
@@ -392,7 +434,8 @@ fn run_source(
                             .iter()
                             .filter_map(|call| policy_def(&call.policy.node))
                             .collect();
-                        corpus.count(&chain, &defs, &fixture.context());
+                        corpus.count(&chain, &defs, &fixture.context(), &declared);
+                        corpus.record_names(&format!("{id} | {call}"), &chain);
                         evaluate(&chain, &fixture)
                     }
                     Err(_) => "does not assemble".to_string(),
@@ -420,9 +463,10 @@ fn run_source(
             ));
             continue;
         }
+        corpus.record_names(&format!("{id} | {name}"), &chain);
         for (route, fixture) in matrix {
             chain.local_asn = fixture.local_asn;
-            corpus.count(&chain, &[def], &fixture.context());
+            corpus.count(&chain, &[def], &fixture.context(), &declared);
             let line = evaluate(&chain, fixture);
             corpus
                 .cases
@@ -576,6 +620,10 @@ fn render(root: &Path) -> (String, Vec<&'static str>) {
     for line in &duplicates {
         writeln!(out, "{line}").unwrap();
     }
+    out.push_str("\n## term names (per instantiation; chain members split by ;)\n");
+    for (key, names) in &corpus.names {
+        writeln!(out, "{key} => {names}").unwrap();
+    }
     out.push_str("\n## cases\n");
     for line in &corpus.cases {
         writeln!(out, "{line}").unwrap();
@@ -583,8 +631,12 @@ fn render(root: &Path) -> (String, Vec<&'static str>) {
     (out, uncovered)
 }
 
-/// Every v1-candidate construct the counter knows: parser AST node kinds
-/// and compiled IR guards, actions and modifications.
+/// Every construct the counter knows: parser AST node kinds, the fields,
+/// operators, operands, parameter types, families, declarations, set
+/// members and test forms they carry, and compiled IR guards, actions and
+/// modifications. Every name a function below returns must be listed here;
+/// the stable-surface checker enforces that, and that the v1 inventory
+/// classifies exactly this list.
 const CONSTRUCTS: &[&str] = &[
     "ast.policy.default-action",
     "ast.policy.parameters",
@@ -632,6 +684,116 @@ const CONSTRUCTS: &[&str] = &[
     "ast.value.field",
     "ast.value.arithmetic",
     "ast.value.call",
+    "ast.arith.add",
+    "ast.arith.sub",
+    "ast.arith.mul",
+    "ast.arith.div",
+    "ast.arith.rem",
+    "ast.cmp.eq",
+    "ast.cmp.ne",
+    "ast.cmp.ge",
+    "ast.cmp.le",
+    "ast.field.route.prefix",
+    "ast.field.route.communities",
+    "ast.field.route.large-communities",
+    "ast.field.route.ext-communities",
+    "ast.field.route.any-community",
+    "ast.field.route.as-path",
+    "ast.field.route.as-path.len",
+    "ast.field.route.communities.len",
+    "ast.field.route.large-communities.len",
+    "ast.field.route.ext-communities.len",
+    "ast.field.route.origin-as",
+    "ast.field.route.local-pref",
+    "ast.field.route.med",
+    "ast.field.route.next-hop",
+    "ast.field.route.rpki",
+    "ast.field.route.aspa",
+    "ast.field.route.route-type",
+    "ast.field.route.evpn-route-type",
+    "ast.field.route.family",
+    "ast.field.peer.address",
+    "ast.field.peer.asn",
+    "ast.field.peer.group",
+    "ast.family.ipv4-unicast",
+    "ast.family.ipv6-unicast",
+    "ast.family.ipv4-labeled-unicast",
+    "ast.family.ipv6-labeled-unicast",
+    "ast.family.vpnv4",
+    "ast.family.vpnv6",
+    "ast.family.ipv4-flowspec",
+    "ast.family.ipv6-flowspec",
+    "ast.family.evpn",
+    "ast.family.rtc",
+    "ast.family.bgp-ls",
+    "ast.family.bgp-ls-vpn",
+    "ast.prepend.self",
+    "ast.prepend.peer",
+    "ast.prepend.origin",
+    "ast.prepend.path-first",
+    "ast.param.u32",
+    "ast.param.prefix-set",
+    "ast.param.community-set",
+    "ast.param.asn-set",
+    "ast.param.community",
+    "ast.param.ip",
+    "ast.decl.import",
+    "ast.decl.prefix-set",
+    "ast.decl.prefix-set.ge-le",
+    "ast.decl.community-set",
+    "ast.decl.asn-set",
+    "ast.decl.dataset.prefix-set",
+    "ast.decl.dataset.asn-set",
+    "ast.decl.dataset.community-set",
+    "ast.decl.fn",
+    "ast.decl.fn.let",
+    "ast.decl.test",
+    "ast.set.community.standard",
+    "ast.set.community.large",
+    "ast.set.community.route-target",
+    "ast.set.community.route-origin",
+    "ast.set.community.well-known-ext",
+    "ast.set.pattern.standard",
+    "ast.set.pattern.large",
+    "ast.set.pattern.route-target",
+    "ast.set.pattern.route-origin",
+    "ast.set.pattern-field.range",
+    "ast.set.pattern-field.private-as",
+    "ast.test.dataset-override",
+    "ast.test.route.prefix",
+    "ast.test.route.communities",
+    "ast.test.route.large-communities",
+    "ast.test.route.ext-communities",
+    "ast.test.route.as-path",
+    "ast.test.route.next-hop",
+    "ast.test.route.local-pref",
+    "ast.test.route.med",
+    "ast.test.route.rpki",
+    "ast.test.route.aspa",
+    "ast.test.route.route-type",
+    "ast.test.route.evpn-route-type",
+    "ast.test.route.family",
+    "ast.test.peer.address",
+    "ast.test.peer.asn",
+    "ast.test.peer.local-as",
+    "ast.test.peer.group",
+    "ast.test.expect.chain",
+    "ast.test.expect.with-only",
+    "ast.test.expect.accept",
+    "ast.test.expect.reject",
+    "ast.test.expect.error",
+    "ast.test.with.local-pref",
+    "ast.test.with.med",
+    "ast.test.with.next-hop",
+    "ast.test.with.community",
+    "ast.test.with.prepend",
+    "ast.test.with.prepend-path",
+    "ast.test.with.removes",
+    "ast.test.with.removes-large-admin",
+    "ast.test.with.removes-all",
+    "ast.test.with.not-removed",
+    "ast.test.with.without-community",
+    "ast.test.with.without",
     "ir.guard.true",
     "ir.guard.prefix-in-set",
     "ir.guard.prefix-eq",
@@ -703,7 +865,9 @@ const CONSTRUCTS: &[&str] = &[
     "ir.mod.ext-community-remove",
 ];
 
-fn ast_stmts(stmts: &[Stmt], seen: &mut std::collections::BTreeSet<&'static str>) {
+type Seen = std::collections::BTreeSet<&'static str>;
+
+fn ast_stmts(stmts: &[Stmt], seen: &mut Seen) {
     for stmt in stmts {
         match stmt {
             Stmt::If(if_stmt) => {
@@ -734,17 +898,21 @@ fn ast_stmts(stmts: &[Stmt], seen: &mut std::collections::BTreeSet<&'static str>
             }
             Stmt::For(for_stmt) => {
                 seen.insert("ast.stmt.for");
-                seen.insert(match for_stmt.source {
-                    ForSource::Field(_) => "ast.for.field",
+                let source = match &for_stmt.source {
+                    ForSource::Field(path) => {
+                        ast_field(path, seen);
+                        "ast.for.field"
+                    }
                     ForSource::Set(_) => "ast.for.set",
-                });
+                };
+                seen.insert(source);
                 ast_stmts(&for_stmt.body, seen);
             }
         }
     }
 }
 
-fn ast_action(action: &ActionStmt, seen: &mut std::collections::BTreeSet<&'static str>) {
+fn ast_action(action: &ActionStmt, seen: &mut Seen) {
     let name = match action {
         ActionStmt::Accept(_) => "ast.action.accept",
         ActionStmt::Reject(_) => "ast.action.reject",
@@ -767,7 +935,17 @@ fn ast_action(action: &ActionStmt, seen: &mut std::collections::BTreeSet<&'stati
             CommunityArg::InSet { negate: false, .. } => "ast.action.community-in-set",
             CommunityArg::InSet { negate: true, .. } => "ast.action.community-not-in-set",
         },
-        ActionStmt::Prepend { .. } => "ast.action.prepend",
+        ActionStmt::Prepend { asn, .. } => {
+            if let Some(operand) = asn.operand() {
+                seen.insert(match operand {
+                    PrependAs::LocalAs => "ast.prepend.self",
+                    PrependAs::PeerAs => "ast.prepend.peer",
+                    PrependAs::OriginAs => "ast.prepend.origin",
+                    PrependAs::PathFirst => "ast.prepend.path-first",
+                });
+            }
+            "ast.action.prepend"
+        }
         ActionStmt::Let { init, .. } => {
             ast_value(init, seen);
             "ast.action.let"
@@ -778,7 +956,7 @@ fn ast_action(action: &ActionStmt, seen: &mut std::collections::BTreeSet<&'stati
     seen.insert(name);
 }
 
-fn ast_expr(expr: &Expr, seen: &mut std::collections::BTreeSet<&'static str>) {
+fn ast_expr(expr: &Expr, seen: &mut Seen) {
     let name = match expr {
         Expr::Or(lhs, rhs) | Expr::And(lhs, rhs) => {
             ast_expr(lhs, seen);
@@ -793,17 +971,43 @@ fn ast_expr(expr: &Expr, seen: &mut std::collections::BTreeSet<&'static str>) {
             ast_expr(inner, seen);
             "ast.expr.not"
         }
-        Expr::Cmp { .. } => "ast.expr.cmp",
-        Expr::In { .. } => "ast.expr.in",
+        Expr::Cmp { field, op, rhs, .. } => {
+            ast_field(field, seen);
+            ast_cmp(*op, seen);
+            if let Rhs::Field(path) = rhs {
+                ast_field(path, seen);
+            }
+            "ast.expr.cmp"
+        }
+        Expr::In { field, .. } => {
+            ast_field(field, seen);
+            "ast.expr.in"
+        }
         Expr::IdentIn { .. } => "ast.expr.ident-in",
-        Expr::Has { .. } => "ast.expr.has",
-        Expr::HasParam { .. } => "ast.expr.has-parameter",
-        Expr::Exists { .. } => "ast.expr.exists",
-        Expr::Matches { .. } => "ast.expr.matches",
-        Expr::Contains { .. } => "ast.expr.contains",
-        Expr::ValueCmp { lhs, rhs, .. } => {
+        Expr::Has { field, .. } => {
+            ast_field(field, seen);
+            "ast.expr.has"
+        }
+        Expr::HasParam { field, .. } => {
+            ast_field(field, seen);
+            "ast.expr.has-parameter"
+        }
+        Expr::Exists { field, .. } => {
+            ast_field(field, seen);
+            "ast.expr.exists"
+        }
+        Expr::Matches { field, .. } => {
+            ast_field(field, seen);
+            "ast.expr.matches"
+        }
+        Expr::Contains { field, .. } => {
+            ast_field(field, seen);
+            "ast.expr.contains"
+        }
+        Expr::ValueCmp { lhs, op, rhs, .. } => {
             ast_value(lhs, seen);
             ast_value(rhs, seen);
+            ast_cmp(*op, seen);
             "ast.expr.value-cmp"
         }
         Expr::Apply { .. } => "ast.expr.apply",
@@ -811,15 +1015,25 @@ fn ast_expr(expr: &Expr, seen: &mut std::collections::BTreeSet<&'static str>) {
     seen.insert(name);
 }
 
-fn ast_value(value: &ValueExprAst, seen: &mut std::collections::BTreeSet<&'static str>) {
+fn ast_value(value: &ValueExprAst, seen: &mut Seen) {
     let name = match value {
         ValueExprAst::Lit(..) => "ast.value.literal",
         ValueExprAst::Community(..) => "ast.value.community",
         ValueExprAst::Ident(_) => "ast.value.identifier",
-        ValueExprAst::Field(_) => "ast.value.field",
-        ValueExprAst::Binary { lhs, rhs, .. } => {
+        ValueExprAst::Field(path) => {
+            ast_field(path, seen);
+            "ast.value.field"
+        }
+        ValueExprAst::Binary { op, lhs, rhs, .. } => {
             ast_value(lhs, seen);
             ast_value(rhs, seen);
+            seen.insert(match op {
+                ArithOp::Add => "ast.arith.add",
+                ArithOp::Sub => "ast.arith.sub",
+                ArithOp::Mul => "ast.arith.mul",
+                ArithOp::Div => "ast.arith.div",
+                ArithOp::Rem => "ast.arith.rem",
+            });
             "ast.value.arithmetic"
         }
         ValueExprAst::Call { args, .. } => {
@@ -830,6 +1044,222 @@ fn ast_value(value: &ValueExprAst, seen: &mut std::collections::BTreeSet<&'stati
         }
     };
     seen.insert(name);
+}
+
+fn ast_cmp(op: CmpOp, seen: &mut Seen) {
+    seen.insert(match op {
+        CmpOp::Eq => "ast.cmp.eq",
+        CmpOp::Ne => "ast.cmp.ne",
+        CmpOp::Ge => "ast.cmp.ge",
+        CmpOp::Le => "ast.cmp.le",
+    });
+}
+
+/// The route or peer field a typechecked path reads.
+fn ast_field(path: &FieldPath, seen: &mut Seen) {
+    seen.insert(match resolve_field(path).expect("typechecked field") {
+        Field::Prefix => "ast.field.route.prefix",
+        Field::Communities => "ast.field.route.communities",
+        Field::LargeCommunities => "ast.field.route.large-communities",
+        Field::ExtCommunities => "ast.field.route.ext-communities",
+        Field::AnyCommunity => "ast.field.route.any-community",
+        Field::AsPath => "ast.field.route.as-path",
+        Field::AsPathLen => "ast.field.route.as-path.len",
+        Field::CommunitiesLen => "ast.field.route.communities.len",
+        Field::LargeCommunitiesLen => "ast.field.route.large-communities.len",
+        Field::ExtCommunitiesLen => "ast.field.route.ext-communities.len",
+        Field::OriginAs => "ast.field.route.origin-as",
+        Field::LocalPref => "ast.field.route.local-pref",
+        Field::Med => "ast.field.route.med",
+        Field::NextHop => "ast.field.route.next-hop",
+        Field::Rpki => "ast.field.route.rpki",
+        Field::Aspa => "ast.field.route.aspa",
+        Field::RouteType => "ast.field.route.route-type",
+        Field::EvpnRouteType => "ast.field.route.evpn-route-type",
+        Field::Family => "ast.field.route.family",
+        Field::PeerAddress => "ast.field.peer.address",
+        Field::PeerAsn => "ast.field.peer.asn",
+        Field::PeerGroup => "ast.field.peer.group",
+    });
+}
+
+fn param_type_name(ty: ParamType) -> &'static str {
+    match ty {
+        ParamType::U32 => "ast.param.u32",
+        ParamType::PrefixSet => "ast.param.prefix-set",
+        ParamType::CommunitySet => "ast.param.community-set",
+        ParamType::AsnSet => "ast.param.asn-set",
+        ParamType::Community => "ast.param.community",
+        ParamType::Ip => "ast.param.ip",
+    }
+}
+
+fn family_name(family: RouteFamily) -> &'static str {
+    match family {
+        RouteFamily::Ipv4Unicast => "ast.family.ipv4-unicast",
+        RouteFamily::Ipv6Unicast => "ast.family.ipv6-unicast",
+        RouteFamily::Ipv4LabeledUnicast => "ast.family.ipv4-labeled-unicast",
+        RouteFamily::Ipv6LabeledUnicast => "ast.family.ipv6-labeled-unicast",
+        RouteFamily::Vpnv4 => "ast.family.vpnv4",
+        RouteFamily::Vpnv6 => "ast.family.vpnv6",
+        RouteFamily::Ipv4Flowspec => "ast.family.ipv4-flowspec",
+        RouteFamily::Ipv6Flowspec => "ast.family.ipv6-flowspec",
+        RouteFamily::Evpn => "ast.family.evpn",
+        RouteFamily::RtConstrain => "ast.family.rtc",
+        RouteFamily::BgpLs => "ast.family.bgp-ls",
+        RouteFamily::BgpLsVpn => "ast.family.bgp-ls-vpn",
+    }
+}
+
+/// A program's declaration and `test`-block constructs: the imports,
+/// sets, set members, datasets and functions it declares and the test
+/// grammar its tests use. Each is credited to every case the program runs.
+fn declared_constructs(file: &RpolFile) -> Seen {
+    let mut seen = Seen::new();
+    let source = &file.file;
+    if file.modules.len() > 1 {
+        seen.insert("ast.decl.import");
+    }
+    for set in &source.prefix_sets {
+        seen.insert("ast.decl.prefix-set");
+        if set.entries.iter().any(|e| e.ge.is_some() || e.le.is_some()) {
+            seen.insert("ast.decl.prefix-set.ge-le");
+        }
+    }
+    for set in &source.community_sets {
+        seen.insert("ast.decl.community-set");
+        for member in &set.entries {
+            community_member(&member.node, &mut seen);
+        }
+    }
+    if !source.asn_sets.is_empty() {
+        seen.insert("ast.decl.asn-set");
+    }
+    for dataset in &source.datasets {
+        seen.insert(match dataset.kind {
+            DatasetKind::Prefix => "ast.decl.dataset.prefix-set",
+            DatasetKind::Asn => "ast.decl.dataset.asn-set",
+            DatasetKind::Community => "ast.decl.dataset.community-set",
+        });
+    }
+    for function in &source.fns {
+        seen.insert("ast.decl.fn");
+        if !function.lets.is_empty() {
+            seen.insert("ast.decl.fn.let");
+        }
+    }
+    for test in &source.tests {
+        seen.insert("ast.decl.test");
+        for dataset in &test.datasets {
+            seen.insert("ast.test.dataset-override");
+            for entry in &dataset.entries {
+                if let DatasetEntryAst::Community(member) = &entry.node {
+                    community_member(member, &mut seen);
+                }
+            }
+        }
+        for field in &test.route {
+            seen.insert(match field {
+                RouteField::Prefix(..) => "ast.test.route.prefix",
+                RouteField::Communities(..) => "ast.test.route.communities",
+                RouteField::LargeCommunities(..) => "ast.test.route.large-communities",
+                RouteField::ExtCommunities(..) => "ast.test.route.ext-communities",
+                RouteField::AsPath(_) => "ast.test.route.as-path",
+                RouteField::NextHop(..) => "ast.test.route.next-hop",
+                RouteField::LocalPref(..) => "ast.test.route.local-pref",
+                RouteField::Med(..) => "ast.test.route.med",
+                RouteField::Rpki(_) => "ast.test.route.rpki",
+                RouteField::Aspa(_) => "ast.test.route.aspa",
+                RouteField::RouteType(_) => "ast.test.route.route-type",
+                RouteField::EvpnRouteType(..) => "ast.test.route.evpn-route-type",
+                RouteField::Family(_) => "ast.test.route.family",
+            });
+        }
+        for field in &test.peer {
+            seen.insert(match field {
+                PeerField::Address(_) => "ast.test.peer.address",
+                PeerField::Asn(_) => "ast.test.peer.asn",
+                PeerField::LocalAs(_) => "ast.test.peer.local-as",
+                PeerField::Group(_) => "ast.test.peer.group",
+            });
+        }
+        for expect in &test.expects {
+            if expect.chain {
+                seen.insert("ast.test.expect.chain");
+            }
+            if expect.with_only {
+                seen.insert("ast.test.expect.with-only");
+            }
+            seen.insert(match expect.verdict {
+                ExpectVerdict::Accept => "ast.test.expect.accept",
+                ExpectVerdict::Reject => "ast.test.expect.reject",
+                ExpectVerdict::Error(_) => "ast.test.expect.error",
+            });
+            for assertion in &expect.with {
+                seen.insert(match assertion {
+                    WithAssertion::LocalPref(_) => "ast.test.with.local-pref",
+                    WithAssertion::Med(_) => "ast.test.with.med",
+                    WithAssertion::NextHop(_) => "ast.test.with.next-hop",
+                    WithAssertion::Community(_) => "ast.test.with.community",
+                    WithAssertion::Prepend(..) => "ast.test.with.prepend",
+                    WithAssertion::PrependPath(_) => "ast.test.with.prepend-path",
+                    WithAssertion::Removes(_) => "ast.test.with.removes",
+                    WithAssertion::RemovesLargeAdmin(_) => "ast.test.with.removes-large-admin",
+                    WithAssertion::RemovesAll(_) => "ast.test.with.removes-all",
+                    WithAssertion::NotRemoved(_) => "ast.test.with.not-removed",
+                    WithAssertion::WithoutCommunity(_) => "ast.test.with.without-community",
+                    WithAssertion::Without(_) => "ast.test.with.without",
+                });
+            }
+        }
+    }
+    seen
+}
+
+/// A community-set or community-dataset member: its exact kind, or its
+/// pattern kind and field forms.
+fn community_member(member: &CommunityMember, seen: &mut Seen) {
+    let fields: Vec<CommunityField> = match member {
+        CommunityMember::Exact(exact) => {
+            seen.insert(match exact {
+                CommunityMatch::Standard { .. } => "ast.set.community.standard",
+                CommunityMatch::LargeCommunity { .. } => "ast.set.community.large",
+                CommunityMatch::RouteTarget { .. } => "ast.set.community.route-target",
+                CommunityMatch::RouteOrigin { .. } => "ast.set.community.route-origin",
+                CommunityMatch::ExactExt(_) => "ast.set.community.well-known-ext",
+            });
+            return;
+        }
+        CommunityMember::Pattern(pattern) => match **pattern {
+            CommunityPattern::Standard { asn, value } => {
+                seen.insert("ast.set.pattern.standard");
+                vec![asn, value]
+            }
+            CommunityPattern::Large {
+                global_admin,
+                local_data1,
+                local_data2,
+            } => {
+                seen.insert("ast.set.pattern.large");
+                vec![global_admin, local_data1, local_data2]
+            }
+            CommunityPattern::RouteTarget { global, local } => {
+                seen.insert("ast.set.pattern.route-target");
+                vec![global, local]
+            }
+            CommunityPattern::RouteOrigin { global, local } => {
+                seen.insert("ast.set.pattern.route-origin");
+                vec![global, local]
+            }
+        },
+    };
+    for field in fields {
+        seen.insert(match field {
+            CommunityField::Range { lo, hi } if lo == hi => continue,
+            CommunityField::Range { .. } => "ast.set.pattern-field.range",
+            CommunityField::PrivateAs => "ast.set.pattern-field.private-as",
+        });
+    }
 }
 
 /// Credit the guard nodes of `expr` the evaluation visited: an `And` or
@@ -1001,8 +1431,14 @@ fn ir_guard(expr: &MatchExpr, seen: &mut std::collections::BTreeSet<&'static str
         MatchExpr::RouteTypeNe(_) => "ir.guard.route-type-ne",
         MatchExpr::EvpnRouteTypeIs(_) => "ir.guard.evpn-route-type-is",
         MatchExpr::EvpnRouteTypeNe(_) => "ir.guard.evpn-route-type-ne",
-        MatchExpr::FamilyIs(_) => "ir.guard.family-is",
-        MatchExpr::FamilyNe(_) => "ir.guard.family-ne",
+        MatchExpr::FamilyIs(family) => {
+            seen.insert(family_name(*family));
+            "ir.guard.family-is"
+        }
+        MatchExpr::FamilyNe(family) => {
+            seen.insert(family_name(*family));
+            "ir.guard.family-ne"
+        }
         MatchExpr::RpkiIs(_) => "ir.guard.rpki-is",
         MatchExpr::AspaIs(_) => "ir.guard.aspa-is",
         MatchExpr::ValueCmp(node) => {
@@ -1145,7 +1581,12 @@ fn short_circuited_guard_children_are_not_credited() {
     let count = |test: usize| {
         let mut corpus = Corpus::default();
         let fixture = Fixture::build(&routes.file.tests[test]);
-        corpus.count(&chain, &[&file.file.policies[0]], &fixture.context());
+        corpus.count(
+            &chain,
+            &[&file.file.policies[0]],
+            &fixture.context(),
+            &Seen::new(),
+        );
         corpus.counts
     };
     let short_circuited = count(0);
