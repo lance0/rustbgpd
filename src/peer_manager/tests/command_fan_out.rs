@@ -54,11 +54,12 @@ async fn advance_settled(by: Duration) {
     }
 }
 
-/// Run `sweep` with a readiness probe already queued. The probe must be
-/// answered before `window` ends, while every command still waits; the sweep
-/// must still be running 1 ms before one `window` ends and finished when it
-/// does. A sequential sweep takes one window per wedged peer, and one that
-/// does not serve readiness leaves the probe waiting for all of them.
+/// Run `sweep` with a readiness probe already queued, and send another once
+/// it is waiting on its wedged sessions. Each probe must be answered without
+/// time passing; the sweep must still be running 1 ms before one `window`
+/// ends and finished when it does. A sequential sweep takes one window per
+/// wedged peer, and one that does not serve readiness while it waits leaves
+/// the second probe waiting for all of them.
 async fn one_readiness_serving_window<T: Send + 'static>(
     readiness_tx: &mpsc::Sender<PeerManagerReadinessQuery>,
     window: Duration,
@@ -71,8 +72,18 @@ async fn one_readiness_serving_window<T: Send + 'static>(
         .unwrap();
     let sweep = tokio::spawn(sweep);
     settle().await;
+    assert!(
+        response.try_recv().is_ok(),
+        "readiness queued before the sweep must be answered as it starts waiting"
+    );
     let probe = window * 3 / 10;
     advance_settled(probe).await;
+    let (reply, mut response) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::Ping { reply })
+        .await
+        .unwrap();
+    settle().await;
     assert!(
         response.try_recv().is_ok(),
         "readiness must be answered while the sweep waits on wedged sessions"
