@@ -95,6 +95,21 @@ fn sparse_position(entries: &[u32], slot: u32) -> Result<usize, usize> {
     entries.binary_search_by(|entry| sparse_slot(*entry).cmp(&slot))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Per-thread units of strided work, for the work-between-checkpoints
+    /// regressions.
+    static STRIDE_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn stride_work() {
+    STRIDE_WORK.with(|work| work.set(work.get() + 1));
+}
+
+#[cfg(not(test))]
+fn stride_work() {}
+
 /// The ledger's key slots. A free slot has zero holders, a free bit and no
 /// index entry; the highest slot is never free.
 #[derive(Debug, Default)]
@@ -289,8 +304,7 @@ impl SlotSpace {
     }
 
     /// The last release frees the slot; only then can it name another key.
-    /// Free slots at the top leave the space, so the high-water mark falls
-    /// as slots drain.
+    /// Free slots at the top stay until settlement trims them.
     fn release(&mut self, slot: u32) {
         let holders = &mut self.holders[slot as usize];
         debug_assert!(*holders > 0, "released slot has a holder");
@@ -302,11 +316,22 @@ impl SlotSpace {
         set_bit(&mut self.free, slot);
         self.free_count += 1;
         self.first_free = self.first_free.min(slot as usize / 64);
+    }
+
+    /// Drop free slots from the top, so the high-water mark falls as slots
+    /// drain.
+    fn trim_top(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        let mut trimmed = 0_usize;
         while let Some(top) = self.keys.len().checked_sub(1) {
             let top = u32::try_from(top).expect("slot capacity fits u32");
             if !bit(&self.free, top) {
                 break;
             }
+            if trimmed.is_multiple_of(CHECKPOINT_STRIDE) {
+                checkpoint(false);
+            }
+            trimmed += 1;
+            stride_work();
             clear_bit(&mut self.free, top);
             self.free_count -= 1;
             self.keys.pop();
@@ -1104,10 +1129,6 @@ impl EvpnRecoveryProvenance {
         }
         assert_eq!(free, space.free_count);
         assert!(
-            holders.last().is_none_or(|count| *count != 0),
-            "top slot held"
-        );
-        assert!(
             space.free[..space.first_free.min(space.free.len())]
                 .iter()
                 .all(|word| *word == 0)
@@ -1235,10 +1256,14 @@ impl EvpnRecoveryProvenance {
         }
     }
 
-    /// Free the space once nothing holds a slot, and shrink it once the
-    /// high-water mark falls to a quarter of its capacity. Shrinking is
-    /// optional: a daemon-cap or allocation refusal leaves the space as is.
+    /// Post-commit maintenance, run when a record releases its holdings at
+    /// finish or retirement, never inside admission. Trim free top slots,
+    /// free the space once nothing holds a slot, renumber a mostly drained
+    /// space and shrink it once the high-water mark falls to a quarter of
+    /// its capacity. Renumbering and shrinking are optional: a daemon-cap or
+    /// allocation refusal leaves the committed state as it is.
     fn settle_space(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        self.space.trim_top(checkpoint);
         if self.space.live() == 0 {
             self.daemon_used -= self.space.bytes();
             self.space.clear();
@@ -1266,7 +1291,7 @@ impl EvpnRecoveryProvenance {
         self.daemon_peak = self.daemon_peak.max(daemon);
         let before = self.space.bytes();
         checkpoint(true);
-        let _ = self.space.resize(target, checkpoint);
+        let _ = self.allocation_permitted() && self.space.resize(target, checkpoint).is_ok();
         checkpoint(true);
         self.daemon_used = self.daemon_used - bytes - before + self.space.bytes();
     }
@@ -1290,7 +1315,7 @@ impl EvpnRecoveryProvenance {
             return;
         };
         let mut renumber = Slots::new();
-        if renumber.try_grow(length).is_err() {
+        if !self.allocation_permitted() || renumber.try_grow(length).is_err() {
             return;
         }
         self.daemon_used = daemon;
@@ -2104,7 +2129,6 @@ impl EvpnRecoveryProvenance {
             self.apply_sparse(index, announcements, withdrawals, checkpoint);
         }
         self.recharge(index, before);
-        self.settle_space(checkpoint);
         Ok(true)
     }
 
@@ -2636,12 +2660,15 @@ mod tests {
         let space = ledger.space.bytes();
         admit(&mut ledger, handle, &[], &[key(1), key(2), key(3)]);
         assert_eq!(ledger.proof_keys(handle).unwrap(), Some([].to_vec()));
-        // The last holder released every slot, so the whole space went.
-        assert_eq!(ledger.slot_usage().capacity, 0);
-        assert_eq!(ledger.daemon_usage().retained, before_delete - space);
+        // Application released every slot but leaves settlement to finish.
+        assert_eq!(ledger.slot_usage().live, 0);
+        assert_eq!(ledger.daemon_usage().retained, before_delete);
         assert_eq!(record(&ledger, handle).held.bytes(), held);
         assert!(ledger.finish_recovery(handle).unwrap());
         assert_eq!(record(&ledger, handle).held.bytes(), 0);
+        // Finish settled the drained space and freed it whole.
+        assert_eq!(ledger.slot_usage().capacity, 0);
+        assert_eq!(ledger.daemon_usage().retained, before_delete - space - held);
         assert!(ledger.retire_member(handle));
         assert_eq!(
             ledger.daemon_usage().retained,
@@ -3702,6 +3729,53 @@ mod tests {
                 times[2]
             );
         }
+    }
+
+    /// Withdrawing all but the top slot crosses the renumbering threshold.
+    /// Application still allocates nothing and leaves the space alone; the
+    /// finish that follows settles it.
+    #[test]
+    fn withdrawals_settle_after_application_not_inside_it() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let drained = ledger.register(owner(1, 7)).unwrap();
+        let slow = ledger.register(owner(2, 7)).unwrap();
+        let keys: Vec<_> = (0..256).map(key).collect();
+        capture(&mut ledger, drained, &keys);
+        capture(&mut ledger, slow, &keys[255..]);
+        assert!(
+            ledger
+                .reserve_admission(drained, [].into_iter(), &keys[..255])
+                .unwrap()
+        );
+        let before = ledger.daemon_usage();
+        ledger.fail_next_allocation_for_test();
+        assert!(
+            ledger
+                .apply_admitted(drained, [].into_iter(), &keys[..255])
+                .unwrap()
+        );
+        assert!(ledger.fail_next_allocation, "application never allocates");
+        assert_eq!(ledger.daemon_usage().peak, before.peak);
+        assert_eq!(ledger.space.keys.len(), 256, "no settlement inside apply");
+        assert_eq!(ledger.slot_usage().live, 1);
+        // A refused renumbering map leaves settlement undone, never the
+        // finish: the committed proofs and charges stay valid.
+        assert!(ledger.finish_recovery(drained).unwrap());
+        assert!(!ledger.fail_next_allocation);
+        assert_eq!(ledger.space.keys.len(), 256, "renumbering was refused");
+        assert_eq!(ledger.proof_keys(slow).unwrap().unwrap(), [key(255)]);
+        assert_running_charges(&ledger);
+        // The next settlement renumbers.
+        let other = ledger.register(owner(3, 7)).unwrap();
+        capture(&mut ledger, other, &keys[..1]);
+        assert!(ledger.finish_recovery(other).unwrap());
+        assert_eq!(
+            ledger.space.keys.len(),
+            1,
+            "settlement renumbered the space"
+        );
+        assert_eq!(ledger.proof_keys(slow).unwrap().unwrap(), [key(255)]);
+        assert_running_charges(&ledger);
     }
 
     /// Guarantee 1: a key and its mapping outlive churn, other members'
