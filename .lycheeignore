@@ -2,3 +2,14 @@
 ^https?://([^.]+\.)*example\.(com|net|org)(:[0-9]+)?(/|$)
 # GitHub theme markers on logo images are not document anchors.
 .*#gh-(dark|light)-mode-only$
+# Workflow artifact downloads need a signed-in session (anonymous requests
+# redirect to a 404) and expire after 30-day retention. Receipts record each
+# archive's SHA-256 and link the run page, which stays checked.
+^https://github\.com/lance0/rustbgpd/actions/runs/[0-9]+/artifacts/[0-9]+$
+# lkml.org returns 502 site-wide and has no archive.org copy of this message;
+# the same patch is linked through mail-archive.com beside it.
+^https://lkml\.org/lkml/2025/8/18/1486$
+# cisco.com answers hosted CI runners with 403; both pages load from a normal
+# client (verified 2026-11-02).
+^https://www\.cisco\.com/c/en/us/td/docs/iosxr/cisco8000/routing/cumulative/command/reference/b-routing-cr-cisco8000/m-rpl-commands-1\.html$
+^https://www\.cisco\.com/c/en/us/td/docs/routers/asr9000/software/24xx/routing/configuration/guide/b-routing-cg-asr9000-24xx/implementing-routing-policy\.html$

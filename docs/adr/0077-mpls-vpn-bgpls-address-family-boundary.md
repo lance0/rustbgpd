@@ -371,7 +371,7 @@ These are out of scope for this ADR and for any first implementation slice:
   <https://www.rfc-editor.org/info/rfc9552>
 - FRR BGP and BGP-LS documentation:
   <https://docs.frrouting.org/en/latest/bgp.html>,
-  <https://docs.frrouting.org/en/latest/bgp-linkstate.html>
+  <https://docs.frrouting.org/en/latest/bgp.html#bgp-link-state>
 - GoBGP configuration and BGP-LS documentation:
   <https://github.com/osrg/gobgp/blob/master/docs/sources/configuration.md>,
   <https://github.com/osrg/gobgp/blob/master/docs/sources/bgp-ls.md>
