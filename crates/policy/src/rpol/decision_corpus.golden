@@ -1,10 +1,10 @@
-# rpol decision corpus: 270 programs, 1851 cases. Regenerate with
+# rpol decision corpus: 270 programs, 1865 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 32
-ast.stmt.if 592
+ast.stmt.if 602
 ast.stmt.else-if 31
 ast.stmt.else 76
 ast.stmt.nested-if 13
@@ -12,10 +12,10 @@ ast.stmt.for 75
 ast.stmt.call 37
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1288
+ast.action.accept 1302
 ast.action.reject 450
 ast.action.set-local-pref 128
-ast.action.set-med 251
+ast.action.set-med 261
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.set-next-hop-parameter 1
@@ -32,8 +32,8 @@ ast.action.continue 22
 ast.expr.or 11
 ast.expr.and 36
 ast.expr.not 5
-ast.expr.cmp 292
-ast.expr.in 115
+ast.expr.cmp 298
+ast.expr.in 119
 ast.expr.ident-in 42
 ast.expr.has 5
 ast.expr.has-parameter 1
@@ -42,7 +42,7 @@ ast.expr.matches 37
 ast.expr.contains 5
 ast.expr.value-cmp 120
 ast.expr.apply 1
-ast.value.literal 380
+ast.value.literal 390
 ast.value.community 22
 ast.value.identifier 106
 ast.value.field 139
@@ -53,12 +53,12 @@ ast.arith.sub 35
 ast.arith.mul 28
 ast.arith.div 11
 ast.arith.rem 11
-ast.cmp.eq 208
+ast.cmp.eq 214
 ast.cmp.ne 40
 ast.cmp.ge 195
 ast.cmp.le 4
 ast.rhs.integer 132
-ast.rhs.identifier 82
+ast.rhs.identifier 88
 ast.rhs.ip 9
 ast.rhs.prefix 57
 ast.rhs.string 9
@@ -66,7 +66,7 @@ ast.rhs.field 9
 ast.field.route.prefix 148
 ast.field.route.communities 66
 ast.field.route.large-communities 1
-ast.field.route.ext-communities 1
+ast.field.route.ext-communities 5
 ast.field.route.any-community 5
 ast.field.route.as-path 73
 ast.field.route.as-path.len 52
@@ -81,21 +81,21 @@ ast.field.route.rpki 39
 ast.field.route.aspa 12
 ast.field.route.route-type 5
 ast.field.route.evpn-route-type 7
-ast.field.route.family 26
+ast.field.route.family 32
 ast.field.peer.address 9
 ast.field.peer.asn 2
 ast.field.peer.group 9
 ast.family.ipv4-unicast 40
 ast.family.ipv6-unicast 46
-ast.family.ipv4-labeled-unicast 14
-ast.family.ipv6-labeled-unicast 13
-ast.family.vpnv4 13
-ast.family.vpnv6 13
-ast.family.ipv4-flowspec 13
-ast.family.ipv6-flowspec 13
-ast.family.evpn 27
-ast.family.rtc 10
-ast.family.bgp-ls 10
+ast.family.ipv4-labeled-unicast 20
+ast.family.ipv6-labeled-unicast 19
+ast.family.vpnv4 18
+ast.family.vpnv6 17
+ast.family.ipv4-flowspec 16
+ast.family.ipv6-flowspec 15
+ast.family.evpn 29
+ast.family.rtc 12
+ast.family.bgp-ls 11
 ast.family.bgp-ls-vpn 10
 ast.prepend.self 11
 ast.prepend.peer 11
@@ -110,69 +110,69 @@ ast.param.asn-set 2
 ast.param.community 2
 ast.param.ip 2
 ast.decl.import 20
-ast.decl.prefix-set 567
+ast.decl.prefix-set 581
 ast.decl.prefix-set.ge-le 337
-ast.decl.community-set 582
-ast.decl.asn-set 283
+ast.decl.community-set 596
+ast.decl.asn-set 297
 ast.decl.dataset.prefix-set 4
 ast.decl.dataset.asn-set 5
-ast.decl.dataset.community-set 77
+ast.decl.dataset.community-set 91
 ast.decl.fn 31
 ast.decl.fn.let 21
-ast.decl.test 1171
-ast.set.community.standard 582
+ast.decl.test 1185
+ast.set.community.standard 596
 ast.set.community.large 149
-ast.set.community.route-target 77
-ast.set.community.route-origin 77
-ast.set.community.well-known-ext 77
+ast.set.community.route-target 91
+ast.set.community.route-origin 91
+ast.set.community.well-known-ext 91
 ast.set.pattern.standard 11
 ast.set.pattern.large 71
-ast.set.pattern.route-target 137
-ast.set.pattern.route-origin 77
-ast.set.pattern-field.range 148
-ast.set.pattern-field.private-as 77
-ast.test.dataset-override 82
-ast.test.route.prefix 1081
-ast.test.route.communities 789
-ast.test.route.large-communities 417
-ast.test.route.ext-communities 137
-ast.test.route.as-path 789
+ast.set.pattern.route-target 151
+ast.set.pattern.route-origin 91
+ast.set.pattern-field.range 162
+ast.set.pattern-field.private-as 91
+ast.test.dataset-override 96
+ast.test.route.prefix 1095
+ast.test.route.communities 803
+ast.test.route.large-communities 431
+ast.test.route.ext-communities 151
+ast.test.route.as-path 803
 ast.test.route.next-hop 137
 ast.test.route.local-pref 197
 ast.test.route.med 407
 ast.test.route.rpki 108
 ast.test.route.aspa 144
 ast.test.route.route-type 137
-ast.test.route.evpn-route-type 214
-ast.test.route.family 288
-ast.test.peer.address 214
-ast.test.peer.asn 137
-ast.test.peer.local-as 77
+ast.test.route.evpn-route-type 228
+ast.test.route.family 302
+ast.test.peer.address 228
+ast.test.peer.asn 151
+ast.test.peer.local-as 91
 ast.test.peer.group 162
 ast.test.expect.chain 161
-ast.test.expect.with-only 370
-ast.test.expect.accept 1160
-ast.test.expect.reject 946
+ast.test.expect.with-only 384
+ast.test.expect.accept 1174
+ast.test.expect.reject 960
 ast.test.expect.error 23
-ast.test.with.local-pref 603
-ast.test.with.med 610
+ast.test.with.local-pref 617
+ast.test.with.med 624
 ast.test.with.next-hop 60
-ast.test.with.community 563
-ast.test.with.prepend 137
-ast.test.with.prepend-path 109
+ast.test.with.community 577
+ast.test.with.prepend 151
+ast.test.with.prepend-path 123
 ast.test.with.removes 300
-ast.test.with.removes-large-admin 77
-ast.test.with.removes-all 169
+ast.test.with.removes-large-admin 91
+ast.test.with.removes-all 183
 ast.test.with.not-removed 200
 ast.test.with.without-community 56
-ast.test.with.without 232
-ir.guard.true 1331
+ast.test.with.without 323
+ir.guard.true 1335
 ir.guard.prefix-in-set 222
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
-ir.guard.community-contains 29
+ir.guard.community-contains 37
 ir.guard.community-in-set 25
-ir.guard.community-kind-in-set 55
+ir.guard.community-kind-in-set 63
 ir.guard.as-path-matches 148
 ir.guard.as-path-len 89
 ir.guard.origin-as-eq 21
@@ -191,7 +191,7 @@ ir.guard.route-type-is 13
 ir.guard.route-type-ne 10
 ir.guard.evpn-route-type-is 18
 ir.guard.evpn-route-type-ne 13
-ir.guard.family-is 79
+ir.guard.family-is 85
 ir.guard.family-ne 12
 ir.guard.rpki-is 52
 ir.guard.aspa-is 76
@@ -199,7 +199,7 @@ ir.guard.value-cmp 193
 ir.guard.exists 12
 ir.guard.local-in-asn-set 22
 ir.guard.local-in-community-set 15
-ir.guard.in-dataset 6
+ir.guard.in-dataset 10
 ir.guard.and 192
 ir.guard.or 15
 ir.guard.not 91
@@ -211,7 +211,7 @@ ir.value.binary 137
 ir.value.min 40
 ir.value.max 11
 ir.value.clamp 11
-ir.action.permit 1246
+ir.action.permit 1260
 ir.action.deny 394
 ir.action.continue 250
 ir.action.bind 121
@@ -224,7 +224,7 @@ ir.action.remove-all-communities 77
 ir.action.remove-communities-in-set 35
 ir.mod.set-local-pref 121
 ir.mod.set-local-pref-computed 19
-ir.mod.set-med 128
+ir.mod.set-med 138
 ir.mod.set-med-computed 87
 ir.mod.set-next-hop 13
 ir.mod.prepend 33
@@ -1407,9 +1407,23 @@ crates/policy/tests/decision_corpus/surface.rpol | test labeled | by-family => p
 crates/policy/tests/decision_corpus/surface.rpol | test evpn-family | by-family => permit with set med 7
 crates/policy/tests/decision_corpus/surface.rpol | test flowspec-v6 | by-family => permit with set med 6
 crates/policy/tests/decision_corpus/surface.rpol | test link-state-vpn | by-family => permit with set med 10
+crates/policy/tests/decision_corpus/surface.rpol | test family-ipv6-labeled-unicast | by-family => permit with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | test family-vpnv4 | by-family => permit with set med 3
+crates/policy/tests/decision_corpus/surface.rpol | test family-vpnv6 | by-family => permit with set med 4
+crates/policy/tests/decision_corpus/surface.rpol | test family-ipv4-flowspec | by-family => permit with set med 5
+crates/policy/tests/decision_corpus/surface.rpol | test family-rtc | by-family => permit with set med 8
+crates/policy/tests/decision_corpus/surface.rpol | test family-bgp-ls | by-family => permit with set med 9
 crates/policy/tests/decision_corpus/surface.rpol | test fed-tag | communities-by-kind => deny
 crates/policy/tests/decision_corpus/surface.rpol | test large-tagged | communities-by-kind => permit with set med 1
 crates/policy/tests/decision_corpus/surface.rpol | test ext-tagged | communities-by-kind => permit with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | test rt-exact-matches | communities-by-kind => permit with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | test rt-exact-misses | communities-by-kind => permit
+crates/policy/tests/decision_corpus/surface.rpol | test ro-exact-matches | communities-by-kind => permit with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | test ro-exact-misses | communities-by-kind => permit
+crates/policy/tests/decision_corpus/surface.rpol | test ov-invalid-matches | communities-by-kind => permit with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | test ov-invalid-misses | communities-by-kind => permit
+crates/policy/tests/decision_corpus/surface.rpol | test rt-private-as-matches | communities-by-kind => permit with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | test rt-private-as-misses | communities-by-kind => permit
 crates/policy/tests/decision_corpus/surface.rpol | test prepends | computed-prepends => permit with prepend as 65000 1; prepend as 64501 1; prepend as 64501 1
 crates/policy/tests/decision_corpus/surface.rpol | test listed | only-prefixes(docs, transit) => permit
 crates/policy/tests/decision_corpus/surface.rpol | test unlisted | only-prefixes(docs, transit) => deny

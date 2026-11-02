@@ -2,7 +2,7 @@
 # operands, parameter types, set members and test forms no other program
 # exercises. `decision_corpus.golden` records every case.
 
-community-set tags { RT:65000:1, RO:64510:5, OV_INVALID, RO:65000:10..20, RT:PRIVATE_AS:* }
+community-set tags { RT:64496:1, RO:64510:5, OV_INVALID, RO:65000:10..20, RT:PRIVATE_AS:* }
 asn-set transit { 64500, 64501 }
 prefix-set docs { 192.0.2.0/24, 198.51.100.0/24 }
 dataset community-set feed
@@ -111,6 +111,36 @@ test link-state-vpn {
     expect by-family == accept with med 10
 }
 
+test family-ipv6-labeled-unicast {
+    route { prefix 2001:db8::/32; family ipv6-labeled-unicast }
+    expect by-family == accept with only med 2
+}
+
+test family-vpnv4 {
+    route { prefix 192.0.2.0/24; family vpnv4 }
+    expect by-family == accept with only med 3
+}
+
+test family-vpnv6 {
+    route { prefix 2001:db8::/32; family vpnv6 }
+    expect by-family == accept with only med 4
+}
+
+test family-ipv4-flowspec {
+    route { prefix 192.0.2.0/24; family ipv4-flowspec }
+    expect by-family == accept with only med 5
+}
+
+test family-rtc {
+    route { prefix 192.0.2.0/24; family rtc }
+    expect by-family == accept with only med 8
+}
+
+test family-bgp-ls {
+    route { prefix 192.0.2.0/24; family bgp-ls }
+    expect by-family == accept with only med 9
+}
+
 test fed-tag {
     dataset feed { 65000:666 }
     route { prefix 192.0.2.0/24; communities [65000:666] }
@@ -127,6 +157,54 @@ test ext-tagged {
     dataset feed { 65000:666 }
     route { prefix 192.0.2.0/24; ext-communities [RO:65000:15] }
     expect communities-by-kind == accept with med 2
+}
+
+test rt-exact-matches {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [RT:64496:1] }
+    expect communities-by-kind == accept with only med 2
+}
+
+test rt-exact-misses {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [RT:64496:2] }
+    expect communities-by-kind == accept with without med
+}
+
+test ro-exact-matches {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [RO:64510:5] }
+    expect communities-by-kind == accept with only med 2
+}
+
+test ro-exact-misses {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [RO:64510:6] }
+    expect communities-by-kind == accept with without med
+}
+
+test ov-invalid-matches {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [OV_INVALID] }
+    expect communities-by-kind == accept with only med 2
+}
+
+test ov-invalid-misses {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [OV_VALID] }
+    expect communities-by-kind == accept with without med
+}
+
+test rt-private-as-matches {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [RT:64512:9] }
+    expect communities-by-kind == accept with only med 2
+}
+
+test rt-private-as-misses {
+    dataset feed { 65000:666 }
+    route { prefix 192.0.2.0/24; ext-communities [RT:64511:9] }
+    expect communities-by-kind == accept with without med
 }
 
 test prepends {
