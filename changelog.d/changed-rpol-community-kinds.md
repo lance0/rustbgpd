@@ -19,9 +19,11 @@
   compare with `==`, `!=`, `>=` and `<=` against an integer literal or u32
   parameter, so `route.origin-as >= 64512 && route.origin-as <= 65534` checks
   a private range, compare with another ASN by `==`/`!=`, probe asn-sets and
-  can be set as a whole value, but take no arithmetic. A loop variable over
-  `route.communities` is a community: it compares with community literals,
-  probes community-sets whose members are standard and is added or removed,
-  but takes no arithmetic and probes no asn-set. A `let` takes its
-  initializer's type. Before, `for a in route.as-path { if a in tags ... }`
-  matched ASN 64500 against the community 0:64500.
+  can be set as a whole value, but take no arithmetic. A standard community
+  literal such as `65000:1`, a `community` parameter and a loop variable over
+  `route.communities` are communities: they compare with another community
+  by `==`/`!=`, probe community-sets whose members are standard and are added
+  or removed, but take no arithmetic, probe no asn-set and never equal an
+  ASN or an integer. A `let` takes its initializer's type. Before,
+  `for a in route.as-path { if a in tags ... }` matched ASN 64500 against the
+  community 0:64500, and so did `if a == 0:64500`.

@@ -1626,18 +1626,17 @@ impl Parser<'_> {
                 let (value, span) = self.expect_u32("a u32 value")?;
                 Ok(ValueExprAst::Lit(value, span))
             }
-            // LAN-303: a standard community literal is a u32 value —
-            // its raw RFC 1997 encoding — so `c == 65000:100` compares
-            // a communities-loop binding against one community.
-            // Un-parseable in value position before, so purely
-            // additive. Large/extended literals stay rejected (not
-            // u32-shaped).
+            // LAN-303: a standard community literal is a community value,
+            // so `c == 65000:100` compares a communities-loop binding
+            // against one community; LAN-2794 keeps it typed, so it never
+            // meets an ASN or arithmetic. Large/extended literals stay
+            // rejected here.
             Some(Tok::StdCommunityLit) => {
                 let lit = self.community_lit()?;
                 let CommunityLit::Standard(value) = lit.node else {
                     unreachable!("StdCommunityLit tokens parse as Standard")
                 };
-                Ok(ValueExprAst::Lit(value, lit.span))
+                Ok(ValueExprAst::Community(value, lit.span))
             }
             Some(Tok::Ident) => {
                 let name = self.expect_ident("a parameter or builtin")?;

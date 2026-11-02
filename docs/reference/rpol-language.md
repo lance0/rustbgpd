@@ -130,7 +130,7 @@ has a known type and every operator a fixed signature.
 | bool | guard expressions | `if` conditions |
 | u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, arguments; the only arithmetic type — `+ - *` **saturate** at 0 and 4294967295, never wrap or trap, and a divisor can never be zero (see "Saturating u32 value expressions") |
 | asn | `route.origin-as`, `peer.asn`, `for` loops over `route.as-path` or an asn-set, `let` bindings of these | compared with `==`, `!=`, `>=`, `<=` against an integer literal or u32 parameter (private ranges: `route.origin-as >= 64512 && route.origin-as <= 65534`), with `==`/`!=` against another ASN, probed against asn-sets, and set as a whole value (`set med route.origin-as`); **no arithmetic** |
-| community value | `for c in route.communities`, `community` parameters, `let` bindings of these | compared with `==`/`!=` against a community literal or another community, probed against community-sets (standard members only), added or removed; no arithmetic and no asn-set probe |
+| community value | standard community literals (`65000:1`), `for c in route.communities`, `community` parameters, `let` bindings of these | compared with `==`/`!=` against another community value, probed against community-sets (standard members only), added or removed; no arithmetic, no asn-set probe, and never equal to an ASN or an integer |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -572,7 +572,7 @@ policy customer-in(lp: u32, pfx: prefix-set, tag: community, nh: ip) {
 | `prefix-set` | a prefix-set or prefix dataset name | `route.prefix in pfx` |
 | `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists), `<binding> in tags`, and, for a community-set argument, `remove community in tags` / `not in tags` (the argument gets the member checks a named set gets) |
 | `asn-set` | an asn-set or ASN dataset name | `route.origin-as in origins`, `peer.asn in origins`, `<binding> in origins` |
-| `community` | a standard community, `65000:100` or a well-known name such as `NO_EXPORT` | `route.communities has tag`, `add community tag`, `remove community tag` |
+| `community` | a standard community, `65000:100` or a well-known name such as `NO_EXPORT` | `route.communities has tag`, `add community tag`, `remove community tag`, `tag in tags`, and as a community value (`let t = tag`, `c == tag`) |
 | `ip` | an IPv4 or IPv6 address | `set next-hop nh`, `route.next-hop == nh`, `peer.address == nh` |
 
 Arguments are written the same way everywhere a policy is instantiated:
@@ -847,14 +847,17 @@ policy dampen {
 position admits no other bare identifier, so sets, policies, and
 parameters named `let` keep working.
 
-**Immutable, u32-only.** There is no assignment, no `var`, and no
+**Immutable and typed.** There is no assignment, no `var`, and no
 mutation: a binding's value is fixed by its initializer for the rest
-of its scope. Bindings hold `u32` values only this slice — the
-initializer is a value expression, so the bindable inputs are integer
-literals, parameters, other bindings, and the u32 fields
-(`route.local-pref`, `route.med`, `route.as-path.len`,
-`route.origin-as`, `peer.asn`); binding a non-u32 field is a compile
-error naming the u32 field set.
+of its scope. The initializer is a value expression, and the binding
+takes its type: a u32 (integer literals, u32 parameters, arithmetic,
+and the u32 fields `route.local-pref`, `route.med`,
+`route.as-path.len` and the community counts), an ASN
+(`route.origin-as`, `peer.asn`, or another ASN binding), or a standard
+community (a literal such as `65000:1`, a `community` parameter, or a
+communities-loop variable). A typed value keeps its type through any
+number of bindings. Binding a field that is none of these is a compile
+error naming the value fields.
 
 **Scope and shadowing (normative).**
 
@@ -1004,8 +1007,8 @@ runtime-meterable.
 **The loop variable in guards and actions.** It resolves like any
 `let` binding, by type. An ASN compares and orders against integers and
 probes an asn-set (`asn in bogon-asns` above). A community compares with
-community literals, probes a community-set whose members are all
-standard (`c in scrub` above; a member of another kind is a compile
+another community (`c == 65000:1`, never `c == 4259840001`), probes a
+community-set whose members are all standard (`c in scrub` above; a member of another kind is a compile
 error), and is staged per execution by `add community <var>` /
 `remove community <var>`: the scrub-loop idiom. An ASN never probes a
 community-set and a community never probes an asn-set: that is how

@@ -713,11 +713,30 @@ fn rpol_fallthrough_keeps_continue_mods_under_the_permit_default() {
 }
 
 /// LAN-304 dual attribution: a call's bindings render with the calling
-/// term's name AND the function-qualified binding names — the trace names
-/// both — and the action renders the call source-level with its value. (A
-/// call is total: it takes u32 values, which are never missing, LAN-2794.)
+/// term's name AND the function-qualified binding names, and an error in a
+/// call's binding names both and fails the action closed. A call takes u32
+/// values, which are never missing (LAN-2794), so the test swaps the missing
+/// `route.origin-as` into the compiled call to reach the rail.
 #[test]
 fn rpol_fn_body_error_names_function_and_calling_term() {
+    use crate::ir::{TermAction, ValueExpr, ValueField};
+    fn origin_for_med(expr: &mut ValueExpr) {
+        match expr {
+            ValueExpr::Field(field) if *field == ValueField::Med => *field = ValueField::OriginAs,
+            ValueExpr::Binary { lhs, rhs, .. }
+            | ValueExpr::Min(lhs, rhs)
+            | ValueExpr::Max(lhs, rhs) => {
+                origin_for_med(lhs);
+                origin_for_med(rhs);
+            }
+            ValueExpr::Clamp(x, lo, hi) => {
+                origin_for_med(x);
+                origin_for_med(lo);
+                origin_for_med(hi);
+            }
+            ValueExpr::Const(_) | ValueExpr::Field(_) | ValueExpr::Local { .. } => {}
+        }
+    }
     const FN_RPOL: &str = r"
 fn share(total: u32, parts: u32) -> u32 {
     let each = total / max(parts, 1)
@@ -732,25 +751,45 @@ policy divide {
     let compiled = file
         .compile_policy("divide", &[], &mut store)
         .expect("policy exists");
-    let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
-        "divide".to_string(),
-        std::sync::Arc::new(compiled),
-    )]);
+    let chain_of = |compiled: crate::ir::CompiledChain| {
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "divide".to_string(),
+            std::sync::Arc::new(compiled),
+        )])
+    };
     let mut ctx = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
     ctx.med = Some(50);
-    let trace = explain_chain_statements(Some(&chain), &ctx);
+    let trace = explain_chain_statements(Some(&chain_of(compiled.clone())), &ctx);
     assert_eq!(trace.action, PolicyAction::Permit, "100/50 = 2");
-    let step = &trace.steps[0];
-    let traces = step.term_traces.join(
-        "
-",
-    );
+    let traces = trace.steps[0].term_traces.join("\n");
     // The calling term (compute.<n> split names) attributes the walk...
     assert!(traces.contains("term compute."), "{traces}");
     // ...and the bind names the function-qualified binding.
     assert!(traces.contains("let share.each"), "{traces}");
     let rendered = format!("{:?}", trace.steps[0]);
     assert!(rendered.contains("share(100, route.med)"), "{rendered}");
+
+    // The call's operand has no value: the erroring bind names the
+    // function-qualified binding, and the action that needs it fails closed.
+    let mut missing = compiled;
+    for term in &mut missing.policies[0].terms {
+        if let TermAction::Bind { expr, .. } = &mut term.action {
+            origin_for_med(expr);
+        }
+    }
+    let trace = explain_chain_statements(
+        Some(&chain_of(missing)),
+        &plain_ctx(v4_prefix([10, 0, 0, 0], 24)),
+    );
+    assert_eq!(trace.action, PolicyAction::Deny, "fail closed");
+    let traces = trace.steps[0].term_traces.join("\n");
+    assert!(traces.contains("term compute."), "{traces}");
+    assert!(traces.contains("let share.each"), "{traces}");
+    assert!(
+        traces.contains("`route.origin-as` has no value"),
+        "{traces}"
+    );
+    assert!(traces.contains("fail closed => reject"), "{traces}");
 }
 
 /// The rpol agreement matrix: mixed TOML + rpol chains, contexts that

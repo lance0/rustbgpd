@@ -176,6 +176,12 @@ fn render_value_ast(expr: &ValueExprAst) -> String {
             ValueExprAst::Lit(value, _) => {
                 let _ = std::fmt::Write::write_fmt(out, format_args!("{value}"));
             }
+            ValueExprAst::Community(value, _) => {
+                let _ = std::fmt::Write::write_fmt(
+                    out,
+                    format_args!("{}:{}", value >> 16, value & 0xffff),
+                );
+            }
             ValueExprAst::Ident(name) => out.push_str(&name.node),
             ValueExprAst::Field(path) => out.push_str(&path.render()),
             ValueExprAst::Binary { op, lhs, rhs, .. } => {
@@ -1281,8 +1287,8 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// The community a parameter `name` stands for in a community
-    /// position: a `u32` parameter's value, or a `community` argument.
+    /// The value of a parameter `name` in a community or value position:
+    /// a `u32` parameter's value, or a `community` argument.
     fn community(&self, name: &Spanned<String>, env: &HashMap<&str, u32>) -> u32 {
         if let Some(value) = env.get(name.node.as_str()) {
             return *value;
@@ -1931,7 +1937,9 @@ impl<'a> Lowerer<'a> {
         binds: &mut Vec<TermAction>,
     ) -> ValueExpr {
         match expr {
-            ValueExprAst::Lit(value, _) => ValueExpr::Const(*value),
+            ValueExprAst::Lit(value, _) | ValueExprAst::Community(value, _) => {
+                ValueExpr::Const(*value)
+            }
             ValueExprAst::Ident(name) => match names {
                 // Innermost binding shadows parameters (and outer
                 // bindings) in value positions — the typechecker
@@ -1943,10 +1951,9 @@ impl<'a> Lowerer<'a> {
                             name: name.node.clone().into_boxed_str(),
                         };
                     }
-                    ValueExpr::Const(
-                        *env.get(name.node.as_str())
-                            .expect("typechecked: parameter in scope"),
-                    )
+                    // A `u32` parameter's value, or a `community`
+                    // argument's (LAN-2794).
+                    ValueExpr::Const(self.community(name, env))
                 }
                 // Function bodies see their parameters and earlier
                 // body lets, nothing else (closed over nothing). The

@@ -629,6 +629,9 @@ impl<'a> Checker<'a> {
                 // `let x = x + 1` reads a parameter/earlier `x`
                 // (shadowing, never self-reference) — the LAN-302 rule.
                 self.check_value_expr(&l.init, &scope);
+                // LAN-2794: a function computes u32 values only, so a
+                // community literal cannot leave it as a number.
+                self.require_u32_operand(&l.init, &scope, "a function body");
                 if def.params.len() + index == MAX_LOCALS {
                     self.locals_exceeded(l.name.span);
                 }
@@ -637,6 +640,7 @@ impl<'a> Checker<'a> {
                     .push((l.name.node.clone(), ValueType::U32, false));
             }
             self.check_value_expr(&def.result, &scope);
+            self.require_u32_operand(&def.result, &scope, "a function body");
         }
         self.check_fn_graph()
     }
@@ -1401,9 +1405,10 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            // LAN-303: `add/remove community <binding>` — bindings are
-            // u32-valued, so the variable form is standard-kind only,
-            // and the name must resolve to a binding or parameter.
+            // LAN-303: `add/remove community <binding>` — a binding holds
+            // at most a standard community, so the variable form is
+            // standard-kind only, and the name must resolve to a binding
+            // or parameter.
             ActionStmt::Community {
                 kind,
                 arg: CommunityArg::Var(name),
@@ -1418,10 +1423,10 @@ impl<'a> Checker<'a> {
                                 "`{}` actions take a literal, not a binding",
                                 kind_keyword(*kind)
                             ),
-                            "bindings are u32-valued",
+                            "bindings hold standard communities only",
                         )
                         .with_note(
-                            "only standard (RFC 1997) communities are u32-shaped; \
+                            "a binding is a u32, an ASN or a standard (RFC 1997) community; \
                              large/extended community actions need a literal",
                         ),
                     );
@@ -1533,7 +1538,7 @@ impl<'a> Checker<'a> {
     )]
     fn check_value_expr(&mut self, expr: &ValueExprAst, scope: &Scope<'_>) {
         match expr {
-            ValueExprAst::Lit(..) => {}
+            ValueExprAst::Lit(..) | ValueExprAst::Community(..) => {}
             // A bare identifier in a value position resolves innermost
             // `let` first, then parameters (LAN-302 shadowing). A name
             // followed by `(` is a builtin call (the `Call` arm), the
@@ -1721,9 +1726,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A bare identifier in a value position (LAN-302): innermost
-    /// `let` binding, else parameter, else a spanned unknown-name
-    /// diagnostic suggesting across both.
     /// LAN-2794: arithmetic, builtins and function arguments take u32
     /// values; an ASN or a community there is reported at the operand.
     fn require_u32_operand(&mut self, operand: &ValueExprAst, scope: &Scope<'_>, position: &str) {
@@ -1751,13 +1753,13 @@ impl<'a> Checker<'a> {
     }
 
     /// LAN-2794: whether two compared values' types meet. Each side is its
-    /// type and how constant it is. An ASN compares with an ASN (`==`/`!=`)
-    /// or a constant u32 (any operator); a community compares with a
-    /// community or a literal (`==`/`!=`); u32 with u32.
+    /// type and whether it is a compile-time constant. An ASN compares with
+    /// an ASN (`==`/`!=`) or a constant u32 (any operator); a community with
+    /// a community (`==`/`!=`), a literal `65000:1` included; u32 with u32.
     fn check_compare_types(
         &mut self,
-        lhs: (ValueType, Constness),
-        rhs: (ValueType, Constness),
+        lhs: (ValueType, bool),
+        rhs: (ValueType, bool),
         op: CmpOp,
         span: Span,
     ) {
@@ -1772,24 +1774,18 @@ impl<'a> Checker<'a> {
             ((ValueType::U32, _), (ValueType::U32, _))
             | ((ValueType::Asn, _), (ValueType::Asn, _))
             | ((ValueType::Community, _), (ValueType::Community, _)) => None,
-            ((ValueType::Asn, _), (ValueType::U32, constness))
-            | ((ValueType::U32, constness), (ValueType::Asn, _)) => {
-                (constness == Constness::Runtime).then_some(
-                    "an ASN compares with an ASN, an integer literal or a u32 parameter, \
+            ((ValueType::Asn, _), (ValueType::U32, constant))
+            | ((ValueType::U32, constant), (ValueType::Asn, _)) => (!constant).then_some(
+                "an ASN compares with an ASN, an integer literal or a u32 parameter, \
                      not a runtime u32 value",
-                )
-            }
-            ((ValueType::Community, _), (ValueType::U32, constness))
-            | ((ValueType::U32, constness), (ValueType::Community, _)) => {
-                if ordering {
-                    Some("communities compare with `==` and `!=` only")
-                } else {
-                    (constness != Constness::Literal).then_some(
-                        "a community compares with a community or a community literal; declare \
-                         a parameter as `community`",
-                    )
-                }
-            }
+            ),
+            ((ValueType::Community, _), (ValueType::U32, _))
+            | ((ValueType::U32, _), (ValueType::Community, _)) => Some(if ordering {
+                "communities compare with `==` and `!=` only"
+            } else {
+                "a community compares with a community: a literal such as `65000:1`, a \
+                 binding, or a parameter declared `community`"
+            }),
             ((ValueType::Asn, _), (ValueType::Community, _))
             | ((ValueType::Community, _), (ValueType::Asn, _)) => {
                 Some("an ASN and a community never compare equal; they are different kinds")
@@ -1812,13 +1808,13 @@ impl<'a> Checker<'a> {
     fn check_probe_kind(
         &mut self,
         ident: &Spanned<String>,
-        (ty, constness): (ValueType, Constness),
+        (ty, constant): (ValueType, bool),
         set: &Spanned<String>,
         kind: DatasetKind,
     ) {
         let problem = match (ty, kind) {
             (ValueType::Asn, DatasetKind::Asn) => None,
-            (ValueType::U32, DatasetKind::Asn) if constness != Constness::Runtime => None,
+            (ValueType::U32, DatasetKind::Asn) if constant => None,
             (ValueType::Community, DatasetKind::Community) => {
                 self.check_set_member_kinds(
                     set,
@@ -1858,8 +1854,15 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A bare identifier in a value position (LAN-302): innermost `let`
+    /// binding, else parameter (a `community` parameter is a community
+    /// value, LAN-2794), else a spanned unknown-name diagnostic suggesting
+    /// across both.
     fn check_value_ident(&mut self, name: &Spanned<String>, scope: &Scope<'_>) {
-        if scope.is_local(&name.node) || scope.is_param(&name.node) {
+        if scope.is_local(&name.node)
+            || scope.is_param(&name.node)
+            || scope.typed_param(&name.node) == Some(ParamType::Community)
+        {
             return;
         }
         if self.typed_param_misused(name, scope, "a u32 value") {
@@ -2037,8 +2040,8 @@ impl<'a> Checker<'a> {
                 self.check_value_expr(rhs, scope);
                 // LAN-2794: both sides' types must meet.
                 self.check_compare_types(
-                    (value_type(lhs, scope), constness(lhs, scope)),
-                    (value_type(rhs, scope), constness(rhs, scope)),
+                    (value_type(lhs, scope), is_constant(lhs, scope)),
+                    (value_type(rhs, scope), is_constant(rhs, scope)),
                     *op,
                     *span,
                 );
@@ -2068,16 +2071,11 @@ impl<'a> Checker<'a> {
                 // LAN-2794: the probed value's type: a binding's own, a
                 // `community` parameter, or a u32 parameter (a constant).
                 let value = if let Some(ty) = scope.local_type(&ident.node) {
-                    let constness = if scope.local_is_constant(&ident.node) {
-                        Constness::Constant
-                    } else {
-                        Constness::Runtime
-                    };
-                    Some((ty, constness))
+                    Some((ty, scope.local_is_constant(&ident.node)))
                 } else if scope.typed_param(&ident.node) == Some(ParamType::Community) {
-                    Some((ValueType::Community, Constness::Constant))
+                    Some((ValueType::Community, true))
                 } else if scope.is_param(&ident.node) {
-                    Some((ValueType::U32, Constness::Constant))
+                    Some((ValueType::U32, true))
                 } else {
                     self.check_value_ident(ident, scope);
                     None
@@ -2436,14 +2434,9 @@ impl<'a> Checker<'a> {
                     ValueType::U32
                 };
                 let binding_ty = scope.local_type(&name.node).unwrap_or(ValueType::U32);
-                let binding_constness = if scope.local_is_constant(&name.node) {
-                    Constness::Constant
-                } else {
-                    Constness::Runtime
-                };
                 self.check_compare_types(
-                    (field_ty, Constness::Runtime),
-                    (binding_ty, binding_constness),
+                    (field_ty, false),
+                    (binding_ty, scope.local_is_constant(&name.node)),
                     op,
                     field.span.to(rhs.span()),
                 );
@@ -3923,11 +3916,19 @@ impl ValueType {
 }
 
 /// The type of a value expression in `scope` (LAN-2794): a binding's own
-/// type, `asn` for the two ASN fields, otherwise u32 (arithmetic and
-/// builtins are u32-only, so a typed operand is reported where it occurs).
+/// type, `community` for a community literal or `community` parameter,
+/// `asn` for the two ASN fields, otherwise u32 (arithmetic and builtins
+/// are u32-only, so a typed operand is reported where it occurs).
 fn value_type(expr: &ValueExprAst, scope: &Scope<'_>) -> ValueType {
     match expr {
-        ValueExprAst::Ident(name) => scope.local_type(&name.node).unwrap_or(ValueType::U32),
+        ValueExprAst::Ident(name) => scope.local_type(&name.node).unwrap_or_else(|| {
+            if scope.typed_param(&name.node) == Some(ParamType::Community) {
+                ValueType::Community
+            } else {
+                ValueType::U32
+            }
+        }),
+        ValueExprAst::Community(..) => ValueType::Community,
         ValueExprAst::Field(path) => match resolve_field(path) {
             Ok(Field::OriginAs | Field::PeerAsn) => ValueType::Asn,
             _ => ValueType::U32,
@@ -3943,42 +3944,26 @@ fn value_type(expr: &ValueExprAst, scope: &Scope<'_>) -> ValueType {
 /// through a u32, and a constant u32 stays usable where constants are.
 fn binding_type(init: &ValueExprAst, scope: &Scope<'_>) -> (ValueType, bool) {
     let ty = value_type(init, scope);
-    (
-        ty,
-        ty == ValueType::U32 && constness(init, scope) != Constness::Runtime,
-    )
+    (ty, ty == ValueType::U32 && is_constant(init, scope))
 }
 
-/// How constant a compared value is (LAN-2794): an ASN compares with any
-/// constant, a community only with a literal, neither with a runtime u32.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Constness {
-    Runtime,
-    /// Parameters, combined by arithmetic and calls.
-    Constant,
-    Literal,
-}
-
-fn constness(expr: &ValueExprAst, scope: &Scope<'_>) -> Constness {
-    fn constant(expr: &ValueExprAst, scope: &Scope<'_>) -> bool {
-        match expr {
-            ValueExprAst::Lit(..) => true,
-            ValueExprAst::Ident(name) => {
-                if scope.is_local(&name.node) {
-                    scope.local_is_constant(&name.node)
-                } else {
-                    scope.is_param(&name.node)
-                }
-            }
-            ValueExprAst::Field(_) => false,
-            ValueExprAst::Binary { lhs, rhs, .. } => constant(lhs, scope) && constant(rhs, scope),
-            ValueExprAst::Call { args, .. } => args.iter().all(|arg| constant(arg, scope)),
-        }
-    }
+/// Whether a value is a compile-time constant (LAN-2794): literals,
+/// parameters and constant bindings, combined by arithmetic and calls. An
+/// ASN compares with a constant u32, never a runtime one.
+fn is_constant(expr: &ValueExprAst, scope: &Scope<'_>) -> bool {
     match expr {
-        ValueExprAst::Lit(..) => Constness::Literal,
-        other if constant(other, scope) => Constness::Constant,
-        _ => Constness::Runtime,
+        ValueExprAst::Lit(..) | ValueExprAst::Community(..) => true,
+        ValueExprAst::Ident(name) => {
+            if scope.is_local(&name.node) {
+                scope.local_is_constant(&name.node)
+            } else {
+                scope.is_param(&name.node)
+                    || scope.typed_param(&name.node) == Some(ParamType::Community)
+            }
+        }
+        ValueExprAst::Field(_) => false,
+        ValueExprAst::Binary { lhs, rhs, .. } => is_constant(lhs, scope) && is_constant(rhs, scope),
+        ValueExprAst::Call { args, .. } => args.iter().all(|arg| is_constant(arg, scope)),
     }
 }
 
@@ -4172,7 +4157,10 @@ fn first_loop(def: &PolicyDef) -> Option<Span> {
 fn first_fn_call(def: &PolicyDef, file: &SourceFile) -> Option<Span> {
     fn in_value(expr: &ValueExprAst, file: &SourceFile) -> Option<Span> {
         match expr {
-            ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
+            ValueExprAst::Lit(..)
+            | ValueExprAst::Community(..)
+            | ValueExprAst::Ident(_)
+            | ValueExprAst::Field(_) => None,
             ValueExprAst::Binary { lhs, rhs, .. } => {
                 in_value(lhs, file).or_else(|| in_value(rhs, file))
             }
@@ -4223,7 +4211,10 @@ fn first_fn_call(def: &PolicyDef, file: &SourceFile) -> Option<Span> {
 /// arguments walked for nested calls.
 fn collect_fn_calls<'a>(expr: &'a ValueExprAst, file: &SourceFile, out: &mut Vec<(&'a str, Span)>) {
     match expr {
-        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => {}
+        ValueExprAst::Lit(..)
+        | ValueExprAst::Community(..)
+        | ValueExprAst::Ident(_)
+        | ValueExprAst::Field(_) => {}
         ValueExprAst::Binary { lhs, rhs, .. } => {
             collect_fn_calls(lhs, file, out);
             collect_fn_calls(rhs, file, out);
@@ -4245,7 +4236,10 @@ fn collect_fn_calls<'a>(expr: &'a ValueExprAst, file: &SourceFile, out: &mut Vec
 /// exactly the lowerer's monotonic allocation order.
 fn call_slots(expr: &ValueExprAst, fns: &HashMap<&str, FnCost>) -> u64 {
     match expr {
-        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => 0,
+        ValueExprAst::Lit(..)
+        | ValueExprAst::Community(..)
+        | ValueExprAst::Ident(_)
+        | ValueExprAst::Field(_) => 0,
         ValueExprAst::Binary { lhs, rhs, .. } => {
             call_slots(lhs, fns).saturating_add(call_slots(rhs, fns))
         }
@@ -4323,7 +4317,10 @@ fn stmts_slot_high_water(stmts: &[Stmt], base: u64, fns: &HashMap<&str, FnCost>)
 /// charges two — it is a min/max pair).
 fn value_cost(expr: &ValueExprAst, fns: &HashMap<&str, FnCost>) -> u64 {
     match expr {
-        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => 1,
+        ValueExprAst::Lit(..)
+        | ValueExprAst::Community(..)
+        | ValueExprAst::Ident(_)
+        | ValueExprAst::Field(_) => 1,
         ValueExprAst::Binary { lhs, rhs, .. } => 1u64
             .saturating_add(value_cost(lhs, fns))
             .saturating_add(value_cost(rhs, fns)),
@@ -4366,7 +4363,7 @@ fn nonzero_divisor(divisor: &ValueExprAst) -> bool {
 pub(super) fn fold_const(expr: &ValueExprAst) -> Option<u32> {
     match expr {
         ValueExprAst::Lit(value, _) => Some(*value),
-        ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
+        ValueExprAst::Community(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
         ValueExprAst::Binary { op, lhs, rhs, .. } => {
             checked_arith(*op, fold_const(lhs)?, fold_const(rhs)?).ok()
         }

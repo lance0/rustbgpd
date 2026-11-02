@@ -6922,7 +6922,7 @@ mod coverage {
     fn optional_field_negation_follows_binding_scope() {
         for body in [
             "let o = route.origin-as; let o = 5; if !(o == 1) { accept }",
-            "let o = route.origin-as; for o in route.communities { if !(o == 1) { accept } }",
+            "let o = route.origin-as; for o in route.communities { if !(o == 0:1) { accept } }",
             "let o = 5; if route.med == 5 { let o = route.origin-as; set med o; accept } if !(o == 1) { accept }",
             "let o = route.med; if !(o == 0) { accept }",
         ] {
@@ -11507,6 +11507,135 @@ test scrub-cancels-earlier-additions-of-every-kind {
             "{formatted}"
         );
         assert_eq!(format_rpol(&formatted).expect("reformats"), formatted);
+    }
+
+    /// A standard community literal is a community wherever it appears, so
+    /// it never meets an ASN, an integer or arithmetic; before, it was a raw
+    /// u32 there and `a == 0:64500` matched ASN 64500. Every repro is
+    /// checked before the assertion, so a red proof lists each one that
+    /// compiles.
+    #[test]
+    fn community_literals_are_communities() {
+        let policy = |body: &str| {
+            format!(
+                "asn-set origins {{ 64500 }} community-set tags {{ 0:64500 }} \
+                 policy p {{ term t {{ {body}; accept }} }}"
+            )
+        };
+        let crossings: Vec<_> = [
+            (
+                policy("for a in route.as-path { if a == 0:64500 { reject } }"),
+                "an ASN compared with a community",
+            ),
+            (
+                policy("let x = 0:64500; if x in origins { reject }"),
+                "`x` is a community, but `origins` is an asn-set",
+            ),
+            (
+                policy("let x = 0:64500; for a in route.as-path { if a == x { reject } }"),
+                "an ASN compared with a community",
+            ),
+            (
+                policy("set med 65000:1 + 1"),
+                "arithmetic takes u32 values, but this is a community",
+            ),
+            (
+                policy("for c in route.communities { if c == 4259840001 { reject } }"),
+                "a community compared with a u32 value",
+            ),
+            (
+                policy("if route.origin-as == (0:64500) { reject }"),
+                "an ASN compared with a community",
+            ),
+            (
+                "fn tag(x: u32) -> u32 { 65000:1 } \
+                 policy p { term t { set med tag(1); accept } }"
+                    .to_string(),
+                "a function body takes u32 values, but this is a community",
+            ),
+        ]
+        .into_iter()
+        .filter(|(source, message)| {
+            crate::rpol::compile_rpol(source, &mut crate::sets::SetStore::new())
+                .err()
+                .is_none_or(|diags| !diags.render("test.rpol", source, false).contains(message))
+        })
+        .collect();
+        assert!(
+            crossings.is_empty(),
+            "these are not rejected: {crossings:#?}"
+        );
+        // A `let` keeps the literal's type: it probes and matches as one.
+        passes(
+            r"
+community-set tags { 65000:1 }
+policy p {
+    term t {
+        let x = 65000:1;
+        if x in tags { add community 65000:2 }
+        for c in route.communities { if c == x { remove community c } }
+        accept
+    }
+}
+test literal-binding-is-a-community {
+    route { prefix 192.0.2.0/24; communities [65000:1, 65000:3] }
+    expect p == accept with community 65000:2, removes community 65000:1,
+        not removed community 65000:3
+}
+",
+            1,
+        );
+    }
+
+    /// A `community` parameter is a community value: it binds, compares with
+    /// another community and acts, and never meets a number or an ASN.
+    #[test]
+    fn community_parameters_are_community_values() {
+        passes(
+            r"
+policy scrub(tag: community) {
+    term t {
+        let mine = tag;
+        for c in route.communities { if c == tag { remove community c } }
+        if mine == 65000:1 { set local-pref 50 }
+        accept
+    }
+}
+test removes-the-tag {
+    route { prefix 192.0.2.0/24; communities [65000:1, 65000:2] }
+    expect scrub(65000:1) == accept with local-pref 50, removes community 65000:1,
+        not removed community 65000:2
+}
+test other-tag {
+    route { prefix 192.0.2.0/24; communities [65000:1] }
+    expect scrub(65000:9) == accept with without local-pref, not removed community 65000:1
+}
+",
+            2,
+        );
+        for (body, message) in [
+            (
+                "set med tag",
+                "`set` takes a u32 value or an ASN, but this is a community",
+            ),
+            (
+                "let x = tag + 1; set med x",
+                "arithmetic takes u32 values, but this is a community",
+            ),
+            (
+                "for a in route.as-path { if a == tag { reject } }",
+                "an ASN compared with a community",
+            ),
+            (
+                "if route.origin-as == tag { reject }",
+                "parameter `tag` is a community",
+            ),
+        ] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "policy p(tag: community) {{ term t {{ {body}; accept }} }}"
+            ));
+            assert!(rendered.contains(message), "{body}: {rendered}");
+        }
     }
 }
 

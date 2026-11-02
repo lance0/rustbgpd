@@ -509,7 +509,7 @@ fn optional_value_field(
             .iter()
             .find_map(|arg| optional_value_field(arg, missing)),
         ValueExprAst::Ident(name) => missing.get(name.node.as_str()).cloned(),
-        ValueExprAst::Lit(..) => None,
+        ValueExprAst::Lit(..) | ValueExprAst::Community(..) => None,
     }
 }
 
@@ -889,7 +889,10 @@ impl<'a> Refs<'a> {
                 self.value(lhs);
                 self.value(rhs);
             }
-            ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => {}
+            ValueExprAst::Lit(..)
+            | ValueExprAst::Community(..)
+            | ValueExprAst::Ident(_)
+            | ValueExprAst::Field(_) => {}
         }
     }
 }

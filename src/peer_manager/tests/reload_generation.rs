@@ -793,10 +793,17 @@ async fn generation_policy_normalization_preserves_referenced_sets_and_loop_fall
             false,
         ),
         (
-            // A community binding probes a community-set; a u32 never
-            // does (LAN-2794).
-            "community-set selected { 65000:1 } policy members-out { term t { for c in route.communities { let x = c; if x in selected { reject } } accept } }",
-            "community-set selected { 65000:2 } policy members-out { term t { for c in route.communities { let x = c; if x in selected { reject } } accept } }".to_string(),
+            // A constant community binding probes the set at runtime
+            // (LAN-2794: a community literal, never a u32).
+            "community-set selected { 65000:1 } policy members-out { term t { let x = 65000:1; if x in selected { reject } accept } }",
+            "community-set selected { 65000:2 } policy members-out { term t { let x = 65000:1; if x in selected { reject } accept } }".to_string(),
+            false,
+        ),
+        (
+            // A `community` parameter's probe folds at instantiation, so
+            // the edited member changes the folded verdict.
+            "community-set selected { 65000:1 } policy probe(tag: community) { term t { if tag in selected { accept } } } policy members-out { term t { if apply(probe(65000:1)) { reject } accept } }",
+            "community-set selected { 65000:2 } policy probe(tag: community) { term t { if tag in selected { accept } } } policy members-out { term t { if apply(probe(65000:1)) { reject } accept } }".to_string(),
             false,
         ),
         (RS_RPOL_MED_10, RS_RPOL_MED_20.to_string(), false),

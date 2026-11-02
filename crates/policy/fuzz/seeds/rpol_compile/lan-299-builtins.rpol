@@ -1,6 +1,6 @@
 policy edges {
     term t {
-        if route.origin-as >= 64512 || route.med / 3 >= 10 {
+        if route.med % 2 == 0 || route.local-pref - 1 >= route.med / 3 {
             set local-pref clamp(route.local-pref, 100, 400);
             set med max(min(route.med, 400), 25 + 25);
             accept
@@ -9,6 +9,6 @@ policy edges {
 }
 
 test boundary {
-    route { med 4294967295 }
+    route { med 4294967294 }
     expect edges == accept with local-pref 100, med 400
 }

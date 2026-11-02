@@ -621,6 +621,7 @@ const CONSTRUCTS: &[&str] = &[
     "ast.expr.value-cmp",
     "ast.expr.apply",
     "ast.value.literal",
+    "ast.value.community",
     "ast.value.identifier",
     "ast.value.field",
     "ast.value.arithmetic",
@@ -803,6 +804,7 @@ fn ast_expr(expr: &Expr, seen: &mut std::collections::BTreeSet<&'static str>) {
 fn ast_value(value: &ValueExprAst, seen: &mut std::collections::BTreeSet<&'static str>) {
     let name = match value {
         ValueExprAst::Lit(..) => "ast.value.literal",
+        ValueExprAst::Community(..) => "ast.value.community",
         ValueExprAst::Ident(_) => "ast.value.identifier",
         ValueExprAst::Field(_) => "ast.value.field",
         ValueExprAst::Binary { lhs, rhs, .. } => {
