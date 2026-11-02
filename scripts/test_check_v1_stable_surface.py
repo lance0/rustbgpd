@@ -348,6 +348,13 @@ class EvpnReflectorRoleTests(unittest.TestCase):
                     lambda text=text: self.check_with({"fixture.rs": text}), self.MISSING
                 )
 
+    def test_test_gated_conditional_strips_every_branch(self):
+        text = checker.strip_cfg_test_items(
+            "#[cfg(test)]\nif a {\n} else if b {\n} else {\n"
+            + self.HELPER + "}\nkeep();\n"
+        )
+        self.assertEqual(text, "\nkeep();\n")
+
     def test_production_emitter_still_counts(self):
         self.check_with(self.fixture_sources("mod test_support;"))
         for prefix in ("", "#[cfg(not(test))]\n", '#[cfg(feature = "test-utils")]\n'):

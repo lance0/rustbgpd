@@ -2262,6 +2262,24 @@ impl Parser<'_> {
                 self.bump();
                 let kind = if self.at(Tok::Ident) {
                     let kind = self.expect_ident("an evaluation-error kind")?;
+                    if matches!(
+                        kind.node.as_str(),
+                        "overflow" | "underflow" | "clamp-inverted"
+                    ) {
+                        self.diags.push(
+                            Diagnostic::coded(
+                                DiagnosticCode::Parse,
+                                kind.span,
+                                format!("`{}` is a retired evaluation-error kind", kind.node),
+                                "retired error kind",
+                            )
+                            .with_note(
+                                "arithmetic now saturates and clamp uses min(max(value, lo), hi); \
+                                 expect the resulting verdict and modifications instead",
+                            ),
+                        );
+                        return Err(Fail);
+                    }
                     if !crate::eval::EvalErrorKind::LABELS.contains(&kind.node.as_str()) {
                         let mut diag = Diagnostic::coded(
                             DiagnosticCode::Parse,
@@ -2539,12 +2557,10 @@ fn address_bits(prefix: Prefix) -> u8 {
 // Dataset file parsing (LAN-305)
 // ---------------------------------------------------------------------
 
-/// Whether an identifier is spelled like a well-known community name
-/// (`NO_EXPORT`, `OV_INVALID`): upper case and underscores only.
 /// Whether `text` is a well-known community name (`NO_EXPORT`,
 /// `OV_INVALID`, …): the exact alias list the literal parser accepts,
-/// not any all-caps identifier. Parser and typechecker share it, so an
-/// argument, a `has` operand and a reserved name agree.
+/// not any all-caps identifier. Name reservation also covers future
+/// RFC-assigned aliases without making them literals here.
 pub(super) fn is_well_known_alias(text: &str) -> bool {
     text.chars().all(|c| c.is_ascii_uppercase() || c == '_') && parse_community_match(text).is_ok()
 }

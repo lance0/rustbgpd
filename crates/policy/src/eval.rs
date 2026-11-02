@@ -153,12 +153,6 @@ pub(crate) const MAX_LOOP_ITERATIONS: u32 = 4096;
 /// here; the disposition never varies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvalErrorKind {
-    /// `+` or `*` exceeded `u32::MAX`. No longer produced: `+ - *`
-    /// saturate (LAN-2791); the label stays valid in `expect` forms.
-    Overflow,
-    /// `-` went below zero. No longer produced: `-` saturates at 0
-    /// (LAN-2791).
-    Underflow,
     /// `/` with a zero divisor. Unreachable through the compiler — a
     /// divisor is a non-zero constant or `max(e, k)` with `k >= 1`
     /// (LAN-2791) — so this is the fail-closed disposition of a
@@ -167,9 +161,6 @@ pub enum EvalErrorKind {
     /// `%` with a zero divisor; unreachable like
     /// [`DivideByZero`](Self::DivideByZero).
     RemainderByZero,
-    /// `clamp(x, lo, hi)` with `lo > hi`. No longer produced: `clamp`
-    /// is `min(max(x, lo), hi)` (LAN-2791).
-    ClampInverted,
     /// A `u32` field operand with no default was absent (origin AS on
     /// an empty/`AS_SET`-only path, unknown peer ASN).
     AbsentField(ValueField),
@@ -299,11 +290,8 @@ impl EvalErrorKind {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            EvalErrorKind::Overflow => "overflow",
-            EvalErrorKind::Underflow => "underflow",
             EvalErrorKind::DivideByZero => "divide-by-zero",
             EvalErrorKind::RemainderByZero => "remainder-by-zero",
-            EvalErrorKind::ClampInverted => "clamp-inverted",
             EvalErrorKind::AbsentField(_) => "absent-operand",
             EvalErrorKind::AbsentPrependOperand(_) => "absent-prepend-operand",
             EvalErrorKind::UnboundLocal => "unbound-local",
@@ -320,11 +308,8 @@ impl EvalErrorKind {
     /// The kind set is closed by construction — extending the enum
     /// extends this list (the exhaustive `label` match enforces it).
     pub const LABELS: &'static [&'static str] = &[
-        "overflow",
-        "underflow",
         "divide-by-zero",
         "remainder-by-zero",
-        "clamp-inverted",
         "absent-operand",
         "absent-prepend-operand",
         "unbound-local",
@@ -339,11 +324,8 @@ impl EvalErrorKind {
 impl fmt::Display for EvalErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EvalErrorKind::Overflow => write!(f, "arithmetic overflow"),
-            EvalErrorKind::Underflow => write!(f, "arithmetic underflow"),
             EvalErrorKind::DivideByZero => write!(f, "division by zero"),
             EvalErrorKind::RemainderByZero => write!(f, "remainder by zero"),
-            EvalErrorKind::ClampInverted => write!(f, "clamp bounds inverted (lo > hi)"),
             EvalErrorKind::AbsentField(field) => {
                 write!(f, "`{}` has no value for this route", field.as_str())
             }
@@ -525,18 +507,6 @@ pub(crate) fn arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKin
 /// inverted bounds yield `hi` instead of failing.
 pub(crate) fn clamp(x: u32, lo: u32, hi: u32) -> u32 {
     x.max(lo).min(hi)
-}
-
-/// The same step without saturation, for the typechecker's literal-only
-/// diagnostic: `4294967295 + 1` can only be a typo.
-pub(crate) fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> {
-    match op {
-        ArithOp::Add => lhs.checked_add(rhs).ok_or(EvalErrorKind::Overflow),
-        ArithOp::Sub => lhs.checked_sub(rhs).ok_or(EvalErrorKind::Underflow),
-        ArithOp::Mul => lhs.checked_mul(rhs).ok_or(EvalErrorKind::Overflow),
-        ArithOp::Div => lhs.checked_div(rhs).ok_or(EvalErrorKind::DivideByZero),
-        ArithOp::Rem => lhs.checked_rem(rhs).ok_or(EvalErrorKind::RemainderByZero),
-    }
 }
 
 /// Rate-limited operator-visible WARN for evaluation errors: at most
@@ -2929,14 +2899,10 @@ mod tests {
         ] {
             assert!(!kind.fails_closed(), "{kind:?}");
         }
-        // Arithmetic no longer produces these (LAN-2791); a zero divisor
-        // would be a compiler bug.
+        // A zero divisor would be a compiler bug.
         for kind in [
-            Kind::Overflow,
-            Kind::Underflow,
             Kind::DivideByZero,
             Kind::RemainderByZero,
-            Kind::ClampInverted,
             Kind::UnboundLocal,
             Kind::DatasetUnpinned,
             Kind::StrayLoopControl,

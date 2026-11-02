@@ -46,13 +46,13 @@
   for example `route.med / max(x, 1)`. A test that expected
   `error divide-by-zero` or `error remainder-by-zero` needs its policy
   rewritten this way; changing the expectation is not enough.
-- **In-language tests that expect a guard or arithmetic error now fail.**
-  `expect p == error underflow`, `error overflow` and `error clamp-inverted`,
-  and `error absent-operand` from a guard, no longer match: arithmetic
-  saturates and a missing operand makes the guard false, so the policy
-  returns a verdict. `rustbgpd --check` reports the failure, and with
-  `require_passing_tests = true` the config load is refused, as above, until
-  the test is updated.
+- **In-language tests that expect a missing-operand guard error now fail.**
+  `error absent-operand` from a guard no longer matches: a missing operand
+  makes the guard false, so the policy returns a verdict. `rustbgpd --check`
+  reports the failure, and with `require_passing_tests = true` the config
+  load is refused, as above, until the test is updated. The arithmetic
+  error kinds are retired entirely; their separate upgrade note covers the
+  resulting compile errors.
 - **`optional-field-negation` flags more forms.** A negated binding, binding
   probe or computed comparison over `route.origin-as` or `peer.asn` is now
   flagged with a new message, so `rbgp policy check --deny-lints

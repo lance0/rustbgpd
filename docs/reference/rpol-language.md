@@ -601,8 +601,17 @@ positions a parameter could fill, so no parameter can take them:
   `route.family` (`valid`, `internal`, `ipv4-unicast`, …);
 - the `prepend as` operands `origin` and `path-first`.
 
-A set or dataset cannot take a well-known community name either: as
-an argument the name is that community.
+A `let` binding, `for` variable, function parameter, set or dataset cannot
+take a well-known community name either. This includes `let` bindings inside
+functions and nested blocks. Reservation is case-sensitive; names such as
+`no_export` and `NO_EXPORT_COUNT` remain available.
+
+The RFC-assigned names `NOPEER`, `ACCEPT_OWN`, `LLGR_STALE`, `NO_LLGR` and
+`STANDBY_PE` are reserved in all these positions, including policy
+parameters, for future literal support. They are not community literals
+yet; use their numeric community values. These spellings follow the
+uppercase underscore convention for the
+[IANA well-known community registry](https://www.iana.org/assignments/bgp-well-known-communities/).
 
 A `let` binding still shadows a parameter of the same name in value
 positions and in `add`/`remove community`.
@@ -1810,6 +1819,29 @@ test missing-origin-fails-closed {
     expect origin-pad == error absent-prepend-operand
 }
 ```
+
+The supported kinds are also the closed `kind` vocabulary of
+`bgp_policy_eval_errors_total`:
+
+| Kind | Runtime cause |
+|---|---|
+| `absent-operand` | An action needs a missing origin AS or peer ASN. |
+| `absent-prepend-operand` | A computed prepend operand is missing or zero. |
+| `loop-limit-exceeded` | A loop exceeds the per-loop iteration cap. |
+| `fuel-exhausted` | Evaluation exhausts its work budget. |
+| `divide-by-zero` | Defensive rail for a zero divisor in invalid compiled IR. |
+| `remainder-by-zero` | Defensive rail for a zero remainder divisor in invalid compiled IR. |
+| `unbound-local` | Defensive rail for a missing binding slot. |
+| `stray-loop-control` | Defensive rail for loop control outside a loop. |
+| `prepend-limit-exceeded` | Defensive rail for a chain that bypasses the static prepend cap. |
+| `dataset-unpinned` | Defensive rail for a missing or wrong-kind dataset snapshot. |
+
+The defensive rails have runtime emitters but cannot arise from correctly
+compiled policies. The retired kinds `overflow`, `underflow` and
+`clamp-inverted` have no runtime emitter and are no longer accepted in
+`expect` statements. Arithmetic saturates and `clamp` returns
+`min(max(value, lo), hi)`; expect the resulting verdict and modifications
+instead. Literal-only invalid arithmetic remains a compile error.
 
 **Chains.** `expect chain [p1, p2(300), ...]` evaluates the listed
 policies as one import or export chain, in order, through the same chain

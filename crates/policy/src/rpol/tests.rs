@@ -4318,6 +4318,134 @@ fn error_expectation_grammar_diagnostics() {
     );
 }
 
+#[test]
+fn retired_arithmetic_error_expectations_have_a_migration_hint() {
+    for kind in ["overflow", "underflow", "clamp-inverted"] {
+        let (_, rendered) = diagnostics_of(&format!(
+            "policy p {{ term t {{ set med route.med + 1; accept }} }}
+             test t {{ route {{ med 4294967295 }} expect p == error {kind} }}"
+        ));
+        assert!(
+            rendered.contains(&format!("`{kind}` is a retired evaluation-error kind")),
+            "{rendered}"
+        );
+        assert!(rendered.contains("arithmetic now saturates"), "{rendered}");
+        assert!(
+            rendered.contains("expect the resulting verdict and modifications"),
+            "{rendered}"
+        );
+    }
+}
+
+mod reserved_community_bindings {
+    use super::diagnostics_of;
+
+    // Existing literals and RFC-assigned names reserved before literal support.
+    const NAMES: &[&str] = &[
+        "NO_EXPORT",
+        "NO_ADVERTISE",
+        "NO_EXPORT_SUBCONFED",
+        "BLACKHOLE",
+        "GRACEFUL_SHUTDOWN",
+        "OV_VALID",
+        "OV_NOT_FOUND",
+        "OV_INVALID",
+        "NOPEER",
+        "ACCEPT_OWN",
+        "LLGR_STALE",
+        "NO_LLGR",
+        "STANDBY_PE",
+    ];
+
+    fn rejects(template: &str, kind: &str) {
+        for name in NAMES {
+            let (_, rendered) = diagnostics_of(&template.replace("NAME", name));
+            assert!(
+                rendered.contains(&format!(
+                    "{kind} `{name}` has the name of a well-known community"
+                )),
+                "{name}: {rendered}"
+            );
+            assert!(rendered.contains("rename"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn policy_let() {
+        rejects(
+            "policy p { term t { let NAME = 1; set med NAME; accept } }",
+            "binding",
+        );
+    }
+
+    #[test]
+    fn loop_variable() {
+        rejects(
+            "policy p { term t { for NAME in route.communities { remove community NAME } accept } }",
+            "binding",
+        );
+    }
+
+    #[test]
+    fn function_parameter() {
+        rejects(
+            "fn f(NAME: u32) -> u32 { NAME } policy p { term t { set med f(1); accept } }",
+            "parameter",
+        );
+    }
+
+    #[test]
+    fn function_let() {
+        rejects(
+            "fn f(x: u32) -> u32 { let NAME = x; NAME }
+             policy p { term t { set med f(1); accept } }",
+            "binding",
+        );
+    }
+
+    #[test]
+    fn policy_parameter_and_sets_share_the_reservation() {
+        rejects(
+            "policy p(NAME: u32) { term t { set med NAME; accept } }",
+            "parameter",
+        );
+        for (kind, entry) in [
+            ("community-set", "65000:1"),
+            ("prefix-set", "192.0.2.0/24"),
+            ("asn-set", "65000"),
+        ] {
+            rejects(&format!("{kind} NAME {{ {entry} }}"), kind);
+        }
+        rejects("dataset community-set NAME", "dataset");
+    }
+
+    #[test]
+    fn other_names_and_existing_literals_still_work() {
+        let source = r"
+fn value(LOCAL: u32) -> u32 { let ACCEPT_OWN_COUNT = LOCAL; ACCEPT_OWN_COUNT }
+policy p(NO_EXPORT_COUNT: u32) {
+    term t {
+        let no_export = NO_EXPORT_COUNT;
+        for VALUE in route.communities { remove community VALUE }
+        set med value(no_export);
+        add community NO_EXPORT;
+        accept
+    }
+}
+test allowed {
+    route { communities [65000:1] }
+    expect p(7) == accept with med 7, removes community 65000:1, community NO_EXPORT
+}
+";
+        let report = super::run_rpol_tests(source).expect("non-reserved names compile");
+        assert!(report.all_passed(), "{:?}", report.failures);
+        // Reserving an identifier does not implement its community literal.
+        let (_, rendered) =
+            diagnostics_of("policy p { term t { add community ACCEPT_OWN; accept } }");
+        assert!(rendered.contains("ACCEPT_OWN"), "{rendered}");
+    }
+}
+
 /// `error` stays contextual: a policy (or set) named `error` keeps
 /// compiling and keeps being referencable from expects.
 #[test]
