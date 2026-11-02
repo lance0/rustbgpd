@@ -172,7 +172,7 @@ pub fn explain_chain_statements(
             continue;
         }
         let matched = named.policy.entries.iter().position(|e| e.matches(ctx));
-        let (statement_index, action, matched_conditions, modifications) = match matched {
+        let (statement_index, mut action, matched_conditions, mut modifications) = match matched {
             Some(index) => {
                 let entry = &named.policy.entries[index];
                 // Live-path parity: a Deny terminator returns
@@ -196,7 +196,15 @@ pub fn explain_chain_statements(
         if let Some(index) = matched
             && action == PolicyAction::Permit
         {
-            accumulated.merge_applicable(named.policy.entries[index].modifications.clone(), ctx);
+            let mods = named.policy.entries[index].modifications.clone();
+            if crate::eval::charge_merge(&mut fuel, Some(&accumulated), &mods).is_ok() {
+                accumulated.merge_applicable(mods, ctx);
+            } else {
+                // Out of fuel merging into the staged total: the live walk
+                // fails the route closed on the evaluation-error rail.
+                action = PolicyAction::Deny;
+                modifications = Vec::new();
+            }
         }
         steps.push(StatementAttribution {
             policy_index,
@@ -445,6 +453,15 @@ fn render_modifications(
 // `.rpol` member tracing (ADR-0096 explain slice).
 // ---------------------------------------------------------------------
 
+/// The trace line for a term whose merge into the staged modifications ran
+/// out of evaluation fuel.
+fn merge_failure_trace(term: &Term, kind: crate::eval::EvalErrorKind) -> String {
+    format!(
+        "term {}: evaluation error: {kind} — fail closed => reject",
+        term.name.as_deref().unwrap_or("<unnamed>"),
+    )
+}
+
 /// The trace line for a community scan that stopped the walk: over its wire
 /// bound (`Ok(false)`, a plain fail-closed reject) or out of evaluation fuel
 /// (`Err`, the eval-error rail).
@@ -599,6 +616,14 @@ fn trace_rpol_policy(
                             crate::eval::LoopFlow::Completed => {}
                             crate::eval::LoopFlow::Permit(mods) => {
                                 let mut merged = continued.take().unwrap_or_default();
+                                if let Err(kind) =
+                                    crate::eval::charge_merge(fuel, Some(&merged), &mods)
+                                {
+                                    term_traces.push(merge_failure_trace(term, kind));
+                                    eval_failed = true;
+                                    decided = Some((index, term));
+                                    break;
+                                }
                                 merged.merge_applicable(mods, ctx);
                                 deciding_permit = Some(merged);
                                 decided = Some((index, term));
@@ -628,9 +653,13 @@ fn trace_rpol_policy(
                 slot,
                 name: _name,
             } => {
-                if let Err(kind) =
-                    crate::eval::exec_community_var(add, slot, locals.as_ref(), &mut continued)
-                {
+                if let Err(kind) = crate::eval::exec_community_var(
+                    add,
+                    slot,
+                    locals.as_ref(),
+                    &mut continued,
+                    fuel,
+                ) {
                     term_traces.push(format!(
                         "term {}: evaluation error: {kind} — fail closed => reject",
                         term.name.as_deref().unwrap_or("<unnamed>"),
@@ -726,6 +755,12 @@ fn trace_rpol_policy(
                     break;
                 }
                 let mut merged = continued.take().unwrap_or_default();
+                if let Err(kind) = crate::eval::charge_merge(fuel, Some(&merged), mods) {
+                    term_traces.push(merge_failure_trace(term, kind));
+                    eval_failed = true;
+                    decided = Some((index, term));
+                    break;
+                }
                 merged.merge_applicable(mods.clone(), ctx);
                 deciding_permit = Some(merged);
                 decided = Some((index, term));
@@ -754,9 +789,16 @@ fn trace_rpol_policy(
                 };
                 // Resolve at action time: later sibling scopes may
                 // reuse the frame slots this term read.
+                let mods = resolved.unwrap_or_else(|| mods.clone());
+                if let Err(kind) = crate::eval::charge_merge(fuel, continued.as_ref(), &mods) {
+                    term_traces.push(merge_failure_trace(term, kind));
+                    eval_failed = true;
+                    decided = Some((index, term));
+                    break;
+                }
                 continued
                     .get_or_insert_with(RouteModifications::default)
-                    .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                    .merge_applicable(mods, ctx);
             }
         }
     }
@@ -938,7 +980,11 @@ fn list_delta<T: Copy + PartialEq>(before: &[T], after: &[T]) -> (Vec<T>, Vec<T>
 }
 
 /// `values` without the entries `drop` renders as a cancellation instead.
-fn without<T: Copy + PartialEq>(values: Vec<T>, drop: &[T]) -> Vec<T> {
+fn without<T: Copy + Eq + std::hash::Hash>(values: Vec<T>, drop: &[T]) -> Vec<T> {
+    if drop.is_empty() {
+        return values;
+    }
+    let drop: std::collections::HashSet<T> = drop.iter().copied().collect();
     values
         .into_iter()
         .filter(|value| !drop.contains(value))

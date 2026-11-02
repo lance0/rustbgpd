@@ -960,12 +960,19 @@ and evaluation enforce the following bounds:
   1,000,000-step worst-case budget (`MAX_EVAL_COST`), not metered per
   route. Nest small set loops, or restructure with membership probes.
 - **Runtime fuel.** Every evaluation starts with `MAX_EVAL_COST` fuel,
-  decremented **only at loop iteration steps** — straight-line code is
-  pre-paid by the compile-time bound, so a chain with no loops pays
-  exactly zero (fuel is one register write, never read again).
-  Exhaustion — reachable only by compounding data-dependent iteration
-  across a chain — is an evaluation error on the same uniform-Deny
-  rail (`fuel-exhausted` in the error counters and explain traces).
+  decremented at loop iteration steps and for the staged community
+  entries that work traverses: a community scan pays one step per staged
+  addition and removal of its kind, and merging a community action into
+  the staged modifications pays one step per staged entry of the opposite
+  operation it checks for cancellation. Staged entries have no
+  compile-time bound — loops stage one per iteration and chain members
+  carry them forward — so this is the work the compile-time bound cannot
+  pre-pay. Other straight-line code is pre-paid, so a chain with no loops
+  pays only for the few staged entries its community actions traverse.
+  Exhaustion — reachable only by
+  compounding data-dependent iteration or staging across a chain — is an
+  evaluation error on the same uniform-Deny rail (`fuel-exhausted` in the
+  error counters and explain traces).
 
 **Explain.** Traces render a bounded loop summary — iteration count
 plus the deciding iteration (`loop reject at iteration 3 of 3`), never

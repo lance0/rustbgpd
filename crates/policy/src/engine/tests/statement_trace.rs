@@ -799,6 +799,10 @@ policy tag { term t { add community 65000:7 } }
 policy strip { term t { remove community *; accept } }
 policy stage { term t { for c in route.communities { add community c } } }
 policy scan { term t { remove community in own; accept } }
+policy unstage { term t { for c in route.communities { remove community c } } }
+policy readd { term t { for c in route.communities { add community c } } }
+policy tag-continue { term t { add community 65000:1 } }
+policy tag-accept { term t { add community 65000:2; accept } }
 ";
 
 fn seeded_member(name: &str) -> NamedPolicy {
@@ -827,6 +831,63 @@ fn explain_shows_a_later_scan_cancelling_an_earlier_addition() {
         trace.steps[1].modifications,
         ["community - 65000:7 (cancels an earlier addition)"]
     );
+}
+
+/// Explain meters merges into the staged total like the live walk: a loop
+/// whose per-iteration merges traverse removals carried in from earlier
+/// members exhausts the fuel in both.
+#[test]
+fn explain_agrees_with_live_when_carried_removals_exhaust_merge_fuel() {
+    let mut members: Vec<NamedPolicy> = (0..10).map(|_| seeded_member("unstage")).collect();
+    members.push(seeded_member("readd"));
+    let chain = PolicyChain::from_named(members);
+    let communities: Vec<u32> = (0..4096u32).collect();
+    let ctx = RouteContext {
+        communities: &communities,
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&chain), &ctx);
+    assert_eq!(live.action, PolicyAction::Deny);
+    let error = evaluation
+        .eval_error
+        .expect("fuel exhaustion is an evaluation error");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::FuelExhausted);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    let last = trace.steps.last().expect("steps");
+    assert_eq!(last.policy_name, error.policy);
+    let trace_line = last.term_traces.last().expect("trace line");
+    assert!(trace_line.contains("fuel exhausted"), "{trace_line}");
+}
+
+/// The same for the merges of each member's own `continue` and `accept`
+/// terms: 26 members each merge an addition across 40,960 carried removals.
+#[test]
+fn explain_agrees_with_live_when_term_merges_exhaust_fuel() {
+    let mut members: Vec<NamedPolicy> = (0..10).map(|_| seeded_member("unstage")).collect();
+    for _ in 0..13 {
+        members.push(seeded_member("tag-continue"));
+        members.push(seeded_member("tag-accept"));
+    }
+    let chain = PolicyChain::from_named(members);
+    let communities: Vec<u32> = (0..4096u32).collect();
+    let ctx = RouteContext {
+        communities: &communities,
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&chain), &ctx);
+    assert_eq!(live.action, PolicyAction::Deny);
+    let error = evaluation
+        .eval_error
+        .expect("fuel exhaustion is an evaluation error");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::FuelExhausted);
+    let compiled = chain.compiled();
+    let mut hits = compiled.zero_term_hits();
+    assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    let last = trace.steps.last().expect("steps");
+    assert_eq!(last.policy_name, error.policy);
 }
 
 /// Explain meters the staged additions an earlier member carried in, like

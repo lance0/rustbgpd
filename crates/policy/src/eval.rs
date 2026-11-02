@@ -693,6 +693,7 @@ pub(crate) fn exec_community_var(
     slot: u8,
     locals: Option<&LocalFrame>,
     continued: &mut Option<RouteModifications>,
+    fuel: &mut u64,
 ) -> Result<(), EvalErrorKind> {
     let value = locals_slice(locals)
         .get(usize::from(slot))
@@ -704,10 +705,50 @@ pub(crate) fn exec_community_var(
     } else {
         mods.communities_remove.push(value);
     }
+    charge_merge(fuel, continued.as_ref(), &mods)?;
     continued
         .get_or_insert_with(RouteModifications::default)
         .merge_from(mods);
     Ok(())
+}
+
+/// Charge merging `new` into the staged `target` for the staged entries the
+/// later-wins merge traverses: for each kind `new` adds (removes), one pass
+/// over `target`'s staged removals (additions) of that kind to cancel the
+/// opposite operation. Staged lists have no compile-time bound and a loop
+/// merges once per iteration, so without this the work would grow with
+/// iterations times staged entries, outside the budget.
+pub(crate) fn charge_merge(
+    fuel: &mut u64,
+    target: Option<&RouteModifications>,
+    new: &RouteModifications,
+) -> Result<(), EvalErrorKind> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let pass = |staged: usize, touched: bool| if touched { staged } else { 0 };
+    charge_staged_scan(
+        fuel,
+        pass(
+            target.communities_add.len(),
+            !new.communities_remove.is_empty(),
+        ) + pass(
+            target.communities_remove.len(),
+            !new.communities_add.is_empty(),
+        ) + pass(
+            target.extended_communities_add.len(),
+            !new.extended_communities_remove.is_empty(),
+        ) + pass(
+            target.extended_communities_remove.len(),
+            !new.extended_communities_add.is_empty(),
+        ) + pass(
+            target.large_communities_add.len(),
+            !new.large_communities_remove.is_empty(),
+        ) + pass(
+            target.large_communities_remove.len(),
+            !new.large_communities_add.is_empty(),
+        ),
+    )
 }
 
 /// Charge a scan one fuel step per staged entry of its kind it visits: the
@@ -1481,19 +1522,20 @@ impl CompiledChain {
                             break;
                         }
                         TermActionView::Continue(mods) => {
-                            if let Ok(resolved) =
+                            let Ok(resolved) =
                                 self.resolve_computed(mods, ctx, locals_slice(locals.as_ref()))
-                            {
-                                continued
-                                    .get_or_insert_with(RouteModifications::default)
-                                    .merge_applicable(
-                                        resolved.unwrap_or_else(|| mods.clone()),
-                                        ctx,
-                                    );
-                            } else {
+                            else {
+                                denied = true;
+                                break;
+                            };
+                            let mods = resolved.unwrap_or_else(|| mods.clone());
+                            if charge_merge(&mut fuel, continued.as_ref(), &mods).is_err() {
                                 denied = true;
                                 break;
                             }
+                            continued
+                                .get_or_insert_with(RouteModifications::default)
+                                .merge_applicable(mods, ctx);
                         }
                         // LAN-302: eager `let`, identical to the live
                         // walk — initializer error fails closed.
@@ -1542,8 +1584,14 @@ impl CompiledChain {
                             slot,
                             name: _name,
                         } => {
-                            if exec_community_var(add, slot, locals.as_ref(), &mut continued)
-                                .is_err()
+                            if exec_community_var(
+                                add,
+                                slot,
+                                locals.as_ref(),
+                                &mut continued,
+                                &mut fuel,
+                            )
+                            .is_err()
                             {
                                 denied = true;
                                 break;
@@ -1613,6 +1661,9 @@ impl CompiledChain {
             }
             let mut merged = continued.unwrap_or_default();
             if let Some(Some(mods)) = permit_mods {
+                if charge_merge(&mut fuel, Some(&merged), &mods).is_err() {
+                    return PolicyResult::deny();
+                }
                 merged.merge_applicable(mods, ctx);
             }
             accumulated = applicable(merged, ctx);
@@ -1686,7 +1737,11 @@ impl CompiledChain {
                             };
                         return match (continued, resolved) {
                             (Some(mut acc), resolved) => {
-                                acc.merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                                let mods = resolved.unwrap_or_else(|| mods.clone());
+                                if let Err(kind) = charge_merge(fuel, Some(&acc), &mods) {
+                                    return PolicyDecision::Error { kind, term_index };
+                                }
+                                acc.merge_applicable(mods, ctx);
                                 PolicyDecision::PermitOwned(acc)
                             }
                             (None, Some(owned)) => PolicyDecision::PermitOwned(owned),
@@ -1706,9 +1761,13 @@ impl CompiledChain {
                                 Ok(resolved) => resolved,
                                 Err(kind) => return PolicyDecision::Error { kind, term_index },
                             };
+                        let mods = resolved.unwrap_or_else(|| mods.clone());
+                        if let Err(kind) = charge_merge(fuel, continued.as_ref(), &mods) {
+                            return PolicyDecision::Error { kind, term_index };
+                        }
                         continued
                             .get_or_insert_with(RouteModifications::default)
-                            .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                            .merge_applicable(mods, ctx);
                     }
                     // LAN-302: eager `let` — evaluate the initializer
                     // (against the frame as written so far; earlier
@@ -1744,6 +1803,10 @@ impl CompiledChain {
                                 LoopFlow::Permit(mods) => {
                                     return match continued {
                                         Some(mut acc) => {
+                                            if let Err(kind) = charge_merge(fuel, Some(&acc), &mods)
+                                            {
+                                                return PolicyDecision::Error { kind, term_index };
+                                            }
                                             acc.merge_applicable(mods, ctx);
                                             PolicyDecision::PermitOwned(acc)
                                         }
@@ -1776,7 +1839,7 @@ impl CompiledChain {
                         name: _name,
                     } => {
                         if let Err(kind) =
-                            exec_community_var(add, slot, locals.as_ref(), &mut continued)
+                            exec_community_var(add, slot, locals.as_ref(), &mut continued, fuel)
                         {
                             return PolicyDecision::Error { kind, term_index };
                         }
@@ -1941,9 +2004,12 @@ impl CompiledChain {
                         let resolved = self
                             .resolve_computed(mods, ctx, locals_slice(locals.as_ref()))
                             .map_err(|kind| (kind, iterations - 1))?;
+                        let mods = resolved.unwrap_or_else(|| mods.clone());
+                        charge_merge(fuel, continued.as_ref(), &mods)
+                            .map_err(|kind| (kind, iterations - 1))?;
                         continued
                             .get_or_insert_with(RouteModifications::default)
-                            .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                            .merge_applicable(mods, ctx);
                     }
                     TermAction::Bind { slot, expr, .. } => {
                         let value = eval_value(expr, ctx, locals_slice(locals.as_ref()))
@@ -1951,7 +2017,7 @@ impl CompiledChain {
                         locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(*slot)] = value;
                     }
                     TermAction::CommunityVar { add, slot, .. } => {
-                        exec_community_var(*add, *slot, locals.as_ref(), continued)
+                        exec_community_var(*add, *slot, locals.as_ref(), continued, fuel)
                             .map_err(|kind| (kind, iterations - 1))?;
                     }
                     TermAction::RemoveLargeCommunityAdmin { global_admin } => {

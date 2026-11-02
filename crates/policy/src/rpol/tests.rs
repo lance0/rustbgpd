@@ -9743,6 +9743,57 @@ test large-strip-all-cancels {
         assert_eq!(counters.eval_errors(), 1);
     }
 
+    /// Merging an addition into the staged modifications cancels a staged
+    /// removal of the same value, a pass over the staged removals. That pass
+    /// pays fuel per entry: chain members carry removals forward and a loop
+    /// merges once per iteration, so the work would otherwise grow with
+    /// iterations times carried entries.
+    #[test]
+    fn merges_pay_fuel_for_the_staged_entries_they_traverse() {
+        use crate::eval::PolicyHitCounters;
+        let unstage = |i: usize| {
+            format!(
+                " policy unstage{i} {{ term t {{ for c in route.communities {{ remove community c }} }} }}"
+            )
+        };
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+
+        // Exact accounting: 4096 loop iterations, then one literal addition
+        // merged across the 4096 staged removals.
+        let one = compile_ok(&format!(
+            "{} policy tag {{ term t {{ add community 65000:1 }} }}",
+            unstage(0)
+        ));
+        let (result, consumed) = one.evaluate_measuring_fuel(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(consumed, 4096 + 4096);
+
+        // Ten loops carry 40,960 removals into a loop that adds each route
+        // community back: each iteration's merge traverses them.
+        let mut source = String::new();
+        for i in 0..10 {
+            source.push_str(&unstage(i));
+        }
+        source.push_str(
+            " policy readd { term t { for c in route.communities { add community c } } }",
+        );
+        let many = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&many);
+        assert_eq!(
+            many.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "merge fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+        let mut hits = many.zero_term_hits();
+        assert_eq!(
+            many.evaluate_recording_hits(&ctx, &mut hits),
+            crate::PolicyResult::deny(),
+            "the dry run is metered identically"
+        );
+    }
+
     /// Conditions read the route as received: a later term's guard does not
     /// see an earlier term's addition.
     #[test]
