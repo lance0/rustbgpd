@@ -2080,8 +2080,8 @@ message TestPolicyRequest {
   // fail the dry run with compiled=false and rendered diagnostics.
   string rpol_source = 1;
   // Which policy in the file to evaluate. Bare name for zero-parameter
-  // policies; call-form with u32 arguments for parameterized ones,
-  // e.g. "customer-in(200)".
+  // policies; call-form for parameterized ones, with integer, community,
+  // address or set-name arguments, e.g. "customer-in(200, cust-65001)".
   string policy = 2;
   // "import" evaluates over the retained post-policy Adj-RIB-In
   // (optionally one peer's): routes admitted by import policy when they

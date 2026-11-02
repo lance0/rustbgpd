@@ -18,9 +18,9 @@ use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith};
 use crate::ir::ValueField;
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, CommunityKind, DatasetDecl, DatasetEntryAst, Expr, FieldPath,
-    FieldRoot, FnDef, ForSource, ForStmt, IfStmt, PolicyDef, PrependAsArg, Rhs, RouteField,
-    SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CallArg, CmpOp, CommunityArg, CommunityKind, DatasetDecl, DatasetEntryAst, Expr,
+    FieldPath, FieldRoot, FnDef, ForSource, ForStmt, IfStmt, NextHopArg, ParamType, PolicyDef,
+    PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned, closest};
 
@@ -166,6 +166,9 @@ const MAX_LOCALS: usize = 64;
 /// its meaning (LAN-296).
 struct Scope<'a> {
     params: Vec<&'a str>,
+    /// The policy's parameters of a type other than `u32`, which resolve
+    /// only in positions of their own type.
+    typed: Vec<(&'a str, ParamType)>,
     lets: Vec<String>,
     /// False inside a function body (LAN-304): functions are closed
     /// over nothing — `route.`/`peer.` field reads are rejected there;
@@ -181,6 +184,22 @@ impl Scope<'_> {
 
     fn is_local(&self, name: &str) -> bool {
         self.lets.iter().any(|local| local == name)
+    }
+
+    fn typed_param(&self, name: &str) -> Option<ParamType> {
+        self.typed
+            .iter()
+            .find(|(param, _)| *param == name)
+            .map(|(_, ty)| *ty)
+    }
+
+    /// The type of a parameter `name`, `u32` included.
+    fn param_type(&self, name: &str) -> Option<ParamType> {
+        if self.is_param(name) {
+            Some(ParamType::U32)
+        } else {
+            self.typed_param(name)
+        }
     }
 }
 
@@ -204,6 +223,35 @@ pub(super) const FAMILY_MEMBERS: &[&str] = &[
     "bgp-ls",
     "bgp-ls-vpn",
 ];
+
+/// Whether a comparison against `field` resolves an identifier to an `ip`
+/// parameter: the address fields. Shared with lowering, so both passes
+/// read a name the same way.
+pub(super) fn takes_ip_param(field: Field) -> bool {
+    matches!(field, Field::NextHop | Field::PeerAddress)
+}
+
+/// What a reserved parameter name already means, or `None` for a free
+/// name: an enum value, a well-known community, or a `prepend as`
+/// operand. Reserving them at the declaration gives every pass the same
+/// reading of the name.
+fn reserved_param_meaning(name: &str) -> Option<String> {
+    if super::parser::is_well_known_alias(name) {
+        return Some("a well-known community".to_string());
+    }
+    if matches!(name, "origin" | "path-first") {
+        return Some(format!("the `prepend as {name}` operand"));
+    }
+    [
+        ("route.rpki", RPKI_MEMBERS),
+        ("route.aspa", ASPA_MEMBERS),
+        ("route.route-type", ROUTE_TYPE_MEMBERS),
+        ("route.family", FAMILY_MEMBERS),
+    ]
+    .iter()
+    .find(|(_, members)| members.contains(&name))
+    .map(|(field, _)| format!("a `{field}` value"))
+}
 
 /// The optional value `exists <field>` tests, or `None` for a field
 /// that is always present (LAN-2790).
@@ -374,6 +422,38 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        let set_names = self
+            .file
+            .prefix_sets
+            .iter()
+            .map(|s| ("prefix-set", &s.name))
+            .chain(
+                self.file
+                    .community_sets
+                    .iter()
+                    .map(|s| ("community-set", &s.name)),
+            )
+            .chain(self.file.asn_sets.iter().map(|s| ("asn-set", &s.name)))
+            .chain(self.file.datasets.iter().map(|d| ("dataset", &d.name)));
+        for (kind, name) in set_names {
+            if super::parser::is_well_known_alias(&name.node) {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        name.span,
+                        format!(
+                            "{kind} `{}` has the name of a well-known community",
+                            name.node
+                        ),
+                        "reserved name",
+                    )
+                    .with_note(
+                        "an argument spelled like a well-known community is that community, \
+                         so a set with this name could never be passed; rename the set",
+                    ),
+                );
+            }
+        }
         if self.file.datasets.len() > MAX_UNIT_DATASETS {
             let extra = &self.file.datasets[MAX_UNIT_DATASETS];
             self.diags.push(Diagnostic::coded(
@@ -464,6 +544,7 @@ impl<'a> Checker<'a> {
             self.duplicate_check("parameter", def.params.iter());
             let mut scope = Scope {
                 params: def.params.iter().map(|p| p.node.as_str()).collect(),
+                typed: Vec::new(),
                 lets: Vec::new(),
                 fields_allowed: false,
             };
@@ -669,8 +750,56 @@ impl<'a> Checker<'a> {
     fn check_policy(&mut self, policy: &PolicyDef) {
         self.duplicate_check("parameter", policy.params.iter());
         self.duplicate_check("term", policy.terms.iter().map(|t| &t.name));
+        for param in &policy.params {
+            if let Some(meaning) = reserved_param_meaning(&param.node) {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        param.span,
+                        format!("parameter `{}` has the name of {meaning}", param.node),
+                        "reserved name",
+                    )
+                    .with_note(
+                        "a parameter cannot be named like an enum value, a well-known \
+                         community or the `prepend as` operands `origin` and `path-first`: \
+                         those positions read the name with its fixed meaning; rename the \
+                         parameter",
+                    ),
+                );
+            }
+        }
+        let mut params = Vec::new();
+        let mut typed = Vec::new();
+        for (param, ty) in policy.params.iter().zip(&policy.param_types) {
+            if *ty == ParamType::U32 {
+                params.push(param.node.as_str());
+                continue;
+            }
+            typed.push((param.node.as_str(), *ty));
+            // A set parameter stands where a set name does; sharing a
+            // name with a set would make that position ambiguous.
+            if ty.set_kind().is_some()
+                && let Some((kind, span)) = self.symbol_def_of(&param.node)
+                && matches!(kind, "prefix-set" | "community-set" | "asn-set" | "dataset")
+            {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        param.span,
+                        format!(
+                            "parameter `{}` has the name of {} {kind}",
+                            param.node,
+                            article(kind)
+                        ),
+                        "set parameters and sets share one namespace",
+                    )
+                    .with_label(span, format!("`{}` is defined here", param.node)),
+                );
+            }
+        }
         let mut scope = Scope {
-            params: policy.params.iter().map(|p| p.node.as_str()).collect(),
+            params,
+            typed,
             lets: Vec::new(),
             fields_allowed: true,
         };
@@ -741,6 +870,24 @@ impl<'a> Checker<'a> {
     /// finite u32-valued forms, cap nesting, then check the body in a
     /// fresh scope holding the loop variable.
     fn check_for(&mut self, for_stmt: &ForStmt, scope: &mut Scope, loop_depth: u32) {
+        if let ForSource::Set(name) = &for_stmt.source
+            && let Some(ty) = scope.typed_param(&name.node)
+        {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    name.span,
+                    format!(
+                        "parameter `{}` is {} {}; loops iterate a named asn-set only",
+                        name.node,
+                        ty.article(),
+                        ty.keyword()
+                    ),
+                    "a set parameter is not a loop source",
+                )
+                .with_note("a loop's bound is the set's size at compile time, which a parameter does not have"),
+            );
+        }
         if loop_depth == MAX_LOOP_DEPTH {
             self.diags.push(
                 Diagnostic::coded(
@@ -1040,6 +1187,18 @@ impl<'a> Checker<'a> {
     )]
     fn check_action(&mut self, action: &ActionStmt, scope: &Scope<'_>, loop_depth: u32) {
         match action {
+            ActionStmt::SetNextHop(NextHopArg::Param(name), _) => {
+                if scope.typed_param(&name.node) != Some(ParamType::Ip)
+                    && !self.typed_param_misused(name, scope, "an `ip` parameter")
+                {
+                    self.diags.push(Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        name.span,
+                        format!("unknown `ip` parameter `{}`", name.node),
+                        "`set next-hop` takes an address, `self`, or an `ip` parameter",
+                    ));
+                }
+            }
             ActionStmt::Accept(_)
             | ActionStmt::Reject(_)
             | ActionStmt::SetNextHop(..)
@@ -1146,7 +1305,16 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
-                if !scope.is_local(&name.node) && !scope.is_param(&name.node) {
+                // A `let` shadows an outer parameter here, as in value
+                // positions; lowering resolves the same way.
+                let local = scope.is_local(&name.node);
+                let community_param =
+                    !local && scope.typed_param(&name.node) == Some(ParamType::Community);
+                if local || community_param {
+                    // Resolved.
+                } else if self.typed_param_misused(name, scope, "a community") {
+                    // Reported.
+                } else if !scope.is_param(&name.node) {
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         name.span,
@@ -1171,17 +1339,17 @@ impl<'a> Checker<'a> {
                 kind,
                 arg: CommunityArg::InSet { set, negate },
                 ..
-            } => self.check_remove_in_set(*add, *kind, set, *negate),
+            } => self.check_remove_in_set(*add, *kind, set, *negate, scope),
             ActionStmt::Prepend { asn, count, .. } => {
-                // A computed operand (`self`/`peer`, or an `origin`/`path-first`
-                // identifier that is not a declared parameter —
-                // LAN-296) needs no parameter check; the operand
-                // decision itself is shared with lowering via
-                // `PrependAsArg::operand`. `let` bindings deliberately
+                // A computed operand (`self`, `peer`, `origin`,
+                // `path-first`) needs no parameter check. Parameters
+                // cannot take the operand names, so the operand decision
+                // (`PrependAsArg::operand`, shared with lowering) depends
+                // on the name alone. `let` bindings deliberately
                 // do not resolve here: this is not a value position
                 // (LAN-302 scoping rule), so `prepend as origin` keeps
                 // its operand meaning even under a `let origin`.
-                if asn.operand(|name| scope.is_param(name)).is_none()
+                if asn.operand().is_none()
                     && let PrependAsArg::Value(arg) = asn
                 {
                     self.check_u32_arg(arg, scope);
@@ -1207,16 +1375,9 @@ impl<'a> Checker<'a> {
                             ));
                         }
                     }
-                    U32Arg::Param(name) => {
-                        self.diags.push(Diagnostic::coded(
-                            DiagnosticCode::Typecheck,
-                            name.span,
-                            "prepend count must be a literal",
-                            "parameters are not allowed here",
-                        ).with_note(
-                            "the count is encoded as a u8; a parameterized count cannot be range-checked at definition time",
-                        ));
-                    }
+                    // A u32 parameter: its argument is range-checked where the
+                    // policy is instantiated (an attach, a test, `apply`).
+                    U32Arg::Param(_) => self.check_u32_arg(count, scope),
                 }
             }
         }
@@ -1410,6 +1571,9 @@ impl<'a> Checker<'a> {
         if scope.is_local(&name.node) || scope.is_param(&name.node) {
             return;
         }
+        if self.typed_param_misused(name, scope, "a u32 value") {
+            return;
+        }
         let mut diag = Diagnostic::coded(
             DiagnosticCode::Typecheck,
             name.span,
@@ -1438,6 +1602,9 @@ impl<'a> Checker<'a> {
         if scope.is_param(&name.node) {
             return;
         }
+        if self.typed_param_misused(name, scope, "a u32 value") {
+            return;
+        }
         if scope.is_local(&name.node) {
             self.diags.push(
                 Diagnostic::coded(
@@ -1462,6 +1629,105 @@ impl<'a> Checker<'a> {
         self.diags.push(diag);
     }
 
+    /// A non-`u32` parameter in a position of another type: reports it and
+    /// returns true.
+    fn typed_param_misused(
+        &mut self,
+        name: &Spanned<String>,
+        scope: &Scope<'_>,
+        wanted: &str,
+    ) -> bool {
+        let Some(ty) = scope.typed_param(&name.node) else {
+            return false;
+        };
+        self.diags.push(Diagnostic::coded(
+            DiagnosticCode::Typecheck,
+            name.span,
+            format!(
+                "parameter `{}` is {} {}, but this position needs {wanted}",
+                name.node,
+                ty.article(),
+                ty.keyword()
+            ),
+            "parameter type mismatch",
+        ));
+        true
+    }
+
+    /// A typed parameter where a set name goes: `route.prefix in p`,
+    /// `x in p`. `wanted` lists the set types the position accepts.
+    fn check_set_param(&mut self, set: &Spanned<String>, ty: ParamType, wanted: &[ParamType]) {
+        if !wanted.contains(&ty) {
+            let names: Vec<_> = wanted
+                .iter()
+                .map(|ty| format!("`{}`", ty.keyword()))
+                .collect();
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Typecheck,
+                set.span,
+                format!(
+                    "parameter `{}` is {} {}, but this probe needs {}",
+                    set.node,
+                    ty.article(),
+                    ty.keyword(),
+                    names.join(" or ")
+                ),
+                "parameter type mismatch",
+            ));
+        }
+    }
+
+    /// The arguments of a policy reference against the callee's parameter
+    /// types. `scope` is the caller's inside `apply`, where a name may be
+    /// one of its parameters; `None` in a test `expect`.
+    fn check_call_args(
+        &mut self,
+        target: &PolicyDef,
+        args: &[Spanned<CallArg>],
+        scope: Option<&Scope<'_>>,
+    ) {
+        for (index, arg) in args.iter().enumerate().take(target.param_types.len()) {
+            let ty = target.param_types[index];
+            if let (Some(scope), CallArg::Name(name)) = (scope, &arg.node) {
+                // A u32 position keeps its established checks: parameter,
+                // `let` binding, or unknown name.
+                if ty == ParamType::U32 && scope.typed_param(name).is_none() {
+                    self.check_u32_arg(&U32Arg::Param(Spanned::new(name.clone(), arg.span)), scope);
+                    continue;
+                }
+                if let Some(caller) = scope.param_type(name) {
+                    if caller != ty {
+                        self.diags.push(Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            arg.span,
+                            format!(
+                                "parameter `{name}` is {} {}, but `{}` takes {} {}",
+                                caller.article(),
+                                caller.keyword(),
+                                target.params[index].node,
+                                ty.article(),
+                                ty.keyword()
+                            ),
+                            "parameter type mismatch",
+                        ));
+                    }
+                    continue;
+                }
+            }
+            if let Err(reason) = check_call_arg(self.file, target, index, &arg.node) {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        arg.span,
+                        reason,
+                        "invalid argument",
+                    )
+                    .with_label(target.params[index].span, "parameter declared here"),
+                );
+            }
+        }
+    }
+
     // ── expressions ─────────────────────────────────────────────────
 
     #[expect(
@@ -1483,12 +1749,32 @@ impl<'a> Checker<'a> {
                 self.check_value_expr(lhs, scope);
                 self.check_value_expr(rhs, scope);
             }
-            Expr::In { field, set } => self.check_in(field, set),
+            Expr::In { field, set } => {
+                if let Some(ty) = scope.typed_param(&set.node) {
+                    let wanted: &[ParamType] = match resolve_field(field) {
+                        Ok(Field::Prefix) => &[ParamType::PrefixSet],
+                        Ok(
+                            Field::Communities | Field::LargeCommunities | Field::ExtCommunities,
+                        ) => &[ParamType::CommunitySet],
+                        Ok(Field::OriginAs | Field::PeerAsn) => &[ParamType::AsnSet],
+                        _ => &[],
+                    };
+                    if wanted.is_empty() {
+                        self.check_in(field, set);
+                    } else {
+                        self.check_set_param(set, ty, wanted);
+                    }
+                } else {
+                    self.check_in(field, set);
+                }
+            }
             // LAN-303: `<binding> in <set>` — u32 value against an
             // asn-set, or a community-set's standard members.
             Expr::IdentIn { ident, set } => {
                 self.check_value_ident(ident, scope);
-                if self.file.asn_sets.iter().any(|s| s.name.node == set.node)
+                if let Some(ty) = scope.typed_param(&set.node) {
+                    self.check_set_param(set, ty, &[ParamType::AsnSet, ParamType::CommunitySet]);
+                } else if self.file.asn_sets.iter().any(|s| s.name.node == set.node)
                     || self
                         .file
                         .community_sets
@@ -1557,6 +1843,33 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                 }
             }
+            Expr::HasParam { field, param } => match resolve_field(field) {
+                Err(diag) => self.diags.push(diag),
+                Ok(Field::Communities) => {
+                    if scope.typed_param(&param.node) != Some(ParamType::Community)
+                        && !self.typed_param_misused(param, scope, "a `community` parameter")
+                    {
+                        self.diags.push(Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            param.span,
+                            format!("unknown `community` parameter `{}`", param.node),
+                            "`has` takes a community literal or a `community` parameter",
+                        ));
+                    }
+                }
+                Ok(_) => self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        field.span.to(param.span),
+                        format!(
+                            "`{}` cannot be probed with a `community` parameter",
+                            field.render()
+                        ),
+                        "`community` parameters are standard communities",
+                    )
+                    .with_note("`has <parameter>` works on route.communities"),
+                ),
+            },
             // LAN-2790: a presence test for the optional values a
             // condition can see as missing (or as their default).
             Expr::Exists { field, span } => match resolve_field(field) {
@@ -1668,6 +1981,7 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                     return;
                 };
+                self.check_call_args(target, args, Some(scope));
                 if target.params.len() != args.len() {
                     self.diags.push(
                         Diagnostic::coded(
@@ -1753,9 +2067,6 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
-                for arg in args {
-                    self.check_u32_arg(arg, scope);
-                }
             }
         }
     }
@@ -1830,6 +2141,12 @@ impl<'a> Checker<'a> {
             Field::Family => {
                 eq_only(self);
                 self.expect_enum_rhs(field, rhs, FAMILY_MEMBERS, scope);
+            }
+            field
+                if takes_ip_param(field)
+                    && matches!(rhs, Rhs::Ident(name) if scope.typed_param(&name.node) == Some(ParamType::Ip)) =>
+            {
+                eq_only(self);
             }
             Field::NextHop => {
                 eq_only(self);
@@ -2016,6 +2333,7 @@ impl<'a> Checker<'a> {
         kind: CommunityKind,
         set: &Spanned<String>,
         negate: bool,
+        scope: &Scope<'_>,
     ) {
         let keyword = kind_keyword(kind);
         let form = if negate { "not in" } else { "in" };
@@ -2031,37 +2349,27 @@ impl<'a> Checker<'a> {
             );
             return;
         }
+        // A set parameter stands for its argument here, as in every other
+        // set position. Its members are known only at instantiation, so
+        // the member-kind notes below apply to named sets.
+        if let Some(ty) = scope.typed_param(&set.node) {
+            self.check_set_param(set, ty, &[ParamType::CommunitySet]);
+            return;
+        }
         if let Some(def) = self
             .file
             .community_sets
             .iter()
             .find(|s| s.name.node == set.node)
         {
-            // `ext-community not in` acts on route targets and route
-            // origins only, so its set needs one of those.
-            if negate
-                && kind == CommunityKind::Ext
-                && def
-                    .entries
-                    .iter()
-                    .any(|entry| member_kind(&entry.node) == kind)
-                && !def.entries.iter().any(|entry| names_rt_or_ro(&entry.node))
-            {
-                self.diags
-                    .push(ext_not_in_without_rt_ro(set, def.name.span));
-            } else if !def
-                .entries
-                .iter()
-                .any(|entry| member_kind(&entry.node) == kind)
-            {
-                let effect = if negate && kind == CommunityKind::Ext {
-                    "removes every arrived route target and route origin".to_string()
-                } else if negate {
-                    format!("removes every arrived {}", kind_describe(kind))
-                } else {
-                    "never removes anything".to_string()
-                };
-                let mut diag = Diagnostic::coded(
+            match removal_set_problem(def, kind, negate) {
+                None => {}
+                Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
+                    self.diags
+                        .push(ext_not_in_without_rt_ro(set, def.name.span));
+                }
+                Some(RemovalSetProblem::NoMembers { effect }) => {
+                    let mut diag = Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     set.span,
                     format!(
@@ -2073,14 +2381,15 @@ impl<'a> Checker<'a> {
                     format!("no {} member", kind_describe(kind)),
                 )
                 .with_label(def.name.span, format!("`{}` is defined here", set.node));
-                if negate {
-                    diag = diag.with_note(format!(
-                        "to strip every {}, write `{}`",
-                        kind_describe(kind),
-                        community_attribute(kind).remove_all_str()
-                    ));
+                    if negate {
+                        diag = diag.with_note(format!(
+                            "to strip every {}, write `{}`",
+                            kind_describe(kind),
+                            community_attribute(kind).remove_all_str()
+                        ));
+                    }
+                    self.diags.push(diag);
                 }
-                self.diags.push(diag);
             }
         } else if self.dataset_of(&set.node).is_some() {
             self.diags.push(
@@ -2492,7 +2801,12 @@ impl<'a> Checker<'a> {
                 }
             }
             for call in test.expects.iter().flat_map(|expect| &expect.calls) {
-                let Some(target) = self.policy(&call.policy.node) else {
+                let file = self.file;
+                let Some(target) = file
+                    .policies
+                    .iter()
+                    .find(|p| p.name.node == call.policy.node)
+                else {
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         call.policy.span,
@@ -2520,6 +2834,7 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                     continue;
                 };
+                self.check_call_args(target, &call.args, None);
                 if target.params.len() != call.args.len() {
                     self.diags.push(
                         Diagnostic::coded(
@@ -2788,6 +3103,247 @@ fn bound_policy<'a>(
     }
     pred_cost.insert(name, total.saturating_add(prior));
     None
+}
+
+/// How a policy uses its parameters where an argument has a range: as a
+/// `prepend` count (1–255), a `prepend` ASN (not 0, RFC 7607), a `set
+/// next-hop` operand (a usable unicast address), or the set of `remove
+/// <kind> in` / `not in` (a community-set, not a dataset). A parameter
+/// passed on through `apply(q(...))` inherits the uses of `q`'s parameter,
+/// so an argument is checked against every place its value reaches.
+#[derive(Clone, Default)]
+pub(super) struct ValueUses<'a> {
+    counts: Vec<&'a str>,
+    prepend_asns: Vec<&'a str>,
+    next_hops: Vec<&'a str>,
+    /// Each removal by membership a parameter names: the parameter, the
+    /// community kind and whether it is `not in`.
+    removal_sets: Vec<(&'a str, CommunityKind, bool)>,
+}
+
+impl<'a> ValueUses<'a> {
+    /// The parameter uses of one action.
+    fn record(&mut self, action: &'a ActionStmt) {
+        match action {
+            ActionStmt::Prepend { asn, count, .. } => {
+                if let U32Arg::Param(name) = count {
+                    self.counts.push(&name.node);
+                }
+                if asn.operand().is_none()
+                    && let PrependAsArg::Value(U32Arg::Param(name)) = asn
+                {
+                    self.prepend_asns.push(&name.node);
+                }
+            }
+            ActionStmt::SetNextHop(NextHopArg::Param(name), _) => self.next_hops.push(&name.node),
+            ActionStmt::Community {
+                kind,
+                arg: CommunityArg::InSet { set, negate },
+                ..
+            } => self.removal_sets.push((&set.node, *kind, *negate)),
+            _ => {}
+        }
+    }
+}
+
+/// The [`ValueUses`] of `def`'s parameters, following `apply` arguments.
+/// Each policy is analysed once; a policy met again on its own path (a
+/// cycle) contributes nothing, and the walk stops past
+/// [`MAX_APPLY_DEPTH`]. Both are rejected on their own, and in a file
+/// that passes those checks neither cut is ever taken. The cut keeps
+/// the recursion within the depth limit, since this runs before the
+/// composition checks.
+pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> ValueUses<'a> {
+    fn exprs<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match expr {
+            Expr::And(lhs, rhs) | Expr::Or(lhs, rhs) => {
+                exprs(lhs, out);
+                exprs(rhs, out);
+            }
+            Expr::Not(inner, _) => exprs(inner, out),
+            Expr::Apply { .. } => out.push(expr),
+            _ => {}
+        }
+    }
+    fn walk<'a>(stmts: &'a [Stmt], actions: &mut Vec<&'a ActionStmt>, applies: &mut Vec<&'a Expr>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Action(action) => actions.push(action),
+                Stmt::If(if_stmt) => {
+                    for branch in &if_stmt.branches {
+                        exprs(&branch.cond, applies);
+                    }
+                    for body in if_stmt.bodies() {
+                        walk(body, actions, applies);
+                    }
+                }
+                Stmt::For(for_stmt) => walk(&for_stmt.body, actions, applies),
+            }
+        }
+    }
+    fn uses<'a>(
+        file: &'a SourceFile,
+        def: &'a PolicyDef,
+        depth: u32,
+        memo: &mut HashMap<&'a str, Option<ValueUses<'a>>>,
+    ) -> ValueUses<'a> {
+        if depth > MAX_APPLY_DEPTH {
+            return ValueUses::default();
+        }
+        match memo.get(def.name.node.as_str()) {
+            Some(Some(done)) => return done.clone(),
+            Some(None) => return ValueUses::default(),
+            None => {}
+        }
+        memo.insert(&def.name.node, None);
+        let mut actions = Vec::new();
+        let mut applies = Vec::new();
+        for term in &def.terms {
+            walk(&term.stmts, &mut actions, &mut applies);
+        }
+        let mut out = ValueUses::default();
+        for action in actions {
+            out.record(action);
+        }
+        for apply in applies {
+            let Expr::Apply { policy, args, .. } = apply else {
+                continue;
+            };
+            let Some(callee) = file.policies.iter().find(|p| p.name.node == policy.node) else {
+                continue;
+            };
+            let inner = uses(file, callee, depth + 1, memo);
+            for (arg, param) in args.iter().zip(&callee.params) {
+                let CallArg::Name(name) = &arg.node else {
+                    continue;
+                };
+                let Some(own) = def.params.iter().find(|p| p.node == *name) else {
+                    continue;
+                };
+                let own = own.node.as_str();
+                let param = param.node.as_str();
+                for (theirs, ours) in [
+                    (&inner.counts, &mut out.counts),
+                    (&inner.prepend_asns, &mut out.prepend_asns),
+                    (&inner.next_hops, &mut out.next_hops),
+                ] {
+                    if theirs.contains(&param) && !ours.contains(&own) {
+                        ours.push(own);
+                    }
+                }
+                for &(theirs, kind, negate) in &inner.removal_sets {
+                    if theirs == param && !out.removal_sets.contains(&(own, kind, negate)) {
+                        out.removal_sets.push((own, kind, negate));
+                    }
+                }
+            }
+        }
+        memo.insert(&def.name.node, Some(out.clone()));
+        out
+    }
+    uses(file, def, 0, &mut HashMap::new())
+}
+
+/// One literal argument against the callee's parameter at `index`: its
+/// type, an existing set or dataset of the parameter's kind, and the
+/// value range of a parameter used as a `prepend` count or `set next-hop`
+/// operand. The same check runs for a test `expect`, an `apply`, and a
+/// configured chain reference.
+pub(super) fn check_call_arg(
+    file: &SourceFile,
+    def: &PolicyDef,
+    index: usize,
+    arg: &CallArg,
+) -> Result<(), String> {
+    let ty = def.param_types[index];
+    let param = def.params[index].node.as_str();
+    let uses = param_value_uses(file, def);
+    match (ty, arg) {
+        (ParamType::U32, CallArg::Int(value)) => {
+            if uses.counts.contains(&param) && !(1..=255).contains(value) {
+                return Err(format!(
+                    "prepend count {value} out of range for parameter `{param}` (must be 1-255)"
+                ));
+            }
+            if uses.prepend_asns.contains(&param) && *value == 0 {
+                return Err(format!(
+                    "AS 0 cannot be prepended (RFC 7607) for parameter `{param}`"
+                ));
+            }
+            Ok(())
+        }
+        (ParamType::Community, CallArg::Community(_)) => Ok(()),
+        (ParamType::Ip, CallArg::Ip(addr)) => {
+            if uses.next_hops.contains(&param)
+                && let Err(why) = crate::engine::NextHopAction::check_specific(*addr)
+            {
+                return Err(format!(
+                    "invalid next hop {addr} for parameter `{param}`: {why}"
+                ));
+            }
+            Ok(())
+        }
+        (
+            ParamType::PrefixSet | ParamType::CommunitySet | ParamType::AsnSet,
+            CallArg::Name(name),
+        ) => {
+            let kind = ty.set_kind().expect("a set type");
+            let declared = match ty {
+                ParamType::PrefixSet => file.prefix_sets.iter().any(|s| s.name.node == *name),
+                ParamType::CommunitySet => file.community_sets.iter().any(|s| s.name.node == *name),
+                _ => file.asn_sets.iter().any(|s| s.name.node == *name),
+            } || file
+                .datasets
+                .iter()
+                .any(|d| d.name.node == *name && d.kind == kind);
+            let removals = uses
+                .removal_sets
+                .iter()
+                .filter(|(used, _, _)| *used == param);
+            let community_set = file.community_sets.iter().find(|s| s.name.node == *name);
+            if declared {
+                for &(_, kind, negate) in removals {
+                    let Some(def) = community_set else {
+                        return Err(format!(
+                            "`{name}` is a dataset, but parameter `{param}` is the set of a \
+                             `remove ... in` action, which takes a community-set"
+                        ));
+                    };
+                    let form = if negate { "not in" } else { "in" };
+                    let action = format!("`remove {} {form} {param}`", kind_keyword(kind));
+                    match removal_set_problem(def, kind, negate) {
+                        None => {}
+                        Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
+                            return Err(format!(
+                                "community-set `{name}` has no route-target or route-origin \
+                                 members, so {action} removes every route target and route origin"
+                            ));
+                        }
+                        Some(RemovalSetProblem::NoMembers { effect }) => {
+                            return Err(format!(
+                                "community-set `{name}` has no {} members, so {action} {effect}",
+                                kind_describe(kind)
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            } else {
+                Err(format!(
+                    "unknown {} `{name}` for parameter `{param}` (name {} {} or {} {kind} dataset)",
+                    ty.keyword(),
+                    ty.article(),
+                    ty.keyword(),
+                    ty.article()
+                ))
+            }
+        }
+        _ => Err(format!(
+            "argument `{arg}` is not {} {} (parameter `{param}`)",
+            ty.article(),
+            ty.keyword()
+        )),
+    }
 }
 
 /// Upper bound on the IR nodes `expr` lowers to, given the predicate
@@ -3294,41 +3850,49 @@ fn collect_applies<'a>(expr: &'a Expr, out: &mut Vec<(&'a str, Span)>) {
     }
 }
 
-/// DFS cycle detection over the `apply` graph. `path` is the current
-/// DFS stack; returns the cycle (closed: `a -> b -> a`) and the span of
-/// the closing edge.
+/// DFS cycle detection over the `apply` (or function call) graph, with
+/// an explicit stack: an acyclic chain of any length cannot exhaust the
+/// thread stack before the depth checks reject it. `path` is the current
+/// DFS path; returns the cycle (closed: `a -> b -> a`) and the span of
+/// the closing edge. Every node the walk leaves, including on a cycle, is
+/// recorded in `done`.
 fn find_cycle<'a>(
-    node: &'a str,
+    start: &'a str,
     edges: &HashMap<&'a str, Vec<(&'a str, Span)>>,
     path: &mut Vec<&'a str>,
     done: &mut HashSet<&'a str>,
 ) -> Option<(Vec<String>, Span)> {
-    if let Some(position) = path.iter().position(|&seen| seen == node) {
-        let mut cycle: Vec<String> = path[position..].iter().map(ToString::to_string).collect();
-        cycle.push(node.to_string());
-        // The span is filled in by the caller (the closing edge).
-        return Some((cycle, Span::new(0..0)));
-    }
-    if done.contains(node) {
+    if done.contains(start) {
         return None;
     }
-    path.push(node);
-    if let Some(targets) = edges.get(node) {
-        for &(target, span) in targets {
-            if let Some((cycle, cycle_span)) = find_cycle(target, edges, path, done) {
+    // Each frame is a node on the path and the index of its next edge.
+    let mut stack: Vec<(&'a str, usize)> = vec![(start, 0)];
+    path.push(start);
+    while let Some(&(node, next)) = stack.last() {
+        let targets = edges.get(node).map_or(&[][..], Vec::as_slice);
+        let Some(&(target, span)) = targets.get(next) else {
+            stack.pop();
+            path.pop();
+            done.insert(node);
+            continue;
+        };
+        if let Some(frame) = stack.last_mut() {
+            frame.1 += 1;
+        }
+        if let Some(position) = path.iter().position(|&seen| seen == target) {
+            let mut cycle: Vec<String> = path[position..].iter().map(ToString::to_string).collect();
+            cycle.push(target.to_string());
+            for (left, _) in stack.drain(..).rev() {
                 path.pop();
-                done.insert(node);
-                let span = if cycle_span == Span::new(0..0) {
-                    span
-                } else {
-                    cycle_span
-                };
-                return Some((cycle, span));
+                done.insert(left);
             }
+            return Some((cycle, span));
+        }
+        if !done.contains(target) {
+            stack.push((target, 0));
+            path.push(target);
         }
     }
-    path.pop();
-    done.insert(node);
     None
 }
 
@@ -3415,6 +3979,49 @@ fn ext_not_in_without_rt_ro(set: &Spanned<String>, def_span: Span) -> Diagnostic
         "`ext-community not in` considers only route targets and route origins; \
          other extended communities are never removed by it",
     )
+}
+
+/// Why a community-set cannot be the set of `remove <kind> in` / `not in`.
+enum RemovalSetProblem {
+    /// `ext-community not in` with extended members but no route target or
+    /// route origin: it would remove every arrived RT and RO.
+    NoRouteTargetOrOrigin,
+    /// No member of the action's kind; `effect` says what the action
+    /// would do instead.
+    NoMembers { effect: String },
+}
+
+/// The member check for a removal set, shared by a named set and a set
+/// reached through a parameter, so both are held to the same rules.
+fn removal_set_problem(
+    def: &super::ast::CommunitySetDef,
+    kind: CommunityKind,
+    negate: bool,
+) -> Option<RemovalSetProblem> {
+    let has_kind = def
+        .entries
+        .iter()
+        .any(|entry| member_kind(&entry.node) == kind);
+    // `ext-community not in` acts on route targets and route origins only,
+    // so its set needs one of those.
+    if negate
+        && kind == CommunityKind::Ext
+        && has_kind
+        && !def.entries.iter().any(|entry| names_rt_or_ro(&entry.node))
+    {
+        return Some(RemovalSetProblem::NoRouteTargetOrOrigin);
+    }
+    if has_kind {
+        return None;
+    }
+    let effect = if negate && kind == CommunityKind::Ext {
+        "removes every arrived route target and route origin".to_string()
+    } else if negate {
+        format!("removes every arrived {}", kind_describe(kind))
+    } else {
+        "never removes anything".to_string()
+    };
+    Some(RemovalSetProblem::NoMembers { effect })
 }
 
 /// Whether a set member names a route target or route origin.

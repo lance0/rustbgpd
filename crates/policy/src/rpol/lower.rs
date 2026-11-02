@@ -67,10 +67,10 @@ use crate::ir::{
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, IfStmt, NextHopArg,
-    PolicyDef, PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CallArg, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, IfStmt,
+    NextHopArg, ParamType, PolicyDef, PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
-use super::diag::{Diagnostic, DiagnosticCode};
+use super::diag::{Diagnostic, DiagnosticCode, Spanned};
 use super::typeck::{Field, community_attribute, resolve_field, value_field_of};
 
 /// Static slot allocation for `let` bindings (LAN-302/LAN-303): one
@@ -251,6 +251,10 @@ pub(super) struct Lowerer<'a> {
     dataset_ids: HashMap<String, DatasetId>,
     bindings: DatasetBindings,
     missing_datasets: Vec<String>,
+    /// The non-`u32` arguments of each policy being lowered, with their
+    /// parameter types, innermost last (`apply` lowers its target inside
+    /// its caller). `u32` arguments ride the `env` map instead.
+    typed_frames: Vec<HashMap<String, (PolicyArg, ParamType)>>,
 }
 
 /// The interned set data of one source file: every defined
@@ -322,6 +326,33 @@ impl SetTables {
     }
 }
 
+/// One instantiation argument of a parameterized policy, after its type
+/// check: a policy lowers once per distinct argument list, so every
+/// argument is a compile-time constant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PolicyArg {
+    /// A `u32` value.
+    U32(u32),
+    /// A standard community, as its RFC 1997 value.
+    Community(u32),
+    /// The name of a set or dataset, for a set-typed parameter.
+    Set(String),
+    /// An address, for an `ip` parameter.
+    Ip(std::net::IpAddr),
+}
+
+impl PolicyArg {
+    /// A literal call argument, typechecked against its parameter.
+    pub(super) fn from_literal(arg: &CallArg) -> Self {
+        match arg {
+            CallArg::Int(value) => Self::U32(*value),
+            CallArg::Community(value) => Self::Community(*value),
+            CallArg::Ip(addr) => Self::Ip(*addr),
+            CallArg::Name(set) => Self::Set(set.clone()),
+        }
+    }
+}
+
 impl<'a> Lowerer<'a> {
     /// Build the chain tables over `file`, interning its sets through
     /// the caller-owned store.
@@ -355,6 +386,7 @@ impl<'a> Lowerer<'a> {
             dataset_ids: HashMap::new(),
             bindings: DatasetBindings::new(),
             missing_datasets: Vec::new(),
+            typed_frames: Vec::new(),
         };
         for (index, def) in file.prefix_sets.iter().enumerate() {
             let id = SetId(u32::try_from(index).expect("fits u32"));
@@ -498,7 +530,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn instantiate_chain(
         &mut self,
         name: &str,
-        args: &[u32],
+        args: &[PolicyArg],
         store: &mut SetStore,
         bindings: &DatasetBindings,
     ) -> CompiledChain {
@@ -527,7 +559,7 @@ impl<'a> Lowerer<'a> {
     pub(super) fn instantiate_member(
         &mut self,
         name: &str,
-        args: &[u32],
+        args: &[PolicyArg],
         store: &mut SetStore,
         bindings: &DatasetBindings,
     ) -> CompiledChain {
@@ -561,7 +593,7 @@ impl<'a> Lowerer<'a> {
     fn lower_named(
         &mut self,
         name: &str,
-        args: &[u32],
+        args: &[PolicyArg],
         store: &mut SetStore,
         bindings: &DatasetBindings,
     ) -> CompiledPolicy {
@@ -578,19 +610,40 @@ impl<'a> Lowerer<'a> {
     fn lower_policy(
         &mut self,
         def: &PolicyDef,
-        args: &[u32],
+        args: &[PolicyArg],
         store: &mut SetStore,
     ) -> CompiledPolicy {
         debug_assert_eq!(def.params.len(), args.len(), "typechecked arity");
-        let env: HashMap<&str, u32> = def
-            .params
-            .iter()
-            .map(|p| p.node.as_str())
-            .zip(args.iter().copied())
-            .collect();
+        // `env` holds the `u32` parameters only; every other argument is
+        // resolved through the typed frame, at the positions the
+        // typechecker resolved to a parameter of that type.
+        let mut env: HashMap<&str, u32> = HashMap::new();
+        let mut frame = HashMap::new();
+        for ((param, arg), ty) in def.params.iter().zip(args).zip(&def.param_types) {
+            match arg {
+                PolicyArg::U32(value) => {
+                    env.insert(param.node.as_str(), *value);
+                }
+                typed => {
+                    frame.insert(param.node.clone(), (typed.clone(), *ty));
+                }
+            }
+        }
+        self.typed_frames.push(frame);
+        let policy = self.lower_policy_body(def, &env, store);
+        self.typed_frames.pop();
+        policy
+    }
+
+    fn lower_policy_body(
+        &mut self,
+        def: &PolicyDef,
+        env: &HashMap<&str, u32>,
+        store: &mut SetStore,
+    ) -> CompiledPolicy {
         let mut terms = Vec::new();
         for term_def in &def.terms {
-            let lowered = self.lower_term(term_def, &env, store);
+            let lowered = self.lower_term(term_def, env, store);
             let multi = lowered.len() > 1;
             for (index, (guard, action)) in lowered.into_iter().enumerate() {
                 let name = if multi {
@@ -730,10 +783,7 @@ impl<'a> Lowerer<'a> {
                     ..
                 }) => {
                     flush_pending(&mut out, &mut pending);
-                    out.push((
-                        MatchExpr::True,
-                        self.remove_in_set(*kind, &set.node, *negate),
-                    ));
+                    out.push((MatchExpr::True, self.remove_in_set(*kind, set, *negate)));
                 }
                 Stmt::Action(ActionStmt::Community {
                     kind,
@@ -1024,7 +1074,18 @@ impl<'a> Lowerer<'a> {
             Expr::Not(inner, _) => {
                 MatchExpr::Not(Box::new(self.lower_expr(inner, env, lets, store, binds)))
             }
-            Expr::Cmp { field, op, rhs, .. } => lower_cmp(field, *op, rhs, env, lets),
+            Expr::Cmp { field, op, rhs, .. } => {
+                // An `ip` parameter resolves only where the typechecker
+                // resolves one: against an address field. Elsewhere the
+                // name is an enum member or a `u32` parameter.
+                if let Rhs::Ident(name) = rhs
+                    && resolve_field(field).is_ok_and(super::typeck::takes_ip_param)
+                    && let Some(PolicyArg::Ip(addr)) = self.bound(&name.node)
+                {
+                    return lower_cmp(field, *op, &Rhs::Ip(*addr, name.span), env, lets);
+                }
+                lower_cmp(field, *op, rhs, env, lets)
+            }
             // LAN-299: value comparisons keep their shape (constant
             // subtrees folded) even when one side folds to a constant.
             // Since LAN-2790 a missing operand makes both shapes false,
@@ -1041,6 +1102,7 @@ impl<'a> Lowerer<'a> {
                 rhs: self.lower_value(rhs, &Names::Policy(env), lets, binds),
             })),
             Expr::In { field, set } => {
+                let set = &self.bound_set(set);
                 // LAN-305: a dataset reference lowers to a pinned
                 // runtime probe — content is external and never folds.
                 if self.file.datasets.iter().any(|d| d.name.node == set.node) {
@@ -1069,6 +1131,9 @@ impl<'a> Lowerer<'a> {
             // probe folds to its truth value here (True / empty-Or =
             // never matches).
             Expr::IdentIn { ident, set } => {
+                let bound = &self.bound_set(set);
+                let asn_set = self.probes_asn_set(set, bound);
+                let set = bound;
                 // LAN-305: `<binding|param> in <dataset>` stays a
                 // runtime probe either way — dataset content swaps at
                 // runtime, so even a parameter probe cannot fold.
@@ -1097,11 +1162,11 @@ impl<'a> Lowerer<'a> {
                     };
                 }
                 if let Some(slot) = lets.lookup(&ident.node) {
-                    if let Some(&id) = self.asn_set_ids.get(&set.node) {
+                    if asn_set {
                         MatchExpr::LocalInAsnSet {
                             slot,
                             name: ident.node.clone().into_boxed_str(),
-                            set: id,
+                            set: self.asn_set_ids[&set.node],
                         }
                     } else {
                         MatchExpr::LocalInCommunitySet {
@@ -1114,7 +1179,8 @@ impl<'a> Lowerer<'a> {
                     let value = *env
                         .get(ident.node.as_str())
                         .expect("typechecked: parameter in scope");
-                    let matched = if let Some(&id) = self.asn_set_ids.get(&set.node) {
+                    let matched = if asn_set {
+                        let id = self.asn_set_ids[&set.node];
                         self.asn_sets[id.0 as usize].contains(value)
                     } else {
                         let id = self.community_set_ids[&set.node];
@@ -1128,6 +1194,9 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Expr::Has { lit, .. } => MatchExpr::CommunityContains(lit.node.to_match()),
+            Expr::HasParam { param, .. } => MatchExpr::CommunityContains(
+                CommunityLit::Standard(self.community(param, env)).to_match(),
+            ),
             Expr::Exists { field, .. } => MatchExpr::Exists(
                 resolve_field(field)
                     .ok()
@@ -1147,7 +1216,23 @@ impl<'a> Lowerer<'a> {
                 // inlined predicate no larger than MAX_APPLY_EXPANSION
                 // nodes, so this cannot overflow or explode (lowering
                 // only ever sees typechecked ASTs).
-                let args: Vec<u32> = args.iter().map(|arg| resolve_u32(arg, env)).collect();
+                // A name is the caller's own parameter (passed through
+                // with its bound value) or a set, as the typechecker
+                // resolved it.
+                let args: Vec<PolicyArg> = args
+                    .iter()
+                    .map(|arg| match &arg.node {
+                        CallArg::Name(name) => env.get(name.as_str()).map_or_else(
+                            || {
+                                self.bound(name)
+                                    .cloned()
+                                    .unwrap_or_else(|| PolicyArg::Set(name.clone()))
+                            },
+                            |value| PolicyArg::U32(*value),
+                        ),
+                        literal => PolicyArg::from_literal(literal),
+                    })
+                    .collect();
                 let def = self
                     .file
                     .policies
@@ -1157,6 +1242,61 @@ impl<'a> Lowerer<'a> {
                 let inlined = self.lower_policy(def, &args, store);
                 accept_predicate(&inlined)
             }
+        }
+    }
+
+    /// The set or address argument bound to parameter `name` in the policy
+    /// being lowered, if any.
+    fn bound(&self, name: &str) -> Option<&PolicyArg> {
+        self.typed_frames
+            .last()
+            .and_then(|frame| frame.get(name))
+            .map(|(arg, _)| arg)
+    }
+
+    /// Whether a `<value> in <set>` probe reads an asn-set: a set
+    /// parameter's declared kind decides, never a second lookup by the
+    /// bound name, which an asn-set and a community-set can share.
+    fn probes_asn_set(&self, set: &Spanned<String>, bound: &Spanned<String>) -> bool {
+        match self
+            .typed_frames
+            .last()
+            .and_then(|frame| frame.get(&set.node))
+        {
+            Some((_, ty)) => *ty == ParamType::AsnSet,
+            None => self.asn_set_ids.contains_key(&bound.node),
+        }
+    }
+
+    /// The community a parameter `name` stands for in a community
+    /// position: a `u32` parameter's value, or a `community` argument.
+    fn community(&self, name: &Spanned<String>, env: &HashMap<&str, u32>) -> u32 {
+        if let Some(value) = env.get(name.node.as_str()) {
+            return *value;
+        }
+        match self.bound(&name.node) {
+            Some(PolicyArg::Community(value)) => *value,
+            _ => unreachable!("typechecked: `u32` or `community` parameter in scope"),
+        }
+    }
+
+    /// A `set next-hop` operand, with an `ip` parameter resolved.
+    fn next_hop_action(&self, arg: &NextHopArg) -> NextHopAction {
+        match arg {
+            NextHopArg::Self_(_) => NextHopAction::Self_,
+            NextHopArg::Addr(addr, _) => NextHopAction::Specific(*addr),
+            NextHopArg::Param(name) => match self.bound(&name.node) {
+                Some(PolicyArg::Ip(addr)) => NextHopAction::Specific(*addr),
+                _ => unreachable!("typechecked: `ip` parameter in scope"),
+            },
+        }
+    }
+
+    /// `set` itself, or the set its set-typed parameter is bound to.
+    fn bound_set(&self, set: &Spanned<String>) -> Spanned<String> {
+        match self.bound(&set.node) {
+            Some(PolicyArg::Set(name)) => Spanned::new(name.clone(), set.span),
+            _ => set.clone(),
         }
     }
 
@@ -1512,7 +1652,7 @@ impl Lowerer<'_> {
                     ..
                 } => {
                     flush(&mut tail, &mut mods);
-                    tail.push(self.remove_in_set(*kind, &set.node, *negate));
+                    tail.push(self.remove_in_set(*kind, set, *negate));
                 }
                 ActionStmt::Community {
                     kind,
@@ -1556,10 +1696,6 @@ impl Lowerer<'_> {
     /// (LAN-304); the caller emits them ahead of the term that carries
     /// the staged modifications, so the computed expression's `Local`
     /// reads always follow their writes in walk order.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one arm per action kind; splitting would scatter the staging rules"
-    )]
     fn apply_action(
         &self,
         mods: &mut RouteModifications,
@@ -1598,10 +1734,7 @@ impl Lowerer<'_> {
                 }
             }
             ActionStmt::SetNextHop(arg, _) => {
-                mods.set_next_hop = Some(match arg {
-                    NextHopArg::Self_(_) => NextHopAction::Self_,
-                    NextHopArg::Addr(addr, _) => NextHopAction::Specific(*addr),
-                });
+                mods.set_next_hop = Some(self.next_hop_action(arg));
             }
             // LAN-303: a parameter-valued community reference is a
             // compile-time constant — it stages as a literal, exactly like
@@ -1620,9 +1753,7 @@ impl Lowerer<'_> {
                 arg: CommunityArg::Var(name),
                 ..
             } => {
-                let value = *env
-                    .get(name.node.as_str())
-                    .expect("typechecked: non-binding community var is a parameter");
+                let value = self.community(name, env);
                 if *add {
                     mods.communities_add.push(value);
                 } else {
@@ -1673,14 +1804,22 @@ impl Lowerer<'_> {
                 }
             },
             ActionStmt::Prepend { asn, count, .. } => {
+                // A literal is range-checked at typecheck. A parameter's
+                // argument is checked where the policy is instantiated,
+                // against every use it reaches through `apply` arguments
+                // (`typeck::param_value_uses`), on every instantiation path:
+                // a test `expect`, `apply`, a configured chain and the
+                // `&[u32]` compile APIs.
                 let count = u8::try_from(resolve_u32(count, env))
-                    .expect("typechecked: count is a 1-255 literal");
+                    .ok()
+                    .filter(|count| *count != 0)
+                    .expect("checked at typecheck or instantiation: prepend count is 1-255");
                 // LAN-296: computed operands lower to the staged
                 // `as_path_prepend_computed` slot (resolved per route by
                 // the evaluator); the literal/parameter form keeps its
                 // existing lowering. The operand decision is shared with
                 // the typechecker (`PrependAsArg::operand`).
-                if let Some(operand) = asn.operand(|name| env.contains_key(name)) {
+                if let Some(operand) = asn.operand() {
                     mods.as_path_prepend_computed = Some((operand, count));
                 } else {
                     let PrependAsArg::Value(arg) = asn else {
@@ -1699,12 +1838,12 @@ impl<'a> Lowerer<'a> {
     fn remove_in_set(
         &self,
         kind: super::ast::CommunityKind,
-        set: &str,
+        set: &Spanned<String>,
         negate: bool,
     ) -> TermAction {
         TermAction::RemoveCommunitiesInSet {
             attribute: community_attribute(kind),
-            set: self.community_set_ids[set],
+            set: self.community_set_ids[&self.bound_set(set).node],
             negate,
         }
     }

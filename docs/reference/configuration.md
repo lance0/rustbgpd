@@ -3828,17 +3828,23 @@ rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
   policies share the named-policy namespace. A name defined by both —
   or by two `.rpol` files — is a load error naming both sources.
 - **Chain references:** chains mix TOML and `.rpol` policies freely.
-  Parameterized `.rpol` policies are referenced in call-form with
-  `u32` arguments, monomorphized at load:
+  Parameterized `.rpol` policies are referenced in call-form, monomorphized
+  at load. An argument is an integer, a standard community (`65000:100`),
+  an IP address, or the name of a set or dataset for a set-typed
+  parameter
+  ([parameter types](rpol-language.md#parameters)):
 
 ```toml
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
-import_policy_chain = ["customer-in(200)", "bogon-filter", "toml-defined"]
+import_policy_chain = ["customer-in(200, cust-65001)", "bogon-filter", "toml-defined"]
 ```
 
-  Unknown names, wrong arity, and non-`u32` arguments are load errors.
+  Unknown names, wrong arity, an argument of the wrong type, a set
+  argument that names no set or dataset of the parameter's kind, and an
+  out-of-range `prepend` count or unusable `set next-hop` address are load
+  errors.
 - **Reload:** editing a referenced `.rpol` file and sending SIGHUP
   recompiles it and hot-applies the changed chains to exactly the
   peers whose resolved policy actually changed (Route Refresh fires

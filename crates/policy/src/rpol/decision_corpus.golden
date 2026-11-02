@@ -1,27 +1,28 @@
-# rpol decision corpus: 262 programs, 1643 cases. Regenerate with
+# rpol decision corpus: 263 programs, 1645 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
-ast.policy.parameters 27
-ast.stmt.if 506
+ast.policy.parameters 29
+ast.stmt.if 507
 ast.stmt.else-if 18
 ast.stmt.else 27
 ast.stmt.nested-if 13
 ast.stmt.for 75
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1134
-ast.action.reject 381
+ast.action.accept 1135
+ast.action.reject 382
 ast.action.set-local-pref 117
 ast.action.set-med 186
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
+ast.action.set-next-hop-parameter 1
 ast.action.community-literal 511
 ast.action.large-community-admin-wildcard 11
 ast.action.community-all 46
 ast.action.community-binding 43
-ast.action.community-in-set 22
+ast.action.community-in-set 23
 ast.action.community-not-in-set 22
 ast.action.prepend 54
 ast.action.let 63
@@ -34,6 +35,7 @@ ast.expr.cmp 220
 ast.expr.in 107
 ast.expr.ident-in 42
 ast.expr.has 4
+ast.expr.has-parameter 1
 ast.expr.exists 4
 ast.expr.matches 37
 ast.expr.contains 5
@@ -44,11 +46,11 @@ ast.value.identifier 106
 ast.value.field 148
 ast.value.arithmetic 128
 ast.value.call 72
-ir.guard.true 1178
+ir.guard.true 1179
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
-ir.guard.community-contains 24
+ir.guard.community-contains 26
 ir.guard.community-in-set 53
 ir.guard.as-path-matches 148
 ir.guard.as-path-len 77
@@ -87,8 +89,8 @@ ir.value.binary 171
 ir.value.min 50
 ir.value.max 21
 ir.value.clamp 9
-ir.action.permit 1113
-ir.action.deny 342
+ir.action.permit 1114
+ir.action.deny 343
 ir.action.continue 167
 ir.action.bind 84
 ir.action.for-each 75
@@ -97,12 +99,12 @@ ir.action.continue-loop 22
 ir.action.community-var 43
 ir.action.remove-large-community-admin 11
 ir.action.remove-all-communities 46
-ir.action.remove-communities-in-set 22
+ir.action.remove-communities-in-set 23
 ir.mod.set-local-pref 99
 ir.mod.set-local-pref-computed 18
 ir.mod.set-med 68
 ir.mod.set-med-computed 99
-ir.mod.set-next-hop 12
+ir.mod.set-next-hop 13
 ir.mod.prepend 43
 ir.mod.prepend-computed 11
 ir.mod.community-add 437
@@ -124,12 +126,14 @@ crates/policy/fuzz/seeds/rpol_compile/lan-303-loop-errors.rpol: does not compile
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-errors.rpol: does not compile (a deliberate error, or datasets bound by config)
 crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol: policy customer-in takes parameters (in-language tests only)
 crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol: policy customer-in takes parameters (in-language tests only)
+crates/policy/tests/decision_corpus/actions.rpol: policy tag-forward takes parameters (in-language tests only)
 docs/adr/0096-policy-language.md#3a31b83af85b070c: does not compile (a deliberate error, or datasets bound by config)
 docs/cookbook/policy-quickstart.md#a3fd935127a98e08: policy customer-in takes parameters (in-language tests only)
 docs/reference/rpol-language.md#9ea347e0d0bb861e: policy customer-in takes parameters (in-language tests only)
 docs/reference/rpol-language.md#985d439acbd4360b: does not compile (a deliberate error, or datasets bound by config)
 docs/reference/rpol-language.md#5385c4f5957c146c: policy origin-guard probes a dataset (in-language tests only)
 docs/reference/rpol-language.md#26d7d85f21d694a7: does not compile (a deliberate error, or datasets bound by config)
+docs/reference/rpol-language.md#4bda8464c1fc633c: policy customer-in takes parameters (in-language tests only)
 docs/reference/rpol-language.md#cb11ac47ba6f8d9c: does not compile (a deliberate error, or datasets bound by config)
 docs/reference/rpol-language.md#8e408bb0eee6c054: does not compile (a deliberate error, or datasets bound by config)
 docs/reference/rpol-language.md#6f490d60b6a2b6b8: does not compile (a deliberate error, or datasets bound by config)
@@ -522,6 +526,8 @@ crates/policy/tests/decision_corpus/actions.rpol | test next-hop-address | next-
 crates/policy/tests/decision_corpus/actions.rpol | test prepend-peer | computed-prepend => permit with prepend as 64500 2
 crates/policy/tests/decision_corpus/actions.rpol | test tag-and-scrub | tag-and-scrub => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
 crates/policy/tests/decision_corpus/actions.rpol | test scrub-by-set | scrub-by-set => permit with remove large-community 65000:1:1; remove ext-community RT:64496:1 (0x0002fbf000000001)
+crates/policy/tests/decision_corpus/actions.rpol | test tag-forward-hit | tag-forward(65000:7, 192.0.2.9, scrub-tags) => permit with set next-hop 192.0.2.9; remove community 65000:666
+crates/policy/tests/decision_corpus/actions.rpol | test tag-forward-miss | tag-forward(65000:7, 192.0.2.9, scrub-tags) => deny
 crates/policy/tests/decision_corpus/actions.rpol | branches | m01-v4-transit => permit with set med 3
 crates/policy/tests/decision_corpus/actions.rpol | branches | m02-v4-invalid-long => permit with set med 2
 crates/policy/tests/decision_corpus/actions.rpol | branches | m03-v6-tagged => permit with set med 3

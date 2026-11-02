@@ -550,7 +550,7 @@ mod tests {
         assert_eq!(file.modules()[0].imports, vec![1]);
         assert_eq!(file.modules()[1].imports, vec![2]);
         let mut store = SetStore::new();
-        assert!(file.compile_policy("edge-in", &[], &mut store).is_some());
+        assert!(file.compile_policy("edge-in", &[], &mut store).is_ok());
     }
 
     #[test]
@@ -696,8 +696,8 @@ mod tests {
         let file = load(dir.path(), "main.rpol").expect("diamond loads");
         assert_eq!(file.modules().len(), 4, "d.rpol loads once");
         let mut store = SetStore::new();
-        assert!(file.compile_policy("from-b", &[], &mut store).is_some());
-        assert!(file.compile_policy("from-c", &[], &mut store).is_some());
+        assert!(file.compile_policy("from-b", &[], &mut store).is_ok());
+        assert!(file.compile_policy("from-c", &[], &mut store).is_ok());
     }
 
     #[test]

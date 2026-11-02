@@ -540,14 +540,59 @@ to one or more IR terms:
 
 ### Parameters
 
-Parameters are `u32` only in V1 and can appear anywhere a u32 is
-expected (`set local-pref peer_lp`, `route.local-pref >= peer_lp`,
-`apply(p(peer_lp))`, `route.as-path contains asn_param`). A
-parameterized policy is a **template**: each use site with concrete
+A parameterized policy is a **template**: each use site with concrete
 arguments is monomorphized at compile time (clone-with-substitution;
 policies are small, this is microseconds). The evaluator only ever
-sees constants. The `prepend` count must be a literal (1–255, it is
-wire-encoded as u8).
+sees constants and interned sets, so a parameter costs nothing per
+route.
+
+```rpol
+policy customer-in(lp: u32, pfx: prefix-set, tag: community, nh: ip) {
+    term ours {
+        if route.prefix in pfx { set local-pref lp; add community tag; set next-hop nh; accept }
+    }
+}
+```
+
+| Type | Argument | Where the parameter goes |
+|---|---|---|
+| `u32` | an integer | anywhere a u32 is expected: `set local-pref lp`, `route.local-pref >= lp`, `route.as-path contains asn`, a `prepend` operand or count |
+| `prefix-set` | a prefix-set or prefix dataset name | `route.prefix in pfx` |
+| `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists), `<binding> in tags`, and, for a community-set argument, `remove community in tags` / `not in tags` (the argument gets the member checks a named set gets) |
+| `asn-set` | an asn-set or ASN dataset name | `route.origin-as in origins`, `peer.asn in origins`, `<binding> in origins` |
+| `community` | a standard community, `65000:100` or a well-known name such as `NO_EXPORT` | `route.communities has tag`, `add community tag`, `remove community tag` |
+| `ip` | an IPv4 or IPv6 address | `set next-hop nh`, `route.next-hop == nh`, `peer.address == nh` |
+
+Arguments are written the same way everywhere a policy is instantiated:
+in `apply(p(...))`, in a test `expect p(...)`, and in a configured chain
+reference such as `"customer-in(200, cust-65001, 65000:100, 192.0.2.1)"`.
+Inside `apply`, a caller's own parameter of the same type passes through
+(`apply(member(pfx))`). Each argument is checked against the parameter's
+type: a set argument must name a set or dataset of that kind in the
+compilation unit, and a parameter used as a `prepend` count or a
+`set next-hop` operand has its argument range-checked at instantiation
+(1–255 for the count, a usable unicast address for the next hop), the
+same checks a literal gets at compile time. In a test the check runs at
+`rbgp policy check`; in a configured chain, at load, so `rustbgpd --check`
+and a SIGHUP reload reject a bad argument without runtime effect.
+
+A set parameter cannot share a name with a set or dataset, and it is
+not a loop source: a loop's bound is its set's size at compile time.
+
+**Reserved names.** Some names already have a fixed meaning in the
+positions a parameter could fill, so no parameter can take them:
+- a well-known community name: `NO_EXPORT`, `NO_ADVERTISE`,
+  `NO_EXPORT_SUBCONFED`, `BLACKHOLE`, `GRACEFUL_SHUTDOWN`, `OV_VALID`,
+  `OV_NOT_FOUND`, `OV_INVALID`;
+- an enum value of `route.rpki`, `route.aspa`, `route.route-type` or
+  `route.family` (`valid`, `internal`, `ipv4-unicast`, …);
+- the `prepend as` operands `origin` and `path-first`.
+
+A set or dataset cannot take a well-known community name either: as
+an argument the name is that community.
+
+A `let` binding still shadows a parameter of the same name in value
+positions and in `add`/`remove community`.
 
 ## Expressions
 
@@ -794,9 +839,8 @@ error naming the u32 field set.
   at each use. The initializer is resolved *before* its own name is
   declared, so `let x = x + 1` reads the outer `x` — shadowing, never
   self-reference.
-- Resolution is **position-typed**, the same rule that lets a
-  parameter named `origin` keep its meaning under `prepend as`:
-  bindings are readable only in value positions. Enum
+- Resolution is **position-typed**: bindings are readable only in
+  value positions. Enum
   members (`valid`, `internal`, …) still win in enum comparisons,
   `min`/`max`/`clamp` followed by `(` are still builtin calls, and
   `prepend as origin` still means the origin operand even with a
@@ -1422,11 +1466,10 @@ must remove those too. Pin the threshold with fixtures on both sides of it and
 - **`peer`** — the evaluation peer's ASN.
 - **`origin`** — the route's origin AS: the last ASN of the rightmost
   non-empty `AS_SEQUENCE` (the same value `route.origin-as` reads).
-  A policy *parameter* named `origin` shadows the operand — the
-  parameter keeps its existing meaning.
+  No parameter can be named `origin` (see "Parameters").
 - **`path-first`** — the first ASN of a non-empty leading
-  `AS_SEQUENCE` in the typed route `AS_PATH`. A parameter with this
-  name also shadows the operand.
+  `AS_SEQUENCE` in the typed route `AS_PATH`. No parameter can be
+  named `path-first` either.
 
 **Direction legality.** `self`, `origin`, and `path-first` are legal on import and
 export chains. `peer` is **import-only**: on an export chain it would
@@ -1947,8 +1990,8 @@ import_policy_chain = ["customer-in(200)", "bogon-filter"]
 Every file compiles (parse + typecheck) at config load; diagnostics
 are load errors. Policies join the same namespace as
 `[policy.definitions]` TOML policies — chains mix both freely, and
-parameterized policies are instantiated by call-form (`u32` arguments,
-arity-checked at load). Editing a referenced file + SIGHUP hot-applies
+parameterized policies are instantiated by call-form (typed arguments,
+checked at load; see [Parameters](#parameters)). Editing a referenced file + SIGHUP hot-applies
 the change to exactly the peers whose resolved chains moved, with
 Route Refresh for materially changed import policy.
 
@@ -2743,9 +2786,9 @@ compiles now:
   caller's statements, inline the callee's logic at the guarded call
   site, or split the caller so that the guards, the action order and the
   dispositions stay as they were.
-- **`$parameter` of a set, address or community type** — parameters are
-  `u32` only; write one policy per set, or keep the set content in a
-  [dataset](#datasets--external-set-content).
+- **`$parameter` of a set, address or community type** — declare the
+  parameter with its type, such as `pfx: prefix-set`, `tag: community` or
+  `nh: ip` (see "Parameters"), and pass the set name or value in the call.
 - **`done`** — differs. RPL `done` accepts the route and runs no further
   policy statements. A `.rpol` `accept` ends only the current policy, and
   the neighbor's chain continues: a later member's `set` overrides the

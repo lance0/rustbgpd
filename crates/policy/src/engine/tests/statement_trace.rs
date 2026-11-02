@@ -924,7 +924,7 @@ fn action_view_member(name: &str) -> PolicyChain {
     let mut store = crate::sets::SetStore::new();
     let mut compiled = file
         .compile_policy(name, &[], &mut store)
-        .unwrap_or_else(|| panic!("policy {name} exists"));
+        .unwrap_or_else(|e| panic!("policy {name}: {e}"));
     if name == "all-actions" {
         compiled.policies[0]
             .terms

@@ -3163,9 +3163,9 @@ fn computed_prepend_operands_lower_to_computed_slot() {
     }
 }
 
-/// Zero source-compatibility break: the literal and parameter forms
-/// still lower to the literal slot, and a policy parameter named
-/// `origin` keeps its parameter meaning (grammar-evolution rule).
+/// The literal and parameter forms lower to the literal slot. A parameter
+/// cannot be named `origin` or `path-first`, so those names always mean
+/// their operands, in the typechecker and in lowering alike.
 #[test]
 fn fixed_prepend_forms_unchanged() {
     let chain = compile_ok("policy p { term t { prepend as 65001 3; accept } }");
@@ -3173,17 +3173,25 @@ fn fixed_prepend_forms_unchanged() {
     assert_eq!(mods.as_path_prepend, Some((65001, 3)));
     assert_eq!(mods.as_path_prepend_computed, None);
 
-    for name in ["origin", "path-first"] {
-        let mut store = SetStore::new();
-        let set = super::RpolFile::parse(&format!(
-            "policy p({name}: u32) {{ term t {{ prepend as {name} 2; accept }} }}"
-        ))
+    let mut store = SetStore::new();
+    let file = super::RpolFile::parse("policy p(asn: u32) { term t { prepend as asn 2; accept } }")
         .expect("compiles");
-        let chain = set
-            .compile_policy("p", &[64999], &mut store)
-            .expect("policy exists");
-        assert_eq!(first_term_mods(&chain).as_path_prepend, Some((64999, 2)));
-        assert_eq!(first_term_mods(&chain).as_path_prepend_computed, None);
+    let chain = file
+        .compile_policy("p", &[64999], &mut store)
+        .expect("policy exists");
+    assert_eq!(first_term_mods(&chain).as_path_prepend, Some((64999, 2)));
+    assert_eq!(first_term_mods(&chain).as_path_prepend_computed, None);
+
+    for name in ["origin", "path-first"] {
+        let (_, rendered) = diagnostics_of(&format!(
+            "policy p({name}: u32) {{ term t {{ prepend as {name} 2; accept }} }}"
+        ));
+        assert!(
+            rendered.contains(&format!(
+                "parameter `{name}` has the name of the `prepend as {name}` operand"
+            )),
+            "{rendered}"
+        );
     }
 }
 
@@ -4592,10 +4600,7 @@ fn apply_of_a_let_policy_is_rejected() {
 fn let_in_const_position_is_rejected() {
     let (_, rendered) =
         diagnostics_of("policy p { term t { let x = 3; prepend as 65001 x; accept } }");
-    assert!(
-        rendered.contains("prepend count must be a literal"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("`x` is a `let` binding"), "{rendered}");
 
     let (_, rendered) = diagnostics_of("policy p { term t { let x = 3; prepend as x 2; accept } }");
     assert!(rendered.contains("`x` is a `let` binding"), "{rendered}");
@@ -7833,9 +7838,14 @@ fn chain_expect_members_retain_only_referenced_tables() {
             .calls
             .iter()
             .map(|call| {
-                let args: Vec<u32> = call.args.iter().map(|arg| arg.node).collect();
-                let full =
-                    lowerer.instantiate_chain(&call.policy.node, &args, &mut store, &bindings);
+                let args: Vec<super::CallArg> =
+                    call.args.iter().map(|arg| arg.node.clone()).collect();
+                let full = lowerer.instantiate_chain(
+                    &call.policy.node,
+                    &super::testing::policy_args(&args),
+                    &mut store,
+                    &bindings,
+                );
                 assert_eq!(full.asn_sets.len(), SETS);
                 NamedPolicy::from_rpol(
                     super::testing::render_call(&call.policy.node, &args),
@@ -10013,5 +10023,1010 @@ test as-set-only-is-accepted {
             "the evaluation budget binds: {rendered}"
         );
         assert_eq!(longest("exists route.med"), has);
+    }
+}
+
+// ─── typed policy parameters ────────────────────────────────────────
+
+const TYPED_SOURCE: &str = "
+prefix-set cust-65001 { 10.10.0.0/16 le 24 }
+prefix-set cust-65002 { 10.20.0.0/16 le 24 }
+community-set blocked { 65000:666 }
+asn-set origins-65001 { 65001 }
+
+policy customer-in(lp: u32, pfx: prefix-set, block: community-set, origins: asn-set,
+                   tag: community, nh: ip) {
+    default-action reject
+    term blocked { if route.communities in block { reject } }
+    term ours {
+        if route.prefix in pfx && route.origin-as in origins {
+            set local-pref lp
+            add community tag
+            set next-hop nh
+            accept
+        }
+    }
+}
+
+policy tagged-only(tag: community) {
+    default-action reject
+    term t { if route.communities has tag { accept } }
+}
+
+policy from-peer(addr: ip) {
+    default-action reject
+    term t { if peer.address == addr && route.next-hop != addr { accept } }
+}
+
+policy pad(n: u32) {
+    term t { prepend as 65000 n; accept }
+}
+";
+
+fn typed_ctx(prefix: Prefix, communities: &[u32], origin: u32) -> RouteContext<'static> {
+    let mut ctx = route_ctx(prefix, communities, RpkiValidation::NotFound);
+    ctx.origin_asn = Some(origin);
+    ctx
+}
+
+fn compile_call(file: &RpolFile, name: &str, args: &[super::CallArg]) -> crate::ir::CompiledChain {
+    let args = file.resolve_call(name, args).expect("arguments resolve");
+    file.compile_policy_args(
+        name,
+        &args,
+        &mut SetStore::new(),
+        &crate::datasets::DatasetBindings::new(),
+        false,
+    )
+    .expect("policy exists")
+    .expect("no datasets")
+}
+
+/// Every parameter type binds at instantiation: the set arguments select
+/// sets, the community and address arguments are constants, and two
+/// argument lists instantiate two independent policies from one template.
+#[test]
+fn typed_parameters_bind_sets_communities_and_addresses() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let args = |prefixes: &str| {
+        vec![
+            CallArg::Int(200),
+            CallArg::Name(prefixes.to_string()),
+            CallArg::Name("blocked".to_string()),
+            CallArg::Name("origins-65001".to_string()),
+            CallArg::Community((65000 << 16) | 0x64),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+        ]
+    };
+    let first = compile_call(&file, "customer-in", &args("cust-65001"));
+    let second = compile_call(&file, "customer-in", &args("cust-65002"));
+    let in_first = typed_ctx(v4(10, 10, 1, 0, 24), &[], 65001);
+    let in_second = typed_ctx(v4(10, 20, 1, 0, 24), &[], 65001);
+
+    let result = first.evaluate(&in_first);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_local_pref, Some(200));
+    assert_eq!(result.modifications.communities_add, [(65000 << 16) | 0x64]);
+    assert_eq!(
+        result.modifications.set_next_hop,
+        Some(crate::engine::NextHopAction::Specific(
+            "192.0.2.1".parse().unwrap()
+        ))
+    );
+    assert_eq!(first.evaluate(&in_second).action, PolicyAction::Deny);
+    assert_eq!(second.evaluate(&in_second).action, PolicyAction::Permit);
+    // Explain renders the set the argument bound.
+    let chain = crate::engine::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "customer-in".to_string(),
+        Arc::new(second.clone()),
+    )]);
+    let trace = crate::engine::explain::explain_chain_statements(Some(&chain), &in_second);
+    let rendered = format!("{:?}", trace.steps);
+    assert!(rendered.contains("cust-65002"), "{rendered}");
+    assert!(!rendered.contains("pfx"), "{rendered}");
+    assert_eq!(second.evaluate(&in_first).action, PolicyAction::Deny);
+    // The community-set and asn-set arguments.
+    let blocked = typed_ctx(v4(10, 10, 1, 0, 24), &[(65000 << 16) | 0x29A], 65001);
+    assert_eq!(first.evaluate(&blocked).action, PolicyAction::Deny);
+    let other_origin = typed_ctx(v4(10, 10, 1, 0, 24), &[], 65009);
+    assert_eq!(first.evaluate(&other_origin).action, PolicyAction::Deny);
+
+    // `has <community>`.
+    let tagged = compile_call(
+        &file,
+        "tagged-only",
+        &[CallArg::Community((65000 << 16) | 0x7)],
+    );
+    assert_eq!(
+        tagged
+            .evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[(65000 << 16) | 0x7], 1))
+            .action,
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        tagged
+            .evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[(65000 << 16) | 0x8], 1))
+            .action,
+        PolicyAction::Deny
+    );
+
+    // `ip` in comparisons.
+    let from = compile_call(
+        &file,
+        "from-peer",
+        &[CallArg::Ip("192.0.2.9".parse().unwrap())],
+    );
+    let mut ctx = typed_ctx(v4(10, 0, 0, 0, 8), &[], 1);
+    ctx.peer_address = Some("192.0.2.9".parse().unwrap());
+    ctx.next_hop = Some("192.0.2.10".parse().unwrap());
+    assert_eq!(from.evaluate(&ctx).action, PolicyAction::Permit);
+    ctx.peer_address = Some("192.0.2.8".parse().unwrap());
+    assert_eq!(from.evaluate(&ctx).action, PolicyAction::Deny);
+}
+
+/// A `prepend` count may be a `u32` parameter. Its argument is range-checked
+/// where the policy is instantiated, as a literal count is at typecheck.
+#[test]
+fn prepend_count_parameter_is_range_checked_at_instantiation() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let chain = compile_call(&file, "pad", &[CallArg::Int(3)]);
+    let result = chain.evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[], 1));
+    assert_eq!(result.modifications.as_path_prepend, Some((65000, 3)));
+    for bad in [0, 256] {
+        let error = file
+            .resolve_call("pad", &[CallArg::Int(bad)])
+            .expect_err("out-of-range count");
+        assert!(error.contains("prepend count"), "{error}");
+        assert!(error.contains("1-255"), "{error}");
+    }
+    let (_, rendered) = diagnostics_of(&format!(
+        "{TYPED_SOURCE}\ntest t {{ route {{ prefix 10.0.0.0/8 }} expect pad(300) == accept }}"
+    ));
+    assert!(
+        rendered.contains("prepend count 300 out of range"),
+        "{rendered}"
+    );
+}
+
+/// Attach-time checks: arity, each argument's type, an unknown set, a set
+/// of the wrong kind, and an unusable `set next-hop` address.
+#[test]
+fn typed_call_resolution_rejects_mismatches() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let good = |index: usize, arg: CallArg| {
+        let mut args = vec![
+            CallArg::Int(200),
+            CallArg::Name("cust-65001".to_string()),
+            CallArg::Name("blocked".to_string()),
+            CallArg::Name("origins-65001".to_string()),
+            CallArg::Community(1),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+        ];
+        args[index] = arg;
+        file.resolve_call("customer-in", &args)
+    };
+    assert!(good(0, CallArg::Int(200)).is_ok());
+    for (index, arg, needle) in [
+        (0, CallArg::Name("cust-65001".to_string()), "is not a u32"),
+        (
+            1,
+            CallArg::Name("nope".to_string()),
+            "unknown prefix-set `nope`",
+        ),
+        (
+            1,
+            CallArg::Name("blocked".to_string()),
+            "unknown prefix-set `blocked`",
+        ),
+        (1, CallArg::Int(5), "is not a prefix-set"),
+        (
+            2,
+            CallArg::Name("cust-65001".to_string()),
+            "unknown community-set",
+        ),
+        (3, CallArg::Community(1), "is not an asn-set"),
+        (4, CallArg::Int(1), "is not a community"),
+        (
+            5,
+            CallArg::Ip("224.0.0.1".parse().unwrap()),
+            "invalid next hop 224.0.0.1",
+        ),
+        (5, CallArg::Name("x".to_string()), "is not an ip"),
+    ] {
+        let error = good(index, arg.clone()).expect_err("mismatch rejected");
+        assert!(error.contains(needle), "{arg:?}: {error}");
+    }
+    let error = file
+        .resolve_call("customer-in", &[CallArg::Int(1)])
+        .expect_err("arity");
+    assert!(error.contains("takes 6 parameter(s), 1 given"), "{error}");
+}
+
+/// Check-time errors: a typed parameter in a position of another type, a set
+/// parameter in the wrong probe, a set parameter as a loop source, a
+/// parameter named like a set, and an `expect` argument of the wrong type.
+#[test]
+fn typed_parameter_misuse_is_a_compile_error() {
+    for (source, needle) in [
+        (
+            "prefix-set s { 10.0.0.0/8 } policy p(x: prefix-set) { term t { set med x } }",
+            "parameter `x` is a prefix-set, but this position needs a u32 value",
+        ),
+        (
+            "policy p(x: prefix-set) { term t { if route.communities in x { accept } } }",
+            "but this probe needs `community-set`",
+        ),
+        (
+            "policy p(x: asn-set) { term t { for a in x { break } } }",
+            "a set parameter is not a loop source",
+        ),
+        (
+            "prefix-set s { 10.0.0.0/8 } policy p(s: prefix-set) { term t { accept } }",
+            "parameter `s` has the name of a prefix-set",
+        ),
+        (
+            "policy p(x: u32) { term t { set next-hop x } }",
+            "parameter `x`",
+        ),
+        (
+            "policy p(x: ip) { term t { add community x } }",
+            "parameter `x` is an ip, but this position needs a community",
+        ),
+        (
+            "policy p(x: community) { term t { if route.large-communities has x { accept } } }",
+            "cannot be probed with a `community` parameter",
+        ),
+        (
+            "prefix-set s { 10.0.0.0/8 }
+             policy p(x: prefix-set) { term t { if route.prefix in x { accept } } }
+             test t { route { prefix 10.0.0.0/8 } expect p(65000:1) == accept }",
+            "is not a prefix-set",
+        ),
+        (
+            "policy p(x: prefix-set) { term t { if route.prefix in x { accept } } }
+             test t { route { prefix 10.0.0.0/8 } expect p(missing) == accept }",
+            "unknown prefix-set `missing`",
+        ),
+    ] {
+        let (_, rendered) = diagnostics_of(source);
+        assert!(rendered.contains(needle), "{source}\n{rendered}");
+    }
+}
+
+/// `apply` passes a caller's typed parameter through, or a set name, and
+/// type-checks both against the target; the in-language test runner
+/// instantiates typed policies from `expect` arguments.
+#[test]
+fn typed_parameters_flow_through_apply_and_tests() {
+    let source = "
+prefix-set ours { 10.0.0.0/8 le 24 }
+prefix-set theirs { 192.0.2.0/24 }
+
+policy member(s: prefix-set) {
+    default-action reject
+    term t { if route.prefix in s { accept } }
+}
+
+policy wrap(s: prefix-set, tag: community) {
+    term t { if apply(member(s)) { add community tag; accept } }
+}
+
+policy fixed {
+    term t { if apply(member(theirs)) { reject } }
+}
+
+test wraps-ours {
+    route { prefix 10.1.0.0/16 }
+    expect wrap(ours, 65000:5) == accept with community 65000:5
+    expect wrap(theirs, 65000:5) == accept
+    expect member(theirs) == reject
+}
+
+test fixed-rejects-theirs {
+    route { prefix 192.0.2.0/24 }
+    expect fixed == reject
+}
+";
+    let file = RpolFile::parse(source).expect("parses");
+    let report = file.run_tests();
+    assert!(report.all_passed(), "{report:?}");
+    assert_eq!(report.total, 2);
+    // Sets used only as arguments are uses, not unused sets.
+    assert!(
+        !file
+            .lints()
+            .iter()
+            .any(|lint| lint.kind == super::LintKind::UnusedSet),
+        "{:?}",
+        file.lints()
+    );
+    let (_, rendered) = diagnostics_of(
+        "policy member(s: prefix-set) { term t { if route.prefix in s { accept } } }
+         policy wrap(tag: community) { term t { if apply(member(tag)) { accept } } }",
+    );
+    assert!(
+        rendered.contains("parameter `tag` is a community, but `s` takes a prefix-set"),
+        "{rendered}"
+    );
+}
+
+/// The configured-chain call form: integers, names, communities and
+/// addresses, with the u32-only reader keeping its error for a name.
+#[test]
+fn call_form_arguments_parse_by_shape() {
+    use super::{CallArg, parse_call_args, parse_call_form};
+
+    let (base, args) = parse_call_args(
+        "customer-in(200, cust-65001, 65000:100, 192.0.2.1, 2001:db8::1, NO_EXPORT)",
+    )
+    .expect("parses");
+    assert_eq!(base, "customer-in");
+    assert_eq!(
+        args,
+        [
+            CallArg::Int(200),
+            CallArg::Name("cust-65001".to_string()),
+            CallArg::Community((65000 << 16) | 0x64),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+            CallArg::Ip("2001:db8::1".parse().unwrap()),
+            CallArg::Community(0xFFFF_FF01),
+        ]
+    );
+    for bad in ["p(4294967296)", "p(70000:1)", "p(@x)"] {
+        assert!(parse_call_args(bad).is_err(), "{bad}");
+    }
+    let error = parse_call_form("p(high)").expect_err("u32 only");
+    assert!(error.contains("is not a u32"), "{error}");
+}
+
+/// Typed parameter lists and arguments format canonically.
+#[test]
+fn typed_parameters_format_canonically() {
+    let source = "policy p( lp:u32,s :prefix-set , t: community,a:ip ) { term t { accept } }
+test x { route { prefix 10.0.0.0/8 } expect p(1,s,65000:1,192.0.2.1) == accept }";
+    let formatted = super::format_rpol(source).expect("formats");
+    assert!(
+        formatted.starts_with("policy p(lp: u32, s: prefix-set, t: community, a: ip) {"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("expect p(1, s, 65000:1, 192.0.2.1) == accept"),
+        "{formatted}"
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+}
+
+/// Typed parameters combine with `else if` chains, nested `if` and
+/// community patterns: a `community-set` parameter binds a set with
+/// pattern members, and parameters inside `else if` and nested bodies
+/// substitute and range-check like top-level ones.
+#[test]
+fn typed_parameters_bind_pattern_sets_inside_else_if_chains() {
+    const GOOD: &str = "exact, pats, 300, 65000:9, 2, 192.0.2.9";
+    let source = |edge_args: &str| {
+        format!(
+            r"
+community-set pats {{ 64496:*, 64497:100..199, PRIVATE_AS:666 }}
+community-set exact {{ 64496:1 }}
+
+policy tiers(top: community-set, rest: community-set, lp: u32, tag: community, n: u32, nh: ip) {{
+    term t {{
+        if route.communities in top {{ set local-pref lp }}
+        else if route.communities in rest {{
+            if route.med >= 10 {{ prepend as 65000 n }} else {{ add community tag }}
+            set next-hop nh
+        }}
+        else {{ reject }}
+        accept
+    }}
+}}
+
+test exact-first {{
+    route {{ prefix 192.0.2.0/24; communities [64496:1] }}
+    expect tiers({GOOD}) == accept with local-pref 300
+}}
+test range-member {{
+    route {{ prefix 192.0.2.0/24; communities [64497:150] }}
+    expect tiers({GOOD}) == accept with community 65000:9
+}}
+test private-pattern-nested {{
+    route {{ prefix 192.0.2.0/24; communities [64600:666]; med 20 }}
+    expect tiers({GOOD}) == accept with prepend as 65000 2
+}}
+test range-edge {{
+    route {{ prefix 192.0.2.0/24; communities [64497:200] }}
+    expect tiers({edge_args}) == reject
+}}
+"
+        )
+    };
+    let report = super::run_rpol_tests(&source(GOOD)).expect("compiles");
+    assert_eq!(report.total, 4);
+    assert!(report.failures.is_empty(), "{:#?}", report.failures);
+
+    // A nested `prepend` count and `set next-hop` operand are still
+    // range-checked at instantiation.
+    for (args, needle) in [
+        (
+            "exact, pats, 300, 65000:9, 0, 192.0.2.9",
+            "prepend count 0 out of range",
+        ),
+        (
+            "exact, pats, 300, 65000:9, 2, 0.0.0.0",
+            "invalid next hop 0.0.0.0",
+        ),
+    ] {
+        let (_, rendered) = diagnostics_of(&source(args));
+        assert!(rendered.contains(needle), "{needle}: {rendered}");
+    }
+
+    // A pattern is a set member, not a `community` argument, in a test
+    // `expect` and in a configured chain reference.
+    let file = RpolFile::parse(&source(GOOD)).expect("parses");
+    for bad in ["65000:*", "PRIVATE_AS"] {
+        let args = format!("exact, pats, 300, {bad}, 2, 192.0.2.9");
+        let (diags, rendered) = diagnostics_of(&source(&args));
+        assert!(!diags.is_empty(), "{bad}: {rendered}");
+        let reference = format!("tiers({args})");
+        let resolved = super::parse_call_args(&reference)
+            .and_then(|(name, args)| file.resolve_call(name, &args).map(|_| ()));
+        assert!(resolved.is_err(), "{bad}");
+    }
+}
+
+// ─── typed parameters: one name resolution ─────────────────────────
+
+/// Every reviewed source that put a parameter name to a second meaning:
+/// the rejection, then the policy around the shape that still compiles.
+mod typed_parameter_names {
+    use super::super::{CallArg, RpolFile, check_rpol, parse_call_args, run_rpol_tests};
+    use super::{SetStore, diagnostics_of};
+    use crate::rpol::typeck::{ASPA_MEMBERS, FAMILY_MEMBERS, ROUTE_TYPE_MEMBERS, RPKI_MEMBERS};
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(report.total, total);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// An enum value cannot name a parameter. Before the reservation, an
+    /// `ip` parameter named like the compared member typechecked as the
+    /// member and panicked in lowering.
+    #[test]
+    fn enum_values_are_reserved_parameter_names() {
+        for (field, members) in [
+            ("rpki", RPKI_MEMBERS),
+            ("aspa", ASPA_MEMBERS),
+            ("route-type", ROUTE_TYPE_MEMBERS),
+            ("family", FAMILY_MEMBERS),
+        ] {
+            for member in members {
+                for ty in ["ip", "u32", "community", "prefix-set"] {
+                    let source = format!(
+                        "policy p({member}: {ty}) {{ term t {{ if route.{field} == {member} {{ accept }} }} }}"
+                    );
+                    let (_, rendered) = diagnostics_of(&source);
+                    assert!(
+                        rendered
+                            .contains(&format!("parameter `{member}` has the name of a `route.")),
+                        "{source}: {rendered}"
+                    );
+                }
+            }
+        }
+        // The member itself still compares.
+        passes(
+            "policy p(a: ip) { term t { if route.rpki == valid && route.next-hop == a { accept } } \
+             term rest { reject } }
+             test v { route { prefix 192.0.2.0/24; rpki valid; next-hop 192.0.2.1 } \
+                 expect p(192.0.2.1) == accept }
+             test n { route { prefix 192.0.2.0/24; rpki valid; next-hop 192.0.2.2 } \
+                 expect p(192.0.2.1) == reject }",
+            2,
+        );
+    }
+
+    /// `origin` and `path-first` always mean their `prepend as` operands:
+    /// a `community` parameter of that name once lowered as an ASN
+    /// (65000:100 prepended as 4259840100).
+    #[test]
+    fn prepend_operand_names_are_reserved() {
+        for name in ["origin", "path-first"] {
+            for ty in ["community", "u32", "ip"] {
+                let (_, rendered) = diagnostics_of(&format!(
+                    "policy p({name}: {ty}) {{ term t {{ prepend as {name} 1; accept }} }}"
+                ));
+                assert!(
+                    rendered.contains(&format!(
+                        "parameter `{name}` has the name of the `prepend as {name}` operand"
+                    )),
+                    "{name}: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// A well-known community name cannot name a parameter or a set: as an
+    /// argument it is always that community. `NO_EXPORT` forwards as the
+    /// community through a parameter, and as a literal.
+    #[test]
+    fn well_known_names_are_reserved_and_forward_as_communities() {
+        let (_, rendered) = diagnostics_of(
+            "policy p(NO_EXPORT: community) { term t { if route.communities has NO_EXPORT { accept } } }",
+        );
+        assert!(
+            rendered.contains("parameter `NO_EXPORT` has the name of a well-known community"),
+            "{rendered}"
+        );
+        for kind in ["community-set", "prefix-set", "asn-set"] {
+            let entry = match kind {
+                "community-set" => "65000:1",
+                "prefix-set" => "192.0.2.0/24",
+                _ => "65000",
+            };
+            let (_, rendered) = diagnostics_of(&format!("{kind} BLACKHOLE {{ {entry} }}"));
+            assert!(
+                rendered.contains(&format!(
+                    "{kind} `BLACKHOLE` has the name of a well-known community"
+                )),
+                "{rendered}"
+            );
+        }
+        let (_, rendered) = diagnostics_of("dataset community-set GRACEFUL_SHUTDOWN");
+        assert!(
+            rendered.contains("dataset `GRACEFUL_SHUTDOWN` has the name of a well-known community"),
+            "{rendered}"
+        );
+        passes(
+            "policy inner(t: community) { term x { if route.communities has t { accept } } term rest { reject } }
+             policy forward(t: community) { term x { if apply(inner(t)) { accept } } term rest { reject } }
+             policy literal { term x { if apply(inner(NO_EXPORT)) { accept } } term rest { reject } }
+             test forwarded { route { prefix 192.0.2.0/24; communities [NO_EXPORT] } expect forward(NO_EXPORT) == accept }
+             test forwarded-other { route { prefix 192.0.2.0/24; communities [65000:1] } expect forward(NO_EXPORT) == reject }
+             test literal-arg { route { prefix 192.0.2.0/24; communities [NO_EXPORT] } expect literal == accept }
+             test literal-other { route { prefix 192.0.2.0/24; communities [65000:1] } expect literal == reject }",
+            4,
+        );
+        // An extended well-known community is not a `community` argument.
+        let (_, rendered) = diagnostics_of(
+            "policy p(t: community) { term x { if route.communities has t { accept } } }
+             test x { route { prefix 192.0.2.0/24 } expect p(OV_VALID) == accept }",
+        );
+        assert!(
+            rendered.contains("`OV_VALID` is an extended community"),
+            "{rendered}"
+        );
+    }
+
+    /// Only the alias list is a literal: any other all-caps name is a
+    /// parameter, in `has` and in `add community`.
+    #[test]
+    fn all_caps_parameter_names_resolve_as_parameters() {
+        passes(
+            "policy p(TAG: community) { term t { if route.communities has TAG { accept } } term rest { reject } }
+             policy q(TAG: community) { term t { add community TAG; accept } }
+             test hit { route { prefix 192.0.2.0/24; communities [65000:7] } expect p(65000:7) == accept }
+             test miss { route { prefix 192.0.2.0/24; communities [65000:8] } expect p(65000:7) == reject }
+             test added { route { prefix 192.0.2.0/24 } expect q(65000:7) == accept with community 65000:7 }",
+            3,
+        );
+    }
+
+    /// A `let` shadows an outer parameter of any type at `add community`,
+    /// as it does in value positions.
+    #[test]
+    fn let_shadows_typed_parameters_in_community_actions() {
+        passes(
+            "policy c(x: community) { term t { let x = 7; add community x; accept } }
+             policy i(x: ip) { term t { let x = 65000; add community x; set med x; accept } }
+             test community { route { prefix 192.0.2.0/24 } expect c(65000:1) == accept with community 0:7 }
+             test ip { route { prefix 192.0.2.0/24 } expect i(192.0.2.1) == accept with community 0:65000, med 65000 }",
+            2,
+        );
+    }
+
+    /// The `&[u32]` compile APIs check their arguments like a chain
+    /// reference: no silent prepend count of 1 for 300, and an error, not
+    /// a panic, for a parameter of another type.
+    #[test]
+    fn u32_compile_apis_check_arguments() {
+        let file = RpolFile::parse("policy cnt(n: u32) { term t { prepend as 65000 n; accept } }")
+            .expect("clean");
+        let error = file
+            .compile_policy("cnt", &[300], &mut SetStore::new())
+            .unwrap_err();
+        assert!(error.contains("prepend count 300 out of range"), "{error}");
+        assert!(
+            file.compile_policy("cnt", &[3], &mut SetStore::new())
+                .is_ok()
+        );
+        let error = file
+            .compile_policy("cnt", &[], &mut SetStore::new())
+            .unwrap_err();
+        assert!(error.contains("takes 1 parameter(s), 0 given"), "{error}");
+        let error = file
+            .compile_policy("missing", &[], &mut SetStore::new())
+            .unwrap_err();
+        assert!(error.contains("is not defined"), "{error}");
+
+        let typed = RpolFile::parse(
+            "prefix-set cust { 192.0.2.0/24 } policy ps(s: prefix-set) { term t { if route.prefix in s { accept } } }",
+        )
+        .expect("clean");
+        let error = typed
+            .compile_policy("ps", &[5], &mut SetStore::new())
+            .unwrap_err();
+        assert!(error.contains("is not a prefix-set"), "{error}");
+    }
+
+    /// A parameter passed on through `apply` is checked against the uses
+    /// it reaches there: the prepend count, the prepend ASN and the next
+    /// hop.
+    #[test]
+    fn apply_arguments_inherit_value_ranges() {
+        let source = |args: &str| {
+            format!(
+                "policy inner(n: u32, a: u32, h: ip) {{ term t {{ prepend as a n; set next-hop h; accept }} }}
+                 policy outer(m: u32, b: u32, g: ip) {{ term t {{ if apply(inner(m, b, g)) {{ accept }} }} }}
+                 test x {{ route {{ prefix 192.0.2.0/24 }} expect outer({args}) == accept }}"
+            )
+        };
+        assert_eq!(check_rpol(&source("3, 65001, 192.0.2.1")).diagnostics.0, []);
+        for (args, needle) in [
+            ("300, 65001, 192.0.2.1", "prepend count 300 out of range"),
+            ("3, 0, 192.0.2.1", "AS 0 cannot be prepended (RFC 7607)"),
+            ("3, 65001, 224.0.0.1", "invalid next hop 224.0.0.1"),
+        ] {
+            let (_, rendered) = diagnostics_of(&source(args));
+            assert!(rendered.contains(needle), "{args}: {rendered}");
+        }
+    }
+
+    /// A parameter used as a `prepend` ASN rejects AS 0 in a test `expect`
+    /// and through `resolve_call`, before any chain is built.
+    #[test]
+    fn prepend_asn_parameter_rejects_as_zero() {
+        let policy = "policy p(a: u32) { term t { prepend as a 1; accept } }";
+        let (_, rendered) = diagnostics_of(&format!(
+            "{policy} test x {{ route {{ prefix 192.0.2.0/24 }} expect p(0) == accept }}"
+        ));
+        assert!(
+            rendered.contains("AS 0 cannot be prepended (RFC 7607) for parameter `a`"),
+            "{rendered}"
+        );
+        let file = RpolFile::parse(policy).expect("clean");
+        let error = file.resolve_call("p", &[CallArg::Int(0)]).unwrap_err();
+        assert!(error.contains("AS 0 cannot be prepended"), "{error}");
+        assert!(file.resolve_call("p", &[CallArg::Int(65001)]).is_ok());
+    }
+
+    /// Call-form arguments read exactly as the language does, so a set
+    /// name may start with `_`.
+    #[test]
+    fn call_form_arguments_follow_the_language_lexer() {
+        assert_eq!(
+            parse_call_args("p(_cust, NO_EXPORT, 65000:1, 2001:db8::1, 7)").unwrap(),
+            (
+                "p",
+                vec![
+                    CallArg::Name("_cust".to_string()),
+                    CallArg::Community(0xFFFF_FF01),
+                    CallArg::Community((65000 << 16) | 1),
+                    CallArg::Ip("2001:db8::1".parse().unwrap()),
+                    CallArg::Int(7),
+                ]
+            )
+        );
+        for bad in ["p(a b)", "p(65000:*)", "p(OV_VALID)", "p(-x)"] {
+            assert!(parse_call_args(bad).is_err(), "{bad}");
+        }
+        let source = "prefix-set _cust { 192.0.2.0/24 }
+                      policy p(s: prefix-set) { term t { if route.prefix in s { accept } } term rest { reject } }
+                      test x { route { prefix 192.0.2.0/24 } expect p(_cust) == accept }";
+        passes(source, 1);
+        let file = RpolFile::parse(source).expect("clean");
+        let (name, args) = parse_call_args("p(_cust)").unwrap();
+        assert!(file.resolve_call(name, &args).is_ok());
+    }
+
+    /// The set-argument diagnostic uses the right article.
+    #[test]
+    fn unknown_set_argument_names_its_kind() {
+        let file = RpolFile::parse(
+            "policy p(a: asn-set) { term t { if route.origin-as in a { accept } } }",
+        )
+        .expect("clean");
+        let error = file
+            .resolve_call("p", &[CallArg::Name("nope".to_string())])
+            .unwrap_err();
+        assert!(
+            error.contains("(name an asn-set or an asn-set dataset)"),
+            "{error}"
+        );
+    }
+}
+
+// ─── typed parameters: round-2 regressions ─────────────────────────
+
+mod typed_parameter_round_two {
+    use super::super::run_rpol_tests;
+    use super::diagnostics_of;
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(report.total, total);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// A set argument keeps the kind of its parameter. With an asn-set and
+    /// a community-set of the same name, a `community-set` parameter
+    /// probes the community-set, for a binding and for a `u32` constant.
+    #[test]
+    fn set_arguments_keep_their_parameter_kind() {
+        passes(
+            "asn-set shared { 65000 }
+             community-set shared { 65000:1 }
+             policy binding(s: community-set) {
+                 term t { for c in route.communities { if c in s { reject } } }
+             }
+             policy constant(s: community-set, x: u32) {
+                 term t { if x in s { reject } }
+             }
+             policy asn(s: asn-set, x: u32) {
+                 term t { if x in s { reject } }
+             }
+             test community-binding {
+                 route { prefix 192.0.2.0/24; communities [65000:1] }
+                 expect binding(shared) == reject
+             }
+             test asn-value-binding {
+                 route { prefix 192.0.2.0/24; communities [0:65000] }
+                 expect binding(shared) == accept
+             }
+             test community-constant {
+                 route { prefix 192.0.2.0/24 }
+                 expect constant(shared, 4259840001) == reject
+             }
+             test asn-value-constant {
+                 route { prefix 192.0.2.0/24 }
+                 expect constant(shared, 65000) == accept
+             }
+             test asn-kind {
+                 route { prefix 192.0.2.0/24 }
+                 expect asn(shared, 65000) == reject
+             }",
+            5,
+        );
+    }
+
+    /// A `u32` parameter in `add`/`remove community` is the community with
+    /// that value.
+    #[test]
+    fn u32_parameters_add_and_remove_communities() {
+        passes(
+            "policy plus(x: u32) { term t { add community x; accept } }
+             policy minus(x: u32) { term t { remove community x; accept } }
+             test added { route { prefix 192.0.2.0/24 } expect plus(7) == accept with community 0:7 }
+             test removed {
+                 route { prefix 192.0.2.0/24; communities [0:7, 0:8] }
+                 expect minus(7) == accept with removes community 0:7, not removed community 0:8
+             }",
+            2,
+        );
+    }
+
+    /// A `community-set` parameter stands for its argument in `remove
+    /// community in` / `not in`, as in every other set position.
+    #[test]
+    fn set_parameters_in_remove_by_membership() {
+        passes(
+            "community-set scrub { 65000:* }
+             community-set keep { 64496:1 }
+             policy strip(s: community-set) { term t { remove community in s; accept } }
+             policy only(s: community-set) { term t { remove community not in s; accept } }
+             test strip-scrub {
+                 route { prefix 192.0.2.0/24; communities [65000:1, 64496:1] }
+                 expect strip(scrub) == accept with removes community 65000:1,
+                     not removed community 64496:1
+             }
+             test keep-only {
+                 route { prefix 192.0.2.0/24; communities [65000:1, 64496:1] }
+                 expect only(keep) == accept with removes community 65000:1,
+                     not removed community 64496:1
+             }",
+            2,
+        );
+        // The parameter must be a community-set, and a reserved name is no
+        // set: `NO_EXPORT` here is an unknown community-set.
+        let (_, rendered) =
+            diagnostics_of("policy p(s: prefix-set) { term t { remove community in s; accept } }");
+        assert!(
+            rendered
+                .contains("parameter `s` is a prefix-set, but this probe needs `community-set`"),
+            "{rendered}"
+        );
+        // A dataset cannot be the set of a removal, through an argument or
+        // passed on through `apply`.
+        for expect in ["strip(live)", "outer(live)"] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "dataset community-set live
+                 policy strip(s: community-set) {{ term t {{ remove community in s; accept }} }}
+                 policy outer(z: community-set) {{ term t {{ if apply(strip(z)) {{ accept }} }} }}
+                 test x {{ route {{ prefix 192.0.2.0/24 }} expect {expect} == accept }}"
+            ));
+            assert!(
+                rendered.contains("`live` is a dataset, but parameter"),
+                "{expect}: {rendered}"
+            );
+        }
+        let (_, rendered) =
+            diagnostics_of("policy p { term t { remove community in NO_EXPORT; accept } }");
+        assert!(rendered.contains("NO_EXPORT"), "{rendered}");
+        let (_, rendered) = diagnostics_of(
+            "policy p(BLACKHOLE: community-set) { term t { remove community in BLACKHOLE; accept } }",
+        );
+        assert!(
+            rendered.contains("parameter `BLACKHOLE` has the name of a well-known community"),
+            "{rendered}"
+        );
+    }
+
+    /// The value-use analysis behind argument checks stays shallow over a
+    /// long `apply` chain: validating a literal argument on a small stack
+    /// reports the depth error instead of overflowing.
+    #[test]
+    fn deep_apply_chain_checks_arguments_on_a_small_stack() {
+        use std::fmt::Write as _;
+        const DEPTH: usize = 5_000;
+        let mut source = String::new();
+        for level in 0..DEPTH {
+            writeln!(
+                source,
+                "policy p{level} {{ term t {{ if apply(p{}) {{ accept }} }} }}",
+                level + 1
+            )
+            .unwrap();
+        }
+        writeln!(source, "policy p{DEPTH} {{ term t {{ accept }} }}").unwrap();
+        source.push_str(
+            "policy w(n: u32) { term t { prepend as 65000 n; if apply(p0) { accept } } }
+             test x { route { prefix 192.0.2.0/24 } expect w(1) == accept }\n",
+        );
+        let rendered = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || diagnostics_of(&source).1)
+            .unwrap()
+            .join()
+            .expect("validation finishes on a 1 MiB stack");
+        assert!(
+            rendered.contains("composition depth limit"),
+            "{}",
+            &rendered[..rendered.len().min(400)]
+        );
+    }
+}
+
+// ─── typed parameters: round-3 regressions ─────────────────────────
+
+mod typed_parameter_round_three {
+    use super::super::{CallArg, RpolFile, check_rpol};
+    use super::diagnostics_of;
+
+    /// The check diagnostics of `source`, rendered (empty when clean).
+    fn check(source: &str) -> String {
+        let report = check_rpol(source);
+        report
+            .diagnostics
+            .0
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    const SETS: &str = "community-set std { 65000:1 }
+                        community-set big { 65000:1:1 }
+                        community-set rt { RT:65000:1 }
+                        community-set ov { OV_VALID }
+                        community-set mixed { 65000:1, 65000:1:1, RT:65000:1 }";
+
+    /// A removal set reached through a parameter gets the member checks a
+    /// named set gets, for every kind and both forms, directly and
+    /// forwarded through `apply`. Before, `remove large-community not in s`
+    /// with `s` bound to a standard-only set stripped every large
+    /// community, while naming that set directly was rejected.
+    #[test]
+    fn parameter_removal_sets_get_the_named_set_checks() {
+        let mut compared = 0;
+        for kind in ["community", "large-community", "ext-community"] {
+            for form in ["in", "not in"] {
+                for set in ["std", "big", "rt", "ov", "mixed"] {
+                    let direct = check(&format!(
+                        "{SETS}\npolicy p {{ term t {{ remove {kind} {form} {set}; accept }} }}"
+                    ))
+                    .is_empty();
+                    let body = format!("remove {kind} {form} s; accept");
+                    let template = format!(
+                        "{SETS}
+                         policy p(s: community-set) {{ term t {{ {body} }} }}
+                         policy outer(z: community-set) {{ term t {{ if apply(p(z)) {{ accept }} }} }}"
+                    );
+                    for call in [format!("p({set})"), format!("outer({set})")] {
+                        let source = format!(
+                            "{template}
+                             test x {{ route {{ prefix 192.0.2.0/24 }} expect {call} == accept }}"
+                        );
+                        let rendered = check(&source);
+                        assert_eq!(
+                            rendered.is_empty(),
+                            direct,
+                            "remove {kind} {form}: {call} vs naming `{set}`: {rendered}"
+                        );
+                        compared += 1;
+                    }
+                    let file = RpolFile::parse(&template).expect("the template checks clean");
+                    assert_eq!(
+                        file.resolve_call("p", &[CallArg::Name(set.to_string())])
+                            .is_ok(),
+                        direct,
+                        "remove {kind} {form}: resolve_call p({set})"
+                    );
+                }
+            }
+        }
+        assert_eq!(compared, 60);
+        let (_, rendered) = diagnostics_of(&format!(
+            "{SETS}
+             policy p(s: community-set) {{ term t {{ remove large-community not in s; accept }} }}
+             test x {{ route {{ prefix 192.0.2.0/24 }} expect p(std) == accept }}"
+        ));
+        assert!(
+            rendered.contains("has no large-community members"),
+            "{rendered}"
+        );
+    }
+
+    /// A well-known community name cannot reach a position that would
+    /// read it as a community alias before the caller's scope: no
+    /// parameter can take one, in any type. (Copilot review, first round,
+    /// "resolve community aliases after checking caller scope".)
+    #[test]
+    fn caller_scope_never_holds_an_alias_name() {
+        for alias in [
+            "NO_EXPORT",
+            "NO_ADVERTISE",
+            "NO_EXPORT_SUBCONFED",
+            "BLACKHOLE",
+            "GRACEFUL_SHUTDOWN",
+            "OV_VALID",
+            "OV_NOT_FOUND",
+            "OV_INVALID",
+        ] {
+            for ty in [
+                "community",
+                "u32",
+                "community-set",
+                "prefix-set",
+                "asn-set",
+                "ip",
+            ] {
+                let (_, rendered) = diagnostics_of(&format!(
+                    "policy inner(t: {ty}) {{ term t {{ accept }} }}
+                     policy outer({alias}: {ty}) {{ term t {{ if apply(inner({alias})) {{ accept }} }} }}"
+                ));
+                assert!(
+                    rendered.contains(&format!(
+                        "parameter `{alias}` has the name of a well-known community"
+                    )),
+                    "{alias}: {ty}: {rendered}"
+                );
+            }
+        }
     }
 }
