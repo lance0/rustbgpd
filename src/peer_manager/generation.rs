@@ -195,6 +195,7 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
                                 | MatchExpr::FamilyNe(_)
                                 | MatchExpr::RpkiIs(_)
                                 | MatchExpr::AspaIs(_)
+                                | MatchExpr::Exists(_)
                                 | MatchExpr::ValueCmp(_)
                                 // Dataset splicing retains name/kind identity;
                                 // contents are refreshed independently below.

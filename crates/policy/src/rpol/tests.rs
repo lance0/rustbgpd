@@ -3677,7 +3677,8 @@ fn computed_set_values_resolve_per_route() {
 /// The eval-error rail end to end on the counting path: uniform Deny,
 /// staged modifications (an earlier Continue term's) discarded, the
 /// per-chain error counter incremented, hit counters untouched by the
-/// error itself.
+/// error itself. Since LAN-2790 only an action can fail, so the error
+/// comes from a computed `set` value.
 #[test]
 fn eval_error_denies_discards_mods_and_counts() {
     use crate::eval::PolicyHitCounters;
@@ -3685,7 +3686,7 @@ fn eval_error_denies_discards_mods_and_counts() {
     let chain = compile_ok(
         "policy p {
             term tag { set local-pref 200 }
-            term guard { if route.med + 1 >= 1 { accept } }
+            term guard { set med route.med + 1; accept }
             term rest { accept }
          }",
     );
@@ -3724,29 +3725,32 @@ fn eval_error_denies_discards_mods_and_counts() {
     assert_eq!(counters.eval_errors(), 1);
 }
 
-/// An absent operand without a documented default (origin-as on an
-/// AS_SET-only path, unknown peer.asn) is unresolvable → the same
-/// eval-error rail. Plain field/literal comparisons keep their
-/// legacy never-match semantics — the two deliberately diverge.
+/// A missing value without a documented default (origin-as on an
+/// AS_SET-only path, unknown peer.asn) makes a comparison false in every
+/// form (LAN-2790): computed, parenthesized and binding forms agree with
+/// the plain comparison, and none of them is an evaluation error.
 #[test]
-fn absent_operand_is_an_eval_error_not_a_non_match() {
-    use crate::eval::EvalErrorKind;
-    use crate::ir::ValueField;
+fn absent_operand_is_a_non_match_in_every_form() {
     use PolicyAction::{Deny, Permit};
 
     // Verdicts are ordered: absent, present/equal, present/different.
     let cases = [
-        ("FIELD == 64500", [Permit, Deny, Permit], false),
-        ("FIELD != 64500", [Permit, Permit, Deny], false),
-        ("!(FIELD == 64500)", [Deny, Permit, Deny], false),
-        ("(FIELD == 64500)", [Permit, Deny, Permit], false),
-        ("FIELD * 1 == 64500", [Deny, Deny, Permit], true),
-        ("FIELD + 0 == 64500", [Deny, Deny, Permit], true),
-        ("FIELD == (64500)", [Deny, Deny, Permit], true),
-        ("!(FIELD == (64500))", [Deny, Permit, Deny], true),
+        ("FIELD == 64500", [Permit, Deny, Permit]),
+        ("FIELD != 64500", [Permit, Permit, Deny]),
+        ("!(FIELD == 64500)", [Deny, Permit, Deny]),
+        ("(FIELD == 64500)", [Permit, Deny, Permit]),
+        ("FIELD * 1 == 64500", [Permit, Deny, Permit]),
+        ("FIELD + 0 == 64500", [Permit, Deny, Permit]),
+        ("FIELD == (64500)", [Permit, Deny, Permit]),
+        ("!(FIELD == (64500))", [Deny, Permit, Deny]),
+        ("FIELD + 0 != 64500", [Permit, Permit, Deny]),
+        ("FIELD + 0 >= 64500", [Permit, Deny, Deny]),
     ];
-    for field in [ValueField::OriginAs, ValueField::PeerAsn] {
-        for (template, actions, absent_error) in cases {
+    for field in [
+        crate::ir::ValueField::OriginAs,
+        crate::ir::ValueField::PeerAsn,
+    ] {
+        for (template, actions) in cases {
             let guard = template.replace("FIELD", field.as_str());
             let chain = reject_if(&guard);
             for (index, value) in [None, Some(64500), Some(64501)].into_iter().enumerate() {
@@ -3757,11 +3761,7 @@ fn absent_operand_is_an_eval_error_not_a_non_match() {
                 };
                 let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
                 assert_eq!(result.action, actions[index], "{guard}, field={value:?}");
-                assert_eq!(
-                    evaluation.eval_error.map(|error| error.kind),
-                    (absent_error && value.is_none()).then_some(EvalErrorKind::AbsentField(field)),
-                    "{guard}, field={value:?}"
-                );
+                assert_eq!(evaluation.eval_error, None, "{guard}, field={value:?}");
             }
         }
     }
@@ -3901,15 +3901,36 @@ fn peer_asn_operand_registers_peer_context() {
     assert!(!route_action.requires_peer_context());
 }
 
-/// Guard evaluation errors render in explain traces in place of a
-/// verdict, in agreement with the live walk (ADR-0103 Decision 6.4).
+/// Action evaluation errors render in explain traces in place of a
+/// verdict, in agreement with the live walk (ADR-0103 Decision 6.4). A
+/// condition never fails (LAN-2790); its explain trace agrees too.
 #[test]
 fn eval_error_explain_renders_and_agrees() {
     use crate::engine::PolicyChain;
     use crate::engine::explain::explain_chain_statements;
 
+    let guard = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compile_ok(
+            "policy p { term big-med { if route.med + 1 >= 1 { reject } } term rest { accept } }",
+        )),
+    )]);
+    let mut ctx = absent_ctx();
+    ctx.med = Some(u32::MAX);
+    let trace = explain_chain_statements(Some(&guard), &ctx);
+    assert_eq!(trace.action, guard.evaluate(&ctx).action);
+    assert_eq!(trace.action, PolicyAction::Permit, "the condition is false");
+    assert!(
+        trace.steps[0]
+            .term_traces
+            .iter()
+            .any(|line| line.contains("route.med + 1 >= 1") && line.contains("[not matched]")),
+        "{:?}",
+        trace.steps[0].term_traces
+    );
+
     let compiled = compile_ok(
-        "policy p { term big-med { if route.med + 1 >= 1 { reject } } term rest { accept } }",
+        "policy p { term big-med { set med route.med + 1; accept } term rest { accept } }",
     );
     let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
         "p".to_string(),
@@ -3925,7 +3946,7 @@ fn eval_error_explain_renders_and_agrees() {
     assert_eq!(step.term_name.as_deref(), Some("big-med"));
     assert!(
         step.term_traces.iter().any(|line| line
-            .contains("route.med + 1 >= 1 => evaluation error: arithmetic overflow")
+            .contains("term big-med: evaluation error: arithmetic overflow")
             && line.contains("fail closed")),
         "error renders in place of a verdict: {:?}",
         step.term_traces
@@ -3963,10 +3984,10 @@ fn eval_error_explain_renders_and_agrees() {
 #[test]
 fn in_language_tests_cover_arithmetic_boundaries() {
     let source = r#"
-policy overflow-guard { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
-policy div-zero { term t { if route.med / 0 >= 0 { accept } } term rest { reject } }
-policy mod-zero { term t { if route.med % route.med >= 0 { accept } } term rest { reject } }
-policy absent-origin { term t { if route.origin-as * 1 >= 0 { accept } } term rest { reject } }
+policy overflow-guard { term t { set med route.med + 1; accept } }
+policy div-zero { term t { set med route.med / 0; accept } }
+policy mod-zero { term t { set med route.med % route.med; accept } }
+policy absent-origin { term t { set med route.origin-as * 1; accept } }
 policy folded-parity(bump: u32) { term t { set med 25 + 25; set local-pref bump * 2; accept } }
 policy builtin-edges {
     term t { set med max(min(route.med, 400), 100); accept }
@@ -4034,7 +4055,7 @@ test builtin-passes-middle {
 #[test]
 fn error_expectation_pins_the_fail_closed_rail() {
     let source = r"
-policy overflowing { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
+policy overflowing { term t { set med route.med + 1; accept } }
 
 test any-error-passes {
     route { med 4294967295 }
@@ -4058,7 +4079,7 @@ test kind-pinned-passes {
 fn error_expectation_mismatches_render_the_divergence() {
     let source = r"
 policy clean-reject { term t { reject } }
-policy overflowing { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
+policy overflowing { term t { set med route.med + 1; accept } }
 
 test clean-reject-is-not-an-error {
     route { }
@@ -4163,7 +4184,7 @@ test error-policy-accepts {
 fn evaluation_carries_eval_error_on_the_error_rail_only() {
     let chain = compile_ok(
         "policy p {
-            term guard { if route.med + 1 >= 1 { accept } }
+            term guard { set med route.med + 1; accept }
             term rest { reject }
          }",
     );
@@ -4413,8 +4434,9 @@ fn initializer_errors_deny_and_discard_staged_mods() {
     assert_eq!(result.modifications.set_med, Some(100));
     assert_eq!(counters.eval_errors(), 0);
 
-    // med 5: `5 - 100` underflows in the initializer → uniform Deny,
-    // the staged local-pref discarded, counter bumped.
+    // med 5: `5 - 100` underflows in the initializer, so `x` has no
+    // value and `set med x` needs one → uniform Deny, the staged
+    // local-pref discarded, counter bumped.
     ctx.med = Some(5);
     let result = chain.evaluate_counting(&ctx, &counters);
     assert_eq!(result.action, PolicyAction::Deny);
@@ -4427,13 +4449,13 @@ fn initializer_errors_deny_and_discard_staged_mods() {
     assert_eq!(recorded.action, PolicyAction::Deny);
     assert!(recorded.modifications.is_empty());
 
-    // An initializer that never reads its binding still errors: eager,
-    // not lazy (an unused erroring binding denies).
+    // A binding no action uses never denies (LAN-2790): it carries the
+    // missing state, and only an action that needs the value fails.
     let chain = compile_ok(
         "policy p { term t { let unused = route.origin-as; accept } term rest { accept } }",
     );
     let ctx = absent_ctx(); // no origin → absent operand
-    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
 }
 
 /// A `let` executes at its statement position: a decision *before* it
@@ -4454,13 +4476,14 @@ fn let_after_a_decision_never_evaluates() {
     let mut ctx = absent_ctx();
     ctx.med = Some(200);
     assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
-    // med 5, absent origin: the let runs and errors → Deny.
+    // med 5, absent origin: the let runs, `x` has no value, and the
+    // condition on it is false (LAN-2790) → the trailing accept.
     ctx.med = Some(5);
-    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
-    // Same rule inside a branch: an untaken branch's binding never
-    // evaluates; a taken branch's binding evaluates even if unused.
-    let chain =
-        compile_ok("policy p { term t { if route.med >= 10 { let x = route.origin-as } accept } }");
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+    // An action that needs the value denies; skipped, it never runs.
+    let chain = compile_ok(
+        "policy p { term t { if route.med >= 10 { let x = route.origin-as; set med x } accept } }",
+    );
     let mut ctx = absent_ctx();
     ctx.med = Some(5);
     assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
@@ -4594,8 +4617,8 @@ fn let_in_const_position_is_rejected() {
 }
 
 /// A binding read on the RIGHT of a plain u32-field comparison lowers
-/// to the checked value-comparison node — fail-closed absent-operand
-/// semantics, like every computed form.
+/// to the checked value-comparison node, which treats a missing operand
+/// as false, like every form (LAN-2790).
 #[test]
 fn cmp_against_a_binding_lowers_to_value_cmp() {
     let chain = compile_ok(
@@ -4614,9 +4637,8 @@ fn cmp_against_a_binding_lowers_to_value_cmp() {
     let mut ctx = absent_ctx();
     ctx.origin_asn = Some(64500);
     assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
-    // Absent origin: computed form denies (eval error), unlike the
-    // never-match scalar node.
-    assert_eq!(chain.evaluate(&absent_ctx()).action, PolicyAction::Deny);
+    // Absent origin: false, like the never-match scalar node.
+    assert_eq!(chain.evaluate(&absent_ctx()).action, PolicyAction::Permit);
 }
 
 /// `peer.asn` in a `let` initializer reads peer identity — the chain
@@ -4685,11 +4707,15 @@ fn let_explain_renders_and_agrees() {
     ctx.med = Some(5);
     let trace = explain_chain_statements(Some(&chain), &ctx);
     assert_eq!(trace.action, chain.evaluate(&ctx).action);
-    assert_eq!(trace.action, PolicyAction::Deny);
+    // An initializer that cannot be computed binds the missing state; no
+    // action needs it, so the route is accepted (LAN-2790) and the trace
+    // says why the binding has no value.
+    assert_eq!(trace.action, PolicyAction::Permit);
     assert!(
-        trace.steps[0].term_traces.iter().any(|line| line
-            .contains("evaluation error: arithmetic underflow")
-            && line.contains("fail closed")),
+        trace.steps[0]
+            .term_traces
+            .iter()
+            .any(|line| line.contains("`x` has no value (arithmetic underflow)")),
         "{:?}",
         trace.steps[0].term_traces
     );
@@ -4734,7 +4760,7 @@ policy shadow(base: u32) {
     }
 }
 policy eager-error {
-    term t { let x = route.origin-as; accept }
+    term t { let x = route.origin-as; set med x; accept }
     term rest { accept }
 }
 
@@ -5827,21 +5853,30 @@ fn fn_eval_error_inside_body_denies_and_counts() {
         "
         fn share(total: u32, parts: u32) -> u32 { total / parts }
         policy p {
-            term t { if share(100, route.med) >= 1 { reject } accept }
+            term t { set local-pref share(100, route.med); accept }
         }
         ",
     );
     let hits = crate::eval::PolicyHitCounters::for_chain(&chain);
-    // med absent -> implicit 0 -> divide-by-zero inside the body ->
-    // Deny, error counted.
+    // med absent -> implicit 0 -> divide-by-zero inside the body, and the
+    // action needs the value -> Deny, error counted.
     let denied = chain.evaluate_counting(&ctx_with_path_and_med(0, None), &hits);
     assert_eq!(denied.action, PolicyAction::Deny);
     assert_eq!(hits.eval_errors(), 1);
-    // A resolvable call decides normally.
-    // 100 / 200 = 0; `0 >= 1` is false -> falls through to accept.
-    let permitted = chain.evaluate_counting(&ctx_with_path_and_med(0, Some(200)), &hits);
+    // A resolvable call sets the value. 100 / 20 = 5.
+    let permitted = chain.evaluate_counting(&ctx_with_path_and_med(0, Some(20)), &hits);
     assert_eq!(permitted.action, PolicyAction::Permit);
+    assert_eq!(permitted.modifications.set_local_pref, Some(5));
     assert_eq!(hits.eval_errors(), 1, "no new error");
+    // In a condition the same call is simply false (LAN-2790).
+    let guard = compile_ok(
+        "
+        fn share(total: u32, parts: u32) -> u32 { total / parts }
+        policy p { term t { if share(100, route.med) >= 1 { reject } accept } }
+        ",
+    );
+    let result = guard.evaluate_counting(&ctx_with_path_and_med(0, None), &hits);
+    assert_eq!(result.action, PolicyAction::Permit);
 }
 
 /// `requires_peer_context` is a property of the CALL SITE's arguments —
@@ -6589,6 +6624,18 @@ mod coverage {
             assert_eq!(lints.len(), 1, "{condition}: {:?}", cov.lints);
             // Parentheses have no AST node; the range ends at the comparison.
             assert_eq!(&source[lints[0].span.range()], format!("!({condition}"));
+            // `exists` is suggested only for a field it can test.
+            let field = condition.split_whitespace().next().unwrap();
+            let advice = if matches!(field, "route.origin-as" | "route.next-hop" | "peer.asn") {
+                format!("test `exists {field}` explicitly")
+            } else {
+                "test the absent case explicitly".to_string()
+            };
+            assert!(
+                lints[0].message.ends_with(&advice),
+                "{condition}: {}",
+                lints[0].message
+            );
         }
     }
 
@@ -6615,24 +6662,135 @@ mod coverage {
         }
     }
 
-    #[test]
-    fn optional_field_negation_does_not_flag_checked_local_comparisons() {
-        let source = r"
-policy p {
-    term t {
-        let target = 64500;
-        if !(route.origin-as == target) { accept }
-        if !(peer.asn == target) { accept }
-    }
-}
-test absent { route { med 0 } expect p == error }
-";
-        let cov = coverage_of(source);
-        assert!(
-            !cov.lints
-                .iter()
-                .any(|lint| lint.kind == LintKind::OptionalFieldNegation)
+    /// The `optional-field-negation` messages for one term body.
+    fn negation_messages(body: &str) -> Vec<String> {
+        let source = format!(
+            "asn-set bogons {{ 64496 }}\n\
+             policy p {{ term t {{ {body} accept }} }}\n\
+             test absent {{ route {{ med 0 }} expect p == accept }}"
         );
+        coverage_of(&source)
+            .lints
+            .into_iter()
+            .filter(|lint| lint.kind == LintKind::OptionalFieldNegation)
+            .map(|lint| lint.message)
+            .collect()
+    }
+
+    /// Since LAN-2790 a comparison or probe on a missing value is false in
+    /// every form, so a negated binding, binding probe or computed
+    /// comparison matches a route without the value, like the plain
+    /// equality, and the lint flags each of them.
+    #[test]
+    fn optional_field_negation_flags_bindings_probes_and_computed_comparisons() {
+        let exists = "test `exists route.origin-as` explicitly";
+        for (body, message) in [
+            (
+                "let target = 64500; if !(route.origin-as == target) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "let target = 64500; if !(peer.asn == target) { accept }",
+                "negated equality matches when peer.asn is absent; use != to require its presence, or test `exists peer.asn` explicitly".to_string(),
+            ),
+            (
+                "if !(route.origin-as + 0 == 64500) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "if !(route.origin-as + 0 >= 64512) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(o == 64500) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(o in bogons) { accept }",
+                format!("negated membership test matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(route.med >= o) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; let p = o + 1; if !(p <= 9) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if route.med == 0 { if !(o == 1) { accept } }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+        ] {
+            assert_eq!(negation_messages(body), [message], "{body}");
+        }
+        // `exists` is suggested only for a field it can test.
+        assert_eq!(
+            negation_messages("if !(route.prefix == 192.0.2.0/24) { accept }"),
+            [
+                "negated equality matches when route.prefix is absent; use != to require its presence, or test the absent case explicitly"
+            ],
+        );
+    }
+
+    /// An origin AS or peer ASN compared against a binding, with any
+    /// operator, or against a parameter is false when the field is absent,
+    /// so its negation is flagged. `route.med` and `route.local-pref` read
+    /// their defaults and are not.
+    #[test]
+    fn optional_field_negation_flags_every_operator_against_an_identifier() {
+        for field in ["route.origin-as", "peer.asn"] {
+            let exists = format!("test `exists {field}` explicitly");
+            for op in ["==", "!=", ">=", "<="] {
+                let message = if op == "==" {
+                    format!(
+                        "negated equality matches when {field} is absent; use != to require its presence, or {exists}"
+                    )
+                } else {
+                    format!("negated comparison matches when {field} is absent; {exists}")
+                };
+                let body = format!("let target = 64500; if !({field} {op} target) {{ accept }}");
+                assert_eq!(
+                    negation_messages(&body),
+                    std::slice::from_ref(&message),
+                    "{body}"
+                );
+                if matches!(op, "==" | "!=") {
+                    let source = format!(
+                        "policy p(target: u32) {{ term t {{ if !({field} {op} target) {{ accept }} accept }} }}\n\
+                         test absent {{ route {{ med 0 }} expect p(64500) == accept }}"
+                    );
+                    let messages: Vec<String> = coverage_of(&source)
+                        .lints
+                        .into_iter()
+                        .filter(|lint| lint.kind == LintKind::OptionalFieldNegation)
+                        .map(|lint| lint.message)
+                        .collect();
+                    assert_eq!(messages, [message], "parameter: {field} {op}");
+                }
+            }
+        }
+        for body in [
+            "let floor = 100; if !(route.local-pref >= floor) { accept }",
+            "let cap = 50; if !(route.med <= cap) { accept }",
+        ] {
+            assert_eq!(negation_messages(body), Vec::<String>::new(), "{body}");
+        }
+    }
+
+    /// A binding stops counting as missing once a later `let` shadows it
+    /// with a present value, inside a `for` over a loop variable of the
+    /// same name, and outside the body that declared it.
+    #[test]
+    fn optional_field_negation_follows_binding_scope() {
+        for body in [
+            "let o = route.origin-as; let o = 5; if !(o == 1) { accept }",
+            "let o = route.origin-as; for o in route.communities { if !(o == 1) { accept } }",
+            "let o = 5; if route.med == 5 { let o = route.origin-as; set med o; accept } if !(o == 1) { accept }",
+            "let o = route.med; if !(o == 0) { accept }",
+        ] {
+            assert_eq!(negation_messages(body), Vec::<String>::new(), "{body}");
+        }
     }
 
     fn term<'a>(cov: &'a CoverageReport, policy: &str, name: &str) -> &'a TermCoverage {
@@ -8230,11 +8388,10 @@ fn modify_only_chain_paths_are_flat_and_in_source_order() {
     }
 }
 
-/// Dropping a deciding branch's negation is safe when its guard fails
-/// closed: the guard errors at the branch's own term, so the route is
-/// denied there and a later branch never decides it.
+/// A deciding branch whose guard reads a missing value is false
+/// (LAN-2790), so the walk reaches the next branch, which decides.
 #[test]
-fn deciding_branch_with_a_failing_guard_still_denies() {
+fn deciding_branch_with_a_missing_operand_falls_to_the_next_branch() {
     let chain = compile_ok(
         "policy p {
              term t {
@@ -8245,20 +8402,16 @@ fn deciding_branch_with_a_failing_guard_still_denies() {
     );
     let ctx = med_lp_ctx(Some(5), None);
     let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
-    assert_eq!(result.action, PolicyAction::Deny);
-    assert_eq!(
-        evaluation.eval_error.map(|error| error.kind),
-        Some(crate::eval::EvalErrorKind::AbsentField(
-            crate::ir::ValueField::OriginAs
-        ))
-    );
-    assert_eq!(result.modifications.set_local_pref, None);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(evaluation.eval_error, None);
+    assert_eq!(result.modifications.set_local_pref, Some(7));
 }
 
 /// An `else if` guard's function call evaluates only where the walk reaches
-/// the branch. A modify-only first branch that matches skips it, so the
-/// call's division by zero never runs; reached, it denies with the error.
-/// The same holds for the guard inside an enclosing branch that is skipped.
+/// the branch. A modify-only first branch that matches skips it; reached,
+/// the call's division by zero makes the condition false (LAN-2790), so
+/// the route is never denied. The same holds for a guard nested inside an
+/// enclosing branch.
 #[test]
 fn skipped_else_if_guard_never_runs_its_function_call() {
     let chain = compile_ok(
@@ -8288,22 +8441,18 @@ fn skipped_else_if_guard_never_runs_its_function_call() {
 
     let reached = med_lp_ctx(Some(0), Some(100));
     let (result, evaluation) = chain.evaluate_with_attribution(&reached);
-    assert_eq!(result.action, PolicyAction::Deny);
-    assert_eq!(
-        evaluation.eval_error.map(|error| error.kind),
-        Some(crate::eval::EvalErrorKind::DivideByZero)
-    );
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(evaluation.eval_error, None);
+    assert_eq!(result.modifications.set_med, None, "the condition is false");
 
     let nested = med_lp_ctx(Some(0), Some(950));
     let (result, evaluation) = chain.evaluate_with_attribution(&nested);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(evaluation.eval_error, None);
     assert_eq!(
-        result.action,
-        PolicyAction::Deny,
-        "the enclosing branch reaches it"
-    );
-    assert_eq!(
-        evaluation.eval_error.map(|error| error.kind),
-        Some(crate::eval::EvalErrorKind::DivideByZero)
+        result.modifications.set_med,
+        Some(1),
+        "the first term's set, not the nested branch's"
     );
 }
 
@@ -9446,6 +9595,434 @@ test else-branch {
         assert_eq!(size_of::<crate::ir::TermAction>(), 216);
         assert_eq!(size_of::<crate::ir::Term>(), 272);
         assert_eq!(size_of::<crate::ir::MatchExpr>(), 32);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// LAN-2790: a condition never fails
+// ─────────────────────────────────────────────────────────────────────
+
+mod condition_truth {
+    use std::sync::Arc;
+
+    use super::super::{format_rpol, run_rpol_tests};
+    use super::{absent_ctx, compile_ok, diagnostics_of, reject_if};
+    use crate::engine::explain::explain_chain_statements;
+    use crate::engine::{PolicyAction, PolicyChain, RouteContext};
+    use crate::eval::EvalErrorKind;
+
+    fn chain_of(source: &str) -> PolicyChain {
+        PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+            "p".to_string(),
+            Arc::new(compile_ok(source)),
+        )])
+    }
+
+    /// An `AS_SET`-only route: no origin AS, no peer ASN, no MED or `LOCAL_PREF`.
+    fn set_only() -> RouteContext<'static> {
+        RouteContext {
+            prefix: Some(super::v4(198, 51, 100, 0, 24)),
+            as_path_str: "{64500 64501}",
+            as_path_len: 1,
+            ..absent_ctx()
+        }
+    }
+
+    /// The verdict, with explain agreeing with live evaluation on both the
+    /// action and the error: explain renders exactly the live error, and
+    /// no error when the live walk raised none.
+    fn verdict(
+        chain: &PolicyChain,
+        ctx: &RouteContext<'_>,
+    ) -> (PolicyAction, Option<EvalErrorKind>) {
+        let (result, evaluation) = chain.compiled().evaluate_with_attribution(ctx);
+        let trace = explain_chain_statements(Some(chain), ctx);
+        assert_eq!(
+            trace.action, result.action,
+            "explain agrees with live evaluation"
+        );
+        let kind = evaluation.eval_error.map(|error| error.kind);
+        let errors: Vec<&String> = trace
+            .steps
+            .iter()
+            .flat_map(|step| step.term_traces.iter().chain(&step.matched_conditions))
+            .filter(|line| line.contains("evaluation error"))
+            .collect();
+        match kind {
+            Some(kind) => assert!(
+                errors.len() == 1 && errors[0].contains(&kind.to_string()),
+                "explain renders the live error {kind}: {errors:?}"
+            ),
+            None => assert!(errors.is_empty(), "explain renders no error: {errors:?}"),
+        }
+        (result.action, kind)
+    }
+
+    /// A missing or uncomputable operand never decides a conjunction or a
+    /// disjunction, whichever side it is on and whatever decides the other
+    /// side: a regex, a prefix-set probe, a plain comparison, `exists`.
+    #[test]
+    fn missing_operands_never_decide_and_or_in_either_order() {
+        let failing = [
+            "route.origin-as + 0 == 1",
+            "route.origin-as == (1)",
+            "route.origin-as * 1 >= 0",
+            "peer.asn + 0 == 1",
+            "route.med / 0 >= 0",
+            "route.med % (route.med - route.med) >= 0",
+            "route.med + 4294967295 >= 1",
+            "clamp(route.med, 10, route.med) >= 0",
+        ];
+        let falsy = [
+            "route.as-path matches \"^65000\"",
+            "route.prefix in customers",
+            "route.local-pref >= 500",
+            "exists route.origin-as",
+        ];
+        let mut ctx = set_only();
+        ctx.med = Some(5);
+        for fail in failing {
+            for other in falsy {
+                for guard in [format!("{fail} && {other}"), format!("{other} && {fail}")] {
+                    let chain = chain_of(&format!(
+                        "prefix-set customers {{ 192.0.2.0/24 }} \
+                         policy p {{ term t {{ if {guard} {{ reject }} }} term rest {{ accept }} }}"
+                    ));
+                    assert_eq!(
+                        verdict(&chain, &ctx),
+                        (PolicyAction::Permit, None),
+                        "{guard}"
+                    );
+                }
+                // `||` with a true side is true, whichever side fails.
+                for guard in [
+                    format!("{fail} || !({other})"),
+                    format!("!({other}) || {fail}"),
+                ] {
+                    let chain = chain_of(&format!(
+                        "prefix-set customers {{ 192.0.2.0/24 }} \
+                         policy p {{ term t {{ if {guard} {{ reject }} }} term rest {{ accept }} }}"
+                    ));
+                    assert_eq!(verdict(&chain, &ctx), (PolicyAction::Deny, None), "{guard}");
+                }
+            }
+            // Alone, the comparison is false; negated, true.
+            let chain = chain_of(&format!(
+                "policy p {{ term t {{ if {fail} {{ reject }} }} term rest {{ accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &ctx),
+                (PolicyAction::Permit, None),
+                "{fail}"
+            );
+            let chain = chain_of(&format!(
+                "policy p {{ term t {{ if !({fail}) {{ reject }} }} term rest {{ accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &ctx),
+                (PolicyAction::Deny, None),
+                "!({fail})"
+            );
+        }
+    }
+
+    /// The forms of one comparison agree on a route without an origin AS:
+    /// plain, parenthesized, computed, a `let` on the right, a `let` holding
+    /// the missing value, and a nested `if` — none denies the route.
+    #[test]
+    fn every_form_of_a_comparison_agrees_on_a_missing_value() {
+        let forms = [
+            "if route.origin-as == 64500 { reject }",
+            "if (route.origin-as == 64500) { reject }",
+            "if route.origin-as == (64500) { reject }",
+            "if route.origin-as + 0 == 64500 { reject }",
+            "if route.origin-as * 1 == 64500 { reject }",
+            "let x = 64500; if route.origin-as == x { reject }",
+            "let o = route.origin-as; if o == 64500 { reject }",
+            "let o = route.origin-as + 0; if o >= 1 { reject }",
+            "if route.as-path.len >= 1 { if route.origin-as + 0 == 64500 { reject } }",
+            "if route.origin-as + 0 == 64500 { reject } else if route.med >= 1 { reject }",
+        ];
+        for form in forms {
+            let chain = chain_of(&format!("policy p {{ term t {{ {form} accept }} }}"));
+            assert_eq!(
+                verdict(&chain, &set_only()),
+                (PolicyAction::Permit, None),
+                "{form}"
+            );
+            // A present origin still decides.
+            let ctx = RouteContext {
+                origin_asn: Some(64500),
+                med: Some(1),
+                ..set_only()
+            };
+            assert_eq!(verdict(&chain, &ctx).0, PolicyAction::Deny, "{form}");
+        }
+    }
+
+    /// Binding probes (`x in set`) on a binding without a value are false.
+    #[test]
+    fn binding_probes_on_a_missing_value_are_false() {
+        for probe in ["o in peers", "!(o in peers)", "o in tags", "!(o in tags)"] {
+            let chain = chain_of(&format!(
+                "asn-set peers {{ 64500 }} community-set tags {{ 0:64500 }} \
+                 policy p {{ term t {{ let o = route.origin-as; if {probe} {{ reject }} accept }} }}"
+            ));
+            let expected = if probe.starts_with('!') {
+                PolicyAction::Deny
+            } else {
+                PolicyAction::Permit
+            };
+            assert_eq!(verdict(&chain, &set_only()), (expected, None), "{probe}");
+        }
+    }
+
+    /// Actions keep the deny: a value an action needs and cannot compute
+    /// fails the route closed, with the error kind that made it missing.
+    #[test]
+    fn actions_that_need_a_missing_value_still_deny() {
+        use crate::ir::ValueField::OriginAs;
+        let cases: [(&str, EvalErrorKind); 6] = [
+            (
+                "set med route.origin-as + 0; accept",
+                EvalErrorKind::AbsentField(OriginAs),
+            ),
+            (
+                "let o = route.origin-as; set med o; accept",
+                EvalErrorKind::AbsentField(OriginAs),
+            ),
+            (
+                "let o = route.origin-as; add community o; accept",
+                EvalErrorKind::AbsentField(OriginAs),
+            ),
+            (
+                "set local-pref route.med / 0; accept",
+                EvalErrorKind::DivideByZero,
+            ),
+            ("set med route.med - 1; accept", EvalErrorKind::Underflow),
+            (
+                "prepend as origin 1; accept",
+                EvalErrorKind::AbsentPrependOperand(crate::engine::PrependAs::OriginAs),
+            ),
+        ];
+        for (body, kind) in cases {
+            let chain = chain_of(&format!("policy p {{ term t {{ {body} }} }}"));
+            assert_eq!(
+                verdict(&chain, &set_only()),
+                (PolicyAction::Deny, Some(kind)),
+                "{body}"
+            );
+        }
+        // A skipped action never runs.
+        let chain = chain_of(
+            "policy p { term t { let o = route.origin-as; if exists route.origin-as { set med o } accept } }",
+        );
+        assert_eq!(verdict(&chain, &set_only()), (PolicyAction::Permit, None));
+    }
+
+    /// `exists` tells a missing value from a present one for every optional
+    /// field, `route.med` and `route.local-pref` included (their comparisons
+    /// read the defaults). Each field is tested on a route where only it is
+    /// present, so a probe of the wrong field cannot pass.
+    #[test]
+    fn exists_tests_each_optional_field() {
+        let fields = [
+            "route.origin-as",
+            "peer.asn",
+            "route.med",
+            "route.local-pref",
+            "route.next-hop",
+        ];
+        let only = |field: &str| {
+            let mut ctx = set_only();
+            match field {
+                "route.origin-as" => ctx.origin_asn = Some(64500),
+                "peer.asn" => ctx.peer_asn = Some(64501),
+                "route.med" => ctx.med = Some(0),
+                "route.local-pref" => ctx.local_pref = Some(100),
+                _ => ctx.next_hop = Some("192.0.2.1".parse().unwrap()),
+            }
+            ctx
+        };
+        for probed in fields {
+            let chain = chain_of(&format!(
+                "policy p {{ term t {{ if exists {probed} {{ reject }} }} term rest {{ accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &set_only()),
+                (PolicyAction::Permit, None),
+                "{probed}"
+            );
+            for present in fields {
+                let expected = if present == probed {
+                    PolicyAction::Deny
+                } else {
+                    PolicyAction::Permit
+                };
+                assert_eq!(
+                    verdict(&chain, &only(present)),
+                    (expected, None),
+                    "exists {probed} on a route with only {present}"
+                );
+            }
+        }
+        let peer = compile_ok("policy p { term t { if exists peer.asn { reject } } }");
+        assert!(
+            peer.requires_peer_context(),
+            "exists peer.asn reads the peer"
+        );
+        let route = compile_ok("policy p { term t { if exists route.med { reject } } }");
+        assert!(!route.requires_peer_context());
+    }
+
+    #[test]
+    fn exists_rejects_unsupported_fields_and_stays_contextual() {
+        let (_, rendered) =
+            diagnostics_of("policy p { term t { if exists route.prefix { reject } } }");
+        assert!(
+            rendered.contains("`exists` does not support `route.prefix`"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("presence tests support only: route.origin-as, peer.asn"),
+            "{rendered}"
+        );
+        // A binding or parameter named `exists` keeps working.
+        compile_ok("policy p(exists: u32) { term t { if exists >= 1 { reject } } }");
+        compile_ok("policy p { term t { let exists = 3; set med exists; accept } }");
+        // `fmt` keeps the form and is idempotent.
+        let source =
+            "policy p {term t {if !exists route.origin-as||route.origin-as+0==1 {reject}}}\n";
+        let formatted = format_rpol(source).expect("formats");
+        assert!(
+            formatted.contains("!exists route.origin-as || route.origin-as + 0 == 1"),
+            "{formatted}"
+        );
+        assert_eq!(format_rpol(&formatted).expect("reformats"), formatted);
+    }
+
+    /// The docs example: reject a route when the value cannot be told.
+    #[test]
+    fn rejecting_when_a_value_is_missing() {
+        let example = r#"
+policy block-64500 {
+    term no-origin { if !exists route.origin-as { reject } }
+    term blocked { if route.origin-as == 64500 { reject } }
+    term rest { accept }
+}
+test as-set-only-is-rejected {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect block-64500 == reject
+}
+test blocked-is-rejected {
+    route { prefix 192.0.2.0/24; as-path "65010 64500" }
+    expect block-64500 == reject
+}
+test others-are-accepted {
+    route { prefix 192.0.2.0/24; as-path "65010 64501" }
+    expect block-64500 == accept
+}
+"#;
+        let report = run_rpol_tests(example).expect("compiles");
+        assert_eq!(report.total, 3);
+        assert!(report.all_passed(), "{:?}", report.failures);
+        // The presence test is load-bearing: without it the missing origin
+        // decides nothing and the route reaches `accept`.
+        let without = r#"
+policy block-64500 {
+    term blocked { if route.origin-as == 64500 { reject } }
+    term rest { accept }
+}
+test as-set-only-is-accepted {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect block-64500 == accept
+}
+"#;
+        let report = run_rpol_tests(without).expect("compiles");
+        assert_eq!(report.total, 1);
+        assert!(report.all_passed(), "{:?}", report.failures);
+    }
+
+    /// Inside a `for` body a binding or guard on a missing value behaves the
+    /// same: the condition is false on every iteration, and an action that
+    /// needs the value denies with its kind (the loop error rail).
+    #[test]
+    fn loop_bodies_follow_the_same_rule() {
+        use crate::ir::ValueField::OriginAs;
+        let communities = [(65_000 << 16) | 1, (65_000 << 16) | 2];
+        let ctx = RouteContext {
+            communities: &communities,
+            ..set_only()
+        };
+        for body in [
+            "let o = route.origin-as; if o == 1 { reject }",
+            "if route.origin-as + 0 == 1 { reject }",
+            "let o = route.origin-as; if o in peers { reject }",
+        ] {
+            let chain = chain_of(&format!(
+                "asn-set peers {{ 1 }} \
+                 policy p {{ term t {{ for c in route.communities {{ {body} }} accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &ctx),
+                (PolicyAction::Permit, None),
+                "{body}"
+            );
+        }
+        let chain = chain_of(
+            "policy p { term t { for c in route.communities { let o = route.origin-as; set med o } accept } }",
+        );
+        assert_eq!(
+            verdict(&chain, &ctx),
+            (
+                PolicyAction::Deny,
+                Some(EvalErrorKind::AbsentField(OriginAs))
+            )
+        );
+    }
+
+    /// Cost pin: `exists` is one cheapest-tier IR node, the rule adds no IR
+    /// node, and the typechecker's evaluation-cost DP charges `exists` one
+    /// step like `has`: the longest loop-body conjunction within the
+    /// per-route budget is the same for both.
+    #[test]
+    fn cost_model_is_unchanged() {
+        use crate::ir::{MatchExpr, OptionalField};
+        assert_eq!(MatchExpr::Exists(OptionalField::Med).cost_class(), 0);
+        let chain = reject_if("route.origin-as + 0 == 1 && route.med >= 1");
+        let guard = &chain.policies[0].terms[0].guard;
+        let MatchExpr::And(children) = guard else {
+            panic!("one And of two leaves: {guard:?}");
+        };
+        assert_eq!(children.len(), 2, "no node added: {guard:?}");
+        let chain = reject_if("exists route.med");
+        assert_eq!(
+            chain.policies[0].terms[0].guard,
+            MatchExpr::Exists(OptionalField::Med)
+        );
+
+        let source = |leaf: &str, n: usize| {
+            let guard = vec![leaf; n].join(" && ");
+            format!(
+                "policy p {{ term t {{ for c in route.communities {{ if {guard} {{ set med 1 }} }} accept }} }}"
+            )
+        };
+        let longest = |leaf: &str| {
+            (1..1_000)
+                .take_while(|&n| {
+                    super::super::compile_rpol(&source(leaf, n), &mut crate::sets::SetStore::new())
+                        .is_ok()
+                })
+                .last()
+                .expect("one leaf fits")
+        };
+        let has = longest("route.communities has 65000:1");
+        let (_, rendered) = diagnostics_of(&source("route.communities has 65000:1", has + 1));
+        assert!(
+            rendered.contains("exceeds the worst-case evaluation budget"),
+            "the evaluation budget binds: {rendered}"
+        );
+        assert_eq!(longest("exists route.med"), has);
     }
 }
 

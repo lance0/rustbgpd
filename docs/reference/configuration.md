@@ -3656,8 +3656,10 @@ peer's Adj-RIB-In, including stale and losing Add-Path paths, plus locally
 injected routes; the candidate need not be the best path.
 `condition_policy` sees the candidate's source peer address, ASN, and peer
 group; an injected route has none of them, so match route type `local` to
-select it. A `condition_policy` evaluation error makes the condition
-`unknown`, which holds the applied state.
+select it. A `condition_policy` evaluation error (an action that needs a
+value it cannot compute; a condition on a missing value is simply false, see
+[Conditions never fail](rpol-language.md#conditions-never-fail)) makes the
+condition `unknown`, which holds the applied state.
 
 **Timing.** A changed condition applies once it has stayed unchanged for
 `settle_time`; a shorter blip changes nothing. At startup every definition
@@ -3669,9 +3671,11 @@ settled (and RFC 4724 selection deferral, when active, has released). With
 **The gate.** For an attached neighbor, each candidate route that reaches
 the export chain is first checked against every attached definition that is
 not advertising. A definition's `advertise_policy` permit suppresses the
-route; an evaluation error also suppresses it (fail closed); only a clean
-reject lets the route continue to the neighbor's export chain, which still
-applies its modifications. Earlier export checks (split horizon, route
+route; an evaluation error also suppresses it (fail closed: an action that
+needs a value it cannot compute; a condition on a missing value is simply
+false, see [Conditions never fail](rpol-language.md#conditions-never-fail));
+only a clean reject lets the route continue to the neighbor's export chain,
+which still applies its modifications. Earlier export checks (split horizon, route
 reflection, family, LLGR, ORF, RFC 1997, route-server control) keep their
 order and their first denial. Suppression is a silent withdraw: it is not an
 export-policy denial and does not appear in policy counters. Under Add-Path

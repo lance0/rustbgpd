@@ -160,6 +160,36 @@ impl ArithOp {
     }
 }
 
+/// An optional route or peer value that `exists <field>` tests
+/// (LAN-2790).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OptionalField {
+    /// `route.origin-as`: missing on an empty or `AS_SET`-only path.
+    OriginAs,
+    /// `peer.asn`: missing when the evaluation peer's ASN is unknown.
+    PeerAsn,
+    /// `route.med`: the `MULTI_EXIT_DISC` attribute.
+    Med,
+    /// `route.local-pref`: the `LOCAL_PREF` attribute.
+    LocalPref,
+    /// `route.next-hop`.
+    NextHop,
+}
+
+impl OptionalField {
+    /// The `.rpol` source spelling (also the explain rendering).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OptionalField::OriginAs => "route.origin-as",
+            OptionalField::PeerAsn => "peer.asn",
+            OptionalField::Med => "route.med",
+            OptionalField::LocalPref => "route.local-pref",
+            OptionalField::NextHop => "route.next-hop",
+        }
+    }
+}
+
 /// A `u32`-typed context field readable as a value-expression operand
 /// (LAN-299). Absent-value semantics per field, mirroring today's
 /// comparison defaults where a documented default exists:
@@ -171,8 +201,9 @@ impl ArithOp {
 ///   present (0 for an empty path or list).
 /// - [`OriginAs`](Self::OriginAs) / [`PeerAsn`](Self::PeerAsn): no
 ///   default exists. An absent value makes the whole expression
-///   unresolvable — an **evaluation error** (uniform Deny, ADR-0103
-///   Decision 4), mirroring how computed prepend operands fail closed.
+///   unresolvable: a condition reading it is false, and an action that
+///   needs it denies the route (LAN-2790), mirroring how computed
+///   prepend operands fail closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueField {
     /// `route.local-pref` (absent → 100).
@@ -181,9 +212,11 @@ pub enum ValueField {
     Med,
     /// `route.as-path.len`.
     AsPathLen,
-    /// `route.origin-as` (absent → evaluation error).
+    /// `route.origin-as` (absent on an empty or `AS_SET`-only path: a
+    /// condition reading it is false, an action needing it denies).
     OriginAs,
-    /// `peer.asn` (absent → evaluation error). Reads peer identity, so
+    /// `peer.asn` (absent when unknown, with the same rule as
+    /// `route.origin-as`). Reads peer identity, so
     /// a chain whose value expressions contain it counts toward
     /// [`CompiledChain::requires_peer_context`].
     PeerAsn,
@@ -214,11 +247,12 @@ impl ValueField {
 
 /// A compiled `u32` value expression (LAN-299): checked arithmetic over
 /// constants, context fields, and the bounded builtins. Evaluated per
-/// route by `eval_value` (`crate::eval`); any checked-arithmetic
-/// failure or absent operand is an evaluation error that resolves the
-/// route as Deny (ADR-0103 Decision 4). Constant subtrees are folded at
-/// compile time (with checked ops); a constant expression that cannot
-/// fold safely is left in place and fails per route, closed.
+/// route by `eval_value` (`crate::eval`). A checked-arithmetic failure
+/// or absent operand makes a condition false; in an action it is an
+/// evaluation error that resolves the route as Deny (ADR-0103 Decision
+/// 4, as amended by LAN-2790). Constant subtrees are folded at compile
+/// time (with checked ops); a constant expression that cannot fold
+/// safely is left in place and fails per route the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueExpr {
     /// A constant (literal, parameter, or folded subtree).
@@ -435,10 +469,11 @@ impl ValueCmpOp {
 /// A comparison between two value expressions (LAN-299) — the compiled
 /// form of any `.rpol` comparison containing arithmetic or a builtin.
 /// Boxed behind [`MatchExpr::ValueCmp`] so plain guard nodes keep their
-/// size. Unlike the plain scalar nodes, an unresolvable operand here
-/// (absent origin/peer ASN, checked-arithmetic failure) is an
-/// **evaluation error**, not a non-match: the route is denied
-/// (ADR-0103 Decision 4).
+/// size. An operand that is missing or cannot be computed (absent
+/// origin/peer ASN, checked-arithmetic failure) makes the comparison
+/// false, like the plain scalar nodes (LAN-2790); only a fail-closed
+/// kind ([`EvalErrorKind::fails_closed`](crate::eval::EvalErrorKind::fails_closed))
+/// denies the route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueCmpNode {
     /// The comparison operator.
@@ -587,12 +622,16 @@ pub enum MatchExpr {
     /// ASPA path verification state equals this state.
     AspaIs(AspaValidation),
     /// A comparison between two `u32` value expressions (LAN-299) —
-    /// any `.rpol` comparison containing arithmetic or a builtin. An
-    /// unresolvable operand or checked-arithmetic failure during
-    /// evaluation is an evaluation error: the route is denied
-    /// (ADR-0103 Decision 4), unlike the never-match semantics of the
-    /// plain scalar nodes above.
+    /// any `.rpol` comparison containing arithmetic or a builtin. A
+    /// condition never fails: an operand that is missing or cannot be
+    /// computed makes the comparison false, exactly like the plain
+    /// scalar nodes above (LAN-2790). Only a compiler-bug rail denies.
     ValueCmp(Box<ValueCmpNode>),
+    /// `exists <field>`: the route (or evaluation peer) carries the
+    /// optional value (LAN-2790). The one way to tell a missing value
+    /// from a present one, since comparisons on a missing value are
+    /// false and `route.local-pref`/`route.med` read their defaults.
+    Exists(OptionalField),
     /// A `let`/loop binding's `u32` value is a member of an indexed
     /// ASN set (LAN-303, `.rpol` `<binding> in <asn-set>`). One frame
     /// load plus one hash probe; an unwritten frame is the fail-closed
@@ -669,6 +708,7 @@ impl MatchExpr {
             | MatchExpr::FamilyNe(_)
             | MatchExpr::RpkiIs(_)
             | MatchExpr::AspaIs(_)
+            | MatchExpr::Exists(_)
             // Straight-line checked arithmetic over scalars — the
             // cheap tier, like the comparisons it generalizes.
             | MatchExpr::ValueCmp(_) => 0,
@@ -1265,6 +1305,7 @@ impl CompiledChain {
             | MatchExpr::NextHopEqPeer
             | MatchExpr::NextHopNePeer
             | MatchExpr::PeerAsInSet(_)
+            | MatchExpr::Exists(OptionalField::PeerAsn)
             | MatchExpr::InDataset {
                 probe: DatasetProbe::PeerAs,
                 ..

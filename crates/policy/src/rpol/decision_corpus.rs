@@ -615,6 +615,7 @@ const CONSTRUCTS: &[&str] = &[
     "ast.expr.ident-in",
     "ast.expr.has",
     "ast.expr.has-parameter",
+    "ast.expr.exists",
     "ast.expr.matches",
     "ast.expr.contains",
     "ast.expr.value-cmp",
@@ -653,6 +654,7 @@ const CONSTRUCTS: &[&str] = &[
     "ir.guard.rpki-is",
     "ir.guard.aspa-is",
     "ir.guard.value-cmp",
+    "ir.guard.exists",
     "ir.guard.local-in-asn-set",
     "ir.guard.local-in-community-set",
     "ir.guard.in-dataset",
@@ -784,6 +786,7 @@ fn ast_expr(expr: &Expr, seen: &mut std::collections::BTreeSet<&'static str>) {
         Expr::IdentIn { .. } => "ast.expr.ident-in",
         Expr::Has { .. } => "ast.expr.has",
         Expr::HasParam { .. } => "ast.expr.has-parameter",
+        Expr::Exists { .. } => "ast.expr.exists",
         Expr::Matches { .. } => "ast.expr.matches",
         Expr::Contains { .. } => "ast.expr.contains",
         Expr::ValueCmp { lhs, rhs, .. } => {
@@ -988,6 +991,7 @@ fn ir_guard(expr: &MatchExpr, seen: &mut std::collections::BTreeSet<&'static str
             ir_value(&node.rhs, seen);
             "ir.guard.value-cmp"
         }
+        MatchExpr::Exists(_) => "ir.guard.exists",
         MatchExpr::LocalInAsnSet { .. } => "ir.guard.local-in-asn-set",
         MatchExpr::LocalInCommunitySet { .. } => "ir.guard.local-in-community-set",
         MatchExpr::InDataset { .. } => "ir.guard.in-dataset",
