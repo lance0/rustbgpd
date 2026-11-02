@@ -1266,7 +1266,11 @@ fn run_evpn_recovery_scan(
             .capture_key_with_checkpoint(anchor, scan_evpn_key(n), &mut |_| {})
             .map_err(|e| e.cause.as_str())?;
     }
-    assert!(ledger.seal_capture(anchor).map_err(|e| e.cause.as_str())?);
+    assert!(
+        ledger
+            .seal_capture_with_checkpoint(anchor, &mut |_| {})
+            .map_err(|e| e.cause.as_str())?
+    );
     let anchor_proof = ledger
         .proof(anchor)
         .unwrap()
@@ -1297,7 +1301,11 @@ fn run_evpn_recovery_scan(
                     .map_err(|error| error.cause.as_str())?
             );
         }
-        assert!(ledger.seal_capture(target).map_err(|e| e.cause.as_str())?);
+        assert!(
+            ledger
+                .seal_capture_with_checkpoint(target, &mut |_| {})
+                .map_err(|e| e.cause.as_str())?
+        );
         Ok(())
     })();
     phase("capture", false);

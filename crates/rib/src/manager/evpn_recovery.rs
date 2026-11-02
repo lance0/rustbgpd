@@ -1302,7 +1302,14 @@ impl RibManager {
                 )
             }
         };
-        if !captured || self.evpn_recovery.seal_capture(handle) != Ok(true) {
+        if !captured
+            || self
+                .evpn_recovery
+                .seal_capture_with_checkpoint(handle, &mut |force| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+                })
+                != Ok(true)
+        {
             self.refuse_evpn_capture(peer, handle);
             return false;
         }
@@ -1365,7 +1372,13 @@ impl RibManager {
                 return false;
             }
         }
-        if self.evpn_recovery.seal_capture(handle) != Ok(true) {
+        if self
+            .evpn_recovery
+            .seal_capture_with_checkpoint(handle, &mut |force| {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+            })
+            != Ok(true)
+        {
             self.refuse_evpn_capture(peer, handle);
             return false;
         }

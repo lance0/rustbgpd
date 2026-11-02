@@ -1,10 +1,13 @@
 //! Actor-owned EVPN recovery keys and their capacity credits.
 //!
-//! Each key a record admits occupies one dense slot in the ledger's slot
-//! space; records keep a bitset over slot IDs. A slot's holder count covers
-//! every record bit and reservation pin that names it, and a slot is reused
-//! only after that count reaches zero, so a bit can never come to name a
-//! different key. Slot IDs never leave this module.
+//! Each key a record admits occupies one slot in the ledger's slot space.
+//! A record holds its slots as sorted IDs while it holds few of them and as a
+//! bitset once that is smaller, so its cost tracks its own keys rather than
+//! the ledger's highest slot. A slot's holder count covers every record entry
+//! and reservation pin that names it, and a slot is reused only after that
+//! count reaches zero, so an entry can never come to name a different key.
+//! New keys take the lowest free slot and free slots at the top are trimmed,
+//! so IDs stay compact as the space drains. Slot IDs never leave this module.
 //!
 //! Credits cover container headers and requested reserved capacity, including
 //! overlapping reallocations. Allocator bookkeeping and RSS are separate
@@ -28,9 +31,9 @@ type Slots = SmallVec<[u32; 0]>;
 
 /// Index buckets per slot of capacity; linear probing stays at most half full.
 const INDEX_BUCKETS_PER_SLOT: usize = 2;
-/// Physical bytes per slot of capacity: the key, its holder count, a
-/// free-list entry and its index buckets. Each peer is also charged this for
-/// every slot it holds, the cost it would impose as that slot's only holder.
+/// The charge per held slot: the key, its holder count, a free-list entry and
+/// its index buckets. Each peer pays it for every slot it holds, the cost it
+/// would impose as that slot's only holder.
 pub(in crate::manager) const SLOT_BYTES: usize =
     size_of::<EvpnRouteKey>() + 2 * size_of::<u32>() + INDEX_BUCKETS_PER_SLOT * size_of::<u32>();
 const MIN_SLOT_CAPACITY: usize = 64;
@@ -38,6 +41,10 @@ const MIN_SLOT_CAPACITY: usize = 64;
 const WORD_STEP: usize = 16;
 /// Ledger loops offer a readiness checkpoint once per this many items.
 const CHECKPOINT_STRIDE: usize = 64;
+/// Slot IDs stay below 2^31, so a sparse entry is `slot << 1` and its low
+/// bit can mark the entry within one validation or application.
+const MARK: u32 = 1;
+const MAX_SLOTS: usize = 1 << 31;
 
 fn bit(words: &[u64], slot: u32) -> bool {
     let slot = slot as usize;
@@ -60,34 +67,41 @@ fn words_for(slot: u32) -> usize {
     slot as usize / 64 + 1
 }
 
-/// Set slots in ID order, with one checkpoint per visited word.
-fn set_slots<'a>(
-    words: &'a [u64],
-    mut checkpoint: impl FnMut(bool) + 'a,
-) -> impl Iterator<Item = u32> + 'a {
-    words.iter().enumerate().flat_map(move |(index, &word)| {
-        checkpoint(false);
-        let base = u32::try_from(index * 64).expect("slot IDs fit u32");
-        let mut rest = word;
-        std::iter::from_fn(move || {
-            (rest != 0).then(|| {
-                let offset = rest.trailing_zeros();
-                rest &= rest - 1;
-                base + offset
-            })
-        })
-    })
+/// Bitset bytes covering `top` in whole word steps.
+fn dense_bytes(top: u32) -> usize {
+    words_for(top).next_multiple_of(WORD_STEP) * size_of::<u64>()
 }
 
-/// The ledger's key slots. A free slot has zero holders and no index entry.
+fn sparse_bytes(count: usize) -> usize {
+    count.saturating_mul(size_of::<u32>())
+}
+
+fn sparse_slot(entry: u32) -> u32 {
+    entry >> 1
+}
+
+fn sparse_entry(slot: u32) -> u32 {
+    slot << 1
+}
+
+/// The position of `slot` in sorted sparse entries, marks ignored.
+fn sparse_position(entries: &[u32], slot: u32) -> Result<usize, usize> {
+    entries.binary_search_by(|entry| sparse_slot(*entry).cmp(&slot))
+}
+
+/// The ledger's key slots. A free slot has zero holders, a free bit and no
+/// index entry; the highest slot is never free.
 #[derive(Debug, Default)]
 struct SlotSpace {
     /// Slot to key; its length is the slot high-water mark.
     keys: Keys,
-    /// Record bits plus reservation pins naming each slot.
+    /// Record entries plus reservation pins naming each slot.
     holders: Slots,
-    /// Free slots below the high-water mark, reused last-in first-out.
-    free: Slots,
+    /// One bit per slot below the high-water mark, set while it is free.
+    free: Words,
+    free_count: usize,
+    /// No word below this one has a free bit.
+    first_free: usize,
     /// Open addressing with linear probing: zero is empty, else slot + 1.
     index: Slots,
     /// A per-space random key for `SipHash`. Keys are peer-chosen, and an
@@ -104,23 +118,33 @@ struct SlotSpace {
 }
 
 impl SlotSpace {
+    /// Bytes of every array sized for `slots`.
+    fn bytes_for(slots: usize) -> Option<usize> {
+        let per_slot = size_of::<EvpnRouteKey>()
+            + size_of::<u32>()
+            + INDEX_BUCKETS_PER_SLOT * size_of::<u32>();
+        slots
+            .checked_mul(per_slot)?
+            .checked_add(slots.div_ceil(64).checked_mul(size_of::<u64>())?)
+    }
+
     /// Slots every array can hold without allocating.
     fn capacity(&self) -> usize {
         self.keys
             .capacity()
             .min(self.holders.capacity())
-            .min(self.free.capacity())
+            .min(self.free.capacity() * 64)
             .min(self.index.len() / INDEX_BUCKETS_PER_SLOT)
     }
 
     fn bytes(&self) -> usize {
         self.keys.capacity() * size_of::<EvpnRouteKey>()
-            + (self.holders.capacity() + self.free.capacity() + self.index.capacity())
-                * size_of::<u32>()
+            + (self.holders.capacity() + self.index.capacity()) * size_of::<u32>()
+            + self.free.capacity() * size_of::<u64>()
     }
 
     fn live(&self) -> usize {
-        self.keys.len() - self.free.len()
+        self.keys.len() - self.free_count
     }
 
     fn bucket(&self, key: &EvpnRouteKey) -> usize {
@@ -220,26 +244,34 @@ impl SlotSpace {
         }
     }
 
-    /// The slot the next new key takes after `taken` earlier new keys.
-    fn next_new_slot(&self, taken: usize) -> u32 {
-        let slot = if taken < self.free.len() {
-            self.free[self.free.len() - 1 - taken] as usize
-        } else {
-            self.keys.len() + taken - self.free.len()
-        };
-        u32::try_from(slot).expect("slot capacity fits u32")
+    /// The lowest free slot, found from the first word that can hold one.
+    fn lowest_free(&mut self) -> Option<u32> {
+        if self.free_count == 0 {
+            return None;
+        }
+        while self.free[self.first_free] == 0 {
+            self.first_free += 1;
+        }
+        let slot = self.first_free * 64 + self.free[self.first_free].trailing_zeros() as usize;
+        Some(u32::try_from(slot).expect("slot capacity fits u32"))
     }
 
     /// Insert a key the caller just failed to find from `home`, its bucket
-    /// in the current table. Callers have already reserved capacity.
+    /// in the current table, into the lowest free slot. Callers have already
+    /// reserved capacity.
     fn insert_new(&mut self, home: usize, key: EvpnRouteKey) -> u32 {
-        let slot = if let Some(slot) = self.free.pop() {
+        let slot = if let Some(slot) = self.lowest_free() {
+            clear_bit(&mut self.free, slot);
+            self.free_count -= 1;
             self.keys[slot as usize] = key;
             slot
         } else {
             assert!(self.keys.len() < self.capacity(), "slot capacity reserved");
             self.keys.push(key);
             self.holders.push(0);
+            if self.keys.len() > self.free.len() * 64 {
+                self.free.push(0);
+            }
             u32::try_from(self.keys.len() - 1).expect("slot capacity fits u32")
         };
         self.insert_at(home, slot);
@@ -251,28 +283,50 @@ impl SlotSpace {
     }
 
     /// The last release frees the slot; only then can it name another key.
+    /// Free slots at the top leave the space, so the high-water mark falls
+    /// as slots drain.
     fn release(&mut self, slot: u32) {
         let holders = &mut self.holders[slot as usize];
         debug_assert!(*holders > 0, "released slot has a holder");
         *holders -= 1;
-        if *holders == 0 {
-            self.remove_index(slot);
-            self.free.push(slot);
+        if *holders != 0 {
+            return;
         }
+        self.remove_index(slot);
+        set_bit(&mut self.free, slot);
+        self.free_count += 1;
+        self.first_free = self.first_free.min(slot as usize / 64);
+        while let Some(top) = self.keys.len().checked_sub(1) {
+            let top = u32::try_from(top).expect("slot capacity fits u32");
+            if !bit(&self.free, top) {
+                break;
+            }
+            clear_bit(&mut self.free, top);
+            self.free_count -= 1;
+            self.keys.pop();
+            self.holders.pop();
+        }
+        self.free.truncate(self.keys.len().div_ceil(64));
+        self.first_free = self.first_free.min(self.free.len());
     }
 
-    /// Grow every array to `slots`, rebuilding the index. A refusal leaves
-    /// already-grown arrays in place; `capacity` still reports the old room.
-    fn try_grow(&mut self, slots: usize) -> Result<(), ()> {
+    /// Resize every array to `slots`, at least the high-water mark, and
+    /// rebuild the index. A refusal leaves arrays already resized in place;
+    /// `capacity` reports the room every array still has.
+    fn resize(&mut self, slots: usize, checkpoint: &mut impl FnMut(bool)) -> Result<(), ()> {
+        debug_assert!(slots >= self.keys.len());
         self.keys.try_grow(slots).map_err(drop)?;
         self.holders.try_grow(slots).map_err(drop)?;
-        self.free.try_grow(slots).map_err(drop)?;
+        self.free.try_grow(slots.div_ceil(64)).map_err(drop)?;
         let buckets = slots * INDEX_BUCKETS_PER_SLOT;
         let mut index = Slots::new();
         index.try_grow(buckets).map_err(drop)?;
         index.resize(buckets, 0);
         self.index = index;
         for slot in 0..self.keys.len() {
+            if slot % 1024 == 0 {
+                checkpoint(false);
+            }
             if self.holders[slot] != 0 {
                 self.insert_index(u32::try_from(slot).expect("slot capacity fits u32"));
             }
@@ -284,16 +338,123 @@ impl SlotSpace {
     fn clear(&mut self) {
         self.keys = Keys::new();
         self.holders = Slots::new();
-        self.free = Slots::new();
+        self.free = Words::new();
+        self.free_count = 0;
+        self.first_free = 0;
         self.index = Slots::new();
     }
 }
 
-/// Raw slot occupancy is not admission: only a record's set bits are.
+/// A record's admitted slots.
+#[derive(Debug)]
+enum Held {
+    /// Sorted unique sparse entries once sealed; capture appends unsorted.
+    Sparse(Slots),
+    /// One bit per slot ID.
+    Dense(Words),
+}
+
+impl Default for Held {
+    fn default() -> Self {
+        Self::Sparse(Slots::new())
+    }
+}
+
+impl Held {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Sparse(entries) => entries.capacity() * size_of::<u32>(),
+            Self::Dense(words) => words.capacity() * size_of::<u64>(),
+        }
+    }
+
+    fn view(&self) -> HeldView<'_> {
+        match self {
+            Self::Sparse(entries) => HeldView::Sparse(entries),
+            Self::Dense(words) => HeldView::Dense(words),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HeldView<'a> {
+    Sparse(&'a [u32]),
+    Dense(&'a [u64]),
+}
+
+impl<'a> HeldView<'a> {
+    fn contains(self, slot: u32) -> bool {
+        match self {
+            Self::Sparse(entries) => sparse_position(entries, slot).is_ok(),
+            Self::Dense(words) => bit(words, slot),
+        }
+    }
+
+    /// The highest held slot of a sealed record.
+    fn top(self) -> Option<u32> {
+        match self {
+            Self::Sparse(entries) => entries.last().map(|entry| sparse_slot(*entry)),
+            Self::Dense(words) => words.iter().rposition(|word| *word != 0).map(|index| {
+                u32::try_from(index * 64 + 63 - words[index].leading_zeros() as usize)
+                    .expect("slot IDs fit u32")
+            }),
+        }
+    }
+
+    /// Held slots in ID order, checkpointing once per 64 entries or words.
+    fn slots<C: FnMut(bool)>(self, checkpoint: C) -> HeldSlots<'a, C> {
+        HeldSlots {
+            held: self,
+            position: 0,
+            base: 0,
+            word: 0,
+            checkpoint,
+        }
+    }
+}
+
+struct HeldSlots<'a, C> {
+    held: HeldView<'a>,
+    position: usize,
+    base: usize,
+    word: u64,
+    checkpoint: C,
+}
+
+impl<C: FnMut(bool)> Iterator for HeldSlots<'_, C> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        match self.held {
+            HeldView::Sparse(entries) => {
+                let entry = *entries.get(self.position)?;
+                if self.position.is_multiple_of(CHECKPOINT_STRIDE) {
+                    (self.checkpoint)(false);
+                }
+                self.position += 1;
+                Some(sparse_slot(entry))
+            }
+            HeldView::Dense(words) => loop {
+                if self.word != 0 {
+                    let offset = self.word.trailing_zeros() as usize;
+                    self.word &= self.word - 1;
+                    return Some(u32::try_from(self.base + offset).expect("slot IDs fit u32"));
+                }
+                let word = *words.get(self.position)?;
+                (self.checkpoint)(false);
+                self.base = self.position * 64;
+                self.position += 1;
+                self.word = word;
+            },
+        }
+    }
+}
+
+/// Raw slot occupancy is not admission: only a record's own entries are.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::manager) struct EvpnProofView<'a> {
     space: &'a SlotSpace,
-    words: &'a [u64],
+    held: HeldView<'a>,
     masked: usize,
 }
 
@@ -309,10 +470,10 @@ impl<'a> EvpnProofView<'a> {
     pub(in crate::manager) fn contains(self, key: &EvpnRouteKey) -> bool {
         self.space
             .find(key)
-            .is_some_and(|slot| bit(self.words, slot))
+            .is_some_and(|slot| self.held.contains(slot))
     }
 
-    /// Admitted keys in slot order, checkpointing once per 64 slots.
+    /// Admitted keys in slot order, checkpointing once per 64 entries.
     pub(in crate::manager) fn iter_with_checkpoint<'c>(
         self,
         checkpoint: impl FnMut(bool) + 'c,
@@ -320,9 +481,12 @@ impl<'a> EvpnProofView<'a> {
     where
         'a: 'c,
     {
-        set_slots(self.words, checkpoint).map(move |slot| self.space.keys[slot as usize])
+        self.held
+            .slots(checkpoint)
+            .map(move |slot| self.space.keys[slot as usize])
     }
 }
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(in crate::manager) struct PeerSession {
     pub(in crate::manager) peer: PeerId,
@@ -373,8 +537,8 @@ struct Record {
     primary: bool,
     reset_admitted: bool,
     state: State,
-    /// One bit per admitted slot.
-    words: Words,
+    /// Admitted slots: sorted entries or a bitset, whichever is smaller.
+    held: Held,
     /// Slots held for the outstanding admission reservation.
     pins: Slots,
     masked: usize,
@@ -386,7 +550,7 @@ struct Record {
 impl Record {
     /// Daemon bytes this record owns beyond its array entry.
     fn owned_bytes(&self) -> usize {
-        self.words.capacity() * size_of::<u64>() + self.pins.capacity() * size_of::<u32>()
+        self.held.bytes() + self.pins.capacity() * size_of::<u32>()
     }
 
     /// Peer charge: the record, its storage and every slot it holds.
@@ -839,7 +1003,7 @@ impl EvpnRecoveryProvenance {
                 primary: generation.is_none(),
                 reset_admitted: false,
                 state: State::Ready,
-                words: Words::new(),
+                held: Held::default(),
                 pins: Slots::new(),
                 masked: 0,
                 peer_peak: target_peak.max(prior_peak),
@@ -853,6 +1017,82 @@ impl EvpnRecoveryProvenance {
     }
 
     /// Fresh registration starts with a sealed empty proof, never desired keys.
+    /// Recompute every holder count, free bit, index entry and credit from
+    /// scratch and compare them with the running values.
+    #[cfg(test)]
+    pub(in crate::manager) fn assert_consistent(&self) {
+        let space = &self.space;
+        let high_water = space.keys.len();
+        assert!(high_water <= space.capacity());
+        assert_eq!(space.holders.len(), high_water);
+        assert_eq!(space.free.len(), high_water.div_ceil(64));
+        let mut holders = vec![0_u32; high_water];
+        let mut daemon = size_of::<Self>() + self.records.capacity() * size_of::<Record>();
+        daemon += space.bytes();
+        for record in &self.records {
+            daemon += record.owned_bytes();
+            let held = record.held.view();
+            if let HeldView::Sparse(entries) = held {
+                assert!(
+                    entries.iter().all(|entry| entry & MARK == 0),
+                    "no mark left"
+                );
+                if !matches!(record.state, State::Capturing) {
+                    assert!(entries.windows(2).all(|pair| pair[0] < pair[1]), "sorted");
+                }
+            }
+            let mut count = 0;
+            for slot in held.slots(|_| {}) {
+                holders[slot as usize] += 1;
+                count += 1;
+            }
+            assert_eq!(record.masked, count, "masked counts held entries");
+            assert!(record.pins.windows(2).all(|pair| pair[0] <= pair[1]));
+            for &slot in &record.pins {
+                holders[slot as usize] += 1;
+            }
+            let expected = self
+                .records
+                .iter()
+                .filter(|other| other.handle.owner.peer == record.handle.owner.peer)
+                .map(Record::charge)
+                .sum::<usize>();
+            assert_eq!(record.peer_retained, expected);
+            assert!(record.peer_peak >= expected);
+        }
+        assert_eq!(space.holders.as_slice(), holders.as_slice());
+        let mut free = 0;
+        for (slot, count) in holders.iter().enumerate() {
+            let id = u32::try_from(slot).unwrap();
+            assert_eq!(
+                bit(&space.free, id),
+                *count == 0,
+                "free bits mark unheld slots"
+            );
+            if *count == 0 {
+                free += 1;
+            } else {
+                assert_eq!(space.find(&space.keys[slot]), Some(id));
+            }
+        }
+        assert_eq!(free, space.free_count);
+        assert!(
+            holders.last().is_none_or(|count| *count != 0),
+            "top slot held"
+        );
+        assert!(
+            space.free[..space.first_free.min(space.free.len())]
+                .iter()
+                .all(|word| *word == 0)
+        );
+        assert_eq!(
+            space.index.iter().filter(|entry| **entry != 0).count(),
+            space.live()
+        );
+        assert_eq!(self.daemon_used, daemon);
+        assert!(self.daemon_peak >= daemon);
+    }
+
     pub(in crate::manager) fn register(
         &mut self,
         owner: PeerSession,
@@ -926,7 +1166,7 @@ impl EvpnRecoveryProvenance {
             .space
             .keys
             .len()
-            .checked_add(fresh.saturating_sub(self.space.free.len()))
+            .checked_add(fresh.saturating_sub(self.space.free_count))
             .ok_or_else(Self::overflow)?;
         let current = self.space.capacity();
         if needed <= current {
@@ -935,10 +1175,10 @@ impl EvpnRecoveryProvenance {
         let target = needed
             .max(current.saturating_add(current / 2))
             .max(MIN_SLOT_CAPACITY);
-        if target >= u32::MAX as usize {
+        if target >= MAX_SLOTS {
             return Err(Self::overflow());
         }
-        let bytes = target.checked_mul(SLOT_BYTES).ok_or_else(Self::overflow)?;
+        let bytes = SlotSpace::bytes_for(target).ok_or_else(Self::overflow)?;
         let retained = self.peer_usage(peer).retained;
         let daemon = self
             .daemon_used
@@ -949,7 +1189,7 @@ impl EvpnRecoveryProvenance {
         self.daemon_peak = self.daemon_peak.max(daemon);
         let before = self.space.bytes();
         checkpoint(true);
-        let grown = self.allocation_permitted() && self.space.try_grow(target).is_ok();
+        let grown = self.allocation_permitted() && self.space.resize(target, checkpoint).is_ok();
         checkpoint(true);
         self.daemon_used = self.daemon_used - bytes - before + self.space.bytes();
         if grown {
@@ -964,39 +1204,266 @@ impl EvpnRecoveryProvenance {
         }
     }
 
-    /// Cover `slot` in the record's bitset, growing in fixed word steps.
-    fn grow_words(
+    /// Free the space once nothing holds a slot, and shrink it once the
+    /// high-water mark falls to a quarter of its capacity. Shrinking is
+    /// optional: a daemon-cap or allocation refusal leaves the space as is.
+    fn settle_space(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        if self.space.live() == 0 {
+            self.daemon_used -= self.space.bytes();
+            self.space.clear();
+            return;
+        }
+        if self.space.keys.len() > MIN_SLOT_CAPACITY
+            && self.space.live().saturating_mul(4) <= self.space.keys.len()
+        {
+            self.compact(checkpoint);
+        }
+        let capacity = self.space.capacity();
+        let length = self.space.keys.len();
+        if capacity <= MIN_SLOT_CAPACITY || length > capacity / 4 {
+            return;
+        }
+        let target = (length * 2).max(MIN_SLOT_CAPACITY);
+        let Some(daemon) = SlotSpace::bytes_for(target)
+            .and_then(|bytes| self.daemon_used.checked_add(bytes))
+            .filter(|daemon| *daemon <= self.daemon_limit)
+        else {
+            return;
+        };
+        let bytes = daemon - self.daemon_used;
+        self.daemon_used = daemon;
+        self.daemon_peak = self.daemon_peak.max(daemon);
+        let before = self.space.bytes();
+        checkpoint(true);
+        let _ = self.space.resize(target, checkpoint);
+        checkpoint(true);
+        self.daemon_used = self.daemon_used - bytes - before + self.space.bytes();
+    }
+
+    /// Renumber held slots into a dense prefix once at most a quarter of the
+    /// high-water mark is live, so slots held high cannot keep the space
+    /// large after the rest drains. The renumbering keeps slot order, so
+    /// sorted entries and pins stay sorted and a bitset is rewritten in
+    /// place. Slot IDs never leave the ledger, so every reference is here:
+    /// record entries, pins and the index. A refused temporary map skips it.
+    fn compact(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        let length = self.space.keys.len();
+        let Some(bytes) = length.checked_mul(size_of::<u32>()) else {
+            return;
+        };
+        let Some(daemon) = self
+            .daemon_used
+            .checked_add(bytes)
+            .filter(|daemon| *daemon <= self.daemon_limit)
+        else {
+            return;
+        };
+        let mut renumber = Slots::new();
+        if renumber.try_grow(length).is_err() {
+            return;
+        }
+        self.daemon_used = daemon;
+        self.daemon_peak = self.daemon_peak.max(daemon);
+        checkpoint(true);
+        let space = &mut self.space;
+        let mut live = 0_u32;
+        for slot in 0..length {
+            if slot % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            if space.holders[slot] == 0 {
+                renumber.push(u32::MAX);
+            } else {
+                let target = live as usize;
+                space.keys[target] = space.keys[slot];
+                space.holders[target] = space.holders[slot];
+                renumber.push(live);
+                live += 1;
+            }
+        }
+        space.keys.truncate(live as usize);
+        space.holders.truncate(live as usize);
+        space.free.clear();
+        space.free.resize((live as usize).div_ceil(64), 0);
+        space.free_count = 0;
+        space.first_free = 0;
+        space.index.iter_mut().for_each(|entry| *entry = 0);
+        for slot in 0..live {
+            if (slot as usize).is_multiple_of(CHECKPOINT_STRIDE) {
+                checkpoint(false);
+            }
+            space.insert_index(slot);
+        }
+        for record in &mut self.records {
+            match &mut record.held {
+                Held::Sparse(entries) => {
+                    for (n, entry) in entries.iter_mut().enumerate() {
+                        if n % CHECKPOINT_STRIDE == 0 {
+                            checkpoint(false);
+                        }
+                        *entry = sparse_entry(renumber[sparse_slot(*entry) as usize]);
+                    }
+                }
+                Held::Dense(words) => {
+                    // A slot only moves down, onto a position already read.
+                    for word in 0..words.len() {
+                        checkpoint(false);
+                        let mut rest = words[word];
+                        while rest != 0 {
+                            let offset = rest.trailing_zeros();
+                            rest &= rest - 1;
+                            let old = u32::try_from(word * 64).expect("slot IDs fit u32") + offset;
+                            clear_bit(words, old);
+                            set_bit(words, renumber[old as usize]);
+                        }
+                    }
+                }
+            }
+            for pin in &mut record.pins {
+                *pin = renumber[*pin as usize];
+            }
+        }
+        checkpoint(true);
+        drop(renumber);
+        self.daemon_used -= bytes;
+    }
+
+    /// Replace a record's held storage with `bytes` of new capacity built by
+    /// `build`, charging it beside the old storage until that is freed.
+    fn replace_held(
         &mut self,
         index: usize,
-        slot: u32,
-        checkpoint: &mut impl FnMut(bool),
+        bytes: usize,
+        build: impl FnOnce(&Held) -> Option<Held>,
     ) -> Result<(), Exhaustion> {
-        let needed = words_for(slot);
-        if needed <= self.records[index].words.len() {
+        let peer = self.records[index].handle.owner.peer;
+        self.credit(peer, bytes)?;
+        let replacement = if self.allocation_permitted() {
+            build(&self.records[index].held)
+        } else {
+            None
+        };
+        let Some(held) = replacement else {
+            let error = self.allocation_failure(peer);
+            self.refund(peer, bytes);
+            return Err(error);
+        };
+        debug_assert_eq!(held.bytes(), bytes);
+        let old = std::mem::replace(&mut self.records[index].held, held);
+        self.refund(peer, old.bytes());
+        Ok(())
+    }
+
+    /// Room for `count` sparse entries.
+    fn grow_sparse(&mut self, index: usize, count: usize) -> Result<(), Exhaustion> {
+        let Held::Sparse(entries) = &self.records[index].held else {
+            return Err(Self::admission_invariant());
+        };
+        if count <= entries.capacity() {
             return Ok(());
         }
-        let target = needed.next_multiple_of(WORD_STEP);
-        let old = self.records[index].words.capacity();
-        if target > old {
-            let peer = self.records[index].handle.owner.peer;
-            let bytes = target
-                .checked_mul(size_of::<u64>())
-                .ok_or_else(Self::overflow)?;
-            self.credit(peer, bytes)?;
-            checkpoint(true);
-            let failed =
-                !self.allocation_permitted() || self.records[index].words.try_grow(target).is_err();
-            checkpoint(true);
-            if failed {
-                let error = self.allocation_failure(peer);
-                self.refund(peer, bytes);
-                return Err(error);
-            }
-            // Pinned SmallVec has freed the old allocation before returning.
-            self.refund(peer, old * size_of::<u64>());
+        let bytes = count
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(Self::overflow)?;
+        self.replace_held(index, bytes, |held| {
+            let Held::Sparse(entries) = held else {
+                return None;
+            };
+            let mut grown = Slots::new();
+            grown.try_grow(count).ok()?;
+            grown.extend_from_slice(entries);
+            Some(Held::Sparse(grown))
+        })
+    }
+
+    /// Cover `top` in a dense record's bitset.
+    fn grow_dense(&mut self, index: usize, top: u32) -> Result<(), Exhaustion> {
+        let Held::Dense(words) = &self.records[index].held else {
+            return Err(Self::admission_invariant());
+        };
+        let target = dense_bytes(top) / size_of::<u64>();
+        if target <= words.len() {
+            return Ok(());
         }
-        self.records[index].words.resize(target, 0);
-        Ok(())
+        self.replace_held(index, target * size_of::<u64>(), |held| {
+            let Held::Dense(words) = held else {
+                return None;
+            };
+            let mut grown = Words::new();
+            grown.try_grow(target).ok()?;
+            grown.extend_from_slice(words);
+            grown.resize(target, 0);
+            Some(Held::Dense(grown))
+        })
+    }
+
+    /// Rebuild sealed sparse entries as a bitset covering `top`.
+    fn rebuild_dense(
+        &mut self,
+        index: usize,
+        top: u32,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<(), Exhaustion> {
+        let target = dense_bytes(top) / size_of::<u64>();
+        self.replace_held(index, target * size_of::<u64>(), |held| {
+            let mut words = Words::new();
+            words.try_grow(target).ok()?;
+            words.resize(target, 0);
+            for slot in held.view().slots(&mut *checkpoint) {
+                set_bit(&mut words, slot);
+            }
+            Some(Held::Dense(words))
+        })
+    }
+
+    /// Rebuild a bitset as sorted sparse entries with room for `count`.
+    fn rebuild_sparse(
+        &mut self,
+        index: usize,
+        count: usize,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<(), Exhaustion> {
+        let bytes = count
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(Self::overflow)?;
+        self.replace_held(index, bytes, |held| {
+            let mut entries = Slots::new();
+            entries.try_grow(count).ok()?;
+            entries.extend(held.view().slots(&mut *checkpoint).map(sparse_entry));
+            Some(Held::Sparse(entries))
+        })
+    }
+
+    /// Size a sealed record for `extra` more slots up to `top`, choosing
+    /// whichever representation is smaller. A switch back to sparse waits
+    /// until sparse is at most half the bitset, so sizes cannot flap.
+    fn fit_held(
+        &mut self,
+        index: usize,
+        extra: usize,
+        top: u32,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<(), Exhaustion> {
+        let record = &self.records[index];
+        let count = record
+            .masked
+            .checked_add(extra)
+            .ok_or_else(Self::overflow)?;
+        let top = record.held.view().top().map_or(top, |held| held.max(top));
+        let dense = dense_bytes(top);
+        checkpoint(true);
+        let fitted = match &record.held {
+            Held::Sparse(_) if sparse_bytes(count) > dense => {
+                self.rebuild_dense(index, top, checkpoint)
+            }
+            Held::Sparse(_) => self.grow_sparse(index, count),
+            Held::Dense(_) if sparse_bytes(count).saturating_mul(2) <= dense => {
+                self.rebuild_sparse(index, count, checkpoint)
+            }
+            Held::Dense(_) => self.grow_dense(index, top),
+        };
+        checkpoint(true);
+        fitted
     }
 
     fn grow_pins(
@@ -1027,7 +1494,7 @@ impl EvpnRecoveryProvenance {
         Ok(())
     }
 
-    /// Credit one held slot to `peer` without allocating.
+    /// Credit held slots to `peer` without allocating.
     fn credit_slots(&mut self, peer: PeerId, slots: usize) -> Result<(), Exhaustion> {
         let attempted = slots
             .checked_mul(SLOT_BYTES)
@@ -1039,18 +1506,11 @@ impl EvpnRecoveryProvenance {
         Ok(())
     }
 
-    fn release_space_if_empty(&mut self) {
-        if self.space.live() == 0 && self.space.bytes() != 0 {
-            self.daemon_used -= self.space.bytes();
-            self.space.clear();
-        }
-    }
-
     fn view(&self, index: usize) -> EvpnProofView<'_> {
         let record = &self.records[index];
         EvpnProofView {
             space: &self.space,
-            words: &record.words,
+            held: record.held.view(),
             masked: record.masked,
         }
     }
@@ -1069,9 +1529,10 @@ impl EvpnRecoveryProvenance {
         Ok(true)
     }
 
-    /// Admit one captured key: one index probe, an insert on first sight and
-    /// a bit. Capture order is irrelevant and repeated keys are idempotent;
-    /// `checkpoint` brackets only allocations, callers checkpoint their walk.
+    /// Admit one captured key: one keyed hash, one lookup, an insert on
+    /// first sight and an appended entry. Capture order is irrelevant and a
+    /// repeated key is merged at sealing; `checkpoint` brackets only
+    /// allocations, callers checkpoint their walk.
     pub(in crate::manager) fn capture_key_with_checkpoint(
         &mut self,
         handle: ProvenanceHandle,
@@ -1095,25 +1556,28 @@ impl EvpnRecoveryProvenance {
         key: EvpnRouteKey,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Exhaustion> {
-        // One keyed hash per key; a new key reuses it to insert unless growth
-        // rebuilt the table in between.
+        // A new key reuses this hash to insert unless growth rebuilt the
+        // table in between.
         let mut home = self.space.bucket_or_empty(&key);
         let existing = home.and_then(|home| self.space.find_from(home, &key));
-        if existing.is_some_and(|slot| bit(&self.records[index].words, slot)) {
-            return Ok(());
-        }
         let peer = self.records[index].handle.owner.peer;
-        let slot = if let Some(slot) = existing {
-            slot
-        } else {
+        if existing.is_none() {
             let buckets = self.space.index.len();
             self.ensure_space(peer, 1, checkpoint)?;
             if self.space.index.len() != buckets {
                 home = None;
             }
-            self.space.next_new_slot(0)
+        }
+        let Held::Sparse(entries) = &self.records[index].held else {
+            return Err(Self::admission_invariant());
         };
-        self.grow_words(index, slot, checkpoint)?;
+        let length = entries.len();
+        if length == entries.capacity() {
+            checkpoint(true);
+            let grown = self.grow_sparse(index, length.saturating_mul(2).max(16));
+            checkpoint(true);
+            grown?;
+        }
         self.credit_slots(peer, 1)?;
         let slot = existing.unwrap_or_else(|| {
             let home = home.unwrap_or_else(|| self.space.bucket(&key));
@@ -1121,15 +1585,21 @@ impl EvpnRecoveryProvenance {
         });
         self.space.hold(slot);
         let record = &mut self.records[index];
-        set_bit(&mut record.words, slot);
+        let Held::Sparse(entries) = &mut record.held else {
+            unreachable!("a capturing record stays sparse");
+        };
+        entries.push(sparse_entry(slot));
         record.masked += 1;
         Ok(())
     }
 
-    /// Sealing publishes the captured bits; there is nothing to sort.
-    pub(in crate::manager) fn seal_capture(
+    /// Seal a capture: merge repeated keys and keep the smaller of sorted
+    /// entries and a bitset. A bitset is built straight from the unsorted
+    /// entries; only a sparse result, at most a 32nd of the span, is sorted.
+    pub(in crate::manager) fn seal_capture_with_checkpoint(
         &mut self,
         handle: ProvenanceHandle,
+        checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Exhaustion> {
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
@@ -1137,8 +1607,101 @@ impl EvpnRecoveryProvenance {
         if !matches!(self.records[index].state, State::Capturing) {
             return Ok(false);
         }
-        self.records[index].state = State::Ready;
-        Ok(true)
+        match self.seal_held(index, checkpoint) {
+            Ok(()) => {
+                self.records[index].state = State::Ready;
+                Ok(true)
+            }
+            Err(error) => Err(self.mark_exhausted(handle, error)),
+        }
+    }
+
+    fn seal_held(
+        &mut self,
+        index: usize,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<(), Exhaustion> {
+        let peer = self.records[index].handle.owner.peer;
+        let Held::Sparse(entries) = &self.records[index].held else {
+            return Err(Self::admission_invariant());
+        };
+        let mut top = None;
+        for (n, entry) in entries.iter().enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            top = top.max(Some(sparse_slot(*entry)));
+        }
+        let Some(top) = top else {
+            return Ok(());
+        };
+        let repeats = if sparse_bytes(entries.len()) > dense_bytes(top) {
+            let bytes = dense_bytes(top);
+            self.credit(peer, bytes)?;
+            let mut words = Words::new();
+            checkpoint(true);
+            let failed =
+                !self.allocation_permitted() || words.try_grow(bytes / size_of::<u64>()).is_err();
+            checkpoint(true);
+            if failed {
+                let error = self.allocation_failure(peer);
+                self.refund(peer, bytes);
+                return Err(error);
+            }
+            words.resize(bytes / size_of::<u64>(), 0);
+            let Self { records, space, .. } = self;
+            let Record { held, masked, .. } = &mut records[index];
+            let Held::Sparse(entries) = &*held else {
+                unreachable!("still sparse");
+            };
+            // Unsorted entries: a repeated key finds its bit already set
+            // and gives back its extra hold.
+            let mut repeats = 0;
+            for (n, entry) in entries.iter().enumerate() {
+                if n % CHECKPOINT_STRIDE == 0 {
+                    checkpoint(false);
+                }
+                let slot = sparse_slot(*entry);
+                if bit(&words, slot) {
+                    space.release(slot);
+                    repeats += 1;
+                } else {
+                    set_bit(&mut words, slot);
+                }
+            }
+            *masked -= repeats;
+            let old = std::mem::replace(held, Held::Dense(words));
+            self.refund(peer, old.bytes());
+            repeats
+        } else {
+            let Self { records, space, .. } = self;
+            let Record { held, masked, .. } = &mut records[index];
+            let Held::Sparse(entries) = held else {
+                unreachable!("still sparse");
+            };
+            checkpoint(true);
+            entries.sort_unstable();
+            checkpoint(true);
+            let mut write = 0;
+            for read in 0..entries.len() {
+                if read % CHECKPOINT_STRIDE == 0 {
+                    checkpoint(false);
+                }
+                if write > 0 && entries[read] == entries[write - 1] {
+                    space.release(sparse_slot(entries[read]));
+                } else {
+                    entries[write] = entries[read];
+                    write += 1;
+                }
+            }
+            let repeats = entries.len() - write;
+            entries.truncate(write);
+            *masked -= repeats;
+            repeats
+        };
+        let retained = self.peer_usage(peer).retained - repeats * SLOT_BYTES;
+        self.set_peer_retained(peer, retained);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1148,6 +1711,14 @@ impl EvpnRecoveryProvenance {
         key: EvpnRouteKey,
     ) -> Result<bool, Exhaustion> {
         self.capture_key_with_checkpoint(handle, key, &mut |_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn seal_capture(
+        &mut self,
+        handle: ProvenanceHandle,
+    ) -> Result<bool, Exhaustion> {
+        self.seal_capture_with_checkpoint(handle, &mut |_| {})
     }
 
     /// None means there is no complete proof; it never permits a withdrawal.
@@ -1201,15 +1772,14 @@ impl EvpnRecoveryProvenance {
         &mut self,
         handle: ProvenanceHandle,
     ) -> Result<Option<ProvenanceHandle>, Exhaustion> {
-        let Some(proof) = self.proof(handle)? else {
+        if self.proof(handle)?.is_none() {
             return Ok(None);
-        };
-        let (length, masked) = (proof.words.len(), proof.masked);
+        }
         let snapshot = match self.insert_record(handle.owner, Some(handle.generation)) {
             Ok(snapshot) => snapshot,
             Err(error) => return Err(self.mark_exhausted(handle, error)),
         };
-        if let Err(error) = self.copy_snapshot(handle, snapshot, length, masked) {
+        if let Err(error) = self.copy_snapshot(handle, snapshot) {
             self.retire(snapshot);
             return Err(self.mark_exhausted(handle, error));
         }
@@ -1220,40 +1790,43 @@ impl EvpnRecoveryProvenance {
         &mut self,
         handle: ProvenanceHandle,
         snapshot: ProvenanceHandle,
-        length: usize,
-        masked: usize,
     ) -> Result<(), Exhaustion> {
         let peer = handle.owner.peer;
-        if length != 0 {
-            let bytes = length
-                .checked_mul(size_of::<u64>())
-                .ok_or_else(Self::overflow)?;
-            self.credit(peer, bytes)?;
-            let destination = self.index(snapshot).expect("new snapshot remains owned");
-            if !self.allocation_permitted()
-                || self.records[destination].words.try_grow(length).is_err()
-            {
-                let error = self.allocation_failure(peer);
-                self.refund(peer, bytes);
-                return Err(error);
-            }
-        }
-        self.credit_slots(peer, masked)?;
         let source = self.index(handle).expect("snapshot source remains owned");
+        let masked = self.records[source].masked;
+        let bytes = match &self.records[source].held {
+            Held::Sparse(entries) => sparse_bytes(entries.len()),
+            Held::Dense(words) => words.len() * size_of::<u64>(),
+        };
+        self.credit(peer, bytes)?;
+        let built = if self.allocation_permitted() {
+            copy_held(&self.records[source].held)
+        } else {
+            None
+        };
+        let Some(held) = built else {
+            let error = self.allocation_failure(peer);
+            self.refund(peer, bytes);
+            return Err(error);
+        };
+        if let Err(error) = self.credit_slots(peer, masked) {
+            drop(held);
+            self.refund(peer, bytes);
+            return Err(error);
+        }
         let destination = self.index(snapshot).expect("new snapshot remains owned");
-        // The snapshot's later ID sorts it after its primary.
-        let (before, after) = self.records.split_at_mut(destination);
-        let copy = &mut after[0];
-        copy.words.extend_from_slice(&before[source].words);
+        let Self { records, space, .. } = self;
+        let copy = &mut records[destination];
+        copy.held = held;
         copy.masked = masked;
-        for slot in set_slots(&copy.words, |_| {}) {
-            self.space.hold(slot);
+        for slot in copy.held.view().slots(|_| {}) {
+            space.hold(slot);
         }
         Ok(())
     }
 
-    /// Every withdrawal names a distinct admitted slot. Bits are cleared to
-    /// detect repeats and restored before returning.
+    /// Every withdrawal names a distinct admitted slot. Entries are marked
+    /// to detect repeats and restored before returning.
     fn validate_withdrawals(
         &mut self,
         index: usize,
@@ -1261,33 +1834,56 @@ impl EvpnRecoveryProvenance {
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Exhaustion> {
         let Self { records, space, .. } = self;
-        let words = &mut records[index].words;
-        let mut cleared = 0;
+        let held = &mut records[index].held;
+        let mut marked = 0;
         for (n, key) in withdrawals.iter().enumerate() {
             if n % CHECKPOINT_STRIDE == 0 {
                 checkpoint(false);
             }
-            match space.find(key) {
-                Some(slot) if bit(words, slot) => {
+            let Some(slot) = space.find(key) else {
+                break;
+            };
+            let fresh = match held {
+                Held::Dense(words) if bit(words, slot) => {
                     clear_bit(words, slot);
-                    cleared += 1;
+                    true
                 }
-                _ => break,
+                Held::Dense(_) => false,
+                Held::Sparse(entries) => match sparse_position(entries, slot) {
+                    Ok(position) if entries[position] & MARK == 0 => {
+                        entries[position] |= MARK;
+                        true
+                    }
+                    _ => false,
+                },
+            };
+            if !fresh {
+                break;
+            }
+            marked += 1;
+        }
+        for (n, key) in withdrawals[..marked].iter().enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            let slot = space.find(key).expect("validated withdrawal");
+            match held {
+                Held::Dense(words) => set_bit(words, slot),
+                Held::Sparse(entries) => {
+                    let position = sparse_position(entries, slot).expect("validated withdrawal");
+                    entries[position] &= !MARK;
+                }
             }
         }
-        for key in &withdrawals[..cleared] {
-            set_bit(words, space.find(key).expect("validated withdrawal"));
-        }
-        if cleared == withdrawals.len() {
+        if marked == withdrawals.len() {
             Ok(())
         } else {
             Err(Self::admission_invariant())
         }
     }
 
-    /// Final announcements are sorted and unique, each with an existing slot
-    /// inside the reserved bitset, and add at most as many bits as the
-    /// reservation pinned.
+    /// Final announcements are sorted and unique, each with an existing
+    /// slot that the record already admits or that its reservation pinned.
     fn validate_announcements(
         &self,
         index: usize,
@@ -1295,7 +1891,7 @@ impl EvpnRecoveryProvenance {
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Exhaustion> {
         let record = &self.records[index];
-        let mut added = 0_usize;
+        let held = record.held.view();
         let mut previous = None;
         for (n, key) in announcements.enumerate() {
             if n % CHECKPOINT_STRIDE == 0 {
@@ -1308,32 +1904,31 @@ impl EvpnRecoveryProvenance {
             let slot = self
                 .space
                 .find(&key)
-                .filter(|slot| (*slot as usize) < record.words.len() * 64)
                 .ok_or_else(Self::admission_invariant)?;
-            if !bit(&record.words, slot) {
-                added += 1;
+            if !held.contains(slot) && record.pins.binary_search(&slot).is_err() {
+                return Err(Self::admission_invariant());
             }
-        }
-        if added > record.pins.len() {
-            return Err(Self::admission_invariant());
         }
         Ok(())
     }
 
-    fn release_pins(&mut self, index: usize) {
+    fn release_pins(&mut self, index: usize, checkpoint: &mut impl FnMut(bool)) {
         if self.records[index].pins.is_empty() {
             return;
         }
         let before = self.records[index].charge();
         let Self { records, space, .. } = self;
-        for slot in records[index].pins.drain(..) {
+        for (n, slot) in records[index].pins.drain(..).enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
             space.release(slot);
         }
         self.recharge(index, before);
     }
 
     /// Pin every announced key the record has not admitted, so final
-    /// application only flips bits: it allocates nothing, and no release
+    /// application only flips entries: it allocates nothing, and no release
     /// elsewhere can free a slot it still needs. Reserve after owning a queue
     /// slot and before export-side mutations; a later reservation replaces
     /// the pins of an earlier one.
@@ -1356,20 +1951,24 @@ impl EvpnRecoveryProvenance {
         if let Err(error) = self.validate_withdrawals(index, withdrawals, checkpoint) {
             return Err(self.mark_exhausted(handle, error));
         }
-        self.release_pins(index);
+        self.release_pins(index, checkpoint);
         self.pin_announcements(index, announcements, checkpoint)
             .map(|()| true)
             .map_err(|error| self.mark_exhausted(handle, error))
     }
 
+    /// Count, make room, pin, then size the record for the pinned slots.
+    /// Pins hold their slots first, so sizing needs no prediction of which
+    /// slots new keys will take.
     fn pin_announcements(
         &mut self,
         index: usize,
         announcements: impl Iterator<Item = EvpnRouteKey> + Clone,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Exhaustion> {
-        let (mut fresh, mut pins, mut top) = (0_usize, 0_usize, None);
+        let (mut fresh, mut pins) = (0_usize, 0_usize);
         let mut previous = None;
+        let held = self.records[index].held.view();
         for (n, key) in announcements.clone().enumerate() {
             if n % CHECKPOINT_STRIDE == 0 {
                 checkpoint(false);
@@ -1379,23 +1978,18 @@ impl EvpnRecoveryProvenance {
                 return Err(Self::admission_invariant());
             }
             previous = Some(key);
-            let slot = match self.space.find(&key) {
-                Some(slot) if bit(&self.records[index].words, slot) => continue,
-                Some(slot) => slot,
-                None => {
-                    fresh += 1;
-                    self.space.next_new_slot(fresh - 1)
-                }
-            };
+            match self.space.find(&key) {
+                Some(slot) if held.contains(slot) => continue,
+                Some(_) => {}
+                None => fresh += 1,
+            }
             pins += 1;
-            top = top.max(Some(slot));
         }
-        let Some(top) = top else {
+        if pins == 0 {
             return Ok(());
-        };
+        }
         let peer = self.records[index].handle.owner.peer;
         self.ensure_space(peer, fresh, checkpoint)?;
-        self.grow_words(index, top, checkpoint)?;
         self.grow_pins(index, pins, checkpoint)?;
         self.credit_slots(peer, pins)?;
         let Self { records, space, .. } = self;
@@ -1406,7 +2000,7 @@ impl EvpnRecoveryProvenance {
             }
             let home = space.bucket(&key);
             let slot = match space.find_from(home, &key) {
-                Some(slot) if bit(&record.words, slot) => continue,
+                Some(slot) if record.held.view().contains(slot) => continue,
                 Some(slot) => slot,
                 None => space.insert_new(home, key),
             };
@@ -1414,14 +2008,19 @@ impl EvpnRecoveryProvenance {
             record.pins.push(slot);
         }
         debug_assert_eq!(record.pins.len(), pins);
-        Ok(())
+        checkpoint(true);
+        record.pins.sort_unstable();
+        checkpoint(true);
+        let top = *record.pins.last().expect("pinned");
+        self.fit_held(index, pins, top, checkpoint)
     }
 
     /// Apply final accepted batches after their reservation and before
     /// enqueue. Final filtering may only remove announcements or add admitted
-    /// withdrawals. The whole batch is validated before any bit changes, and
-    /// application allocates nothing. A key withdrawn and announced in one
-    /// batch stays admitted.
+    /// withdrawals. The whole batch is validated before any entry changes,
+    /// and application allocates nothing. A key withdrawn and announced in
+    /// one batch stays admitted. Withdrawals need only be distinct: the
+    /// emitter sorts them, but the ledger does not depend on it.
     pub(in crate::manager) fn apply_admitted_with_checkpoint<A>(
         &mut self,
         handle: ProvenanceHandle,
@@ -1452,26 +2051,45 @@ impl EvpnRecoveryProvenance {
             return Err(self.mark_exhausted(handle, error));
         }
         let before = self.records[index].charge();
+        if matches!(self.records[index].held, Held::Dense(_)) {
+            self.apply_dense(index, announcements, withdrawals, checkpoint);
+        } else {
+            self.apply_sparse(index, announcements, withdrawals, checkpoint);
+        }
+        self.recharge(index, before);
+        self.settle_space(checkpoint);
+        Ok(true)
+    }
+
+    fn apply_dense(
+        &mut self,
+        index: usize,
+        announcements: impl Iterator<Item = EvpnRouteKey>,
+        withdrawals: &[EvpnRouteKey],
+        checkpoint: &mut impl FnMut(bool),
+    ) {
         let Self { records, space, .. } = self;
-        let record = &mut records[index];
+        let Record {
+            held, pins, masked, ..
+        } = &mut records[index];
+        let Held::Dense(words) = held else {
+            unreachable!("dense application");
+        };
         for (n, key) in withdrawals.iter().enumerate() {
             if n % CHECKPOINT_STRIDE == 0 {
                 checkpoint(false);
             }
-            clear_bit(
-                &mut record.words,
-                space.find(key).expect("validated withdrawal"),
-            );
+            clear_bit(words, space.find(key).expect("validated withdrawal"));
         }
         for (n, key) in announcements.enumerate() {
             if n % CHECKPOINT_STRIDE == 0 {
                 checkpoint(false);
             }
             let slot = space.find(&key).expect("validated announcement");
-            if !bit(&record.words, slot) {
-                set_bit(&mut record.words, slot);
+            if !bit(words, slot) {
+                set_bit(words, slot);
                 space.hold(slot);
-                record.masked += 1;
+                *masked += 1;
             }
         }
         // Withdrawal holds drop only after re-announcements took theirs.
@@ -1479,15 +2097,111 @@ impl EvpnRecoveryProvenance {
             if n % CHECKPOINT_STRIDE == 0 {
                 checkpoint(false);
             }
-            record.masked -= 1;
+            *masked -= 1;
             space.release(space.find(key).expect("withdrawn slot is still held"));
         }
-        for slot in record.pins.drain(..) {
+        for (n, slot) in pins.drain(..).enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
             space.release(slot);
         }
-        self.recharge(index, before);
-        self.release_space_if_empty();
-        Ok(true)
+    }
+
+    /// Sorted entries: mark withdrawals, unmark re-announcements, append new
+    /// slots, release, then merge the appended tail through the drained pin
+    /// buffer. Reservation sized both buffers, so nothing allocates.
+    fn apply_sparse(
+        &mut self,
+        index: usize,
+        announcements: impl Iterator<Item = EvpnRouteKey>,
+        withdrawals: &[EvpnRouteKey],
+        checkpoint: &mut impl FnMut(bool),
+    ) {
+        let Self { records, space, .. } = self;
+        let Record {
+            held, pins, masked, ..
+        } = &mut records[index];
+        let Held::Sparse(entries) = held else {
+            unreachable!("sparse application");
+        };
+        let sealed = entries.len();
+        for (n, key) in withdrawals.iter().enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            let slot = space.find(key).expect("validated withdrawal");
+            let position = sparse_position(&entries[..sealed], slot).expect("validated withdrawal");
+            entries[position] |= MARK;
+        }
+        for (n, key) in announcements.enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            let slot = space.find(&key).expect("validated announcement");
+            match sparse_position(&entries[..sealed], slot) {
+                Ok(position) if entries[position] & MARK != 0 => {
+                    entries[position] &= !MARK;
+                    space.hold(slot);
+                    *masked += 1;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    debug_assert!(entries.len() < entries.capacity(), "reserved room");
+                    entries.push(sparse_entry(slot));
+                    space.hold(slot);
+                    *masked += 1;
+                }
+            }
+        }
+        // Withdrawal holds drop only after re-announcements took theirs.
+        for (n, key) in withdrawals.iter().enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            *masked -= 1;
+            space.release(space.find(key).expect("withdrawn slot is still held"));
+        }
+        for (n, slot) in pins.drain(..).enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            space.release(slot);
+        }
+        // Each appended slot was pinned, so the pin buffer has room for the
+        // tail; sort it there and merge it with the compacted sealed entries.
+        pins.extend_from_slice(&entries[sealed..]);
+        entries.truncate(sealed);
+        checkpoint(true);
+        pins.sort_unstable();
+        checkpoint(true);
+        let mut kept = 0;
+        for read in 0..sealed {
+            if read % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            if entries[read] & MARK == 0 {
+                entries[kept] = entries[read];
+                kept += 1;
+            }
+        }
+        entries.truncate(kept);
+        let total = kept + pins.len();
+        entries.resize(total, 0);
+        let (mut left, mut right) = (kept, pins.len());
+        for write in (0..total).rev() {
+            if write % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
+            if right == 0 || (left > 0 && entries[left - 1] > pins[right - 1]) {
+                left -= 1;
+                entries[write] = entries[left];
+            } else {
+                right -= 1;
+                entries[write] = pins[right];
+            }
+        }
+        pins.clear();
     }
 
     /// Final gates must preserve the reservation. Check this before any
@@ -1565,23 +2279,26 @@ impl EvpnRecoveryProvenance {
 
     /// Release every slot the record holds, then free its storage before
     /// refunding the credit. The last holder of a slot frees it.
-    fn free_keys(&mut self, index: usize) {
+    fn free_keys(&mut self, index: usize, checkpoint: &mut impl FnMut(bool)) {
         let before = self.records[index].charge();
         let Self { records, space, .. } = self;
         let record = &mut records[index];
-        for slot in set_slots(&record.words, |_| {}) {
+        for slot in record.held.view().slots(&mut *checkpoint) {
             space.release(slot);
         }
-        for slot in record.pins.drain(..) {
+        for (n, slot) in record.pins.drain(..).enumerate() {
+            if n % CHECKPOINT_STRIDE == 0 {
+                checkpoint(false);
+            }
             space.release(slot);
         }
         let bytes = record.owned_bytes();
         record.masked = 0;
-        record.words = Words::new();
+        record.held = Held::default();
         record.pins = Slots::new();
         self.daemon_used -= bytes;
         self.recharge(index, before);
-        self.release_space_if_empty();
+        self.settle_space(checkpoint);
     }
 
     /// Exhaustion cannot become a fresh capture.
@@ -1595,7 +2312,7 @@ impl EvpnRecoveryProvenance {
         if !self.records[index].primary || !matches!(self.records[index].state, State::Ready) {
             return Ok(false);
         }
-        self.free_keys(index);
+        self.free_keys(index, &mut |_| {});
         self.records[index].state = State::Dormant;
         Ok(true)
     }
@@ -1626,7 +2343,7 @@ impl EvpnRecoveryProvenance {
         let Some(index) = self.index(handle) else {
             return false;
         };
-        self.free_keys(index);
+        self.free_keys(index, &mut |_| {});
         let retained = self.peer_usage(handle.owner.peer).retained - self.records[index].charge();
         drop(self.records.remove(index));
         self.set_peer_retained(handle.owner.peer, retained);
@@ -1640,6 +2357,24 @@ impl EvpnRecoveryProvenance {
         }
         true
     }
+}
+
+/// An exactly sized copy of sealed held slots.
+fn copy_held(held: &Held) -> Option<Held> {
+    Some(match held {
+        Held::Sparse(entries) => {
+            let mut copied = Slots::new();
+            copied.try_grow(entries.len()).ok()?;
+            copied.extend_from_slice(entries);
+            Held::Sparse(copied)
+        }
+        Held::Dense(words) => {
+            let mut copied = Words::new();
+            copied.try_grow(words.len()).ok()?;
+            copied.extend_from_slice(words);
+            Held::Dense(copied)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1709,61 +2444,8 @@ mod tests {
         &ledger.records[ledger.index(handle).unwrap()]
     }
 
-    /// Recompute every holder count, index entry and credit from scratch.
     fn assert_running_charges(ledger: &EvpnRecoveryProvenance) {
-        let space = &ledger.space;
-        let high_water = space.keys.len();
-        assert!(high_water <= space.capacity());
-        assert_eq!(space.holders.len(), high_water);
-        let mut holders = vec![0_u32; high_water];
-        let mut daemon = size_of::<EvpnRecoveryProvenance>()
-            + ledger.records.capacity() * size_of::<Record>()
-            + space.bytes();
-        for record in &ledger.records {
-            daemon += record.owned_bytes();
-            let bits = record
-                .words
-                .iter()
-                .map(|word| word.count_ones() as usize)
-                .sum::<usize>();
-            assert_eq!(record.masked, bits, "masked is the popcount");
-            for slot in set_slots(&record.words, |_| {}) {
-                holders[slot as usize] += 1;
-            }
-            for &slot in &record.pins {
-                holders[slot as usize] += 1;
-            }
-            let expected = ledger
-                .records
-                .iter()
-                .filter(|other| other.handle.owner.peer == record.handle.owner.peer)
-                .map(Record::charge)
-                .sum::<usize>();
-            assert_eq!(record.peer_retained, expected);
-            assert_eq!(
-                ledger.peer_usage(record.handle.owner.peer).retained,
-                expected
-            );
-            assert!(record.peer_peak >= expected);
-        }
-        assert_eq!(space.holders.as_slice(), holders.as_slice());
-        let free: BTreeSet<_> = space.free.iter().copied().collect();
-        assert_eq!(free.len(), space.free.len(), "a slot is freed once");
-        for slot in 0..high_water {
-            let slot = u32::try_from(slot).unwrap();
-            if holders[slot as usize] == 0 {
-                assert!(free.contains(&slot), "an unheld slot is free");
-            } else {
-                assert!(!free.contains(&slot), "a held slot is never free");
-                assert_eq!(space.find(&space.keys[slot as usize]), Some(slot));
-            }
-        }
-        assert_eq!(
-            space.index.iter().filter(|entry| **entry != 0).count(),
-            space.live()
-        );
-        assert_eq!(ledger.daemon_usage().retained, daemon);
-        assert!(ledger.daemon_usage().peak >= daemon);
+        ledger.assert_consistent();
     }
 
     #[test]
@@ -1851,20 +2533,18 @@ mod tests {
         );
         assert_eq!(ledger.daemon_usage().retained, before_seal);
         assert_eq!(ledger.slot_usage().live, 3);
-        let words = record(&ledger, handle).words.capacity();
-        assert_eq!(words, WORD_STEP);
+        let held = record(&ledger, handle).held.bytes();
+        assert_eq!(held, 16 * size_of::<u32>(), "three sorted entries");
         let before_delete = ledger.daemon_usage().retained;
+        let space = ledger.space.bytes();
         admit(&mut ledger, handle, &[], &[key(1), key(2), key(3)]);
         assert_eq!(ledger.proof_keys(handle).unwrap(), Some([].to_vec()));
         // The last holder released every slot, so the whole space went.
         assert_eq!(ledger.slot_usage().capacity, 0);
-        assert_eq!(
-            ledger.daemon_usage().retained,
-            before_delete - MIN_SLOT_CAPACITY * SLOT_BYTES
-        );
-        assert_eq!(record(&ledger, handle).words.capacity(), words);
+        assert_eq!(ledger.daemon_usage().retained, before_delete - space);
+        assert_eq!(record(&ledger, handle).held.bytes(), held);
         assert!(ledger.finish_recovery(handle).unwrap());
-        assert_eq!(record(&ledger, handle).words.capacity(), 0);
+        assert_eq!(record(&ledger, handle).held.bytes(), 0);
         assert!(ledger.retire_member(handle));
         assert_eq!(
             ledger.daemon_usage().retained,
@@ -1957,11 +2637,13 @@ mod tests {
                 )
                 .unwrap()
         );
-        // Withdrawal validation plus two announcement passes, one visit per
-        // 64 items: never one per key or per comparison.
-        assert_eq!(visits, 3 * 640 / CHECKPOINT_STRIDE);
-        // Slot growth, bitset growth and pin allocation are each bracketed.
-        assert_eq!(edges, 6);
+        // Withdrawal validation and its restore, two announcement passes and
+        // one index rebuild stride: one visit per 64 items, never one per key
+        // or per comparison.
+        assert_eq!(visits, 4 * 640 / CHECKPOINT_STRIDE + 1);
+        // Slot growth, pin allocation, pin sorting and record sizing are each
+        // bracketed.
+        assert_eq!(edges, 8);
         visits = 0;
         assert!(
             ledger
@@ -1976,11 +2658,16 @@ mod tests {
                 )
                 .unwrap()
         );
-        assert_eq!(visits, 5 * 640 / CHECKPOINT_STRIDE);
+        // Validation of both lists and the withdrawal restore, then clearing,
+        // setting, releasing and the pin drain.
+        assert_eq!(visits, 7 * 640 / CHECKPOINT_STRIDE);
         let proof = ledger.proof(handle).unwrap().unwrap();
         visits = 0;
         assert_eq!(proof.iter_with_checkpoint(|_| visits += 1).count(), 640);
-        assert_eq!(visits, record(&ledger, handle).words.len());
+        let Held::Dense(words) = &record(&ledger, handle).held else {
+            panic!("640 of 1280 slots is dense");
+        };
+        assert_eq!(visits, words.len());
         assert_running_charges(&ledger);
     }
 
@@ -2122,8 +2809,8 @@ mod tests {
     #[test]
     fn peer_limit_counts_held_slots_and_bitset_overlap() {
         let record_bytes = size_of::<Record>();
-        let words = WORD_STEP * size_of::<u64>();
-        let limit = record_bytes + words + 16 * SLOT_BYTES;
+        // Capture appends to a 16-entry sparse buffer first.
+        let limit = record_bytes + 16 * size_of::<u32>() + 16 * SLOT_BYTES;
         let mut ledger = EvpnRecoveryProvenance::with_limits(limit, DAEMON_LIMIT_BYTES);
         let handle = ledger.register(owner(1, 7)).unwrap();
         assert!(ledger.finish_recovery(handle).unwrap());
@@ -2136,7 +2823,8 @@ mod tests {
         let retained = ledger.daemon_usage().retained;
         let error = ledger.capture_key(handle, key(17)).unwrap_err();
         assert_eq!(error.cause, ExhaustionCause::PeerLimit);
-        assert_eq!(error.attempted_peer_bytes, limit + SLOT_BYTES);
+        // The next entry needs a 32-entry buffer beside the old one.
+        assert_eq!(error.attempted_peer_bytes, limit + 32 * size_of::<u32>());
         assert_eq!(ledger.daemon_usage().retained, retained);
         assert_eq!(ledger.seal_capture(handle), Err(error));
         assert_eq!(ledger.register(handle.owner).unwrap(), handle);
@@ -2204,10 +2892,7 @@ mod tests {
         let handle = ledger.register(owner(1, 7)).unwrap();
         capture(&mut ledger, handle, &[key(1), key(2)]);
         let snapshot = ledger.snapshot(handle).unwrap().unwrap();
-        assert_eq!(
-            record(&ledger, snapshot).words.capacity(),
-            record(&ledger, handle).words.len()
-        );
+        assert_eq!(record(&ledger, snapshot).held.bytes(), 2 * size_of::<u32>());
         admit(&mut ledger, handle, &[key(3)], &[key(1)]);
         let after_admission = ledger.daemon_usage().retained;
         assert_eq!(
@@ -2300,38 +2985,30 @@ mod tests {
     #[test]
     fn daemon_limit_covers_slot_growth_overlap_and_refuses_before_allocating() {
         let header = size_of::<EvpnRecoveryProvenance>();
-        let record = size_of::<Record>();
-        let words = WORD_STEP * size_of::<u64>();
         let full = MIN_SLOT_CAPACITY;
-        // Two records, one bitset and pins, the first slot space, and
-        // overlap for less than the next growth.
-        let limit = header
-            + 2 * record
-            + size_of::<Records>()
-            + words
-            + full * size_of::<u32>()
-            + full * SLOT_BYTES
-            + full * SLOT_BYTES;
-        let mut ledger = EvpnRecoveryProvenance::with_limits(PEER_LIMIT_BYTES, limit);
-        let first = ledger.register(owner(1, 7)).unwrap();
-        let second = ledger.register(owner(2, 7)).unwrap();
         let keys: Vec<_> = (0..u32::try_from(full).unwrap()).map(key).collect();
-        admit(&mut ledger, first, &keys, &[]);
+        let filled = |limit| {
+            let mut ledger = EvpnRecoveryProvenance::with_limits(PEER_LIMIT_BYTES, limit);
+            let first = ledger.register(owner(1, 7)).unwrap();
+            let second = ledger.register(owner(2, 7)).unwrap();
+            admit(&mut ledger, first, &keys, &[]);
+            (ledger, first, second)
+        };
+        let before = filled(DAEMON_LIMIT_BYTES).0.daemon_usage().retained;
+        // Growth charges every new array beside the old ones.
+        let growth = SlotSpace::bytes_for(full + full / 2).unwrap();
+        let (mut ledger, first, second) = filled(before + growth - 1);
         assert_eq!(ledger.slot_usage().capacity, full);
+        assert_eq!(ledger.daemon_usage().retained, before);
         assert_running_charges(&ledger);
-        let before = ledger.daemon_usage().retained;
-        // Growth needs old and new slot arrays together.
         let error = ledger
             .reserve_admission(second, [key(1_000_000)].into_iter(), &[])
             .unwrap_err();
         assert_eq!(error.cause, ExhaustionCause::DaemonLimit);
-        assert_eq!(
-            error.attempted_daemon_bytes,
-            before + (full + full / 2) * SLOT_BYTES
-        );
+        assert_eq!(error.attempted_daemon_bytes, before + growth);
         assert_eq!(ledger.daemon_usage().retained, before);
         assert_eq!(ledger.slot_usage().capacity, full);
-        assert_eq!(ledger.proof_keys(first).unwrap(), Some(keys));
+        assert_eq!(ledger.proof_keys(first).unwrap(), Some(keys.clone()));
         assert_running_charges(&ledger);
         assert!(ledger.retire_member(first));
         assert!(ledger.retire_member(second));
@@ -2566,7 +3243,7 @@ mod tests {
         for seed in [1, 7, 42] {
             let mut next = rng(seed);
             let mut space = SlotSpace::default();
-            space.try_grow(64).unwrap();
+            space.resize(64, &mut |_| {}).unwrap();
             let mut model: HashMap<EvpnRouteKey, u32> = HashMap::new();
             for _ in 0..20_000 {
                 let candidate = key(u32::try_from(next(96)).unwrap());
@@ -2647,7 +3324,7 @@ mod tests {
     #[test]
     fn deletion_shifts_a_full_run_back_across_the_wrap() {
         let mut space = SlotSpace::default();
-        space.try_grow(64).unwrap();
+        space.resize(64, &mut |_| {}).unwrap();
         let buckets = space.index.len();
         let run: Vec<_> = (0_u32..)
             .map(key)
@@ -2700,7 +3377,7 @@ mod tests {
         for seed in [1, 7, 42] {
             let mut next = rng(seed);
             let mut space = SlotSpace::default();
-            space.try_grow(64).unwrap();
+            space.resize(64, &mut |_| {}).unwrap();
             let buckets = space.index.len();
             let near_wrap: Vec<_> = (0_u32..)
                 .map(key)
@@ -2732,6 +3409,99 @@ mod tests {
                 "seed {seed}"
             );
         }
+    }
+
+    /// A record's cost follows its own keys, not the ledger's highest slot,
+    /// and a drained peak gives its capacity back even while a slow holder
+    /// keeps a slot at the top.
+    #[test]
+    fn skewed_peak_compacts_and_members_stay_proportional() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let peak = ledger.register(owner(1, 7)).unwrap();
+        let slow = ledger.register(owner(2, 7)).unwrap();
+        let spread = ledger.register(owner(3, 7)).unwrap();
+        let big: Vec<_> = (0..10_000).map(key).collect();
+        capture(&mut ledger, peak, &big);
+        // The slow member holds the top slot; the spread member holds every
+        // hundredth slot across the whole span.
+        capture(&mut ledger, slow, &[key(9_999)]);
+        let every: Vec<_> = (0..100).map(|n| key(n * 100)).collect();
+        capture(&mut ledger, spread, &every);
+        assert!(ledger.slot_usage().capacity >= 10_000);
+        assert!(
+            record(&ledger, spread).held.bytes() <= sparse_bytes(128),
+            "100 keys over a 10,000-slot span stay sorted entries"
+        );
+        let peak_bytes = ledger.daemon_usage().retained;
+        assert!(ledger.finish_recovery(peak).unwrap());
+        // 101 live slots of 10,000: renumbered into a prefix and shrunk.
+        assert_eq!(ledger.slot_usage().live, 101);
+        assert_eq!(ledger.space.keys.len(), 101);
+        assert!(ledger.slot_usage().capacity <= 256);
+        assert!(ledger.daemon_usage().retained < peak_bytes / 20);
+        assert_eq!(ledger.proof_keys(slow).unwrap().unwrap(), [key(9_999)]);
+        assert_eq!(ledger.proof_keys(spread).unwrap().unwrap(), every);
+        assert_running_charges(&ledger);
+        // Fresh members take the low free slots and stay proportional.
+        for member in 0..20_u16 {
+            let handle = ledger.register(owner_wide(100 + member, 7)).unwrap();
+            let own: Vec<_> = (0..100)
+                .map(|n| key(100_000 + u32::from(member) * 100 + n))
+                .collect();
+            capture(&mut ledger, handle, &own);
+            assert!(record(&ledger, handle).held.bytes() <= sparse_bytes(128));
+        }
+        assert!(ledger.slot_usage().capacity <= 4 * ledger.slot_usage().live);
+        assert_running_charges(&ledger);
+    }
+
+    /// New keys pinned above a dense record's bitset must be covered before
+    /// application sets their bits.
+    #[test]
+    fn reservation_sizes_a_dense_record_for_pins_above_its_bitset() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let wide = ledger.register(owner(1, 7)).unwrap();
+        let dense = ledger.register(owner(2, 7)).unwrap();
+        let table: Vec<_> = (0..2_000).map(key).collect();
+        capture(&mut ledger, wide, &table);
+        capture(&mut ledger, dense, &table[..200]);
+        assert!(matches!(record(&ledger, dense).held, Held::Dense(_)));
+        let fresh: Vec<_> = (5_000..5_008).map(key).collect();
+        admit(&mut ledger, dense, &fresh, &[]);
+        let mut expected = table[..200].to_vec();
+        expected.extend_from_slice(&fresh);
+        expected.sort_unstable();
+        assert_eq!(ledger.proof_keys(dense).unwrap().unwrap(), expected);
+        assert_running_charges(&ledger);
+    }
+
+    /// A reservation that never reaches application gives back its pins at
+    /// finish and at retirement.
+    #[test]
+    fn unapplied_reservations_release_pins_at_finish_and_retirement() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let finished = ledger.register(owner(1, 7)).unwrap();
+        let retired = ledger.register(owner(2, 7)).unwrap();
+        admit(&mut ledger, finished, &[key(1)], &[]);
+        for handle in [finished, retired] {
+            assert!(
+                ledger
+                    .reserve_admission(handle, [key(2), key(3)].into_iter(), &[])
+                    .unwrap()
+            );
+        }
+        assert_eq!(ledger.slot_usage().live, 3);
+        assert_running_charges(&ledger);
+        assert!(ledger.finish_recovery(finished).unwrap());
+        assert_eq!(
+            ledger.slot_usage().live,
+            2,
+            "the retired member still pins two"
+        );
+        assert_running_charges(&ledger);
+        assert!(ledger.retire_member(retired));
+        assert_eq!(ledger.slot_usage().live, 0);
+        assert_running_charges(&ledger);
     }
 
     /// Guarantee 1: a key and its mapping outlive churn, other members'

@@ -967,10 +967,11 @@ fn shared_captures_share_slots_and_keep_each_old_projection_exact_across_churn()
     let extra2 = make_evpn_imet("192.0.2.10".parse().unwrap(), 18);
     stage(&mut manager, gid, &extra2);
     // Every key but one already has a slot and the slot space has room:
-    // the only allocation is this member's bitset, with no key copies.
+    // the only allocations are this member's own entry buffer, 16 then 32
+    // entries, with no key copies and no shared growth.
     manager
         .evpn_recovery
-        .fail_allocation_after_for_test(Some(1));
+        .fail_allocation_after_for_test(Some(2));
     assert!(manager.capture_shared_evpn_admitted(third));
     assert_eq!(manager.evpn_recovery.slot_usage().live, 18);
     let third_handle = manager.evpn_recovery_handle(third).unwrap();
