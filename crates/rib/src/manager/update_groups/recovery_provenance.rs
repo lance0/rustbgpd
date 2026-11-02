@@ -47,6 +47,8 @@ const MIN_SLOT_CAPACITY: usize = 64;
 const WORD_STEP: usize = 16;
 /// Ledger loops offer a readiness checkpoint once per this many items.
 const CHECKPOINT_STRIDE: usize = 64;
+/// Renumbering clears the index in chunks of this many buckets.
+const INDEX_CLEAR_CHUNK: usize = 4096;
 /// Slot IDs stay below 2^31, so a sparse entry is `slot << 1` and its low
 /// bit can mark the entry within one validation or application.
 const MARK: u32 = 1;
@@ -1279,12 +1281,12 @@ impl EvpnRecoveryProvenance {
     /// its capacity. Renumbering and shrinking are optional: a daemon-cap or
     /// allocation refusal leaves the committed state as it is.
     fn settle_space(&mut self, checkpoint: &mut impl FnMut(bool)) {
-        self.space.trim_top(checkpoint);
         if self.space.live() == 0 {
             self.daemon_used -= self.space.bytes();
             self.space.clear();
             return;
         }
+        self.space.trim_top(checkpoint);
         if self.space.keys.len() > MIN_SLOT_CAPACITY
             && self.space.live().saturating_mul(4) <= self.space.keys.len()
         {
@@ -1343,6 +1345,7 @@ impl EvpnRecoveryProvenance {
             if slot % CHECKPOINT_STRIDE == 0 {
                 checkpoint(false);
             }
+            stride_work();
             if space.holders[slot] == 0 {
                 renumber.push(u32::MAX);
             } else {
@@ -1359,11 +1362,15 @@ impl EvpnRecoveryProvenance {
         space.free.resize((live as usize).div_ceil(64), 0);
         space.free_count = 0;
         space.first_free = 0;
-        space.index.iter_mut().for_each(|entry| *entry = 0);
+        for chunk in space.index.chunks_mut(INDEX_CLEAR_CHUNK) {
+            checkpoint(false);
+            chunk.fill(0);
+        }
         for slot in 0..live {
             if (slot as usize).is_multiple_of(CHECKPOINT_STRIDE) {
                 checkpoint(false);
             }
+            stride_work();
             space.insert_index(slot);
         }
         for record in &mut self.records {
@@ -1373,6 +1380,7 @@ impl EvpnRecoveryProvenance {
                         if n % CHECKPOINT_STRIDE == 0 {
                             checkpoint(false);
                         }
+                        stride_work();
                         *entry = sparse_entry(renumber[sparse_slot(*entry) as usize]);
                     }
                 }
@@ -1382,6 +1390,7 @@ impl EvpnRecoveryProvenance {
                         checkpoint(false);
                         let mut rest = words[word];
                         while rest != 0 {
+                            stride_work();
                             let offset = rest.trailing_zeros();
                             rest &= rest - 1;
                             let old = u32::try_from(word * 64).expect("slot IDs fit u32") + offset;
@@ -1391,7 +1400,11 @@ impl EvpnRecoveryProvenance {
                     }
                 }
             }
-            for pin in &mut record.pins {
+            for (n, pin) in record.pins.iter_mut().enumerate() {
+                if n % CHECKPOINT_STRIDE == 0 {
+                    checkpoint(false);
+                }
+                stride_work();
                 *pin = renumber[*pin as usize];
             }
         }
@@ -2374,12 +2387,14 @@ impl EvpnRecoveryProvenance {
         let Self { records, space, .. } = self;
         let record = &mut records[index];
         for slot in record.held.view().slots(&mut *checkpoint) {
+            stride_work();
             space.release(slot);
         }
         for (n, slot) in record.pins.drain(..).enumerate() {
             if n % CHECKPOINT_STRIDE == 0 {
                 checkpoint(false);
             }
+            stride_work();
             space.release(slot);
         }
         let bytes = record.owned_bytes();
@@ -4203,6 +4218,74 @@ mod tests {
         ] {
             assert!(covered > 0, "{total:?}");
         }
+    }
+
+    /// The most strided work units done between two readiness callbacks.
+    fn most_work_between_checkpoints(run: impl FnOnce(&mut dyn FnMut(bool))) -> u64 {
+        let (mut last, mut most) = (STRIDE_WORK.with(std::cell::Cell::get), 0);
+        run(&mut |_| {
+            let now = STRIDE_WORK.with(std::cell::Cell::get);
+            most = most.max(now - last);
+            last = now;
+        });
+        most.max(STRIDE_WORK.with(std::cell::Cell::get) - last)
+    }
+
+    /// Releasing a record, trimming the free top of the space and
+    /// renumbering slots, entries and pins each do at most one stride of
+    /// work between readiness callbacks, however much they walk in total.
+    #[test]
+    fn release_trim_and_renumbering_bound_work_between_checkpoints() {
+        let stride = CHECKPOINT_STRIDE as u64;
+        // Trim: another member keeps slot 0, so finishing the top member
+        // frees and trims 2047 slots.
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let low = ledger.register(owner(1, 7)).unwrap();
+        let top = ledger.register(owner(2, 7)).unwrap();
+        let keys: Vec<_> = (0..2048).map(key).collect();
+        capture(&mut ledger, low, &keys[..1]);
+        capture(&mut ledger, top, &keys);
+        let most = most_work_between_checkpoints(|checkpoint| {
+            assert!(
+                ledger
+                    .finish_recovery_with_checkpoint(top, &mut |force| checkpoint(force))
+                    .unwrap()
+            );
+        });
+        assert_eq!(ledger.space.keys.len(), 1, "the free top was trimmed");
+        assert!(most <= stride, "trim did {most} units between callbacks");
+        // Renumbering: 512 pins on high slots outlive the peak that drained.
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let peak = ledger.register(owner(1, 7)).unwrap();
+        let pending = ledger.register(owner(2, 7)).unwrap();
+        let keys: Vec<_> = (0..4096).map(key).collect();
+        capture(&mut ledger, peak, &keys);
+        let announced = &keys[3584..];
+        assert!(
+            ledger
+                .reserve_admission(pending, announced.iter().copied(), &[])
+                .unwrap()
+        );
+        let before = compactions_for_test();
+        let most = most_work_between_checkpoints(|checkpoint| {
+            assert!(
+                ledger
+                    .finish_recovery_with_checkpoint(peak, &mut |force| checkpoint(force))
+                    .unwrap()
+            );
+        });
+        assert_eq!(compactions_for_test(), before + 1);
+        assert_eq!(ledger.space.keys.len(), 512);
+        assert!(
+            most <= stride,
+            "renumbering did {most} units between callbacks"
+        );
+        assert!(
+            ledger
+                .apply_admitted(pending, announced.iter().copied(), &[])
+                .unwrap()
+        );
+        assert_eq!(ledger.proof_keys(pending).unwrap().unwrap(), announced);
     }
 
     /// Guarantee 1: a key and its mapping outlive churn, other members'
