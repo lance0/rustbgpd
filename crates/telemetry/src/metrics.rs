@@ -8756,13 +8756,13 @@ mod tests {
     #[test]
     fn policy_eval_errors_counter_uses_direction_and_kind() {
         let m = BgpMetrics::new();
-        m.record_policy_eval_error("import", "overflow");
-        m.record_policy_eval_error("import", "overflow");
+        m.record_policy_eval_error("import", "absent-operand");
+        m.record_policy_eval_error("import", "absent-operand");
         m.record_policy_eval_error("export", "fuel-exhausted");
 
         assert_eq!(
             m.0.policy_eval_errors
-                .with_label_values(&["import", "overflow"])
+                .with_label_values(&["import", "absent-operand"])
                 .get(),
             2
         );
@@ -8774,7 +8774,7 @@ mod tests {
         );
         let text = gather_text(&m);
         assert!(text.contains("bgp_policy_eval_errors_total"));
-        assert!(text.contains(r#"kind="overflow""#));
+        assert!(text.contains(r#"kind="absent-operand""#));
     }
 
     /// ADR-0110 freshness gauges: a successful apply stamps a nonzero

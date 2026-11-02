@@ -278,7 +278,7 @@ CLOSED_LABEL_SOURCES = (
     (
         ("bgp_policy_eval_errors_total",),
         "kind",
-        (("fn", POLICY_EVAL, "EvalErrorKind", "label"),),
+        (("eval_errors", POLICY_EVAL),),
     ),
 )
 
@@ -1069,7 +1069,8 @@ def function_body(
             syntax, rf"\bimpl\s+{re.escape(impl_type)}\s*\{{", f"impl {impl_type}"
         )
     body = braced_body(
-        syntax, rf"\bfn\s+{re.escape(function)}\s*\([^{{}}]*\{{", description
+        syntax, rf"\bfn\s+{re.escape(function)}\s*(?:<[^<>]*>\s*)?\([^{{}}]*\{{",
+        description,
     )
     return body, strings
 
@@ -1083,6 +1084,52 @@ def function_literals(
 ) -> set[str]:
     """Return the string literals in one uniquely named function body."""
     return syntax_literals(*function_body(source, impl_type, function, description))
+
+
+def policy_eval_error_labels(source: str) -> set[str]:
+    """Require each label to have an error construction in the runtime evaluator.
+
+    Only the runtime functions below count: Display, compiler-only helpers
+    and test functions cannot stand in for emitters.
+    Defensive compiler-bug rails remain runtime emitters even though valid
+    compiled policies cannot reach them.
+    """
+    body, strings = function_body(source, "EvalErrorKind", "label", "EvalErrorKind::label")
+    labels = {
+        variant: strings[int(index)]
+        for variant, index in re.findall(
+            r"EvalErrorKind::(\w+)(?:\([^)]*\))?\s*=>\s*__RUST_STRING_(\d+)__",
+            body,
+        )
+    }
+    if set(labels.values()) != syntax_literals(body, strings):
+        raise ValueError("EvalErrorKind::label contains an unrecognized label mapping")
+    runtime_functions = (
+        (None, (
+            "prepend_limit_error", "eval_value", "arith", "exec_community_var",
+            "charge_staged_scan", "local_probe",
+        )),
+        ("CompiledChain", (
+            "evaluate_policy", "eval_for_each", "resolve_computed", "eval_expr",
+        )),
+    )
+    syntax = "\n".join(
+        function_body(source, owner, function, f"runtime emitter {function}")[0]
+        for owner, functions in runtime_functions
+        for function in functions
+    )
+    emitted = set(re.findall(
+        r"(?:\b(?:Err|ok_or|get_or_insert)\s*\(\s*\(?\s*"
+        r"|\blet\s+\w+\s*=\s*|\bkind\s*:\s*)EvalErrorKind::(\w+)",
+        syntax,
+    ))
+    if set(labels) != emitted:
+        raise ValueError(
+            "policy eval-error runtime emitter mismatch: "
+            f"labels without emitters {sorted(set(labels) - emitted)}, "
+            f"emitters without labels {sorted(emitted - set(labels))}"
+        )
+    return set(labels.values())
 
 
 def top_level_elements(syntax: str) -> list[str]:
@@ -1189,7 +1236,9 @@ def closed_label_vocabularies(
             for kind, *location in label_sources:
                 if kind != "call" and location[0] not in sources:
                     raise ValueError(f"{where}: {location[0]} is not a production source")
-                if kind == "fn":
+                if kind == "eval_errors":
+                    found = policy_eval_error_labels(sources[location[0]])
+                elif kind == "fn":
                     relative, impl_type, function = location
                     owner = f"{impl_type}::" if impl_type else ""
                     found = function_literals(

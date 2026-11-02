@@ -657,6 +657,80 @@ groups:
         self.assertGreater(checked, 0)
         self.assertEqual(skipped, [])
 
+    def test_policy_eval_error_labels_need_runtime_emitters(self):
+        source = self.rust[CHECK.POLICY_EVAL]
+        self.assertEqual(
+            CHECK.policy_eval_error_labels(source),
+            {
+                "divide-by-zero", "remainder-by-zero", "absent-operand",
+                "absent-prepend-operand", "unbound-local", "fuel-exhausted",
+                "loop-limit-exceeded", "stray-loop-control", "prepend-limit-exceeded",
+                "dataset-unpinned",
+            },
+        )
+        # Reintroducing a label without an emitter must fail, even if a comment
+        # or a test constructs that kind. This is the retired-kind regression.
+        unused = source.replace(
+            'EvalErrorKind::DivideByZero => "divide-by-zero",',
+            'EvalErrorKind::Overflow => "overflow",\n'
+            '            EvalErrorKind::DivideByZero => "divide-by-zero",',
+            1,
+        )
+        unused += '\n// Err(EvalErrorKind::Overflow)\n#[cfg(test)]\nmod tests {\n'
+        unused += 'fn synthetic() { Err(EvalErrorKind::Overflow); }\n}\n'
+        with self.assertRaisesRegex(ValueError, "labels without emitters.*Overflow"):
+            CHECK.policy_eval_error_labels(unused)
+        # Deleting a real construction fails too; its label and Display arms
+        # are still present and cannot stand in for the emitter.
+        missing = source.replace(
+            "checked_rem(rhs).ok_or(EvalErrorKind::RemainderByZero)",
+            "checked_rem(rhs).ok_or(EvalErrorKind::DivideByZero)",
+        )
+        self.assertNotEqual(missing, source)
+        with self.assertRaisesRegex(ValueError, "labels without emitters.*RemainderByZero"):
+            CHECK.policy_eval_error_labels(missing)
+
+    def test_retired_policy_eval_error_selectors_are_rejected(self):
+        for kind in ("overflow", "underflow", "clamp-inverted"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, kind):
+                self.check_selector(f'bgp_policy_eval_errors_total{{kind="{kind}"}}')
+
+    def test_policy_eval_error_labels_ignore_non_runtime_constructors(self):
+        source = self.rust[CHECK.POLICY_EVAL].replace(
+            'EvalErrorKind::DivideByZero => "divide-by-zero",',
+            'EvalErrorKind::Overflow => "overflow",\n'
+            '            EvalErrorKind::DivideByZero => "divide-by-zero",',
+            1,
+        )
+        display = (
+            "impl fmt::Display for EvalErrorKind {\n"
+            "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n"
+        )
+        test_method = (
+            "    pub(crate) fn evaluate_measuring_fuel(&self, ctx: &RouteContext<'_>) "
+            "-> (PolicyResult, u64) {\n"
+        )
+        self.assertIn(display, source)
+        self.assertIn(test_method, source)
+        fake = "        let _unused = EvalErrorKind::Overflow;\n"
+        for scope, mutant in {
+            "compiler-only helper": source + """
+fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> {
+    match op {
+        ArithOp::Add => lhs.checked_add(rhs).ok_or(EvalErrorKind::Overflow),
+        _ => Ok(lhs),
+    }
+}
+""",
+            "Display": source.replace(display, display + fake, 1),
+            "standalone test": source + "\n#[cfg(test)]\nfn synthetic_error() {\n" + fake + "}\n",
+            "test method": source.replace(test_method, test_method + fake, 1),
+        }.items():
+            with self.subTest(scope=scope), self.assertRaisesRegex(
+                ValueError, "labels without emitters.*Overflow"
+            ):
+                CHECK.policy_eval_error_labels(mutant)
+
     def test_daemon_renaming_a_selected_label_value_is_rejected(self):
         rust = dict(self.rust)
         self.assertEqual(rust[CHECK.TELEMETRY].count('"known_partial"'), 1)
@@ -761,7 +835,7 @@ groups:
         )
         arguments = ({key: self.vocabularies[key]}, self.inventory, frozenset({"t.yml"}))
         self.assertEqual(
-            CHECK.check_label_values({"t.yml": [(10, text % "overflow")]}, *arguments),
+            CHECK.check_label_values({"t.yml": [(10, text % "absent-operand")]}, *arguments),
             (1, []),
         )
         with self.assertRaisesRegex(

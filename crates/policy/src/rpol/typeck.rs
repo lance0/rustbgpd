@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::datasets::{DatasetKind, MAX_UNIT_DATASETS};
 use crate::engine::AsPathRegex;
-use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith, clamp};
+use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, clamp};
 use crate::ir::{ArithOp, ValueField};
 
 use super::ast::{
@@ -266,7 +266,7 @@ pub(super) fn takes_ip_param(field: Field) -> bool {
 /// operand. Reserving them at the declaration gives every pass the same
 /// reading of the name.
 fn reserved_param_meaning(name: &str) -> Option<String> {
-    if super::parser::is_well_known_alias(name) {
+    if is_reserved_community_name(name) {
         return Some("a well-known community".to_string());
     }
     if matches!(name, "origin" | "path-first") {
@@ -281,6 +281,16 @@ fn reserved_param_meaning(name: &str) -> Option<String> {
     .iter()
     .find(|(_, members)| members.contains(&name))
     .map(|(field, _)| format!("a `{field}` value"))
+}
+
+/// Reserve RFC-assigned names before adding literal support, so that a
+/// future alias cannot change the meaning of an existing binding.
+fn is_reserved_community_name(name: &str) -> bool {
+    super::parser::is_well_known_alias(name)
+        || matches!(
+            name,
+            "NOPEER" | "ACCEPT_OWN" | "LLGR_STALE" | "NO_LLGR" | "STANDBY_PE"
+        )
 }
 
 /// The optional value `exists <field>` tests, or `None` for a field
@@ -730,23 +740,7 @@ impl<'a> Checker<'a> {
             .chain(self.file.asn_sets.iter().map(|s| ("asn-set", &s.name)))
             .chain(self.file.datasets.iter().map(|d| ("dataset", &d.name)));
         for (kind, name) in set_names {
-            if super::parser::is_well_known_alias(&name.node) {
-                self.diags.push(
-                    Diagnostic::coded(
-                        DiagnosticCode::Typecheck,
-                        name.span,
-                        format!(
-                            "{kind} `{}` has the name of a well-known community",
-                            name.node
-                        ),
-                        "reserved name",
-                    )
-                    .with_note(
-                        "an argument spelled like a well-known community is that community, \
-                         so a set with this name could never be passed; rename the set",
-                    ),
-                );
-            }
+            self.check_community_name(kind, name);
         }
         if self.file.datasets.len() > MAX_UNIT_DATASETS {
             let extra = &self.file.datasets[MAX_UNIT_DATASETS];
@@ -836,6 +830,9 @@ impl<'a> Checker<'a> {
                 );
             }
             self.duplicate_check("parameter", def.params.iter());
+            for param in &def.params {
+                self.check_community_name("parameter", param);
+            }
             let mut scope = Scope {
                 params: def.params.iter().map(|p| p.node.as_str()).collect(),
                 typed: Vec::new(),
@@ -845,6 +842,7 @@ impl<'a> Checker<'a> {
             // Parameters and lets share the body's single scope, so
             // both count against the per-scope binding cap.
             for (index, l) in def.lets.iter().enumerate() {
+                self.check_community_name("binding", &l.name);
                 // Initializer checked before declaring, so
                 // `let x = x + 1` reads a parameter/earlier `x`
                 // (shadowing, never self-reference) — the LAN-302 rule.
@@ -1472,6 +1470,7 @@ impl<'a> Checker<'a> {
         (ty, constant): (ValueType, bool),
         scope_locals: &mut usize,
     ) {
+        self.check_community_name("binding", name);
         if *scope_locals == MAX_LOCALS {
             self.locals_exceeded(name.span);
         }
@@ -1491,6 +1490,26 @@ impl<'a> Checker<'a> {
             );
         }
         scope.lets.push((name.node.clone(), ty, constant));
+    }
+
+    fn check_community_name(&mut self, kind: &str, name: &Spanned<String>) {
+        if is_reserved_community_name(&name.node) {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    name.span,
+                    format!(
+                        "{kind} `{}` has the name of a well-known community",
+                        name.node
+                    ),
+                    "reserved name",
+                )
+                .with_note(
+                    "well-known community names are reserved, including names whose \
+                     literal syntax is not supported yet; rename the declaration",
+                ),
+            );
+        }
     }
 
     /// The 65th `let` of one scope (LAN-302, `MAX_LOCALS`): fires once,
@@ -4944,6 +4963,17 @@ fn nonzero_divisor(divisor: &ValueExprAst) -> bool {
             .iter()
             .any(|arg| fold_const(arg).is_some_and(|k| k >= 1)),
         other => fold_const(other).is_some_and(|k| k != 0),
+    }
+}
+
+/// Literal-only errors are compile diagnostics, not runtime error kinds.
+fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, &'static str> {
+    match op {
+        ArithOp::Add => lhs.checked_add(rhs).ok_or("arithmetic overflow"),
+        ArithOp::Sub => lhs.checked_sub(rhs).ok_or("arithmetic underflow"),
+        ArithOp::Mul => lhs.checked_mul(rhs).ok_or("arithmetic overflow"),
+        ArithOp::Div => lhs.checked_div(rhs).ok_or("division by zero"),
+        ArithOp::Rem => lhs.checked_rem(rhs).ok_or("remainder by zero"),
     }
 }
 

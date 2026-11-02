@@ -622,6 +622,16 @@ leaves a condition false and fails an action closed, as Decision 4
 describes. The `overflow`, `underflow` and `clamp-inverted` error kinds stay
 valid in `expect … == error KIND`, but evaluation no longer produces them.
 
+### Follow-up (2026-11-02): retire unreachable arithmetic error kinds
+
+The pre-v1 error vocabulary now removes `overflow`, `underflow` and
+`clamp-inverted`, superseding the retention choice above. They have no
+runtime emitter after saturation. `expect … == error KIND` rejects these
+names with a migration hint, and the eval-error metric vocabulary and Rust
+enum no longer include them. Literal-only arithmetic diagnostics remain
+compile errors and do not use runtime error kinds. Defensive runtime rails
+for compiler-invalid IR, such as a zero divisor, remain.
+
 ## Amendment (2026-11-02): ASN and community values
 
 Decision 2 treated every numeric value as a u32, so the typechecker could
