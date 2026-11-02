@@ -10334,3 +10334,122 @@ mod typed_parameter_round_two {
         );
     }
 }
+
+// ─── typed parameters: round-3 regressions ─────────────────────────
+
+mod typed_parameter_round_three {
+    use super::super::{CallArg, RpolFile, check_rpol};
+    use super::diagnostics_of;
+
+    /// The check diagnostics of `source`, rendered (empty when clean).
+    fn check(source: &str) -> String {
+        let report = check_rpol(source);
+        report
+            .diagnostics
+            .0
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    const SETS: &str = "community-set std { 65000:1 }
+                        community-set big { 65000:1:1 }
+                        community-set rt { RT:65000:1 }
+                        community-set ov { OV_VALID }
+                        community-set mixed { 65000:1, 65000:1:1, RT:65000:1 }";
+
+    /// A removal set reached through a parameter gets the member checks a
+    /// named set gets, for every kind and both forms, directly and
+    /// forwarded through `apply`. Before, `remove large-community not in s`
+    /// with `s` bound to a standard-only set stripped every large
+    /// community, while naming that set directly was rejected.
+    #[test]
+    fn parameter_removal_sets_get_the_named_set_checks() {
+        let mut compared = 0;
+        for kind in ["community", "large-community", "ext-community"] {
+            for form in ["in", "not in"] {
+                for set in ["std", "big", "rt", "ov", "mixed"] {
+                    let direct = check(&format!(
+                        "{SETS}\npolicy p {{ term t {{ remove {kind} {form} {set}; accept }} }}"
+                    ))
+                    .is_empty();
+                    let body = format!("remove {kind} {form} s; accept");
+                    let template = format!(
+                        "{SETS}
+                         policy p(s: community-set) {{ term t {{ {body} }} }}
+                         policy outer(z: community-set) {{ term t {{ if apply(p(z)) {{ accept }} }} }}"
+                    );
+                    for call in [format!("p({set})"), format!("outer({set})")] {
+                        let source = format!(
+                            "{template}
+                             test x {{ route {{ prefix 192.0.2.0/24 }} expect {call} == accept }}"
+                        );
+                        let rendered = check(&source);
+                        assert_eq!(
+                            rendered.is_empty(),
+                            direct,
+                            "remove {kind} {form}: {call} vs naming `{set}`: {rendered}"
+                        );
+                        compared += 1;
+                    }
+                    let file = RpolFile::parse(&template).expect("the template checks clean");
+                    assert_eq!(
+                        file.resolve_call("p", &[CallArg::Name(set.to_string())])
+                            .is_ok(),
+                        direct,
+                        "remove {kind} {form}: resolve_call p({set})"
+                    );
+                }
+            }
+        }
+        assert_eq!(compared, 60);
+        let (_, rendered) = diagnostics_of(&format!(
+            "{SETS}
+             policy p(s: community-set) {{ term t {{ remove large-community not in s; accept }} }}
+             test x {{ route {{ prefix 192.0.2.0/24 }} expect p(std) == accept }}"
+        ));
+        assert!(
+            rendered.contains("has no large-community members"),
+            "{rendered}"
+        );
+    }
+
+    /// A well-known community name cannot reach a position that would
+    /// read it as a community alias before the caller's scope: no
+    /// parameter can take one, in any type. (Copilot review, first round,
+    /// "resolve community aliases after checking caller scope".)
+    #[test]
+    fn caller_scope_never_holds_an_alias_name() {
+        for alias in [
+            "NO_EXPORT",
+            "NO_ADVERTISE",
+            "NO_EXPORT_SUBCONFED",
+            "BLACKHOLE",
+            "GRACEFUL_SHUTDOWN",
+            "OV_VALID",
+            "OV_NOT_FOUND",
+            "OV_INVALID",
+        ] {
+            for ty in [
+                "community",
+                "u32",
+                "community-set",
+                "prefix-set",
+                "asn-set",
+                "ip",
+            ] {
+                let (_, rendered) = diagnostics_of(&format!(
+                    "policy inner(t: {ty}) {{ term t {{ accept }} }}
+                     policy outer({alias}: {ty}) {{ term t {{ if apply(inner({alias})) {{ accept }} }} }}"
+                ));
+                assert!(
+                    rendered.contains(&format!(
+                        "parameter `{alias}` has the name of a well-known community"
+                    )),
+                    "{alias}: {ty}: {rendered}"
+                );
+            }
+        }
+    }
+}

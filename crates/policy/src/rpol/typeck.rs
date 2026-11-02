@@ -2327,31 +2327,14 @@ impl<'a> Checker<'a> {
             .iter()
             .find(|s| s.name.node == set.node)
         {
-            // `ext-community not in` acts on route targets and route
-            // origins only, so its set needs one of those.
-            if negate
-                && kind == CommunityKind::Ext
-                && def
-                    .entries
-                    .iter()
-                    .any(|entry| member_kind(&entry.node) == kind)
-                && !def.entries.iter().any(|entry| names_rt_or_ro(&entry.node))
-            {
-                self.diags
-                    .push(ext_not_in_without_rt_ro(set, def.name.span));
-            } else if !def
-                .entries
-                .iter()
-                .any(|entry| member_kind(&entry.node) == kind)
-            {
-                let effect = if negate && kind == CommunityKind::Ext {
-                    "removes every arrived route target and route origin".to_string()
-                } else if negate {
-                    format!("removes every arrived {}", kind_describe(kind))
-                } else {
-                    "never removes anything".to_string()
-                };
-                let mut diag = Diagnostic::coded(
+            match removal_set_problem(def, kind, negate) {
+                None => {}
+                Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
+                    self.diags
+                        .push(ext_not_in_without_rt_ro(set, def.name.span));
+                }
+                Some(RemovalSetProblem::NoMembers { effect }) => {
+                    let mut diag = Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     set.span,
                     format!(
@@ -2363,14 +2346,15 @@ impl<'a> Checker<'a> {
                     format!("no {} member", kind_describe(kind)),
                 )
                 .with_label(def.name.span, format!("`{}` is defined here", set.node));
-                if negate {
-                    diag = diag.with_note(format!(
-                        "to strip every {}, write `{}`",
-                        kind_describe(kind),
-                        community_attribute(kind).remove_all_str()
-                    ));
+                    if negate {
+                        diag = diag.with_note(format!(
+                            "to strip every {}, write `{}`",
+                            kind_describe(kind),
+                            community_attribute(kind).remove_all_str()
+                        ));
+                    }
+                    self.diags.push(diag);
                 }
-                self.diags.push(diag);
             }
         } else if self.dataset_of(&set.node).is_some() {
             self.diags.push(
@@ -3097,7 +3081,9 @@ pub(super) struct ValueUses<'a> {
     counts: Vec<&'a str>,
     prepend_asns: Vec<&'a str>,
     next_hops: Vec<&'a str>,
-    removal_sets: Vec<&'a str>,
+    /// Each removal by membership a parameter names: the parameter, the
+    /// community kind and whether it is `not in`.
+    removal_sets: Vec<(&'a str, CommunityKind, bool)>,
 }
 
 impl<'a> ValueUses<'a> {
@@ -3116,9 +3102,10 @@ impl<'a> ValueUses<'a> {
             }
             ActionStmt::SetNextHop(NextHopArg::Param(name), _) => self.next_hops.push(&name.node),
             ActionStmt::Community {
-                arg: CommunityArg::InSet { set, .. },
+                kind,
+                arg: CommunityArg::InSet { set, negate },
                 ..
-            } => self.removal_sets.push(&set.node),
+            } => self.removal_sets.push((&set.node, *kind, *negate)),
             _ => {}
         }
     }
@@ -3204,10 +3191,14 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
                     (&inner.counts, &mut out.counts),
                     (&inner.prepend_asns, &mut out.prepend_asns),
                     (&inner.next_hops, &mut out.next_hops),
-                    (&inner.removal_sets, &mut out.removal_sets),
                 ] {
                     if theirs.contains(&param) && !ours.contains(&own) {
                         ours.push(own);
+                    }
+                }
+                for &(theirs, kind, negate) in &inner.removal_sets {
+                    if theirs == param && !out.removal_sets.contains(&(own, kind, negate)) {
+                        out.removal_sets.push((own, kind, negate));
                     }
                 }
             }
@@ -3270,15 +3261,37 @@ pub(super) fn check_call_arg(
                 .datasets
                 .iter()
                 .any(|d| d.name.node == *name && d.kind == kind);
-            if declared
-                && uses.removal_sets.contains(&param)
-                && !file.community_sets.iter().any(|s| s.name.node == *name)
-            {
-                Err(format!(
-                    "`{name}` is a dataset, but parameter `{param}` is the set of a `remove ... in` \
-                     action, which takes a community-set"
-                ))
-            } else if declared {
+            let removals = uses
+                .removal_sets
+                .iter()
+                .filter(|(used, _, _)| *used == param);
+            let community_set = file.community_sets.iter().find(|s| s.name.node == *name);
+            if declared {
+                for &(_, kind, negate) in removals {
+                    let Some(def) = community_set else {
+                        return Err(format!(
+                            "`{name}` is a dataset, but parameter `{param}` is the set of a \
+                             `remove ... in` action, which takes a community-set"
+                        ));
+                    };
+                    let form = if negate { "not in" } else { "in" };
+                    let action = format!("`remove {} {form} {param}`", kind_keyword(kind));
+                    match removal_set_problem(def, kind, negate) {
+                        None => {}
+                        Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
+                            return Err(format!(
+                                "community-set `{name}` has no route-target or route-origin \
+                                 members, so {action} removes every route target and route origin"
+                            ));
+                        }
+                        Some(RemovalSetProblem::NoMembers { effect }) => {
+                            return Err(format!(
+                                "community-set `{name}` has no {} members, so {action} {effect}",
+                                kind_describe(kind)
+                            ));
+                        }
+                    }
+                }
                 Ok(())
             } else {
                 Err(format!(
@@ -3931,6 +3944,49 @@ fn ext_not_in_without_rt_ro(set: &Spanned<String>, def_span: Span) -> Diagnostic
         "`ext-community not in` considers only route targets and route origins; \
          other extended communities are never removed by it",
     )
+}
+
+/// Why a community-set cannot be the set of `remove <kind> in` / `not in`.
+enum RemovalSetProblem {
+    /// `ext-community not in` with extended members but no route target or
+    /// route origin: it would remove every arrived RT and RO.
+    NoRouteTargetOrOrigin,
+    /// No member of the action's kind; `effect` says what the action
+    /// would do instead.
+    NoMembers { effect: String },
+}
+
+/// The member check for a removal set, shared by a named set and a set
+/// reached through a parameter, so both are held to the same rules.
+fn removal_set_problem(
+    def: &super::ast::CommunitySetDef,
+    kind: CommunityKind,
+    negate: bool,
+) -> Option<RemovalSetProblem> {
+    let has_kind = def
+        .entries
+        .iter()
+        .any(|entry| member_kind(&entry.node) == kind);
+    // `ext-community not in` acts on route targets and route origins only,
+    // so its set needs one of those.
+    if negate
+        && kind == CommunityKind::Ext
+        && has_kind
+        && !def.entries.iter().any(|entry| names_rt_or_ro(&entry.node))
+    {
+        return Some(RemovalSetProblem::NoRouteTargetOrOrigin);
+    }
+    if has_kind {
+        return None;
+    }
+    let effect = if negate && kind == CommunityKind::Ext {
+        "removes every arrived route target and route origin".to_string()
+    } else if negate {
+        format!("removes every arrived {}", kind_describe(kind))
+    } else {
+        "never removes anything".to_string()
+    };
+    Some(RemovalSetProblem::NoMembers { effect })
 }
 
 /// Whether a set member names a route target or route origin.
