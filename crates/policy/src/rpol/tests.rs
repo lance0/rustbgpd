@@ -11854,6 +11854,22 @@ mod callable_policies_review_one {
         assert_eq!(coverage_of(&coverage, "binds", "c"), (2, 0));
     }
 
+    /// Each call specializes the callee, so matching is decided per call:
+    /// a guard that folds to `true` for one argument matches even when
+    /// another call's specialization keeps it conditional and misses.
+    #[test]
+    fn coverage_decides_matching_per_call() {
+        let source = "asn-set one { 1 }
+            policy lib(n: u32) { term a { if n in one { set med 1 } } }
+            policy caller { term t { apply lib(1); apply lib(2); accept } }
+            test both { route { prefix 192.0.2.0/24 } expect caller == accept with med 1 }";
+        let file = RpolFile::parse(source).expect("clean");
+        let (report, coverage) = file.run_tests_with_coverage();
+        assert_eq!(report.total, 1);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+        assert_eq!(coverage_of(&coverage, "lib", "a"), (1, 1));
+    }
+
     /// A return from inside a callee loop leaves a `#return` marker after
     /// the loop, so the callee's later terms are not reached after it.
     #[test]

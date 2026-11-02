@@ -347,10 +347,12 @@ impl CoverageAccum {
 
     /// Credit the called policies' source terms with this walk's facts,
     /// each source term at most once per walk, by the rules a policy's own
-    /// terms follow: reached if any of its terms was, matched if one of its
-    /// conditional terms matched or it has none.
+    /// terms follow, decided per call invocation: reached if any of its
+    /// terms was, matched if one of its conditional terms matched or it has
+    /// none. Each call specializes the callee, so one invocation's guard can
+    /// fold to `true` while another's stays conditional.
     fn credit_calls(&mut self, credits: &[Credit<'_>]) {
-        let mut folded: HashMap<(usize, usize), (bool, bool, bool)> = HashMap::new();
+        let mut per_call: HashMap<(usize, usize, usize), (bool, bool, bool)> = HashMap::new();
         for credit in credits {
             let Some(&slot) = self.index.get(credit.policy) else {
                 continue;
@@ -362,19 +364,25 @@ impl CoverageAccum {
             else {
                 continue;
             };
-            let entry = folded.entry((slot, src)).or_default();
+            let entry = per_call.entry((slot, src, credit.invocation)).or_default();
             entry.0 |= credit.reached;
             if credit.conditional {
                 entry.1 = true;
                 entry.2 |= credit.reached && credit.hit;
             }
         }
-        for ((slot, src), (reached, conditional, hit)) in folded {
+        let mut folded: HashMap<(usize, usize), (bool, bool)> = HashMap::new();
+        for ((slot, src, _), (reached, conditional, hit)) in per_call {
+            let entry = folded.entry((slot, src)).or_default();
+            entry.0 |= reached;
+            entry.1 |= reached && (hit || !conditional);
+        }
+        for ((slot, src), (reached, matched)) in folded {
             let policy = &mut self.policies[slot];
             policy.status = PolicyTestStatus::Tested;
             if reached {
                 policy.terms[src].evaluated += 1;
-                if hit || !conditional {
+                if matched {
                     policy.terms[src].matched += 1;
                 }
             }
@@ -456,6 +464,8 @@ fn collect_expr_applies<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
 struct Credit<'a> {
     policy: &'a str,
     term: &'a str,
+    /// The call invocation, numbered by entry in walk order.
+    invocation: usize,
     reached: bool,
     conditional: bool,
     hit: bool,
@@ -468,8 +478,10 @@ struct Credit<'a> {
 /// its fall-through deny. `#` cannot begin a source term name.
 #[derive(Default)]
 struct CallWalk<'a> {
-    /// Call instance → (entered, returned) in this walk.
-    instances: HashMap<String, (bool, bool)>,
+    /// Call instance → (entered, returned, invocation) in this walk.
+    instances: HashMap<String, (bool, bool, usize)>,
+    /// Call entries so far, numbering each invocation.
+    entries: usize,
     credits: Vec<Credit<'a>>,
 }
 
@@ -485,7 +497,8 @@ impl<'a> CallWalk<'a> {
         let depth = segments.len();
         let key = instance_key(ir, &segments);
         if innermost_term == "#enter" {
-            self.instances.insert(key, (hit, false));
+            self.entries += 1;
+            self.instances.insert(key, (hit, false, self.entries));
             if depth > 1 {
                 // The entry of a nested call is a term of the call around it.
                 self.credit(&segments[..depth - 1], ir, guard, reached, hit);
@@ -516,14 +529,17 @@ impl<'a> CallWalk<'a> {
         hit: bool,
     ) {
         let key = instance_key(ir, segments);
-        let live = self
+        let (live, invocation) = self
             .instances
             .get(&key)
-            .is_some_and(|&(entered, returned)| entered && !returned);
+            .map_or((false, 0), |&(entered, returned, invocation)| {
+                (entered && !returned, invocation)
+            });
         let &(policy, term) = segments.last().expect("non-empty");
         self.credits.push(Credit {
             policy,
             term,
+            invocation,
             reached: reached && live,
             conditional: !own_guard_is_true(guard),
             hit,
