@@ -275,3 +275,21 @@ test avoid-elsewhere {
     route { prefix 192.0.2.0/24; as-path "64500 64502" }
     expect avoid(64501) == accept
 }
+
+# A call statement passing a community, an address and a set: these
+# argument forms run in an evaluated `apply`, not only in an `expect`.
+community-set scrub-set { 65000:666 }
+
+policy mark(tag: community, nh: ip, drop: community-set) {
+    term mark { remove community in drop; add community tag; set next-hop nh }
+}
+
+policy forward {
+    term marked { apply mark(65000:7, 192.0.2.9, scrub-set) }
+    term done { accept }
+}
+
+test forward-marks {
+    route { prefix 192.0.2.0/24; next-hop 198.51.100.1; communities [65000:666] }
+    expect forward == accept with community 65000:7, next-hop 192.0.2.9, removes community 65000:666
+}
