@@ -44,6 +44,13 @@ policy merged-final {
     term rest { accept }
 }
 
+# A final statement that lowers to no row, an `if` with an empty body and
+# no `else`, leaves no bare row: only `empty-final.1`, the staged run.
+policy empty-final {
+    term empty-final { set med 5; if route.med >= 9 { } }
+    term rest { accept }
+}
+
 # A final call: rows inlined from the called policy hold no verdict of the
 # calling statement, so its last row, `call/lib:tag`, is bare.
 policy lib {
@@ -64,6 +71,7 @@ test high-med {
     expect chain-verdicts == reject
     expect merged == accept with removes community *, removes large-community *:*:*
     expect call == accept with community 65000:9
+    expect empty-final == accept with only med 5
 }
 
 test low-med {

@@ -1,10 +1,10 @@
-# rpol decision corpus: 270 programs, 1879 cases. Regenerate with
+# rpol decision corpus: 270 programs, 1890 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 34
-ast.stmt.if 605
+ast.stmt.if 616
 ast.stmt.else-if 31
 ast.stmt.else 76
 ast.stmt.nested-if 13
@@ -12,10 +12,10 @@ ast.stmt.for 75
 ast.stmt.call 37
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1305
+ast.action.accept 1316
 ast.action.reject 461
 ast.action.set-local-pref 128
-ast.action.set-med 261
+ast.action.set-med 272
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.set-next-hop-parameter 1
@@ -45,7 +45,7 @@ ast.action.continue 22
 ast.expr.or 11
 ast.expr.and 36
 ast.expr.not 5
-ast.expr.cmp 298
+ast.expr.cmp 309
 ast.expr.in 119
 ast.expr.ident-in 42
 ast.expr.has 7
@@ -61,7 +61,7 @@ ast.call-arg.integer 265
 ast.call-arg.name 165
 ast.call-arg.community 60
 ast.call-arg.ip 60
-ast.value.literal 390
+ast.value.literal 401
 ast.value.community 22
 ast.value.identifier 106
 ast.value.field 139
@@ -74,9 +74,9 @@ ast.arith.div 11
 ast.arith.rem 11
 ast.cmp.eq 214
 ast.cmp.ne 40
-ast.cmp.ge 195
+ast.cmp.ge 206
 ast.cmp.le 4
-ast.rhs.integer 132
+ast.rhs.integer 143
 ast.rhs.identifier 88
 ast.rhs.ip 9
 ast.rhs.prefix 57
@@ -94,7 +94,7 @@ ast.field.route.large-communities.len 3
 ast.field.route.ext-communities.len 2
 ast.field.route.origin-as 62
 ast.field.route.local-pref 35
-ast.field.route.med 218
+ast.field.route.med 229
 ast.field.route.next-hop 18
 ast.field.route.rpki 39
 ast.field.route.aspa 12
@@ -138,7 +138,7 @@ ast.decl.dataset.asn-set 5
 ast.decl.dataset.community-set 105
 ast.decl.fn 31
 ast.decl.fn.let 21
-ast.decl.test 1199
+ast.decl.test 1210
 ast.set.community.standard 610
 ast.set.community.large 149
 ast.set.community.route-target 105
@@ -151,14 +151,14 @@ ast.set.pattern.route-origin 105
 ast.set.pattern-field.range 176
 ast.set.pattern-field.private-as 105
 ast.test.dataset-override 110
-ast.test.route.prefix 1109
-ast.test.route.communities 817
-ast.test.route.large-communities 445
+ast.test.route.prefix 1120
+ast.test.route.communities 828
+ast.test.route.large-communities 456
 ast.test.route.ext-communities 165
 ast.test.route.as-path 817
 ast.test.route.next-hop 137
 ast.test.route.local-pref 197
-ast.test.route.med 407
+ast.test.route.med 418
 ast.test.route.rpki 108
 ast.test.route.aspa 144
 ast.test.route.route-type 137
@@ -169,23 +169,23 @@ ast.test.peer.asn 165
 ast.test.peer.local-as 105
 ast.test.peer.group 162
 ast.test.expect.chain 161
-ast.test.expect.with-only 398
-ast.test.expect.accept 1188
-ast.test.expect.reject 974
+ast.test.expect.with-only 501
+ast.test.expect.accept 1199
+ast.test.expect.reject 985
 ast.test.expect.error 23
 ast.test.with.local-pref 631
-ast.test.with.med 638
+ast.test.with.med 649
 ast.test.with.next-hop 60
-ast.test.with.community 591
+ast.test.with.community 602
 ast.test.with.prepend 165
 ast.test.with.prepend-path 137
 ast.test.with.removes 405
 ast.test.with.removes-large-admin 105
-ast.test.with.removes-all 197
+ast.test.with.removes-all 208
 ast.test.with.not-removed 200
 ast.test.with.without-community 56
 ast.test.with.without 337
-ir.guard.true 1346
+ir.guard.true 1357
 ir.guard.prefix-in-set 222
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
@@ -230,9 +230,9 @@ ir.value.binary 137
 ir.value.min 40
 ir.value.max 11
 ir.value.clamp 11
-ir.action.permit 1263
+ir.action.permit 1274
 ir.action.deny 405
-ir.action.continue 250
+ir.action.continue 261
 ir.action.bind 121
 ir.action.for-each 75
 ir.action.break 33
@@ -243,7 +243,7 @@ ir.action.remove-all-communities 77
 ir.action.remove-communities-in-set 35
 ir.mod.set-local-pref 121
 ir.mod.set-local-pref-computed 19
-ir.mod.set-med 138
+ir.mod.set-med 149
 ir.mod.set-med-computed 87
 ir.mod.set-next-hop 13
 ir.mod.prepend 33
@@ -644,6 +644,8 @@ crates/policy/tests/decision_corpus/term-names.rpol | chain-verdicts | row chain
 crates/policy/tests/decision_corpus/term-names.rpol | chain-verdicts | row chain-verdicts chain-verdicts.1 => #1 accept
 crates/policy/tests/decision_corpus/term-names.rpol | chain-verdicts | row chain-verdicts chain-verdicts.3 => #3 continue with set med 1
 crates/policy/tests/decision_corpus/term-names.rpol | chain-verdicts | row chain-verdicts rest => #4 accept
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | row empty-final empty-final.1 => #1 continue with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | row empty-final rest => #2 accept
 crates/policy/tests/decision_corpus/term-names.rpol | if-else | row if-else if-else => #2 reject
 crates/policy/tests/decision_corpus/term-names.rpol | if-else | row if-else if-else.1 => #1 accept with set med 3
 crates/policy/tests/decision_corpus/term-names.rpol | lib | row lib bad => #1 reject
@@ -1533,6 +1535,7 @@ crates/policy/tests/decision_corpus/term-names.rpol | test high-med | verdict-fi
 crates/policy/tests/decision_corpus/term-names.rpol | test high-med | chain-verdicts => deny
 crates/policy/tests/decision_corpus/term-names.rpol | test high-med | merged => permit with remove community 65000:1; remove large-community 65000:1:1
 crates/policy/tests/decision_corpus/term-names.rpol | test high-med | call => permit with add community 65000:9
+crates/policy/tests/decision_corpus/term-names.rpol | test high-med | empty-final => permit with set med 5
 crates/policy/tests/decision_corpus/term-names.rpol | test low-med | if-else => deny
 crates/policy/tests/decision_corpus/term-names.rpol | test low-med | staged => deny
 crates/policy/tests/decision_corpus/term-names.rpol | test low-med | verdict-first => permit with set med 8
@@ -1599,6 +1602,16 @@ crates/policy/tests/decision_corpus/term-names.rpol | merged-final | m07-default
 crates/policy/tests/decision_corpus/term-names.rpol | merged-final | m08-host-routes => permit with remove community 65000:100; remove community 65000:200; remove community 65000:300
 crates/policy/tests/decision_corpus/term-names.rpol | merged-final | m09-evpn => permit
 crates/policy/tests/decision_corpus/term-names.rpol | merged-final | m10-v6-bogon => permit with remove community 65000:666; remove large-community 64512:666:0
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m01-v4-transit => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m02-v4-invalid-long => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m03-v6-tagged => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m04-bare => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m05-internal => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m06-local-as-set => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m07-default => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m08-host-routes => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m09-evpn => permit with set med 5
+crates/policy/tests/decision_corpus/term-names.rpol | empty-final | m10-v6-bogon => permit with set med 5
 crates/policy/tests/decision_corpus/term-names.rpol | lib | m01-v4-transit => permit with add community 65000:9
 crates/policy/tests/decision_corpus/term-names.rpol | lib | m02-v4-invalid-long => deny
 crates/policy/tests/decision_corpus/term-names.rpol | lib | m03-v6-tagged => permit with add community 65000:9
