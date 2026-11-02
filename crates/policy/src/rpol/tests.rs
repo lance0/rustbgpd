@@ -11462,3 +11462,114 @@ fn a_policy_with_an_apply_statement_is_not_a_predicate_target() {
          policy asks { term t { if apply(lib) { accept } } }",
     );
 }
+
+mod callable_policies_lowering {
+    use super::super::run_rpol_tests;
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(report.total, total, "test count");
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// An `accept` inside a callee loop leaves the loop at once: no later
+    /// body term of that iteration and no later iteration runs.
+    #[test]
+    fn a_return_inside_a_loop_leaves_the_loop() {
+        passes(
+            "community-set marks { 65000:9 }
+             asn-set few { 1 }
+             policy finder {
+                 term t {
+                     for c in route.communities {
+                         for x in few { if c in marks { set med 99; accept } }
+                         if c in marks { set med 98; accept }
+                         set med 5
+                     }
+                 }
+                 term none { set med 1 }
+             }
+             policy flat-finder {
+                 term t { for c in route.communities { if c in marks { set med 98; accept } set med 5 } }
+             }
+             policy caller { term t { apply finder; accept } }
+             policy flat-caller { term t { apply flat-finder; accept } }
+             test flat-return {
+                 route { prefix 192.0.2.0/24; communities [65000:9, 65000:1] }
+                 expect flat-caller == accept with med 98
+             }
+             test first-iteration {
+                 route { prefix 192.0.2.0/24; communities [65000:9, 65000:1] }
+                 expect caller == accept with med 99
+             }
+             test no-mark {
+                 route { prefix 192.0.2.0/24; communities [65000:1] }
+                 expect caller == accept with med 1
+             }",
+            3,
+        );
+    }
+
+    /// A callee's bindings sit above the caller's live bindings: a caller
+    /// `let` read after the call keeps its value.
+    #[test]
+    fn callee_bindings_do_not_clobber_the_caller() {
+        passes(
+            "policy lib { term t { let y = 99; set local-pref y } }
+             policy caller { term t { let x = 5; apply lib; set med x; accept } }
+             test kept {
+                 route { prefix 192.0.2.0/24 }
+                 expect caller == accept with med 5, local-pref 99
+             }",
+            1,
+        );
+    }
+
+    /// The size budget charges every call site the callee's nodes, plus
+    /// the call-site path and the flag check on each inlined term, plus the
+    /// entry, return and fall-through terms. The longest caller that fits
+    /// is pinned for a deciding, a returning, a nested and a parameterized
+    /// callee.
+    #[test]
+    fn call_sites_charge_the_inlined_size() {
+        let longest = |callee: &str, call: &str| {
+            let fits = |calls: usize| {
+                let body = vec![call; calls].join("; ");
+                diagnostics_of_ok(&format!(
+                    "{callee}\npolicy caller {{ term t {{ {body}; accept }} }}"
+                ))
+            };
+            let (mut lo, mut hi) = (1usize, 20_000usize);
+            assert!(fits(lo), "{callee}: one call fits");
+            assert!(!fits(hi), "{callee}: {hi} calls do not fit");
+            while hi - lo > 1 {
+                let mid = usize::midpoint(lo, hi);
+                if fits(mid) { lo = mid } else { hi = mid }
+            }
+            lo
+        };
+        let deciding = "policy lib { term a { if route.med >= 9 { reject } } term b { if route.med >= 5 { accept } } }";
+        let nested = "policy lib { term a { if route.med >= 9 { reject } } term b { if route.med >= 5 { accept } } }
+                      policy mid { term m { apply lib; set med 1 } }";
+        let typed =
+            "policy lib(n: u32) { term a { if route.med >= n { reject } } term b { set med n } }";
+        let got = [
+            longest(deciding, "apply lib"),
+            longest(nested, "apply mid"),
+            longest(typed, "apply lib(3)"),
+        ];
+        assert_eq!(got, EXPECTED_LONGEST, "pinned call-site size charges");
+    }
+
+    /// The longest caller per callee shape in [`call_sites_charge_the_inlined_size`].
+    /// With 100,000 nodes: the deciding callee costs 28 nodes a call (its
+    /// two 4-node guards, then five terms at 4 nodes each: the two callee
+    /// terms, one return, the entry and the fall-through), so 3,571 calls
+    /// fit with the caller's own `accept`.
+    const EXPECTED_LONGEST: [usize; 3] = [3571, 2222, 4761];
+
+    fn diagnostics_of_ok(source: &str) -> bool {
+        let mut store = crate::sets::SetStore::new();
+        super::super::compile_rpol(source, &mut store).is_ok()
+    }
+}
