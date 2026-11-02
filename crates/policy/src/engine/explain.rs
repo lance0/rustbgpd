@@ -956,6 +956,11 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 set_label(&tables.community_set_names, id.0, "community-set")
             )
         }
+        MatchExpr::CommunityKindInSet(id, kind) => format!(
+            "{} in {}",
+            kind.field(),
+            set_label(&tables.community_set_names, id.0, "community-set")
+        ),
         MatchExpr::AsPathMatches(id) => format!(
             "route.as-path matches {:?}",
             tables
@@ -1097,7 +1102,10 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 crate::ir::DatasetProbe::Prefix => format!("route.prefix in {name}"),
                 crate::ir::DatasetProbe::OriginAs => format!("route.origin-as in {name}"),
                 crate::ir::DatasetProbe::PeerAs => format!("peer.asn in {name}"),
-                crate::ir::DatasetProbe::Community => format!("route.communities in {name}"),
+                crate::ir::DatasetProbe::Community => format!("route.any-community in {name}"),
+                crate::ir::DatasetProbe::CommunityKind(kind) => {
+                    format!("{} in {name}", kind.field())
+                }
                 crate::ir::DatasetProbe::LocalAsn { name: binding, .. }
                 | crate::ir::DatasetProbe::LocalCommunity { name: binding, .. } => {
                     format!("{binding} in {name}")

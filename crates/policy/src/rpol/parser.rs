@@ -1296,18 +1296,20 @@ impl Parser<'_> {
             Tok::AddKw | Tok::RemoveKw => {
                 let add = token.kind == Tok::AddKw;
                 self.bump();
-                let kind_ident =
-                    self.expect_ident("`community`, `large-community`, or `ext-community`")?;
+                let kind_ident = self.expect_ident(
+                    "`community`, `large-community`, `ext-community`, or `any-community`",
+                )?;
                 let kind = match kind_ident.node.as_str() {
                     "community" => CommunityKind::Standard,
                     "large-community" => CommunityKind::Large,
                     "ext-community" => CommunityKind::Ext,
+                    "any-community" => CommunityKind::Any,
                     other => {
                         self.diags.push(Diagnostic::coded(
                             DiagnosticCode::Parse,
                             kind_ident.span,
                             format!("unknown community kind `{other}`"),
-                            "expected `community`, `large-community`, or `ext-community`",
+                            "expected `community`, `large-community`, `ext-community`, or `any-community`",
                         ));
                         return Err(Fail);
                     }
@@ -2409,7 +2411,7 @@ impl Parser<'_> {
                 Tok::Star,
                 "write every large community as `*:*:*`",
             ),
-            CommunityKind::Standard | CommunityKind::Ext => (
+            CommunityKind::Standard | CommunityKind::Ext | CommunityKind::Any => (
                 Tok::Star,
                 Tok::LargeCommunityAllWildcard,
                 "`*:*:*` is the large-community form; write `*`",

@@ -8659,7 +8659,7 @@ policy ext-in { term t { if route.ext-communities in ext { accept } } term rest 
     fn mixed_sets_match_any_kind() {
         let source = r"
 community-set mixed { 65000:1, 64496:*, 64497:1:*, RT:64498:*, 65001:2:3 }
-policy p { term t { if route.communities in mixed { reject } } term rest { accept } }
+policy p { term t { if route.any-community in mixed { reject } } term rest { accept } }
 test exact-standard { route { prefix 192.0.2.0/24; communities [65000:1] } expect p == reject }
 test std-pattern { route { prefix 192.0.2.0/24; communities [64496:9] } expect p == reject }
 test large-pattern {
@@ -8839,7 +8839,7 @@ test param-miss { route { prefix 192.0.2.0/24 } expect by-param(4226941128) == a
     fn test_block_datasets_accept_patterns() {
         let source = r"
 dataset community-set tags
-policy p { term t { if route.communities in tags { reject } } term rest { accept } }
+policy p { term t { if route.any-community in tags { reject } } term rest { accept } }
 test hit {
     dataset tags { 65000:*, 64496:1..9:* }
     route { prefix 192.0.2.0/24; large-communities [64496:9:1] }
@@ -9020,7 +9020,7 @@ test miss {
     fn patterns_lower_to_their_fields() {
         let chain = compile_ok(
             "community-set s { 64496:*, 64496:5..5, LC:64496:*:*, RT:PRIVATE_AS:1..9 } \
-             policy p { term t { if route.communities in s { reject } } }",
+             policy p { term t { if route.any-community in s { reject } } }",
         );
         let set = &chain.community_sets[0];
         assert_eq!(
@@ -9420,11 +9420,11 @@ test chained {
             ),
             (
                 "community-set s { 64496:* } policy p { term t { remove large-community in s } }",
-                "has no large-community members, so `remove large-community in s` never removes anything",
+                "has a standard-community member, but `remove large-community in` reads only large-community values",
             ),
             (
                 "community-set s { 64496:1:1 } policy p { term t { remove ext-community not in s } }",
-                "removes every arrived route target and route origin",
+                "has a large-community member, but `remove ext-community not in` reads only extended-community values",
             ),
             (
                 "community-set s { OV_INVALID } policy p { term t { remove ext-community not in s } }",
@@ -10988,7 +10988,10 @@ mod typed_parameter_round_three {
              test x {{ route {{ prefix 192.0.2.0/24 }} expect p(std) == accept }}"
         ));
         assert!(
-            rendered.contains("has no large-community members"),
+            rendered.contains(
+                "has a standard-community member, but `remove large-community not in` reads only \
+                 large-community values"
+            ),
             "{rendered}"
         );
     }
@@ -11068,4 +11071,155 @@ fn sets_of_every_kind_share_one_namespace() {
     let (_, rendered) =
         diagnostics_of("asn-set a { 1 } asn-set a { 2 } policy p { term t { accept } }");
     assert!(rendered.contains("duplicate asn-set `a`"), "{rendered}");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// LAN-2794: community kinds
+// ─────────────────────────────────────────────────────────────────────
+
+mod community_kinds {
+    use super::super::{format_rpol, run_rpol_tests};
+    use super::{compile_ok, diagnostics_of};
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, total, "{source}");
+        assert!(report.all_passed(), "{:?}", report.failures);
+    }
+
+    /// A kind-specific probe reads only its own kind. A named set member of
+    /// another kind is a compile error pointing at `route.any-community`;
+    /// before, `route.large-communities in tags` with `tags { 65000:1 }`
+    /// matched a route's standard community 65000:1.
+    #[test]
+    fn kind_specific_probes_reject_members_of_another_kind() {
+        for (probe, set, member) in [
+            ("route.large-communities", "65000:1", "standard"),
+            ("route.communities", "65000:1:1", "large"),
+            ("route.ext-communities", "65000:1", "standard"),
+            ("route.communities", "RT:65000:1", "extended"),
+        ] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "community-set tags {{ {set} }} \
+                 policy p {{ term t {{ if {probe} in tags {{ reject }} accept }} }}"
+            ));
+            assert!(
+                rendered.contains(&format!("has a {member} member"))
+                    || rendered.contains(&format!("has an {member} member")),
+                "{probe} in {{ {set} }}: {rendered}"
+            );
+            assert!(
+                rendered.contains("route.any-community in tags"),
+                "{rendered}"
+            );
+        }
+        for (probe, set) in [
+            ("route.communities", "65000:1, 64496:*"),
+            ("route.large-communities", "65000:1:1, 64496:*:*"),
+            ("route.ext-communities", "RT:65000:1, RO:64496:*"),
+            ("route.any-community", "65000:1, 65000:1:1, RT:65000:1"),
+        ] {
+            compile_ok(&format!(
+                "community-set tags {{ {set} }} \
+                 policy p {{ term t {{ if {probe} in tags {{ reject }} accept }} }}"
+            ));
+        }
+    }
+
+    /// Datasets and set parameters are known only at runtime, so a
+    /// kind-specific probe filters by kind there: a standard member never
+    /// matches a large-community probe, and `route.any-community` matches
+    /// each kind against its own members.
+    #[test]
+    fn datasets_and_parameters_filter_by_kind_at_runtime() {
+        passes(
+            r"
+dataset community-set tags
+community-set mixed { 65000:1, 65000:1:1 }
+policy large { term t { if route.large-communities in tags { reject } } term rest { accept } }
+policy any { term t { if route.any-community in tags { reject } } term rest { accept } }
+policy by-param(s: community-set) {
+    term t { if route.large-communities in s { reject } } term rest { accept }
+}
+test standard-member-misses-the-large-probe {
+    dataset tags { 65000:1 }
+    route { prefix 192.0.2.0/24; communities [65000:1] }
+    expect large == accept
+}
+test large-member-hits-the-large-probe {
+    dataset tags { 65000:1:1 }
+    route { prefix 192.0.2.0/24; large-communities [65000:1:1] }
+    expect large == reject
+}
+test any-reads-every-kind {
+    dataset tags { 65000:1 }
+    route { prefix 192.0.2.0/24; communities [65000:1] }
+    expect any == reject
+}
+test parameter-filters-by-kind {
+    route { prefix 192.0.2.0/24; communities [65000:1] }
+    expect by-param(mixed) == accept
+}
+test parameter-hits-its-kind {
+    route { prefix 192.0.2.0/24; large-communities [65000:1:1] }
+    expect by-param(mixed) == reject
+}
+",
+            5,
+        );
+    }
+
+    /// `remove any-community in S` removes the members of every kind; the
+    /// kind-specific removals reject a member of another kind, and
+    /// `any-community` takes no value, wildcard or `not in` set.
+    #[test]
+    fn any_community_removes_a_mixed_set() {
+        passes(
+            r"
+community-set twins { 65000:666, 65000:666:0, RT:65000:666 }
+policy scrub { term t { remove any-community in twins; accept } }
+test removes-every-kind {
+    route {
+        prefix 192.0.2.0/24
+        communities [65000:666, 65000:1]
+        large-communities [65000:666:0]
+        ext-communities [RT:65000:666]
+    }
+    expect scrub == accept with only removes community 65000:666,
+        removes large-community 65000:666:0, removes ext-community RT:65000:666,
+        not removed community 65000:1
+}
+",
+            1,
+        );
+        let (_, rendered) = diagnostics_of(
+            "community-set twins { 65000:666, 65000:666:0 } \
+             policy p { term t { remove community in twins; accept } }",
+        );
+        assert!(
+            rendered.contains("has a large-community member")
+                && rendered.contains("remove any-community in twins"),
+            "{rendered}"
+        );
+        for bad in [
+            "remove any-community not in twins",
+            "add any-community in twins",
+            "remove any-community 65000:666",
+            "remove any-community *",
+        ] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "community-set twins {{ 65000:666, 65000:666:0 }} \
+                 policy p {{ term t {{ {bad}; accept }} }}"
+            ));
+            assert!(!rendered.is_empty(), "{bad}");
+        }
+        let source = "community-set twins {65000:666,65000:666:0}\npolicy p {term t {if route.any-community in twins {remove any-community in twins} accept}}\n";
+        let formatted = format_rpol(source).expect("formats");
+        assert!(
+            formatted.contains("if route.any-community in twins")
+                && formatted.contains("remove any-community in twins"),
+            "{formatted}"
+        );
+        assert_eq!(format_rpol(&formatted).expect("reformats"), formatted);
+    }
 }

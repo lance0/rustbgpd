@@ -1,19 +1,19 @@
-# rpol decision corpus: 263 programs, 1645 cases. Regenerate with
+# rpol decision corpus: 263 programs, 1658 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 29
-ast.stmt.if 507
+ast.stmt.if 510
 ast.stmt.else-if 18
 ast.stmt.else 27
 ast.stmt.nested-if 13
 ast.stmt.for 75
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1135
+ast.action.accept 1148
 ast.action.reject 382
-ast.action.set-local-pref 117
+ast.action.set-local-pref 120
 ast.action.set-med 186
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
@@ -32,7 +32,7 @@ ast.expr.or 9
 ast.expr.and 20
 ast.expr.not 5
 ast.expr.cmp 220
-ast.expr.in 107
+ast.expr.in 110
 ast.expr.ident-in 42
 ast.expr.has 4
 ast.expr.has-parameter 1
@@ -41,17 +41,18 @@ ast.expr.matches 37
 ast.expr.contains 5
 ast.expr.value-cmp 116
 ast.expr.apply 1
-ast.value.literal 337
+ast.value.literal 340
 ast.value.identifier 106
 ast.value.field 148
 ast.value.arithmetic 128
 ast.value.call 72
-ir.guard.true 1179
+ir.guard.true 1189
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
 ir.guard.community-contains 26
-ir.guard.community-in-set 53
+ir.guard.community-in-set 13
+ir.guard.community-kind-in-set 53
 ir.guard.as-path-matches 148
 ir.guard.as-path-len 77
 ir.guard.origin-as-eq 21
@@ -89,7 +90,7 @@ ir.value.binary 171
 ir.value.min 50
 ir.value.max 21
 ir.value.clamp 9
-ir.action.permit 1114
+ir.action.permit 1127
 ir.action.deny 343
 ir.action.continue 167
 ir.action.bind 84
@@ -100,7 +101,7 @@ ir.action.community-var 43
 ir.action.remove-large-community-admin 11
 ir.action.remove-all-communities 46
 ir.action.remove-communities-in-set 23
-ir.mod.set-local-pref 99
+ir.mod.set-local-pref 102
 ir.mod.set-local-pref-computed 18
 ir.mod.set-med 68
 ir.mod.set-med-computed 99
@@ -640,6 +641,9 @@ crates/policy/tests/decision_corpus/guards.rpol | test evpn-prefix | evpn-types 
 crates/policy/tests/decision_corpus/guards.rpol | test evpn-imet | evpn-types => permit
 crates/policy/tests/decision_corpus/guards.rpol | test family-v6 | not-v4 => deny
 crates/policy/tests/decision_corpus/guards.rpol | test family-v4 | not-v4 => permit
+crates/policy/tests/decision_corpus/guards.rpol | test any-kind-standard-twin | any-kind-twins => permit with set local-pref 50
+crates/policy/tests/decision_corpus/guards.rpol | test any-kind-large-twin | any-kind-twins => permit with set local-pref 50
+crates/policy/tests/decision_corpus/guards.rpol | test any-kind-neither | any-kind-twins => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-bogon | m01-v4-transit => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-bogon | m02-v4-invalid-long => deny
 crates/policy/tests/decision_corpus/guards.rpol | not-bogon | m03-v6-tagged => permit
@@ -740,6 +744,16 @@ crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m07-default => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m08-host-routes => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m09-evpn => deny
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m10-v6-bogon => deny
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m01-v4-transit => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m02-v4-invalid-long => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m03-v6-tagged => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m04-bare => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m05-internal => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m06-local-as-set => permit with set local-pref 50
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m07-default => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m08-host-routes => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m09-evpn => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m10-v6-bogon => permit
 crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m01-v4-transit => permit
 crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m02-v4-invalid-long => deny
 crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m03-v6-tagged => deny

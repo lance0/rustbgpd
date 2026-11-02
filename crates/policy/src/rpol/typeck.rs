@@ -31,6 +31,9 @@ pub(super) enum Field {
     Communities,
     LargeCommunities,
     ExtCommunities,
+    /// `route.any-community`: the kind-agnostic community probe, valid
+    /// only on the left of `in` (LAN-2794).
+    AnyCommunity,
     AsPath,
     AsPathLen,
     CommunitiesLen,
@@ -55,6 +58,7 @@ const ROUTE_FIELDS: &[(&str, Field)] = &[
     ("communities", Field::Communities),
     ("large-communities", Field::LargeCommunities),
     ("ext-communities", Field::ExtCommunities),
+    ("any-community", Field::AnyCommunity),
     ("as-path", Field::AsPath),
     ("origin-as", Field::OriginAs),
     ("local-pref", Field::LocalPref),
@@ -1243,6 +1247,27 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
+            // LAN-2794: `any-community` addresses every kind, so it only
+            // removes the members of a set; a value has one kind.
+            ActionStmt::Community {
+                kind: CommunityKind::Any,
+                arg,
+                span,
+                ..
+            } if !matches!(arg, CommunityArg::InSet { .. }) => {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        *span,
+                        "`any-community` removes only by set",
+                        "a single value has one kind",
+                    )
+                    .with_note(
+                        "write `remove any-community in SET`, or name the kind: \
+                         `community`, `large-community` or `ext-community`",
+                    ),
+                );
+            }
             ActionStmt::Accept(_)
             | ActionStmt::Reject(_)
             | ActionStmt::SetNextHop(..)
@@ -2218,7 +2243,10 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => {
+            Field::Communities
+            | Field::LargeCommunities
+            | Field::ExtCommunities
+            | Field::AnyCommunity => {
                 self.diags.push(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
@@ -2393,6 +2421,21 @@ impl<'a> Checker<'a> {
             );
             return;
         }
+        if kind == CommunityKind::Any && negate {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    set.span,
+                    "`remove any-community not in` is not an action",
+                    "an allow-list is per kind",
+                )
+                .with_note(format!(
+                    "write one `remove <kind> not in {}` per kind you scrub",
+                    set.node
+                )),
+            );
+            return;
+        }
         // A set parameter stands for its argument here, as in every other
         // set position. Its members are known only at instantiation, so
         // the member-kind notes below apply to named sets.
@@ -2408,6 +2451,10 @@ impl<'a> Checker<'a> {
         {
             match removal_set_problem(def, kind, negate) {
                 None => {}
+                Some(RemovalSetProblem::OtherKind { member, span }) => {
+                    self.diags
+                        .push(other_kind_removal(set, member, span, kind, form));
+                }
                 Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
                     self.diags
                         .push(ext_not_in_without_rt_ro(set, def.name.span));
@@ -2498,6 +2545,55 @@ impl<'a> Checker<'a> {
         self.diags.push(diag);
     }
 
+    /// LAN-2794: a kind-specific probe or removal of a named community-set
+    /// reads only members of its own kind, so a member of another kind is
+    /// a compile error pointing at `instead` (the kind-agnostic form).
+    /// Returns whether it reported one. Set parameters and datasets are
+    /// known only at runtime and filter by kind there.
+    fn check_set_member_kinds(
+        &mut self,
+        set: &Spanned<String>,
+        attribute: crate::ir::CommunityAttribute,
+        form: &str,
+        instead: &str,
+    ) -> bool {
+        let Some(def) = self
+            .file
+            .community_sets
+            .iter()
+            .find(|s| s.name.node == set.node)
+        else {
+            return false;
+        };
+        let Some(member) = def
+            .entries
+            .iter()
+            .find(|member| member.node.attribute() != attribute)
+        else {
+            return false;
+        };
+        let other = attribute_describe(member.node.attribute());
+        self.diags.push(
+            Diagnostic::coded(
+                DiagnosticCode::Typecheck,
+                set.span,
+                format!(
+                    "community-set `{}` has {} {other} member, but `{form}` reads only {} \
+                     communities",
+                    set.node,
+                    article(other),
+                    attribute_describe(attribute)
+                ),
+                "a member of another kind",
+            )
+            .with_label(member.span, format!("{} {other} member", article(other)))
+            .with_note(format!(
+                "for a set that mixes kinds, write `{instead}`, or split the set by kind"
+            )),
+        );
+        true
+    }
+
     fn check_in(&mut self, field: &FieldPath, set: &Spanned<String>) {
         let resolved = match resolve_field(field) {
             Ok(resolved) => resolved,
@@ -2511,9 +2607,10 @@ impl<'a> Checker<'a> {
         // error as a wrong-kind set.
         let expected_kind = match resolved {
             Field::Prefix => Some(DatasetKind::Prefix),
-            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => {
-                Some(DatasetKind::Community)
-            }
+            Field::Communities
+            | Field::LargeCommunities
+            | Field::ExtCommunities
+            | Field::AnyCommunity => Some(DatasetKind::Community),
             Field::OriginAs | Field::PeerAsn => Some(DatasetKind::Asn),
             _ => None,
         };
@@ -2547,8 +2644,11 @@ impl<'a> Checker<'a> {
                     .map(|s| &s.name)
                     .chain(self.dataset_names(DatasetKind::Prefix)),
             ),
-            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => self
-                .check_set_reference(
+            Field::Communities
+            | Field::LargeCommunities
+            | Field::ExtCommunities
+            | Field::AnyCommunity => {
+                self.check_set_reference(
                     set,
                     "community-set",
                     "community membership needs a community-set",
@@ -2557,7 +2657,16 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|s| &s.name)
                         .chain(self.dataset_names(DatasetKind::Community)),
-                ),
+                );
+                if let Some(attribute) = community_attribute_of(resolved) {
+                    self.check_set_member_kinds(
+                        set,
+                        attribute,
+                        &format!("{} in", field.render()),
+                        &format!("route.any-community in {}", set.node),
+                    );
+                }
+            }
             Field::OriginAs | Field::PeerAsn => self.check_set_reference(
                 set,
                 "asn-set",
@@ -3357,6 +3466,9 @@ pub(super) fn check_call_arg(
                     let action = format!("`remove {} {form} {param}`", kind_keyword(kind));
                     match removal_set_problem(def, kind, negate) {
                         None => {}
+                        Some(RemovalSetProblem::OtherKind { member, .. }) => {
+                            return Err(other_kind_message(name, member, kind, form));
+                        }
                         Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
                             return Err(format!(
                                 "community-set `{name}` has no route-target or route-origin \
@@ -3643,7 +3755,10 @@ fn action_value_cost(action: &ActionStmt, fns: &HashMap<&str, FnCost>) -> u64 {
             kind,
             arg: CommunityArg::All(_) | CommunityArg::InSet { .. },
             ..
-        } => crate::eval::max_communities_per_route(community_attribute(*kind)),
+        } => community_attributes(*kind)
+            .iter()
+            .map(|&attribute| crate::eval::max_communities_per_route(attribute))
+            .fold(0, u64::saturating_add),
         _ => 0,
     }
 }
@@ -4002,6 +4117,7 @@ fn kind_describe(kind: CommunityKind) -> &'static str {
         CommunityKind::Standard => "standard-community",
         CommunityKind::Large => "large-community",
         CommunityKind::Ext => "extended-community",
+        CommunityKind::Any => "community",
     }
 }
 
@@ -4027,12 +4143,49 @@ fn ext_not_in_without_rt_ro(set: &Spanned<String>, def_span: Span) -> Diagnostic
 
 /// Why a community-set cannot be the set of `remove <kind> in` / `not in`.
 enum RemovalSetProblem {
+    /// LAN-2794: a member of another kind. A kind-specific removal reads
+    /// only its own kind, so the member could never match.
+    OtherKind { member: CommunityKind, span: Span },
     /// `ext-community not in` with extended members but no route target or
     /// route origin: it would remove every arrived RT and RO.
     NoRouteTargetOrOrigin,
     /// No member of the action's kind; `effect` says what the action
     /// would do instead.
     NoMembers { effect: String },
+}
+
+/// LAN-2794: the diagnostic for a named removal set with a member of
+/// another kind, at `member_span`.
+fn other_kind_removal(
+    set: &Spanned<String>,
+    member: CommunityKind,
+    member_span: Span,
+    kind: CommunityKind,
+    form: &str,
+) -> Diagnostic {
+    Diagnostic::coded(
+        DiagnosticCode::Typecheck,
+        set.span,
+        other_kind_message(&set.node, member, kind, form),
+        "a member of another kind",
+    )
+    .with_label(member_span, format!("{} member", kind_describe(member)))
+    .with_note(format!(
+        "for a set that mixes kinds, write `remove any-community in {}`, or split the set \
+         by kind",
+        set.node
+    ))
+}
+
+/// LAN-2794: the message for a removal set with a member of another kind.
+fn other_kind_message(set: &str, member: CommunityKind, kind: CommunityKind, form: &str) -> String {
+    format!(
+        "community-set `{set}` has {} {} member, but `remove {} {form}` reads only {} values",
+        article(kind_describe(member)),
+        kind_describe(member),
+        kind_keyword(kind),
+        kind_describe(kind)
+    )
 }
 
 /// The member check for a removal set, shared by a named set and a set
@@ -4042,6 +4195,20 @@ fn removal_set_problem(
     kind: CommunityKind,
     negate: bool,
 ) -> Option<RemovalSetProblem> {
+    // `any-community` removes members of every kind.
+    if kind == CommunityKind::Any {
+        return None;
+    }
+    if let Some(other) = def
+        .entries
+        .iter()
+        .find(|entry| member_kind(&entry.node) != kind)
+    {
+        return Some(RemovalSetProblem::OtherKind {
+            member: member_kind(&other.node),
+            span: other.span,
+        });
+    }
     let has_kind = def
         .entries
         .iter()
@@ -4102,12 +4269,55 @@ fn member_kind(member: &crate::sets::CommunityMember) -> CommunityKind {
     }
 }
 
-/// The IR attribute a community action kind addresses.
+/// The IR attribute a single-kind community action addresses.
+/// `any-community` addresses every kind; see [`community_attributes`]
+/// (the typechecker admits it only in `remove any-community in S`).
 pub(super) fn community_attribute(kind: CommunityKind) -> crate::ir::CommunityAttribute {
     match kind {
         CommunityKind::Standard => crate::ir::CommunityAttribute::Standard,
         CommunityKind::Large => crate::ir::CommunityAttribute::Large,
         CommunityKind::Ext => crate::ir::CommunityAttribute::Extended,
+        CommunityKind::Any => unreachable!("typechecked: any-community addresses every kind"),
+    }
+}
+
+/// Every IR attribute a community action kind addresses: one, or all
+/// three for `any-community` (LAN-2794).
+pub(super) fn community_attributes(
+    kind: CommunityKind,
+) -> &'static [crate::ir::CommunityAttribute] {
+    use crate::ir::CommunityAttribute;
+    match kind {
+        CommunityKind::Standard => &[CommunityAttribute::Standard],
+        CommunityKind::Large => &[CommunityAttribute::Large],
+        CommunityKind::Ext => &[CommunityAttribute::Extended],
+        CommunityKind::Any => &[
+            CommunityAttribute::Standard,
+            CommunityAttribute::Extended,
+            CommunityAttribute::Large,
+        ],
+    }
+}
+
+/// The community attribute a kind-specific community field reads
+/// (LAN-2794); `None` for `route.any-community` and non-community fields.
+pub(super) fn community_attribute_of(field: Field) -> Option<crate::ir::CommunityAttribute> {
+    use crate::ir::CommunityAttribute;
+    match field {
+        Field::Communities => Some(CommunityAttribute::Standard),
+        Field::LargeCommunities => Some(CommunityAttribute::Large),
+        Field::ExtCommunities => Some(CommunityAttribute::Extended),
+        _ => None,
+    }
+}
+
+/// A community attribute in prose: `standard`, `large` or `extended`.
+fn attribute_describe(attribute: crate::ir::CommunityAttribute) -> &'static str {
+    use crate::ir::CommunityAttribute;
+    match attribute {
+        CommunityAttribute::Standard => "standard",
+        CommunityAttribute::Large => "large",
+        CommunityAttribute::Extended => "extended",
     }
 }
 
@@ -4116,6 +4326,7 @@ pub(super) fn kind_keyword(kind: CommunityKind) -> &'static str {
         CommunityKind::Standard => "community",
         CommunityKind::Large => "large-community",
         CommunityKind::Ext => "ext-community",
+        CommunityKind::Any => "any-community",
     }
 }
 
@@ -4124,6 +4335,7 @@ fn kind_field(kind: CommunityKind) -> &'static str {
         CommunityKind::Standard => "communities",
         CommunityKind::Large => "large-communities",
         CommunityKind::Ext => "ext-communities",
+        CommunityKind::Any => "any-community",
     }
 }
 

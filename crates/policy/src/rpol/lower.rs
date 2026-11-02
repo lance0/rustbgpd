@@ -71,7 +71,10 @@ use super::ast::{
     NextHopArg, ParamType, PolicyDef, PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Spanned};
-use super::typeck::{Field, community_attribute, resolve_field, value_field_of};
+use super::typeck::{
+    Field, community_attribute, community_attribute_of, community_attributes, resolve_field,
+    value_field_of,
+};
 
 /// Static slot allocation for `let` bindings (LAN-302/LAN-303): one
 /// register file per **source term** (bindings never cross terms),
@@ -783,7 +786,9 @@ impl<'a> Lowerer<'a> {
                     ..
                 }) => {
                     flush_pending(&mut out, &mut pending);
-                    out.push((MatchExpr::True, self.remove_in_set(*kind, set, *negate)));
+                    for action in self.remove_in_set(*kind, set, *negate) {
+                        out.push((MatchExpr::True, action));
+                    }
                 }
                 Stmt::Action(ActionStmt::Community {
                     kind,
@@ -1110,7 +1115,10 @@ impl<'a> Lowerer<'a> {
                         Field::Prefix => DatasetProbe::Prefix,
                         Field::OriginAs => DatasetProbe::OriginAs,
                         Field::PeerAsn => DatasetProbe::PeerAs,
-                        _ => DatasetProbe::Community,
+                        Field::AnyCommunity => DatasetProbe::Community,
+                        other => DatasetProbe::CommunityKind(
+                            community_attribute_of(other).expect("typechecked: community field"),
+                        ),
                     };
                     return match self.dataset_ref(&set.node) {
                         Some(id) => MatchExpr::InDataset { probe, id },
@@ -1123,7 +1131,13 @@ impl<'a> Lowerer<'a> {
                     Field::Prefix => MatchExpr::PrefixInSet(self.prefix_set_ids[&set.node]),
                     Field::OriginAs => MatchExpr::OriginAsInSet(self.asn_set_ids[&set.node]),
                     Field::PeerAsn => MatchExpr::PeerAsInSet(self.asn_set_ids[&set.node]),
-                    _ => MatchExpr::CommunityInSet(self.community_set_ids[&set.node]),
+                    Field::AnyCommunity => {
+                        MatchExpr::CommunityInSet(self.community_set_ids[&set.node])
+                    }
+                    other => MatchExpr::CommunityKindInSet(
+                        self.community_set_ids[&set.node],
+                        community_attribute_of(other).expect("typechecked: community field"),
+                    ),
                 }
             }
             // LAN-303: `<binding> in <set>` — a binding probes at
@@ -1532,7 +1546,11 @@ fn lower_cmp(
                 }
             }
         }
-        Field::Communities | Field::LargeCommunities | Field::ExtCommunities | Field::AsPath => {
+        Field::Communities
+        | Field::LargeCommunities
+        | Field::ExtCommunities
+        | Field::AnyCommunity
+        | Field::AsPath => {
             unreachable!("typechecked: no direct comparison on lists")
         }
     }
@@ -1652,7 +1670,7 @@ impl Lowerer<'_> {
                     ..
                 } => {
                     flush(&mut tail, &mut mods);
-                    tail.push(self.remove_in_set(*kind, set, *negate));
+                    tail.extend(self.remove_in_set(*kind, set, *negate));
                 }
                 ActionStmt::Community {
                     kind,
@@ -1835,17 +1853,27 @@ impl Lowerer<'_> {
 impl<'a> Lowerer<'a> {
     /// `remove <kind> in SET` / `not in SET` as its scan action; the
     /// typechecker has resolved `set` to a community-set.
+    /// `remove any-community in SET` is one scan per kind the set has
+    /// members of (LAN-2794).
     fn remove_in_set(
         &self,
         kind: super::ast::CommunityKind,
         set: &Spanned<String>,
         negate: bool,
-    ) -> TermAction {
-        TermAction::RemoveCommunitiesInSet {
-            attribute: community_attribute(kind),
-            set: self.community_set_ids[&self.bound_set(set).node],
-            negate,
-        }
+    ) -> Vec<TermAction> {
+        let id = self.community_set_ids[&self.bound_set(set).node];
+        community_attributes(kind)
+            .iter()
+            .filter(|&&attribute| {
+                kind != super::ast::CommunityKind::Any
+                    || self.community_sets[id.0 as usize].has_kind(attribute)
+            })
+            .map(|&attribute| TermAction::RemoveCommunitiesInSet {
+                attribute,
+                set: id,
+                negate,
+            })
+            .collect()
     }
 
     /// Lower a value expression to IR: parameters substituted, `let`

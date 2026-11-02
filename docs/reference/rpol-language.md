@@ -162,11 +162,16 @@ not tell which to probe.
   `10.0.0.0/24 le 16` or `10.0.0.0/24 ge 28 le 26`, is a compile
   error. Dataset snapshot files use the same grammar and the same
   rule.
-- Community sets may mix standard, large, and extended members.
-  Membership (`in`) matches when **any route community of any kind
-  matches any member** — the set is kind-partitioned internally, and
-  the field you write it against (`route.communities in tagged`)
-  reads as documentation, not a kind filter.
+- Community sets may mix standard, large, and extended members, but a
+  probe reads one kind: `route.communities in S` matches the route's
+  standard communities against the set's standard members only, and
+  `route.large-communities` / `route.ext-communities` likewise. A
+  member of another kind in a named set is a compile error for that
+  probe, because it could never match there. A set that mixes kinds, such
+  as the standard and large twins of a route-server action community, is
+  probed with `route.any-community in S`, which matches a route community
+  of any kind against the members of its kind. Datasets and set
+  parameters filter by kind at runtime.
 - Community-set members may be **patterns** that match a range of
   values (see "Community patterns" below).
 - ASN sets hold plain ASN literals (u32; 4-byte ASNs are first-class,
@@ -609,7 +614,8 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.prefix == 10.0.0.0/24` | exact prefix (same network *and* length) |
 | `route.prefix in customers` | prefix-set membership (mask + ge/le ranges) |
 | `route.communities has 65000:100` | route carries this community (kind-checked against the field) |
-| `route.communities in tagged` | any route community matches any set member |
+| `route.communities in tagged` | a standard route community matches a standard set member (`route.large-communities` and `route.ext-communities` likewise; a set member of another kind is a compile error) |
+| `route.any-community in tagged` | a route community of any kind matches a set member of its kind; for sets that mix kinds |
 | `route.as-path.len >= 3` | AS-path ASN count (RFC 4271 counting) |
 | `route.communities.len >= 100` | number of standard communities on the route (`route.large-communities.len` and `route.ext-communities.len` likewise; 0 when the attribute is absent); route-context-only, so it never disqualifies update-group sharing |
 | `route.as-path contains 65001` | boundary-anchored ASN presence (sugar for `matches "_65001_"`) |
@@ -1273,6 +1279,7 @@ Two consequences worth internalizing:
 | `remove large-community 65000:*:*` | every arrived large community with global administrator 65000 |
 | `remove community *` / `remove large-community *:*:*` / `remove ext-community *` | every arrived community of that kind, except that `remove community *` keeps well-known communities (see below) |
 | `remove community in scrub` / `remove community not in allow` | every arrived community of that kind that is (or, with `not in`, is not) a member of the community-set; `large-community` and `ext-community` likewise (see below) |
+| `remove any-community in twins` | every arrived community, of any kind, that is a member of a set that mixes kinds (`in` only) |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (ASN: 1–4294967295; count: literal 1–255) |
 | `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
@@ -1392,9 +1399,12 @@ test scrubbed {
   targets would strip the encapsulation, color and EVPN communities that EVPN
   reflection and SR-TE steering depend on. `remove ext-community in SET`
   removes whatever the set names, the origin-validation state included.
-- **The set** must be a `community-set` with at least one member of the
-  action's kind: otherwise `in` would remove nothing and `not in` would remove
-  every value, and both are compile errors. For `ext-community not in` the
+- **The set** must be a `community-set` whose members are all of the
+  action's kind, with at least one: a member of another kind could never be
+  removed, `in` with none would remove nothing and `not in` every value, and
+  all three are compile errors. `remove any-community in SET` takes a set that
+  mixes kinds and removes the members of every kind; it has no `not in` form,
+  because an allow-list is per kind. For `ext-community not in` the
   set needs a route-target or route-origin member. Datasets are not accepted
   here yet; probe a dataset in a guard instead.
 - **Removal only, arrived route only.** `add <kind> in` is a compile error.

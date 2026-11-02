@@ -2074,6 +2074,9 @@ impl CompiledChain {
                         ctx.peer_asn.is_some_and(|asn| set.contains(asn))
                     }
                     (DatasetProbe::Community, DatasetData::Community(set)) => set.matches(ctx),
+                    (DatasetProbe::CommunityKind(kind), DatasetData::Community(set)) => {
+                        set.matches_kind(ctx, *kind)
+                    }
                     (DatasetProbe::LocalAsn { slot, .. }, DatasetData::Asn(set)) => {
                         local_probe(locals, *slot, err, |value| set.contains(value))
                     }
@@ -2148,6 +2151,9 @@ impl CompiledChain {
                 .is_some_and(|candidate| self.prefix_sets[id.0 as usize].matches(candidate)),
             MatchExpr::CommunityContains(cm) => cm.matches_route_communities(ctx),
             MatchExpr::CommunityInSet(id) => self.community_sets[id.0 as usize].matches(ctx),
+            MatchExpr::CommunityKindInSet(id, kind) => {
+                self.community_sets[id.0 as usize].matches_kind(ctx, *kind)
+            }
             MatchExpr::AsPathMatches(id) => {
                 self.as_path_regexes[id.0 as usize].is_match(ctx.as_path_str)
             }

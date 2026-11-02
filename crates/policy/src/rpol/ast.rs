@@ -187,6 +187,9 @@ pub enum CommunityKind {
     Large,
     /// Extended (RFC 4360 RT/RO).
     Ext,
+    /// Every kind: `remove any-community in S` only (LAN-2794), the
+    /// kind-agnostic removal for a set that mixes kinds.
+    Any,
 }
 
 impl CommunityLit {
