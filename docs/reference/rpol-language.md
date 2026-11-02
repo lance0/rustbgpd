@@ -917,9 +917,10 @@ at that iteration, exactly as in an `if` body; staged modifications
 from earlier iterations merge under an `accept` and are discarded by a
 `reject`, the ordinary rules.
 
-**Iterated collections cannot change mid-loop.** Reads always see the
-route as it arrived — staged modifications are never read back
-(ADR-0103 Decision 2) — so `add community` inside a
+**Iterated collections cannot change mid-loop.** Conditions and loop
+sources always read the route as it arrived — staged modifications are
+never read back there (ADR-0103 Decision 2); only a community scan consults
+the staged additions it cancels — so `add community` inside a
 `for c in route.communities` body cannot extend its own iteration
 (pinned by test).
 
@@ -1335,7 +1336,10 @@ test scrubbed {
   evaluation step per value, as for `remove community *`. Each step is one
   exact-member hash probe plus at most 64 pattern comparisons, so a set at
   the pattern limit costs up to about 1.05 million comparisons per route for
-  one standard-community scan.
+  one standard-community scan. The scan also probes the earlier staged
+  additions of its kind the same way; they have no compile-time bound, so
+  each costs one step of the evaluation's runtime budget, and a route that
+  exhausts it fails closed on the evaluation-error rail.
 
 ### Routes that carry too many communities
 

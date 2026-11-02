@@ -79,11 +79,13 @@ pub struct StatementAttribution {
     /// Rendered modifications this statement contributes, with
     /// `before -> after` for scalar attributes. The "before" side is
     /// always the route's *pre-policy* value: chain semantics
-    /// accumulate modifications and apply them once after the walk, so
-    /// a later statement does not see an earlier statement's edits.
-    /// For an `.rpol` member this is the policy's merged contribution
-    /// (matched `Continue` terms folded under the deciding permit,
-    /// mirroring the live evaluator's merge).
+    /// accumulate modifications and apply them once after the walk, and
+    /// conditions read the route as received.
+    /// For an `.rpol` member this is the policy's own merged contribution
+    /// (matched `Continue` terms folded under the deciding permit). The
+    /// trace walks each member from nothing staged, so it does not show
+    /// a later member's community scan cancelling an earlier member's
+    /// addition, which the live walk applies in statement order.
     pub modifications: Vec<String>,
     /// `.rpol` term name of the deciding term (ADR-0096). `None` for
     /// TOML statements and for default-action fallthroughs.
@@ -431,6 +433,21 @@ fn render_modifications(
 // `.rpol` member tracing (ADR-0096 explain slice).
 // ---------------------------------------------------------------------
 
+/// The trace line for a community scan that stopped the walk: over its wire
+/// bound (`Ok(false)`, a plain fail-closed reject) or out of evaluation fuel
+/// (`Err`, the eval-error rail).
+fn scan_failure_trace(
+    term: &Term,
+    scanned: Result<bool, crate::eval::EvalErrorKind>,
+    bound: &str,
+) -> String {
+    let name = term.name.as_deref().unwrap_or("<unnamed>");
+    match scanned {
+        Err(kind) => format!("term {name}: evaluation error: {kind} — fail closed => reject"),
+        Ok(_) => format!("term {name}: {bound} — fail closed => reject"),
+    }
+}
+
 /// Trace one pre-compiled `.rpol` policy: walk its terms exactly like
 /// `CompiledChain::evaluate_policy` (first decider wins, matched
 /// `Continue` modifications accumulate under an eventual permit and are
@@ -605,26 +622,36 @@ fn trace_rpol_policy(
                 }
             }
             TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
-                if !crate::eval::exec_remove_large_community_admin(
+                let scanned = crate::eval::exec_remove_large_community_admin(
                     global_admin,
                     ctx,
                     &mut continued,
-                ) {
-                    term_traces.push(format!(
-                        "term {}: large-community input exceeds the wildcard-removal bound — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
+                    fuel,
+                );
+                if scanned != Ok(true) {
+                    term_traces.push(scan_failure_trace(
+                        term,
+                        scanned,
+                        "large-community input exceeds the wildcard-removal bound",
                     ));
+                    eval_failed = scanned.is_err();
                     decided = Some((index, term));
                     break;
                 }
             }
             TermActionView::RemoveAllCommunities { attributes } => {
-                if !crate::eval::exec_remove_all_communities(attributes, ctx, &mut continued) {
-                    term_traces.push(format!(
-                        "term {}: community input exceeds the `{}` bound — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                        attributes.render(),
+                let scanned =
+                    crate::eval::exec_remove_all_communities(attributes, ctx, &mut continued, fuel);
+                if scanned != Ok(true) {
+                    term_traces.push(scan_failure_trace(
+                        term,
+                        scanned,
+                        &format!(
+                            "community input exceeds the `{}` bound",
+                            attributes.render()
+                        ),
                     ));
+                    eval_failed = scanned.is_err();
                     decided = Some((index, term));
                     break;
                 }
@@ -634,18 +661,24 @@ fn trace_rpol_policy(
                 set,
                 negate,
             } => {
-                if !crate::eval::exec_remove_communities_in_set(
+                let scanned = crate::eval::exec_remove_communities_in_set(
                     attribute,
                     &tables.community_sets[set.0 as usize],
                     negate,
                     ctx,
                     &mut continued,
-                ) {
-                    term_traces.push(format!(
-                        "term {}: community input exceeds the `{}` bound — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                        render_remove_in_set(attribute, set, negate, tables),
+                    fuel,
+                );
+                if scanned != Ok(true) {
+                    term_traces.push(scan_failure_trace(
+                        term,
+                        scanned,
+                        &format!(
+                            "community input exceeds the `{}` bound",
+                            render_remove_in_set(attribute, set, negate, tables)
+                        ),
                     ));
+                    eval_failed = scanned.is_err();
                     decided = Some((index, term));
                     break;
                 }

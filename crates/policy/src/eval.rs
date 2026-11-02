@@ -710,20 +710,42 @@ pub(crate) fn exec_community_var(
     Ok(())
 }
 
-/// Execute the bounded `.rpol` global-admin wildcard removal. The arrived
-/// route is the sole authority: one scan produces stable, deduplicated concrete
-/// removals, which then merge through the ordinary policy-local accumulator.
-/// Input beyond the pre-paid wire bound fails closed before the scan.
+/// Charge a scan one fuel step per staged add it visits. The compile-time
+/// cost pre-pays the arrived values only: the staged adds a scan cancels in
+/// statement order have no static bound (a loop stages one per iteration,
+/// and a chain carries them from member to member), so each scan pays for
+/// them here and fails closed when the evaluation budget runs out.
+fn charge_staged_scan(fuel: &mut u64, staged: usize) -> Result<(), EvalErrorKind> {
+    *fuel = u64::try_from(staged)
+        .ok()
+        .and_then(|steps| fuel.checked_sub(steps))
+        .ok_or(EvalErrorKind::FuelExhausted)?;
+    Ok(())
+}
+
+/// Execute the bounded `.rpol` global-admin wildcard removal. One scan of the
+/// arrived route produces stable, deduplicated concrete removals, which merge
+/// through the ordinary policy-local accumulator; in statement order the scan
+/// also cancels the earlier staged adds with that administrator, metered by
+/// [`charge_staged_scan`]. Input beyond the pre-paid wire bound fails closed
+/// (`Ok(false)`) before the scan; fuel exhaustion is an evaluation error.
 pub(crate) fn exec_remove_large_community_admin(
     global_admin: u32,
     ctx: &RouteContext<'_>,
     continued: &mut Option<RouteModifications>,
-) -> bool {
+    fuel: &mut u64,
+) -> Result<bool, EvalErrorKind> {
     if ctx.large_communities.len()
         > usize::try_from(MAX_LARGE_COMMUNITIES_PER_ROUTE).expect("fixed bound fits usize")
     {
-        return false;
+        return Ok(false);
     }
+    charge_staged_scan(
+        fuel,
+        continued
+            .as_ref()
+            .map_or(0, |current| current.large_communities_add.len()),
+    )?;
     let mut mods = RouteModifications::default();
     let mut seen: HashSet<_> = continued.as_ref().map_or_else(HashSet::new, |current| {
         current.large_communities_remove.iter().copied().collect()
@@ -745,7 +767,7 @@ pub(crate) fn exec_remove_large_community_admin(
             .get_or_insert_with(RouteModifications::default)
             .merge_from(mods);
     }
-    true
+    Ok(true)
 }
 
 /// Stage a removal of every arrived community of each listed attribute not
@@ -753,13 +775,15 @@ pub(crate) fn exec_remove_large_community_admin(
 /// ([`is_well_known_community`]): `remove community *` never strips
 /// `NO_EXPORT` and its kin unless they are named. Like
 /// [`exec_remove_large_community_admin`], a route carrying more values of a
-/// listed attribute than its wire bound fails closed (`false`) before any
-/// scan, so the compile-time pre-payment holds.
+/// listed attribute than its wire bound fails closed (`Ok(false)`) before
+/// any scan, so the compile-time pre-payment holds. The earlier staged adds
+/// the scan cancels are metered by [`charge_staged_scan`].
 pub(crate) fn exec_remove_all_communities(
     attributes: CommunityAttributes,
     ctx: &RouteContext<'_>,
     continued: &mut Option<RouteModifications>,
-) -> bool {
+    fuel: &mut u64,
+) -> Result<bool, EvalErrorKind> {
     let arrived = |attribute| match attribute {
         CommunityAttribute::Standard => ctx.communities.len(),
         CommunityAttribute::Extended => ctx.extended_communities.len(),
@@ -768,9 +792,18 @@ pub(crate) fn exec_remove_all_communities(
     if attributes.iter().any(|attribute| {
         u64::try_from(arrived(attribute)).unwrap_or(u64::MAX) > max_communities_per_route(attribute)
     }) {
-        return false;
+        return Ok(false);
     }
     let staged = continued.as_ref();
+    charge_staged_scan(
+        fuel,
+        staged.map_or(0, |current| {
+            attributes
+                .iter()
+                .map(|attribute| staged_adds(current, attribute))
+                .sum()
+        }),
+    )?;
     let mut mods = RouteModifications::default();
     if attributes.standard {
         stage_removals(
@@ -817,7 +850,16 @@ pub(crate) fn exec_remove_all_communities(
             .get_or_insert_with(RouteModifications::default)
             .merge_from(mods);
     }
-    true
+    Ok(true)
+}
+
+/// How many adds of `attribute` are staged in `mods`.
+fn staged_adds(mods: &RouteModifications, attribute: CommunityAttribute) -> usize {
+    match attribute {
+        CommunityAttribute::Standard => mods.communities_add.len(),
+        CommunityAttribute::Extended => mods.extended_communities_add.len(),
+        CommunityAttribute::Large => mods.large_communities_add.len(),
+    }
 }
 
 /// `mods` with a next-hop action that does not apply to the route dropped,
@@ -861,26 +903,34 @@ fn stage_removals<T: Copy + Eq + std::hash::Hash>(
 /// allow-list `not in` scrub cannot strip `NO_EXPORT`. Likewise `not in`
 /// over extended communities considers only route targets and route
 /// origins (every encoding) and keeps every other extended type. A route carrying more
-/// values of the attribute than its wire bound fails closed (`false`)
+/// values of the attribute than its wire bound fails closed (`Ok(false)`)
 /// before any scan, so the compile-time pre-payment holds. Each value costs
 /// one exact probe plus at most
 /// [`MAX_COMMUNITY_PATTERN_SCAN`](crate::sets::MAX_COMMUNITY_PATTERN_SCAN)
-/// pattern comparisons.
+/// pattern comparisons; the earlier staged adds of the attribute, which the
+/// scan probes the same way, are metered by [`charge_staged_scan`].
 pub(crate) fn exec_remove_communities_in_set(
     attribute: CommunityAttribute,
     set: &CommunitySet,
     negate: bool,
     ctx: &RouteContext<'_>,
     continued: &mut Option<RouteModifications>,
-) -> bool {
+    fuel: &mut u64,
+) -> Result<bool, EvalErrorKind> {
     let arrived = match attribute {
         CommunityAttribute::Standard => ctx.communities.len(),
         CommunityAttribute::Extended => ctx.extended_communities.len(),
         CommunityAttribute::Large => ctx.large_communities.len(),
     };
     if u64::try_from(arrived).unwrap_or(u64::MAX) > max_communities_per_route(attribute) {
-        return false;
+        return Ok(false);
     }
+    charge_staged_scan(
+        fuel,
+        continued
+            .as_ref()
+            .map_or(0, |current| staged_adds(current, attribute)),
+    )?;
     // Which values the scan keeps; it removes the rest, among the arrived
     // values and, in statement order, among the earlier staged adds.
     let keep_standard = |value: u32| {
@@ -947,7 +997,7 @@ pub(crate) fn exec_remove_communities_in_set(
             .get_or_insert_with(RouteModifications::default)
             .merge_from(mods);
     }
-    true
+    Ok(true)
 }
 
 /// A policy's disposition of the route, borrowing the matched term's
@@ -1167,6 +1217,7 @@ impl CompiledChain {
             // staged, so its statements apply after theirs: a later scan or
             // removal cancels an earlier member's add, as within a policy.
             let seed = (!accumulated.is_empty()).then(|| std::mem::take(&mut accumulated));
+            let seeded = seed.is_some();
             match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel, pinned, seed) {
                 PolicyDecision::Deny { term_index } => {
                     let matched_term = if TERM {
@@ -1224,11 +1275,15 @@ impl CompiledChain {
                     );
                 }
                 // Unseeded (nothing staged before this member): merge as the
-                // only contribution.
+                // only contribution. A seeded member always returns
+                // `PermitOwned`, so these arms never drop the seed.
                 PolicyDecision::Permit(Some(mods)) if !mods.is_empty() => {
+                    debug_assert!(!seeded, "a seeded member permits with owned mods");
                     accumulated.merge_applicable(mods.clone(), ctx);
                 }
-                PolicyDecision::Permit(_) => {}
+                PolicyDecision::Permit(_) => {
+                    debug_assert!(!seeded, "a seeded member permits with owned mods");
+                }
                 // Seeded or owned: the member's result already includes the
                 // earlier members' modifications.
                 PolicyDecision::PermitOwned(mods) => accumulated = applicable(mods, ctx),
@@ -1486,14 +1541,31 @@ impl CompiledChain {
                             }
                         }
                         TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
-                            if !exec_remove_large_community_admin(global_admin, ctx, &mut continued)
-                            {
+                            // Over the wire bound or out of fuel: fail
+                            // closed, as the live walk does.
+                            if !matches!(
+                                exec_remove_large_community_admin(
+                                    global_admin,
+                                    ctx,
+                                    &mut continued,
+                                    &mut fuel,
+                                ),
+                                Ok(true)
+                            ) {
                                 denied = true;
                                 break;
                             }
                         }
                         TermActionView::RemoveAllCommunities { attributes } => {
-                            if !exec_remove_all_communities(attributes, ctx, &mut continued) {
+                            if !matches!(
+                                exec_remove_all_communities(
+                                    attributes,
+                                    ctx,
+                                    &mut continued,
+                                    &mut fuel,
+                                ),
+                                Ok(true)
+                            ) {
                                 denied = true;
                                 break;
                             }
@@ -1503,12 +1575,16 @@ impl CompiledChain {
                             set,
                             negate,
                         } => {
-                            if !exec_remove_communities_in_set(
-                                attribute,
-                                &self.community_sets[set.0 as usize],
-                                negate,
-                                ctx,
-                                &mut continued,
+                            if !matches!(
+                                exec_remove_communities_in_set(
+                                    attribute,
+                                    &self.community_sets[set.0 as usize],
+                                    negate,
+                                    ctx,
+                                    &mut continued,
+                                    &mut fuel,
+                                ),
+                                Ok(true)
                             ) {
                                 denied = true;
                                 break;
@@ -1697,17 +1773,30 @@ impl CompiledChain {
                         }
                     }
                     TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
-                        if !exec_remove_large_community_admin(global_admin, ctx, &mut continued) {
-                            return PolicyDecision::Deny {
-                                term_index: Some(term_index),
-                            };
+                        match exec_remove_large_community_admin(
+                            global_admin,
+                            ctx,
+                            &mut continued,
+                            fuel,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return PolicyDecision::Deny {
+                                    term_index: Some(term_index),
+                                };
+                            }
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
                         }
                     }
                     TermActionView::RemoveAllCommunities { attributes } => {
-                        if !exec_remove_all_communities(attributes, ctx, &mut continued) {
-                            return PolicyDecision::Deny {
-                                term_index: Some(term_index),
-                            };
+                        match exec_remove_all_communities(attributes, ctx, &mut continued, fuel) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return PolicyDecision::Deny {
+                                    term_index: Some(term_index),
+                                };
+                            }
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
                         }
                     }
                     TermActionView::RemoveCommunitiesInSet {
@@ -1715,16 +1804,21 @@ impl CompiledChain {
                         set,
                         negate,
                     } => {
-                        if !exec_remove_communities_in_set(
+                        match exec_remove_communities_in_set(
                             attribute,
                             &self.community_sets[set.0 as usize],
                             negate,
                             ctx,
                             &mut continued,
+                            fuel,
                         ) {
-                            return PolicyDecision::Deny {
-                                term_index: Some(term_index),
-                            };
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return PolicyDecision::Deny {
+                                    term_index: Some(term_index),
+                                };
+                            }
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
                         }
                     }
                 }
@@ -1749,8 +1843,10 @@ impl CompiledChain {
     /// cost is pre-paid by the compile-time DP) and counts against the
     /// hard per-loop cap [`MAX_LOOP_ITERATIONS`]; exhausting either
     /// fails closed. The iterated collection is the arrived route
-    /// (staged modifications are never read back — Decision 2), so a
-    /// body `add community` cannot extend its own iteration source.
+    /// (conditions and loop sources never read staged modifications back —
+    /// Decision 2; only a community scan consults the staged adds it
+    /// cancels), so a body `add community` cannot extend its own
+    /// iteration source.
     ///
     /// `Err` carries the iteration index at which evaluation failed,
     /// for explain rendering; the live walk uses only the kind.
@@ -1850,7 +1946,9 @@ impl CompiledChain {
                             .map_err(|kind| (kind, iterations - 1))?;
                     }
                     TermAction::RemoveLargeCommunityAdmin { global_admin } => {
-                        if !exec_remove_large_community_admin(*global_admin, ctx, continued) {
+                        if !exec_remove_large_community_admin(*global_admin, ctx, continued, fuel)
+                            .map_err(|kind| (kind, iterations - 1))?
+                        {
                             return Ok(LoopOutcome {
                                 iterations,
                                 decided_at: Some(iterations - 1),
@@ -1859,7 +1957,9 @@ impl CompiledChain {
                         }
                     }
                     TermAction::RemoveAllCommunities { attributes } => {
-                        if !exec_remove_all_communities(*attributes, ctx, continued) {
+                        if !exec_remove_all_communities(*attributes, ctx, continued, fuel)
+                            .map_err(|kind| (kind, iterations - 1))?
+                        {
                             return Ok(LoopOutcome {
                                 iterations,
                                 decided_at: Some(iterations - 1),
@@ -1878,7 +1978,10 @@ impl CompiledChain {
                             *negate,
                             ctx,
                             continued,
-                        ) {
+                            fuel,
+                        )
+                        .map_err(|kind| (kind, iterations - 1))?
+                        {
                             return Ok(LoopOutcome {
                                 iterations,
                                 decided_at: Some(iterations - 1),
