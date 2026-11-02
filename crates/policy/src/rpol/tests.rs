@@ -11468,8 +11468,15 @@ test removes-every-kind {
         removes large-community 65000:666:0, removes ext-community RT:65000:666,
         not removed community 65000:1
 }
+policy tag-then-scrub {
+    term t { add large-community 65000:666:0; add community 65000:2; remove any-community in twins; accept }
+}
+test scrub-cancels-earlier-additions-of-every-kind {
+    route { prefix 192.0.2.0/24 }
+    expect tag-then-scrub == accept with only community 65000:2
+}
 ",
-            1,
+            2,
         );
         let (_, rendered) = diagnostics_of(
             "community-set twins { 65000:666, 65000:666:0 } \
