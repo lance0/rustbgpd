@@ -27,21 +27,30 @@
   must not see 4294967295, which RFC 4451 notes some implementations treat as
   "infinity", cap it: `set med min(route.med + 50, 4294967294)`.
 - **Conditional advertisement.** A guard that used to fail in a
-  `condition_policy` now makes the candidate a miss instead of `unknown`, so
-  the condition can change state rather than hold it; in an
-  `advertise_policy` it is a clean reject instead of a fail-closed
-  suppression.
+  `condition_policy` or `advertise_policy` now decides like any other guard,
+  and the policy's final verdict decides the outcome. A missing operand makes
+  the condition false, so the policy moves on to its next term. Saturated
+  arithmetic gives a value, and the guard decides on that value: on MED 4,
+  `if route.med - 100 <= 5 { accept }` now accepts. A candidate that used to
+  make the condition `unknown`, which held the applied state, can therefore
+  match or miss, and a route that an `advertise_policy` error used to
+  suppress fail-closed is now suppressed when the policy permits it and
+  passes when the policy rejects it.
 - **Division needs a divisor that cannot be zero.** `route.med / x` with a
-  field, binding or parameter divisor no longer loads; write
-  `route.med / max(x, 1)`.
-- **In-language tests that expect these errors now fail.**
-  `expect p == error underflow`, `error overflow`, `error divide-by-zero`,
-  `error remainder-by-zero` and `error clamp-inverted`, and
-  `error absent-operand` from a guard, no longer match, because the policy
-  now returns a verdict. `rustbgpd --check` reports the failure, and with
-  `require_passing_tests = true` the config load is refused: the daemon does
-  not start, and a SIGHUP reload is rejected and keeps the running policy,
-  until the test is updated.
+  field, binding or parameter divisor is now a compile error, so the config
+  load is refused whatever `require_passing_tests` says: the daemon does not
+  start, and a SIGHUP reload is rejected and keeps the running policy. This
+  includes a policy that only a `test` block exercises. Rewrite the divisor,
+  for example `route.med / max(x, 1)`. A test that expected
+  `error divide-by-zero` or `error remainder-by-zero` needs its policy
+  rewritten this way; changing the expectation is not enough.
+- **In-language tests that expect a guard or arithmetic error now fail.**
+  `expect p == error underflow`, `error overflow` and `error clamp-inverted`,
+  and `error absent-operand` from a guard, no longer match: arithmetic
+  saturates and a missing operand makes the guard false, so the policy
+  returns a verdict. `rustbgpd --check` reports the failure, and with
+  `require_passing_tests = true` the config load is refused, as above, until
+  the test is updated.
 - **`optional-field-negation` flags more forms.** A negated binding, binding
   probe or computed comparison over `route.origin-as` or `peer.asn` is now
   flagged with a new message, so `rbgp policy check --deny-lints
