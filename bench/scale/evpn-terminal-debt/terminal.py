@@ -77,7 +77,48 @@ class KernelSampler:
         check.require(not self.thread.is_alive() and not self.errors, f"kernel sampler failed: {self.errors}")
 
 
+def readiness_type(r):
+    """The pinned input's 20 Hz sampler, except that a slot already due when
+    the stop request lands is still issued. Its loop sleeps 5 ms between
+    checks, so a stop just after finish could otherwise drop the slot that
+    reaches the workload's end and leave the series short of it."""
+    class Readiness(r.Readiness):
+        def run(self):
+            pending, scheduled = [], time.monotonic()
+            with self.path.open("x") as stream, r.ThreadPoolExecutor(max_workers=8) as executor:
+                while True:
+                    stopping = self.stop_event.is_set()
+                    now = time.monotonic()
+                    if now >= scheduled and (not stopping or scheduled <= self.stop_at):
+                        pending.append(executor.submit(self.probe, scheduled))
+                        scheduled += .05
+                    elif stopping and not pending:
+                        break
+                    for future in list(pending):
+                        if future.done():
+                            row = future.result()
+                            stream.write(json.dumps(row) + "\n")
+                            stream.flush()
+                            self.results.put(row)
+                            pending.remove(future)
+                    time.sleep(.005)
+
+        def stop(self):
+            if not self.stop_event.is_set():
+                self.stop_at = time.monotonic()
+                self.stop_event.set()
+            self.thread.join(timeout=5)
+            check.require(not self.thread.is_alive(), "readiness sampler did not stop")
+
+    return Readiness
+
+
 def controller_type(r):
+    # The pinned input's Controller builds its sampler from this module name.
+    if not getattr(r.Readiness, "issues_slot_due_before_stop", False):
+        r.Readiness = readiness_type(r)
+        r.Readiness.issues_slot_due_before_stop = True
+
     class Controller(r.Controller):
         def __init__(self, *args):
             super().__init__(*args)

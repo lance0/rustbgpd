@@ -426,3 +426,41 @@ class ReadinessAndWireChecks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SamplerStop(unittest.TestCase):
+    def test_sampler_issues_the_slot_due_before_stop(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import json
+        from pathlib import Path
+        import queue
+        import tempfile
+        import threading
+        from types import SimpleNamespace
+        from unittest import mock
+        import terminal
+
+        class Base:
+            def probe(self, scheduled):
+                return {"status": 200, "at": scheduled, "scheduled": scheduled}
+
+        sampler_type = terminal.readiness_type(SimpleNamespace(Readiness=Base, ThreadPoolExecutor=ThreadPoolExecutor))
+        with tempfile.TemporaryDirectory() as temporary:
+            sampler = sampler_type.__new__(sampler_type)
+            sampler.path, sampler.results = Path(temporary) / "readiness.jsonl", queue.Queue()
+            sampler.stop_event = threading.Event()
+            sampler.thread = mock.Mock(is_alive=mock.Mock(return_value=False))
+            clock = {"now": 0.}
+
+            def sleep(_):
+                # The stop request lands between two loop checks, after the next slot was due.
+                clock["now"] = round(clock["now"] + .006, 6)
+                if clock["now"] == .054:
+                    sampler.stop()
+
+            with mock.patch.object(terminal.time, "monotonic", side_effect=lambda: clock["now"]), \
+                 mock.patch.object(terminal.time, "sleep", side_effect=sleep):
+                sampler.run()
+            scheduled = [json.loads(line)["scheduled"] for line in sampler.path.read_text().splitlines()]
+            self.assertEqual(sorted(scheduled), [0., .05])
+            self.assertGreaterEqual(max(scheduled), sampler.stop_at - .05)
