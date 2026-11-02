@@ -768,6 +768,50 @@ impl CommunitySet {
                 .is_some_and(|patterns| patterns.has_standard() && patterns.matches_standard(value))
     }
 
+    /// Whether `value` is an **exact** standard member; patterns are not
+    /// consulted. A well-known community counts as named by a set only
+    /// through an exact member.
+    #[must_use]
+    #[inline]
+    pub fn contains_standard_exact(&self, value: u32) -> bool {
+        self.standard.contains(&value)
+    }
+
+    /// Whether a large community is a member, exact or by pattern.
+    #[must_use]
+    #[inline]
+    pub fn contains_large(&self, lc: &LargeCommunity) -> bool {
+        self.large
+            .contains(&(lc.global_admin, lc.local_data1, lc.local_data2))
+            || self.patterns.as_deref().is_some_and(|patterns| {
+                !patterns.large.is_empty()
+                    && patterns.large.matches(
+                        lc.global_admin,
+                        [lc.global_admin, lc.local_data1, lc.local_data2],
+                    )
+            })
+    }
+
+    /// Whether an extended community is a member: an RT/RO member by its
+    /// decoded `(global, local)`, a raw member by its wire value, or an
+    /// RT/RO pattern.
+    #[must_use]
+    #[inline]
+    pub fn contains_ext(&self, ec: &ExtendedCommunity) -> bool {
+        let target = ec.route_target();
+        let origin = ec.route_origin();
+        target.is_some_and(|key| self.route_targets.contains(&key))
+            || origin.is_some_and(|key| self.route_origins.contains(&key))
+            || self.exact_ext.contains(&ec.as_u64())
+            || self.patterns.as_deref().is_some_and(|patterns| {
+                target.is_some_and(|(global, local)| {
+                    patterns.route_targets.matches(global, [global, local])
+                }) || origin.is_some_and(|(global, local)| {
+                    patterns.route_origins.matches(global, [global, local])
+                })
+            })
+    }
+
     /// The canonical (sorted, deduplicated) criteria list.
     #[must_use]
     pub fn criteria(&self) -> &[CommunityMatch] {
@@ -1294,6 +1338,7 @@ mod tests {
                         ..empty_ctx()
                     };
                     assert_eq!(set.matches(&ctx), scan_large(&lc), "large {ga}:{l1}:{l2}");
+                    assert_eq!(set.contains_large(&lc), scan_large(&lc), "{ga}:{l1}:{l2}");
                     hits += usize::from(scan_large(&lc));
                 }
             }
@@ -1319,6 +1364,7 @@ mod tests {
                         ..empty_ctx()
                     };
                     assert_eq!(set.matches(&ctx), scan_ext(&ec), "ext {ec:?}");
+                    assert_eq!(set.contains_ext(&ec), scan_ext(&ec), "ext {ec:?}");
                     hits += usize::from(scan_ext(&ec));
                 }
             }
@@ -1404,6 +1450,54 @@ mod tests {
         assert_eq!(size_of::<CommunityMember>(), 16);
         // One pointer for a set's optional pattern index.
         assert_eq!(size_of::<Option<Box<CommunityPatterns>>>(), 8);
+    }
+
+    /// The per-value probes `remove <kind> in SET` uses: exact members of
+    /// each kind, and the exact-only standard probe that ignores patterns.
+    #[test]
+    fn per_value_probes_cover_exact_members_and_skip_patterns_when_asked() {
+        use rustbgpd_wire::{ExtendedCommunity, LargeCommunity};
+
+        let set = CommunitySet::with_patterns(
+            [
+                CommunityMatch::Standard {
+                    value: rustbgpd_wire::COMMUNITY_NO_EXPORT,
+                },
+                CommunityMatch::LargeCommunity {
+                    global_admin: 64_496,
+                    local_data1: 1,
+                    local_data2: 2,
+                },
+                CommunityMatch::RouteTarget {
+                    global: 64_496,
+                    local: 7,
+                },
+                CommunityMatch::RouteOrigin {
+                    global: 64_497,
+                    local: 8,
+                },
+                CommunityMatch::ExactExt(ExtendedCommunity::ORIGIN_VALIDATION_INVALID.as_u64()),
+            ],
+            [CommunityPattern::Standard {
+                asn: CommunityField::exact(0xFFFF),
+                value: range(0, 0xFFFF),
+            }],
+        );
+        let no_advertise = rustbgpd_wire::COMMUNITY_NO_ADVERTISE;
+        assert!(set.contains_standard(no_advertise));
+        assert!(!set.contains_standard_exact(no_advertise));
+        assert!(set.contains_standard_exact(rustbgpd_wire::COMMUNITY_NO_EXPORT));
+        assert!(set.contains_large(&LargeCommunity::new(64_496, 1, 2)));
+        assert!(!set.contains_large(&LargeCommunity::new(64_496, 1, 3)));
+        // RT 64496:7 in its 2-octet and 4-octet encodings; RO 64497:8.
+        let rt2 = ExtendedCommunity::new((0x02 << 48) | (64_496 << 32) | 7);
+        let rt4 = ExtendedCommunity::new((0x0202 << 48) | (64_496 << 16) | 7);
+        let ro = ExtendedCommunity::new((0x03 << 48) | (64_497 << 32) | 8);
+        let rt_as_ro = ExtendedCommunity::new((0x03 << 48) | (64_496 << 32) | 7);
+        assert!(set.contains_ext(&rt2) && set.contains_ext(&rt4) && set.contains_ext(&ro));
+        assert!(!set.contains_ext(&rt_as_ro));
+        assert!(set.contains_ext(&ExtendedCommunity::ORIGIN_VALIDATION_INVALID));
+        assert!(!set.contains_ext(&ExtendedCommunity::ORIGIN_VALIDATION_VALID));
     }
 
     fn empty_ctx() -> RouteContext<'static> {

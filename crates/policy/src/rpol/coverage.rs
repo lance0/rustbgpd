@@ -38,8 +38,8 @@ use std::collections::{HashMap, HashSet};
 use crate::ir::{CompiledPolicy, MatchExpr};
 
 use super::ast::{
-    ActionStmt, CallArg, CmpOp, Expr, ForSource, IfStmt, Rhs, SourceFile, Stmt, TermDef,
-    ValueExprAst,
+    ActionStmt, CallArg, CmpOp, CommunityArg, Expr, ForSource, IfStmt, Rhs, SourceFile, Stmt,
+    TermDef, ValueExprAst,
 };
 use super::typeck::{Field, fold_const, resolve_field};
 use super::{Span, Spanned};
@@ -691,6 +691,12 @@ impl<'a> Refs<'a> {
             ActionStmt::SetLocalPref(value, _)
             | ActionStmt::SetMed(value, _)
             | ActionStmt::Let { init: value, .. } => self.value(value),
+            ActionStmt::Community {
+                arg: CommunityArg::InSet { set, .. },
+                ..
+            } => {
+                self.sets.insert(&set.node);
+            }
             ActionStmt::Accept(_)
             | ActionStmt::Reject(_)
             | ActionStmt::SetNextHop(..)

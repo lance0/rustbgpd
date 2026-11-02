@@ -820,6 +820,23 @@ pub enum TermAction {
         /// The community attributes to clear.
         attributes: CommunityAttributes,
     },
+    /// Scan the arrived route's communities of one attribute once and stage
+    /// a concrete removal for every value that is a member of the set (or,
+    /// with `negate`, is not). A well-known standard community
+    /// (RFC 1997, `0xFFFF0000`–`0xFFFFFFFF`) is removed only when the set names it
+    /// as an exact member — a pattern never names one, and `not in` never
+    /// removes one. Over extended communities `not in` considers only route
+    /// targets and route origins and keeps every other extended type. `.rpol` `remove <kind> in SET` / `remove <kind> not in
+    /// SET`; route-only, with the bounded scan of
+    /// [`RemoveAllCommunities`](Self::RemoveAllCommunities).
+    RemoveCommunitiesInSet {
+        /// The community attribute scanned.
+        attribute: CommunityAttribute,
+        /// The set (indexes [`CompiledChain::community_sets`]).
+        set: SetId,
+        /// True for `not in`.
+        negate: bool,
+    },
 }
 
 /// Whether a standard community is in the well-known range reserved by
@@ -845,6 +862,17 @@ pub enum CommunityAttribute {
 }
 
 impl CommunityAttribute {
+    /// The `.rpol` action keyword: `community`, `ext-community` or
+    /// `large-community`.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Standard => "community",
+            Self::Extended => "ext-community",
+            Self::Large => "large-community",
+        }
+    }
+
     /// The `.rpol` strip-all spelling (also the explain rendering).
     #[must_use]
     pub fn remove_all_str(self) -> &'static str {
@@ -937,6 +965,11 @@ pub(crate) enum TermActionView<'a> {
     RemoveAllCommunities {
         attributes: CommunityAttributes,
     },
+    RemoveCommunitiesInSet {
+        attribute: CommunityAttribute,
+        set: SetId,
+        negate: bool,
+    },
 }
 
 impl TermAction {
@@ -967,6 +1000,15 @@ impl TermAction {
             }
             Self::RemoveAllCommunities { attributes } => TermActionView::RemoveAllCommunities {
                 attributes: *attributes,
+            },
+            Self::RemoveCommunitiesInSet {
+                attribute,
+                set,
+                negate,
+            } => TermActionView::RemoveCommunitiesInSet {
+                attribute: *attribute,
+                set: *set,
+                negate: *negate,
             },
         }
     }
