@@ -1048,6 +1048,8 @@ class RpolInventoryTests(unittest.TestCase):
         self.rejected(f"differs from the inventory at row {count + 1}", docs=appended)
         headless = self.docs.replace("| Construct | Class |", "| Name | Class |", 1)
         self.rejected("must start with the header", docs=headless)
+        split = self.docs.replace(row + "\n", row + "\n\n", 1)
+        self.rejected("a blank line splits the rpol construct table", docs=split)
         inventory = copy.deepcopy(self.inventory)
         inventory["rpol"]["constructs"][-1]["reason"] += " (edited)"
         count = len(inventory["rpol"]["constructs"])

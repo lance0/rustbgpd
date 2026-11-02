@@ -2800,7 +2800,12 @@ def check_rpol_inventory(inventory: dict, source: str, golden: str, docs: str) -
     if docs.count(RPOL_TABLE_START) != 1 or docs.count(RPOL_TABLE_END) != 1:
         fail(f"{RPOL_DOCS_PATH.relative_to(ROOT)} needs one rpol construct inventory table")
     table = docs.split(RPOL_TABLE_START, 1)[1].split(RPOL_TABLE_END, 1)[0]
-    lines = [line for line in table.splitlines() if line.strip()]
+    lines = table.strip("\n").splitlines()
+    if any(not line.strip() for line in lines):
+        fail(
+            f"a blank line splits the rpol construct table in "
+            f"{RPOL_DOCS_PATH.relative_to(ROOT)}; keep its rows contiguous"
+        )
     if lines[:2] != list(RPOL_TABLE_HEADER):
         fail(
             f"rpol construct table in {RPOL_DOCS_PATH.relative_to(ROOT)} must start with "
