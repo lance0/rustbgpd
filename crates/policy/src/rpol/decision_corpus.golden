@@ -1,20 +1,20 @@
-# rpol decision corpus: 262 programs, 1643 cases. Regenerate with
+# rpol decision corpus: 262 programs, 1632 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 27
-ast.stmt.if 506
+ast.stmt.if 508
 ast.stmt.else-if 18
 ast.stmt.else 27
 ast.stmt.nested-if 13
 ast.stmt.for 75
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1134
-ast.action.reject 381
-ast.action.set-local-pref 117
-ast.action.set-med 186
+ast.action.accept 1121
+ast.action.reject 383
+ast.action.set-local-pref 116
+ast.action.set-med 173
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.community-literal 511
@@ -37,14 +37,14 @@ ast.expr.has 4
 ast.expr.exists 4
 ast.expr.matches 37
 ast.expr.contains 5
-ast.expr.value-cmp 116
+ast.expr.value-cmp 118
 ast.expr.apply 1
-ast.value.literal 337
+ast.value.literal 314
 ast.value.identifier 106
-ast.value.field 148
-ast.value.arithmetic 128
-ast.value.call 72
-ir.guard.true 1178
+ast.value.field 137
+ast.value.arithmetic 105
+ast.value.call 48
+ir.guard.true 1165
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
@@ -80,15 +80,15 @@ ir.guard.in-dataset 5
 ir.guard.and 127
 ir.guard.or 15
 ir.guard.not 64
-ir.value.const 204
-ir.value.field 170
+ir.value.const 181
+ir.value.field 159
 ir.value.local 107
-ir.value.binary 171
-ir.value.min 50
-ir.value.max 21
+ir.value.binary 148
+ir.value.min 38
+ir.value.max 9
 ir.value.clamp 9
-ir.action.permit 1113
-ir.action.deny 342
+ir.action.permit 1098
+ir.action.deny 346
 ir.action.continue 167
 ir.action.bind 84
 ir.action.for-each 75
@@ -99,9 +99,9 @@ ir.action.remove-large-community-admin 11
 ir.action.remove-all-communities 46
 ir.action.remove-communities-in-set 22
 ir.mod.set-local-pref 99
-ir.mod.set-local-pref-computed 18
+ir.mod.set-local-pref-computed 17
 ir.mod.set-med 68
-ir.mod.set-med-computed 99
+ir.mod.set-med-computed 85
 ir.mod.set-next-hop 12
 ir.mod.prepend 43
 ir.mod.prepend-computed 11
@@ -118,7 +118,6 @@ crates/policy/fuzz/seeds/rpol_compile/lan-299-arithmetic.rpol: policy arith take
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol: in-language tests fail: boundary
 crates/policy/fuzz/seeds/rpol_compile/lan-299-fold-errors.rpol: does not compile (a deliberate error, or datasets bound by config)
 crates/policy/fuzz/seeds/rpol_compile/lan-300-imports.rpol: does not compile (a deliberate error, or datasets bound by config)
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol: in-language tests fail: underflow-denies
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-shadowing.rpol: policy shadow takes parameters (in-language tests only)
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loop-errors.rpol: does not compile (a deliberate error, or datasets bound by config)
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-errors.rpol: does not compile (a deliberate error, or datasets bound by config)
@@ -363,19 +362,19 @@ crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m07-defaul
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m08-host-routes => permit with set local-pref 400; set med 400
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m09-evpn => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m10-v6-bogon => permit with set local-pref 100; set med 50
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test any-error | overflowing => deny (error overflow)
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test kind-pinned | overflowing => deny (error overflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test any-error | failing => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test kind-pinned | failing => deny (error absent-operand)
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test contextual-error-name | error => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m01-v4-transit => permit with set med 51
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m02-v4-invalid-long => permit with set med 1001
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m03-v6-tagged => permit with set med 1
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m04-bare => permit with set med 1
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m05-internal => permit with set med 1
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m06-local-as-set => permit with set med 1
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m07-default => permit with set med 1
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m08-host-routes => deny (error overflow)
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m09-evpn => permit with set med 1
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m10-v6-bogon => permit with set med 1
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m01-v4-transit => permit with set med 64502
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m02-v4-invalid-long => permit with set med 64505
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m03-v6-tagged => permit with set med 64511
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m04-bare => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m05-internal => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m06-local-as-set => permit with set med 64500
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m07-default => permit with set med 64500
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m08-host-routes => permit with set med 64500
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m09-evpn => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | m10-v6-bogon => permit with set med 64513
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m01-v4-transit => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m02-v4-invalid-long => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m03-v6-tagged => permit
@@ -396,18 +395,18 @@ crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m07-de
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m08-host-routes => permit with set med 20
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m09-evpn => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m10-v6-bogon => deny
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | test underflow-denies | eager => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | test underflow-saturates | eager => permit with set local-pref 500; set med 0
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | test ok-applies | eager => permit with set local-pref 500; set med 100
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m01-v4-transit => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m01-v4-transit => permit with set local-pref 500; set med 0
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m02-v4-invalid-long => permit with set local-pref 500; set med 900
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m03-v6-tagged => deny (error underflow)
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m04-bare => deny (error underflow)
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m05-internal => deny (error underflow)
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m06-local-as-set => deny (error underflow)
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m07-default => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m03-v6-tagged => permit with set local-pref 500; set med 0
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m04-bare => permit with set local-pref 500; set med 0
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m05-internal => permit with set local-pref 500; set med 0
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m06-local-as-set => permit with set local-pref 500; set med 0
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m07-default => permit with set local-pref 500; set med 0
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m08-host-routes => permit with set local-pref 500; set med 4294967195
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m09-evpn => deny (error underflow)
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m10-v6-bogon => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m09-evpn => permit with set local-pref 500; set med 0
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m10-v6-bogon => permit with set local-pref 500; set med 0
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | test scrub-loop | strip-scrub => permit with remove community 65000:100
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | test bogon-loop | bogon-path-guard => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | strip-scrub | m01-v4-transit => permit with remove community 65000:100
@@ -448,7 +447,7 @@ crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m04-bare => pe
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m05-internal => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m06-local-as-set => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m07-default => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m08-host-routes => permit
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m08-host-routes => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m09-evpn => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m10-v6-bogon => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | test penalty-rejects-long-paths | p => deny
@@ -1260,7 +1259,7 @@ docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m04-bare => permit 
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m05-internal => permit with set local-pref 400; set med 50
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m06-local-as-set => permit with set local-pref 200; set med 50
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m07-default => permit with set local-pref 200; set med 50
-docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m08-host-routes => deny (error overflow)
+docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m08-host-routes => deny
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m09-evpn => permit with set local-pref 200; set med 50
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m10-v6-bogon => permit with set local-pref 200; set med 50
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m01-v4-transit => permit
@@ -1280,7 +1279,7 @@ docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m04-bare => 
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m05-internal => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m06-local-as-set => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m07-default => permit with set med 50
-docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m08-host-routes => deny (error overflow)
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m08-host-routes => deny
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m09-evpn => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m10-v6-bogon => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m01-v4-transit => permit with set med 100
@@ -1290,7 +1289,7 @@ docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m04-bare => permit 
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m05-internal => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m06-local-as-set => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m07-default => permit with set med 50
-docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m08-host-routes => deny (error overflow)
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m08-host-routes => deny
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m09-evpn => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m10-v6-bogon => permit with set med 50
 docs/reference/rpol-language.md#01a0dec67ca64dc2 | route-server-in | m01-v4-transit => permit with remove community 65000:100
@@ -1496,40 +1495,29 @@ docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | m07-default => p
 docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | m08-host-routes => permit
 docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | m09-evpn => permit with set local-pref 200
 docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | m10-v6-bogon => permit
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test literal-underflow-denies | med-minus-literal => deny (error underflow)
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test floor-at-zero | med-minus => permit with set med 0
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test ordinary-subtraction | med-minus => permit with set med 40
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test ceiling-at-max | med-plus => permit with set med 4294967295
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m01-v4-transit => permit with set med 40
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m02-v4-invalid-long => permit with set med 990
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m03-v6-tagged => deny (error underflow)
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m04-bare => deny (error underflow)
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m05-internal => deny (error underflow)
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m06-local-as-set => deny (error underflow)
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m07-default => deny (error underflow)
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m08-host-routes => permit with set med 4294967285
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m09-evpn => deny (error underflow)
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m10-v6-bogon => deny (error underflow)
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m01-v4-transit => permit with set med 40
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m02-v4-invalid-long => permit with set med 990
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m03-v6-tagged => permit with set med 0
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m04-bare => permit with set med 0
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m05-internal => permit with set med 0
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m06-local-as-set => permit with set med 0
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m07-default => permit with set med 0
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m08-host-routes => permit with set med 4294967285
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m09-evpn => permit with set med 0
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m10-v6-bogon => permit with set med 0
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m01-v4-transit => permit with set med 60
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m02-v4-invalid-long => permit with set med 1010
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m03-v6-tagged => permit with set med 10
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m04-bare => permit with set med 10
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m05-internal => permit with set med 10
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m06-local-as-set => permit with set med 10
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m07-default => permit with set med 10
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m08-host-routes => permit with set med 4294967295
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m09-evpn => permit with set med 10
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-plus | m10-v6-bogon => permit with set med 10
+docs/reference/rpol-language.md#2eb648d1b1173957 | test floor-at-zero | med-minus => permit with set med 0
+docs/reference/rpol-language.md#2eb648d1b1173957 | test ordinary-subtraction | med-minus => permit with set med 40
+docs/reference/rpol-language.md#2eb648d1b1173957 | test ceiling-at-max | med-plus => permit with set med 4294967295
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m01-v4-transit => permit with set med 40
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m02-v4-invalid-long => permit with set med 990
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m03-v6-tagged => permit with set med 0
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m04-bare => permit with set med 0
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m05-internal => permit with set med 0
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m06-local-as-set => permit with set med 0
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m07-default => permit with set med 0
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m08-host-routes => permit with set med 4294967285
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m09-evpn => permit with set med 0
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | m10-v6-bogon => permit with set med 0
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m01-v4-transit => permit with set med 60
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m02-v4-invalid-long => permit with set med 1010
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m03-v6-tagged => permit with set med 10
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m04-bare => permit with set med 10
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m05-internal => permit with set med 10
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m06-local-as-set => permit with set med 10
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m07-default => permit with set med 10
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m08-host-routes => permit with set med 4294967295
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m09-evpn => permit with set med 10
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m10-v6-bogon => permit with set med 10
 docs/reference/rpol-language.md#f77d7a4d3578017b | test later-prepend-replaces | prepend-literal => permit with prepend as 65000 2
 docs/reference/rpol-language.md#f77d7a4d3578017b | test total-count | prepend-total => permit with prepend as 65000 3
 docs/reference/rpol-language.md#f77d7a4d3578017b | test mixed-asn-prepends-keep-only-the-last | chain [prepend-65000, prepend-65001] => permit with prepend as 65001 2

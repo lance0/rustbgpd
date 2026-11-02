@@ -58,13 +58,13 @@ fn rpol_chain(source: &str, name: &str) -> PolicyChain {
     )])
 }
 
-/// Matches MED 0, misses any other MED, and errors on MED `u32::MAX`
-/// (checked-arithmetic overflow). The error comes from the fall-through
-/// `set med` action: a condition never fails, so an overflowing comparison
-/// would only miss, and a `set` before `reject` is never evaluated.
+/// Matches MED 0, misses any other MED, and errors on MED `u32::MAX`. The
+/// error is the fall-through `set med route.origin-as`, which these test
+/// routes (no AS path) cannot compute: a condition never fails, arithmetic
+/// saturates, and a `set` before `reject` is never evaluated.
 fn med_guard() -> PolicyChain {
     rpol_chain(
-        "policy guard { term t { if route.med == 0 { accept } set med route.med + 1 } term rest { reject } }",
+        "policy guard { term t { if route.med == 0 { accept } if route.med == 4294967295 { set med route.origin-as } } term rest { reject } }",
         "guard",
     )
 }
@@ -324,7 +324,7 @@ async fn unknown_cancels_and_a_returning_observation_rearms_in_full() {
         counter_metric_value(
             &metrics,
             "bgp_policy_eval_errors_total",
-            &[("direction", "condition"), ("kind", "overflow")],
+            &[("direction", "condition"), ("kind", "absent-operand")],
         ) >= 1.0
     );
 

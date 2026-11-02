@@ -134,15 +134,16 @@ pub enum Cmp {
 /// A checked `u32` arithmetic operator (LAN-299, ADR-0103 Decision 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithOp {
-    /// `+` — checked; overflow is an evaluation error.
+    /// `+` — saturates at `u32::MAX` (LAN-2791).
     Add,
-    /// `-` — checked; underflow is an evaluation error.
+    /// `-` — saturates at 0 (LAN-2791).
     Sub,
-    /// `*` — checked; overflow is an evaluation error.
+    /// `*` — saturates at `u32::MAX` (LAN-2791).
     Mul,
-    /// `/` — checked; division by zero is an evaluation error.
+    /// `/` — the divisor is a non-zero constant or `max(e, k)` with
+    /// `k >= 1`, so it never divides by zero (LAN-2791).
     Div,
-    /// `%` — checked; modulo by zero is an evaluation error.
+    /// `%` — the same divisor rule as `/`.
     Rem,
 }
 

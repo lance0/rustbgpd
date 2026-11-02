@@ -14,8 +14,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::datasets::{DatasetKind, MAX_UNIT_DATASETS};
 use crate::engine::AsPathRegex;
-use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith};
-use crate::ir::ValueField;
+use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, checked_arith, clamp};
+use crate::ir::{ArithOp, ValueField};
 
 use super::ast::{
     ActionStmt, CmpOp, CommunityArg, CommunityKind, DatasetDecl, DatasetEntryAst, Expr, FieldPath,
@@ -1281,18 +1281,34 @@ impl<'a> Checker<'a> {
             ValueExprAst::Binary { op, lhs, rhs, span } => {
                 self.check_value_expr(lhs, scope);
                 self.check_value_expr(rhs, scope);
-                // Constant folding diagnostic, reported at the
-                // smallest failing subexpression: both children fold
-                // cleanly, this operator fails.
+                // LAN-2791: arithmetic saturates, but literal-only
+                // arithmetic that leaves u32 can only be a typo. Reported
+                // at the smallest failing subexpression: both children
+                // fold cleanly, this operator fails.
                 if let (Some(l), Some(r)) = (fold_const(lhs), fold_const(rhs))
                     && let Err(kind) = checked_arith(*op, l, r)
                 {
                     self.diags.push(Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         *span,
-                        format!("this expression always fails: {kind}"),
+                        format!("this constant expression is invalid: {kind}"),
                         "statically invalid arithmetic",
                     ));
+                } else if matches!(op, ArithOp::Div | ArithOp::Rem) && !nonzero_divisor(rhs) {
+                    // LAN-2791: a divisor that can be zero would make the
+                    // route's data decide an error; require one that cannot.
+                    self.diags.push(
+                        Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            rhs.span(),
+                            format!("the divisor of `{}` can be zero", op.symbol()),
+                            "divisor must be a non-zero constant",
+                        )
+                        .with_note(
+                            "divide by a non-zero constant, or bound a variable divisor \
+                             with `max(divisor, 1)`",
+                        ),
+                    );
                 }
             }
             ValueExprAst::Call { name, args, span } => {
@@ -1385,9 +1401,9 @@ impl<'a> Checker<'a> {
                     ));
                     return;
                 }
-                // Statically inverted clamp bounds are a compile
-                // error (the data-dependent case fails per route on
-                // the eval-error rail).
+                // Literal-only inverted clamp bounds are a compile
+                // error, a typo like literal overflow; any other clamp
+                // is `min(max(x, lo), hi)` and never fails (LAN-2791).
                 if name.node == "clamp"
                     && let (Some(lo), Some(hi)) = (fold_const(&args[1]), fold_const(&args[2]))
                     && lo > hi
@@ -1396,7 +1412,7 @@ impl<'a> Checker<'a> {
                         DiagnosticCode::Typecheck,
                         *span,
                         format!("clamp bounds are inverted: lo ({lo}) > hi ({hi})"),
-                        "this clamp always fails",
+                        "this clamp always returns hi",
                     ));
                 }
             }
@@ -3258,11 +3274,23 @@ fn value_cost(expr: &ValueExprAst, fns: &HashMap<&str, FnCost>) -> u64 {
     }
 }
 
-/// A constant subtree's checked-folded value, or `None` when it
+/// Whether a divisor can never be zero (LAN-2791): a literal-only
+/// constant other than 0, or `max(e, k)` / `max(k, e)` with a literal-only
+/// `k >= 1`.
+fn nonzero_divisor(divisor: &ValueExprAst) -> bool {
+    match divisor {
+        ValueExprAst::Call { name, args, .. } if name.node == "max" => args
+            .iter()
+            .any(|arg| fold_const(arg).is_some_and(|k| k >= 1)),
+        other => fold_const(other).is_some_and(|k| k != 0),
+    }
+}
+
+/// A literal-only subtree's checked-folded value, or `None` when it
 /// contains a parameter/field or a folding step that itself fails
-/// (reported where it happens — see `check_value_expr`). Folding uses
-/// the same [`checked_arith`] as evaluation, so compile-time folding
-/// and per-route evaluation can never disagree about what overflows.
+/// (reported where it happens — see `check_value_expr`). Literal-only
+/// arithmetic folds checked, because leaving u32 there can only be a
+/// typo; everything else saturates (LAN-2791).
 pub(super) fn fold_const(expr: &ValueExprAst) -> Option<u32> {
     match expr {
         ValueExprAst::Lit(value, _) => Some(*value),
@@ -3273,10 +3301,7 @@ pub(super) fn fold_const(expr: &ValueExprAst) -> Option<u32> {
         ValueExprAst::Call { name, args, .. } => match (name.node.as_str(), args.as_slice()) {
             ("min", [a, b]) => Some(fold_const(a)?.min(fold_const(b)?)),
             ("max", [a, b]) => Some(fold_const(a)?.max(fold_const(b)?)),
-            ("clamp", [x, lo, hi]) => {
-                let (x, lo, hi) = (fold_const(x)?, fold_const(lo)?, fold_const(hi)?);
-                (lo <= hi).then(|| x.clamp(lo, hi))
-            }
+            ("clamp", [x, lo, hi]) => Some(clamp(fold_const(x)?, fold_const(lo)?, fold_const(hi)?)),
             _ => None,
         },
     }

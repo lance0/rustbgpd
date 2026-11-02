@@ -1,17 +1,17 @@
-policy overflowing {
-    term bump { set med route.med + 1; accept }
+policy failing {
+    term t { set med route.origin-as; accept }
 }
 
 policy error { term t { accept } }
 
 test any-error {
-    route { med 4294967295 }
-    expect overflowing == error
+    route { }
+    expect failing == error
 }
 
 test kind-pinned {
-    route { med 4294967295 }
-    expect overflowing == error overflow
+    route { }
+    expect failing == error absent-operand
 }
 
 test contextual-error-name {

@@ -189,7 +189,9 @@ term).
   (`+ - * / %`) is **checked**: overflow, underflow, and
   division/modulo by zero are *evaluation errors* (Decision 4), never
   traps — the SIGFPE class is unrepresentable. No floats, no signed
-  integers, no bigints.
+  integers, no bigints. *(Amended 2026-11-02: `+ - *` saturate and
+  divisors cannot be zero; see "Amendment (2026-11-02): saturating
+  arithmetic".)*
 - First-class values (bindable by `let`): `u32`, `bool`,
   IP address, prefix, the three community kinds, the RPKI/ASPA/
   route-type enums, strings (literals only — no string operations),
@@ -583,3 +585,37 @@ the previous one built.
 - The bytecode question is settled by receipt, not taste, and stays
   re-openable by receipt: the gate names the profile signal that would
   reverse it.
+
+## Amendment (2026-11-02): saturating arithmetic
+
+Decision 2 made `+ - * / %` checked, with overflow, underflow and a zero
+divisor as evaluation errors that deny the route (Decision 4). With
+conditions that never fail, an arithmetic error left a guard false and an
+action denied, so route data decided the error: on export, one peer's MED
+could drop a route toward another peer. Junos, IOS-XR RPL and FRR saturate
+MED and local-preference arithmetic at 0 and 2^32-1, and RFC 4271 makes the
+whole u32 range valid.
+
+This amendment replaces the checked rule:
+
+- `+`, `-` and `*` saturate per operation at 0 and 4294967295 in every
+  value position (comparisons, `let`, `set`). There is no per-field
+  ceiling. RFC 4451 notes that some implementations treat 4294967295 as
+  "infinity", so the language reference documents
+  `min(route.med + n, 4294967294)` for policies that must not emit it.
+- A literal-only expression that leaves u32 (`4294967295 + 1`) stays a
+  compile error, since it can only be a typo. An expression with a
+  parameter folds with saturation, so an argument value never decides
+  whether a policy loads.
+- The divisor of `/` or `%` must be a non-zero constant, or `max(e, k)`
+  with a constant `k >= 1`, so division never fails at runtime. A runtime
+  zero divisor would be a compiler bug and fails closed.
+- `clamp(x, lo, hi)` is `min(max(x, lo), hi)` and never fails; literal-only
+  inverted bounds stay a compile error.
+
+After this amendment an arithmetic expression cannot fail on its own. The
+only value that cannot be computed is one built from a missing operand
+(`route.origin-as` on an origin-less path, an unknown `peer.asn`), which
+leaves a condition false and fails an action closed, as Decision 4
+describes. The `overflow`, `underflow` and `clamp-inverted` error kinds stay
+valid in `expect … == error KIND`, but evaluation no longer produces them.

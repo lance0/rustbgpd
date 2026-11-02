@@ -58,7 +58,7 @@ use crate::engine::{
     AsPathRegex, NeighborSetMatch, NextHopAction, PolicyAction, RouteExtendedCommunityAdmin,
     RouteExtendedCommunityKind, RouteModifications, encode_route_extended_community,
 };
-use crate::eval::checked_arith;
+use crate::eval::{arith, clamp};
 use crate::ir::{
     Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetProbe, DatasetSlot, ForEachNode,
     LoopSource, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction, ValueCmpNode,
@@ -1711,15 +1711,13 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a value expression to IR: parameters substituted, `let`
     /// bindings resolved to frame slots (innermost first — LAN-302
-    /// shadowing), constant subtrees folded bottom-up with checked
-    /// arithmetic (LAN-299), and user-function calls fully inlined
+    /// shadowing), constant subtrees folded bottom-up with the evaluator's
+    /// saturating arithmetic (LAN-2791), and user-function calls fully inlined
     /// (LAN-304) — each call hoists `Bind` terms into `binds` (the
     /// caller emits them ahead of the reading term) and reads its
-    /// result slot. A constant step that fails its check (e.g.
-    /// `4294967295 + p` with `p = 1` at instantiation — invisible to
-    /// the typechecker, which only sees literals) is left unfolded and
-    /// fails per route on the eval-error rail: fail closed, never
-    /// wrap.
+    /// result slot. A constant step with a parameter folds with
+    /// saturation (`4294967295 + p` with `p = 1` folds to 4294967295), so
+    /// an argument value never decides whether a policy loads.
     fn lower_value(
         &self,
         expr: &ValueExprAst,
@@ -1774,7 +1772,7 @@ impl<'a> Lowerer<'a> {
                 let lhs = self.lower_value(lhs, names, lets, binds);
                 let rhs = self.lower_value(rhs, names, lets, binds);
                 if let (ValueExpr::Const(l), ValueExpr::Const(r)) = (&lhs, &rhs)
-                    && let Ok(folded) = checked_arith(*op, *l, *r)
+                    && let Ok(folded) = arith(*op, *l, *r)
                 {
                     return ValueExpr::Const(folded);
                 }
@@ -1804,8 +1802,8 @@ impl<'a> Lowerer<'a> {
                 match (name.node.as_str(), consts.as_slice()) {
                     ("min", [Some(a), Some(b)]) => ValueExpr::Const((*a).min(*b)),
                     ("max", [Some(a), Some(b)]) => ValueExpr::Const((*a).max(*b)),
-                    ("clamp", [Some(x), Some(lo), Some(hi)]) if lo <= hi => {
-                        ValueExpr::Const((*x).clamp(*lo, *hi))
+                    ("clamp", [Some(x), Some(lo), Some(hi)]) => {
+                        ValueExpr::Const(clamp(*x, *lo, *hi))
                     }
                     ("min", _) => {
                         let b = Box::new(args.pop().expect("typechecked arity"));
@@ -1817,9 +1815,8 @@ impl<'a> Lowerer<'a> {
                         let a = Box::new(args.pop().expect("typechecked arity"));
                         ValueExpr::Max(a, b)
                     }
-                    // Statically inverted constant clamps are typecheck
-                    // errors; a parameter-dependent inversion stays a
-                    // Clamp node and fails per route.
+                    // A literal-only inverted clamp is a typecheck
+                    // error; any other clamp is `min(max(x, lo), hi)`.
                     _ => {
                         let hi = Box::new(args.pop().expect("typechecked arity"));
                         let lo = Box::new(args.pop().expect("typechecked arity"));

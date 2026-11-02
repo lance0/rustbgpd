@@ -7,9 +7,9 @@ policy eager {
     }
 }
 
-test underflow-denies {
+test underflow-saturates {
     route { med 5 }
-    expect eager == reject
+    expect eager == accept with med 0, local-pref 500
 }
 
 test ok-applies {

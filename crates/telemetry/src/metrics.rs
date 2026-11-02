@@ -6566,8 +6566,8 @@ impl BgpMetrics {
     /// - `direction`: `"import"` or `"export"`, or `"condition"` for a
     ///   conditional-advertisement `condition_policy` candidate (ADR-0137),
     ///   which leaves the observed condition `unknown` instead of denying.
-    /// - `kind`: an `EvalErrorKind` stable label (`"overflow"`,
-    ///   `"divide-by-zero"`, `"fuel-exhausted"`, ...).
+    /// - `kind`: an `EvalErrorKind` stable label (`"absent-operand"`,
+    ///   `"absent-prepend-operand"`, `"fuel-exhausted"`, ...).
     ///
     /// Error path only — the evaluator's hot path never reaches this.
     pub fn record_policy_eval_error(&self, direction: &str, kind: &str) {
