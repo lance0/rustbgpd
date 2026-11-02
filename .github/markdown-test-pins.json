@@ -39,5 +39,5 @@
     "docs/reference/reload-matrix.md": ["src/config/tests/examples.rs"],
     "docs/reference/rpol-language.md": ["src/config/diagnostic.rs", "tests/check_strict.rs"]
   },
-  "all_markdown": []
+  "all_markdown": ["crates/policy/src/rpol/decision_corpus.rs"]
 }

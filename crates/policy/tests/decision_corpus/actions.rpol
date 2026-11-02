@@ -1,0 +1,83 @@
+# Decision-corpus programs: branch shapes and the actions no other program
+# in the tree exercises, each pinned by tests.
+
+policy branches {
+    term t {
+        if route.med >= 100 {
+            if route.local-pref >= 200 { set med 1 } else { set med 2 }
+        } else {
+            set med 3
+        }
+        accept
+    }
+}
+
+policy next-hop-rewrite {
+    term own { if route.prefix == 192.0.2.0/24 { set next-hop self; accept } }
+    term fixed { set next-hop 198.51.100.254; accept }
+}
+
+policy computed-prepend {
+    term t { prepend as peer 2; accept }
+}
+
+policy tag-and-scrub {
+    term t {
+        add large-community 65000:1:2
+        remove ext-community RT:65000:1
+        accept
+    }
+}
+
+test nested-then {
+    route { prefix 192.0.2.0/24; med 100; local-pref 200 }
+    expect branches == accept with med 1
+}
+test nested-else {
+    route { prefix 192.0.2.0/24; med 100; local-pref 100 }
+    expect branches == accept with med 2
+}
+test outer-else {
+    route { prefix 192.0.2.0/24; med 50 }
+    expect branches == accept with med 3
+}
+test next-hop-self {
+    route { prefix 192.0.2.0/24 }
+    expect next-hop-rewrite == accept with next-hop self
+}
+test next-hop-address {
+    route { prefix 198.51.100.0/24 }
+    expect next-hop-rewrite == accept with next-hop 198.51.100.254
+}
+test prepend-peer {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    peer { asn 64500 }
+    expect computed-prepend == accept with prepend as 64500 2
+}
+test tag-and-scrub {
+    route { prefix 192.0.2.0/24; ext-communities [RT:65000:1, RT:65000:2] }
+    expect tag-and-scrub == accept with large-community 65000:1:2,
+        removes ext-community RT:65000:1, not removed ext-community RT:65000:2
+}
+
+community-set route-targets { RT:65000:* }
+community-set own-large { 65000:*:* }
+
+policy scrub-by-set {
+    term t {
+        remove ext-community not in route-targets
+        remove large-community in own-large
+        accept
+    }
+}
+
+test scrub-by-set {
+    route {
+        prefix 192.0.2.0/24
+        ext-communities [RT:65000:1, RT:64496:1, OV_VALID]
+        large-communities [65000:1:1, 64496:1:1]
+    }
+    expect scrub-by-set == accept with only removes ext-community RT:64496:1,
+        removes large-community 65000:1:1, not removed ext-community RT:65000:1,
+        not removed ext-community OV_VALID, not removed large-community 64496:1:1
+}
