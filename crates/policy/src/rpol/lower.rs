@@ -1692,7 +1692,9 @@ fn flag_is(flag: u8, value: u32) -> MatchExpr {
 /// One callee term emitted into its caller under `guard`. A `Permit` sets
 /// the flag to `ordinal` and applies its modifications behind "flag is
 /// `ordinal`". A loop body gets the same treatment, with a `Break` after
-/// each return and after each inner loop whose body returned.
+/// each return and after each inner loop whose body returned; a loop that
+/// can return is followed by an empty `#return` term behind "flag is
+/// `ordinal`", so every return leaves a top-level marker.
 fn emit_returning(
     flag: u8,
     ordinal: u32,
@@ -1719,8 +1721,21 @@ fn emit_returning(
             );
         }
         TermAction::ForEach(mut node) => {
+            let returns = node
+                .body
+                .iter()
+                .any(|term| term.any_term(&|t| matches!(t.action, TermAction::Permit(_))));
             node.body = loop_body_returning(flag, ordinal, std::mem::take(&mut node.body));
             out.push_named(guard, TermAction::ForEach(node), suffix.to_string());
+            if returns {
+                // The return already applied its modifications inside the
+                // loop; this empty marker only shows that the call returned.
+                out.push_named(
+                    flag_is(flag, ordinal),
+                    TermAction::Continue(RouteModifications::default()),
+                    format!("{suffix}:#return"),
+                );
+            }
         }
         other => out.push_named(guard, other, suffix.to_string()),
     }

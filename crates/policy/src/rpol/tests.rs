@@ -11854,6 +11854,28 @@ mod callable_policies_review_one {
         assert_eq!(coverage_of(&coverage, "binds", "c"), (2, 0));
     }
 
+    /// A return from inside a callee loop leaves a `#return` marker after
+    /// the loop, so the callee's later terms are not reached after it.
+    #[test]
+    fn coverage_stops_at_a_return_inside_a_loop() {
+        let source = "community-set marks { 65000:9 }
+            policy lib {
+                term a { for c in route.communities { if c in marks { set local-pref 7; accept } } }
+                term never { set med 5 }
+            }
+            policy caller { term t { apply lib; accept } }
+            test returns {
+                route { prefix 192.0.2.0/24; communities [65000:9] }
+                expect caller == accept with local-pref 7, without med
+            }";
+        let file = RpolFile::parse(source).expect("clean");
+        let (report, coverage) = file.run_tests_with_coverage();
+        assert_eq!(report.total, 1);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+        assert_eq!(coverage_of(&coverage, "lib", "a"), (1, 1));
+        assert_eq!(coverage_of(&coverage, "lib", "never"), (0, 0));
+    }
+
     /// The flag is cleared on every call: two calls in sequence, a call
     /// in each branch of a loop body, and a flag slot an earlier term's
     /// binding left non-zero.
@@ -12017,6 +12039,40 @@ mod callable_policies_nested_cost {
                 "levels={levels} guard={guard} inner={inner}: {nodes} guard nodes"
             );
         }
+    }
+
+    /// A return inside a loop over a one-entry set lowers to the same flag
+    /// terms as any loop return, so the budget charges them by where the
+    /// `accept` sits, not by the loop's iteration bound: at the largest
+    /// accepted caller, the lowered guards stay within 100,000 nodes.
+    #[test]
+    fn a_return_in_a_singleton_loop_is_charged() {
+        let body = (0..10)
+            .map(|k| format!("if x == {} {{ accept }}", 64_500 + k))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let callee = format!(
+            "asn-set one {{ 64500 }}\npolicy lib {{ term a {{ for x in one {{ {body} }} }} }}"
+        );
+        let source = |calls: usize| {
+            format!(
+                "{callee}\npolicy top {{ term t {{ {}; accept }} }}",
+                vec!["apply lib"; calls].join("; ")
+            )
+        };
+        let (mut lo, mut hi) = (1usize, 20_000usize);
+        assert!(compiles(&source(lo)), "one call fits");
+        assert!(!compiles(&source(hi)), "{hi} calls do not fit");
+        while hi - lo > 1 {
+            let mid = usize::midpoint(lo, hi);
+            if compiles(&source(mid)) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let nodes = guard_nodes(&compile_ok(&source(lo)), "top");
+        assert!(nodes <= 100_000, "{lo} calls: {nodes} guard nodes");
     }
 
     /// Inside a loop the same terms run once per iteration (up to 4,096),

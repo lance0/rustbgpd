@@ -1368,7 +1368,8 @@ policy's frame.
 `<term>.<n>/<call>:<called-term>`, for example `common.3/customer-common(200):tag`.
 Nested calls compose, and the flag's own terms are named `:#enter`,
 `:#return` and `:#default` (`#` cannot begin a term name, so no source term
-can collide with them). Explain traces, `rbgp policy test` term hits and
+can collide with them). A `:#return` term follows each called loop that
+can return, so a return from inside a loop is visible too. Explain traces, `rbgp policy test` term hits and
 `rbgp policy stats` show these names, and in-language test coverage credits
 the called policy's source terms. A call inside a `for` body is attributed
 to the loop term, like any loop body.

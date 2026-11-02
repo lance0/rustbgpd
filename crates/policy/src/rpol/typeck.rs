@@ -3555,7 +3555,8 @@ struct InlineCost {
     /// included. Each gains the call-site path and the flag check.
     terms: u64,
     /// Its `accept`s outside loops, each adding a flag `Bind` and a
-    /// `Continue`.
+    /// `Continue`, and its outermost loops holding an `accept`, each
+    /// followed by a return marker.
     returns: u64,
     /// Loop terms in its emitted IR, at any depth and through its calls:
     /// a caller adds a flag `Break` after each one inside a loop body.
@@ -3623,6 +3624,7 @@ fn loop_facts(
     fn walk(
         stmts: &[Stmt],
         multiplier: u64,
+        in_loop: bool,
         file: &SourceFile,
         calls: &HashMap<&str, InlineCost>,
         facts: &mut (u64, u64, u64),
@@ -3634,14 +3636,17 @@ fn loop_facts(
                         multiplier.saturating_mul(loop_iteration_bound(&for_stmt.source, file));
                     facts.0 = facts.0.saturating_add(1);
                     facts.2 = facts.2.saturating_add(execs);
-                    walk(&for_stmt.body, execs, file, calls, facts);
+                    walk(&for_stmt.body, execs, true, file, calls, facts);
                 }
                 Stmt::If(if_stmt) => {
                     for body in if_stmt.bodies() {
-                        walk(body, multiplier, file, calls, facts);
+                        walk(body, multiplier, in_loop, file, calls, facts);
                     }
                 }
-                Stmt::Action(ActionStmt::Accept(_)) if multiplier > 1 => {
+                // Lexical membership, not the multiplier: a loop over a
+                // one-entry set multiplies by 1 and still lowers its
+                // return as `Bind`, `Continue` and `Break`.
+                Stmt::Action(ActionStmt::Accept(_)) if in_loop => {
                     facts.1 = facts.1.saturating_add(1);
                 }
                 Stmt::Action(_) => {}
@@ -3658,20 +3663,31 @@ fn loop_facts(
     }
     let mut facts = (0, 0, 0);
     for term in terms {
-        walk(&term.stmts, 1, file, calls, &mut facts);
+        walk(&term.stmts, 1, false, file, calls, &mut facts);
     }
     facts
 }
 
-/// The `accept` statements of `terms` outside loop bodies.
+/// The return markers of `terms`: each `accept` outside loop bodies, and
+/// each outermost loop that holds an `accept` (its return marker follows
+/// the loop).
 fn count_accepts(terms: &[super::ast::TermDef]) -> u64 {
+    fn holds_accept(stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            Stmt::Action(ActionStmt::Accept(_)) => true,
+            Stmt::If(if_stmt) => if_stmt.bodies().any(holds_accept),
+            Stmt::For(for_stmt) => holds_accept(&for_stmt.body),
+            Stmt::Action(_) | Stmt::Call(_) => false,
+        })
+    }
     fn in_stmts(stmts: &[Stmt]) -> u64 {
         stmts
             .iter()
             .map(|stmt| match stmt {
                 Stmt::Action(ActionStmt::Accept(_)) => 1,
                 Stmt::If(if_stmt) => if_stmt.bodies().map(in_stmts).fold(0, u64::saturating_add),
-                Stmt::Action(_) | Stmt::For(_) | Stmt::Call(_) => 0,
+                Stmt::For(for_stmt) => u64::from(holds_accept(&for_stmt.body)),
+                Stmt::Action(_) | Stmt::Call(_) => 0,
             })
             .fold(0, u64::saturating_add)
     }
