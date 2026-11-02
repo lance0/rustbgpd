@@ -1,17 +1,19 @@
-//! The pinned `.rpol` decision corpus: every program in the tree, run
-//! against its own in-language test fixtures and a fixed route matrix,
-//! with the verdict and the exact staged modifications committed in
-//! `decision_corpus.golden`.
+//! The pinned `.rpol` decision corpus: every operator-facing program in
+//! the tree, run against its own in-language test fixtures and a fixed
+//! route matrix, with the verdict and the exact staged modifications
+//! committed in `decision_corpus.golden`.
 //!
-//! A change to any recorded decision fails `corpus_decisions_are_pinned`
-//! with a line diff. Programs are `.rpol` files (with their imports), the
-//! ```` ```rpol ```` blocks of Markdown files, and the string-literal
-//! `.rpol` programs of this crate's Rust tests. Block and string programs
-//! are named by a content hash, so adding one elsewhere renames nothing. The golden also records the programs and
-//! policies that produce no case (and why), and a per-construct case
-//! count over the parser AST and the compiled IR, zero counts included.
+//! Programs are the tracked `.rpol` files (with their imports) and the
+//! ```` ```rpol ```` blocks of tracked Markdown files; Markdown blocks are
+//! named by a content hash, so adding one elsewhere renames nothing.
+//! `crates/policy/tests/decision_corpus/` holds small programs that give
+//! every construct at least one case. The golden also records the
+//! programs and policies that produce no case (and why), and a
+//! per-construct case count over the parser AST and the compiled IR; a
+//! construct with no case fails the test.
 //!
-//! After an intentional decision change, rewrite the golden with
+//! A change to `decision_corpus.golden` is a behaviour change; justify it
+//! in the PR. After an intentional change, rewrite the golden with
 //! `RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib
 //! corpus_decisions_are_pinned` and review every changed line.
 
@@ -29,6 +31,9 @@ use crate::datasets::{DatasetBindings, DatasetHandle};
 use crate::engine::{NextHopAction, PolicyAction, RouteModifications};
 use crate::ir::{CompiledChain, MatchExpr, Term, TermAction, ValueExpr};
 use crate::sets::SetStore;
+
+/// The curated programs that give every construct a case.
+const CURATED: &str = "crates/policy/tests/decision_corpus/";
 
 /// The fixed route matrix every zero-parameter policy runs against. It
 /// is parsed by the in-language fixture parser, so the fields mean what
@@ -129,8 +134,6 @@ test m10-v6-bogon {
 struct Corpus {
     cases: Vec<String>,
     skipped: Vec<String>,
-    /// Embedded Rust-test programs that do not compile (diagnostic tests).
-    embedded_errors: usize,
     counts: BTreeMap<&'static str, usize>,
 }
 
@@ -140,8 +143,6 @@ struct Program {
     text: String,
     /// The file, for `.rpol` files (import resolution).
     path: Option<PathBuf>,
-    /// A raw string from a Rust test.
-    embedded: bool,
 }
 
 /// A short, stable content name for a block or raw-string program.
@@ -264,15 +265,27 @@ fn run_source(corpus: &mut Corpus, program: &Program, matrix: &[(String, Fixture
         None => Err(()),
     });
     let Ok(file) = parsed else {
-        if program.embedded {
-            corpus.embedded_errors += 1;
-        } else {
-            corpus.skipped.push(format!(
-                "{id}: does not compile (a deliberate error, or datasets bound by config)"
-            ));
-        }
+        corpus.skipped.push(format!(
+            "{id}: does not compile (a deliberate error, or datasets bound by config)"
+        ));
         return;
     };
+    // The curated programs' own expectations must hold; elsewhere (fuzz
+    // seeds, receipts) a failing in-language test is recorded.
+    let report = file.run_tests();
+    if id.starts_with(CURATED) {
+        assert!(
+            report.all_passed(),
+            "{id}: in-language tests fail: {:?}",
+            report.failures
+        );
+    } else if !report.all_passed() {
+        let names: Vec<&str> = report.failures.iter().map(|f| f.name.as_str()).collect();
+        corpus.skipped.push(format!(
+            "{id}: in-language tests fail: {}",
+            names.join(", ")
+        ));
+    }
     let mut store = SetStore::new();
     let mut lowerer = lower::Lowerer::from_tables(&file.file, file.tables());
     let policy_def = |name: &str| file.file.policies.iter().find(|p| p.name.node == name);
@@ -341,11 +354,11 @@ fn run_source(corpus: &mut Corpus, program: &Program, matrix: &[(String, Fixture
     }
 }
 
-/// Every `.rpol` file, every ```` ```rpol ```` Markdown block, and every
-/// string literal holding a `policy` in this crate's Rust sources, in path
-/// order.
-fn programs(root: &Path) -> Vec<Program> {
-    fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+/// The tracked files of the tree (`git ls-files`), or every file under
+/// `root` outside dot directories and `target` when `root` is not a git
+/// work tree.
+fn tracked_files(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -355,53 +368,67 @@ fn programs(root: &Path) -> Vec<Program> {
             let name = name.to_string_lossy();
             if path.is_dir() {
                 if !name.starts_with('.') && name != "target" {
-                    collect(&path, out);
+                    walk(&path, out);
                 }
-            } else if name.ends_with(".rpol") || name.ends_with(".md") || name.ends_with(".rs") {
+            } else {
                 out.push(path);
             }
         }
     }
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--", "*.rpol", "*.md"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success());
     let mut files = Vec::new();
-    collect(root, &mut files);
+    if let Some(output) = listed {
+        files.extend(
+            output
+                .stdout
+                .split(|&byte| byte == 0)
+                .filter(|name| !name.is_empty())
+                .map(|name| root.join(String::from_utf8_lossy(name).as_ref()))
+                .filter(|path| path.is_file()),
+        );
+    } else {
+        walk(root, &mut files);
+    }
     files.sort();
+    files
+}
+
+/// Every `.rpol` file and every ```` ```rpol ```` Markdown block, in path
+/// order.
+fn programs(root: &Path) -> Vec<Program> {
     let mut out = Vec::new();
-    for path in files {
+    for path in tracked_files(root) {
         let rel = path
             .strip_prefix(root)
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        if ext == "rs"
-            && (!rel.starts_with("crates/policy/src/") || rel.ends_with("/decision_corpus.rs"))
-        {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).unwrap();
-        if ext == "rpol" {
-            out.push(Program {
-                id: rel,
-                text,
-                path: Some(path),
-                embedded: false,
-            });
-            continue;
-        }
-        let blocks = if ext == "md" {
-            markdown_blocks(&text)
-        } else {
-            let mut raw = rust_strings(&text);
-            raw.retain(|body| body.contains("policy "));
-            raw
-        };
-        for body in blocks {
-            out.push(Program {
-                id: format!("{rel}#{}", content_id(&body)),
-                text: body,
-                path: None,
-                embedded: ext == "rs",
-            });
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some("rpol") => {
+                let text = std::fs::read_to_string(&path).unwrap();
+                out.push(Program {
+                    id: rel,
+                    text,
+                    path: Some(path),
+                });
+            }
+            Some("md") => {
+                let text = std::fs::read_to_string(&path).unwrap();
+                for body in markdown_blocks(&text) {
+                    out.push(Program {
+                        id: format!("{rel}#{}", content_id(&body)),
+                        text: body,
+                        path: None,
+                    });
+                }
+            }
+            _ => {}
         }
     }
     out
@@ -420,94 +447,7 @@ fn markdown_blocks(text: &str) -> Vec<String> {
     out
 }
 
-/// The string literals of a Rust file, raw and escaped, with escapes
-/// resolved. Comments and character literals are skipped; a scan that
-/// goes wrong only yields text that does not compile, which is counted.
-fn rust_strings(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let next = chars.get(i + 1).copied();
-        if c == '/' && next == Some('/') {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-        } else if c == '/' && next == Some('*') {
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i += 2;
-        } else if c == '\'' {
-            // A char literal ('x', '\'', '\u{..}') or a lifetime.
-            if next == Some('\\') {
-                i += 2;
-                while i < chars.len() && chars[i] != '\'' {
-                    i += 1;
-                }
-                i += 1;
-            } else if chars.get(i + 2) == Some(&'\'') {
-                i += 3;
-            } else {
-                i += 1;
-            }
-        } else if c == 'r'
-            && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_'))
-            && matches!(next, Some('"' | '#'))
-        {
-            let hashes = chars[i + 1..].iter().take_while(|&&h| h == '#').count();
-            let open = i + 1 + hashes;
-            if chars.get(open) != Some(&'"') {
-                i += 1;
-                continue;
-            }
-            let mut j = open + 1;
-            let body_start = j;
-            while j < chars.len()
-                && !(chars[j] == '"'
-                    && chars[j + 1..].iter().take(hashes).all(|&h| h == '#')
-                    && chars[j + 1..].len() >= hashes)
-            {
-                j += 1;
-            }
-            out.push(chars[body_start..j.min(chars.len())].iter().collect());
-            i = j + 1 + hashes;
-        } else if c == '"' {
-            let mut j = i + 1;
-            let mut body = String::new();
-            while j < chars.len() && chars[j] != '"' {
-                if chars[j] == '\\' {
-                    j += 1;
-                    match chars.get(j) {
-                        Some('n') => body.push('\n'),
-                        Some('t') => body.push('\t'),
-                        Some('r') => body.push('\r'),
-                        Some('0') => body.push('\0'),
-                        Some('\n') => {
-                            while chars.get(j + 1).is_some_and(|w| w.is_whitespace()) {
-                                j += 1;
-                            }
-                        }
-                        Some(&other) => body.push(other),
-                        None => {}
-                    }
-                } else {
-                    body.push(chars[j]);
-                }
-                j += 1;
-            }
-            out.push(body);
-            i = j + 1;
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn render(root: &Path) -> String {
+fn render(root: &Path) -> (String, Vec<&'static str>) {
     let matrix_file = RpolFile::parse(MATRIX).expect("the route matrix parses");
     let matrix: Vec<(String, Fixture)> = matrix_file
         .file
@@ -524,9 +464,7 @@ fn render(root: &Path) -> String {
     let mut duplicates = Vec::new();
     for program in &programs {
         if let Some(first) = first_copy.get(&content_id(&program.text)) {
-            if !program.embedded {
-                duplicates.push(format!("{} = {first}", program.id));
-            }
+            duplicates.push(format!("{} = {first}", program.id));
             continue;
         }
         first_copy.insert(content_id(&program.text), &program.id);
@@ -541,22 +479,16 @@ fn render(root: &Path) -> String {
         corpus.cases.len()
     )
     .unwrap();
-    out.push_str("\n## constructs (cases exercising each; 0 = no case yet)\n");
+    out.push_str("\n## constructs (cases exercising each)\n");
+    let mut uncovered = Vec::new();
     for name in CONSTRUCTS {
-        writeln!(
-            out,
-            "{name} {}",
-            corpus.counts.get(name).copied().unwrap_or(0)
-        )
-        .unwrap();
+        let count = corpus.counts.get(name).copied().unwrap_or(0);
+        if count == 0 {
+            uncovered.push(*name);
+        }
+        writeln!(out, "{name} {count}").unwrap();
     }
     out.push_str("\n## programs and policies without cases\n");
-    writeln!(
-        out,
-        "{} embedded Rust-test programs do not compile (diagnostic tests)",
-        corpus.embedded_errors
-    )
-    .unwrap();
     for line in &corpus.skipped {
         writeln!(out, "{line}").unwrap();
     }
@@ -568,7 +500,7 @@ fn render(root: &Path) -> String {
     for line in &corpus.cases {
         writeln!(out, "{line}").unwrap();
     }
-    out
+    (out, uncovered)
 }
 
 /// Every v1-candidate construct the counter knows: parser AST node kinds
@@ -988,9 +920,17 @@ fn corpus_decisions_are_pinned() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest.join("../..");
     let golden_path = manifest.join("src/rpol/decision_corpus.golden");
-    let rendered = render(&root);
-    if std::env::var_os("RPOL_DECISION_GOLDEN_BLESS").is_some() {
+    let (rendered, uncovered) = render(&root);
+    let bless = std::env::var_os("RPOL_DECISION_GOLDEN_BLESS").is_some();
+    if bless {
         std::fs::write(&golden_path, &rendered).unwrap();
+    }
+    assert!(
+        uncovered.is_empty(),
+        "constructs with no corpus case: {uncovered:?}; add a program with `expect` tests \
+         under {CURATED}"
+    );
+    if bless {
         return;
     }
     let golden = std::fs::read_to_string(&golden_path).unwrap();
