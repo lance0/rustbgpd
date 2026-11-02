@@ -2238,7 +2238,11 @@ impl PeerManager {
         let mut purges = Vec::with_capacity(peers.len());
         let mut fences = Vec::with_capacity(peers.len());
         for peer in peers {
-            let managed = &self.peers[peer];
+            let Some(managed) = self.peers.get(peer) else {
+                fences.push(None);
+                purges.push(futures::future::Either::Left(std::future::ready(Ok(()))));
+                continue;
+            };
             let primary_session_id = managed.session_id();
             let pending_session_id = managed
                 .pending_inbound
@@ -2254,11 +2258,11 @@ impl PeerManager {
             if let Some(session_id) = pending_session_id {
                 self.retiring_sessions.insert(session_id, peer.clone());
             }
-            fences.push((primary_session_id, pending_session_id));
+            fences.push(Some((primary_session_id, pending_session_id)));
             // Admission to both channels is the ownership fence: the actor
             // handles no BackToIdle while the sweep waits, and a later
             // Shutdown queues behind each PurgeReset.
-            purges.push(async move {
+            purges.push(futures::future::Either::Right(async move {
                 if let Some(pending) = pending {
                     send_session_command(pending, PeerCommand::PurgeReset, "purge reset")
                         .await
@@ -2267,7 +2271,7 @@ impl PeerManager {
                 send_session_command(primary, PeerCommand::PurgeReset, "purge reset")
                     .await
                     .map_err(|error| (false, error))
-            });
+            }));
         }
         let admitted = self
             .await_session_sweep(futures::future::join_all(purges))
@@ -2275,9 +2279,11 @@ impl PeerManager {
 
         let mut results = Vec::with_capacity(peers.len());
         let mut retiring = Vec::new();
-        for ((peer, (primary_session_id, pending_session_id)), admission) in
-            peers.iter().zip(fences).zip(admitted)
-        {
+        for ((peer, fence), admission) in peers.iter().zip(fences).zip(admitted) {
+            let Some((primary_session_id, pending_session_id)) = fence else {
+                results.push(Err(PeerLifecycleError::NotFound(peer.clone())));
+                continue;
+            };
             results.push(match admission {
                 Ok(()) => Ok(()),
                 Err((true, error)) => {
@@ -2977,10 +2983,11 @@ impl PeerManager {
             Ok(())
         } else {
             Err(SetGshutError::Internal(format!(
-                "graceful-shutdown toggle had failures on {} of {} peers (desired \
+                "graceful-shutdown toggle had failures on {} of {} {} (desired \
                  state stored regardless): {}",
                 failures.len(),
                 targets.len(),
+                if targets.len() == 1 { "peer" } else { "peers" },
                 failures.join("; ")
             )))
         }
