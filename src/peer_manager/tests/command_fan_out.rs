@@ -486,6 +486,25 @@ async fn toggles_during_a_stuck_refresh_queue_each_peer_once() {
     );
 }
 
+/// A refresh whose reply the RIB drops is one failed refresh: the refresher
+/// carries on with the next peer instead of stopping, which would leave
+/// every later toggle unrefreshed while the RIB is still running.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_refresh_reply_does_not_stop_the_refresher() {
+    let (mut mgr, mut rib_rx, _sessions_rib_tx) = gshut_manager_with_rib_queue();
+    mgr.set_graceful_shutdown(None, true).await.unwrap();
+    settle().await;
+    let Ok(RibUpdate::RefreshPeerOutbound { reply, .. }) = rib_rx.try_recv() else {
+        panic!("the first refresh is sent");
+    };
+    drop(reply);
+    settle().await;
+    assert!(
+        matches!(rib_rx.try_recv(), Ok(RibUpdate::RefreshPeerOutbound { .. })),
+        "the next peer is refreshed"
+    );
+}
+
 /// A toggle that lands while one peer's refresh is in flight and another's
 /// still waits: the in-flight peer is refreshed again, since its replay may
 /// have read the older state, and the waiting one is not, since its replay

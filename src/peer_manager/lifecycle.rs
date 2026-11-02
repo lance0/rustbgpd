@@ -187,7 +187,12 @@ async fn run_outbound_refresher(
                 failed += 1;
                 warn!(%peer, %error, "graceful-shutdown outbound refresh failed");
             }
-            Err(_) => return,
+            Err(_) => {
+                // The RIB dropped the reply. If it has exited, the next send
+                // fails and ends the refresher.
+                failed += 1;
+                warn!(%peer, "graceful-shutdown outbound refresh reply dropped");
+            }
         }
     }
 }
