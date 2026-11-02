@@ -4394,9 +4394,15 @@ and survives session flaps mid-maintenance. The toggle does NOT
 persist across daemon restart by design (RFC 8326 is a maintenance-
 window action, not a steady state).
 
-When the toggle flips, rustbgpd issues a `RibUpdate::RefreshPeerOutbound`
-which queues re-emission of all routes already in `AdjRibOut` to the
-target peer without waiting for an unrelated RIB event. Receiver-side
+The command returns once every live session has accepted the toggle (a
+session that could not is reported as a failure; it picks the toggle up when
+it next starts). The re-emission of routes already in `AdjRibOut`, which puts
+the change on the wire without waiting for an unrelated RIB event, follows in
+the background: one peer at a time, each after the RIB finished the previous
+one, so the peers' own route updates are not held behind every replay. Each
+time that queue empties the daemon logs `graceful-shutdown outbound refreshes
+complete` with `refreshed`, `skipped` (peers not Established) and `failed`
+counts; a failed refresh also logs a warning naming the peer. Receiver-side
 verification is still required to prove delivery.
 
 `rbgp neighbor <peer>` always reports the local desired state as

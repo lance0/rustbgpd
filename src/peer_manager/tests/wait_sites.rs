@@ -213,6 +213,13 @@ fn stall_then_hold_state(command: &PeerCommand, index: usize) -> SessionAction {
     }
 }
 
+fn hold_first_gshut(command: &PeerCommand, index: usize) -> SessionAction {
+    match command {
+        PeerCommand::UpdateGracefulShutdown { .. } if index == 0 => SessionAction::Hold,
+        _ => SessionAction::Answer,
+    }
+}
+
 fn hold_first_revalidate(command: &PeerCommand, index: usize) -> SessionAction {
     match command {
         PeerCommand::RevalidateImport { .. } if index == 0 => SessionAction::Hold,
@@ -304,9 +311,6 @@ const FORWARD_COHORT: Drive = Drive::ForwardCohort {
     import_delta: false,
     cohort_reply: CohortReply::Committed,
 };
-
-const QUERY_PROBE_REASON: &str = "one session state probe bounded by PEER_QUERY_TIMEOUT (100 ms), \
-     below the 2 s reader deadline; the readiness lane is drained after it";
 
 /// One row per actor wait-helper call site, in source order.
 const WAIT_SITES: &[WaitSite] = &[
@@ -579,7 +583,8 @@ const WAIT_SITES: &[WaitSite] = &[
     },
     WaitSite {
         site: "policy.rs::revalidate_import_validation_dependents",
-        awaits: "PeerCommand::RevalidateImport answer of each validation-dependent peer",
+        awaits: "PeerCommand::RevalidateImport answers of every validation-dependent peer at \
+                 once, and the Route Refresh any of them needs",
         drive: Drive::LocalRevalidation,
         rib: RibHold::None,
         session: hold_first_revalidate,
@@ -590,14 +595,19 @@ const WAIT_SITES: &[WaitSite] = &[
     },
     WaitSite {
         site: "policy.rs::soft_reset_import_validation_dependents",
-        awaits: "PeerCommand::QueryState of each validation-dependent peer",
+        awaits: "PeerCommand::QueryState of every validation-dependent peer at once, then \
+                 SendRouteRefresh of each Established one",
         drive: Drive::ValidationRefresh,
         rib: RibHold::None,
         session: hold_first_state,
         additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
-            reason: QUERY_PROBE_REASON,
+            reason: "each dependent's state probe (PEER_QUERY_TIMEOUT, 100 ms) and the \
+                     refresh it admits (PEER_POLICY_UPDATE_TIMEOUT) run as one chain, 64 \
+                     chains at once: one 600 ms window per 64 wedged dependents, so a read \
+                     waits past the 2 s reader deadline only behind more than 192 of them; \
+                     the readiness lane is drained after them",
         },
         completion: Completion::Finished,
     },
@@ -770,14 +780,22 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
-        awaits: "RibUpdate::RefreshPeerOutbound after acknowledged GSHUT toggle",
+        site: "mod.rs::await_session_sweep",
+        awaits: "per-peer session commands of a lifecycle sweep, all at once (here the \
+                 graceful-shutdown toggles)",
         drive: Drive::GracefulShutdown,
-        rib: RibHold::Reply(is_outbound_refresh),
-        session: answer_all,
-        additional_entry: Some("set_graceful_shutdown"),
-        window: HELD_FOREVER,
-        contract: Contract::Served,
+        rib: RibHold::None,
+        session: hold_first_gshut,
+        additional_entry: None,
+        window: Duration::from_millis(250),
+        contract: Contract::Fenced {
+            reason: "until each command settles, sessions and manager bookkeeping can \
+                     disagree. A single command per peer is sent to every peer at once and \
+                     takes one 500 ms window; a chain per peer (a delete: up to 1.5 s) runs \
+                     PEER_SHUTDOWN_CONCURRENCY at once, one chain window per 64 wedged \
+                     sessions, so a read queued behind more than 64 wedged delete chains \
+                     misses the 2 s reader deadline",
+        },
         completion: Completion::Finished,
     },
     WaitSite {
@@ -1143,6 +1161,7 @@ fn command_kind(command: &PeerCommand) -> &'static str {
         PeerCommand::QueryImportPolicyTermHits { .. } => "QueryImportPolicyTermHits",
         PeerCommand::ReplayOutbound { .. } => "ReplayOutbound",
         PeerCommand::RevalidateImport { .. } => "RevalidateImport",
+        PeerCommand::UpdateGracefulShutdown { .. } => "UpdateGracefulShutdown",
         _ => "other",
     }
 }
@@ -2226,6 +2245,12 @@ fn wait_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
 /// the readiness lane while a RIB send or reply is awaited bare, so `/readyz`
 /// goes unanswered for the whole wait.
 const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
+    (
+        "lifecycle.rs::run_outbound_refresher",
+        1,
+        "a detached task, not the actor: it owns no manager state, and the run loop keeps \
+         serving readiness while it waits for each outbound refresh",
+    ),
     (
         "configured_owners.rs::send_configured_owners",
         1,

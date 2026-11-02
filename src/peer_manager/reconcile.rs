@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use rustbgpd_api::peer_types::{
-    FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, PeerReconcileAuthority,
-    PeerReconcileEffect, PeerReconcileOutcome, ReconcileFailure, ReconcileFailureKind,
-    RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
+    FibTableSnapshot, PeerKey, PeerLifecycleError, PeerManagerNeighborConfig,
+    PeerReconcileAuthority, PeerReconcileEffect, PeerReconcileOutcome, ReconcileFailure,
+    ReconcileFailureKind, RuntimeConfigDiff, RuntimeConfigDiffError, RuntimeConfigTransactionPlan,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use tracing::{info, warn};
@@ -68,39 +68,88 @@ impl PeerManager {
             })
             .collect();
 
-        // Remove peers
+        // Detach removed peers, and changed peers for delete-then-re-add,
+        // then stop their sessions together (`bounded_fan_out`): sessions
+        // that stopped draining commands cost one delete window per 64 of
+        // them, not one per peer. Each changed peer is re-added only after
+        // its old sessions are gone.
+        let mut detached = Vec::with_capacity(removed.len() + changed.len());
         for addr in &removed {
-            if let Err(e) = self.delete_peer(addr.clone(), false).await {
-                warn!(peer = %addr, error = %e, "reconcile: failed to remove peer");
-                failures.push(ReconcileFailure {
-                    kind: ReconcileFailureKind::Remove,
-                    peer: addr.clone(),
-                    error: e.to_string(),
-                });
-            } else {
-                effects.push(PeerReconcileEffect::Removed(addr.clone()));
+            match self
+                .detach_peer_for_delete(addr.clone(), false, None, true, None, None)
+                .await
+            {
+                Ok(peer) => detached.push(peer),
+                Err(e) => {
+                    warn!(peer = %addr, error = %e, "reconcile: failed to remove peer");
+                    failures.push(ReconcileFailure {
+                        kind: ReconcileFailureKind::Remove,
+                        peer: addr.clone(),
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
             }
+            effects.push(PeerReconcileEffect::Removed(addr.clone()));
         }
-        // Changed peers: delete then re-add
+        // A changed peer whose discard list changes is purge-reset first;
+        // every such purge is sent at once.
+        let mut prepared = Vec::with_capacity(changed.len());
+        let mut remove_failures = Vec::new();
         for cfg in &changed {
             let addr = PeerKey::new(cfg.address, cfg.interface.clone());
-            if let Err(e) = self
-                .delete_peer_for_reconfigure(
+            match self
+                .prepare_delete(
                     addr.clone(),
+                    false,
                     cfg.tcp_ao.as_ref(),
-                    &cfg.discard_path_attributes,
-                    stop_reasons.remove(&addr),
+                    Some(&cfg.discard_path_attributes),
                 )
                 .await
             {
-                warn!(peer = %addr, error = %e, "reconcile: failed to remove changed peer");
-                failures.push(ReconcileFailure {
-                    kind: ReconcileFailureKind::ChangeRemove,
-                    peer: addr.clone(),
-                    error: e.to_string(),
-                });
+                Ok(delete) => prepared.push((cfg, delete)),
+                Err(e) => remove_failures.push((addr, e)),
+            }
+        }
+        let purging: Vec<PeerKey> = prepared
+            .iter()
+            .filter(|(_, delete)| delete.purge_reset)
+            .map(|(_, delete)| delete.peer().clone())
+            .collect();
+        let purge = self.purge_reset_for_delete(&purging).await;
+        let mut purged: HashMap<PeerKey, Result<(), PeerLifecycleError>> =
+            purging.iter().cloned().zip(purge.results).collect();
+        let mut replaced = Vec::with_capacity(changed.len());
+        for (cfg, delete) in prepared {
+            let addr = delete.peer().clone();
+            if let Some(Err(e)) = purged.remove(&addr) {
+                remove_failures.push((addr, e));
                 continue;
             }
+            match self.detach_prepared(delete, false, stop_reasons.remove(&addr)) {
+                Ok(peer) => {
+                    detached.push(peer);
+                    replaced.push(cfg);
+                }
+                Err(e) => remove_failures.push((addr, e)),
+            }
+        }
+        // Every purged peer is detached now, so retiring the failed peers'
+        // candidates cannot mistake a purged peer's BackToIdle for a live
+        // session failure.
+        self.retire_purged_candidates(purge.retiring).await;
+        for (addr, e) in remove_failures {
+            warn!(peer = %addr, error = %e, "reconcile: failed to remove changed peer");
+            failures.push(ReconcileFailure {
+                kind: ReconcileFailureKind::ChangeRemove,
+                peer: addr,
+                error: e.to_string(),
+            });
+        }
+        self.delete_detached_peers(detached).await;
+        // Changed peers: re-add
+        for cfg in replaced {
+            let addr = PeerKey::new(cfg.address, cfg.interface.clone());
             let was_enabled = preserved_runtime_state
                 .get(&addr)
                 .is_none_or(|(enabled, _)| *enabled);

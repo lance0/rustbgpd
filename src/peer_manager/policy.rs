@@ -481,6 +481,55 @@ fn import_validation_dependency_label(dependency: ImportValidationDependency) ->
     }
 }
 
+/// One validation-dependent peer's part of a cache-update pass.
+enum ValidationPass {
+    /// The session did not admit or answer the request in time.
+    Unanswered,
+    NotEstablished,
+    /// Re-evaluated locally (RFC 9324) with nothing left to refresh.
+    Local,
+    /// A Route Refresh was requested: after a local re-evaluation (`local`),
+    /// or as the fallback; `full` when it covered every family.
+    Refreshed {
+        local: bool,
+        full: bool,
+        result: Result<(), String>,
+    },
+}
+
+/// Inbound Route Refresh for one validation-dependent peer (`families`
+/// empty = every negotiated family), bounded by the policy-update timeout.
+async fn refresh_validation_dependent(
+    peer_key: &PeerKey,
+    target: super::lifecycle::SoftResetTarget,
+    families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
+    dependency: ImportValidationDependency,
+) -> Result<(), String> {
+    match tokio::time::timeout(PEER_POLICY_UPDATE_TIMEOUT, target.send(families)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(failure)) => {
+            let error = failure.error;
+            warn!(
+                peer = %peer_key,
+                ?dependency,
+                error = %error,
+                "failed to refresh validation-dependent import policy after cache update"
+            );
+            Err(format!("{peer_key}: {error}"))
+        }
+        Err(_) => {
+            let error = format!("route refresh timed out after {PEER_POLICY_UPDATE_TIMEOUT:?}");
+            warn!(
+                peer = %peer_key,
+                ?dependency,
+                error = %error,
+                "timed out refreshing validation-dependent import policy after cache update"
+            );
+            Err(format!("{peer_key}: {error}"))
+        }
+    }
+}
+
 /// The validation cache a delta belongs to.
 pub(super) fn validation_dependency(
     delta: &rustbgpd_transport::ValidationDelta,
@@ -2780,6 +2829,10 @@ impl PeerManager {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear pass: candidate selection, the concurrent probe-and-refresh fan-out, and bounded metrics"
+    )]
     pub(super) async fn soft_reset_import_validation_dependents(
         &mut self,
         dependency: ImportValidationDependency,
@@ -2791,34 +2844,61 @@ impl PeerManager {
         let mut skipped_state_unknown = 0usize;
         let mut failures = Vec::new();
 
+        // Every dependent is probed, and refreshed once Established, 64 at a
+        // time (`bounded_fan_out`): sessions that stopped draining commands
+        // cost one window per 64 of them, not one per dependent.
+        let mut peers = Vec::with_capacity(candidates.len());
+        let mut passes = Vec::with_capacity(candidates.len());
         for peer_key in &candidates {
-            let Some(commands) = self
-                .peers
-                .get(peer_key)
-                .map(|managed| managed.handle().commands_sender())
-            else {
+            let Ok(target) = self.soft_reset_target(peer_key) else {
                 continue;
             };
-            let state = self
-                .await_with_readiness(
-                    rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                        commands,
-                        PEER_QUERY_TIMEOUT,
-                    ),
-                    OperatorReadAdmission::Fenced {
-                        reason: "100 ms state probe in a validation-cache refresh fan-out",
-                    },
+            let commands = self.peers[peer_key].handle().commands_sender();
+            let peer = peer_key.clone();
+            passes.push(async move {
+                match rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
                 )
-                .await;
-            self.drain_readiness_queries().await;
-            match state {
-                StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
+                .await
+                {
+                    StateQueryOutcome::State(state)
+                        if state.fsm_state == SessionState::Established =>
+                    {
+                        ValidationPass::Refreshed {
+                            local: false,
+                            full: true,
+                            result: refresh_validation_dependent(
+                                &peer,
+                                target,
+                                Vec::new(),
+                                dependency,
+                            )
+                            .await,
+                        }
+                    }
+                    StateQueryOutcome::State(_) | StateQueryOutcome::SessionGone => {
+                        ValidationPass::NotEstablished
+                    }
+                    StateQueryOutcome::TimedOut => ValidationPass::Unanswered,
                 }
-                StateQueryOutcome::State(_) | StateQueryOutcome::SessionGone => {
-                    skipped_not_established += 1;
-                    continue;
-                }
-                StateQueryOutcome::TimedOut => {
+            });
+            peers.push(peer_key);
+        }
+        let passes = self
+            .await_with_readiness(
+                super::bounded_fan_out(passes),
+                OperatorReadAdmission::Fenced {
+                    reason: "100 ms state probes and the Route Refresh requests they admit in a \
+                             validation-cache refresh fan-out",
+                },
+            )
+            .await;
+        self.drain_readiness_queries().await;
+        for (peer_key, pass) in peers.into_iter().zip(passes) {
+            match pass {
+                ValidationPass::NotEstablished => skipped_not_established += 1,
+                ValidationPass::Unanswered => {
                     skipped_state_unknown += 1;
                     if let Some(managed) = self.peers.get_mut(peer_key) {
                         managed.pending_refresh = true;
@@ -2826,16 +2906,12 @@ impl PeerManager {
                     failures.push(format!(
                         "{peer_key}: state query timed out after {PEER_QUERY_TIMEOUT:?}"
                     ));
-                    continue;
                 }
-            }
-
-            match self
-                .refresh_validation_dependent(peer_key, Vec::new(), dependency)
-                .await
-            {
-                Ok(()) => refreshed += 1,
-                Err(error) => failures.push(error),
+                ValidationPass::Refreshed { result, .. } => match result {
+                    Ok(()) => refreshed += 1,
+                    Err(error) => failures.push(error),
+                },
+                ValidationPass::Local => unreachable!("a soft reset never re-evaluates locally"),
             }
         }
 
@@ -2889,43 +2965,6 @@ impl PeerManager {
             .collect()
     }
 
-    /// Inbound Route Refresh for one validation-dependent peer (`families`
-    /// empty = every negotiated family), bounded by the policy-update timeout.
-    async fn refresh_validation_dependent(
-        &self,
-        peer_key: &PeerKey,
-        families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
-        dependency: ImportValidationDependency,
-    ) -> Result<(), String> {
-        match tokio::time::timeout(
-            PEER_POLICY_UPDATE_TIMEOUT,
-            self.soft_reset_in(peer_key.clone(), families),
-        )
-        .await
-        {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => {
-                warn!(
-                    peer = %peer_key,
-                    ?dependency,
-                    error = %error,
-                    "failed to refresh validation-dependent import policy after cache update"
-                );
-                Err(format!("{peer_key}: {error}"))
-            }
-            Err(_) => {
-                let error = format!("route refresh timed out after {PEER_POLICY_UPDATE_TIMEOUT:?}");
-                warn!(
-                    peer = %peer_key,
-                    ?dependency,
-                    error = %error,
-                    "timed out refreshing validation-dependent import policy after cache update"
-                );
-                Err(format!("{peer_key}: {error}"))
-            }
-        }
-    }
-
     /// RFC 9324 (`[rpki] local_revalidation`): each dependent session
     /// re-evaluates its retained input locally. Route Refresh is sent only to
     /// a session whose retained input is incomplete (reject bound exceeded,
@@ -2950,33 +2989,83 @@ impl PeerManager {
         let mut skipped_state_unknown = 0usize;
         let mut failures = Vec::new();
 
+        // Every dependent is asked, and refreshed if it needs it, 64 at a
+        // time (`bounded_fan_out`): sessions that stopped draining commands
+        // cost one window per 64 of them, not one per dependent. Each
+        // session still sees this pass's command after the previous pass's,
+        // in its own command FIFO.
+        let mut peers = Vec::with_capacity(candidates.len());
+        let mut passes = Vec::with_capacity(candidates.len());
         for peer_key in &candidates {
-            let Some(commands) = self
-                .peers
-                .get(peer_key)
-                .map(|managed| managed.handle().commands_sender())
-            else {
+            let Ok(target) = self.soft_reset_target(peer_key) else {
                 continue;
             };
+            let managed = &self.peers[peer_key];
+            let commands = managed.handle().commands_sender();
+            // An unfired import-policy refresh means routes received before
+            // the policy change were never re-evaluated under it, so the
+            // retained input is not authoritative: refresh.
+            let pending_refresh = managed.pending_refresh;
             let delta = delta.clone();
-            let answer = self
-                .await_with_readiness(
-                    tokio::time::timeout(PEER_POLICY_UPDATE_TIMEOUT, async move {
-                        let (reply, response) = oneshot::channel();
-                        commands
-                            .send(rustbgpd_transport::PeerCommand::RevalidateImport {
-                                delta,
-                                reply,
-                            })
-                            .await
-                            .ok()?;
-                        response.await.ok()
-                    }),
-                    OperatorReadAdmission::Served,
-                )
+            let peer = peer_key.clone();
+            passes.push(async move {
+                let answer = tokio::time::timeout(PEER_POLICY_UPDATE_TIMEOUT, async move {
+                    let (reply, response) = oneshot::channel();
+                    commands
+                        .send(rustbgpd_transport::PeerCommand::RevalidateImport { delta, reply })
+                        .await
+                        .ok()?;
+                    response.await.ok()
+                })
                 .await;
-            let refresh_families = match answer {
-                Err(_elapsed) => {
+                let (local, refresh_families) = match answer {
+                    Err(_elapsed) => return ValidationPass::Unanswered,
+                    Ok(None | Some(rustbgpd_transport::ImportRevalidation::NotEstablished)) => {
+                        return ValidationPass::NotEstablished;
+                    }
+                    Ok(Some(rustbgpd_transport::ImportRevalidation::Local {
+                        refresh_families,
+                    })) if !pending_refresh => {
+                        if refresh_families.is_empty() {
+                            return ValidationPass::Local;
+                        }
+                        (true, refresh_families)
+                    }
+                    Ok(Some(
+                        rustbgpd_transport::ImportRevalidation::Local { .. }
+                        | rustbgpd_transport::ImportRevalidation::Incomplete,
+                    )) => {
+                        warn!(
+                            peer = %peer,
+                            ?dependency,
+                            "retained validation input is incomplete; falling back to inbound Route Refresh"
+                        );
+                        (false, Vec::new())
+                    }
+                };
+                // An empty list refreshes every negotiated family: like the
+                // import-policy path, an acknowledged full refresh discharges
+                // an unfired policy refresh, so later deltas answer locally
+                // again.
+                let full = refresh_families.is_empty();
+                ValidationPass::Refreshed {
+                    local,
+                    full,
+                    result: refresh_validation_dependent(&peer, target, refresh_families, dependency)
+                        .await,
+                }
+            });
+            peers.push(peer_key);
+        }
+        let passes = self
+            .await_with_readiness(
+                super::bounded_fan_out(passes),
+                OperatorReadAdmission::Served,
+            )
+            .await;
+        for (peer_key, pass) in peers.into_iter().zip(passes) {
+            match pass {
+                ValidationPass::Unanswered => {
                     // The command may still run; a pending refresh is the
                     // conservative recovery if it never does.
                     skipped_state_unknown += 1;
@@ -2986,55 +3075,29 @@ impl PeerManager {
                     failures.push(format!(
                         "{peer_key}: local re-evaluation request timed out after {PEER_POLICY_UPDATE_TIMEOUT:?}"
                     ));
-                    continue;
                 }
-                Ok(None | Some(rustbgpd_transport::ImportRevalidation::NotEstablished)) => {
-                    skipped_not_established += 1;
-                    continue;
-                }
-                // An unfired import-policy refresh means routes received
-                // before the policy change were never re-evaluated under it,
-                // so the retained input is not authoritative: refresh.
-                Ok(Some(rustbgpd_transport::ImportRevalidation::Local { refresh_families }))
-                    if !self
-                        .peers
-                        .get(peer_key)
-                        .is_some_and(|managed| managed.pending_refresh) =>
-                {
-                    revalidated_locally += 1;
-                    if refresh_families.is_empty() {
-                        continue;
+                ValidationPass::NotEstablished => skipped_not_established += 1,
+                ValidationPass::Local => revalidated_locally += 1,
+                ValidationPass::Refreshed {
+                    local,
+                    full,
+                    result,
+                } => {
+                    if local {
+                        revalidated_locally += 1;
+                    } else {
+                        fallback += 1;
                     }
-                    refresh_families
-                }
-                Ok(Some(
-                    rustbgpd_transport::ImportRevalidation::Local { .. }
-                    | rustbgpd_transport::ImportRevalidation::Incomplete,
-                )) => {
-                    fallback += 1;
-                    warn!(
-                        peer = %peer_key,
-                        ?dependency,
-                        "retained validation input is incomplete; falling back to inbound Route Refresh"
-                    );
-                    Vec::new()
-                }
-            };
-            // An empty list refreshes every negotiated family: like the
-            // import-policy path, an acknowledged full refresh discharges an
-            // unfired policy refresh, so later deltas answer locally again.
-            let full = refresh_families.is_empty();
-            match self
-                .refresh_validation_dependent(peer_key, refresh_families, dependency)
-                .await
-            {
-                Ok(()) => {
-                    refreshed += 1;
-                    if full && let Some(managed) = self.peers.get_mut(peer_key) {
-                        managed.pending_refresh = false;
+                    match result {
+                        Ok(()) => {
+                            refreshed += 1;
+                            if full && let Some(managed) = self.peers.get_mut(peer_key) {
+                                managed.pending_refresh = false;
+                            }
+                        }
+                        Err(error) => failures.push(error),
                     }
                 }
-                Err(error) => failures.push(error),
             }
         }
 

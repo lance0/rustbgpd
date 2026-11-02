@@ -978,6 +978,59 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
     drop(next_client_stream);
 }
 
+/// An all-peers graceful-shutdown clear also clears the intent dead-lettered
+/// for a dynamic neighbor between sessions, so its reconnect, which reads
+/// the dead letter when it spawns the new session, does not bring
+/// `GRACEFUL_SHUTDOWN` back. Mutation-red: clearing only the managed peers
+/// restores the intent on the reconnect.
+#[tokio::test]
+async fn an_all_peers_gshut_clear_reaches_a_dead_lettered_dynamic_neighbor() {
+    let mut mgr = dynamic_test_manager();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let client_stream = client.await.unwrap();
+    let peer_addr = remote_addr.ip();
+    mgr.handle_inbound(server_stream, sock(peer_addr), None, None)
+        .await;
+    mgr.peers
+        .get_mut(&key(peer_addr))
+        .expect("dynamic peer present")
+        .advertise_graceful_shutdown = true;
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+    })
+    .await;
+    assert!(mgr.peers.is_empty());
+    assert!(mgr.dead_lettered_pending[&peer_addr].graceful_shutdown);
+    drop(client_stream);
+
+    mgr.set_graceful_shutdown(None, false).await.unwrap();
+
+    let next_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let next_listener_addr = next_listener.local_addr().unwrap();
+    let next_client =
+        tokio::spawn(async move { TcpStream::connect(next_listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = next_listener.accept().await.unwrap();
+    let next_client_stream = next_client.await.unwrap();
+    assert_eq!(
+        remote_addr.ip(),
+        peer_addr,
+        "both sessions share one address"
+    );
+    mgr.handle_inbound(server_stream, sock(peer_addr), None, None)
+        .await;
+    assert!(
+        !mgr.peers[&key(peer_addr)].advertise_graceful_shutdown,
+        "the reconnect must not restore a cleared intent"
+    );
+    drop(next_client_stream);
+}
+
 #[tokio::test]
 async fn dead_lettered_pending_over_cap_evicts_oldest_entry() {
     let (_tx, rx) = mpsc::channel(16);

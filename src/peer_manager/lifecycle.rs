@@ -55,6 +55,199 @@ async fn send_max_prefix_start_before(
     }
 }
 
+/// Send one session command within [`PEER_LIFECYCLE_COMMAND_TIMEOUT`] through
+/// an owned sender, so a sweep can address many sessions at once.
+async fn send_session_command(
+    commands: tokio::sync::mpsc::Sender<PeerCommand>,
+    command: PeerCommand,
+    operation: &'static str,
+) -> Result<(), PeerCommandError> {
+    match tokio::time::timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT, commands.send(command)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(PeerCommandError::SessionExited),
+        Err(_elapsed) => Err(PeerCommandError::TimedOut {
+            operation,
+            deadline: PEER_LIFECYCLE_COMMAND_TIMEOUT,
+        }),
+    }
+}
+
+/// Peers waiting for a forced outbound refresh, each at most once.
+#[derive(Default)]
+struct OutboundRefreshQueue {
+    pending: std::collections::VecDeque<PeerId>,
+    waiting: std::collections::HashSet<PeerId>,
+}
+
+impl OutboundRefreshQueue {
+    fn extend(&mut self, peers: Vec<PeerId>) {
+        for peer in peers {
+            if self.waiting.insert(peer) {
+                self.pending.push_back(peer);
+            }
+        }
+    }
+
+    /// The next peer to refresh. From here on a toggle for it asks for a
+    /// replay of its own: the one about to run may read the older state.
+    fn pop(&mut self) -> Option<PeerId> {
+        let peer = self.pending.pop_front()?;
+        self.waiting.remove(&peer);
+        Some(peer)
+    }
+}
+
+fn lock_refresh_queue(
+    queue: &std::sync::Mutex<OutboundRefreshQueue>,
+) -> std::sync::MutexGuard<'_, OutboundRefreshQueue> {
+    queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The peer manager's handle on the outbound refresher. Requests merge
+/// straight into the refresher's queue, so however many toggles arrive while
+/// a refresh waits on the RIB, it holds each waiting peer once. Dropping the
+/// handle stops the refresher.
+pub(super) struct OutboundRefresher {
+    queue: std::sync::Arc<std::sync::Mutex<OutboundRefreshQueue>>,
+    wake: std::sync::Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl OutboundRefresher {
+    fn start(rib_tx: tokio::sync::mpsc::Sender<RibUpdate>) -> Self {
+        let queue = std::sync::Arc::default();
+        let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(run_outbound_refresher(
+            rib_tx,
+            std::sync::Arc::clone(&queue),
+            std::sync::Arc::clone(&wake),
+        ));
+        Self { queue, wake, task }
+    }
+
+    fn request(&self, peers: Vec<PeerId>) {
+        lock_refresh_queue(&self.queue).extend(peers);
+        self.wake.notify_one();
+    }
+
+    /// Peers waiting for a refresh, not counting one in flight.
+    #[cfg(test)]
+    pub(super) fn waiting(&self) -> usize {
+        lock_refresh_queue(&self.queue).pending.len()
+    }
+}
+
+impl Drop for OutboundRefresher {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Drain forced outbound refreshes one peer at a time: each
+/// `RefreshPeerOutbound` is sent only after the RIB answered the one before,
+/// so the RIB's FIFO lane carries at most one replay ahead of the sessions'
+/// route updates. Requests for a peer already waiting are merged; the replay
+/// reads the peer's state when the RIB runs it, so one is enough. A peer the
+/// RIB no longer has registered for outbound updates (deleted, or not yet
+/// Established) is skipped: its next `PeerUp` emits fresh. Each time the
+/// queue empties, one log line counts what it refreshed and what failed.
+async fn run_outbound_refresher(
+    rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
+    queue: std::sync::Arc<std::sync::Mutex<OutboundRefreshQueue>>,
+    wake: std::sync::Arc<tokio::sync::Notify>,
+) {
+    let (mut refreshed, mut skipped, mut failed) = (0_usize, 0_usize, 0_usize);
+    loop {
+        let next = lock_refresh_queue(&queue).pop();
+        let Some(peer) = next else {
+            if refreshed + skipped + failed > 0 {
+                info!(
+                    refreshed,
+                    skipped, failed, "graceful-shutdown outbound refreshes complete"
+                );
+                (refreshed, skipped, failed) = (0, 0, 0);
+            }
+            wake.notified().await;
+            continue;
+        };
+        let (reply, response) = oneshot::channel();
+        if rib_tx
+            .send(RibUpdate::RefreshPeerOutbound { peer, reply })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        match response.await {
+            Ok(Ok(())) => refreshed += 1,
+            Ok(Err(RibCommandError::NotFound(_))) => skipped += 1,
+            Ok(Err(error)) => {
+                failed += 1;
+                warn!(%peer, %error, "graceful-shutdown outbound refresh failed");
+            }
+            Err(_) => {
+                // The RIB dropped the reply. If it has exited, the next send
+                // fails and ends the refresher.
+                failed += 1;
+                warn!(%peer, "graceful-shutdown outbound refresh reply dropped");
+            }
+        }
+    }
+}
+
+/// A peer taken out of the table whose sessions have yet to stop
+/// ([`PeerManager::detach_peer_for_delete`]).
+pub(super) struct DetachedPeer {
+    primary: PeerHandle,
+    primary_session_id: u64,
+    pending: Option<super::PendingInbound>,
+    stop_reason: Option<bytes::Bytes>,
+    settlement: DeleteSettlement,
+}
+
+/// A validated delete ([`PeerManager::prepare_delete`]); the peer and its
+/// sessions are untouched.
+pub(super) struct PreparedDelete {
+    peer: PeerKey,
+    next_config: Option<crate::config::Config>,
+    /// The discard list changes, so the sessions' routes must be purged
+    /// first ([`PeerManager::purge_reset_for_delete`]).
+    pub(super) purge_reset: bool,
+}
+
+impl PreparedDelete {
+    pub(super) fn peer(&self) -> &PeerKey {
+        &self.peer
+    }
+}
+
+/// The admission result of each purge, and the pending generations of the
+/// peers whose primary purge failed, to retire with
+/// [`PeerManager::retire_purged_candidates`].
+#[must_use]
+pub(super) struct PurgeOutcome {
+    pub(super) results: Vec<Result<(), PeerLifecycleError>>,
+    pub(super) retiring: Vec<PurgedCandidate>,
+}
+
+/// A peer whose primary purge was not admitted: its primary stays installed,
+/// fenced as retiring until its pending generation has been retired.
+pub(super) struct PurgedCandidate {
+    peer: PeerKey,
+    primary_session_id: u64,
+    pending: Option<super::PendingInbound>,
+}
+
+/// What a delete still does once the peer's sessions have stopped.
+struct DeleteSettlement {
+    peer: PeerKey,
+    next_config: Option<crate::config::Config>,
+    removed_config: PeerManagerNeighborConfig,
+    reap_metric_series: bool,
+}
+
 impl PeerManager {
     pub(super) fn publish_peer_admin_enabled_metric(&self, peer: &PeerKey, enabled: bool) {
         self.metrics.set_peer_admin_enabled(
@@ -1091,28 +1284,6 @@ impl PeerManager {
             .await
     }
 
-    /// Reconfigure's delete half: the peer is immediately re-added, so
-    /// it continues to exist and keeps its metric series
-    /// (`reap_metric_series = false`).
-    pub(super) async fn delete_peer_for_reconfigure(
-        &mut self,
-        peer: PeerKey,
-        next_tcp_ao: Option<&TcpAoKeyring>,
-        next_discard_path_attributes: &[u8],
-        stop_reason: Option<bytes::Bytes>,
-    ) -> Result<(), PeerLifecycleError> {
-        self.delete_peer_checked(
-            peer,
-            false,
-            next_tcp_ao,
-            false,
-            Some(next_discard_path_attributes),
-            stop_reason,
-        )
-        .await
-        .map(|_| ())
-    }
-
     /// Runtime (config-transaction) entry to [`Self::reconfigure_peer`].
     /// Unlike SIGHUP reload — which replaces the listener MD5/GTSM inventory
     /// in the same coordinated apply — runtime paths cannot update the BGP
@@ -1773,6 +1944,10 @@ impl PeerManager {
     /// keep for session-shaping dynamic peer-group edits). Admin-disabled
     /// dynamic peers are skipped: they have no running session, and `BackToIdle`
     /// deliberately keeps them un-reaped.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sweep: member selection, per-member purge-or-stop ordering, and outcome reporting"
+    )]
     pub(super) async fn bounce_dynamic_peers_for_ranges(
         &mut self,
         ranges: &[DynamicRangeTarget],
@@ -1816,10 +1991,12 @@ impl PeerManager {
             .collect();
         matched.sort();
 
-        for peer_key in matched {
-            let Some(managed) = self.peers.get(&peer_key) else {
-                continue;
-            };
+        let reason = rustbgpd_wire::notification::encode_shutdown_communication(
+            "peer-group configuration change",
+        );
+        let mut signals = Vec::with_capacity(matched.len());
+        for peer_key in &matched {
+            let managed = &self.peers[peer_key];
             let purge_routes = managed
                 .accepted_dynamic_range
                 .as_ref()
@@ -1830,49 +2007,54 @@ impl PeerManager {
                         accepted.peer_group.as_str(),
                     ))
                 });
-            let reason = rustbgpd_wire::notification::encode_shutdown_communication(
-                "peer-group configuration change",
-            );
-            // Bounded send: the session command channel is small, so a
-            // session task that has stopped draining commands would park
-            // this whole post-persist sweep (and the peer-manager actor
-            // behind it) on one wedged peer. The sweep is best-effort by
-            // contract — a peer that can't be signaled keeps its running
-            // config until it reconnects, same as a send error.
-            let signaled = if purge_routes {
+            let primary = managed.handle().commands_sender();
+            let pending = managed
+                .pending_inbound
+                .as_ref()
+                .filter(|_| purge_routes)
+                .map(|pending| pending.handle.commands_sender());
+            let reason = reason.clone();
+            // Bounded sends, all members at once: a session task that has
+            // stopped draining commands costs one window for the whole
+            // post-persist sweep, not one per member. The sweep is
+            // best-effort by contract: a peer that can't be signaled keeps
+            // its running config until it reconnects, same as a send error.
+            signals.push(async move {
+                if !purge_routes {
+                    return send_session_command(
+                        primary,
+                        PeerCommand::Stop {
+                            reason: Some(reason),
+                        },
+                        "stop",
+                    )
+                    .await
+                    .map_err(|error| error.to_string());
+                }
                 // Collision generations can both have announced routes. Queue
                 // the purge on the pending candidate first and only then the
                 // primary. The peer-manager actor cannot process either
-                // BackToIdle while this method is awaiting command admission,
-                // so successful admission to both channels is the ownership
+                // BackToIdle while this sweep awaits command admission, so
+                // successful admission to both channels is the ownership
                 // fence; later ordinary Shutdown remains FIFO behind each
                 // PurgeReset. If pending admission fails, leave the primary
                 // untouched so it cannot retire and ordinary-shutdown the
                 // unpurged candidate.
-                let pending = if let Some(pending) = managed.pending_inbound.as_ref() {
-                    pending
-                        .handle
-                        .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                if let Some(pending) = pending {
+                    send_session_command(pending, PeerCommand::PurgeReset, "purge reset")
                         .await
-                        .map_err(|error| format!("pending session: {error}"))
-                } else {
-                    Ok(())
-                };
-                match pending {
-                    Ok(()) => managed
-                        .handle()
-                        .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                        .await
-                        .map_err(|error| format!("primary session: {error}")),
-                    Err(error) => Err(error),
+                        .map_err(|error| format!("pending session: {error}"))?;
                 }
-            } else {
-                managed
-                    .handle()
-                    .stop_timeout(Some(reason), PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                send_session_command(primary, PeerCommand::PurgeReset, "purge reset")
                     .await
-                    .map_err(|error| error.to_string())
-            };
+                    .map_err(|error| format!("primary session: {error}"))
+            });
+        }
+        let signaled = self
+            .await_session_sweep(futures::future::join_all(signals))
+            .await;
+
+        for (peer_key, signaled) in matched.into_iter().zip(signaled) {
             match signaled {
                 Ok(()) => {
                     info!(
@@ -1956,10 +2138,6 @@ impl PeerManager {
     /// the peer's per-peer metric series — the peer ceases to exist)
     /// from reconfigure's delete-then-re-add (the peer continues to
     /// exist and keeps its series and counter history).
-    #[expect(
-        clippy::too_many_lines,
-        reason = "peer deletion keeps validation, purge-reset settlement, collision-generation retirement, and final ownership cleanup in one ordered lifecycle transaction"
-    )]
     pub(super) async fn delete_peer_checked(
         &mut self,
         peer: PeerKey,
@@ -1969,6 +2147,69 @@ impl PeerManager {
         next_discard_path_attributes: Option<&[u8]>,
         stop_reason: Option<bytes::Bytes>,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
+        let detached = self
+            .detach_peer_for_delete(
+                peer,
+                sync_config_snapshot,
+                next_tcp_ao,
+                reap_metric_series,
+                next_discard_path_attributes,
+                stop_reason,
+            )
+            .await?;
+        Ok(self
+            .delete_detached_peers(vec![detached])
+            .await
+            .pop()
+            .expect("one detached peer settles one delete"))
+    }
+
+    /// A delete's first half: validate, settle any purge reset, and take the
+    /// peer out of the table, its sessions still running. Finish it with
+    /// [`Self::delete_detached_peers`], which stops the sessions of many
+    /// detached peers at once. To purge-reset many peers at once, use
+    /// [`Self::prepare_delete`], [`Self::purge_reset_for_delete`] and
+    /// [`Self::detach_prepared`] instead.
+    pub(super) async fn detach_peer_for_delete(
+        &mut self,
+        peer: PeerKey,
+        sync_config_snapshot: bool,
+        next_tcp_ao: Option<&TcpAoKeyring>,
+        reap_metric_series: bool,
+        next_discard_path_attributes: Option<&[u8]>,
+        stop_reason: Option<bytes::Bytes>,
+    ) -> Result<DetachedPeer, PeerLifecycleError> {
+        let prepared = self
+            .prepare_delete(
+                peer,
+                sync_config_snapshot,
+                next_tcp_ao,
+                next_discard_path_attributes,
+            )
+            .await?;
+        if prepared.purge_reset {
+            let PurgeOutcome {
+                mut results,
+                retiring,
+            } = self
+                .purge_reset_for_delete(std::slice::from_ref(&prepared.peer))
+                .await;
+            // No other peer was purged, so nothing else is mid-reconfiguration.
+            self.retire_purged_candidates(retiring).await;
+            results.pop().expect("one purge per prepared peer")?;
+        }
+        self.detach_prepared(prepared, reap_metric_series, stop_reason)
+    }
+
+    /// Validate a delete and build its next snapshot, with no effect on the
+    /// peer or its sessions.
+    pub(super) async fn prepare_delete(
+        &mut self,
+        peer: PeerKey,
+        sync_config_snapshot: bool,
+        next_tcp_ao: Option<&TcpAoKeyring>,
+        next_discard_path_attributes: Option<&[u8]>,
+    ) -> Result<PreparedDelete, PeerLifecycleError> {
         let address = peer.address;
         // Dynamic-range peers are not deletable through the static-neighbor
         // surface: they auto-remove when their session ends (a range delete
@@ -2022,91 +2263,167 @@ impl PeerManager {
             None
         };
 
-        // Linearize any terminal signal emitted before this operation, then
-        // fence both collision generations before enqueueing a purge. This
-        // prevents a fast BackToIdle from being handled as a live restart
-        // while reconfiguration still owns the generation.
+        // Linearize any terminal signal emitted before this operation.
         self.drain_ready_session_notifications(Some(&peer)).await;
+        if !self.peers.contains_key(&peer) {
+            return Err(PeerLifecycleError::NotFound(peer));
+        }
         let purge_reset = next_discard_path_attributes.is_some_and(|next| {
             self.peers.get(&peer).is_some_and(|managed| {
                 managed.transport_config.discard_path_attributes.as_ref() != next
             })
         });
-        if purge_reset {
-            let (primary_session_id, pending_session_id) = self
-                .peers
-                .get(&peer)
-                .map(|managed| {
-                    (
-                        managed.session_id(),
-                        managed
-                            .pending_inbound
-                            .as_ref()
-                            .map(|pending| pending.session_id),
-                    )
-                })
-                .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+        Ok(PreparedDelete {
+            peer,
+            next_config,
+            purge_reset,
+        })
+    }
+
+    /// Purge-reset every peer in `peers` before its delete, all at once.
+    /// Per peer the pending candidate is purged before the primary.
+    ///
+    /// Both collision generations are fenced as retiring before a purge is
+    /// enqueued, so a fast `BackToIdle` is not handled as a live restart
+    /// while reconfiguration still owns the generation. A peer whose pending
+    /// purge is not admitted is left untouched; one whose primary purge is
+    /// not admitted keeps its old primary and config for an explicit retry,
+    /// and its pending generation, which may already have purged, is taken
+    /// out for [`Self::retire_purged_candidates`]. Retire those only once
+    /// every peer whose purge was admitted has been detached: retiring
+    /// handles every ready notification, and an installed peer's
+    /// purge-driven `BackToIdle` would be handled as a live failure.
+    /// Results come back in input order.
+    pub(super) async fn purge_reset_for_delete(&mut self, peers: &[PeerKey]) -> PurgeOutcome {
+        let mut purges = Vec::with_capacity(peers.len());
+        let mut fences = Vec::with_capacity(peers.len());
+        for peer in peers {
+            let Some(managed) = self.peers.get(peer) else {
+                fences.push(None);
+                purges.push(futures::future::Either::Left(std::future::ready(Ok(()))));
+                continue;
+            };
+            let primary_session_id = managed.session_id();
+            let pending_session_id = managed
+                .pending_inbound
+                .as_ref()
+                .map(|pending| pending.session_id);
+            let primary = managed.handle().commands_sender();
+            let pending = managed
+                .pending_inbound
+                .as_ref()
+                .map(|pending| pending.handle.commands_sender());
             self.retiring_sessions
                 .insert(primary_session_id, peer.clone());
             if let Some(session_id) = pending_session_id {
                 self.retiring_sessions.insert(session_id, peer.clone());
             }
-
-            let pending_result = if pending_session_id.is_some() {
-                self.peers
-                    .get(&peer)
-                    .and_then(|managed| managed.pending_inbound.as_ref())
-                    .expect("captured pending session remains owned before purge")
-                    .handle
-                    .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                    .await
-            } else {
-                Ok(())
-            };
-            if let Err(error) = pending_result {
-                self.retiring_sessions.remove(&primary_session_id);
-                if let Some(session_id) = pending_session_id {
-                    self.retiring_sessions.remove(&session_id);
-                }
-                return Err(PeerLifecycleError::Internal(format!(
-                    "failed to purge-reset pending session for {peer}: {error}"
-                )));
-            }
-
-            let primary_result = self
-                .peers
-                .get(&peer)
-                .expect("primary session remains owned before purge")
-                .handle()
-                .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                .await;
-            if let Err(error) = primary_result {
-                // The pending purge may already have executed. Join and retire
-                // that generation deliberately, while leaving the old primary
-                // and config owned for an explicit retry.
-                let pending = self
-                    .peers
-                    .get_mut(&peer)
-                    .and_then(|managed| managed.pending_inbound.take());
+            fences.push(Some((primary_session_id, pending_session_id)));
+            // Admission to both channels is the ownership fence: the actor
+            // handles no BackToIdle while the sweep waits, and a later
+            // Shutdown queues behind each PurgeReset.
+            purges.push(futures::future::Either::Right(async move {
                 if let Some(pending) = pending {
-                    let _ = self
-                        .quiesce_retiring_session(
-                            &peer,
-                            pending.session_id,
-                            pending.handle,
-                            "purge pending after primary delivery failure",
-                            false,
-                        )
-                        .await;
+                    send_session_command(pending, PeerCommand::PurgeReset, "purge reset")
+                        .await
+                        .map_err(|error| (true, error))?;
                 }
-                self.retiring_sessions.remove(&primary_session_id);
-                return Err(PeerLifecycleError::Internal(format!(
-                    "failed to purge-reset primary session for {peer}: {error}"
-                )));
-            }
+                send_session_command(primary, PeerCommand::PurgeReset, "purge reset")
+                    .await
+                    .map_err(|error| (false, error))
+            }));
         }
+        let admitted = self
+            .await_session_sweep(futures::future::join_all(purges))
+            .await;
 
-        let (primary_handle, primary_session_id, mut managed) = self
+        let mut results = Vec::with_capacity(peers.len());
+        let mut retiring = Vec::new();
+        for ((peer, fence), admission) in peers.iter().zip(fences).zip(admitted) {
+            let Some((primary_session_id, pending_session_id)) = fence else {
+                results.push(Err(PeerLifecycleError::NotFound(peer.clone())));
+                continue;
+            };
+            results.push(match admission {
+                Ok(()) => Ok(()),
+                Err((true, error)) => {
+                    self.retiring_sessions.remove(&primary_session_id);
+                    if let Some(session_id) = pending_session_id {
+                        self.retiring_sessions.remove(&session_id);
+                    }
+                    Err(PeerLifecycleError::Internal(format!(
+                        "failed to purge-reset pending session for {peer}: {error}"
+                    )))
+                }
+                Err((false, error)) => {
+                    // The pending purge may already have executed. Its
+                    // generation is retired deliberately, later, while the
+                    // old primary and config stay owned for an explicit
+                    // retry. Both stay fenced as retiring until then.
+                    let pending = self
+                        .peers
+                        .get_mut(peer)
+                        .and_then(|managed| managed.pending_inbound.take());
+                    retiring.push(PurgedCandidate {
+                        peer: peer.clone(),
+                        primary_session_id,
+                        pending,
+                    });
+                    Err(PeerLifecycleError::Internal(format!(
+                        "failed to purge-reset primary session for {peer}: {error}"
+                    )))
+                }
+            });
+        }
+        PurgeOutcome { results, retiring }
+    }
+
+    /// Stop the pending generations of peers whose primary purge was not
+    /// admitted, all at once while serving readiness, then handle what they
+    /// reported and lift their fences. Call it once every peer whose purge
+    /// was admitted has left the table.
+    pub(super) async fn retire_purged_candidates(&mut self, mut retiring: Vec<PurgedCandidate>) {
+        if retiring.is_empty() {
+            return;
+        }
+        let shutdowns: Vec<_> = retiring
+            .iter_mut()
+            .filter_map(|candidate| {
+                let address = candidate.peer.address;
+                candidate.pending.take().map(|pending| async move {
+                    let _ = Self::shutdown_handle_bounded_owned(
+                        address,
+                        "purge pending after primary delivery failure",
+                        pending.handle,
+                    )
+                    .await;
+                    pending.session_id
+                })
+            })
+            .collect();
+        let stopped = self
+            .await_session_sweep(super::bounded_fan_out(shutdowns))
+            .await;
+        for candidate in &retiring {
+            Box::pin(self.drain_ready_session_notifications(Some(&candidate.peer))).await;
+            self.retiring_sessions.remove(&candidate.primary_session_id);
+        }
+        for session_id in stopped {
+            self.retiring_sessions.remove(&session_id);
+            self.unregister_session(session_id);
+        }
+    }
+
+    /// Take a prepared peer out of the table, its sessions still running.
+    pub(super) fn detach_prepared(
+        &mut self,
+        PreparedDelete {
+            peer, next_config, ..
+        }: PreparedDelete,
+        reap_metric_series: bool,
+        stop_reason: Option<bytes::Bytes>,
+    ) -> Result<DetachedPeer, PeerLifecycleError> {
+        let (primary, primary_session_id, mut managed) = self
             .peers
             .remove(&peer)
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?
@@ -2117,34 +2434,100 @@ impl PeerManager {
         let removed_config = Self::removed_peer_config(&peer, &managed);
         self.retiring_sessions
             .insert(primary_session_id, peer.clone());
-        if let Some(pending) = managed.pending_inbound.take() {
-            let _ = self
-                .quiesce_retiring_session(
-                    &peer,
-                    pending.session_id,
-                    pending.handle,
-                    "delete pending inbound",
-                    false,
-                )
-                .await;
+        let pending = managed.pending_inbound.take();
+        if let Some(pending) = &pending {
+            self.retiring_sessions
+                .insert(pending.session_id, peer.clone());
         }
+        Ok(DetachedPeer {
+            primary,
+            primary_session_id,
+            pending,
+            stop_reason,
+            settlement: DeleteSettlement {
+                peer,
+                next_config,
+                removed_config,
+                reap_metric_series,
+            },
+        })
+    }
 
-        if stop_reason.is_some() {
-            // Best effort: an Established session sends Cease/Administrative
-            // Shutdown with the reason; the shutdown below closes it anyway.
-            let _ = primary_handle
-                .stop_timeout(stop_reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                .await;
+    /// A delete's second half for every peer in `detached`: stop all their
+    /// sessions at once, then settle each delete in input order. Per peer the
+    /// order is unchanged: the pending inbound candidate stops before the
+    /// primary, and the primary is sent its Cease first when there is a stop
+    /// reason. Up to `PEER_SHUTDOWN_CONCURRENCY` peers' chains run at once
+    /// ([`super::bounded_fan_out`]), so sessions that stopped draining
+    /// commands cost one delete window per 64 of them, not one per peer.
+    pub(super) async fn delete_detached_peers(
+        &mut self,
+        detached: Vec<DetachedPeer>,
+    ) -> Vec<PeerManagerNeighborConfig> {
+        let mut settlements = Vec::with_capacity(detached.len());
+        let mut shutdowns = Vec::with_capacity(detached.len());
+        for DetachedPeer {
+            primary,
+            primary_session_id,
+            pending,
+            stop_reason,
+            settlement,
+        } in detached
+        {
+            let address = settlement.peer.address;
+            let pending_session_id = pending.as_ref().map(|pending| pending.session_id);
+            shutdowns.push(async move {
+                if let Some(pending) = pending {
+                    let _ = Self::shutdown_handle_bounded_owned(
+                        address,
+                        "delete pending inbound",
+                        pending.handle,
+                    )
+                    .await;
+                }
+                if stop_reason.is_some() {
+                    // Best effort: an Established session sends
+                    // Cease/Administrative Shutdown with the reason; the
+                    // shutdown below closes it anyway.
+                    let _ = primary
+                        .stop_timeout(stop_reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .await;
+                }
+                Self::shutdown_handle_bounded_owned(address, "delete primary", primary).await
+            });
+            settlements.push((settlement, pending_session_id, primary_session_id));
         }
-        let shutdown = self
-            .quiesce_retiring_session(
-                &peer,
-                primary_session_id,
-                primary_handle,
-                "delete primary",
-                false,
-            )
+        let shutdowns = self
+            .await_session_sweep(super::bounded_fan_out(shutdowns))
             .await;
+
+        let mut removed = Vec::with_capacity(settlements.len());
+        for ((settlement, pending_session_id, primary_session_id), shutdown) in
+            settlements.into_iter().zip(shutdowns)
+        {
+            // As in `quiesce_retiring_session`: what the stopped sessions
+            // reported is handled while they are still known as retiring.
+            Box::pin(self.drain_ready_session_notifications(Some(&settlement.peer))).await;
+            for session_id in pending_session_id.into_iter().chain([primary_session_id]) {
+                self.retiring_sessions.remove(&session_id);
+                self.unregister_session(session_id);
+            }
+            removed.push(self.settle_peer_delete(settlement, shutdown));
+        }
+        removed
+    }
+
+    fn settle_peer_delete(
+        &mut self,
+        DeleteSettlement {
+            peer,
+            next_config,
+            removed_config,
+            reap_metric_series,
+        }: DeleteSettlement,
+        shutdown: PeerShutdownOutcome,
+    ) -> PeerManagerNeighborConfig {
+        let address = peer.address;
         if reap_metric_series {
             // A real operator deletion is authoritative even if the actor
             // crossed max-prefix while it was being joined. Reconfigure keeps
@@ -2181,7 +2564,7 @@ impl PeerManager {
             self.reap_deleted_peer_metric_series_for_key(&peer_for_reap);
         }
         self.recheck_refused_bindings();
-        Ok(removed_config)
+        removed_config
     }
 
     /// The lifetime counter block for `peer`: its retained block, or a new
@@ -2546,33 +2929,49 @@ impl PeerManager {
     /// community attachment for one peer (`Some(addr)`) or every
     /// currently-managed peer (`None`).
     ///
-    /// Three-step per-peer sequence so the toggle is observable on the
-    /// wire AND survives session restart:
+    /// Three steps, each taken for every target before the next, so the
+    /// toggle is observable on the wire AND survives session restart:
     ///
     /// 1. **Update desired state on `ManagedPeer`** — survives session
     ///    restart so a flap mid-maintenance doesn't silently drop the
     ///    toggle.
     /// 2. **Send the live-session command** — flips the per-session
     ///    bool; the next outbound advertise carries (or stops carrying)
-    ///    the community.
-    /// 3. **Issue `RibUpdate::RefreshPeerOutbound`** — forces re-emission
-    ///    of routes already in `AdjRibOut` so the wire form updates
-    ///    immediately. Without this, an operator running
-    ///    `rbgp gshut` against an Established session with active
-    ///    routes would see no change until something else triggered a
-    ///    re-advertise.
+    ///    the community. Every session is told at once, so sessions that
+    ///    stopped draining commands share one deadline.
+    /// 3. **Queue `RibUpdate::RefreshPeerOutbound`** for every peer whose
+    ///    session acknowledged — forces re-emission of routes already in
+    ///    `AdjRibOut` so the wire form updates without waiting for an
+    ///    unrelated RIB event. The outbound refresher sends them one at a
+    ///    time, each after the RIB answered the previous one, so a session's
+    ///    route updates queue between the replays rather than behind all of
+    ///    them. The reply does not wait for them: refresh failures are
+    ///    logged, not returned.
     ///
     /// `Some(peer)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
-    /// so callers can distinguish that from a session/RIB failure.
-    /// Per-peer dispatch failures aggregate into `Internal`. The
+    /// so callers can distinguish that from a session failure.
+    /// Per-peer session failures aggregate into `Internal`. The
     /// authoritative state is updated even when the live-session
-    /// command or refresh fails — the toggle takes effect on the next
+    /// command fails — the toggle takes effect on the next
     /// session spawn regardless.
     pub(super) async fn set_graceful_shutdown(
         &mut self,
         peer: Option<PeerKey>,
         enabled: bool,
     ) -> Result<(), SetGshutError> {
+        if peer.is_none() && !enabled {
+            // A neighbor between sessions holds its intent for its next
+            // peer: a dynamic neighbor's dead-letter entry and an unbound
+            // interface-only neighbor's held state. An all-peers clear
+            // reaches them too, or the neighbor reconnects advertising
+            // GRACEFUL_SHUTDOWN with no peer left to clear it by name.
+            for held in self.dead_lettered_pending.values_mut() {
+                held.graceful_shutdown = false;
+            }
+            if let Some(unnumbered) = self.unnumbered.as_mut() {
+                unnumbered.clear_held_graceful_shutdown();
+            }
+        }
         let targets: Vec<PeerKey> = match peer {
             Some(peer) => {
                 if !self.peers.contains_key(&peer) {
@@ -2583,65 +2982,57 @@ impl PeerManager {
             None => self.peers.keys().cloned().collect(),
         };
 
-        let mut failures: Vec<String> = Vec::new();
+        // (1) Update authoritative state on ManagedPeer so it survives
+        // session restart.
+        let mut toggles = Vec::with_capacity(targets.len());
         for peer in &targets {
-            let addr = peer.address;
-            // (1) Update authoritative state on ManagedPeer so it
-            // survives session restart.
+            // Targets were read from the table with no await since.
+            let commands = self.peers[peer].handle().commands_sender();
             if let Some(managed) = self.peers.get_mut(peer) {
                 managed.advertise_graceful_shutdown = enabled;
-            } else {
-                // Peer disappeared between snapshot and dispatch; rare
-                // (would require concurrent removal in this same
-                // task). Skip silently.
-                continue;
             }
+            toggles.push(PeerHandle::update_graceful_shutdown_with(
+                commands,
+                enabled,
+                PEER_POLICY_UPDATE_TIMEOUT,
+            ));
+        }
 
-            // (2) Tell the live session — best-effort. If the session
-            // task is wedged or already restarting, the new session
-            // will pick up the toggle from ManagedPeer at spawn time.
-            if let Some(managed) = self.peers.get(peer)
-                && let Err(e) = managed
-                    .handle()
-                    .update_graceful_shutdown_timeout(enabled, PEER_POLICY_UPDATE_TIMEOUT)
-                    .await
-            {
-                warn!(
-                    peer = %addr,
-                    enabled,
-                    error = %e,
-                    "failed to toggle graceful-shutdown on live peer session — \
-                     desired state stored, will apply on next session"
-                );
-                failures.push(format!("{addr}: session: {e}"));
-                continue;
-            }
-
-            // (3) Force re-emission of already-advertised routes so
-            // the toggle is visible on the wire without waiting for
-            // an unrelated RIB event. RIB ignores peers not yet
-            // registered for outbound (newly added, not Established
-            // yet) — that's fine, the next PeerUp will emit fresh.
-            match self
-                .refresh_peer_outbound_in_rib(peer, OperatorReadAdmission::Served, false)
-                .await
-            {
-                Err(error) => {
-                    warn!(peer = %addr, %error, "RIB refresh failed after gshut toggle");
-                    failures.push(format!("{addr}: {error}"));
-                }
-                Ok(Err(e)) => {
-                    // "peer X not registered for outbound updates" is
-                    // expected for peers not yet Established — log at
-                    // debug, not as a failure.
-                    debug!(
-                        peer = %addr, error = %e,
-                        "RIB declined refresh (peer likely not yet Established) — \
-                         desired state stored, will apply on next PeerUp"
+        // (2) Tell every live session at once, best-effort. If a session
+        // task is wedged or already restarting, the new session will pick
+        // up the toggle from ManagedPeer at spawn time.
+        let acks = self
+            .await_session_sweep(futures::future::join_all(toggles))
+            .await;
+        let mut failures: Vec<String> = Vec::new();
+        let mut acknowledged = Vec::with_capacity(targets.len());
+        for (peer, ack) in targets.iter().zip(acks) {
+            match ack {
+                Ok(()) => acknowledged.push(peer.clone()),
+                Err(e) => {
+                    warn!(
+                        peer = %peer.address,
+                        enabled,
+                        error = %e,
+                        "failed to toggle graceful-shutdown on live peer session — \
+                         desired state stored, will apply on next session"
                     );
+                    failures.push(format!("{}: session: {e}", peer.address));
                 }
-                Ok(Ok(())) => {}
             }
+        }
+
+        // (3) Force re-emission of already-advertised routes so the toggle
+        // is visible on the wire without waiting for an unrelated RIB event,
+        // for every peer whose session acknowledged, each after its own
+        // toggle. The refresher replays one peer's table per RIB turn, off
+        // this actor, so the operator's reply does not wait for it.
+        if !acknowledged.is_empty() {
+            let peers = acknowledged
+                .iter()
+                .map(|peer| self.rib_peer_of(peer))
+                .collect();
+            self.request_outbound_refresh(peers);
         }
 
         if failures.is_empty() {
@@ -2652,10 +3043,11 @@ impl PeerManager {
             Ok(())
         } else {
             Err(SetGshutError::Internal(format!(
-                "graceful-shutdown toggle had failures on {} of {} peers (desired \
+                "graceful-shutdown toggle had failures on {} of {} {} (desired \
                  state stored regardless): {}",
                 failures.len(),
                 targets.len(),
+                if targets.len() == 1 { "peer" } else { "peers" },
                 failures.join("; ")
             )))
         }
@@ -2725,6 +3117,15 @@ impl PeerManager {
             }
         };
         self.await_with_readiness(bounded, admission).await
+    }
+
+    /// Queue a forced outbound refresh for `peers` on the outbound refresher,
+    /// started on first use.
+    fn request_outbound_refresh(&mut self, peers: Vec<PeerId>) {
+        let rib_tx = self.rib_tx.clone();
+        self.outbound_refresher
+            .get_or_insert_with(|| OutboundRefresher::start(rib_tx))
+            .request(peers);
     }
 
     /// Re-emit the current exportable outbound inventory for one managed peer.
@@ -2826,27 +3227,58 @@ impl PeerManager {
         peer: PeerKey,
         families: Vec<(Afi, Safi)>,
     ) -> Result<(), SoftResetFailure> {
-        let address = peer.address;
-        let managed = self.peers.get(&peer).ok_or_else(|| SoftResetFailure {
+        self.soft_reset_target(&peer)?.send(families).await
+    }
+
+    /// What an inbound soft reset of `peer` needs, owned, so many peers'
+    /// requests can run at once.
+    pub(super) fn soft_reset_target(
+        &self,
+        peer: &PeerKey,
+    ) -> Result<SoftResetTarget, SoftResetFailure> {
+        let managed = self.peers.get(peer).ok_or_else(|| SoftResetFailure {
             error: PeerLifecycleError::NotFound(peer.clone()),
             delivery_began: false,
             acknowledgement_lost: false,
         })?;
+        Ok(SoftResetTarget {
+            address: peer.address,
+            commands: managed.handle().commands_sender(),
+            configured_families: managed.transport_config.peer.families.clone(),
+        })
+    }
+}
 
+/// One peer's inbound soft reset, detached from the manager
+/// ([`PeerManager::soft_reset_target`]).
+pub(super) struct SoftResetTarget {
+    address: std::net::IpAddr,
+    commands: tokio::sync::mpsc::Sender<PeerCommand>,
+    configured_families: Vec<(Afi, Safi)>,
+}
+
+impl SoftResetTarget {
+    /// Ask the peer to resend `families`; empty asks for every family it
+    /// can be asked for.
+    pub(super) async fn send(self, families: Vec<(Afi, Safi)>) -> Result<(), SoftResetFailure> {
+        let address = self.address;
         // An empty request means "everything this peer can be asked for".
         let refresh_all = families.is_empty();
         let target_families = if refresh_all {
-            managed.transport_config.peer.families.clone()
+            self.configured_families
         } else {
             families
         };
 
         let mut refreshed = Vec::with_capacity(target_families.len());
         for (afi, safi) in &target_families {
-            match managed
-                .handle()
-                .send_route_refresh_timeout(*afi, *safi, PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                .await
+            match PeerHandle::send_route_refresh_with(
+                self.commands.clone(),
+                *afi,
+                *safi,
+                PEER_LIFECYCLE_COMMAND_TIMEOUT,
+            )
+            .await
             {
                 Ok(()) => refreshed.push((*afi, *safi)),
                 // ADR-0112: "everything" is bounded by the *negotiated* set,

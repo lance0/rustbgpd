@@ -78,6 +78,10 @@ mod unnumbered {
         pub(super) async fn shutdown(self) {
             match self {}
         }
+
+        pub(super) fn clear_held_graceful_shutdown(&mut self) {
+            match *self {}
+        }
     }
 
     impl super::PeerManager {
@@ -265,11 +269,40 @@ const PEER_POLICY_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 const PEER_LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Maximum number of independently owned peers drained at once during
-/// process shutdown. Each peer still drains a pending inbound candidate before
-/// its primary session, preserving the collision-owner ordering, while the
-/// fixed cross-peer cap prevents the daemon's shutdown time from growing as
-/// `peer_count * PEER_LIFECYCLE_COMMAND_TIMEOUT` under transport back-pressure.
+/// process shutdown, and of per-peer command chains in flight in one sweep
+/// ([`bounded_fan_out`]). Each peer still drains a pending inbound candidate
+/// before its primary session, preserving the collision-owner ordering, while
+/// the fixed cross-peer cap prevents the daemon's shutdown time, or a sweep,
+/// from growing as `peer_count * PEER_LIFECYCLE_COMMAND_TIMEOUT` under
+/// transport back-pressure.
 const PEER_SHUTDOWN_CONCURRENCY: usize = 64;
+
+/// Run independent per-peer command chains with at most
+/// [`PEER_SHUTDOWN_CONCURRENCY`] in flight; outputs come back in input order.
+///
+/// For chains of steps that each keep their own deadline from when they
+/// start, such as a delete's pending shutdown, Cease and primary shutdown,
+/// and whose steps start real work, such as a session teardown or a Route
+/// Refresh. Sessions parked on a full RIB mailbox (ADR-0078) stop draining
+/// their command channels. A chain waiting on one holds a slot until its
+/// steps time out while every other chain passes it, so W such sessions cost
+/// `ceil(W / PEER_SHUTDOWN_CONCURRENCY)` chain windows however many peers the
+/// sweep covers. A single command per peer needs no cap: send them all at
+/// once with `join_all` and they share one window.
+fn bounded_fan_out<F: Future>(
+    chains: impl IntoIterator<Item = F>,
+) -> impl Future<Output = Vec<F::Output>> {
+    use futures::StreamExt as _;
+    let chains = futures::stream::iter(chains.into_iter().enumerate())
+        .map(|(index, chain)| async move { (index, chain.await) })
+        .buffer_unordered(PEER_SHUTDOWN_CONCURRENCY)
+        .collect::<Vec<_>>();
+    async move {
+        let mut outputs = chains.await;
+        outputs.sort_unstable_by_key(|(index, _)| *index);
+        outputs.into_iter().map(|(_, output)| output).collect()
+    }
+}
 
 /// Readiness requests serviced after each bounded policy-transaction step.
 /// A small fixed budget prevents probe traffic from starving forward policy
@@ -843,6 +876,10 @@ pub struct PeerManager {
     /// At most the operator lane's capacity; dropping the manager aborts
     /// them, and their callers observe a dropped reply.
     detached_list_peers: JoinSet<()>,
+    /// The outbound refresher, which replays graceful-shutdown toggles'
+    /// outbound inventories one peer per RIB turn, off this actor. Started
+    /// on first use.
+    outbound_refresher: Option<lifecycle::OutboundRefresher>,
     /// Current command's policy phase. Reset before each command; ordinary
     /// commands must not erase the last completed policy phase below.
     operator_read_seam: OperatorReadSeam,
@@ -1463,6 +1500,23 @@ impl PeerManager {
         }
     }
 
+    /// Await one lifecycle sweep's per-peer session commands, sent at once
+    /// with `join_all` or [`bounded_fan_out`], serving readiness while they
+    /// wait.
+    ///
+    /// Operator reads stay queued: until every command settles, the sessions
+    /// and this actor's bookkeeping can disagree.
+    async fn await_session_sweep<T>(&mut self, sweep: impl Future<Output = T>) -> T {
+        self.await_with_readiness(
+            sweep,
+            OperatorReadAdmission::Fenced {
+                reason: "a lifecycle sweep's session commands are in flight; until each \
+                         settles, sessions and manager bookkeeping can disagree",
+            },
+        )
+        .await
+    }
+
     /// Like [`Self::await_with_readiness`], but bound the step by a budget
     /// that accrues only while the step itself is being driven. Wall time
     /// spent servicing an interleaved readiness or operator query is not
@@ -1738,6 +1792,7 @@ impl PeerManager {
             operator_rx: None,
             deferred_operator_queries: VecDeque::new(),
             detached_list_peers: JoinSet::new(),
+            outbound_refresher: None,
             operator_read_seam: OperatorReadSeam::Unfenced,
             completed_operator_seam: None,
             internal_rx: Some(internal_rx),

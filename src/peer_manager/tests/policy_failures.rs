@@ -2,13 +2,13 @@ use super::*;
 use rustbgpd_rib::PeerId;
 
 #[tokio::test(start_paused = true)]
-async fn gshut_toggle_times_out_when_rib_reply_wedges() {
+async fn gshut_toggle_does_not_wait_when_rib_reply_wedges() {
     use rustbgpd_transport::PeerCommand;
 
     // LAN-286: a wedged RIB (accepts RefreshPeerOutbound but never
-    // replies) must surface as a bounded error — not park the
-    // peer-manager actor (and the reload/apply path driving the
-    // toggle) forever.
+    // replies) must not park the peer-manager actor (and the
+    // reload/apply path driving the toggle). The outbound refresh runs
+    // off the actor, so the toggle never waits for the RIB at all.
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let session_task = tokio::spawn(async move {
@@ -44,14 +44,16 @@ async fn gshut_toggle_times_out_when_rib_reply_wedges() {
     );
     insert_test_managed_peer(&mut mgr, addr, handle, false);
 
-    let err = mgr
-        .set_graceful_shutdown(Some(key(addr)), true)
+    let started = tokio::time::Instant::now();
+    mgr.set_graceful_shutdown(Some(key(addr)), true)
         .await
-        .expect_err("wedged RIB reply must fail the toggle, not hang it");
-    assert!(
-        err.to_string().contains("timed out"),
-        "error must name the RIB reply timeout: {err}"
+        .expect("the toggle does not wait for the RIB's outbound refresh");
+    assert_eq!(
+        started.elapsed(),
+        Duration::ZERO,
+        "no RIB deadline is waited out"
     );
+    assert!(mgr.peers[&key(addr)].advertise_graceful_shutdown);
 }
 
 #[tokio::test(start_paused = true)]
