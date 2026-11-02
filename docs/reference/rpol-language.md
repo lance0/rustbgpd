@@ -969,10 +969,12 @@ and evaluation enforce the following bounds:
   carry them forward — so this is the work the compile-time bound cannot
   pre-pay. Other straight-line code is pre-paid, so a chain with no loops
   pays only for the few staged entries its community actions traverse.
-  Exhaustion — reachable only by
-  compounding data-dependent iteration or staging across a chain — is an
-  evaluation error on the same uniform-Deny rail (`fuel-exhausted` in the
-  error counters and explain traces).
+  The trade-off is quadratic staging: a policy that loops removals over
+  the route's n communities and then loops re-adding them pays roughly
+  n²/2 steps, so it fails closed above about 1,400 communities.
+  Exhaustion — reachable only by compounding data-dependent iteration or
+  staging — is an evaluation error on the same uniform-Deny rail
+  (`fuel-exhausted` in the error counters and explain traces).
 
 **Explain.** Traces render a bounded loop summary — iteration count
 plus the deciding iteration (`loop reject at iteration 3 of 3`), never
