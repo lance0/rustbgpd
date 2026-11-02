@@ -1365,7 +1365,9 @@ test customer-route-is-scrubbed {
   same thing when called, as a chain member and under its own tests.
 - **Writes stage into the caller in order.** A later scalar write wins, and
   for a community value the later operation wins, whether the caller's or
-  the called policy's (statement order, as across terms). **Every condition reads
+  the called policy's (statement order, as across terms). Prepends add up
+  in the same order, and the prepend cap counts a called policy's prepends
+  with the call's arguments. **Every condition reads
   the route as received**, in the called policy and in the caller after
   the call, as everywhere else in the language.
 - **`else if` first-match is unchanged.** A branch whose body calls a

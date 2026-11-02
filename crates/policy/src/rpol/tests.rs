@@ -11280,6 +11280,67 @@ mod callable_policies {
         }
     }
 
+    /// Prepends keep statement order across a call boundary: each later
+    /// prepend goes to the left, whether the caller's or the callee's, and
+    /// a computed operand takes its place in the sequence.
+    #[test]
+    fn prepends_accumulate_in_statement_order_across_a_call() {
+        passes(
+            r#"policy lib(n: u32) { term t { prepend as 65002 n; accept } term never { prepend as 65009 1 } }
+             policy wrap { term t { prepend as 65001 1; apply lib(2); prepend as 65003 1; accept } }
+             policy by-peer { term t { prepend as peer 1 } }
+             policy computed { term t { prepend as 65000 1; apply by-peer; prepend as 65004 1; accept } }
+             test order {
+                 route { prefix 192.0.2.0/24; as-path "65010" }
+                 expect wrap == accept with only prepend "65003 65002 65002 65001"
+             }
+             test computed-operand {
+                 route { prefix 192.0.2.0/24; as-path "65010" }
+                 peer { asn 65010 }
+                 expect computed == accept with only prepend "65004 65010 65000"
+             }"#,
+            2,
+        );
+    }
+
+    /// The static prepend cap counts a call's callee with the call's
+    /// arguments: at compile time for literal arguments (a forwarded
+    /// parameter counts 1), and again at instantiation with the argument.
+    #[test]
+    fn the_prepend_cap_counts_called_policies() {
+        let lib = "policy big(n: u32) { term t { prepend as 65000 n } }";
+        let compiles = |policy: &str| {
+            super::super::compile_rpol(
+                &format!("{lib}\n{policy}"),
+                &mut crate::sets::SetStore::new(),
+            )
+            .is_ok()
+        };
+        assert!(compiles(
+            "policy at { term t { apply big(200); apply big(55); accept } }"
+        ));
+        let (_, rendered) = diagnostics_of(&format!(
+            "{lib}\npolicy over {{ term t {{ apply big(200); apply big(56); accept }} }}"
+        ));
+        assert!(
+            rendered.contains("policy `over` can prepend 256 ASNs to one route; at most 255 fit"),
+            "{rendered}"
+        );
+        let file = super::super::RpolFile::parse(&format!(
+            "{lib}\npolicy fwd(m: u32) {{ term t {{ apply big(m); apply big(200); accept }} }}"
+        ))
+        .expect("compiles: m counts 1");
+        let mut store = crate::sets::SetStore::new();
+        assert!(file.compile_policy("fwd", &[55], &mut store).is_ok());
+        let error = file
+            .compile_policy("fwd", &[56], &mut store)
+            .expect_err("256 ASNs");
+        assert!(
+            error.contains("policy \"fwd\" can prepend 256 ASNs to one route; at most 255 fit"),
+            "{error}"
+        );
+    }
+
     /// Community operations keep statement order across a call boundary:
     /// whichever of the caller's and the callee's operations on a value
     /// runs later wins, whether the callee returns or falls through.
