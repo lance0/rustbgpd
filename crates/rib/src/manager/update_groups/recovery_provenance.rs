@@ -3676,6 +3676,34 @@ mod tests {
         assert_eq!(ledger.slot_usage().live, 0);
     }
 
+    /// One slot-index rebuild with the keyed hash, at sizes the daemon cap
+    /// allows. The rebuild checkpoints once per 1024 slots; this measures its
+    /// total work. Run with `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "probe: run with --release --ignored --nocapture"]
+    fn probe_index_rebuild_time() {
+        for slots in [250_000_usize, 1_000_000, 2_000_000] {
+            let mut space = SlotSpace::default();
+            space.resize(slots, &mut |_| {}).unwrap();
+            for n in 0..slots {
+                let key = mac_key(n as u64);
+                let slot = space.insert_new(space.bucket(&key), key);
+                space.hold(slot);
+            }
+            let mut times = Vec::new();
+            for _ in 0..5 {
+                let started = std::time::Instant::now();
+                space.resize(slots + slots / 2, &mut |_| {}).unwrap();
+                times.push(started.elapsed().as_micros());
+            }
+            times.sort_unstable();
+            println!(
+                "index_rebuild slots={slots} median_us={} us={times:?}",
+                times[2]
+            );
+        }
+    }
+
     /// Guarantee 1: a key and its mapping outlive churn, other members'
     /// release and slot reuse until every record naming the slot releases it.
     #[test]
