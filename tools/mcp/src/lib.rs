@@ -2403,7 +2403,7 @@ mod tests {
             vec![
                 "set_local_pref = 200".to_string(),
                 "large_communities_add = [64500:1:2]".to_string(),
-                "as_path_prepend = 64500 x3".to_string(),
+                "as_path_prepend = 64500 64500 64500".to_string(),
             ]
         );
     }

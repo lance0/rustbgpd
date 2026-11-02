@@ -539,11 +539,11 @@ fn rpol_max_graph_bytes_out_of_range_is_a_load_error() {
 
 #[test]
 fn rpol_parameterized_as0_prepend_rejected_at_attachment() {
-    for action in [
-        "prepend as n 1;",
-        "for value in route.as-path { prepend as n 1; }",
-    ] {
-        let source = format!("policy p(n: u32) {{ term t {{ {action} accept }} }}");
+    // A loop over a route attribute cannot prepend (the 255-ASN cap), so
+    // the loop case iterates an asn-set.
+    for action in ["prepend as n 1;", "for value in one { prepend as n 1; }"] {
+        let source =
+            format!("asn-set one {{ 1 }}\npolicy p(n: u32) {{ term t {{ {action} accept }} }}");
         for (import, export) in [(r#""p(0)""#, ""), ("", r#""p(0)""#)] {
             let dir = rpol_directional_config_dir(&source, import, export);
             let error = load_dir(&dir).expect_err("AS 0 prepend must reject attachment");
@@ -672,8 +672,8 @@ fn prepend_operand_legal_directions_attach_and_resolve() {
         med: None,
     };
     // Import: `prepend as peer` resolves to the neighbor's ASN (the
-    // later `origin-pad` member wins the shared prepend slot — chain
-    // merge semantics — so evaluate the peer-pad member's chain alone).
+    // later `origin-pad` member adds its own prepend, so evaluate the
+    // peer-pad member's chain alone).
     let peer_only = rustbgpd_policy::PolicyChain::from_named(vec![import.policies[0].clone()]);
     let result = peer_only.evaluate(&ctx);
     assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
@@ -690,11 +690,15 @@ fn prepend_operand_legal_directions_attach_and_resolve() {
         [rustbgpd_policy::AsPathPrepend::asn(65001, 3)]
     );
 
-    // Both directions: `origin` resolves from the route.
+    // Both directions: `origin` resolves from the route, after the
+    // `self` member's prepend, so it lands to the left.
     let result = export.evaluate(&ctx);
     assert_eq!(
         result.modifications.as_path_prepend,
-        [rustbgpd_policy::AsPathPrepend::asn(64500, 2)]
+        [
+            rustbgpd_policy::AsPathPrepend::asn(65001, 3),
+            rustbgpd_policy::AsPathPrepend::asn(64500, 2)
+        ]
     );
 }
 
