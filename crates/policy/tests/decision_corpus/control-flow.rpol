@@ -1,0 +1,66 @@
+# Decision-corpus programs: loop control and branch order, each with an
+# observable action on every path, so that `continue`, `break`, a no-op
+# and an early verdict all decide differently.
+
+policy scrub-loop {
+    term t {
+        for c in route.communities {
+            if c == 65000:1 { continue }
+            if c == 65000:9 { break }
+            remove community c
+        }
+        accept
+    }
+}
+
+policy tiers {
+    term tier {
+        if route.med >= 300 { set local-pref 300 }
+        else if route.med >= 200 { set local-pref 200 }
+        else if route.med >= 100 { set local-pref 100 }
+        else { set local-pref 50 }
+    }
+    term mark { add community 65000:7 }
+    term rest { accept }
+}
+
+policy early-verdicts {
+    term drop { if route.med >= 500 { reject } }
+    term keep { if route.med >= 100 { set local-pref 150; accept } }
+    term late { add community 65000:8; accept }
+}
+
+test loop-continue-and-break {
+    route { prefix 192.0.2.0/24; communities [65000:2, 65000:1, 65000:3, 65000:9, 65000:4] }
+    expect scrub-loop == accept with only removes community 65000:2,
+        removes community 65000:3, not removed community 65000:1,
+        not removed community 65000:4
+}
+test tiers-first {
+    route { prefix 192.0.2.0/24; med 300 }
+    expect tiers == accept with only local-pref 300, community 65000:7
+}
+test tiers-second {
+    route { prefix 192.0.2.0/24; med 250 }
+    expect tiers == accept with only local-pref 200, community 65000:7
+}
+test tiers-third {
+    route { prefix 192.0.2.0/24; med 100 }
+    expect tiers == accept with only local-pref 100, community 65000:7
+}
+test tiers-else {
+    route { prefix 192.0.2.0/24; med 5 }
+    expect tiers == accept with only local-pref 50, community 65000:7
+}
+test early-reject {
+    route { prefix 192.0.2.0/24; med 500 }
+    expect early-verdicts == reject
+}
+test early-accept {
+    route { prefix 192.0.2.0/24; med 100 }
+    expect early-verdicts == accept with only local-pref 150
+}
+test fall-through {
+    route { prefix 192.0.2.0/24; med 1 }
+    expect early-verdicts == accept with only community 65000:8
+}
