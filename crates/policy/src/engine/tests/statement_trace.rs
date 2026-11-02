@@ -785,7 +785,78 @@ fn rpol_agreement_chains() -> Vec<(&'static str, PolicyChain)> {
             "rpol_then_toml",
             PolicyChain::from_named(vec![rpol_member(200), toml_deny()]),
         ),
+        (
+            "tag_then_strip",
+            PolicyChain::from_named(vec![seeded_member("tag"), seeded_member("strip")]),
+        ),
     ]
+}
+
+/// Chain members whose scans act on what earlier members staged.
+const SEEDED_RPOL: &str = r"
+community-set own { 65000:1 }
+policy tag { term t { add community 65000:7 } }
+policy strip { term t { remove community *; accept } }
+policy stage { term t { for c in route.communities { add community c } } }
+policy scan { term t { remove community in own; accept } }
+";
+
+fn seeded_member(name: &str) -> NamedPolicy {
+    let file = crate::rpol::RpolFile::parse(SEEDED_RPOL).expect("clean rpol");
+    let mut store = crate::sets::SetStore::new();
+    let compiled = file
+        .compile_policy(name, &[], &mut store)
+        .expect("policy exists");
+    NamedPolicy::from_rpol(name.to_owned(), std::sync::Arc::new(compiled))
+}
+
+/// Explain walks each member from what the earlier members staged, like
+/// the live walk: the scanning member's line shows the earlier addition it
+/// cancelled, which is why the value is absent from the result.
+#[test]
+fn explain_shows_a_later_scan_cancelling_an_earlier_addition() {
+    let chain = PolicyChain::from_named(vec![seeded_member("tag"), seeded_member("strip")]);
+    let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    let live = chain.compiled().evaluate(&ctx);
+    assert_eq!(live.action, PolicyAction::Permit);
+    assert_eq!(live.modifications.communities_add, Vec::<u32>::new());
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(trace.steps[0].modifications, ["community + 65000:7"]);
+    assert_eq!(
+        trace.steps[1].modifications,
+        ["community - 65000:7 (cancels an earlier addition)"]
+    );
+}
+
+/// Explain meters the staged additions an earlier member carried in, like
+/// the live walk: a chain whose scans exhaust the fuel only through them is
+/// a fail-closed evaluation error in both.
+#[test]
+fn explain_agrees_with_live_when_carried_additions_exhaust_fuel() {
+    let mut members = vec![seeded_member("stage")];
+    members.extend((0..250).map(|_| seeded_member("scan")));
+    let chain = PolicyChain::from_named(members);
+    let communities: Vec<u32> = (0..4096u32).collect();
+    let ctx = RouteContext {
+        communities: &communities,
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&chain), &ctx);
+    assert_eq!(live.action, PolicyAction::Deny);
+    let error = evaluation
+        .eval_error
+        .expect("fuel exhaustion is an evaluation error");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::FuelExhausted);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    let last = trace.steps.last().expect("steps");
+    assert_eq!(last.policy_name, error.policy);
+    let trace_line = last.term_traces.last().expect("trace line");
+    assert!(
+        trace_line.contains("evaluation error") && trace_line.contains("fuel exhausted"),
+        "{trace_line}"
+    );
 }
 
 fn rpol_agreement_contexts() -> Vec<(&'static str, RouteContext<'static>)> {

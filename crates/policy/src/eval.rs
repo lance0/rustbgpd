@@ -710,11 +710,12 @@ pub(crate) fn exec_community_var(
     Ok(())
 }
 
-/// Charge a scan one fuel step per staged add it visits. The compile-time
-/// cost pre-pays the arrived values only: the staged adds a scan cancels in
-/// statement order have no static bound (a loop stages one per iteration,
-/// and a chain carries them from member to member), so each scan pays for
-/// them here and fails closed when the evaluation budget runs out.
+/// Charge a scan one fuel step per staged entry of its kind it visits: the
+/// adds it cancels in statement order and the removals it dedups its own
+/// against. The compile-time cost pre-pays the arrived values only; staged
+/// lists have no static bound (a loop stages one entry per iteration, and a
+/// chain carries them from member to member), so each scan pays for them
+/// here and fails closed when the evaluation budget runs out.
 fn charge_staged_scan(fuel: &mut u64, staged: usize) -> Result<(), EvalErrorKind> {
     *fuel = u64::try_from(staged)
         .ok()
@@ -726,8 +727,8 @@ fn charge_staged_scan(fuel: &mut u64, staged: usize) -> Result<(), EvalErrorKind
 /// Execute the bounded `.rpol` global-admin wildcard removal. One scan of the
 /// arrived route produces stable, deduplicated concrete removals, which merge
 /// through the ordinary policy-local accumulator; in statement order the scan
-/// also cancels the earlier staged adds with that administrator, metered by
-/// [`charge_staged_scan`]. Input beyond the pre-paid wire bound fails closed
+/// also cancels the earlier staged adds with that administrator. The staged
+/// large-community entries it visits are metered by [`charge_staged_scan`]. Input beyond the pre-paid wire bound fails closed
 /// (`Ok(false)`) before the scan; fuel exhaustion is an evaluation error.
 pub(crate) fn exec_remove_large_community_admin(
     global_admin: u32,
@@ -742,9 +743,9 @@ pub(crate) fn exec_remove_large_community_admin(
     }
     charge_staged_scan(
         fuel,
-        continued
-            .as_ref()
-            .map_or(0, |current| current.large_communities_add.len()),
+        continued.as_ref().map_or(0, |current| {
+            staged_entries(current, CommunityAttribute::Large)
+        }),
     )?;
     let mut mods = RouteModifications::default();
     let mut seen: HashSet<_> = continued.as_ref().map_or_else(HashSet::new, |current| {
@@ -776,8 +777,8 @@ pub(crate) fn exec_remove_large_community_admin(
 /// `NO_EXPORT` and its kin unless they are named. Like
 /// [`exec_remove_large_community_admin`], a route carrying more values of a
 /// listed attribute than its wire bound fails closed (`Ok(false)`) before
-/// any scan, so the compile-time pre-payment holds. The earlier staged adds
-/// the scan cancels are metered by [`charge_staged_scan`].
+/// any scan, so the compile-time pre-payment holds. The staged entries of
+/// the listed attributes it visits are metered by [`charge_staged_scan`].
 pub(crate) fn exec_remove_all_communities(
     attributes: CommunityAttributes,
     ctx: &RouteContext<'_>,
@@ -800,7 +801,7 @@ pub(crate) fn exec_remove_all_communities(
         staged.map_or(0, |current| {
             attributes
                 .iter()
-                .map(|attribute| staged_adds(current, attribute))
+                .map(|attribute| staged_entries(current, attribute))
                 .sum()
         }),
     )?;
@@ -853,18 +854,25 @@ pub(crate) fn exec_remove_all_communities(
     Ok(true)
 }
 
-/// How many adds of `attribute` are staged in `mods`.
-fn staged_adds(mods: &RouteModifications, attribute: CommunityAttribute) -> usize {
+/// How many adds and removals of `attribute` are staged in `mods`.
+fn staged_entries(mods: &RouteModifications, attribute: CommunityAttribute) -> usize {
     match attribute {
-        CommunityAttribute::Standard => mods.communities_add.len(),
-        CommunityAttribute::Extended => mods.extended_communities_add.len(),
-        CommunityAttribute::Large => mods.large_communities_add.len(),
+        CommunityAttribute::Standard => mods.communities_add.len() + mods.communities_remove.len(),
+        CommunityAttribute::Extended => {
+            mods.extended_communities_add.len() + mods.extended_communities_remove.len()
+        }
+        CommunityAttribute::Large => {
+            mods.large_communities_add.len() + mods.large_communities_remove.len()
+        }
     }
 }
 
 /// `mods` with a next-hop action that does not apply to the route dropped,
 /// as [`RouteModifications::merge_applicable`] drops one.
-fn applicable(mut mods: RouteModifications, ctx: &RouteContext<'_>) -> RouteModifications {
+pub(crate) fn applicable(
+    mut mods: RouteModifications,
+    ctx: &RouteContext<'_>,
+) -> RouteModifications {
     if mods
         .set_next_hop
         .as_ref()
@@ -907,8 +915,9 @@ fn stage_removals<T: Copy + Eq + std::hash::Hash>(
 /// before any scan, so the compile-time pre-payment holds. Each value costs
 /// one exact probe plus at most
 /// [`MAX_COMMUNITY_PATTERN_SCAN`](crate::sets::MAX_COMMUNITY_PATTERN_SCAN)
-/// pattern comparisons; the earlier staged adds of the attribute, which the
-/// scan probes the same way, are metered by [`charge_staged_scan`].
+/// pattern comparisons; the staged entries of the attribute it visits (the
+/// adds it probes the same way, the removals it dedups against) are metered
+/// by [`charge_staged_scan`].
 pub(crate) fn exec_remove_communities_in_set(
     attribute: CommunityAttribute,
     set: &CommunitySet,
@@ -929,7 +938,7 @@ pub(crate) fn exec_remove_communities_in_set(
         fuel,
         continued
             .as_ref()
-            .map_or(0, |current| staged_adds(current, attribute)),
+            .map_or(0, |current| staged_entries(current, attribute)),
     )?;
     // Which values the scan keeps; it removes the rest, among the arrived
     // values and, in statement order, among the earlier staged adds.

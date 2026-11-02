@@ -1336,10 +1336,12 @@ test scrubbed {
   evaluation step per value, as for `remove community *`. Each step is one
   exact-member hash probe plus at most 64 pattern comparisons, so a set at
   the pattern limit costs up to about 1.05 million comparisons per route for
-  one standard-community scan. The scan also probes the earlier staged
-  additions of its kind the same way; they have no compile-time bound, so
-  each costs one step of the evaluation's runtime budget, and a route that
-  exhausts it fails closed on the evaluation-error rail.
+  one standard-community scan. The scan also visits the earlier staged
+  additions and removals of its kind: it probes the additions the same way
+  and skips values already staged for removal. Staged entries have no
+  compile-time bound, so each costs one step of the evaluation's runtime
+  budget, and a route that exhausts it fails closed on the evaluation-error
+  rail.
 
 ### Routes that carry too many communities
 

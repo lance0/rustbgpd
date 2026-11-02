@@ -9695,6 +9695,54 @@ test large-strip-all-cancels {
         assert!(consumed <= MAX_EVAL_COST);
     }
 
+    /// A scan also pays for the staged removals of its kind it dedups its
+    /// own against: loops append removals without deduplication, so chain
+    /// members can carry hundreds of thousands of them into later scans.
+    #[test]
+    fn scans_pay_fuel_for_carried_staged_removals() {
+        use crate::eval::PolicyHitCounters;
+        use std::fmt::Write as _;
+        let unstage = |i: usize| {
+            format!(
+                " policy unstage{i} {{ term t {{ for c in route.communities {{ remove community c }} }} }}"
+            )
+        };
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+
+        // Exact accounting: 4096 loop iterations, then one scan over the
+        // 4096 staged removals.
+        let one = compile_ok(&format!(
+            "community-set own {{ 65000:1 }}{} policy scan {{ term t {{ remove community in own; accept }} }}",
+            unstage(0)
+        ));
+        let (result, consumed) = one.evaluate_measuring_fuel(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_remove.len(), 4096);
+        assert_eq!(consumed, 4096 + 4096);
+
+        // 50 loops stage 204,800 removals; four scans over them exceed the
+        // budget, though the loops alone spend about a fifth of it.
+        let mut source = "community-set own { 65000:1 }".to_owned();
+        for i in 0..50 {
+            source.push_str(&unstage(i));
+        }
+        for i in 0..4 {
+            let _ = write!(
+                source,
+                " policy scan{i} {{ term t {{ remove community in own; accept }} }}"
+            );
+        }
+        let many = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&many);
+        assert_eq!(
+            many.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "scan fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+    }
+
     /// Conditions read the route as received: a later term's guard does not
     /// see an earlier term's addition.
     #[test]

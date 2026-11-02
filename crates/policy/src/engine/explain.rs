@@ -81,11 +81,13 @@ pub struct StatementAttribution {
     /// always the route's *pre-policy* value: chain semantics
     /// accumulate modifications and apply them once after the walk, and
     /// conditions read the route as received.
-    /// For an `.rpol` member this is the policy's own merged contribution
-    /// (matched `Continue` terms folded under the deciding permit). The
-    /// trace walks each member from nothing staged, so it does not show
-    /// a later member's community scan cancelling an earlier member's
-    /// addition, which the live walk applies in statement order.
+    /// For an `.rpol` member this is the policy's own contribution
+    /// (matched `Continue` terms folded under the deciding permit): the
+    /// trace walks it from what the earlier members staged, as the live
+    /// walk does, and renders what it changed. An earlier addition or
+    /// removal it cancelled renders as the opposite operation with a
+    /// `(cancels an earlier addition)` / `(cancels an earlier removal)`
+    /// note.
     pub modifications: Vec<String>,
     /// `.rpol` term name of the deciding term (ADR-0096). `None` for
     /// TOML statements and for default-action fallthroughs.
@@ -134,6 +136,9 @@ pub fn explain_chain_statements(
     // LAN-303: the trace walk meters loop fuel exactly like the live
     // evaluation — one budget across the whole chain walk.
     let mut fuel: u64 = crate::eval::MAX_EVAL_COST;
+    // As in the live walk, each member starts from the modifications the
+    // earlier members staged, so its scans see and cancel them.
+    let mut accumulated = RouteModifications::default();
     for (policy_index, named) in chain.policies.iter().enumerate() {
         if let Some(rpol) = named.rpol.as_deref() {
             // `.rpol` member: walk the pre-compiled IR terms against
@@ -142,14 +147,16 @@ pub fn explain_chain_statements(
             // walks cannot disagree about a guard).
             let mut denied = false;
             for policy in &rpol.policies {
-                let step = trace_rpol_policy(
+                let (step, total) = trace_rpol_policy(
                     policy_index,
                     named.name.clone(),
                     policy,
                     rpol,
                     ctx,
+                    &accumulated,
                     &mut fuel,
                 );
+                accumulated = total;
                 denied = step.action == PolicyAction::Deny;
                 steps.push(step);
                 if denied {
@@ -186,6 +193,11 @@ pub fn explain_chain_statements(
             }
             None => (None, named.policy.default_action, Vec::new(), Vec::new()),
         };
+        if let Some(index) = matched
+            && action == PolicyAction::Permit
+        {
+            accumulated.merge_applicable(named.policy.entries[index].modifications.clone(), ctx);
+        }
         steps.push(StatementAttribution {
             policy_index,
             policy_name: named.name.clone(),
@@ -454,6 +466,12 @@ fn scan_failure_trace(
 /// discarded by a deny), rendering a `term_traces` line per evaluated
 /// term. `tables` is the member's donor chain — its set/regex tables
 /// and names are self-contained.
+///
+/// The walk starts from `before`, the modifications the earlier members
+/// staged, exactly like the live walk, and returns the running total after
+/// this member. The member's `modifications` lines render the change from
+/// `before` to that total ([`render_member_delta`]), so a scan that cancels
+/// an earlier member's addition shows the cancellation on its own line.
 #[expect(
     clippy::too_many_lines,
     reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
@@ -464,10 +482,11 @@ fn trace_rpol_policy(
     policy: &CompiledPolicy,
     tables: &CompiledChain,
     ctx: &RouteContext<'_>,
+    before: &RouteModifications,
     fuel: &mut u64,
-) -> StatementAttribution {
+) -> (StatementAttribution, RouteModifications) {
     let mut term_traces = Vec::new();
-    let mut continued: Option<RouteModifications> = None;
+    let mut continued: Option<RouteModifications> = (!before.is_empty()).then(|| before.clone());
     let mut decided: Option<(usize, &Term)> = None;
     // A permitting action's modifications travel with the decision so
     // the result never needs to inspect the original action again.
@@ -746,17 +765,18 @@ fn trace_rpol_policy(
         // modifications and contributes none of its own; a fail-closed
         // evaluation error denies regardless of the term's own action.
         let locals_view = crate::eval::locals_slice(locals.as_ref());
-        let (action, modifications) = if eval_failed {
-            (PolicyAction::Deny, Vec::new())
-        } else if let Some(merged) = &deciding_permit {
-            (
-                PolicyAction::Permit,
-                render_modifications(merged, ctx, Some(tables), locals_view),
-            )
-        } else {
-            (PolicyAction::Deny, Vec::new())
+        let (action, modifications, total) = match deciding_permit {
+            Some(merged) if !eval_failed => {
+                let total = crate::eval::applicable(merged, ctx);
+                (
+                    PolicyAction::Permit,
+                    render_member_delta(before, &total, ctx, tables, locals_view),
+                    total,
+                )
+            }
+            _ => (PolicyAction::Deny, Vec::new(), before.clone()),
         };
-        StatementAttribution {
+        let step = StatementAttribution {
             policy_index,
             policy_name,
             statement_index: Some(index),
@@ -769,20 +789,28 @@ fn trace_rpol_policy(
             modifications,
             term_name: term.name.clone(),
             term_traces,
-        }
+        };
+        (step, total)
     } else {
         // Fallthrough to the policy default; a permitting default
         // keeps accumulated Continue modifications (live parity).
-        let modifications = match (policy.default_action, continued) {
-            (PolicyAction::Permit, Some(mods)) => render_modifications(
-                &mods,
-                ctx,
-                Some(tables),
-                crate::eval::locals_slice(locals.as_ref()),
-            ),
-            _ => Vec::new(),
+        let (modifications, total) = match policy.default_action {
+            PolicyAction::Permit => {
+                let total = crate::eval::applicable(continued.unwrap_or_default(), ctx);
+                (
+                    render_member_delta(
+                        before,
+                        &total,
+                        ctx,
+                        tables,
+                        crate::eval::locals_slice(locals.as_ref()),
+                    ),
+                    total,
+                )
+            }
+            PolicyAction::Deny => (Vec::new(), before.clone()),
         };
-        StatementAttribution {
+        let step = StatementAttribution {
             policy_index,
             policy_name,
             statement_index: None,
@@ -791,8 +819,130 @@ fn trace_rpol_policy(
             modifications,
             term_name: None,
             term_traces,
+        };
+        (step, total)
+    }
+}
+
+/// Render what one `.rpol` member changed: the difference between the
+/// running total `before` it and the total `after` it. Scalars render when
+/// the member changed them; list entries the member appended render as
+/// usual. An earlier entry the member dropped is a cancellation, rendered
+/// as the opposite operation with a note, in place of the member's own line
+/// for that value: a later scan or removal that cancels an earlier addition
+/// renders `community - V (cancels an earlier addition)`.
+fn render_member_delta(
+    before: &RouteModifications,
+    after: &RouteModifications,
+    ctx: &RouteContext<'_>,
+    tables: &CompiledChain,
+    locals: &[u32],
+) -> Vec<String> {
+    let mut own = RouteModifications::default();
+    if (after.set_local_pref, &after.set_local_pref_computed)
+        != (before.set_local_pref, &before.set_local_pref_computed)
+    {
+        own.set_local_pref = after.set_local_pref;
+        own.set_local_pref_computed
+            .clone_from(&after.set_local_pref_computed);
+    }
+    if (after.set_med, &after.set_med_computed) != (before.set_med, &before.set_med_computed) {
+        own.set_med = after.set_med;
+        own.set_med_computed.clone_from(&after.set_med_computed);
+    }
+    if after.set_next_hop != before.set_next_hop {
+        own.set_next_hop.clone_from(&after.set_next_hop);
+    }
+    if (after.as_path_prepend, after.as_path_prepend_computed)
+        != (before.as_path_prepend, before.as_path_prepend_computed)
+    {
+        own.as_path_prepend = after.as_path_prepend;
+        own.as_path_prepend_computed = after.as_path_prepend_computed;
+    }
+    let mut cancellations = Vec::new();
+    let (added, dropped_adds) = list_delta(&before.communities_add, &after.communities_add);
+    let (removed, dropped_removes) =
+        list_delta(&before.communities_remove, &after.communities_remove);
+    own.communities_add = without(added, &dropped_removes);
+    own.communities_remove = without(removed, &dropped_adds);
+    for value in dropped_adds {
+        cancellations.push(format!(
+            "community - {} (cancels an earlier addition)",
+            fmt_standard_community(value)
+        ));
+    }
+    for value in dropped_removes {
+        cancellations.push(format!(
+            "community + {} (cancels an earlier removal)",
+            fmt_standard_community(value)
+        ));
+    }
+    let (added, dropped_adds) = list_delta(
+        &before.extended_communities_add,
+        &after.extended_communities_add,
+    );
+    let (removed, dropped_removes) = list_delta(
+        &before.extended_communities_remove,
+        &after.extended_communities_remove,
+    );
+    own.extended_communities_add = without(added, &dropped_removes);
+    own.extended_communities_remove = without(removed, &dropped_adds);
+    for value in dropped_adds {
+        cancellations.push(format!(
+            "extended_community - {value} (cancels an earlier addition)"
+        ));
+    }
+    for value in dropped_removes {
+        cancellations.push(format!(
+            "extended_community + {value} (cancels an earlier removal)"
+        ));
+    }
+    let (added, dropped_adds) =
+        list_delta(&before.large_communities_add, &after.large_communities_add);
+    let (removed, dropped_removes) = list_delta(
+        &before.large_communities_remove,
+        &after.large_communities_remove,
+    );
+    own.large_communities_add = without(added, &dropped_removes);
+    own.large_communities_remove = without(removed, &dropped_adds);
+    for value in dropped_adds {
+        cancellations.push(format!(
+            "large_community - {value} (cancels an earlier addition)"
+        ));
+    }
+    for value in dropped_removes {
+        cancellations.push(format!(
+            "large_community + {value} (cancels an earlier removal)"
+        ));
+    }
+    let mut out = render_modifications(&own, ctx, Some(tables), locals);
+    out.extend(cancellations);
+    out
+}
+
+/// Split `after` against `before` for one staged list. Merges and scans
+/// only drop entries (keeping order) and append new ones, so `after` is a
+/// subsequence of `before` followed by the appended tail: returns the
+/// appended entries and the dropped earlier ones.
+fn list_delta<T: Copy + PartialEq>(before: &[T], after: &[T]) -> (Vec<T>, Vec<T>) {
+    let mut kept = 0;
+    let mut dropped = Vec::new();
+    for &earlier in before {
+        if after.get(kept) == Some(&earlier) {
+            kept += 1;
+        } else {
+            dropped.push(earlier);
         }
     }
+    (after[kept..].to_vec(), dropped)
+}
+
+/// `values` without the entries `drop` renders as a cancellation instead.
+fn without<T: Copy + PartialEq>(values: Vec<T>, drop: &[T]) -> Vec<T> {
+    values
+        .into_iter()
+        .filter(|value| !drop.contains(value))
+        .collect()
 }
 
 /// Render a compiled term's action in `.rpol` surface syntax, e.g.
