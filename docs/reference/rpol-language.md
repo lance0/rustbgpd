@@ -607,15 +607,18 @@ attributes when testing guards over optional fields. `route.local-pref`
 and `route.med` use their implicit defaults, so they do not have the
 absent-field behavior in the last row.
 
-`rbgp policy check` reports `optional-field-negation` for a negated
-equality on an optional field: `!(optional-field == literal)`, and for
-`route.origin-as` and `peer.asn` also a binding or parameter on the right
-and a computed form such as `!(route.origin-as + 0 == 64500)`. It points at
-the negated expression, including inside compound guards and loops. Use
-`!=` when absence must not match, or keep the negation and test an
-absent-field fixture when it is intentional. The lint does not flag
-defaulted `route.local-pref` or `route.med`, total fields such as
-`route.rpki`, or field-to-field comparisons.
+`rbgp policy check` reports `optional-field-negation` for a negated test
+that is false on a route without the value, so the negation matches that
+route: `!(optional-field == literal)`, and for `route.origin-as` and
+`peer.asn` also a binding or parameter on the right, any computed
+comparison such as `!(route.origin-as + 0 >= 64512)`, and a `let` binding
+of such a value compared or probed (`let o = route.origin-as;` then
+`!(o == 64500)` or `!(o in bogons)`). It points at the negated expression,
+including inside compound guards and loops. Use `!=` for an equality when
+absence must not match, test `exists` where the field supports it, or keep
+the negation and test an absent-field fixture when it is intentional. The
+lint does not flag defaulted `route.local-pref` or `route.med`, total fields
+such as `route.rpki`, or field-to-field comparisons.
 
 ### Checked u32 value expressions
 
@@ -1665,8 +1668,10 @@ Static lints ride the same pass and need no fixtures:
   folds to true. The same constant folding, no reachability proof.
 - `unreferenced-policy` — no test and no `apply` names it in the
   compilation unit (with the config-chain caveat above).
-- `optional-field-negation` — `!(optional-field == literal)` also matches
-  absence; see [optional comparison semantics](#expressions).
+- `optional-field-negation` — a negated test on an optional value, such as
+  `!(optional-field == literal)` or `!(route.origin-as + 0 >= 64512)`, also
+  matches a route without the value; see
+  [optional comparison semantics](#expressions).
 
 Coverage is a report: it never changes the exit code by itself. For
 CI, `--coverage-min PCT` (which implies `--coverage`) exits **3**

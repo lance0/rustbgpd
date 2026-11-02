@@ -1567,12 +1567,12 @@ impl<'a> Checker<'a> {
                             Diagnostic::coded(
                                 DiagnosticCode::Typecheck,
                                 *span,
-                                format!("`{}` has no presence test", field.render()),
-                                "`exists` takes an optional value",
+                                format!("`exists` does not support `{}`", field.render()),
+                                "no presence test for this field",
                             )
                             .with_note(
-                                "`exists` takes route.origin-as, peer.asn, route.med, \
-                                 route.local-pref or route.next-hop",
+                                "presence tests support only: route.origin-as, peer.asn, \
+                                 route.med, route.local-pref, route.next-hop",
                             ),
                         );
                     }

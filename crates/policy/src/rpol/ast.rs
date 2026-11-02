@@ -778,9 +778,9 @@ pub enum Expr {
     /// A comparison containing arithmetic or a builtin on either side
     /// (LAN-299): `route.med + 50 >= p`, `route.as-path.len * 10 >=
     /// route.med`, `route.med == min(a, b)`. Plain comparisons keep
-    /// the [`Cmp`](Self::Cmp) shape (and its never-match absent
-    /// semantics); this shape evaluates checked, and an unresolvable
-    /// operand denies the route (ADR-0103 Decision 4).
+    /// the [`Cmp`](Self::Cmp) shape. This shape evaluates checked; an
+    /// operand that is missing or cannot be computed makes it false,
+    /// like the plain shape's absent field (LAN-2790).
     ValueCmp {
         /// Left value expression.
         lhs: ValueExprAst,

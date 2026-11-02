@@ -353,6 +353,36 @@ async fn unknown_cancels_and_a_returning_observation_rearms_in_full() {
     );
 }
 
+/// A `condition_policy` guard whose operand is missing is a miss, not an
+/// evaluation error: an injected candidate has no peer ASN, so the
+/// condition is absent rather than unknown, and a received candidate from
+/// AS 65001 makes it present.
+#[tokio::test(start_paused = true)]
+async fn a_missing_operand_in_the_condition_policy_is_a_miss() {
+    let mut manager = manager();
+    let _ = manager.install_conditional_advertisements(vec![definition(
+        ConditionalAdvertiseIf::Absent,
+        Some(rpol_chain(
+            "policy asn { term t { if peer.asn + 0 == 65001 { accept } } term rest { reject } }",
+            "asn",
+        )),
+        SETTLE,
+    )]);
+    inject(&mut manager, prefix(1), None);
+    assert_eq!(state(&manager).0, ConditionObservation::Absent);
+
+    let source = peer(1);
+    peer_up(&mut manager, source, 1);
+    received(
+        &mut manager,
+        source,
+        1,
+        vec![route_with_med(source, prefix(1), None)],
+        vec![],
+    );
+    assert_eq!(state(&manager).0, ConditionObservation::Present);
+}
+
 /// A clean match beats an erroring candidate, and a clean rejection is a
 /// miss rather than an error.
 #[tokio::test(start_paused = true)]

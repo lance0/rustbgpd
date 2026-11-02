@@ -9,5 +9,8 @@
   `route.origin-as == 64500` did not match. A `let` that cannot be computed
   now binds that state: conditions on it are false, and only an action that
   needs the value denies the route. Computed `set` values, computed prepend
-  operands and community bindings still fail closed. See
+  operands and community bindings still fail closed. The
+  `optional-field-negation` lint now also flags a negated binding, binding
+  probe or computed comparison over `route.origin-as` or `peer.asn`, which
+  matches a route without the value. See
   [Conditions never fail](../docs/reference/rpol-language.md#conditions-never-fail).

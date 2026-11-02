@@ -6645,29 +6645,90 @@ mod coverage {
         }
     }
 
-    /// Since LAN-2790 a comparison on a missing value is false in every
-    /// form, so a negated binding or computed comparison also matches a
-    /// route without the value, and the lint flags each of them.
-    #[test]
-    fn optional_field_negation_flags_binding_and_computed_comparisons() {
-        let source = r"
-policy p {
-    term t {
-        let target = 64500;
-        if !(route.origin-as == target) { accept }
-        if !(peer.asn == target) { accept }
-        if !(route.origin-as + 0 == 64500) { accept }
-    }
-}
-test absent { route { med 0 } expect p == accept }
-";
-        let cov = coverage_of(source);
-        let flagged = cov
+    /// The `optional-field-negation` messages for one term body.
+    fn negation_messages(body: &str) -> Vec<String> {
+        let source = format!(
+            "asn-set bogons {{ 64496 }}\n\
+             policy p {{ term t {{ {body} accept }} }}\n\
+             test absent {{ route {{ med 0 }} expect p == accept }}"
+        );
+        coverage_of(&source)
             .lints
-            .iter()
+            .into_iter()
             .filter(|lint| lint.kind == LintKind::OptionalFieldNegation)
-            .count();
-        assert_eq!(flagged, 3, "{:?}", cov.lints);
+            .map(|lint| lint.message)
+            .collect()
+    }
+
+    /// Since LAN-2790 a comparison or probe on a missing value is false in
+    /// every form, so a negated binding, binding probe or computed
+    /// comparison matches a route without the value, like the plain
+    /// equality, and the lint flags each of them.
+    #[test]
+    fn optional_field_negation_flags_bindings_probes_and_computed_comparisons() {
+        let exists = "test `exists route.origin-as` explicitly";
+        for (body, message) in [
+            (
+                "let target = 64500; if !(route.origin-as == target) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "let target = 64500; if !(peer.asn == target) { accept }",
+                "negated equality matches when peer.asn is absent; use != to require its presence, or test `exists peer.asn` explicitly".to_string(),
+            ),
+            (
+                "if !(route.origin-as + 0 == 64500) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "if !(route.origin-as + 0 >= 64512) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(o == 64500) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(o in bogons) { accept }",
+                format!("negated membership test matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(route.med >= o) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; let p = o + 1; if !(p <= 9) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if route.med == 0 { if !(o == 1) { accept } }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+        ] {
+            assert_eq!(negation_messages(body), [message], "{body}");
+        }
+        // `exists` is suggested only for a field it can test.
+        assert_eq!(
+            negation_messages("if !(route.prefix == 192.0.2.0/24) { accept }"),
+            [
+                "negated equality matches when route.prefix is absent; use != to require its presence, or test the absent case explicitly"
+            ],
+        );
+    }
+
+    /// A binding stops counting as missing once a later `let` shadows it
+    /// with a present value, inside a `for` over a loop variable of the
+    /// same name, and outside the body that declared it.
+    #[test]
+    fn optional_field_negation_follows_binding_scope() {
+        for body in [
+            "let o = route.origin-as; let o = 5; if !(o == 1) { accept }",
+            "let o = route.origin-as; for o in route.communities { if !(o == 1) { accept } }",
+            "let o = 5; if route.med == 5 { let o = route.origin-as; set med o; accept } if !(o == 1) { accept }",
+            "let o = route.med; if !(o == 0) { accept }",
+        ] {
+            assert_eq!(negation_messages(body), Vec::<String>::new(), "{body}");
+        }
     }
 
     fn term<'a>(cov: &'a CoverageReport, policy: &str, name: &str) -> &'a TermCoverage {
@@ -9477,8 +9538,6 @@ test else-branch {
 mod condition_truth {
     use std::sync::Arc;
 
-    use rustbgpd_wire::RpkiValidation;
-
     use super::super::{format_rpol, run_rpol_tests};
     use super::{absent_ctx, compile_ok, diagnostics_of, reject_if};
     use crate::engine::explain::explain_chain_statements;
@@ -9502,7 +9561,9 @@ mod condition_truth {
         }
     }
 
-    /// The verdict, with explain agreeing with live evaluation.
+    /// The verdict, with explain agreeing with live evaluation on both the
+    /// action and the error: explain renders exactly the live error, and
+    /// no error when the live walk raised none.
     fn verdict(
         chain: &PolicyChain,
         ctx: &RouteContext<'_>,
@@ -9513,7 +9574,21 @@ mod condition_truth {
             trace.action, result.action,
             "explain agrees with live evaluation"
         );
-        (result.action, evaluation.eval_error.map(|error| error.kind))
+        let kind = evaluation.eval_error.map(|error| error.kind);
+        let errors: Vec<&String> = trace
+            .steps
+            .iter()
+            .flat_map(|step| step.term_traces.iter().chain(&step.matched_conditions))
+            .filter(|line| line.contains("evaluation error"))
+            .collect();
+        match kind {
+            Some(kind) => assert!(
+                errors.len() == 1 && errors[0].contains(&kind.to_string()),
+                "explain renders the live error {kind}: {errors:?}"
+            ),
+            None => assert!(errors.is_empty(), "explain renders no error: {errors:?}"),
+        }
+        (result.action, kind)
     }
 
     /// A missing or uncomputable operand never decides a conjunction or a
@@ -9621,7 +9696,7 @@ mod condition_truth {
     /// Binding probes (`x in set`) on a binding without a value are false.
     #[test]
     fn binding_probes_on_a_missing_value_are_false() {
-        for probe in ["o in peers", "!(o in peers)"] {
+        for probe in ["o in peers", "!(o in peers)", "o in tags", "!(o in tags)"] {
             let chain = chain_of(&format!(
                 "asn-set peers {{ 64500 }} community-set tags {{ 0:64500 }} \
                  policy p {{ term t {{ let o = route.origin-as; if {probe} {{ reject }} accept }} }}"
@@ -9734,11 +9809,15 @@ mod condition_truth {
     }
 
     #[test]
-    fn exists_rejects_fields_that_are_always_present_and_stays_contextual() {
+    fn exists_rejects_unsupported_fields_and_stays_contextual() {
         let (_, rendered) =
             diagnostics_of("policy p { term t { if exists route.prefix { reject } } }");
         assert!(
-            rendered.contains("`route.prefix` has no presence test"),
+            rendered.contains("`exists` does not support `route.prefix`"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("presence tests support only: route.origin-as, peer.asn"),
             "{rendered}"
         );
         // A binding or parameter named `exists` keeps working.
@@ -9797,14 +9876,51 @@ test as-set-only-is-accepted {
         assert!(report.all_passed(), "{:?}", report.failures);
     }
 
-    /// Cost pin: `exists` is one cheapest-tier IR node, the IR node size is
-    /// unchanged, and the condition rule adds no node (each node is still
-    /// evaluated at most once per route, so the compile-time cost charged
-    /// for a guard is the same as before).
+    /// Inside a `for` body a binding or guard on a missing value behaves the
+    /// same: the condition is false on every iteration, and an action that
+    /// needs the value denies with its kind (the loop error rail).
+    #[test]
+    fn loop_bodies_follow_the_same_rule() {
+        use crate::ir::ValueField::OriginAs;
+        let communities = [(65_000 << 16) | 1, (65_000 << 16) | 2];
+        let ctx = RouteContext {
+            communities: &communities,
+            ..set_only()
+        };
+        for body in [
+            "let o = route.origin-as; if o == 1 { reject }",
+            "if route.origin-as + 0 == 1 { reject }",
+            "let o = route.origin-as; if o in peers { reject }",
+        ] {
+            let chain = chain_of(&format!(
+                "asn-set peers {{ 1 }} \
+                 policy p {{ term t {{ for c in route.communities {{ {body} }} accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &ctx),
+                (PolicyAction::Permit, None),
+                "{body}"
+            );
+        }
+        let chain = chain_of(
+            "policy p { term t { for c in route.communities { let o = route.origin-as; set med o } accept } }",
+        );
+        assert_eq!(
+            verdict(&chain, &ctx),
+            (
+                PolicyAction::Deny,
+                Some(EvalErrorKind::AbsentField(OriginAs))
+            )
+        );
+    }
+
+    /// Cost pin: `exists` is one cheapest-tier IR node, the rule adds no IR
+    /// node, and the typechecker's evaluation-cost DP charges `exists` one
+    /// step like `has`: the longest loop-body conjunction within the
+    /// per-route budget is the same for both.
     #[test]
     fn cost_model_is_unchanged() {
         use crate::ir::{MatchExpr, OptionalField};
-        assert_eq!(std::mem::size_of::<MatchExpr>(), 32);
         assert_eq!(MatchExpr::Exists(OptionalField::Med).cost_class(), 0);
         let chain = reject_if("route.origin-as + 0 == 1 && route.med >= 1");
         let guard = &chain.policies[0].terms[0].guard;
@@ -9817,6 +9933,28 @@ test as-set-only-is-accepted {
             chain.policies[0].terms[0].guard,
             MatchExpr::Exists(OptionalField::Med)
         );
-        let _ = RpkiValidation::NotFound;
+
+        let source = |leaf: &str, n: usize| {
+            let guard = vec![leaf; n].join(" && ");
+            format!(
+                "policy p {{ term t {{ for c in route.communities {{ if {guard} {{ set med 1 }} }} accept }} }}"
+            )
+        };
+        let longest = |leaf: &str| {
+            (1..1_000)
+                .take_while(|&n| {
+                    super::super::compile_rpol(&source(leaf, n), &mut crate::sets::SetStore::new())
+                        .is_ok()
+                })
+                .last()
+                .expect("one leaf fits")
+        };
+        let has = longest("route.communities has 65000:1");
+        let (_, rendered) = diagnostics_of(&source("route.communities has 65000:1", has + 1));
+        assert!(
+            rendered.contains("exceeds the worst-case evaluation budget"),
+            "the evaluation budget binds: {rendered}"
+        );
+        assert_eq!(longest("exists route.med"), has);
     }
 }

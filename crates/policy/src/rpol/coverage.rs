@@ -42,7 +42,7 @@ use super::ast::{
     ActionStmt, CmpOp, CommunityArg, Expr, ForSource, IfStmt, Rhs, SourceFile, Stmt, TermDef,
     ValueExprAst,
 };
-use super::typeck::{Field, fold_const, resolve_field};
+use super::typeck::{Field, fold_const, optional_field, resolve_field, value_field_of};
 
 /// Coverage of one source term, aggregated over every test walk that
 /// ran its policy.
@@ -411,60 +411,111 @@ fn belongs(ir: &str, src: &str) -> bool {
     ir == src || (ir.len() > src.len() && ir.starts_with(src) && ir.as_bytes()[src.len()] == b'.')
 }
 
-/// The optional field an equality under `!` compares, when the negation
-/// matches routes that lack it. Since LAN-2790 a comparison on a missing
-/// value is false in every form, so computed comparisons over
-/// `route.origin-as` or `peer.asn` qualify as well as the plain ones.
-fn negated_optional_equality(inner: &Expr) -> Option<String> {
+/// `let` bindings in scope whose value can be missing, with the optional
+/// field each comes from, as written.
+type MissingBindings<'a> = HashMap<&'a str, (Field, String)>;
+
+/// A test under `!` that is false on a route lacking an optional value,
+/// so the negation matches that route: the noun for the message and the
+/// field, resolved and as written. Since LAN-2790 a comparison or probe
+/// on a missing value is false in every form, so computed comparisons,
+/// bindings and binding probes qualify as well as the plain equalities.
+fn negated_optional(
+    inner: &Expr,
+    missing: &MissingBindings<'_>,
+) -> Option<(&'static str, Field, String)> {
     match inner {
-        Expr::Cmp {
-            field,
-            op: CmpOp::Eq,
-            rhs,
-            ..
-        } => {
-            let optional = matches!(
-                (resolve_field(field), rhs),
-                (
-                    Ok(Field::Prefix
-                        | Field::OriginAs
-                        | Field::NextHop
-                        | Field::RouteType
-                        | Field::EvpnRouteType
-                        | Field::Family
-                        | Field::PeerAddress
-                        | Field::PeerAsn
-                        | Field::PeerGroup),
-                    Rhs::Int(..) | Rhs::Ip(..) | Rhs::Prefix(..) | Rhs::Str(_)
-                ) | (
-                    Ok(Field::RouteType | Field::Family | Field::OriginAs | Field::PeerAsn),
-                    Rhs::Ident(_)
-                )
-            );
-            optional.then(|| field.render())
+        Expr::Cmp { field, op, rhs, .. } => {
+            let resolved = resolve_field(field).ok()?;
+            // A binding on the right of a u32 field lowers to a value
+            // comparison, false when the binding has no value.
+            if let Rhs::Ident(name) = rhs
+                && value_field_of(resolved).is_some()
+                && let Some((from, written)) = missing.get(name.node.as_str())
+            {
+                let noun = if *op == CmpOp::Eq {
+                    "equality"
+                } else {
+                    "comparison"
+                };
+                return Some((noun, *from, written.clone()));
+            }
+            let optional = *op == CmpOp::Eq
+                && matches!(
+                    (resolved, rhs),
+                    (
+                        Field::Prefix
+                            | Field::OriginAs
+                            | Field::NextHop
+                            | Field::RouteType
+                            | Field::EvpnRouteType
+                            | Field::Family
+                            | Field::PeerAddress
+                            | Field::PeerAsn
+                            | Field::PeerGroup,
+                        Rhs::Int(..) | Rhs::Ip(..) | Rhs::Prefix(..) | Rhs::Str(_)
+                    ) | (
+                        Field::RouteType | Field::Family | Field::OriginAs | Field::PeerAsn,
+                        Rhs::Ident(_)
+                    )
+                );
+            optional.then(|| ("equality", resolved, field.render()))
         }
-        Expr::ValueCmp {
-            lhs,
-            op: CmpOp::Eq,
-            rhs,
-            ..
-        } => optional_value_field(lhs).or_else(|| optional_value_field(rhs)),
+        Expr::ValueCmp { lhs, op, rhs, .. } => {
+            let (from, written) = optional_value_field(lhs, missing)
+                .or_else(|| optional_value_field(rhs, missing))?;
+            let noun = if *op == CmpOp::Eq {
+                "equality"
+            } else {
+                "comparison"
+            };
+            Some((noun, from, written))
+        }
+        Expr::IdentIn { ident, .. } => missing
+            .get(ident.node.as_str())
+            .map(|(from, written)| ("membership test", *from, written.clone())),
         _ => None,
     }
 }
 
-/// The first `route.origin-as` / `peer.asn` read in a value expression.
-fn optional_value_field(value: &ValueExprAst) -> Option<String> {
+/// The first value in `value` that can be missing: a `route.origin-as` /
+/// `peer.asn` read, or a binding whose value can be missing.
+fn optional_value_field(
+    value: &ValueExprAst,
+    missing: &MissingBindings<'_>,
+) -> Option<(Field, String)> {
     match value {
-        ValueExprAst::Field(field) => {
-            matches!(resolve_field(field), Ok(Field::OriginAs | Field::PeerAsn))
-                .then(|| field.render())
-        }
+        ValueExprAst::Field(field) => match resolve_field(field) {
+            Ok(resolved @ (Field::OriginAs | Field::PeerAsn)) => Some((resolved, field.render())),
+            _ => None,
+        },
         ValueExprAst::Binary { lhs, rhs, .. } => {
-            optional_value_field(lhs).or_else(|| optional_value_field(rhs))
+            optional_value_field(lhs, missing).or_else(|| optional_value_field(rhs, missing))
         }
-        ValueExprAst::Call { args, .. } => args.iter().find_map(optional_value_field),
-        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) => None,
+        ValueExprAst::Call { args, .. } => args
+            .iter()
+            .find_map(|arg| optional_value_field(arg, missing)),
+        ValueExprAst::Ident(name) => missing.get(name.node.as_str()).cloned(),
+        ValueExprAst::Lit(..) => None,
+    }
+}
+
+/// The `optional-field-negation` message: `!=` is the fix for an
+/// equality, and `exists` is suggested only for a field it can test.
+fn optional_negation_message(noun: &str, field: Field, written: &str) -> String {
+    let fix = if noun == "equality" {
+        "use != to require its presence, or "
+    } else {
+        ""
+    };
+    if optional_field(field).is_some() {
+        format!(
+            "negated {noun} matches when {written} is absent; {fix}test `exists {written}` explicitly"
+        )
+    } else {
+        format!(
+            "negated {noun} matches when {written} is absent; {fix}test the absent case explicitly"
+        )
     }
 }
 
@@ -677,8 +728,10 @@ fn const_truth(expr: &Expr) -> Option<bool> {
 /// Names the compilation unit references, by namespace.
 #[derive(Default)]
 struct Refs<'a> {
-    /// Negated optional-field equalities found during the same AST walk.
+    /// Negated optional-field tests found during the same AST walk.
     optional_negations: Vec<Lint>,
+    /// The term walk's `let` bindings in scope whose value can be missing.
+    missing: MissingBindings<'a>,
     /// Set and dataset references (one flat namespace).
     sets: HashSet<&'a str>,
     /// `fn` call references (builtin names may appear; harmless — the
@@ -693,6 +746,7 @@ impl<'a> Refs<'a> {
         let mut refs = Refs::default();
         for def in &file.policies {
             for term in &def.terms {
+                refs.missing.clear();
                 refs.stmts(&term.stmts);
             }
         }
@@ -718,7 +772,9 @@ impl<'a> Refs<'a> {
                         self.expr(&branch.cond);
                     }
                     for body in if_stmt.bodies() {
+                        let scope = self.missing.clone();
                         self.stmts(body);
+                        self.missing = scope;
                     }
                 }
                 Stmt::Action(action) => self.action(action),
@@ -726,7 +782,10 @@ impl<'a> Refs<'a> {
                     if let ForSource::Set(name) = &for_stmt.source {
                         self.sets.insert(&name.node);
                     }
+                    let scope = self.missing.clone();
+                    self.missing.remove(for_stmt.var.node.as_str());
                     self.stmts(&for_stmt.body);
+                    self.missing = scope;
                 }
             }
         }
@@ -734,9 +793,14 @@ impl<'a> Refs<'a> {
 
     fn action(&mut self, action: &'a ActionStmt) {
         match action {
-            ActionStmt::SetLocalPref(value, _)
-            | ActionStmt::SetMed(value, _)
-            | ActionStmt::Let { init: value, .. } => self.value(value),
+            ActionStmt::Let { name, init, .. } => {
+                self.value(init);
+                match optional_value_field(init, &self.missing) {
+                    Some(from) => self.missing.insert(&name.node, from),
+                    None => self.missing.remove(name.node.as_str()),
+                };
+            }
+            ActionStmt::SetLocalPref(value, _) | ActionStmt::SetMed(value, _) => self.value(value),
             ActionStmt::Community {
                 arg: CommunityArg::InSet { set, .. },
                 ..
@@ -760,13 +824,11 @@ impl<'a> Refs<'a> {
                 self.expr(rhs);
             }
             Expr::Not(inner, span) => {
-                if let Some(field) = negated_optional_equality(inner) {
+                if let Some((noun, field, written)) = negated_optional(inner, &self.missing) {
                     self.optional_negations.push(Lint {
                         kind: LintKind::OptionalFieldNegation,
                         span: *span,
-                        message: format!(
-                            "negated equality matches when {field} is absent; use != to require its presence, or test `exists {field}` explicitly",
-                        ),
+                        message: optional_negation_message(noun, field, &written),
                     });
                 }
                 self.expr(inner);
