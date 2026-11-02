@@ -1159,12 +1159,24 @@ the index and becomes free; only then can a later key reuse it. The holder count
 covers every primary entry, snapshot entry and pin, so a key and its mapping
 remain until every record that can reference the slot has released it, and
 reuse cannot make an existing entry name a different route. A new key takes the
-lowest free slot, and free slots at the top of the space are trimmed. Once at
-most a quarter of the remaining slots are held, the ledger renumbers held slots
-into a dense prefix, preserving their order, rewrites every record's entries and
-pins and its index, and shrinks the space. A drained peak therefore returns its
-capacity even while a slow member holds one of its highest slots. When no slot
-is held, the ledger frees the whole space.
+lowest free slot.
+
+**Settlement.** When a record releases its holdings at finish or retirement,
+the ledger settles the space: it frees the whole space when no slot is held,
+trims free slots from the top, and, once at most a quarter of the remaining
+slots are held, renumbers held slots into a dense prefix, preserving their
+order, rewrites every record's entries, bitset and pins and the index, and
+shrinks the space. A drained peak therefore returns its capacity even while a
+slow member holds one of its highest slots. Settlement never runs inside
+admission, so final application stays free of allocation; a withdrawal that
+drains the space waits for the next finish or retirement. Renumbering and
+shrinking are optional maintenance: a daemon-cap or allocation refusal leaves
+the committed state unchanged. Renumbering costs one pass over the slots and the
+index plus one over every record's entries, bitset words and pins. It offers
+the readiness checkpoint at the ledger stride; a component probe at 1,500
+members with large bitsets measured about 0.3 s in total with gaps of about
+1 ms between checkpoints. It runs only after at least three quarters of the
+slots have drained.
 
 **Admission.** Reservation interns and pins each announced key the record has
 not already admitted, then sizes the record for those slots. Final application
@@ -1203,10 +1215,11 @@ charge is exact for the ledger's own allocations: its header, record array,
 each record's entries or bitset and pin capacity, and the slot space's keys,
 holder counts, free bits and index. Growth, renumbering and shrinking charge new
 storage beside the old before allocating and reconcile to the actual capacities
-afterwards. Each peer is charged its records' own storage plus 80 bytes for
-every slot it holds through an entry or a pin, which is the cost it would impose
-as the slot's only holder. Capacity above the held slots is charged to the
-daemon, not to a peer; trimming and renumbering return it as slots drain. The
+afterwards. A slot of capacity costs 76⅛ bytes: the key, its holder count, two
+index buckets and a free bit. Each peer is charged its records' own storage plus
+80 bytes, that cost rounded up, for every slot it holds through an entry or a
+pin, which is the cost it would impose as the slot's only holder. Capacity above the held slots is charged to the
+daemon, not to a peer; settlement returns it as slots drain. The
 peer cap is 22 MiB. At 80 bytes per held key that admits at least 262,144 held
 keys, including a capture's entry buffer, which the earlier 64-byte charge per
 universe key allowed under 16 MiB. A lower ceiling would refuse every recovery
@@ -1218,14 +1231,18 @@ surfaces.
 **Evidence status.** Component tests pin retention across churn, finish and
 snapshot; adversarial reuse with a retained snapshot, a pin and a slow holder;
 exact accounting with bounded slot reuse under sustained churn; renumbering
-after a skewed peak; linear index work for keys built to collide under an
-unkeyed hash; and the cap boundary. Test builds recount the whole ledger at the
-start of every public call, so manager-level flows run the same check. A
+after a skewed peak; renumbering with pins, snapshots, an open capture and both
+representations live, in a fixed case and a seeded interleaving model; settlement
+after, never inside, application; the most work between readiness checkpoints;
+linear index work for keys built to collide under an unkeyed hash; and the cap
+boundary. While the ledger has at most 512 slots and 64 records, test builds
+recount it at the start of every public call and when it is dropped, so
+manager-level flows run the same check; larger tests recount explicitly. A
 deterministic differential drives owned and private managers through capture
 under backpressure, recovery, a refresh replay, admission into a retained
-proof, churn and full withdrawal, and requires equal routes and no withdrawal
-of an unheld route; the existing update-group and selection-deferral oracles do
-not enable EVPN ownership. A synthetic probe at ten times the measured receiver
+proof, a renumbering settlement, churn and full withdrawal, and requires equal
+routes and no withdrawal of an unheld route; the existing update-group and
+selection-deferral oracles do not enable EVPN ownership. A synthetic probe at ten times the measured receiver
 count checks the ledger peak against the qualification bar. These are component
 results. They do not qualify the recovery memory envelope, readiness or replay
 cost, and production EVPN ownership remains disabled until the mass-dirty and

@@ -6,8 +6,10 @@
 //! the ledger's highest slot. A slot's holder count covers every record entry
 //! and reservation pin that names it, and a slot is reused only after that
 //! count reaches zero, so an entry can never come to name a different key.
-//! New keys take the lowest free slot and free slots at the top are trimmed,
-//! so IDs stay compact as the space drains. Slot IDs never leave this module.
+//! New keys take the lowest free slot. When a record releases its holdings,
+//! settlement trims free top slots and renumbers a mostly drained space, so
+//! IDs stay compact as it drains; admission never settles. Slot IDs never
+//! leave this module.
 //!
 //! Credits cover container headers and requested reserved capacity, including
 //! overlapping reallocations. Allocator bookkeeping and RSS are separate
@@ -37,11 +39,21 @@ type Slots = SmallVec<[u32; 0]>;
 
 /// Index buckets per slot of capacity; linear probing stays at most half full.
 const INDEX_BUCKETS_PER_SLOT: usize = 2;
-/// The charge per held slot: the key, its holder count, a free-list entry and
-/// its index buckets. Each peer pays it for every slot it holds, the cost it
-/// would impose as that slot's only holder.
-pub(in crate::manager) const SLOT_BYTES: usize =
-    size_of::<EvpnRouteKey>() + 2 * size_of::<u32>() + INDEX_BUCKETS_PER_SLOT * size_of::<u32>();
+/// The charge per held slot. A slot of capacity physically costs 76⅛ bytes,
+/// as [`SlotSpace::bytes_for`] counts it: the 64-byte key, a 4-byte holder
+/// count, two 4-byte index buckets and one free bit. The charge rounds that
+/// up to 80 bytes, failing closed; the 22 MiB peer cap is derived from it.
+/// Each peer pays it for every slot it holds, the cost it would impose as
+/// that slot's only holder.
+pub(in crate::manager) const SLOT_BYTES: usize = 80;
+const _: () = assert!(
+    SLOT_BYTES * 8
+        > (size_of::<EvpnRouteKey>()
+            + size_of::<u32>()
+            + INDEX_BUCKETS_PER_SLOT * size_of::<u32>())
+            * 8,
+    "the per-slot charge covers a slot's physical cost, free bit included"
+);
 const MIN_SLOT_CAPACITY: usize = 64;
 /// Bitsets grow in steps of this many words (1024 slots).
 const WORD_STEP: usize = 16;
