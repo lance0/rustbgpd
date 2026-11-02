@@ -3087,8 +3087,9 @@ fn bound_policy<'a>(
                         pred_cost,
                         calls,
                         fns,
-                        &mut |guard, terms, action| {
+                        &mut |guard, terms, action, steps| {
                             push_arms(&mut arms, guard, terms);
+                            action_cost = action_cost.saturating_add(steps);
                             if let Some(action) = action {
                                 action_cost =
                                     action_cost.saturating_add(action_value_cost(action, fns));
@@ -3102,7 +3103,9 @@ fn bound_policy<'a>(
                     action_cost = action_cost.saturating_add(action_value_cost(action, fns));
                 }
                 Stmt::Call(call) => {
-                    push_arms(&mut arms, call_cost(call, PathCost::default(), calls), 1);
+                    let (nodes, steps) = call_cost(call, PathCost::default(), calls);
+                    push_arms(&mut arms, nodes, 1);
+                    action_cost = action_cost.saturating_add(steps.saturating_sub(nodes));
                 }
                 // LAN-303: one IR term for the loop itself; the body
                 // charges the eval-cost budget at bound × per-iteration
@@ -3172,11 +3175,13 @@ fn bound_policy<'a>(
     calls.insert(
         name,
         InlineCost {
+            nodes: lowered,
             steps: lowered.saturating_add(action_cost),
             terms: arms.len() as u64,
             returns: count_accepts(&def.terms),
-            loop_returns: def.terms.iter().fold(0, |acc, term| {
-                acc.saturating_add(loop_return_steps(&term.stmts, file))
+            loop_returns: def.terms.iter().fold((0, 0), |(nodes, steps), term| {
+                let (n, s) = loop_return_cost(&term.stmts, file);
+                (nodes.saturating_add(n), steps.saturating_add(s))
             }),
         },
     );
@@ -3497,8 +3502,9 @@ const CALL_FLAG_NODES: u64 = 3;
 /// totals only: nothing is allocated per inlined term.
 #[derive(Clone, Copy)]
 struct InlineCost {
-    /// The policy's own worst-case evaluation steps, which also bound its
-    /// IR nodes: guards, actions, loops and its own calls.
+    /// The policy's own IR nodes: guards, loop bodies and its own calls.
+    nodes: u64,
+    /// Its worst-case evaluation steps, at least `nodes`.
     steps: u64,
     /// Its IR terms outside loop bodies, each of which gains the call-site
     /// path and the flag check.
@@ -3506,19 +3512,19 @@ struct InlineCost {
     /// Its `accept`s outside loops, each adding a flag `Bind` and a
     /// `Continue`.
     returns: u64,
-    /// The flag terms a return from inside its loops adds, multiplied by
-    /// the loop bounds.
-    loop_returns: u64,
+    /// The flag terms a return from inside its loops adds: their nodes,
+    /// and their steps multiplied by the loop bounds.
+    loop_returns: (u64, u64),
 }
 
-/// The size and per-route step charge of one `apply` statement under
+/// The `(IR nodes, worst-case steps)` of one `apply` statement under
 /// `path`: the callee's own cost, plus the call-site path and the flag
 /// check on every inlined term, plus the entry, return and fall-through
-/// terms. One saturating number, charged as one arm.
-fn call_cost(call: &CallStmt, path: PathCost, calls: &HashMap<&str, InlineCost>) -> u64 {
+/// terms. Saturating totals, charged as one arm.
+fn call_cost(call: &CallStmt, path: PathCost, calls: &HashMap<&str, InlineCost>) -> (u64, u64) {
     let Some(callee) = calls.get(call.policy.node.as_str()) else {
         // Unknown or on a diagnosed cycle: the file already has errors.
-        return 1;
+        return (1, 1);
     };
     // Entry clear, a fall-through deny, and each return's extra term.
     let terms = callee
@@ -3526,10 +3532,17 @@ fn call_cost(call: &CallStmt, path: PathCost, calls: &HashMap<&str, InlineCost>)
         .saturating_add(callee.returns)
         .saturating_add(2);
     let per_term = path.with(CALL_FLAG_NODES).cost().saturating_add(1);
-    callee
-        .steps
-        .saturating_add(terms.saturating_mul(per_term))
-        .saturating_add(callee.loop_returns)
+    let added = terms.saturating_mul(per_term);
+    (
+        callee
+            .nodes
+            .saturating_add(added)
+            .saturating_add(callee.loop_returns.0),
+        callee
+            .steps
+            .saturating_add(added)
+            .saturating_add(callee.loop_returns.1),
+    )
 }
 
 /// The `accept` statements of `terms` outside loop bodies.
@@ -3550,40 +3563,50 @@ fn count_accepts(terms: &[super::ast::TermDef]) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
-/// The steps a return from inside loops adds when the policy is called:
-/// per `accept` in a loop body, a flag `Bind`, a `Continue` and a `Break`;
-/// per inner loop, a `Break` on the flag. Each runs up to the loop bound,
-/// and nested loops multiply.
-fn loop_return_steps(stmts: &[Stmt], file: &SourceFile) -> u64 {
-    fn in_body(stmts: &[Stmt], file: &SourceFile) -> u64 {
+/// The `(IR nodes, worst-case steps)` a return from inside loops adds when
+/// the policy is called: per `accept` in a loop body, a flag `Bind`, a
+/// `Continue` and a `Break`; per inner loop, a `Break` on the flag. The
+/// nodes count once; the steps run up to the loop bound, and nested loops
+/// multiply.
+fn loop_return_cost(stmts: &[Stmt], file: &SourceFile) -> (u64, u64) {
+    fn add(a: (u64, u64), b: (u64, u64)) -> (u64, u64) {
+        (a.0.saturating_add(b.0), a.1.saturating_add(b.1))
+    }
+    fn in_body(stmts: &[Stmt], file: &SourceFile) -> (u64, u64) {
         let per_term = CALL_FLAG_NODES.saturating_add(2);
         stmts
             .iter()
             .map(|stmt| match stmt {
-                Stmt::Action(ActionStmt::Accept(_)) => per_term.saturating_mul(3),
+                Stmt::Action(ActionStmt::Accept(_)) => {
+                    (per_term.saturating_mul(3), per_term.saturating_mul(3))
+                }
                 Stmt::If(if_stmt) => if_stmt
                     .bodies()
                     .map(|body| in_body(body, file))
-                    .fold(0, u64::saturating_add),
-                Stmt::For(inner) => loop_steps(inner, file).saturating_add(per_term),
-                Stmt::Action(_) | Stmt::Call(_) => 0,
+                    .fold((0, 0), add),
+                Stmt::For(inner) => add(loop_cost(inner, file), (per_term, per_term)),
+                Stmt::Action(_) | Stmt::Call(_) => (0, 0),
             })
-            .fold(0, u64::saturating_add)
+            .fold((0, 0), add)
     }
-    fn loop_steps(for_stmt: &ForStmt, file: &SourceFile) -> u64 {
-        loop_iteration_bound(&for_stmt.source, file).saturating_mul(in_body(&for_stmt.body, file))
+    fn loop_cost(for_stmt: &ForStmt, file: &SourceFile) -> (u64, u64) {
+        let (nodes, steps) = in_body(&for_stmt.body, file);
+        (
+            nodes,
+            loop_iteration_bound(&for_stmt.source, file).saturating_mul(steps),
+        )
     }
     stmts
         .iter()
         .map(|stmt| match stmt {
-            Stmt::For(for_stmt) => loop_steps(for_stmt, file),
+            Stmt::For(for_stmt) => loop_cost(for_stmt, file),
             Stmt::If(if_stmt) => if_stmt
                 .bodies()
-                .map(|body| loop_return_steps(body, file))
-                .fold(0, u64::saturating_add),
-            Stmt::Action(_) | Stmt::Call(_) => 0,
+                .map(|body| loop_return_cost(body, file))
+                .fold((0, 0), add),
+            Stmt::Action(_) | Stmt::Call(_) => (0, 0),
         })
-        .fold(0, u64::saturating_add)
+        .fold((0, 0), add)
 }
 
 /// One loop's `(body IR nodes, worst-case evaluation steps)` for the
@@ -3612,10 +3635,10 @@ fn for_costs(
                     pred_cost,
                     calls,
                     fns,
-                    &mut |guard, terms, action| {
+                    &mut |guard, terms, action, steps| {
                         let guards = guard.saturating_mul(terms);
                         nodes = nodes.saturating_add(guards);
-                        body_steps = body_steps.saturating_add(guards);
+                        body_steps = body_steps.saturating_add(guards).saturating_add(steps);
                         if let Some(action) = action {
                             nodes = nodes.saturating_add(1);
                             body_steps = body_steps
@@ -3639,9 +3662,9 @@ fn for_costs(
             }
             // The whole inlined callee, per iteration.
             Stmt::Call(call) => {
-                let cost = call_cost(call, PathCost::default(), calls);
-                nodes = nodes.saturating_add(cost);
-                body_steps = body_steps.saturating_add(cost);
+                let (call_nodes, call_steps) = call_cost(call, PathCost::default(), calls);
+                nodes = nodes.saturating_add(call_nodes);
+                body_steps = body_steps.saturating_add(call_steps);
             }
         }
     }
@@ -3702,7 +3725,7 @@ fn if_terms<'a>(
     pred_cost: &HashMap<&str, u64>,
     calls: &HashMap<&str, InlineCost>,
     fns: &HashMap<&str, FnCost>,
-    out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>),
+    out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>, u64),
 ) {
     fn body_terms<'a>(
         body: &'a [Stmt],
@@ -3710,10 +3733,10 @@ fn if_terms<'a>(
         pred_cost: &HashMap<&str, u64>,
         calls: &HashMap<&str, InlineCost>,
         fns: &HashMap<&str, FnCost>,
-        out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>),
+        out: &mut dyn FnMut(u64, u64, Option<&'a ActionStmt>, u64),
     ) {
         if body.is_empty() {
-            out(path.cost(), 1, None);
+            out(path.cost(), 1, None, 0);
         }
         for stmt in body {
             match stmt {
@@ -3721,9 +3744,13 @@ fn if_terms<'a>(
                     path.cost(),
                     guarded_action_terms(std::slice::from_ref(action), fns),
                     Some(action),
+                    0,
                 ),
                 Stmt::If(inner) => if_terms(inner, path, pred_cost, calls, fns, out),
-                Stmt::Call(call) => out(call_cost(call, path, calls), 1, None),
+                Stmt::Call(call) => {
+                    let (nodes, steps) = call_cost(call, path, calls);
+                    out(nodes, 1, None, steps.saturating_sub(nodes));
+                }
                 // Rejected by the typechecker; nothing lowers.
                 Stmt::For(_) => {}
             }
@@ -3737,7 +3764,7 @@ fn if_terms<'a>(
         // branch, under its path condition.
         let binds = guard_call_slots(&branch.cond, fns);
         if binds != 0 {
-            out(prefix.cost(), binds, None);
+            out(prefix.cost(), binds, None, 0);
         }
         body_terms(&branch.body, prefix.with(guard), pred_cost, calls, fns, out);
         // A flat `if` whose body only binds still gates its `else` with a
@@ -3750,7 +3777,7 @@ fn if_terms<'a>(
                 .iter()
                 .all(|stmt| matches!(stmt, Stmt::Action(ActionStmt::Let { .. })))
         {
-            out(prefix.with(guard).cost(), 1, None);
+            out(prefix.with(guard).cost(), 1, None, 0);
         }
         if flat || !super::coverage::body_decides(&branch.body) {
             prefix = prefix.with(guard.saturating_add(1));

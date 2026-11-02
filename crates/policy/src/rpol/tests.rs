@@ -11191,3 +11191,110 @@ mod callable_policies {
         );
     }
 }
+
+mod callable_policies_bounds {
+    use std::fmt::Write as _;
+
+    use super::super::{RpolFile, run_rpol_tests};
+    use super::{SetStore, compile_ok, diagnostics_of};
+
+    /// Statement calls nest under the same depth cap as `apply(...)`.
+    #[test]
+    fn call_chains_share_the_depth_cap() {
+        let chain = |links: usize| {
+            let mut source = String::from("policy p0 { term t { set med 1 } }\n");
+            for level in 1..=links {
+                writeln!(
+                    source,
+                    "policy p{level} {{ term t {{ apply p{} }} }}",
+                    level - 1
+                )
+                .unwrap();
+            }
+            source
+        };
+        compile_ok(&chain(8));
+        let (_, rendered) = diagnostics_of(&chain(9));
+        assert!(rendered.contains("nests policies more than"), "{rendered}");
+    }
+
+    /// A callee's bindings take frame slots above the caller's live ones
+    /// and the return flag. The callee here needs 240 slots (four nested
+    /// scopes of 60), so with the flag a caller fits 15 live bindings of
+    /// its own in the 256-slot frame, and not 16.
+    #[test]
+    fn call_frames_count_against_the_caller_frame() {
+        let lets = |prefix: &str, count: usize| {
+            (0..count).fold(String::new(), |mut out, n| {
+                writeln!(out, "let {prefix}{n} = {n}").unwrap();
+                out
+            })
+        };
+        let mut body = String::from("set med 1");
+        for level in 0..4 {
+            body = format!(
+                "if route.med >= {level} {{ {} {body} }}",
+                lets(&format!("l{level}v"), 60)
+            );
+        }
+        let source = |live: usize| {
+            format!(
+                "policy lib {{ term t {{ {body} }} }}
+                 policy caller {{ term t {{ {} apply lib; accept }} }}",
+                lets("c", live)
+            )
+        };
+        compile_ok(&source(15));
+        let (_, rendered) = diagnostics_of(&source(16));
+        assert!(rendered.contains("needs 257 binding slots"), "{rendered}");
+    }
+
+    /// A callee reading `peer.*` makes its caller's chain need peer
+    /// context, which takes the caller's peers out of update-group
+    /// sharing.
+    #[test]
+    fn peer_context_propagates_through_a_call() {
+        let file = RpolFile::parse(
+            "policy by-peer { term t { if peer.asn == 65001 { set med 5 } } }
+             policy caller { term t { apply by-peer; accept } }
+             policy plain { term t { set med 5; accept } }",
+        )
+        .expect("clean");
+        let caller = file
+            .compile_policy("caller", &[], &mut SetStore::new())
+            .unwrap();
+        let plain = file
+            .compile_policy("plain", &[], &mut SetStore::new())
+            .unwrap();
+        assert!(caller.requires_peer_context());
+        assert!(!plain.requires_peer_context());
+    }
+
+    /// A parameterized callee is instantiated per call site, and an
+    /// argument it uses as a prepend count is range-checked at the call.
+    #[test]
+    fn parameterized_callees_instantiate_per_call() {
+        let report = run_rpol_tests(
+            "policy tag(c: community, n: u32) { term t { add community c; prepend as 65000 n } }
+             policy caller(m: u32) {
+                 term t { apply tag(65000:1, 2); apply tag(65000:2, m); accept }
+             }
+             test both {
+                 route { prefix 192.0.2.0/24 }
+                 expect caller(3) == accept with community 65000:1, community 65000:2,
+                     prepend as 65000 3
+             }",
+        )
+        .unwrap_or_else(|d| panic!("{d:?}"));
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+        let (_, rendered) = diagnostics_of(
+            "policy tag(n: u32) { term t { prepend as 65000 n } }
+             policy caller(m: u32) { term t { apply tag(m); accept } }
+             test x { route { prefix 192.0.2.0/24 } expect caller(300) == accept }",
+        );
+        assert!(
+            rendered.contains("prepend count 300 out of range"),
+            "{rendered}"
+        );
+    }
+}
