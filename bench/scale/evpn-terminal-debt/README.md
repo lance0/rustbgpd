@@ -27,10 +27,10 @@ qualification must pass. Feed and receipt rows carry the daemon's wall clock and
 from the derived `main`, the same `CLOCK_MONOTONIC` the controller stamps on its
 dispatches (`mono_us`, microseconds).
 
-- **Timed overlap** cells dispatch the churn at refresh dispatch + 100 ms on the
+- **Timed overlap** cells dispatch the churn at refresh dispatch + 20 ms on the
   controller's `CLOCK_MONOTONIC`, sleeping then spinning; nothing observed from the
   daemon gates it, and no pressure witness is taken or required. The realised phase
-  must lie in [100, 102] ms, and at least one client's refresh replay (a
+  must lie in [20, 22] ms, and at least one client's refresh replay (a
   `data_admitted` row of 20,000 rows) must complete after the dispatch, in either
   arm; otherwise the cell is INVALID. Churn-applied is the dispatch to the last
   client's generation-2 actor input receipt, both on `CLOCK_MONOTONIC`, so source

@@ -251,7 +251,7 @@ class DependencyChecks(unittest.TestCase):
             self.write_wire_fixture(leg)
             row = {name: 0 for name in ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
                                         "refresh_pending", "eor_pending", "protocol_obligations", "retained", "peak", "owned_routes", "private_routes")}
-            row.update(members=3, owned_groups=2, owned_members=3, peer_budget=16777216, daemon_budget=268435456,
+            row.update(members=3, owned_groups=2, owned_members=3, peer_budget=self.q.REPORTED_PEER_BUDGET, daemon_budget=268435456,
                        peers=[[self.q.COMMON.peer(peer), 1 if peer == 1 else 0, False, 0, 0, 0, False, False, False, False]
                               for peer in range(3)])
             controls = terminal.check.lines(leg / "driver.log", "evpn_control ")
@@ -441,7 +441,8 @@ class DependencyChecks(unittest.TestCase):
 
             # Timed overlap cell on the same raw files: no pressure handshake,
             # churn timed on CLOCK_MONOTONIC from dispatch to the last receipt.
-            refresh_us, dispatch_us = 9_000_000, 9_100_500
+            refresh_us = 9_000_000
+            dispatch_us = refresh_us + terminal.BARS["churn_phase_us"] + 500
             overlap_events = [dict(event) for event in original_events
                               if event["event"] not in ("pressure-before", "pressure-after")]
             for event in overlap_events:
@@ -453,7 +454,7 @@ class DependencyChecks(unittest.TestCase):
                 value["mono_us"] = 8_000_000 if index % 2 == 0 else dispatch_us + 50_000 + index
             replay_rows = (terminal.BARS["clients"] - 1) * terminal.BARS["routes_per_source"]
             replays = [feed_fixture("data_admitted", 80, rows=replay_rows, peer=self.q.COMMON.peer(peer), mono_us=mono)
-                       for peer, mono in enumerate((9_040_000, 9_120_000, 9_210_000))]
+                       for peer, mono in enumerate((dispatch_us - 1_000, 9_120_000, 9_210_000))]
             feed[:0] = replays
             overlap = {key: value for key, value in copy.deepcopy(record).items()
                        if key not in ("pressure_before", "pressure_after")}
@@ -467,7 +468,8 @@ class DependencyChecks(unittest.TestCase):
 
             write_overlap(overlap_events)
             good = terminal.evidence(leg, overlap, self.q, self.r, self.wire)
-            self.assertEqual(good["phase"], {"phase_us": 100_500, "replays_before_dispatch": 1,
+            self.assertEqual(good["phase"], {"phase_us": terminal.BARS["churn_phase_us"] + 500,
+                                             "replays_before_dispatch": 1,
                                              "replay_residue_us": 9_210_000 - dispatch_us})
             self.assertEqual(good["churn_applied_seconds"], overlap["churn-applied-seconds"])
             self.assertNotIn("kernel", good)
@@ -482,11 +484,11 @@ class DependencyChecks(unittest.TestCase):
                     churn_event = next(event for event in events_now if event.get("command") == "terminal-churn"
                                        and event["event"] == "command")
                     if defect == "late-dispatch":
-                        churn_event["mono_us"] = refresh_us + 102_001
+                        churn_event["mono_us"] = refresh_us + terminal.BARS["churn_phase_us"] + 2_001
                         for index, value in enumerate(barriers):
                             if index % 2:
                                 value["mono_us"] = refresh_us + 200_000 + index
-                        current["churn-applied-seconds"] = (200_005 - 102_001) / 1e6
+                        current["churn-applied-seconds"] = (200_005 - terminal.BARS["churn_phase_us"] - 2_001) / 1e6
                     elif defect == "drained":
                         for value in feed[:3]:
                             value["mono_us"] = dispatch_us - 1_000
@@ -540,7 +542,7 @@ class DependencyChecks(unittest.TestCase):
             peer = self.q.COMMON.peer(1)
             row = {name: 0 for name in ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
                                         "refresh_pending", "eor_pending", "protocol_obligations", "retained", "peak", "owned_routes", "private_routes")}
-            row.update(members=3, owned_groups=2, owned_members=3, peer_budget=16777216, daemon_budget=268435456,
+            row.update(members=3, owned_groups=2, owned_members=3, peer_budget=self.q.REPORTED_PEER_BUDGET, daemon_budget=268435456,
                        peers=[[self.q.COMMON.peer(index), 1 if index == 1 else 0, False, 0, 0, 0, False, False, False, False]
                               for index in range(3)])
             (leg / "readiness.jsonl").write_text("".join(

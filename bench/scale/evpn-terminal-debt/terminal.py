@@ -29,10 +29,11 @@ BARS = {"clients": 3, "routes_per_source": 10000, "type2_fraction": .8,
         "kernel_sample_hz": 20, "max_repeated_inventory_visits": 0,
         "candidate_median_ratio": 1.03,
         # Timed overlap cells: churn dispatched on the controller's
-        # CLOCK_MONOTONIC at refresh dispatch + 100 ms, inside [100, 102] ms,
-        # while refresh replays still run in both arms. churn-applied is that
-        # dispatch to the last actor-applied receipt, on the same clock.
-        "churn_phase_us": 100_000, "churn_phase_window_us": 2_000,
+        # CLOCK_MONOTONIC at refresh dispatch + 20 ms, inside [20, 22] ms: after
+        # every replay has started and long before any arm's last replay ends.
+        # churn-applied is that dispatch to the last actor-applied receipt, on
+        # the same clock.
+        "churn_phase_us": 20_000, "churn_phase_window_us": 2_000,
         # Five timed overlap pairs carry the medians. Pressure cells keep the
         # Pending/kernel witness around churn; their timings are diagnostic.
         "schedule": [["overlap", "private"], ["overlap", "candidate"]] * 5
