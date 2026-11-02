@@ -998,7 +998,7 @@ impl<'a> Checker<'a> {
     }
 
     /// The three iterable source forms (LAN-303): `route.communities`
-    /// (standard, u32), `route.as-path` (ASNs), a named `asn-set`.
+    /// (standard communities), `route.as-path` (ASNs), a named `asn-set`.
     /// Everything else gets a spanned diagnostic naming why — the
     /// finite-source grammar is what makes every loop bound provable
     /// or runtime-meterable.
@@ -1016,12 +1016,12 @@ impl<'a> Checker<'a> {
                         DiagnosticCode::Typecheck,
                         path.span,
                         format!("`{}` is not iterable", path.render()),
-                        "large/extended communities are not u32 values",
+                        "only standard communities iterate",
                     )
                     .with_note(
-                        "the loop variable is u32-typed (ADR-0103 Decision 2); only \
-                         route.communities (standard, RFC 1997) and route.as-path iterate \
-                         in this slice — probe large/ext communities with `has` or `in`",
+                        "a loop variable is an ASN or a standard community (RFC 1997): \
+                         only route.communities and route.as-path iterate — probe \
+                         large/ext communities with `has` or `in`",
                     ),
                 ),
                 Ok(_) => self.diags.push(
@@ -2062,8 +2062,8 @@ impl<'a> Checker<'a> {
                     self.check_in(field, set);
                 }
             }
-            // LAN-303: `<binding> in <set>` — u32 value against an
-            // asn-set, or a community-set's standard members.
+            // LAN-303: `<binding> in <set>` — an ASN against an asn-set,
+            // or a community against a community-set's standard members.
             Expr::IdentIn { ident, set } => {
                 // LAN-2794: the probed value's type: a binding's own, a
                 // `community` parameter, or a u32 parameter (a constant).

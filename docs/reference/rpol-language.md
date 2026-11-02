@@ -1008,10 +1008,10 @@ community literals, probes a community-set whose members are all
 standard (`c in scrub` above; a member of another kind is a compile
 error), and is staged per execution by `add community <var>` /
 `remove community <var>`: the scrub-loop idiom. An ASN never probes a
-community-set, a community never probes an asn-set, and a runtime u32
-probes neither: that is how `0:64500` used to match ASN 64500. A
-community action also takes a constant u32 (a literal `let` or a u32
-parameter) standing for the community with that value. A loop removal is
+community-set and a community never probes an asn-set: that is how
+`0:64500` used to match ASN 64500. A u32 probes only an asn-set, and only
+as a constant (a literal `let` or a u32 parameter). A community action
+also takes a constant u32 standing for the community with that value. A loop removal is
 explicit, so it removes well-known values such as `NO_EXPORT` too, unlike
 `remove community *`. Shadowing follows
 the `let` rules — the loop variable shadows outer bindings, a body
