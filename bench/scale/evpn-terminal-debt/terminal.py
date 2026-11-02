@@ -113,6 +113,19 @@ def readiness_type(r):
     return Readiness
 
 
+def resume_after_fallback(controller, q, arm, debtor):
+    """Resume the readers; in a candidate forced cell, withdraw nothing until
+    the tick has sent the owed markers, so the drain the fallback bar measures
+    lies inside [resume, unfill]. The wait is bounded by the convergence bar."""
+    controller.command("resume")
+    started = controller.last_completion
+    if arm == "candidate":
+        resumed = controller.last_command_start["wall_us"]
+        sent = controller.fallback_send(resumed, debtor, BARS["convergence_seconds"])
+        q.accept(sent is not None, "fallback marker send exceeded the convergence bar")
+    return started
+
+
 def controller_type(r):
     # The pinned input's Controller builds its sampler from this module name.
     if not getattr(r.Readiness, "issues_slot_due_before_stop", False):
@@ -230,6 +243,18 @@ def controller_type(r):
                     self.event("refresh-full", peer=debtor, admitted=full[0], refusal=witness)
                     return self.last_event.copy()
             raise ValueError("refresh did not take the last outbound slot with a refused marker send")
+
+        def fallback_send(self, after, debtor, seconds):
+            """The debtor's owed markers sent by the resync tick after `after`, or
+            None when the bounded wait expires."""
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                self.poll()
+                if any(row["peer"] == debtor and row["wall_us"] >= after and row["event"] == "retry_sent"
+                       for row in self.feed):
+                    return True
+                time.sleep(.01)
+            return None
 
         def close(self):
             try:
@@ -543,8 +568,7 @@ def run_cell(output, manifest, q, r, wire, shape, arm, index, correctness):
                 controller.command("refresh", BARS["convergence_seconds"])
                 refresh_started = controller.last_command_start["wall_us"]
                 record["refresh_full"] = controller.refusal(refresh_started, record["fill"]["peer"])
-                controller.command("resume")
-                started = controller.last_completion
+                started = resume_after_fallback(controller, q, arm, record["fill"]["peer"])
                 controller.command("terminal-unfill", BARS["convergence_seconds"])
                 unfill_started = controller.last_command_start.copy()
                 record["applied"] = controller.source_barrier()

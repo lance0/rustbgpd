@@ -281,9 +281,11 @@ class ForcedRefusalChecks(unittest.TestCase):
         rows = forced_feed()
         refusal = check.refusal_witness(rows, "127.1.0.2", 70)
         rows[-1]["wall_us"] = RESUME + check.MARKER_RETRY_US + 100_000
-        self.assertTrue(check.fallback_within_bar(check.fallback(rows, refusal, RESUME, UNFILL)))
+        # The runner withdraws the fill only after the tick's send.
+        late_unfill = rows[-1]["wall_us"] + 10
+        self.assertTrue(check.fallback_within_bar(check.fallback(rows, refusal, RESUME, late_unfill)))
         rows[-1]["wall_us"] += 1
-        self.assertFalse(check.fallback_within_bar(check.fallback(rows, refusal, RESUME, UNFILL)))
+        self.assertFalse(check.fallback_within_bar(check.fallback(rows, refusal, RESUME, late_unfill)))
 
     def test_markers_settled_outside_the_tick_fail(self):
         for event in ("refresh_sent", "sample"):
@@ -311,6 +313,13 @@ class ForcedRefusalChecks(unittest.TestCase):
                     rows[4]["wall_us"] = RESUME - 1
                 with self.assertRaisesRegex(ValueError, "missing drain clock"):
                     check.fallback(rows, rows[2], RESUME, UNFILL)
+
+    def test_fill_withdrawn_before_the_fallback_send_is_invalid(self):
+        rows = forced_feed()
+        refusal = check.refusal_witness(rows, "127.1.0.2", 70)
+        # Unfill dispatched right after resume, before the drain and the tick's send.
+        with self.assertRaisesRegex(ValueError, "fill withdrawn before the fallback send"):
+            check.fallback(rows, refusal, RESUME, RESUME + 300)
 
     def test_refusal_after_resume_is_invalid(self):
         rows = forced_feed()
@@ -464,3 +473,39 @@ class SamplerStop(unittest.TestCase):
             scheduled = [json.loads(line)["scheduled"] for line in sampler.path.read_text().splitlines()]
             self.assertEqual(sorted(scheduled), [0., .05])
             self.assertGreaterEqual(max(scheduled), sampler.stop_at - .05)
+
+
+class ForcedResumeOrder(unittest.TestCase):
+    def run_order(self, arm, sent=True):
+        from types import SimpleNamespace
+        import terminal
+
+        calls = []
+
+        class Controller:
+            last_completion, last_command_start = 5.0, {"wall_us": 123}
+
+            def command(self, name, *args):
+                calls.append(name)
+
+            def fallback_send(self, after, debtor, seconds):
+                calls.append(("wait", after, debtor, seconds))
+                return True if sent else None
+
+        failures = []
+        q = SimpleNamespace(accept=lambda ok, reason: ok or failures.append(reason))
+        started = terminal.resume_after_fallback(Controller(), q, arm, "127.1.0.2")
+        calls.append("terminal-unfill")
+        return calls, started, failures
+
+    def test_candidate_withdraws_the_fill_only_after_the_fallback_send(self):
+        import terminal
+
+        calls, started, failures = self.run_order("candidate")
+        self.assertEqual(calls, ["resume", ("wait", 123, "127.1.0.2", terminal.BARS["convergence_seconds"]),
+                                 "terminal-unfill"])
+        self.assertEqual((started, failures), (5.0, []))
+        calls, _, failures = self.run_order("candidate", sent=False)
+        self.assertEqual(failures, ["fallback marker send exceeded the convergence bar"])
+        calls, _, failures = self.run_order("private")
+        self.assertEqual((calls, failures), (["resume", "terminal-unfill"], []))

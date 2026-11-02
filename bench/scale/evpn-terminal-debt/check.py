@@ -311,11 +311,14 @@ def fallback(feed, refusal, resume_us, limit_us):
             "nonmonotone terminal-marker send-site counter")
     require(refusal in rows and refusal["wall_us"] < resume_us <= limit_us,
             "refusal does not precede the reader resume")
+    later = rows[rows.index(refusal) + 1:]
+    sent = next((row for row in later if row["owed"] == 0), None)
+    # The fill is withdrawn only after the fallback send, so the drain window
+    # [resume, unfill] contains the drain the bar measures.
+    require(sent is None or sent["wall_us"] <= limit_us, "fill withdrawn before the fallback send")
     empty = next((row for row in rows if resume_us <= row["wall_us"] <= limit_us and row["event"] == "sample"
                   and row["capacity"] == row["max_capacity"]), None)
     require(empty is not None, "missing drain clock: no empty-channel sample after resume")
-    later = rows[rows.index(refusal) + 1:]
-    sent = next((row for row in later if row["owed"] == 0), None)
     return {"refused_us": refusal["wall_us"], "resume_us": resume_us, "empty_us": empty["wall_us"],
             "drain_us": empty["wall_us"] - resume_us,
             "sent_event": sent["event"] if sent else None, "sent_us": sent["wall_us"] if sent else None,

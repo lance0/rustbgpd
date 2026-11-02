@@ -513,7 +513,7 @@ class DependencyChecks(unittest.TestCase):
             self.assertEqual(good["work"]["inventory_visits"], 0)
             terminal.accept_report(good, "candidate", self.q)
             for mode, failure in (("no-refusal", "no refused refresh-site"), ("no-drain-clock", "missing drain clock"),
-                                  ("late-tick", "resync tick within 1 s"), ("free-slot", "last outbound slot")):
+                                  ("free-slot", "last outbound slot"), ("late-tick", "resync tick within 1 s")):
                 with self.subTest(mode=mode):
                     rows, current, raw = copy.deepcopy(feed), copy.deepcopy(record), copy.deepcopy(events)
                     if mode == "no-refusal":
@@ -521,8 +521,31 @@ class DependencyChecks(unittest.TestCase):
                     elif mode == "no-drain-clock":
                         rows[6]["capacity"] = 4095
                     elif mode == "late-tick":
-                        # One microsecond past resume + 1 s + the 10 us drain.
-                        rows[7]["wall_us"] = 530 + 1_000_000 + 10 + 1
+                        # One microsecond past resume + 1 s + the 10 us drain. The
+                        # runner withdraws the fill only after that send, so every
+                        # later clock moves with it. Last mode: shifts in place.
+                        late = 530 + 1_000_000 + 10 + 1
+                        delta = late - rows[7]["wall_us"]
+
+                        def shift(value, delta=delta):
+                            if isinstance(value, dict):
+                                for key, item in value.items():
+                                    if key.endswith("_us") and isinstance(item, int) and item > 545:
+                                        value[key] = item + delta
+                                    else:
+                                        shift(item, delta)
+                            elif isinstance(value, list):
+                                for item in value:
+                                    shift(item, delta)
+                        for value in (rows, raw, current, work, barriers):
+                            shift(value)
+                        rows[7]["wall_us"] = late
+                        controls = [json.loads(line.split(" ", 1)[1])
+                                    for line in (leg / "driver.log").read_text().splitlines()]
+                        prefixes = [line.split(" ", 1)[0] for line in (leg / "driver.log").read_text().splitlines()]
+                        shift(controls)
+                        (leg / "driver.log").write_text("".join(f"{prefix} {json.dumps(value)}\n"
+                                                                for prefix, value in zip(prefixes, controls)))
                     else:
                         rows[3]["capacity"] = 1
                         current["refresh_full"]["admitted"]["capacity"] = 1
