@@ -11314,3 +11314,151 @@ policy p { term t { apply   lib( 5 ) ;if route.med >= 1 { apply lib(2) } for c i
     assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
     assert_eq!(compile_ok(source), compile_ok(&formatted));
 }
+
+mod callable_policies_naming {
+    use std::sync::Arc;
+
+    use rustbgpd_wire::RpkiValidation;
+
+    use super::super::RpolFile;
+    use super::{SetStore, compile_ok, route_ctx, v4};
+    use crate::engine::PolicyAction;
+
+    const SOURCE: &str = "policy lib {
+        term bad { if route.med >= 100 { reject } }
+        term good { if route.med >= 50 { set local-pref 300; accept } }
+        term tag { add community 65000:1 }
+    }
+    policy strict { default-action reject term ok { if route.med <= 10 { accept } } }
+    policy middle { term t { apply lib; set med 2 } }
+    policy caller { term t { apply lib; apply strict; accept } }
+    policy outer { term o { apply middle; accept } }
+    policy wrapper(n: u32) { term w { apply tagger(n); accept } }
+    policy tagger(m: u32) { term s { set med m } }
+    test hit { route { prefix 192.0.2.0/24; med 60 } expect caller == reject }
+    test nested { route { prefix 192.0.2.0/24; med 20 } expect outer == accept }";
+
+    fn names(policy: &str) -> Vec<String> {
+        let chain = compile_ok(SOURCE);
+        chain
+            .policies
+            .iter()
+            .find(|p| p.name.as_deref() == Some(policy))
+            .unwrap()
+            .terms
+            .iter()
+            .map(|t| t.name.clone().unwrap_or_default())
+            .collect()
+    }
+
+    /// Inlined terms are named under the call site,
+    /// `<term>.<n>/<call>:<callee-term>`, with the flag's own terms as
+    /// `:enter`, `:return` and `:default`, and nested calls compose.
+    #[test]
+    fn inlined_terms_are_named_under_the_call() {
+        assert_eq!(
+            names("caller"),
+            [
+                "t.1/lib:enter",
+                "t.2/lib:bad",
+                "t.3/lib:good",
+                "t.4/lib:good:return",
+                "t.5/lib:tag",
+                "t.6/strict:enter",
+                "t.7/strict:ok",
+                "t.8/strict:ok:return",
+                "t.9/strict:default",
+                "t.10",
+            ]
+        );
+        assert_eq!(
+            names("outer"),
+            [
+                "o.1/middle:enter",
+                "o.2/middle:t.1/lib:enter",
+                "o.3/middle:t.2/lib:bad",
+                "o.4/middle:t.3/lib:good",
+                "o.5/middle:t.4/lib:good:return",
+                "o.6/middle:t.5/lib:tag",
+                "o.7/middle:t.6",
+                "o.8",
+            ]
+        );
+    }
+
+    /// Explain names the deciding inlined term under its call.
+    #[test]
+    fn explain_names_inlined_terms() {
+        let file = RpolFile::parse(SOURCE).expect("clean");
+        let compiled = file
+            .compile_policy("caller", &[], &mut SetStore::new())
+            .unwrap();
+        let chain = crate::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+            "caller".into(),
+            Arc::new(compiled),
+        )]);
+        let mut ctx = route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound);
+        ctx.med = Some(150);
+        let trace = crate::explain_chain_statements(Some(&chain), &ctx);
+        assert_eq!(trace.action, PolicyAction::Deny);
+        let names: Vec<_> = trace
+            .steps
+            .iter()
+            .filter_map(|s| s.term_name.clone())
+            .collect();
+        assert!(names.iter().any(|n| n == "t.2/lib:bad"), "{names:?}");
+    }
+
+    /// In-language coverage credits the called policy's source terms.
+    #[test]
+    fn coverage_credits_the_callee_terms() {
+        let file = RpolFile::parse(SOURCE).expect("clean");
+        let (report, coverage) = file.run_tests_with_coverage();
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+        let lib = coverage.policies.iter().find(|p| p.name == "lib").unwrap();
+        let term = |name: &str| lib.terms.iter().find(|t| t.name == name).unwrap();
+        assert!(term("bad").evaluated > 0, "{lib:#?}");
+        assert!(term("good").matched > 0, "{lib:#?}");
+        // The `hit` route returns at `good`, the `nested` route reaches `tag`.
+        assert!(term("tag").evaluated > 0, "{lib:#?}");
+    }
+}
+
+/// A policy that holds an `apply` statement, at any depth, cannot be an
+/// `apply(...)` target: a predicate must not have side effects, and the
+/// called policy's writes would be one.
+#[test]
+fn a_policy_with_an_apply_statement_is_not_a_predicate_target() {
+    for body in [
+        "apply lib",
+        "if route.med >= 1 { apply lib }",
+        "for c in route.communities { apply lib }",
+    ] {
+        let (diags, rendered) = diagnostics_of(&format!(
+            "policy lib {{ term t {{ set med 1 }} }}
+             policy runs {{ term t {{ {body} }} }}
+             policy asks {{ term t {{ if apply(runs) {{ accept }} }} }}"
+        ));
+        // A loop is a predicate-target error of its own as well.
+        let calls = diags
+            .0
+            .iter()
+            .filter(|d| d.message.contains("it runs another policy"))
+            .count();
+        assert_eq!(calls, 1, "{body}: {rendered}");
+        assert!(
+            rendered.contains("cannot `apply(...)` policy `runs`: it runs another policy"),
+            "{body}: {rendered}"
+        );
+        assert!(
+            rendered.contains("first `apply` statement is here"),
+            "{body}: {rendered}"
+        );
+    }
+    // The called policy itself stays a valid predicate target.
+    compile_ok(
+        "policy lib { term t { if route.med >= 5 { accept } } term r { reject } }
+         policy runs { term t { apply lib } }
+         policy asks { term t { if apply(lib) { accept } } }",
+    );
+}

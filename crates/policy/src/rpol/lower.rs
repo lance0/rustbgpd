@@ -659,12 +659,15 @@ impl<'a> Lowerer<'a> {
         for term_def in &def.terms {
             let lowered = self.lower_term(term_def, env, store);
             let multi = lowered.len() > 1;
-            for (index, (guard, action)) in lowered.into_iter().enumerate() {
-                let name = if multi {
+            for (index, (guard, action, suffix)) in lowered.into_iter().enumerate() {
+                let mut name = if multi {
                     format!("{}.{}", term_def.name.node, index + 1)
                 } else {
                     term_def.name.node.clone()
                 };
+                if let Some(suffix) = suffix {
+                    name.push_str(&suffix);
+                }
                 terms.push(Term {
                     name: Some(name),
                     guard,
@@ -700,7 +703,7 @@ impl<'a> Lowerer<'a> {
         term: &super::ast::TermDef,
         env: &HashMap<&str, u32>,
         store: &mut SetStore,
-    ) -> Vec<(MatchExpr, TermAction)> {
+    ) -> Lowered {
         // Slots reset per source term: bindings never cross terms.
         let mut lets = LetEnv::starting_at(self.slot_base);
         self.lower_stmts(&term.stmts, env, &mut lets, store)
@@ -723,8 +726,8 @@ impl<'a> Lowerer<'a> {
         env: &HashMap<&str, u32>,
         lets: &mut LetEnv,
         store: &mut SetStore,
-    ) -> Vec<(MatchExpr, TermAction)> {
-        let mut out: Vec<(MatchExpr, TermAction)> = Vec::new();
+    ) -> Lowered {
+        let mut out = Lowered::default();
         let mut pending = RouteModifications::default();
         for stmt in stmts {
             match stmt {
@@ -871,7 +874,7 @@ impl<'a> Lowerer<'a> {
                     let body = self
                         .lower_stmts(&for_stmt.body, env, lets, store)
                         .into_iter()
-                        .map(|(guard, action)| Term {
+                        .map(|(guard, action, _)| Term {
                             name: None,
                             guard,
                             action,
@@ -908,7 +911,7 @@ impl<'a> Lowerer<'a> {
         env: &HashMap<&str, u32>,
         lets: &mut LetEnv,
         store: &mut SetStore,
-        out: &mut Vec<(MatchExpr, TermAction)>,
+        out: &mut Lowered,
     ) {
         let branch = &if_stmt.branches[0];
         // Function calls in the guard hoist their binds as
@@ -970,7 +973,7 @@ impl<'a> Lowerer<'a> {
         env: &HashMap<&str, u32>,
         lets: &mut LetEnv,
         store: &mut SetStore,
-        out: &mut Vec<(MatchExpr, TermAction)>,
+        out: &mut Lowered,
     ) {
         // The negation of every earlier branch guard that can fall through;
         // `None` before the first such branch. An earlier branch whose body
@@ -1023,7 +1026,7 @@ impl<'a> Lowerer<'a> {
         env: &HashMap<&str, u32>,
         lets: &mut LetEnv,
         store: &mut SetStore,
-        out: &mut Vec<(MatchExpr, TermAction)>,
+        out: &mut Lowered,
     ) {
         let scope = lets.mark();
         let terms = self.lower_stmts(body, env, lets, store);
@@ -1035,12 +1038,12 @@ impl<'a> Lowerer<'a> {
                 TermAction::Continue(RouteModifications::default()),
             ));
         }
-        for (guard, action) in terms {
+        for (guard, action, suffix) in terms {
             let guard = match guard {
                 MatchExpr::True => path_or_true(),
                 inner => conjoin(path, inner),
             };
-            out.push((guard, action));
+            out.0.push((guard, action, suffix));
         }
     }
 
@@ -1315,7 +1318,7 @@ impl<'a> Lowerer<'a> {
         env: &HashMap<&str, u32>,
         lets: &mut LetEnv,
         store: &mut SetStore,
-        out: &mut Vec<(MatchExpr, TermAction)>,
+        out: &mut Lowered,
     ) {
         let args = self.reference_args(&call.args, env);
         let def = self
@@ -1332,22 +1335,30 @@ impl<'a> Lowerer<'a> {
         self.slot_base = outer_base;
         lets.reset(scope);
 
-        out.push((
+        let written: Vec<CallArg> = call.args.iter().map(|arg| arg.node.clone()).collect();
+        let call_name = super::testing::render_call(&call.policy.node, &written);
+        out.push_named(
             MatchExpr::True,
             TermAction::Bind {
                 slot: flag,
                 name: RETURN_FLAG.into(),
                 expr: ValueExpr::Const(0),
             },
-        ));
+            format!("/{call_name}:enter"),
+        );
         let mut ordinal: u32 = 0;
         for term in callee.terms {
             let guard = conjoin(Some(&flag_is(flag, 0)), term.guard);
             ordinal += 1;
-            emit_returning(flag, ordinal, guard, term.action, out);
+            let suffix = format!("/{call_name}:{}", term.name.as_deref().unwrap_or("?"));
+            emit_returning(flag, ordinal, guard, term.action, &suffix, out);
         }
         if callee.default_action == PolicyAction::Deny {
-            out.push((flag_is(flag, 0), TermAction::Deny));
+            out.push_named(
+                flag_is(flag, 0),
+                TermAction::Deny,
+                format!("/{call_name}:default"),
+            );
         }
     }
 
@@ -1621,6 +1632,44 @@ fn lower_cmp(
     }
 }
 
+/// Lowered IR terms of one source term, in walk order, before naming. A
+/// term inlined at an `apply` statement carries its name under the call
+/// (`/<call>:<callee-term>`); every other term is named by position.
+#[derive(Default)]
+struct Lowered(Vec<(MatchExpr, TermAction, Option<String>)>);
+
+impl Lowered {
+    fn push(&mut self, (guard, action): (MatchExpr, TermAction)) {
+        self.0.push((guard, action, None));
+    }
+
+    /// A term with its name suffix under a call site.
+    fn push_named(&mut self, guard: MatchExpr, action: TermAction, suffix: String) {
+        self.0.push((guard, action, Some(suffix)));
+    }
+
+    fn last_mut(&mut self) -> Option<(&mut MatchExpr, &mut TermAction)> {
+        self.0.last_mut().map(|(guard, action, _)| (guard, action))
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl IntoIterator for Lowered {
+    type Item = (MatchExpr, TermAction, Option<String>);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 /// The binding name of a call's return flag, shown in explain traces. No
 /// source identifier can spell it, so no binding can shadow it.
 const RETURN_FLAG: &str = "#return";
@@ -1646,25 +1695,31 @@ fn emit_returning(
     ordinal: u32,
     guard: MatchExpr,
     action: TermAction,
-    out: &mut Vec<(MatchExpr, TermAction)>,
+    suffix: &str,
+    out: &mut Lowered,
 ) {
     match action {
         TermAction::Permit(mods) => {
-            out.push((
+            out.push_named(
                 guard,
                 TermAction::Bind {
                     slot: flag,
                     name: RETURN_FLAG.into(),
                     expr: ValueExpr::Const(ordinal),
                 },
-            ));
-            out.push((flag_is(flag, ordinal), TermAction::Continue(mods)));
+                suffix.to_string(),
+            );
+            out.push_named(
+                flag_is(flag, ordinal),
+                TermAction::Continue(mods),
+                format!("{suffix}:return"),
+            );
         }
         TermAction::ForEach(mut node) => {
             node.body = loop_body_returning(flag, ordinal, std::mem::take(&mut node.body));
-            out.push((guard, TermAction::ForEach(node)));
+            out.push_named(guard, TermAction::ForEach(node), suffix.to_string());
         }
-        other => out.push((guard, other)),
+        other => out.push_named(guard, other, suffix.to_string()),
     }
 }
 
@@ -1747,7 +1802,7 @@ fn conjoin(path: Option<&MatchExpr>, inner: MatchExpr) -> MatchExpr {
 /// [`TermAction::Continue`] term, preserving execution order around
 /// terms that must stand alone (`if` blocks, loops, loop control,
 /// binding-valued community actions).
-fn flush_pending(out: &mut Vec<(MatchExpr, TermAction)>, pending: &mut RouteModifications) {
+fn flush_pending(out: &mut Lowered, pending: &mut RouteModifications) {
     if !pending.is_empty() {
         out.push((
             MatchExpr::True,

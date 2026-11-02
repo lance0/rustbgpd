@@ -298,6 +298,9 @@ impl CoverageAccum {
         // term lowers to several — group greedily by that contract
         // (term names are identifiers and cannot contain `.`).
         let mut src = 0usize;
+        // Terms inlined at `apply` statements also credit the called
+        // policy's own source terms, named under the call site.
+        let mut callee_hits: Vec<(&str, &str, bool, bool)> = Vec::new();
         for (i, term) in policy.terms.iter().enumerate() {
             let Some(ir_name) = term.name.as_deref() else {
                 continue;
@@ -310,15 +313,21 @@ impl CoverageAccum {
                 // bug; degrade to dropped attribution, never a panic.
                 break;
             }
-            if evaluated.get(i).copied().unwrap_or(0) > 0 {
+            let was_reached = evaluated.get(i).copied().unwrap_or(0) > 0;
+            let was_hit = matched.get(i).copied().unwrap_or(0) > 0;
+            if was_reached {
                 reached[src] = true;
             }
             if !matches!(term.guard, MatchExpr::True) {
                 conditional[src] = true;
-                if matched.get(i).copied().unwrap_or(0) > 0 {
+                if was_hit {
                     hit[src] = true;
                 }
             }
+            callee_hits.extend(
+                called_terms(ir_name)
+                    .map(|(policy, callee_term)| (policy, callee_term, was_reached, was_hit)),
+            );
         }
         for (term, ((reached, hit), conditional)) in entry
             .terms
@@ -330,6 +339,38 @@ impl CoverageAccum {
                 // An unconditional term "matches" whenever reached.
                 if hit || !conditional {
                     term.matched += 1;
+                }
+            }
+        }
+        self.credit_calls(&callee_hits);
+    }
+
+    /// Credit the called policies' source terms with this walk's facts,
+    /// each source term at most once per walk.
+    fn credit_calls(&mut self, hits: &[(&str, &str, bool, bool)]) {
+        let mut credited: HashMap<(usize, usize), (bool, bool)> = HashMap::new();
+        for &(policy, ir_term, reached, hit) in hits {
+            let Some(&slot) = self.index.get(policy) else {
+                continue;
+            };
+            let Some(src) = self.policies[slot]
+                .terms
+                .iter()
+                .position(|term| belongs(ir_term, &term.name))
+            else {
+                continue;
+            };
+            let entry = credited.entry((slot, src)).or_default();
+            entry.0 |= reached;
+            entry.1 |= reached && hit;
+        }
+        for ((slot, src), (reached, hit)) in credited {
+            let policy = &mut self.policies[slot];
+            policy.status = PolicyTestStatus::Tested;
+            if reached {
+                policy.terms[src].evaluated += 1;
+                if hit {
+                    policy.terms[src].matched += 1;
                 }
             }
         }
@@ -404,6 +445,30 @@ fn collect_expr_applies<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
         Expr::Apply { policy, .. } => out.push(&policy.node),
         _ => {}
     }
+}
+
+/// The called policies an inlined IR term name passes through, with the
+/// callee's IR term at each: `t.3/a(1):x.2/b:y` gives `(a, x.2)` and
+/// `(b, y)`. A call's own flag terms (`:enter`, `:default`) name no callee
+/// term, and `:return` belongs to the term before it.
+fn called_terms(ir: &str) -> impl Iterator<Item = (&str, &str)> {
+    ir.split('/').skip(1).filter_map(|segment| {
+        // `<call>:<callee-term>`; a call's arguments may hold `:`.
+        let mut depth = 0usize;
+        let colon = segment.char_indices().find_map(|(i, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ':' if depth == 0 => return Some(i),
+                _ => {}
+            }
+            None
+        })?;
+        let call = &segment[..colon];
+        let policy = call.split('(').next().unwrap_or(call);
+        let term = segment[colon + 1..].split(':').next().unwrap_or("");
+        (!matches!(term, "enter" | "default" | "")).then_some((policy, term))
+    })
 }
 
 /// Does IR term name `ir` belong to source term `src`? Either the name
