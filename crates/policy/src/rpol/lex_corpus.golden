@@ -64,6 +64,9 @@ docs/artifacts/soak/soak-rs-flagship-20261025T223837Z/scenario/member.rpol 48 fa
 docs/artifacts/soak/soak-rs-flagship-20261027T050805Z/scenario/gen-a.rpol 48 faf50c281c6045e3
 docs/artifacts/soak/soak-rs-flagship-20261027T050805Z/scenario/gen-b.rpol 48 faf50c281c6045e3
 docs/artifacts/soak/soak-rs-flagship-20261027T050805Z/scenario/member.rpol 48 faf50c281c6045e3
+docs/artifacts/soak/soak-rs-flagship-20261101T061310Z/scenario/gen-a.rpol 48 faf50c281c6045e3
+docs/artifacts/soak/soak-rs-flagship-20261101T061310Z/scenario/gen-b.rpol 48 faf50c281c6045e3
+docs/artifacts/soak/soak-rs-flagship-20261101T061310Z/scenario/member.rpol 48 faf50c281c6045e3
 docs/perf/artifacts/explain-cache-opt-in-2026-07/gen-a.rpol 48 faf50c281c6045e3
 docs/perf/artifacts/explain-cache-opt-in-2026-07/gen-b.rpol 48 faf50c281c6045e3
 docs/perf/artifacts/explain-cache-opt-in-2026-07/member.rpol 48 faf50c281c6045e3
