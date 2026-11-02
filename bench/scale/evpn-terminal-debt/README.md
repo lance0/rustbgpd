@@ -10,8 +10,9 @@ The harness is independent of the qualification branch. Its required input is
 one explicit clean commit. The 2026-10-27 receipt used qualification commit
 `a5da4df26898b3658511babd3cb919e130b7fc40` from
 [the qualification PR](https://github.com/lance0/rustbgpd/pull/3440). The current
-input, `ee118318bd2757bf548137f600ae76974453e220`, merges that commit into the owned-feed renewal fix
-`028932dc82b73cc95ec765b32b11ae5868a72286`; it changes no product file of the fix.
+input, `8de125af1384e61d8fdb31268bc26a710507a72d`, merges that commit into the
+owned-feed renewal fix `288e12769ec20e56f01ed30b26471c2f1678d35e`; it changes no
+product file of the fix.
 Preparation archives that input and this harness separately, records both source
 commits and archive hashes, and derives two independent source exports. Verification
 compares every export input with both archives and the reviewed derivations.
