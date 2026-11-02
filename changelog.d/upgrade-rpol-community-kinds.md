@@ -5,9 +5,9 @@
   extended list), or removes it with `remove community in S`, no longer
   loads; the error names the member of the other kind. Write
   `route.any-community in S` or `remove any-community in S` to keep matching
-  every kind, or split the set by kind. A route that matched only because a
-  standard member and a large community (or the reverse) shared digits no
-  longer matches.
+  every kind, or split the set by kind. Datasets and set parameters filter
+  at runtime instead: a route that matched only because a standard member
+  and a large community (or the reverse) shared digits no longer matches.
 - **`.rpol` ASNs take no arithmetic, and values probe sets of their own
   kind.** A policy with arithmetic on `route.origin-as`, `peer.asn` or an
   AS-path loop variable (`route.origin-as + 0 == 64500`,
