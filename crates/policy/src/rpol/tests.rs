@@ -11228,6 +11228,33 @@ mod callable_policies {
         );
     }
 
+    /// Community operations keep statement order across a call boundary:
+    /// whichever of the caller's and the callee's operations on a value
+    /// runs later wins, whether the callee returns or falls through.
+    #[test]
+    fn community_statement_order_spans_the_call() {
+        passes(
+            "policy scrub { term t { remove community 65000:1; accept } }
+             policy tag { term t { add community 65000:1 } }
+             policy add-then-call { term t { add community 65000:1; apply scrub; accept } }
+             policy call-then-add { term t { apply scrub; add community 65000:1; accept } }
+             policy remove-then-call { term t { remove community 65000:1; apply tag; accept } }
+             test callee-removes-later {
+                 route { prefix 192.0.2.0/24 }
+                 expect add-then-call == accept with without community 65000:1
+             }
+             test caller-adds-later {
+                 route { prefix 192.0.2.0/24; communities [65000:1] }
+                 expect call-then-add == accept with community 65000:1
+             }
+             test fall-through-adds-later {
+                 route { prefix 192.0.2.0/24; communities [65000:1] }
+                 expect remove-then-call == accept with community 65000:1
+             }",
+            3,
+        );
+    }
+
     /// Callee writes reach the outcome, a later caller write overrides
     /// them, and every condition reads the route as received.
     #[test]

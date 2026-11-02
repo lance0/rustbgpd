@@ -1326,7 +1326,8 @@ test customer-route-is-scrubbed {
   declaration, returns; `default-action reject` denies. A policy means the
   same thing when called, as a chain member and under its own tests.
 - **Writes stage into the caller in order.** A later scalar write wins, and
-  community additions and removals apply in order. **Every condition reads
+  for a community value the later operation wins, whether the caller's or
+  the called policy's (statement order, as across terms). **Every condition reads
   the route as received**, in the called policy and in the caller after
   the call, as everywhere else in the language.
 - **`else if` first-match is unchanged.** A branch whose body calls a
