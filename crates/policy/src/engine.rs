@@ -418,7 +418,9 @@ impl PrependAs {
     /// across chain members: `leftmost` is the ASN the latest of them
     /// placed first, `earliest` the one the first of them placed. So
     /// `path-first` reads the latest prepend, and `origin` of a route that
-    /// arrived without any ASN reads the first.
+    /// arrived without one (no `AS_SEQUENCE` ASN: an empty path, or only an
+    /// `AS_SET`) reads the first, as [`AsPath::origin_asn`] would on the
+    /// prepended path, whose leading `AS_SEQUENCE` is then the rightmost.
     #[must_use]
     pub fn resolve_after(
         self,
@@ -427,14 +429,9 @@ impl PrependAs {
         leftmost: Option<u32>,
         earliest: Option<u32>,
     ) -> Option<u32> {
-        let arrived_empty = ctx.as_path.is_none_or(|path| {
-            path.segments.iter().all(|segment| match segment {
-                AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns.is_empty(),
-            })
-        });
         match self {
             PrependAs::PathFirst if leftmost.is_some() => leftmost,
-            PrependAs::OriginAs if ctx.origin_asn.is_none() && arrived_empty => earliest,
+            PrependAs::OriginAs if ctx.origin_asn.is_none() => earliest,
             _ => return self.resolve(local_asn, ctx),
         }
         .filter(|&asn| asn != 0)

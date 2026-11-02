@@ -11887,8 +11887,20 @@ test origin-of-a-path-is-unchanged {
     route { prefix 192.0.2.0/24; as-path "64500" }
     expect chain [first, then-origin] == accept with only prepend "64500 65000 65000"
 }
+test origin-of-an-as-set-only-path-within {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect origin-within == accept with only prepend "65000 65000"
+}
+test origin-of-an-as-set-only-path-across-members {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect chain [first, then-origin] == accept with only prepend "65000 65000 65000"
+}
+test origin-of-an-as-set-only-path-alone-fails-closed {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect then-origin == error absent-prepend-operand
+}
 "#,
-            5,
+            8,
         );
     }
 

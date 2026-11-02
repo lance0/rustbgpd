@@ -1525,8 +1525,10 @@ must remove those too. Pin the threshold with fixtures on both sides of it and
 runs: the prepends before it, in statement order and in earlier chain
 members, have already been placed. So `prepend as 65000 2; prepend as
 path-first 1` places `65000 65000 65000`, and on a route that arrived
-with no ASN, `prepend as 65000 1; prepend as origin 1` places
-`65000 65000`. Conditions still read the route as it arrived.
+without an origin (an empty path, or only an `AS_SET`, where
+`route.origin-as` has no value), `prepend as 65000 1; prepend as origin 1`
+places `65000 65000`: the prepended `AS_SEQUENCE` is then the rightmost
+one. Conditions still read the route as it arrived.
 
 **Direction legality.** `self`, `origin`, and `path-first` are legal on import and
 export chains. `peer` is **import-only**: on an export chain it would

@@ -826,6 +826,7 @@ policy prepend-56 { term t { prepend as 65001 56; accept } }
 policy prepend-55 { term t { prepend as 65001 55; accept } }
 policy prepend-65000-twice { term t { prepend as 65000 2 } }
 policy then-path-first { term t { prepend as path-first 1; accept } }
+policy then-origin { term t { prepend as origin 1; accept } }
 ";
 
 fn seeded_member(name: &str) -> NamedPolicy {
@@ -1029,6 +1030,40 @@ fn explain_agrees_with_live_on_sequential_operands() {
     assert_eq!(
         trace.steps[1].modifications,
         ["as_path prepend path-first=65000 x1"]
+    );
+
+    // A route that arrived with only an AS_SET has no origin; after the
+    // earlier member's prepend, `origin` reads the prepended AS_SEQUENCE,
+    // as `AsPath::origin_asn` does on the prepended path.
+    let set_only = rustbgpd_wire::AsPath {
+        segments: vec![rustbgpd_wire::AsPathSegment::AsSet(vec![64500, 64501])],
+    };
+    assert_eq!(set_only.origin_asn(), None);
+    let ctx = RouteContext {
+        as_path: Some(&set_only),
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let chain = PolicyChain::from_named(vec![
+        seeded_member("prepend-65000-twice"),
+        seeded_member("then-origin"),
+    ]);
+    let live = chain.compiled().evaluate(&ctx);
+    assert_eq!(live.action, PolicyAction::Permit);
+    assert_eq!(live.modifications.prepended_asns(), [65000, 65000, 65000]);
+    let mut attrs = vec![rustbgpd_wire::PathAttribute::AsPath(set_only.clone())];
+    crate::apply_modifications(&mut attrs, &live.modifications);
+    let rustbgpd_wire::PathAttribute::AsPath(prepended) = &attrs[0] else {
+        panic!("AS_PATH kept");
+    };
+    assert_eq!(prepended.origin_asn(), Some(65000));
+    let compiled = chain.compiled();
+    let mut hits = compiled.zero_term_hits();
+    assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(
+        trace.steps[1].modifications,
+        ["as_path prepend origin=65000 x1"]
     );
 }
 
