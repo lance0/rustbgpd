@@ -841,7 +841,7 @@ async fn received_empty_path_keeps_rpki_not_found_after_import_and_cache_updates
     session.validation_rx = Some(snapshot_rx);
     let mut statement = retention_statement(None, PolicyAction::Permit);
     statement.match_rpki_validation = Some(RpkiValidation::NotFound);
-    statement.modifications.as_path_prepend = Some((65003, 1));
+    statement.modifications.as_path_prepend = vec![rustbgpd_policy::AsPathPrepend::asn(65003, 1)];
     session.import_policy = Some(PolicyChain::new(vec![Policy {
         entries: vec![statement],
         default_action: PolicyAction::Deny,
@@ -1018,7 +1018,8 @@ async fn session_verdicts_equal_rib_validation_for_the_same_tables() {
         session.validation_rx = Some(snapshot_rx);
         if remote_asn != 65001 {
             let mut statement = retention_statement(None, PolicyAction::Permit);
-            statement.modifications.as_path_prepend = Some((65001, 1));
+            statement.modifications.as_path_prepend =
+                vec![rustbgpd_policy::AsPathPrepend::asn(65001, 1)];
             session.import_policy = Some(PolicyChain::new(vec![Policy {
                 entries: vec![statement],
                 default_action: PolicyAction::Deny,

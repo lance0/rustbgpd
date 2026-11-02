@@ -1812,9 +1812,13 @@ fn render_modifications(modifications: Option<&proto::ExplainModifications>) -> 
         "large_communities_remove",
         &modifications.large_communities_remove,
     );
-    if let Some(asn) = modifications.as_path_prepend_asn {
-        let count = modifications.as_path_prepend_count.unwrap_or(1);
-        lines.push(format!("as_path_prepend = {asn} x{count}"));
+    if !modifications.as_path_prepend.is_empty() {
+        let asns: Vec<String> = modifications
+            .as_path_prepend
+            .iter()
+            .map(u32::to_string)
+            .collect();
+        lines.push(format!("as_path_prepend = {}", asns.join(" ")));
     }
     lines
 }
@@ -2391,8 +2395,7 @@ mod tests {
         let lines = render_modifications(Some(&proto::ExplainModifications {
             set_local_pref: Some(200),
             large_communities_add: vec!["64500:1:2".into()],
-            as_path_prepend_asn: Some(64500),
-            as_path_prepend_count: Some(3),
+            as_path_prepend: vec![64500; 3],
             ..Default::default()
         }));
         assert_eq!(
@@ -2400,7 +2403,7 @@ mod tests {
             vec![
                 "set_local_pref = 200".to_string(),
                 "large_communities_add = [64500:1:2]".to_string(),
-                "as_path_prepend = 64500 x3".to_string(),
+                "as_path_prepend = 64500 64500 64500".to_string(),
             ]
         );
     }

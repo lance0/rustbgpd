@@ -2293,11 +2293,6 @@ pub(crate) fn parse_route_event_prefix_filter(
 fn explain_modifications_to_proto(
     modifications: &rustbgpd_policy::RouteModifications,
 ) -> proto::ExplainModifications {
-    let (as_path_prepend_asn, as_path_prepend_count) = modifications
-        .as_path_prepend
-        .map_or((None, None), |(asn, count)| {
-            (Some(asn), Some(u32::from(count)))
-        });
     proto::ExplainModifications {
         set_local_pref: modifications.set_local_pref,
         set_med: modifications.set_med,
@@ -2330,8 +2325,7 @@ fn explain_modifications_to_proto(
             .iter()
             .map(ToString::to_string)
             .collect(),
-        as_path_prepend_asn,
-        as_path_prepend_count,
+        as_path_prepend: modifications.prepended_asns(),
     }
 }
 
@@ -7024,7 +7018,7 @@ mod tests {
                 modifications: rustbgpd_policy::RouteModifications {
                     set_med: Some(0),
                     set_local_pref: Some(200),
-                    as_path_prepend: Some((65000, 2)),
+                    as_path_prepend: vec![rustbgpd_policy::AsPathPrepend::asn(65000, 2)],
                     ..Default::default()
                 },
                 staged: Some(staged),
@@ -7078,8 +7072,7 @@ mod tests {
         let modifications = export.modifications.unwrap();
         assert_eq!(modifications.set_med, Some(0));
         assert_eq!(modifications.set_local_pref, Some(200));
-        assert_eq!(modifications.as_path_prepend_asn, Some(65000));
-        assert_eq!(modifications.as_path_prepend_count, Some(2));
+        assert_eq!(modifications.as_path_prepend, [65000, 65000]);
         assert_eq!(export.staged, Some(expected_staged));
         assert_eq!(export.advertised, Some(expected_committed));
         assert!(!export.already_advertised);

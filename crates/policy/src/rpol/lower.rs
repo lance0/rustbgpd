@@ -55,8 +55,9 @@ use rustbgpd_wire::ExtendedCommunity;
 
 use crate::datasets::DatasetBindings;
 use crate::engine::{
-    AsPathRegex, NeighborSetMatch, NextHopAction, PolicyAction, RouteExtendedCommunityAdmin,
-    RouteExtendedCommunityKind, RouteModifications, encode_route_extended_community,
+    AsPathPrepend, AsPathRegex, NeighborSetMatch, NextHopAction, PolicyAction, PrependAsn,
+    RouteExtendedCommunityAdmin, RouteExtendedCommunityKind, RouteModifications,
+    encode_route_extended_community,
 };
 use crate::eval::{arith, clamp};
 use crate::ir::{
@@ -675,6 +676,9 @@ impl<'a> Lowerer<'a> {
                 .as_ref()
                 .map_or(PolicyAction::Permit, |action| action.node),
             source: PolicySource::Rpol,
+            prepend_bound: super::typeck::policy_prepend_bound(def, self.file, &|count| {
+                u64::from(resolve_u32(count, env))
+            }),
         }
     }
 
@@ -1847,19 +1851,14 @@ impl Lowerer<'_> {
                     .ok()
                     .filter(|count| *count != 0)
                     .expect("checked at typecheck or instantiation: prepend count is 1-255");
-                // LAN-296: computed operands lower to the staged
-                // `as_path_prepend_computed` slot (resolved per route by
-                // the evaluator); the literal/parameter form keeps its
-                // existing lowering. The operand decision is shared with
-                // the typechecker (`PrependAsArg::operand`).
-                if let Some(operand) = asn.operand() {
-                    mods.as_path_prepend_computed = Some((operand, count));
-                } else {
-                    let PrependAsArg::Value(arg) = asn else {
-                        unreachable!("non-Value prepend args always denote an operand")
-                    };
-                    mods.as_path_prepend = Some((resolve_u32(arg, env), count));
-                }
+                // Prepends accumulate in statement order. A computed operand
+                // (LAN-296, `PrependAsArg::operand`) resolves per route.
+                let asn = match (asn.operand(), asn) {
+                    (Some(operand), _) => PrependAsn::Computed(operand),
+                    (None, PrependAsArg::Value(arg)) => PrependAsn::Asn(resolve_u32(arg, env)),
+                    (None, _) => unreachable!("non-Value prepend args always denote an operand"),
+                };
+                mods.as_path_prepend.push(AsPathPrepend { asn, count });
             }
         }
     }

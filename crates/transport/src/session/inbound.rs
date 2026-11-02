@@ -709,7 +709,9 @@ impl ImportAttrMemo {
         mods: &RouteModifications,
     ) -> Option<Arc<Option<rustbgpd_wire::AsPath>>> {
         // Prepend is the only import action that can change AS_PATH.
-        mods.as_path_prepend?;
+        if mods.as_path_prepend.is_empty() {
+            return None;
+        }
         let stored = modified.iter().find_map(|attr| match attr {
             PathAttribute::AsPath(path) => Some(path),
             _ => None,
@@ -3957,7 +3959,7 @@ mod route_attr_bundle_tests {
                 ..RouteModifications::default()
             },
             RouteModifications {
-                as_path_prepend: Some((65001, 0)),
+                as_path_prepend: vec![rustbgpd_policy::AsPathPrepend::asn(65001, 0)],
                 ..RouteModifications::default()
             },
         ] {
@@ -3969,7 +3971,7 @@ mod route_attr_bundle_tests {
             assert!(memo.received_as_path.is_none());
         }
         let mods = RouteModifications {
-            as_path_prepend: Some((65001, 1)),
+            as_path_prepend: vec![rustbgpd_policy::AsPathPrepend::asn(65001, 1)],
             ..RouteModifications::default()
         };
         let (attrs, _) = memo.materialize(&canonical, &mods);

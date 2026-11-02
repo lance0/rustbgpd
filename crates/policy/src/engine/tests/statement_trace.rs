@@ -307,7 +307,7 @@ fn modifications_render_before_and_after_from_pre_policy_values() {
         )))),
         communities_add: vec![(65001 << 16) | 0x029a],
         communities_remove: vec![(65001 << 16) | 0x0064],
-        as_path_prepend: Some((65001, 3)),
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 3)],
         ..RouteModifications::default()
     };
     let chain = PolicyChain::from_named(vec![named(
@@ -821,6 +821,7 @@ policy tagged(tag: community) {
             false,
         )
         .expect("policy exists")
+        .expect("within the prepend cap")
         .expect("no datasets");
     let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
         "tagged".to_string(),
@@ -888,6 +889,12 @@ policy tag-x { term t { add community 65000:3 } }
 policy strip-readd-x { term t { remove community *; add community 65000:3; accept } }
 policy med-a { term t { let x = route.med + 1; set med x; accept } }
 policy med-b { term t { let x = route.med + 2; set med x; accept } }
+policy prepend-200 { term t { prepend as 65000 200 } }
+policy prepend-56 { term t { prepend as 65001 56; accept } }
+policy prepend-55 { term t { prepend as 65001 55; accept } }
+policy prepend-65000-twice { term t { prepend as 65000 2 } }
+policy then-path-first { term t { prepend as path-first 1; accept } }
+policy then-origin { term t { prepend as origin 1; accept } }
 ";
 
 fn seeded_member(name: &str) -> NamedPolicy {
@@ -1016,6 +1023,115 @@ fn explain_resolves_scalars_before_seeding_the_next_member() {
         trace.steps[1].modifications[0].ends_with("= 12"),
         "{:?}",
         trace.steps[1].modifications
+    );
+}
+
+/// A chain assembled without the attach-time check fails closed above 255
+/// prepended ASNs in the live walk, and explain agrees; one ASN fewer
+/// passes in both.
+#[test]
+fn explain_agrees_with_live_on_the_prepend_cap() {
+    let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    // A member after the one that crosses the limit is never reached.
+    let over = PolicyChain::from_named(vec![
+        seeded_member("prepend-200"),
+        seeded_member("prepend-56"),
+        seeded_member("prepend-55"),
+    ]);
+    let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&over), &ctx);
+    assert_eq!(live.action, PolicyAction::Deny);
+    let error = evaluation.eval_error.expect("an evaluation error");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::PrependLimitExceeded);
+    // Attributed to the member whose prepends crossed the limit.
+    assert_eq!(error.policy.as_deref(), Some("prepend-56"));
+    let trace = explain_chain_statements(Some(&over), &ctx);
+    assert_eq!(trace.action, PolicyAction::Deny);
+    assert_eq!(trace.steps.len(), 2);
+    let crossing = trace.steps.last().expect("steps");
+    assert_eq!(crossing.policy_name.as_deref(), Some("prepend-56"));
+    assert_eq!(crossing.action, PolicyAction::Deny);
+    assert!(
+        crossing
+            .term_traces
+            .last()
+            .is_some_and(|line| line.contains("prepends reach 256 ASNs")),
+        "{:?}",
+        crossing.term_traces
+    );
+    let fits = PolicyChain::from_named(vec![
+        seeded_member("prepend-200"),
+        seeded_member("prepend-55"),
+    ]);
+    let live = fits.compiled().evaluate(&ctx);
+    assert_eq!(live.action, PolicyAction::Permit);
+    assert_eq!(live.modifications.prepend_len(), 255);
+    assert_eq!(
+        explain_chain_statements(Some(&fits), &ctx).action,
+        PolicyAction::Permit
+    );
+}
+
+/// A computed operand resolves against the path with the earlier members'
+/// prepends placed, alike in the live walk, the dry run and explain, which
+/// renders the operand with the value it resolved to.
+#[test]
+fn explain_agrees_with_live_on_sequential_operands() {
+    let chain = PolicyChain::from_named(vec![
+        seeded_member("prepend-65000-twice"),
+        seeded_member("then-path-first"),
+    ]);
+    let path = rustbgpd_wire::AsPath {
+        segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![64500])],
+    };
+    let ctx = RouteContext {
+        as_path: Some(&path),
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let live = chain.compiled().evaluate(&ctx);
+    assert_eq!(live.modifications.prepended_asns(), [65000, 65000, 65000]);
+    let compiled = chain.compiled();
+    let mut hits = compiled.zero_term_hits();
+    assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(trace.steps[0].modifications, ["as_path prepend 65000 x2"]);
+    assert_eq!(
+        trace.steps[1].modifications,
+        ["as_path prepend path-first=65000 x1"]
+    );
+
+    // A route that arrived with only an AS_SET has no origin; after the
+    // earlier member's prepend, `origin` reads the prepended AS_SEQUENCE,
+    // as `AsPath::origin_asn` does on the prepended path.
+    let set_only = rustbgpd_wire::AsPath {
+        segments: vec![rustbgpd_wire::AsPathSegment::AsSet(vec![64500, 64501])],
+    };
+    assert_eq!(set_only.origin_asn(), None);
+    let ctx = RouteContext {
+        as_path: Some(&set_only),
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let chain = PolicyChain::from_named(vec![
+        seeded_member("prepend-65000-twice"),
+        seeded_member("then-origin"),
+    ]);
+    let live = chain.compiled().evaluate(&ctx);
+    assert_eq!(live.action, PolicyAction::Permit);
+    assert_eq!(live.modifications.prepended_asns(), [65000, 65000, 65000]);
+    let mut attrs = vec![rustbgpd_wire::PathAttribute::AsPath(set_only.clone())];
+    crate::apply_modifications(&mut attrs, &live.modifications);
+    let rustbgpd_wire::PathAttribute::AsPath(prepended) = &attrs[0] else {
+        panic!("AS_PATH kept");
+    };
+    assert_eq!(prepended.origin_asn(), Some(65000));
+    let compiled = chain.compiled();
+    let mut hits = compiled.zero_term_hits();
+    assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(
+        trace.steps[1].modifications,
+        ["as_path prepend origin=65000 x1"]
     );
 }
 

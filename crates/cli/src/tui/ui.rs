@@ -1166,8 +1166,11 @@ fn explain_lines(
                 m.large_communities_remove.join(",")
             ));
         }
-        if let (Some(asn), Some(count)) = (m.as_path_prepend_asn, m.as_path_prepend_count) {
-            mods.push(format!("prepend={asn}x{count}"));
+        if !m.as_path_prepend.is_empty() {
+            mods.push(format!(
+                "prepend={}",
+                crate::output::format_as_path(&m.as_path_prepend)
+            ));
         }
         if !mods.is_empty() {
             lines.push(Line::styled(
@@ -2240,8 +2243,7 @@ mod tests {
                     extended_communities_add: vec![4_294_967_297, 4_294_967_298],
                     extended_communities_remove: vec![8_589_934_593],
                     large_communities_add: vec!["64512:1:2".into()],
-                    as_path_prepend_asn: Some(64512),
-                    as_path_prepend_count: Some(2),
+                    as_path_prepend: vec![64512; 2],
                     ..Default::default()
                 }),
             },
@@ -2268,7 +2270,7 @@ mod tests {
             "Modifications",
             "local-pref=200",
             "MED=0",
-            "prepend=64512x2",
+            "prepend=64512 64512",
             "communities+=65000:1",
             "extended-communities+=4294967297,4294967298",
             "extended-communities-=8589934593",

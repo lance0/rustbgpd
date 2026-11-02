@@ -376,6 +376,7 @@ pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
     for policy in &file.policies {
         checker.check_policy(policy);
         checker.check_policy_frames(policy, &fn_costs);
+        checker.check_prepend_bound(policy);
     }
     checker.check_apply_dag();
     checker.check_apply_bounds(&fn_costs);
@@ -388,7 +389,144 @@ struct Checker<'a> {
     diags: Vec<Diagnostic>,
 }
 
+/// How a prepend's count reads for the static bound: the typechecker counts
+/// a parameter at its smallest value, 1; lowering substitutes the argument.
+pub(super) type PrependCount<'a> = &'a dyn Fn(&U32Arg) -> u64;
+
+/// Every ASN `stmts` can prepend, as if each could run: every prepend's
+/// count, an `if`'s branches summed, a loop body times the loop's static
+/// iteration bound.
+fn prepend_total(stmts: &[Stmt], file: &SourceFile, count: PrependCount<'_>) -> u64 {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            Stmt::Action(ActionStmt::Prepend { count: n, .. }) => count(n),
+            Stmt::Action(_) => 0,
+            Stmt::If(if_stmt) => if_stmt
+                .branches
+                .iter()
+                .map(|branch| prepend_total(&branch.body, file, count))
+                .chain(
+                    if_stmt
+                        .else_body
+                        .iter()
+                        .map(|body| prepend_total(&body.body, file, count)),
+                )
+                .fold(0, u64::saturating_add),
+            Stmt::For(for_stmt) => loop_iteration_bound(&for_stmt.source, file)
+                .saturating_mul(prepend_total(&for_stmt.body, file, count)),
+        })
+        .fold(0, u64::saturating_add)
+}
+
+/// Walk `stmts` from `running` prepended ASNs: prepends add up along a path
+/// and an `accept` ends one. Returns the running total for the paths that
+/// fall through (`None` when every path decides) and the largest total any
+/// `accept` reached. Branches that fall through add up, as if every guard
+/// matched; a loop adds its [`prepend_total`].
+fn prepend_walk(
+    stmts: &[Stmt],
+    mut running: u64,
+    file: &SourceFile,
+    count: PrependCount<'_>,
+) -> (Option<u64>, u64) {
+    let mut peak = 0;
+    for stmt in stmts {
+        match stmt {
+            Stmt::Action(ActionStmt::Prepend { count: n, .. }) => {
+                running = running.saturating_add(count(n));
+            }
+            Stmt::Action(ActionStmt::Accept(_)) => return (None, peak.max(running)),
+            Stmt::Action(ActionStmt::Reject(_)) => return (None, peak),
+            Stmt::Action(_) => {}
+            Stmt::If(if_stmt) => {
+                let mut added: u64 = 0;
+                let mut falls_through = if_stmt.else_body.is_none();
+                let bodies = if_stmt
+                    .branches
+                    .iter()
+                    .map(|branch| &branch.body)
+                    .chain(if_stmt.else_body.iter().map(|body| &body.body));
+                for body in bodies {
+                    let (after, branch_peak) = prepend_walk(body, running, file, count);
+                    peak = peak.max(branch_peak);
+                    if let Some(after) = after {
+                        added = added.saturating_add(after - running);
+                        falls_through = true;
+                    }
+                }
+                if !falls_through {
+                    return (None, peak);
+                }
+                running = running.saturating_add(added);
+            }
+            Stmt::For(for_stmt) => {
+                running = running.saturating_add(
+                    loop_iteration_bound(&for_stmt.source, file).saturating_mul(prepend_total(
+                        &for_stmt.body,
+                        file,
+                        count,
+                    )),
+                );
+                peak = peak.max(running);
+            }
+        }
+    }
+    (Some(running), peak)
+}
+
+/// The most ASNs one evaluation of `def` can prepend: the largest total
+/// [`prepend_walk`] reaches over its terms in order (a term that always
+/// decides leaves the running total for the next one unchanged), or the
+/// total that falls through to the default action. The typechecker and
+/// lowering both compute it here, with their own [`PrependCount`], and
+/// lowering stores it on [`crate::ir::CompiledPolicy::prepend_bound`].
+pub(super) fn policy_prepend_bound(
+    def: &PolicyDef,
+    file: &SourceFile,
+    count: PrependCount<'_>,
+) -> u64 {
+    let (mut running, mut bound) = (0, 0);
+    for term in &def.terms {
+        let (after, peak) = prepend_walk(&term.stmts, running, file, count);
+        bound = bound.max(peak);
+        running = after.unwrap_or(running);
+    }
+    bound.max(running)
+}
+
 impl<'a> Checker<'a> {
+    /// The static prepend cap: one evaluation of the policy can place at
+    /// most [`crate::engine::MAX_PREPEND_ASNS`] ASNs in front of a path.
+    fn check_prepend_bound(&mut self, def: &PolicyDef) {
+        // A parameter count counts its smallest value here; instantiation
+        // rechecks with the argument.
+        let bound = policy_prepend_bound(def, self.file, &|count| match count {
+            U32Arg::Lit(value, _) => u64::from(*value),
+            U32Arg::Param(_) => 1,
+        });
+        let limit = crate::engine::MAX_PREPEND_ASNS;
+        if bound > limit as u64 {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    def.name.span,
+                    format!(
+                        "policy `{}` can prepend {bound} ASNs to one route; at most {limit} fit",
+                        def.name.node
+                    ),
+                    "prepend limit exceeded",
+                )
+                .with_note(
+                    "prepends add up along a path until an `accept`; `if` branches that fall \
+                     through add up together, and a prepend inside a loop counts once per \
+                     iteration: 4,096 times in a loop over a route attribute, so such a loop \
+                     cannot prepend",
+                ),
+            );
+        }
+    }
+
     fn policy(&self, name: &str) -> Option<&PolicyDef> {
         self.file.policies.iter().find(|p| p.name.node == name)
     }

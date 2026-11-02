@@ -1044,9 +1044,19 @@ fn render_client(
 ) -> Result<String, Error> {
     let slug = client.vlan_interface_id;
     let reachable_receive = reachable_receive_filters(filters);
-    let compiled_receive = reachable_receive_overlap(&reachable_receive)
-        .then(|| compile_receive_cells(&reachable_receive))
-        .transpose()?;
+    // The `.rpol` prepend bound counts fall-through prepend terms as if
+    // every guard matched, so when the filters' prepends sum past 255 they
+    // render as cells, each prepending its total and accepting, even where
+    // no two filters overlap.
+    let summed_prepends: u32 = reachable_receive
+        .iter()
+        .filter_map(|filter| filter.action_receive.prepend_count())
+        .map(u32::from)
+        .sum();
+    let compiled_receive = (reachable_receive_overlap(&reachable_receive)
+        || summed_prepends > u32::try_from(rustbgpd_policy::MAX_PREPEND_ASNS).unwrap_or(u32::MAX))
+    .then(|| compile_receive_cells(&reachable_receive))
+    .transpose()?;
     let mut out = if client.irr_filter {
         format!(
             "# GENERATED IXP Manager IRR policy.\ndataset asn-set client-{slug}-origins\ndataset prefix-set client-{slug}-prefixes\n"

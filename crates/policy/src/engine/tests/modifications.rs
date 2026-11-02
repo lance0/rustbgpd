@@ -438,7 +438,7 @@ fn apply_as_path_prepend_existing() {
         segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
     })];
     let mods = RouteModifications {
-        as_path_prepend: Some((65001, 2)),
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 2)],
         ..Default::default()
     };
     apply_modifications(&mut attrs, &mods);
@@ -461,7 +461,7 @@ fn apply_as_path_prepend_existing() {
 fn apply_as_path_prepend_empty() {
     let mut attrs = vec![];
     let mods = RouteModifications {
-        as_path_prepend: Some((65001, 3)),
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 3)],
         ..Default::default()
     };
     apply_modifications(&mut attrs, &mods);
@@ -487,7 +487,7 @@ fn apply_as_path_prepend_avoids_first_segment_overflow() {
         segments: vec![AsPathSegment::AsSequence(long_seq.clone())],
     })];
     let mods = RouteModifications {
-        as_path_prepend: Some((65001, 10)),
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 10)],
         ..Default::default()
     };
     apply_modifications(&mut attrs, &mods);
@@ -544,7 +544,7 @@ fn apply_as_path_prepend_segment_boundary_254_plus_3() {
         segments: vec![AsPathSegment::AsSequence(long_seq.clone())],
     })];
     let mods = RouteModifications {
-        as_path_prepend: Some((65001, 3)),
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 3)],
         ..Default::default()
     };
     apply_modifications(&mut attrs, &mods);
@@ -572,7 +572,7 @@ fn apply_as_path_prepend_segment_boundary_255_plus_1() {
         segments: vec![AsPathSegment::AsSequence(full_seq.clone())],
     })];
     let mods = RouteModifications {
-        as_path_prepend: Some((65001, 1)),
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 1)],
         ..Default::default()
     };
     apply_modifications(&mut attrs, &mods);
@@ -596,7 +596,7 @@ fn apply_as_path_prepend_segment_boundary_254_plus_1_fits() {
         segments: vec![AsPathSegment::AsSequence(long_seq)],
     })];
     let mods = RouteModifications {
-        as_path_prepend: Some((65001, 1)),
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 1)],
         ..Default::default()
     };
     apply_modifications(&mut attrs, &mods);
@@ -617,44 +617,63 @@ fn apply_as_path_prepend_segment_boundary_254_plus_1_fits() {
     }
 }
 
-/// LAN-296: literal and computed prepends occupy one logical merge
-/// slot — a later prepend of either form replaces an earlier one of
-/// either form, exactly like the other scalar modifications.
+/// Prepends accumulate across merges, literal and computed alike: the
+/// later merge's actions run after the earlier one's, and an empty merge
+/// leaves them alone.
 #[test]
-fn merge_prepend_slot_shared_between_literal_and_computed() {
+fn merge_accumulates_prepends_in_order() {
     use crate::engine::PrependAs;
+    use crate::{AsPathPrepend, PrependAsn};
 
-    // computed then literal → literal wins, computed cleared.
+    let origin = AsPathPrepend {
+        asn: PrependAsn::Computed(PrependAs::OriginAs),
+        count: 2,
+    };
     let mut mods = RouteModifications {
-        as_path_prepend_computed: Some((PrependAs::OriginAs, 2)),
+        as_path_prepend: vec![origin],
         ..Default::default()
     };
     mods.merge_from(RouteModifications {
-        as_path_prepend: Some((65001, 1)),
+        as_path_prepend: vec![AsPathPrepend::asn(65001, 1)],
         ..Default::default()
     });
-    assert_eq!(mods.as_path_prepend, Some((65001, 1)));
-    assert_eq!(mods.as_path_prepend_computed, None);
-
-    // literal then computed → computed wins, literal cleared.
-    let mut mods = RouteModifications {
-        as_path_prepend: Some((65001, 1)),
-        ..Default::default()
-    };
-    mods.merge_from(RouteModifications {
-        as_path_prepend_computed: Some((PrependAs::PeerAs, 3)),
-        ..Default::default()
-    });
-    assert_eq!(mods.as_path_prepend, None);
-    assert_eq!(mods.as_path_prepend_computed, Some((PrependAs::PeerAs, 3)));
-
-    // a merge with neither leaves the slot alone.
-    let mut mods = RouteModifications {
-        as_path_prepend_computed: Some((PrependAs::LocalAs, 2)),
-        ..Default::default()
-    };
     mods.merge_from(RouteModifications::default());
-    assert_eq!(mods.as_path_prepend_computed, Some((PrependAs::LocalAs, 2)));
+    assert_eq!(mods.as_path_prepend, [origin, AsPathPrepend::asn(65001, 1)]);
+}
+
+/// The later prepend lands to the left: IOS-XR's documented
+/// `prepend as-path 2.5 3` then `prepend as-path 666.5 2` places
+/// `666.5 666.5 2.5 2.5 2.5` in front of the path.
+#[test]
+fn later_prepends_land_to_the_left() {
+    use crate::AsPathPrepend;
+    let asdot = |high: u32, low: u32| (high << 16) | low;
+    let mods = RouteModifications {
+        as_path_prepend: vec![
+            AsPathPrepend::asn(asdot(2, 5), 3),
+            AsPathPrepend::asn(asdot(666, 5), 2),
+        ],
+        ..Default::default()
+    };
+    let expected = [
+        asdot(666, 5),
+        asdot(666, 5),
+        asdot(2, 5),
+        asdot(2, 5),
+        asdot(2, 5),
+    ];
+    assert_eq!(mods.prepended_asns(), expected);
+    assert_eq!(mods.prepend_len(), 5);
+    let mut attrs = vec![PathAttribute::AsPath(AsPath {
+        segments: vec![AsPathSegment::AsSequence(vec![64500])],
+    })];
+    apply_modifications(&mut attrs, &mods);
+    let PathAttribute::AsPath(path) = &attrs[0] else {
+        panic!("AS_PATH kept");
+    };
+    let mut leading = expected.to_vec();
+    leading.push(64500);
+    assert_eq!(path.segments, [AsPathSegment::AsSequence(leading)]);
 }
 
 #[test]
@@ -682,7 +701,7 @@ fn same_as_matches_derived_equality() {
             ..RouteModifications::default()
         },
         RouteModifications {
-            as_path_prepend: Some((65_000, 2)),
+            as_path_prepend: vec![crate::AsPathPrepend::asn(65_000, 2)],
             ..RouteModifications::default()
         },
     ];
@@ -726,11 +745,14 @@ fn same_as_matches_derived_equality() {
             ..RouteModifications::default()
         },
         |v: u32| RouteModifications {
-            as_path_prepend: Some((v, 1)),
+            as_path_prepend: vec![crate::AsPathPrepend::asn(v, 1)],
             ..RouteModifications::default()
         },
         |v: u32| RouteModifications {
-            as_path_prepend_computed: Some((PrependAs::PeerAs, u8::try_from(v).unwrap())),
+            as_path_prepend: vec![crate::AsPathPrepend {
+                asn: crate::PrependAsn::Computed(PrependAs::PeerAs),
+                count: u8::try_from(v).unwrap(),
+            }],
             ..RouteModifications::default()
         },
         |v: u32| RouteModifications {

@@ -539,11 +539,11 @@ fn rpol_max_graph_bytes_out_of_range_is_a_load_error() {
 
 #[test]
 fn rpol_parameterized_as0_prepend_rejected_at_attachment() {
-    for action in [
-        "prepend as n 1;",
-        "for value in route.as-path { prepend as n 1; }",
-    ] {
-        let source = format!("policy p(n: u32) {{ term t {{ {action} accept }} }}");
+    // A loop over a route attribute cannot prepend (the 255-ASN cap), so
+    // the loop case iterates an asn-set.
+    for action in ["prepend as n 1;", "for value in one { prepend as n 1; }"] {
+        let source =
+            format!("asn-set one {{ 1 }}\npolicy p(n: u32) {{ term t {{ {action} accept }} }}");
         for (import, export) in [(r#""p(0)""#, ""), ("", r#""p(0)""#)] {
             let dir = rpol_directional_config_dir(&source, import, export);
             let error = load_dir(&dir).expect_err("AS 0 prepend must reject attachment");
@@ -553,6 +553,28 @@ fn rpol_parameterized_as0_prepend_rejected_at_attachment() {
                 "{error}"
             );
         }
+    }
+}
+
+/// Prepends accumulate across a chain, so attachment adds the members'
+/// bounds: 255 prepended ASNs load, 256 refuse the config, in either
+/// direction, naming the member that crossed the limit.
+#[test]
+fn rpol_chain_prepend_bound_is_checked_at_attachment() {
+    let source = "policy a(n: u32) { term t { prepend as 65001 n } }
+                  policy b { term t { prepend as 65001 200; accept } }";
+    for (import, export) in [(r#""a(55)", "b""#, ""), ("", r#""a(55)", "b""#)] {
+        let dir = rpol_directional_config_dir(source, import, export);
+        load_dir(&dir).expect("255 prepended ASNs attach");
+    }
+    for (import, export) in [(r#""a(56)", "b""#, ""), ("", r#""a(56)", "b""#)] {
+        let dir = rpol_directional_config_dir(source, import, export);
+        let error = load_dir(&dir).expect_err("256 prepended ASNs reject attachment");
+        assert!(error.contains("\"b\""), "{error}");
+        assert!(
+            error.contains("the chain can prepend 256 ASNs to one route; at most 255 fit"),
+            "{error}"
+        );
     }
 }
 
@@ -576,7 +598,10 @@ fn rpol_parameterized_prepend_accepts_valid_asns_and_zero_med() {
         for chain in [import, export] {
             let result = chain.expect("configured chain").evaluate(&ctx);
             assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
-            assert_eq!(result.modifications.as_path_prepend, Some((asn, 1)));
+            assert_eq!(
+                result.modifications.as_path_prepend,
+                [rustbgpd_policy::AsPathPrepend::asn(asn, 1)]
+            );
             assert_eq!(result.modifications.set_med, Some(0));
         }
     }
@@ -647,21 +672,34 @@ fn prepend_operand_legal_directions_attach_and_resolve() {
         med: None,
     };
     // Import: `prepend as peer` resolves to the neighbor's ASN (the
-    // later `origin-pad` member wins the shared prepend slot — chain
-    // merge semantics — so evaluate the peer-pad member's chain alone).
+    // later `origin-pad` member adds its own prepend, so evaluate the
+    // peer-pad member's chain alone).
     let peer_only = rustbgpd_policy::PolicyChain::from_named(vec![import.policies[0].clone()]);
     let result = peer_only.evaluate(&ctx);
     assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
-    assert_eq!(result.modifications.as_path_prepend, Some((65002, 3)));
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        [rustbgpd_policy::AsPathPrepend::asn(65002, 3)]
+    );
 
     // Export: `prepend as self` resolves to the daemon's [global] asn.
     let self_only = rustbgpd_policy::PolicyChain::from_named(vec![export.policies[0].clone()]);
     let result = self_only.evaluate(&ctx);
-    assert_eq!(result.modifications.as_path_prepend, Some((65001, 3)));
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        [rustbgpd_policy::AsPathPrepend::asn(65001, 3)]
+    );
 
-    // Both directions: `origin` resolves from the route.
+    // Both directions: `origin` resolves from the route, after the
+    // `self` member's prepend, so it lands to the left.
     let result = export.evaluate(&ctx);
-    assert_eq!(result.modifications.as_path_prepend, Some((64500, 2)));
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        [
+            rustbgpd_policy::AsPathPrepend::asn(65001, 3),
+            rustbgpd_policy::AsPathPrepend::asn(64500, 2)
+        ]
+    );
 }
 
 /// `prepend as peer` on the GLOBAL export chain is rejected too — the

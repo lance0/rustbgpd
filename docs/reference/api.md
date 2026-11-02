@@ -2054,6 +2054,14 @@ This dry-runs the current export decision for a single prefix and peer. The
 response includes the final decision, decisive reasons, selected best-route
 identity, and any export modifications that would be applied.
 
+In `ExplainModifications`, used by this response, `ExplainImportPolicy` and
+`TestPolicy`, `as_path_prepend` lists the ASNs the policy chain places in
+front of the `AS_PATH`, leftmost first, with computed operands resolved: a
+policy that prepends `2.5` three times and then `666.5` twice reports
+`[43646981, 43646981, 131077, 131077, 131077]`. It replaced the
+`as_path_prepend_asn` / `as_path_prepend_count` pair, whose field numbers and
+names are reserved, because one ASN and count cannot represent that sequence.
+
 For an IPv4/IPv6 unicast peer with negotiated Add-Path send, set the optional
 presence-bearing `source` message to explain one exact Adj-RIB-In candidate:
 

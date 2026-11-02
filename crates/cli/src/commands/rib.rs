@@ -1511,8 +1511,7 @@ pub(super) fn modifications_to_json(
             extended_communities_remove: vec![],
             large_communities_add: vec![],
             large_communities_remove: vec![],
-            as_path_prepend_asn: None,
-            as_path_prepend_count: None,
+            as_path_prepend: vec![],
         },
         |mods| JsonExplainModifications {
             set_local_pref: mods.set_local_pref,
@@ -1532,8 +1531,7 @@ pub(super) fn modifications_to_json(
             extended_communities_remove: mods.extended_communities_remove.clone(),
             large_communities_add: mods.large_communities_add.clone(),
             large_communities_remove: mods.large_communities_remove.clone(),
-            as_path_prepend_asn: mods.as_path_prepend_asn,
-            as_path_prepend_count: mods.as_path_prepend_count,
+            as_path_prepend: mods.as_path_prepend.clone(),
         },
     )
 }
@@ -1742,8 +1740,7 @@ fn print_explain_advertised(
             || !mods.extended_communities_remove.is_empty()
             || !mods.large_communities_add.is_empty()
             || !mods.large_communities_remove.is_empty()
-            || mods.as_path_prepend_asn.is_some()
-            || mods.as_path_prepend_count.is_some())
+            || !mods.as_path_prepend.is_empty())
     {
         outln!("Modifications:")?;
         if let Some(value) = mods.set_local_pref {
@@ -1807,8 +1804,11 @@ fn print_explain_advertised(
                 mods.large_communities_remove.join(", ")
             )?;
         }
-        if let (Some(asn), Some(count)) = (mods.as_path_prepend_asn, mods.as_path_prepend_count) {
-            outln!("- as_path_prepend: {asn} x {count}")?;
+        if !mods.as_path_prepend.is_empty() {
+            outln!(
+                "- as_path_prepend: {}",
+                crate::output::format_as_path(&mods.as_path_prepend)
+            )?;
         }
     }
     Ok(())
@@ -4131,8 +4131,7 @@ mod tests {
                 extended_communities_remove: vec![33],
                 large_communities_add: vec!["65001:1:2".into()],
                 large_communities_remove: vec!["65001:3:4".into()],
-                as_path_prepend_asn: Some(65002),
-                as_path_prepend_count: Some(3),
+                as_path_prepend: vec![65002; 3],
             }),
             orr_vantage: "10.0.1.1".into(),
             orr_candidates: vec![
@@ -4180,7 +4179,7 @@ mod tests {
                     "communities_add": ["NO_EXPORT"], "communities_remove": ["65001:9"],
                     "extended_communities_add": [u64::MAX], "extended_communities_remove": [33],
                     "large_communities_add": ["65001:1:2"], "large_communities_remove": ["65001:3:4"],
-                    "as_path_prepend_asn": 65002, "as_path_prepend_count": 3
+                    "as_path_prepend": [65002, 65002, 65002]
                 },
                 "orr_vantage": "10.0.1.1", "orr_candidates": [
                     {"peer_address": "192.0.2.4", "path_id": 34, "next_hop": "192.0.2.5", "cost": u64::MAX, "selected": true},

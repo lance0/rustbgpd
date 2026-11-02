@@ -1,4 +1,4 @@
-# rpol decision corpus: 264 programs, 1658 cases. Regenerate with
+# rpol decision corpus: 264 programs, 1647 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
@@ -11,7 +11,7 @@ ast.stmt.nested-if 13
 ast.stmt.for 75
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1138
+ast.action.accept 1127
 ast.action.reject 384
 ast.action.set-local-pref 123
 ast.action.set-med 175
@@ -24,7 +24,7 @@ ast.action.community-all 45
 ast.action.community-binding 43
 ast.action.community-in-set 25
 ast.action.community-not-in-set 22
-ast.action.prepend 54
+ast.action.prepend 43
 ast.action.let 63
 ast.action.break 33
 ast.action.continue 22
@@ -47,7 +47,7 @@ ast.value.identifier 106
 ast.value.field 139
 ast.value.arithmetic 96
 ast.value.call 50
-ir.guard.true 1175
+ir.guard.true 1164
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
@@ -92,7 +92,7 @@ ir.value.binary 137
 ir.value.min 40
 ir.value.max 11
 ir.value.clamp 11
-ir.action.permit 1115
+ir.action.permit 1104
 ir.action.deny 347
 ir.action.continue 167
 ir.action.bind 84
@@ -108,7 +108,7 @@ ir.mod.set-local-pref-computed 19
 ir.mod.set-med 68
 ir.mod.set-med-computed 87
 ir.mod.set-next-hop 13
-ir.mod.prepend 43
+ir.mod.prepend 32
 ir.mod.prepend-computed 11
 ir.mod.community-add 436
 ir.mod.community-remove 33
@@ -1551,49 +1551,38 @@ docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m07-default => per
 docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m08-host-routes => permit with set med 4294967295
 docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m09-evpn => permit with set med 10
 docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | m10-v6-bogon => permit with set med 10
-docs/reference/rpol-language.md#f77d7a4d3578017b | test later-prepend-replaces | prepend-literal => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | test total-count | prepend-total => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | test mixed-asn-prepends-keep-only-the-last | chain [prepend-65000, prepend-65001] => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m01-v4-transit => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m02-v4-invalid-long => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m03-v6-tagged => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m04-bare => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m05-internal => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m06-local-as-set => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m07-default => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m08-host-routes => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m09-evpn => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-literal | m10-v6-bogon => permit with prepend as 65000 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m01-v4-transit => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m02-v4-invalid-long => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m03-v6-tagged => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m04-bare => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m05-internal => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m06-local-as-set => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m07-default => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m08-host-routes => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m09-evpn => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-total | m10-v6-bogon => permit with prepend as 65000 3
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m01-v4-transit => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m02-v4-invalid-long => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m03-v6-tagged => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m04-bare => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m05-internal => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m06-local-as-set => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m07-default => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m08-host-routes => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m09-evpn => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65000 | m10-v6-bogon => permit with prepend as 65000 1
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m01-v4-transit => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m02-v4-invalid-long => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m03-v6-tagged => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m04-bare => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m05-internal => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m06-local-as-set => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m07-default => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m08-host-routes => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m09-evpn => permit with prepend as 65001 2
-docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m10-v6-bogon => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | test later-prepend-lands-to-the-left | prepend-twice => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | test chain-prepends-accumulate | chain [prepend-65000, prepend-65001] => permit with prepend as 65000 1; prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m01-v4-transit => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m02-v4-invalid-long => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m03-v6-tagged => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m04-bare => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m05-internal => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m06-local-as-set => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m07-default => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m08-host-routes => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m09-evpn => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | m10-v6-bogon => permit with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m01-v4-transit => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m02-v4-invalid-long => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m03-v6-tagged => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m04-bare => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m05-internal => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m06-local-as-set => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m07-default => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m08-host-routes => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m09-evpn => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | m10-v6-bogon => permit with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m01-v4-transit => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m02-v4-invalid-long => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m03-v6-tagged => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m04-bare => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m05-internal => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m06-local-as-set => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m07-default => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m08-host-routes => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m09-evpn => permit with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | m10-v6-bogon => permit with prepend as 65001 2
 docs/reference/rpol-language.md#18fe62d24c72b97d | test retag-keeps-no-export | retag => permit with add community 65000:100; remove community 65010:1
 docs/reference/rpol-language.md#18fe62d24c72b97d | test the-replacement-discards-an-earlier-addition | tag-then-retag => permit with add community 65000:100; remove community 65010:1
 docs/reference/rpol-language.md#18fe62d24c72b97d | test a-later-addition-stays | retag-then-tag => permit with add community 65000:100; add community 65000:1; remove community 65010:1

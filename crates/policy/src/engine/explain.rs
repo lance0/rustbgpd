@@ -46,7 +46,7 @@ use std::fmt::Write as _;
 
 use super::{
     CommunityMatch, IMPLICIT_LOCAL_PREF, IMPLICIT_MED, NextHopAction, PolicyAction, PolicyChain,
-    PolicyStatement, RouteContext, RouteModifications, RouteType,
+    PolicyStatement, PrependAsn, RouteContext, RouteModifications, RouteType,
 };
 use crate::ir::{Cmp, CompiledChain, CompiledPolicy, MatchExpr, Term, TermAction, TermActionView};
 
@@ -147,7 +147,7 @@ pub fn explain_chain_statements(
             // walks cannot disagree about a guard).
             let mut denied = false;
             for policy in &rpol.policies {
-                let (step, total) = trace_rpol_policy(
+                let (mut step, total) = trace_rpol_policy(
                     policy_index,
                     named.name.clone(),
                     policy,
@@ -157,6 +157,11 @@ pub fn explain_chain_statements(
                     &mut fuel,
                 );
                 accumulated = total;
+                if let Some(line) = prepend_limit_line(&accumulated) {
+                    step.action = PolicyAction::Deny;
+                    step.modifications.clear();
+                    step.term_traces.push(line);
+                }
                 denied = step.action == PolicyAction::Deny;
                 steps.push(step);
                 if denied {
@@ -206,6 +211,12 @@ pub fn explain_chain_statements(
                 modifications = Vec::new();
             }
         }
+        let mut term_traces = Vec::new();
+        if let Some(line) = prepend_limit_line(&accumulated) {
+            action = PolicyAction::Deny;
+            modifications = Vec::new();
+            term_traces.push(line);
+        }
         steps.push(StatementAttribution {
             policy_index,
             policy_name: named.name.clone(),
@@ -214,7 +225,7 @@ pub fn explain_chain_statements(
             matched_conditions,
             modifications,
             term_name: None,
-            term_traces: Vec::new(),
+            term_traces,
         });
         if action == PolicyAction::Deny {
             // Chain semantics: a Deny terminates evaluation. Later
@@ -229,6 +240,21 @@ pub fn explain_chain_statements(
         action: PolicyAction::Permit,
         steps,
     }
+}
+
+/// The live walk's defence-in-depth prepend cap, as a trace line on the
+/// member whose prepends took the running total past
+/// [`MAX_PREPEND_ASNS`](super::MAX_PREPEND_ASNS): the route fails closed
+/// (`prepend-limit-exceeded`).
+fn prepend_limit_line(accumulated: &RouteModifications) -> Option<String> {
+    let prepended = accumulated.prepend_len();
+    (prepended > super::MAX_PREPEND_ASNS).then(|| {
+        format!(
+            "evaluation error: prepends reach {prepended} ASNs, more than {} \
+             (prepend-limit-exceeded) — fail closed => reject",
+            super::MAX_PREPEND_ASNS
+        )
+    })
 }
 
 /// Render a standard (RFC 1997) community as `ASN:VALUE`.
@@ -425,25 +451,28 @@ fn render_modifications(
     for lc in &mods.large_communities_remove {
         out.push(format!("large_community - {lc}"));
     }
-    if let Some((asn, count)) = mods.as_path_prepend {
-        out.push(format!("as_path prepend {asn} x{count}"));
-    }
-    // LAN-296: a computed operand renders with its source spelling plus
-    // the value it resolves to for this route (`tables` carries the
-    // chain's attach-time `local_asn` for `self`). The unresolvable
-    // case never reaches here — the trace walk denies at the failing
-    // term first — but renders honestly if it ever did.
-    if let Some((operand, count)) = mods.as_path_prepend_computed {
-        let resolved = tables.and_then(|chain| operand.resolve(chain.local_asn, ctx));
-        match resolved {
-            Some(asn) => out.push(format!(
-                "as_path prepend {}={asn} x{count}",
-                operand.as_str()
-            )),
-            None => out.push(format!(
-                "as_path prepend {} x{count} (unresolvable)",
-                operand.as_str()
-            )),
+    // One line per prepend, in the order they run (each later one lands
+    // to the left). LAN-296: a computed operand renders with its source
+    // spelling plus the value it resolves to for this route (`tables`
+    // carries the chain's attach-time `local_asn` for `self`). The
+    // unresolvable case never reaches here — the trace walk denies at
+    // the failing term first — but renders honestly if it ever did.
+    for prepend in &mods.as_path_prepend {
+        let count = prepend.count;
+        match prepend.asn {
+            PrependAsn::Asn(asn) => out.push(format!("as_path prepend {asn} x{count}")),
+            PrependAsn::Computed(operand) => {
+                match tables.and_then(|chain| operand.resolve(chain.local_asn, ctx)) {
+                    Some(asn) => out.push(format!(
+                        "as_path prepend {}={asn} x{count}",
+                        operand.as_str()
+                    )),
+                    None => out.push(format!(
+                        "as_path prepend {} x{count} (unresolvable)",
+                        operand.as_str()
+                    )),
+                }
+            }
         }
     }
     out
@@ -754,6 +783,7 @@ fn trace_rpol_policy(
                     mods,
                     ctx,
                     crate::eval::locals_slice(locals.as_ref()),
+                    continued.as_ref(),
                 ) {
                     Ok(resolved) => resolved,
                     Err(kind) => {
@@ -790,6 +820,7 @@ fn trace_rpol_policy(
                     mods,
                     ctx,
                     crate::eval::locals_slice(locals.as_ref()),
+                    continued.as_ref(),
                 ) {
                     Ok(resolved) => resolved,
                     Err(kind) => {
@@ -887,6 +918,7 @@ fn trace_rpol_policy(
 ///
 /// Scalars compare resolved values and render when the member changed them,
 /// from the deciding term's own `source` expression when it computed one.
+/// Prepends render the member's own, in the order they run.
 /// Communities compare by logical presence per kind: a value newly added or
 /// newly removed renders as usual; an earlier addition (removal) no longer
 /// present renders `- V (cancels an earlier addition)` (`+ V (cancels an
@@ -928,16 +960,37 @@ fn render_member_delta(
     if after.set_next_hop != before.set_next_hop {
         own.set_next_hop.clone_from(&after.set_next_hop);
     }
-    if (after.as_path_prepend, after.as_path_prepend_computed)
-        != (before.as_path_prepend, before.as_path_prepend_computed)
-    {
-        if let Some(computed) = source.and_then(|own_source| own_source.as_path_prepend_computed) {
-            own.as_path_prepend_computed = Some(computed);
-        } else {
-            own.as_path_prepend = after.as_path_prepend;
-            own.as_path_prepend_computed = after.as_path_prepend_computed;
-        }
-    }
+    // Prepends only accumulate, so the member's own are the tail past the
+    // running total before it, resolved as the live walk resolved them. The
+    // deciding term's, last in that tail, carry its source spelling, so a
+    // computed operand renders as `path-first=65000`.
+    let own_prepends = after
+        .as_path_prepend
+        .get(before.as_path_prepend.len()..)
+        .unwrap_or_default();
+    let spelled = source.map_or(&[][..], |source| source.as_path_prepend.as_slice());
+    let spelled_from = own_prepends.len().saturating_sub(spelled.len());
+    let prepend_lines: Vec<String> = own_prepends
+        .iter()
+        .enumerate()
+        .map(|(index, prepend)| {
+            let asn = match prepend.asn {
+                PrependAsn::Asn(asn) => asn.to_string(),
+                PrependAsn::Computed(operand) => operand.as_str().to_string(),
+            };
+            let operand = index
+                .checked_sub(spelled_from)
+                .and_then(|at| spelled.get(at))
+                .and_then(|source| match source.asn {
+                    PrependAsn::Computed(operand) => Some(operand.as_str()),
+                    PrependAsn::Asn(_) => None,
+                });
+            match operand {
+                Some(operand) => format!("as_path prepend {operand}={asn} x{}", prepend.count),
+                None => format!("as_path prepend {asn} x{}", prepend.count),
+            }
+        })
+        .collect();
     let mut out = Vec::new();
     let standard = presence_delta(
         (&before.communities_add, &before.communities_remove),
@@ -977,6 +1030,7 @@ fn render_member_delta(
     own.large_communities_add = large.added;
     own.large_communities_remove = large.removed;
     out.extend(render_modifications(&own, ctx, Some(tables), locals));
+    out.extend(prepend_lines);
     out
 }
 
@@ -1173,12 +1227,14 @@ fn render_action_stmts(mods: &RouteModifications) -> Vec<String> {
     for ec in &mods.extended_communities_remove {
         out.push(format!("remove community {ec}"));
     }
-    if let Some((asn, count)) = mods.as_path_prepend {
-        out.push(format!("prepend {asn} {count}"));
-    }
     // LAN-296 computed operands render in their source form.
-    if let Some((operand, count)) = mods.as_path_prepend_computed {
-        out.push(format!("prepend as {} {count}", operand.as_str()));
+    for prepend in &mods.as_path_prepend {
+        match prepend.asn {
+            PrependAsn::Asn(asn) => out.push(format!("prepend {asn} {}", prepend.count)),
+            PrependAsn::Computed(operand) => {
+                out.push(format!("prepend as {} {}", operand.as_str(), prepend.count));
+            }
+        }
     }
     out
 }
