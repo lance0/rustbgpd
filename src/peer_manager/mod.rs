@@ -78,6 +78,10 @@ mod unnumbered {
         pub(super) async fn shutdown(self) {
             match self {}
         }
+
+        pub(super) fn clear_held_graceful_shutdown(&mut self) {
+            match *self {}
+        }
     }
 
     impl super::PeerManager {

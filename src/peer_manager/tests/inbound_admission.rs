@@ -978,6 +978,42 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
     drop(next_client_stream);
 }
 
+/// An all-peers graceful-shutdown clear also clears the intent dead-lettered
+/// for a dynamic neighbor between sessions, so its reconnect does not bring
+/// `GRACEFUL_SHUTDOWN` back. Mutation-red: clearing only the managed peers
+/// restores the intent on the reconnect.
+#[tokio::test]
+async fn an_all_peers_gshut_clear_reaches_a_dead_lettered_dynamic_neighbor() {
+    let mut mgr = dynamic_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9));
+    mgr.dead_lettered_pending.insert(
+        addr,
+        crate::peer_manager::dynamic::DeadLetteredPending {
+            graceful_shutdown: true,
+            ..Default::default()
+        },
+    );
+    mgr.dead_lettered_pending_order.push_back(addr);
+
+    mgr.set_graceful_shutdown(None, false).await.unwrap();
+
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        1,
+        closed_peer_handle(),
+        true,
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        8,
+        "ix-members",
+    );
+    mgr.restore_dead_lettered_pending(addr);
+    assert!(
+        !mgr.peers[&key(addr)].advertise_graceful_shutdown,
+        "the reconnect must not restore a cleared intent"
+    );
+}
+
 #[tokio::test]
 async fn dead_lettered_pending_over_cap_evicts_oldest_entry() {
     let (_tx, rx) = mpsc::channel(16);

@@ -247,6 +247,18 @@ struct HeldState {
 }
 
 impl Unnumbered {
+    /// Drop the graceful-shutdown intent every unbound neighbor holds for
+    /// its next peer.
+    pub(super) fn clear_held_graceful_shutdown(&mut self) {
+        for held in self
+            .ports
+            .values_mut()
+            .filter_map(|port| port.held.as_mut())
+        {
+            held.graceful_shutdown = false;
+        }
+    }
+
     /// Take ownership of a spawned discovery actor.
     pub(crate) fn new(discovery: RaDiscovery, events: DiscoveryEvents) -> Self {
         Self {

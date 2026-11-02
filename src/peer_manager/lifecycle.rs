@@ -2690,6 +2690,19 @@ impl PeerManager {
         peer: Option<PeerKey>,
         enabled: bool,
     ) -> Result<(), SetGshutError> {
+        if peer.is_none() && !enabled {
+            // A neighbor between sessions holds its intent for its next
+            // peer: a dynamic neighbor's dead-letter entry and an unbound
+            // interface-only neighbor's held state. An all-peers clear
+            // reaches them too, or the neighbor reconnects advertising
+            // GRACEFUL_SHUTDOWN with no peer left to clear it by name.
+            for held in self.dead_lettered_pending.values_mut() {
+                held.graceful_shutdown = false;
+            }
+            if let Some(unnumbered) = self.unnumbered.as_mut() {
+                unnumbered.clear_held_graceful_shutdown();
+            }
+        }
         let targets: Vec<PeerKey> = match peer {
             Some(peer) => {
                 if !self.peers.contains_key(&peer) {

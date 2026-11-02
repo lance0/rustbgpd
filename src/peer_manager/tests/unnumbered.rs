@@ -799,6 +799,39 @@ async fn disable_and_enable_apply_to_a_stopped_retained_peer() {
     );
 }
 
+/// An all-peers graceful-shutdown clear also clears the intent an unbound
+/// neighbor holds for its next peer. Mutation-red: clearing only the managed
+/// peers rebinds the neighbor still advertising `GRACEFUL_SHUTDOWN`.
+#[tokio::test(start_paused = true)]
+async fn an_all_peers_gshut_clear_reaches_an_unbound_neighbors_held_intent() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    // The session is not Established, so its outbound refresh may fail; the
+    // intent is stored regardless.
+    let _ = h.mgr.set_graceful_shutdown(Some(key.clone()), true).await;
+    assert!(h.mgr.peers[&key].advertise_graceful_shutdown);
+    h.mgr
+        .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
+    h.bind("swp1", None).await;
+    h.mgr.note_unnumbered_session_idle(&key);
+    h.reconcile().await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [],
+        "unbound: only the held state remains"
+    );
+
+    let _ = h.mgr.set_graceful_shutdown(None, false).await;
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(
+        !h.mgr.peers[&key].advertise_graceful_shutdown,
+        "the next peer must not restore a cleared intent"
+    );
+}
+
 /// Without retained routes the address is released as soon as the session
 /// is down.
 #[tokio::test(start_paused = true)]
