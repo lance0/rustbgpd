@@ -8,3 +8,12 @@
   every kind, or split the set by kind. A route that matched only because a
   standard member and a large community (or the reverse) shared digits no
   longer matches.
+- **`.rpol` ASNs take no arithmetic, and values probe sets of their own
+  kind.** A policy with arithmetic on `route.origin-as`, `peer.asn` or an
+  AS-path loop variable (`route.origin-as + 0 == 64500`,
+  `route.origin-as % 2`), an ASN passed to a function, an ASN or runtime u32
+  probing a community-set, a community probing an asn-set, or an ASN in
+  `add`/`remove community` no longer loads. Compare the ASN directly
+  (`route.origin-as == 64500`, or `>=`/`<=` for a range), probe an asn-set,
+  and declare a community parameter as `community` instead of `u32` where it
+  probes a community-set.

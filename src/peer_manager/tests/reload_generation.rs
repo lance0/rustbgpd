@@ -793,8 +793,10 @@ async fn generation_policy_normalization_preserves_referenced_sets_and_loop_fall
             false,
         ),
         (
-            "community-set selected { 65000:1 } policy members-out { term t { let x = 4259840001; if x in selected { reject } accept } }",
-            "community-set selected { 65000:2 } policy members-out { term t { let x = 4259840001; if x in selected { reject } accept } }".to_string(),
+            // A community binding probes a community-set; a u32 never
+            // does (LAN-2794).
+            "community-set selected { 65000:1 } policy members-out { term t { for c in route.communities { let x = c; if x in selected { reject } } accept } }",
+            "community-set selected { 65000:2 } policy members-out { term t { for c in route.communities { let x = c; if x in selected { reject } } accept } }".to_string(),
             false,
         ),
         (RS_RPOL_MED_10, RS_RPOL_MED_20.to_string(), false),

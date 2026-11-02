@@ -12,3 +12,14 @@
   `remove any-community in S`. Datasets and set parameters filter by kind at
   runtime. Each probe still makes one pass over the route's communities of
   its kind.
+- **Breaking:** `.rpol` values carry a type. `route.origin-as`, `peer.asn`
+  and loop variables over `route.as-path` or an asn-set are ASNs: they
+  compare with `==`, `!=`, `>=` and `<=` against an integer literal or u32
+  parameter, so `route.origin-as >= 64512 && route.origin-as <= 65534` checks
+  a private range, compare with another ASN by `==`/`!=`, probe asn-sets and
+  can be set as a whole value, but take no arithmetic. A loop variable over
+  `route.communities` is a community: it compares with community literals,
+  probes community-sets whose members are standard and is added or removed,
+  but takes no arithmetic and probes no asn-set. A `let` takes its
+  initializer's type. Before, `for a in route.as-path { if a in tags ... }`
+  matched ASN 64500 against the community 0:64500.

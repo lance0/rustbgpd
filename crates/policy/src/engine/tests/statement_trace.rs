@@ -712,10 +712,10 @@ fn rpol_fallthrough_keeps_continue_mods_under_the_permit_default() {
     assert!(step.term_traces[2].ends_with("[not matched]"));
 }
 
-/// LAN-304 dual attribution: a call whose argument has no value renders
-/// with the calling term's name AND the function-qualified binding
-/// names — the trace names both — and the action that needs the result
-/// fails closed.
+/// LAN-304 dual attribution: a call's bindings render with the calling
+/// term's name AND the function-qualified binding names — the trace names
+/// both — and the action renders the call source-level with its value. (A
+/// call is total: it takes u32 values, which are never missing, LAN-2794.)
 #[test]
 fn rpol_fn_body_error_names_function_and_calling_term() {
     const FN_RPOL: &str = r"
@@ -724,7 +724,7 @@ fn share(total: u32, parts: u32) -> u32 {
     each
 }
 policy divide {
-    term compute { set local-pref share(100, route.origin-as); accept }
+    term compute { set local-pref share(100, route.med); accept }
 }
 ";
     let file = crate::rpol::RpolFile::parse(FN_RPOL).expect("clean rpol");
@@ -736,9 +736,10 @@ policy divide {
         "divide".to_string(),
         std::sync::Arc::new(compiled),
     )]);
-    // No origin AS: `share.each` has no value, and the action needs it.
-    let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
-    assert_eq!(trace.action, PolicyAction::Deny, "fail closed");
+    let mut ctx = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
+    ctx.med = Some(50);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, PolicyAction::Permit, "100/50 = 2");
     let step = &trace.steps[0];
     let traces = step.term_traces.join(
         "
@@ -746,26 +747,10 @@ policy divide {
     );
     // The calling term (compute.<n> split names) attributes the walk...
     assert!(traces.contains("term compute."), "{traces}");
-    // ...the erroring bind names the function-qualified binding...
+    // ...and the bind names the function-qualified binding.
     assert!(traces.contains("let share.each"), "{traces}");
-    // ...and the error renders on the uniform rail.
-    assert!(
-        traces.contains("`route.origin-as` has no value"),
-        "{traces}"
-    );
-    assert!(traces.contains("fail closed => reject"), "{traces}");
-
-    // On a resolvable route the action renders the call source-level
-    // (the result slot's name) with its value.
-    let mut ok = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
-    ok.origin_asn = Some(50);
-    let trace = explain_chain_statements(Some(&chain), &ok);
-    assert_eq!(trace.action, PolicyAction::Permit, "100/50 = 2");
     let rendered = format!("{:?}", trace.steps[0]);
-    assert!(
-        rendered.contains("share(100, route.origin-as)"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("share(100, route.med)"), "{rendered}");
 }
 
 /// The rpol agreement matrix: mixed TOML + rpol chains, contexts that

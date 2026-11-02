@@ -5,8 +5,7 @@ policy nested {
     term t {
         for a in transits {
             for b in peers {
-                let sum = a + b;
-                if sum == 65194 { add community 65009:1 }
+                if a == 174 && b == 65020 { add community 65009:1 }
                 if b == 65020 { break }
             }
         }

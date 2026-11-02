@@ -719,7 +719,7 @@ fn large_community_wildcard_prepays_the_full_wire_scan() {
 
     let nested = |n| {
         format!(
-            "asn-set one {{ 1 }} fn bump(x: u32) -> u32 {{ x }} policy p {{ term t {{ for c in one {{ if route.med == 1 && route.local-pref == 100 {{ remove community c; add community c; set med bump(2); {} accept }} }} reject }} }}",
+            "asn-set one {{ 1 }} fn bump(x: u32) -> u32 {{ x }} policy p {{ term t {{ for a in one {{ let c = 1; if route.med == 1 && route.local-pref == 100 {{ remove community c; add community c; set med bump(2); {} accept }} }} reject }} }}",
             guarded.repeat(n)
         )
     };
@@ -1978,7 +1978,7 @@ fn legal_max_depth_shapes_compile_and_evaluate_on_small_stack() {
         asn-set s { 1, 2 }
         policy p { term t {
             for a in s { for b in s { for c in s { for d in s {
-                if a + b + c + d >= 8 { add community 65009:9 }
+                if a == 2 && b == 2 && c == 2 && d == 2 { add community 65009:9 }
             } } } }
             accept
         } }"
@@ -2810,11 +2810,16 @@ fn asn_set_diagnostics() {
         "{rendered}"
     );
 
-    // Ordering comparisons are rejected on origin-as.
-    let (_, rendered) =
-        diagnostics_of("policy p { term t { if route.origin-as >= 64500 { accept } } }");
+    // LAN-2794: an ASN orders against an integer (private-range checks),
+    // but not against a runtime u32 value.
+    compile_ok(
+        "policy p { term t { if route.origin-as >= 64512 && route.origin-as <= 65534 { accept } } }",
+    );
+    let (_, rendered) = diagnostics_of(
+        "policy p { term t { let m = route.med; if route.origin-as >= m { accept } } }",
+    );
     assert!(
-        rendered.contains("supports only `==` and `!=`"),
+        rendered.contains("an ASN compared with a u32 value"),
         "{rendered}"
     );
 
@@ -3743,12 +3748,12 @@ fn absent_operand_is_a_non_match_in_every_form() {
         ("FIELD != 64500", [Permit, Permit, Deny]),
         ("!(FIELD == 64500)", [Deny, Permit, Deny]),
         ("(FIELD == 64500)", [Permit, Deny, Permit]),
-        ("FIELD * 1 == 64500", [Permit, Deny, Permit]),
-        ("FIELD + 0 == 64500", [Permit, Deny, Permit]),
         ("FIELD == (64500)", [Permit, Deny, Permit]),
         ("!(FIELD == (64500))", [Deny, Permit, Deny]),
-        ("FIELD + 0 != 64500", [Permit, Permit, Deny]),
-        ("FIELD + 0 >= 64500", [Permit, Deny, Deny]),
+        // LAN-2794: ASNs order against integers (no arithmetic on ASNs).
+        ("FIELD >= 64500", [Permit, Deny, Deny]),
+        ("FIELD <= 64500", [Permit, Deny, Permit]),
+        ("!(FIELD >= 64501)", [Deny, Deny, Permit]),
     ];
     for field in [
         crate::ir::ValueField::OriginAs,
@@ -3891,13 +3896,13 @@ fn deep_arithmetic_chains_are_depth_diagnostics() {
 /// not (grouping stays unaffected).
 #[test]
 fn peer_asn_operand_registers_peer_context() {
-    let peer_guard = reject_if("route.med + peer.asn >= 100");
+    let peer_guard = reject_if("peer.asn >= 100");
     assert!(peer_guard.requires_peer_context());
 
     let route_only = reject_if("route.med * 2 >= route.as-path.len + 10");
     assert!(!route_only.requires_peer_context());
 
-    let peer_action = compile_ok("policy p { term t { set med peer.asn + 1; accept } }");
+    let peer_action = compile_ok("policy p { term t { set med peer.asn; accept } }");
     assert!(
         peer_action.requires_peer_context(),
         "computed set value reading peer.asn"
@@ -3918,7 +3923,7 @@ fn eval_error_explain_renders_and_agrees() {
     let guard = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
         "p".to_string(),
         std::sync::Arc::new(compile_ok(
-            "policy p { term no-origin { if route.origin-as + 1 >= 1 { reject } } term rest { accept } }",
+            "policy p { term no-origin { if route.origin-as >= 1 { reject } } term rest { accept } }",
         )),
     )]);
     let mut ctx = absent_ctx();
@@ -3930,13 +3935,13 @@ fn eval_error_explain_renders_and_agrees() {
         trace.steps[0]
             .term_traces
             .iter()
-            .any(|line| line.contains("route.origin-as + 1 >= 1") && line.contains("[not matched]")),
+            .any(|line| line.contains("route.origin-as >= 1") && line.contains("[not matched]")),
         "{:?}",
         trace.steps[0].term_traces
     );
 
     let compiled = compile_ok(
-        "policy p { term no-origin { set med route.origin-as + 1; accept } term rest { accept } }",
+        "policy p { term no-origin { set med route.origin-as; accept } term rest { accept } }",
     );
     let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
         "p".to_string(),
@@ -3992,7 +3997,7 @@ fn in_language_tests_cover_arithmetic_boundaries() {
 policy saturating { term t { set med route.med + 1; set local-pref route.local-pref - 200; accept } }
 policy halves { term t { set med route.med / 2; accept } }
 policy bounded-divisor(d: u32) { term t { set med route.med % max(d, 1); accept } }
-policy absent-origin { term t { set med route.origin-as * 1; accept } }
+policy absent-origin { term t { set med route.origin-as; accept } }
 policy folded-parity(bump: u32) { term t { set med 25 + 25; set local-pref bump * 2; accept } }
 policy builtin-edges {
     term t { set med max(min(route.med, 400), 100); accept }
@@ -4545,7 +4550,7 @@ fn initializer_errors_deny_and_discard_staged_mods() {
         "policy p {
             term t {
                 set local-pref 500
-                let x = route.origin-as - 100
+                let x = route.origin-as
                 set med x
                 accept
             }
@@ -4553,13 +4558,13 @@ fn initializer_errors_deny_and_discard_staged_mods() {
     );
     let counters = PolicyHitCounters::for_chain(&chain);
 
-    // origin 64600: x = 64500, everything applies.
+    // origin 64600: x = 64600, everything applies.
     let mut ctx = absent_ctx();
     ctx.origin_asn = Some(64_600);
     let result = chain.evaluate_counting(&ctx, &counters);
     assert_eq!(result.action, PolicyAction::Permit);
     assert_eq!(result.modifications.set_local_pref, Some(500));
-    assert_eq!(result.modifications.set_med, Some(64_500));
+    assert_eq!(result.modifications.set_med, Some(64_600));
     assert_eq!(counters.eval_errors(), 0);
 
     // No origin AS: the initializer has no value, so `x` carries that
@@ -4825,9 +4830,8 @@ fn let_explain_renders_and_agrees() {
 
     // An erroring initializer renders the error in place of a verdict
     // and the trace verdict agrees with the live Deny.
-    let compiled = compile_ok(
-        "policy p { term t { let x = route.origin-as - 100; accept } term rest { accept } }",
-    );
+    let compiled =
+        compile_ok("policy p { term t { let x = route.origin-as; accept } term rest { accept } }");
     let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
         "p".to_string(),
         std::sync::Arc::new(compiled),
@@ -5138,8 +5142,8 @@ fn loop_var_scoping_and_shadowing() {
          policy p { term t {
              let x = 100;
              for x in s {
-                 let x = x + 1;
-                 if x == 8 { add community 65009:8 }
+                 let x = x;
+                 if x == 7 { add community 65009:8 }
              }
              set med x;
              accept
@@ -5151,7 +5155,7 @@ fn loop_var_scoping_and_shadowing() {
     assert_eq!(
         result.modifications.communities_add.len(),
         1,
-        "body let read the loop var (7) and shadowed it with 8"
+        "body let read the loop var (7) and shadowed it"
     );
     assert_eq!(
         result.modifications.set_med,
@@ -5973,41 +5977,23 @@ fn fn_expansion_bomb_rejected() {
     );
 }
 
-/// A call whose argument has no value denies the route on the uniform
-/// rail when an action needs the result, and counts; in a condition the
-/// same call is simply false (LAN-2790). A body can no longer fail on its
-/// own: its arithmetic saturates and its divisors cannot be zero
-/// (LAN-2791).
+/// An ASN is no function argument (LAN-2794): functions take u32 values,
+/// so a call never has a missing argument and is total — its arithmetic
+/// saturates and its divisors are non-zero constants (LAN-2791).
 #[test]
-fn fn_call_without_a_value_denies_in_an_action_and_counts() {
-    let chain = compile_ok(
-        "
-        fn share(total: u32, parts: u32) -> u32 { total / max(parts, 1) }
-        policy p {
-            term t { set local-pref share(100, route.origin-as); accept }
-        }
-        ",
-    );
-    let hits = crate::eval::PolicyHitCounters::for_chain(&chain);
-    let mut ctx = absent_ctx();
-    let denied = chain.evaluate_counting(&ctx, &hits);
-    assert_eq!(denied.action, PolicyAction::Deny);
-    assert_eq!(hits.eval_errors(), 1);
-    // A resolvable call sets the value. 100 / 20 = 5.
-    ctx.origin_asn = Some(20);
-    let permitted = chain.evaluate_counting(&ctx, &hits);
-    assert_eq!(permitted.action, PolicyAction::Permit);
-    assert_eq!(permitted.modifications.set_local_pref, Some(5));
-    assert_eq!(hits.eval_errors(), 1, "no new error");
-    // In a condition the same call is simply false (LAN-2790).
-    let guard = compile_ok(
-        "
-        fn share(total: u32, parts: u32) -> u32 { total / max(parts, 1) }
-        policy p { term t { if share(100, route.origin-as) >= 1 { reject } accept } }
-        ",
-    );
-    let result = guard.evaluate_counting(&absent_ctx(), &hits);
-    assert_eq!(result.action, PolicyAction::Permit);
+fn fn_call_rejects_an_asn_argument() {
+    for source in [
+        "fn share(total: u32, parts: u32) -> u32 { total / max(parts, 1) }
+         policy p { term t { set local-pref share(100, route.origin-as); accept } }",
+        "fn share(total: u32, parts: u32) -> u32 { total / max(parts, 1) }
+         policy p { term t { if share(100, peer.asn) >= 1 { reject } accept } }",
+    ] {
+        let (_, rendered) = diagnostics_of(source);
+        assert!(
+            rendered.contains("`share` takes u32 values, but this is an ASN"),
+            "{rendered}"
+        );
+    }
 }
 
 /// `requires_peer_context` is a property of the CALL SITE's arguments —
@@ -6022,11 +6008,18 @@ fn fn_peer_argument_sets_requires_peer_context() {
     );
     assert!(!route_only.requires_peer_context());
 
-    let peer_arg = compile_ok(
+    // An ASN is no function argument (LAN-2794), so a call never reads
+    // peer identity; `peer.asn` itself still does.
+    let (_, rendered) = diagnostics_of(
         "fn f(a: u32) -> u32 { a + 1 }
          policy p { term t { if f(peer.asn) >= 64512 { reject } accept } }",
     );
-    assert!(peer_arg.requires_peer_context());
+    assert!(
+        rendered.contains("`f` takes u32 values, but this is an ASN"),
+        "{rendered}"
+    );
+    let peer = compile_ok("policy p { term t { if peer.asn >= 64512 { reject } accept } }");
+    assert!(peer.requires_peer_context());
 }
 
 /// Explain renders the call site source-level: the result slot is
@@ -6095,11 +6088,11 @@ fn fn_calls_inside_loop_bodies() {
     let chain = compile_ok(
         "
         asn-set candidates { 64512, 64513, 64514 }
-        fn shifted(asn: u32, bump: u32) -> u32 { asn + bump }
+        fn shifted(value: u32, bump: u32) -> u32 { value + bump }
         policy p {
             term t {
                 for a in candidates {
-                    if shifted(a, 1) >= 64515 { reject }
+                    if a >= 64514 && shifted(route.med, 1) >= 1 { reject }
                 }
                 accept
             }
@@ -6108,7 +6101,8 @@ fn fn_calls_inside_loop_bodies() {
     );
     let ctx = ctx_with_path_and_med(0, None);
     let (result, fuel) = chain.evaluate_measuring_fuel(&ctx);
-    // 64514 + 1 >= 64515 on the third member.
+    // The third member is 64514, and 0 + 1 >= 1. (A loop variable is an
+    // ASN, which takes no arithmetic, LAN-2794.)
     assert_eq!(result.action, PolicyAction::Deny);
     assert_eq!(fuel, 3, "one fuel step per iteration, none for the calls");
 }
@@ -6825,11 +6819,11 @@ mod coverage {
                 "negated equality matches when peer.asn is absent; use != to require its presence, or test `exists peer.asn` explicitly".to_string(),
             ),
             (
-                "if !(route.origin-as + 0 == 64500) { accept }",
-                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+                "if !(peer.asn <= 64512) { accept }",
+                "negated comparison matches when peer.asn is absent; test `exists peer.asn` explicitly".to_string(),
             ),
             (
-                "if !(route.origin-as + 0 >= 64512) { accept }",
+                "if !(route.origin-as >= 64512) { accept }",
                 format!("negated comparison matches when route.origin-as is absent; {exists}"),
             ),
             (
@@ -6841,11 +6835,11 @@ mod coverage {
                 format!("negated membership test matches when route.origin-as is absent; {exists}"),
             ),
             (
-                "let o = route.origin-as; if !(route.med >= o) { accept }",
-                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+                "let o = route.origin-as; if !(peer.asn == o) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
             ),
             (
-                "let o = route.origin-as; let p = o + 1; if !(p <= 9) { accept }",
+                "let o = route.origin-as; let p = o; if !(p <= 9) { accept }",
                 format!("negated comparison matches when route.origin-as is absent; {exists}"),
             ),
             (
@@ -7376,7 +7370,7 @@ fn chain_splice_remaps_loop_set_ids() {
          policy pb {\n\
            term s { for c in route.communities { if c in scrub { remove community c } } }\n\
            term b { for asn in bogons { if asn == 64512 { add community 65000:2 } } }\n\
-           term l { let x = 4259840001; if x in scrub { add community 65000:3 } }\n\
+           term l { for c in route.communities { let x = c; if x in scrub { add community 65000:3 } } }\n\
          }",
     );
     let scrubbed = (65000 << 16) | 1;
@@ -8131,8 +8125,8 @@ fn nested_guard_evaluates_only_under_its_enclosing_guard() {
              default-action reject
              term t {
                  if route.prefix in ours {
-                     if route.origin-as * 1 == 64500 { accept }
-                 } else if route.origin-as * 1 == 64501 {
+                     if route.origin-as == 64500 { accept }
+                 } else if route.origin-as == 64501 {
                      accept
                  }
              }
@@ -8152,7 +8146,7 @@ fn nested_guard_evaluates_only_under_its_enclosing_guard() {
          policy p {
              term t {
                  if route.prefix in ours {
-                     if route.origin-as * 1 == 64500 { reject }
+                     if route.origin-as == 64500 { reject }
                  }
              }
          }",
@@ -8526,7 +8520,7 @@ fn deciding_branch_with_a_missing_operand_falls_to_the_next_branch() {
     let chain = compile_ok(
         "policy p {
              term t {
-                 if route.origin-as * 1 == 64500 { accept }
+                 if route.origin-as == 64500 { accept }
                  else if route.med >= 0 { set local-pref 7; accept }
              }
          }",
@@ -8540,9 +8534,10 @@ fn deciding_branch_with_a_missing_operand_falls_to_the_next_branch() {
 
 /// An `else if` guard's function call evaluates only where the walk reaches
 /// the branch. A modify-only first branch that matches skips it; reached,
-/// the call's missing argument makes the condition false (LAN-2790), so
-/// the route is never denied. The same holds for a guard nested inside an
-/// enclosing branch.
+/// the call decides the branch like any value. The same holds for a guard
+/// nested inside an enclosing branch. (A call is total: its arithmetic
+/// saturates and its arguments are u32 values that are never missing,
+/// LAN-2791 and LAN-2794.)
 #[test]
 fn skipped_else_if_guard_never_runs_its_function_call() {
     let chain = compile_ok(
@@ -8550,11 +8545,11 @@ fn skipped_else_if_guard_never_runs_its_function_call() {
          policy p {
              term t {
                  if route.local-pref >= 500 { set med 1 }
-                 else if per(route.origin-as) == 10 { set med 2 }
+                 else if per(route.med) == 5 { set med 2 }
              }
              term nested {
                  if route.local-pref >= 900 {
-                     if per(route.origin-as) == 10 { set med 3 }
+                     if per(route.med) == 5 { set med 3 }
                  }
              }
          }",
@@ -8574,7 +8569,10 @@ fn skipped_else_if_guard_never_runs_its_function_call() {
     let (result, evaluation) = chain.evaluate_with_attribution(&reached);
     assert_eq!(result.action, PolicyAction::Permit);
     assert_eq!(evaluation.eval_error, None);
-    assert_eq!(result.modifications.set_med, None, "the condition is false");
+    assert_eq!(
+        result.modifications.set_med, None,
+        "10 / max(0, 1) is 10, not 5"
+    );
 
     let nested = med_lp_ctx(Some(0), Some(950));
     let (result, evaluation) = chain.evaluate_with_attribution(&nested);
@@ -8820,24 +8818,20 @@ test miss {
     #[test]
     fn binding_and_parameter_probes_use_standard_patterns() {
         let source = r"
-community-set scrub { 64496:*, 64497:100..199, 64498:1:* }
+community-set scrub { 64496:*, 64497:100..199 }
 policy delete-in {
     term t { for c in route.communities { if c in scrub { remove community c } } accept }
 }
-policy by-param(x: u32) { term t { if x in scrub { reject } } term rest { accept } }
+policy by-param(x: community) { term t { if x in scrub { reject } } term rest { accept } }
 test scrubbed {
     route { prefix 192.0.2.0/24; communities [64496:1, 64497:150, 64497:200, NO_EXPORT] }
     expect delete-in == accept with only removes community 64496:1,
         removes community 64497:150, not removed community 64497:200,
         not removed community NO_EXPORT
 }
-test param-hit { route { prefix 192.0.2.0/24 } expect by-param(4226875492) == reject }
-test param-miss { route { prefix 192.0.2.0/24 } expect by-param(4226941128) == accept }
+test param-hit { route { prefix 192.0.2.0/24 } expect by-param(64497:100) == reject }
+test param-miss { route { prefix 192.0.2.0/24 } expect by-param(64498:200) == accept }
 ";
-        // 4226875492 = 64497:100; 4226941128 = 64498:200 (only a large
-        // pattern names 64498, and a binding is a standard community).
-        assert_eq!((64_497u32 << 16) + 100, 4_226_875_492);
-        assert_eq!((64_498u32 << 16) + 200, 4_226_941_128);
         let report = run_rpol_tests(source).expect("compiles");
         assert_eq!(report.total, 3);
         assert!(report.all_passed(), "{:?}", report.failures);
@@ -9798,14 +9792,14 @@ mod condition_truth {
         // (LAN-2791) leave missing values as the only operands that
         // cannot be computed.
         let failing = [
-            "route.origin-as + 0 == 1",
+            "route.origin-as == 1",
             "route.origin-as == (1)",
-            "route.origin-as * 1 >= 0",
-            "peer.asn + 0 == 1",
-            "route.med / max(route.origin-as, 1) >= 0",
-            "route.med % max(peer.asn, 1) >= 0",
-            "min(route.med, route.origin-as) >= 0",
-            "clamp(route.med, 10, peer.asn) >= 0",
+            "route.origin-as >= 0",
+            "peer.asn == 1",
+            "peer.asn <= 4294967295",
+            "route.origin-as != 1",
+            "peer.asn != 0",
+            "peer.asn >= 0",
         ];
         let falsy = [
             "route.as-path matches \"^65000\"",
@@ -9869,13 +9863,12 @@ mod condition_truth {
             "if route.origin-as == 64500 { reject }",
             "if (route.origin-as == 64500) { reject }",
             "if route.origin-as == (64500) { reject }",
-            "if route.origin-as + 0 == 64500 { reject }",
-            "if route.origin-as * 1 == 64500 { reject }",
+            "if route.origin-as >= 64500 && route.origin-as <= 64500 { reject }",
             "let x = 64500; if route.origin-as == x { reject }",
             "let o = route.origin-as; if o == 64500 { reject }",
-            "let o = route.origin-as + 0; if o >= 1 { reject }",
-            "if route.as-path.len >= 1 { if route.origin-as + 0 == 64500 { reject } }",
-            "if route.origin-as + 0 == 64500 { reject } else if route.med >= 1 { reject }",
+            "let o = route.origin-as; let p = o; if p >= 1 { reject }",
+            "if route.as-path.len >= 1 { if route.origin-as == 64500 { reject } }",
+            "if route.origin-as == 64500 { reject } else if route.med >= 1 { reject }",
         ];
         for form in forms {
             let chain = chain_of(&format!("policy p {{ term t {{ {form} accept }} }}"));
@@ -9897,9 +9890,11 @@ mod condition_truth {
     /// Binding probes (`x in set`) on a binding without a value are false.
     #[test]
     fn binding_probes_on_a_missing_value_are_false() {
-        for probe in ["o in peers", "!(o in peers)", "o in tags", "!(o in tags)"] {
+        // An ASN binding probes only asn-sets (LAN-2794); a community
+        // binding comes from `route.communities` and is never missing.
+        for probe in ["o in peers", "!(o in peers)"] {
             let chain = chain_of(&format!(
-                "asn-set peers {{ 64500 }} community-set tags {{ 0:64500 }} \
+                "asn-set peers {{ 64500 }} \
                  policy p {{ term t {{ let o = route.origin-as; if {probe} {{ reject }} accept }} }}"
             ));
             let expected = if probe.starts_with('!') {
@@ -9915,10 +9910,12 @@ mod condition_truth {
     /// fails the route closed, with the error kind that made it missing.
     #[test]
     fn actions_that_need_a_missing_value_still_deny() {
-        use crate::ir::ValueField::OriginAs;
-        let cases: [(&str, EvalErrorKind); 6] = [
+        use crate::ir::ValueField::{OriginAs, PeerAsn};
+        // ASNs take no arithmetic and are no community (LAN-2794), so an
+        // action meets a missing value as a whole ASN.
+        let cases: [(&str, EvalErrorKind); 5] = [
             (
-                "set med route.origin-as + 0; accept",
+                "set med route.origin-as; accept",
                 EvalErrorKind::AbsentField(OriginAs),
             ),
             (
@@ -9926,16 +9923,12 @@ mod condition_truth {
                 EvalErrorKind::AbsentField(OriginAs),
             ),
             (
-                "let o = route.origin-as; add community o; accept",
-                EvalErrorKind::AbsentField(OriginAs),
+                "set local-pref peer.asn; accept",
+                EvalErrorKind::AbsentField(PeerAsn),
             ),
             (
-                "set local-pref route.med / max(route.origin-as, 1); accept",
-                EvalErrorKind::AbsentField(OriginAs),
-            ),
-            (
-                "set med peer.asn - 1; accept",
-                EvalErrorKind::AbsentField(crate::ir::ValueField::PeerAsn),
+                "let a = peer.asn; let b = a; set local-pref b; accept",
+                EvalErrorKind::AbsentField(PeerAsn),
             ),
             (
                 "prepend as origin 1; accept",
@@ -10029,10 +10022,10 @@ mod condition_truth {
         compile_ok("policy p { term t { let exists = 3; set med exists; accept } }");
         // `fmt` keeps the form and is idempotent.
         let source =
-            "policy p {term t {if !exists route.origin-as||route.origin-as+0==1 {reject}}}\n";
+            "policy p {term t {if !exists route.origin-as||route.origin-as>=1 {reject}}}\n";
         let formatted = format_rpol(source).expect("formats");
         assert!(
-            formatted.contains("!exists route.origin-as || route.origin-as + 0 == 1"),
+            formatted.contains("!exists route.origin-as || route.origin-as >= 1"),
             "{formatted}"
         );
         assert_eq!(format_rpol(&formatted).expect("reformats"), formatted);
@@ -10093,7 +10086,7 @@ test as-set-only-is-accepted {
         };
         for body in [
             "let o = route.origin-as; if o == 1 { reject }",
-            "if route.origin-as + 0 == 1 { reject }",
+            "if route.origin-as >= 1 { reject }",
             "let o = route.origin-as; if o in peers { reject }",
         ] {
             let chain = chain_of(&format!(
@@ -10126,7 +10119,7 @@ test as-set-only-is-accepted {
     fn cost_model_is_unchanged() {
         use crate::ir::{MatchExpr, OptionalField};
         assert_eq!(MatchExpr::Exists(OptionalField::Med).cost_class(), 0);
-        let chain = reject_if("route.origin-as + 0 == 1 && route.med >= 1");
+        let chain = reject_if("route.med + 0 == 1 && route.med >= 1");
         let guard = &chain.policies[0].terms[0].guard;
         let MatchExpr::And(children) = guard else {
             panic!("one And of two leaves: {guard:?}");
@@ -10902,9 +10895,10 @@ mod typed_parameter_round_two {
     }
 
     /// A set argument keeps the kind of its parameter: a `community-set`
-    /// parameter probes the community-set, for a binding and for a `u32`
-    /// constant, and an `asn-set` parameter the asn-set. (Sets of different
-    /// kinds can no longer share a name, LAN-2803.)
+    /// parameter probes the community-set, for a binding and for a
+    /// `community` parameter, and an `asn-set` parameter the asn-set. (Sets
+    /// of different kinds can no longer share a name, LAN-2803, and a u32
+    /// value probes no community-set, LAN-2794.)
     #[test]
     fn set_arguments_keep_their_parameter_kind() {
         passes(
@@ -10913,7 +10907,7 @@ mod typed_parameter_round_two {
              policy binding(s: community-set) {
                  term t { for c in route.communities { if c in s { reject } } }
              }
-             policy constant(s: community-set, x: u32) {
+             policy constant(s: community-set, x: community) {
                  term t { if x in s { reject } }
              }
              policy asn(s: asn-set, x: u32) {
@@ -10929,11 +10923,11 @@ mod typed_parameter_round_two {
              }
              test community-constant {
                  route { prefix 192.0.2.0/24 }
-                 expect constant(tags, 4259840001) == reject
+                 expect constant(tags, 65000:1) == reject
              }
              test asn-value-constant {
                  route { prefix 192.0.2.0/24 }
-                 expect constant(tags, 65000) == accept
+                 expect constant(tags, 0:65000) == accept
              }
              test asn-kind {
                  route { prefix 192.0.2.0/24 }
@@ -11191,14 +11185,18 @@ fn sets_of_every_kind_share_one_namespace() {
         "prefix-set shared { 192.0.2.0/24 } asn-set shared { 65000 } \
          policy p { term t { if route.origin-as in shared { reject } accept } }",
     ] {
-        let (diags, rendered) = diagnostics_of(source);
+        let (_, rendered) = diagnostics_of(source);
         assert!(
             rendered.contains("collides with the"),
             "{source}: {rendered}"
         );
         assert!(rendered.contains("of the same name"), "{rendered}");
         assert!(rendered.contains("defined here"), "names both: {rendered}");
-        assert_eq!(diags.len(), 1, "{rendered}");
+        assert_eq!(
+            rendered.matches("collides with the").count(),
+            1,
+            "{rendered}"
+        );
     }
     // Distinct names compile; a same-kind duplicate keeps its own error.
     compile_ok(
@@ -11303,6 +11301,128 @@ test parameter-hits-its-kind {
 }
 ",
             5,
+        );
+    }
+
+    /// The ticket's repros: an AS-path loop variable is an ASN and a
+    /// `route.communities` loop variable a community, so neither probes the
+    /// other's set or takes the other's action, and a `let` keeps its
+    /// initializer's type. Before, ASN 64500 matched the community 0:64500.
+    #[test]
+    fn values_probe_and_act_on_their_own_kind() {
+        let sets = "asn-set origins { 64500 } community-set tags { 0:64500 }";
+        for (body, message) in [
+            (
+                "for a in route.as-path { if a in tags { reject } }",
+                "`a` is an ASN, but `tags` is a community-set",
+            ),
+            (
+                "for a in route.as-path { remove community a }",
+                "`a` is an ASN, not a community",
+            ),
+            (
+                "for c in route.communities { if c in origins { reject } }",
+                "`c` is a community, but `origins` is an asn-set",
+            ),
+            (
+                "let o = route.origin-as; if o in tags { reject }",
+                "`o` is an ASN, but `tags` is a community-set",
+            ),
+            (
+                "let m = route.med; if m in tags { reject }",
+                "`m` is a u32 value, but `tags` is a community-set",
+            ),
+            (
+                "let o = route.origin-as; let p = o + 1; set med p",
+                "arithmetic takes u32 values, but this is an ASN",
+            ),
+            (
+                "for c in route.communities { if c + 1 == 2 { reject } }",
+                "arithmetic takes u32 values, but this is a community",
+            ),
+            (
+                "for c in route.communities { set med c }",
+                "`set` takes a u32 value or an ASN, but this is a community",
+            ),
+        ] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "{sets} policy p {{ term t {{ {body}; accept }} }}"
+            ));
+            assert!(rendered.contains(message), "{body}: {rendered}");
+        }
+        passes(
+            r#"
+asn-set origins { 64500 }
+community-set tags { 0:64500 }
+policy p {
+    term asns { for a in route.as-path { if a in origins { set med 1 } } }
+    term communities { for c in route.communities { if c in tags { remove community c } } }
+    term whole { if route.origin-as == 64500 { set local-pref route.origin-as } }
+    term rest { accept }
+}
+test kinds-stay-apart {
+    route { prefix 192.0.2.0/24; as-path "65010 64500"; communities [0:64500] }
+    expect p == accept with med 1, local-pref 64500, removes community 0:64500
+}
+test digits-never-cross {
+    route { prefix 192.0.2.0/24; as-path "65010 64501"; communities [0:64500] }
+    expect p == accept with without med, removes community 0:64500
+}
+"#,
+            2,
+        );
+    }
+
+    /// An ASN orders against an integer literal or u32 parameter, the only
+    /// spelling of a private-range check now that ASNs take no arithmetic;
+    /// two ASNs compare by `==`/`!=`, and an ASN never meets a runtime u32
+    /// or a community.
+    #[test]
+    fn asns_order_against_constants_only() {
+        passes(
+            r#"
+policy private(lo: u32) {
+    term t { if route.origin-as >= lo && route.origin-as <= 65534 { reject } }
+    term rest { accept }
+}
+policy same { term t { let a = peer.asn; if route.origin-as == a { reject } } term rest { accept } }
+test below { route { prefix 192.0.2.0/24; as-path "64511" } expect private(64512) == accept }
+test low-edge { route { prefix 192.0.2.0/24; as-path "64512" } expect private(64512) == reject }
+test high-edge { route { prefix 192.0.2.0/24; as-path "65534" } expect private(64512) == reject }
+test above { route { prefix 192.0.2.0/24; as-path "65535" } expect private(64512) == accept }
+test no-origin { route { prefix 192.0.2.0/24 } expect private(64512) == accept }
+"#,
+            5,
+        );
+        for (guard, message) in [
+            (
+                "let m = route.med; if route.origin-as >= m { reject }",
+                "an ASN compared with a u32 value",
+            ),
+            (
+                "if route.origin-as + 0 >= 64512 { reject }",
+                "arithmetic takes u32 values, but this is an ASN",
+            ),
+            (
+                "let a = route.origin-as; if peer.asn >= a { reject }",
+                "two ASNs compare with `==` and `!=` only",
+            ),
+            (
+                "for c in route.communities { if c >= 65000:1 { reject } }",
+                "communities compare with `==` and `!=` only",
+            ),
+            (
+                "for c in route.communities { let o = route.origin-as; if c == o { reject } }",
+                "an ASN and a community never compare equal",
+            ),
+        ] {
+            let (_, rendered) =
+                diagnostics_of(&format!("policy p {{ term t {{ {guard}; accept }} }}"));
+            assert!(rendered.contains(message), "{guard}: {rendered}");
+        }
+        // A constant u32 still stands for a community in an action.
+        compile_ok(
+            "policy p(x: u32) { term t { let c = 1; add community c; remove community x; accept } }",
         );
     }
 

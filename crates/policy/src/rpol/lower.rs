@@ -1160,15 +1160,13 @@ impl<'a> Lowerer<'a> {
                         } else {
                             DatasetProbe::LocalCommunity { slot, name }
                         }
+                    } else if asn_kind {
+                        DatasetProbe::ConstAsn(
+                            *env.get(ident.node.as_str())
+                                .expect("typechecked: parameter in scope"),
+                        )
                     } else {
-                        let value = *env
-                            .get(ident.node.as_str())
-                            .expect("typechecked: parameter in scope");
-                        if asn_kind {
-                            DatasetProbe::ConstAsn(value)
-                        } else {
-                            DatasetProbe::ConstCommunity(value)
-                        }
+                        DatasetProbe::ConstCommunity(self.community(ident, env))
                     };
                     return match self.dataset_ref(&set.node) {
                         Some(id) => MatchExpr::InDataset { probe, id },
@@ -1190,13 +1188,14 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                 } else {
-                    let value = *env
-                        .get(ident.node.as_str())
-                        .expect("typechecked: parameter in scope");
                     let matched = if asn_set {
+                        let value = *env
+                            .get(ident.node.as_str())
+                            .expect("typechecked: parameter in scope");
                         let id = self.asn_set_ids[&set.node];
                         self.asn_sets[id.0 as usize].contains(value)
                     } else {
+                        let value = self.community(ident, env);
                         let id = self.community_set_ids[&set.node];
                         self.community_sets[id.0 as usize].contains_standard(value)
                     };
@@ -1384,6 +1383,19 @@ fn lower_cmp(
         // origin (empty or AS_SET-only path) must match neither `==` nor
         // `!=` (LAN-209 class), and `Not(OriginAsEq)` would wrongly
         // match every origin-less route.
+        // LAN-2794: ordering an ASN (private-range checks) is a value
+        // comparison, false when the origin is absent like the plain nodes.
+        Field::OriginAs | Field::PeerAsn if matches!(op, CmpOp::Ge | CmpOp::Le) => {
+            MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+                op: if op == CmpOp::Ge {
+                    ValueCmpOp::Ge
+                } else {
+                    ValueCmpOp::Le
+                },
+                lhs: ValueExpr::Field(value_field_of(resolved).expect("an ASN field")),
+                rhs: ValueExpr::Const(rhs_u32(rhs, env)),
+            }))
+        }
         Field::OriginAs => {
             let asn = rhs_u32(rhs, env);
             if op == CmpOp::Ne {

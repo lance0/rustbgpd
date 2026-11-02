@@ -128,7 +128,9 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — `+ - *` **saturate** at 0 and 4294967295, never wrap or trap, and a divisor can never be zero (see "Saturating u32 value expressions") |
+| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, arguments; the only arithmetic type — `+ - *` **saturate** at 0 and 4294967295, never wrap or trap, and a divisor can never be zero (see "Saturating u32 value expressions") |
+| asn | `route.origin-as`, `peer.asn`, `for` loops over `route.as-path` or an asn-set, `let` bindings of these | compared with `==`, `!=`, `>=`, `<=` against an integer literal or u32 parameter (private ranges: `route.origin-as >= 64512 && route.origin-as <= 65534`), with `==`/`!=` against another ASN, probed against asn-sets, and set as a whole value (`set med route.origin-as`); **no arithmetic** |
+| community value | `for c in route.communities`, `community` parameters, `let` bindings of these | compared with `==`/`!=` against a community literal or another community, probed against community-sets (standard members only), added or removed; no arithmetic and no asn-set probe |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -668,7 +670,7 @@ that is false on a route without the value, so the negation matches that
 route: `!(optional-field == literal)`, and for `route.origin-as` and
 `peer.asn` also a comparison against a binding or parameter with any
 operator, any computed comparison such as
-`!(route.origin-as + 0 >= 64512)`, and a `let` binding
+`!(route.origin-as >= 64512)`, and a `let` binding
 of such a value compared or probed (`let o = route.origin-as;` then
 `!(o == 64500)` or `!(o in bogons)`). It points at the negated expression,
 including inside compound guards and loops. Use `!=` for an equality when
@@ -684,8 +686,11 @@ u32 value positions — either side of a u32 comparison, and the
 (ADR-0103): arithmetic over integer literals, parameters,
 `let` bindings (below), u32-typed fields (`route.local-pref`,
 `route.med`, `route.as-path.len`, the three community counts such as
-`route.communities.len`, `route.origin-as`, `peer.asn`), and
-three bounded builtins. A comparison's left side may also carry
+`route.communities.len`), and three bounded builtins. An ASN
+(`route.origin-as`, `peer.asn`) is no arithmetic operand: it compares,
+orders against an integer, probes an asn-set, and may be set as a whole
+value; an ASN or a community in arithmetic, a builtin or a function
+argument is a compile error. A comparison's left side may also carry
 arithmetic when it starts with a field or a binding.
 
 ```rpol
@@ -738,12 +743,12 @@ cannot be computed is one built from a missing operand.
 `route.local-pref` and `route.med` read their implicit defaults (100 / 0)
 when absent, consistent with comparisons. Every form of a comparison
 agrees: `route.origin-as == 64500`, `route.origin-as == (64500)`,
-`route.origin-as + 0 == 64500` and `route.origin-as == x` with a `let`
+`route.origin-as >= 64500` and `route.origin-as == x` with a `let`
 binding are all false on an origin-less route, and match neither `==` nor
 `!=` there. `&&`, `||` and `!` therefore combine plain true and false
 values: an operand's evaluation order never changes a verdict, and `!`
-follows the truth table above (`!(route.origin-as + 0 == 64500)` is true
-on an origin-less route).
+follows the truth table above (`!(route.origin-as >= 64512)` is true on
+an origin-less route).
 
 **Rejecting when a value is missing.** Say so with `exists`, which tests
 whether the route carries the value (`route.origin-as`, `peer.asn`,
@@ -820,8 +825,11 @@ cap keeps the local-pref doubling at 400.
 
 ### Bindings — `let`
 
-`let <name> = <value expression>` names a computed `u32` in statement
-position — a term body, or an `if`/`else` body (ADR-0103):
+`let <name> = <value expression>` names a value in statement position
+— a term body, or an `if`/`else` body (ADR-0103). The binding takes its
+initializer's type: `let origin = route.origin-as` is an ASN, `let x = c`
+in a `route.communities` loop is a community, and anything else is a u32,
+so a typed value is never laundered through a u32:
 
 ```rpol
 policy dampen {
@@ -944,8 +952,10 @@ fields alone never disqualify grouping.
 ### Loops — `for`
 
 `for <var> in <source> { ... }` walks a finite collection, binding
-each element to an immutable `u32` loop variable — a fresh binding per
-iteration, scoped to the body (ADR-0103 Decision 3):
+each element to an immutable loop variable — a fresh binding per
+iteration, scoped to the body (ADR-0103 Decision 3). The source types
+the variable: an ASN from `route.as-path` or an asn-set, a standard
+community from `route.communities`:
 
 ```rpol
 community-set scrub { 65000:100, 65000:200 }
@@ -975,14 +985,11 @@ runtime-meterable.
 **Iteration sources — exactly three forms.**
 
 - `route.communities` — the route's **standard** (RFC 1997)
-  communities as raw `u32` values (`ASN << 16 | value`), in attribute
-  order. This is the community-iteration decision for this slice: a
-  standard community *is* a `u32`, so it rides the u32-only value
-  model without a new type. `route.large-communities` and
-  `route.ext-communities` do not iterate (their members are 96/64-bit
-  — probe them with `has`/`in`); community-sets do not iterate either
-  (mixed-kind members). A standard community literal doubles as a u32
-  in value positions, so `if c == 65000:100 { ... }` reads naturally.
+  communities, in attribute order, as community values: compare one
+  with a community literal (`if c == 65000:100 { ... }`), probe a
+  community-set, or add or remove it. `route.large-communities` and
+  `route.ext-communities` do not iterate (probe them with `has`/`in`);
+  community-sets do not iterate either (mixed-kind members).
 - `route.as-path` — every ASN in wire order: segments in order, ASNs
   within each segment in stored order, **prepend duplicates included**.
   `AS_SET` members are yielded individually in received order (note
@@ -995,12 +1002,16 @@ runtime-meterable.
   per-loop bound are rejected at compile time (probe those with `in`).
 
 **The loop variable in guards and actions.** It resolves like any
-`let` binding: value comparisons and arithmetic, `in` membership —
-against an `asn-set`, or against a `community-set`'s standard members
-(`c in scrub` above; large/ext members of the set never match a u32)
-— and the binding-valued community actions `add community <var>` /
-`remove community <var>` (standard kind only), which stage the
-element's value per execution: the scrub-loop idiom. A loop removal is
+`let` binding, by type. An ASN compares and orders against integers and
+probes an asn-set (`asn in bogon-asns` above). A community compares with
+community literals, probes a community-set whose members are all
+standard (`c in scrub` above; a member of another kind is a compile
+error), and is staged per execution by `add community <var>` /
+`remove community <var>`: the scrub-loop idiom. An ASN never probes a
+community-set, a community never probes an asn-set, and a runtime u32
+probes neither: that is how `0:64500` used to match ASN 64500. A
+community action also takes a constant u32 (a literal `let` or a u32
+parameter) standing for the community with that value. A loop removal is
 explicit, so it removes well-known values such as `NO_EXPORT` too, unlike
 `remove community *`. Shadowing follows
 the `let` rules — the loop variable shadows outer bindings, a body
@@ -1739,7 +1750,7 @@ Static lints ride the same pass and need no fixtures:
 - `unreferenced-policy` — no test and no `apply` names it in the
   compilation unit (with the config-chain caveat above).
 - `optional-field-negation` — a negated test on an optional value, such as
-  `!(optional-field == literal)` or `!(route.origin-as + 0 >= 64512)`, also
+  `!(optional-field == literal)` or `!(route.origin-as >= 64512)`, also
   matches a route without the value; see
   [optional comparison semantics](#expressions).
 

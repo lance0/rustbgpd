@@ -906,7 +906,7 @@ async fn evaluation_error_fails_closed_and_differs_from_a_clean_reject() {
 #[tokio::test(start_paused = true)]
 async fn a_missing_operand_in_the_advertise_policy_is_a_clean_reject() {
     let predicate = rpol(
-        "policy guard { term t { if route.origin-as + 0 == 65100 { accept } } term rest { reject } }",
+        "policy guard { term t { if route.origin-as >= 65100 && route.origin-as <= 65100 { accept } } term rest { reject } }",
         "guard",
     );
     let mut manager = manager_with(install_set(

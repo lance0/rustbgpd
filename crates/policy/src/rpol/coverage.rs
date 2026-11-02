@@ -448,6 +448,14 @@ fn negated_optional(
                     return Some((noun, resolved, field.render()));
                 }
             }
+            // LAN-2794: an ASN orders against an integer, and the ordering
+            // is false when the field is absent.
+            if matches!(op, CmpOp::Ge | CmpOp::Le)
+                && matches!(resolved, Field::OriginAs | Field::PeerAsn)
+                && matches!(rhs, Rhs::Int(..))
+            {
+                return Some(("comparison", resolved, field.render()));
+            }
             let optional = *op == CmpOp::Eq
                 && matches!(
                     (resolved, rhs),
