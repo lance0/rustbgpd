@@ -3572,7 +3572,10 @@ export_policy_chain = ["tag-ixp"]
 
 When multiple policies in a chain both set a scalar value (e.g. `set_local_pref`),
 the later policy wins. List values (community add/remove) accumulate across the
-chain.
+chain. Prepends accumulate too: each later `set_as_path_prepend` places its
+copies to the left of the earlier ones, so two members that prepend 1 and 2
+copies place 3, and a chain whose prepends could exceed 255 ASNs is rejected
+when it is attached.
 
 **Mutual exclusion:** Inline policy and policy chain cannot both be set for the
 same direction on the same neighbor. This is a config validation error.

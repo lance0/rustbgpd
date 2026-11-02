@@ -1582,7 +1582,6 @@ fn unsafe_mods(
         large_communities_add,
         large_communities_remove,
         as_path_prepend,
-        as_path_prepend_computed,
         set_local_pref_computed,
         set_med_computed,
     } = mods;
@@ -1595,7 +1594,7 @@ fn unsafe_mods(
     if set_next_hop.is_some() {
         return Some("next-hop changes are refused");
     }
-    if as_path_prepend.is_some() || as_path_prepend_computed.is_some() {
+    if !as_path_prepend.is_empty() {
         return Some("AS prepend is refused");
     }
     let _ = (

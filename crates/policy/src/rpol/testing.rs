@@ -666,21 +666,48 @@ fn check_assertion(
                     .set_next_hop
                     .as_ref()
                     .map(|action| render_next_hop(Some(action))),
-                ScalarAttr::Prepend => mods.as_path_prepend.map(|(a, c)| format!("as {a} {c}")),
+                ScalarAttr::Prepend => {
+                    (!mods.as_path_prepend.is_empty()).then(|| render_prepend(mods))
+                }
             };
             set.map(|value| format!("expected no {} change, got {value}", attr.keyword()))
         }
-        WithAssertion::Prepend(asn, count) => {
-            let expected = Some((*asn, u8::try_from(*count).unwrap_or(u8::MAX)));
-            (mods.as_path_prepend != expected).then(|| {
-                format!(
-                    "expected prepend as {asn} {count}, got {}",
-                    mods.as_path_prepend
-                        .map_or_else(|| "none".to_string(), |(a, c)| format!("as {a} {c}"))
-                )
-            })
+        WithAssertion::Prepend(..) | WithAssertion::PrependPath(_) => {
+            check_prepend(assertion, mods)
         }
     }
+}
+
+/// Both prepend forms pin the whole sequence placed in front of the path.
+fn check_prepend(assertion: &WithAssertion, mods: &RouteModifications) -> Option<String> {
+    let actual = mods.prepended_asns();
+    let (matches, written) = match assertion {
+        // Compared without expanding the count.
+        WithAssertion::Prepend(asn, count) => (
+            u32::try_from(actual.len()) == Ok(*count) && actual.iter().all(|value| value == asn),
+            format!("as {asn} {count}"),
+        ),
+        WithAssertion::PrependPath(asns) => (actual == *asns, format!("\"{}\"", join_asns(asns))),
+        _ => return None,
+    };
+    (!matches).then(|| format!("expected prepend {written}, got {}", render_prepend(mods)))
+}
+
+/// The prepended ASNs as a quoted sequence, or `none`.
+fn render_prepend(mods: &RouteModifications) -> String {
+    let asns = mods.prepended_asns();
+    if asns.is_empty() {
+        "none".to_string()
+    } else {
+        format!("\"{}\"", join_asns(&asns))
+    }
+}
+
+fn join_asns(asns: &[u32]) -> String {
+    asns.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn check_only(expect: &ExpectDef, fixture: &Fixture, mods: &RouteModifications) -> Option<String> {
@@ -698,7 +725,9 @@ fn discard_asserted(assertion: &WithAssertion, fixture: &Fixture, mods: &mut Rou
         WithAssertion::LocalPref(_) => mods.set_local_pref = None,
         WithAssertion::Med(_) => mods.set_med = None,
         WithAssertion::NextHop(_) => mods.set_next_hop = None,
-        WithAssertion::Prepend(_, _) => mods.as_path_prepend = None,
+        WithAssertion::Prepend(_, _) | WithAssertion::PrependPath(_) => {
+            mods.as_path_prepend.clear();
+        }
         WithAssertion::RemovesLargeAdmin(global) => mods
             .large_communities_remove
             .retain(|lc| lc.global_admin != *global || !fixture.large_communities.contains(lc)),

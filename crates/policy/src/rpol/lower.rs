@@ -55,8 +55,9 @@ use rustbgpd_wire::ExtendedCommunity;
 
 use crate::datasets::DatasetBindings;
 use crate::engine::{
-    AsPathRegex, NeighborSetMatch, NextHopAction, PolicyAction, RouteExtendedCommunityAdmin,
-    RouteExtendedCommunityKind, RouteModifications, encode_route_extended_community,
+    AsPathPrepend, AsPathRegex, NeighborSetMatch, NextHopAction, PolicyAction, PrependAsn,
+    RouteExtendedCommunityAdmin, RouteExtendedCommunityKind, RouteModifications,
+    encode_route_extended_community,
 };
 use crate::eval::{arith, clamp};
 use crate::ir::{
@@ -277,6 +278,10 @@ pub(super) struct Lowerer<'a> {
     /// member, above the caller's live slots and return flag for a policy
     /// lowered at an `apply` statement.
     slot_base: u16,
+    /// Each `apply` statement's callee prepend bound in its latest
+    /// lowering, keyed by the statement's address in the source tree: a
+    /// caller's own bound is computed right after its body lowers its calls.
+    call_prepends: HashMap<usize, u64>,
 }
 
 /// The interned set data of one source file: every defined
@@ -410,6 +415,7 @@ impl<'a> Lowerer<'a> {
             missing_datasets: Vec::new(),
             typed_frames: Vec::new(),
             slot_base: 0,
+            call_prepends: HashMap::new(),
         };
         for (index, def) in file.prefix_sets.iter().enumerate() {
             let id = SetId(u32::try_from(index).expect("fits u32"));
@@ -695,6 +701,17 @@ impl<'a> Lowerer<'a> {
                 .as_ref()
                 .map_or(PolicyAction::Permit, |action| action.node),
             source: PolicySource::Rpol,
+            prepend_bound: super::typeck::policy_prepend_bound(
+                def,
+                self.file,
+                &|count| u64::from(resolve_u32(count, env)),
+                &|call| {
+                    self.call_prepends
+                        .get(&std::ptr::from_ref(call).addr())
+                        .copied()
+                        .unwrap_or(0)
+                },
+            ),
         }
     }
 
@@ -1354,6 +1371,8 @@ impl<'a> Lowerer<'a> {
         let outer_base = self.slot_base;
         self.slot_base = lets.next_slot;
         let callee = self.lower_policy(def, &args, store);
+        self.call_prepends
+            .insert(std::ptr::from_ref(call).addr(), callee.prepend_bound);
         self.slot_base = outer_base;
         lets.reset(scope);
 
@@ -2103,19 +2122,14 @@ impl Lowerer<'_> {
                     .ok()
                     .filter(|count| *count != 0)
                     .expect("checked at typecheck or instantiation: prepend count is 1-255");
-                // LAN-296: computed operands lower to the staged
-                // `as_path_prepend_computed` slot (resolved per route by
-                // the evaluator); the literal/parameter form keeps its
-                // existing lowering. The operand decision is shared with
-                // the typechecker (`PrependAsArg::operand`).
-                if let Some(operand) = asn.operand() {
-                    mods.as_path_prepend_computed = Some((operand, count));
-                } else {
-                    let PrependAsArg::Value(arg) = asn else {
-                        unreachable!("non-Value prepend args always denote an operand")
-                    };
-                    mods.as_path_prepend = Some((resolve_u32(arg, env), count));
-                }
+                // Prepends accumulate in statement order. A computed operand
+                // (LAN-296, `PrependAsArg::operand`) resolves per route.
+                let asn = match (asn.operand(), asn) {
+                    (Some(operand), _) => PrependAsn::Computed(operand),
+                    (None, PrependAsArg::Value(arg)) => PrependAsn::Asn(resolve_u32(arg, env)),
+                    (None, _) => unreachable!("non-Value prepend args always denote an operand"),
+                };
+                mods.as_path_prepend.push(AsPathPrepend { asn, count });
             }
         }
     }

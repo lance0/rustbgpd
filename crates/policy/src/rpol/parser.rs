@@ -275,6 +275,40 @@ impl Parser<'_> {
         Ok((addr, token.span))
     }
 
+    /// `with prepend as ASN COUNT`: COUNT copies of ASN, the count 1-255.
+    fn prepend_count_assertion(&mut self) -> PResult<WithAssertion> {
+        self.expect(Tok::AsKw, "`as` or a quoted ASN sequence")?;
+        let (asn, _) = self.expect_u32("an ASN")?;
+        let (count, span) = self.expect_u32("a prepend count")?;
+        if count == 0 || count > 255 {
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Parse,
+                span,
+                format!("prepend count {count} out of range"),
+                "must be 1-255",
+            ));
+            return Err(Fail);
+        }
+        Ok(WithAssertion::Prepend(asn, count))
+    }
+
+    /// `with prepend "666.5 666.5 2.5"`: the whole prepended sequence.
+    fn prepend_path_assertion(&mut self) -> PResult<WithAssertion> {
+        let path = self.expect_str("the prepended ASNs")?;
+        match parse_prepend_path(&path.node) {
+            Ok(asns) => Ok(WithAssertion::PrependPath(asns)),
+            Err(reason) => {
+                self.diags.push(Diagnostic::coded(
+                    DiagnosticCode::Parse,
+                    path.span,
+                    format!("invalid prepend sequence: {reason}"),
+                    "expected ASNs such as \"666.5 666.5 2.5\"",
+                ));
+                Err(Fail)
+            }
+        }
+    }
+
     fn expect_str(&mut self, what: &str) -> PResult<Spanned<String>> {
         let token = self.expect(Tok::Str, what)?;
         let raw = self.text(token);
@@ -2374,10 +2408,10 @@ impl Parser<'_> {
             };
         }
         if self.eat(Tok::PrependKw).is_some() {
-            self.expect(Tok::AsKw, "`as`")?;
-            let (asn, _) = self.expect_u32("an ASN")?;
-            let (count, _) = self.expect_u32("a prepend count")?;
-            return Ok(WithAssertion::Prepend(asn, count));
+            if self.peek().is_some_and(|t| t.kind == Tok::Str) {
+                return self.prepend_path_assertion();
+            }
+            return self.prepend_count_assertion();
         }
         let field =
             self.expect_ident("an assertion (`local-pref`, `med`, `next-hop`, `community`, ...)")?;
@@ -2629,6 +2663,41 @@ pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<Datase
             DatasetData::Community(set)
         }
     })
+}
+
+/// The ASNs of a `with prepend "..."` assertion: whitespace-separated
+/// asplain (`43646981`) or asdot (`666.5`, RFC 5396) numbers, 1 to
+/// [`crate::engine::MAX_PREPEND_ASNS`] of them, none of them AS 0.
+pub(super) fn parse_prepend_path(text: &str) -> Result<Vec<u32>, String> {
+    let asns = text
+        .split_whitespace()
+        .map(|word| {
+            let asn = match word.split_once('.') {
+                Some((high, low)) => high
+                    .parse::<u16>()
+                    .ok()
+                    .zip(low.parse::<u16>().ok())
+                    .map(|(high, low)| (u32::from(high) << 16) | u32::from(low)),
+                None => word.parse::<u32>().ok(),
+            };
+            match asn {
+                Some(0) => Err("AS 0 cannot be prepended (RFC 7607)".to_string()),
+                Some(asn) => Ok(asn),
+                None => Err(format!("`{word}` is not an ASN")),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if asns.is_empty() {
+        return Err("no ASNs; use `without prepend` to assert none".to_string());
+    }
+    if asns.len() > crate::engine::MAX_PREPEND_ASNS {
+        return Err(format!(
+            "{} ASNs; a route takes at most {}",
+            asns.len(),
+            crate::engine::MAX_PREPEND_ASNS
+        ));
+    }
+    Ok(asns)
 }
 
 #[cfg(test)]

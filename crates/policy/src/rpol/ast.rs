@@ -1056,6 +1056,9 @@ pub enum WithAssertion {
     Community(Spanned<CommunityLit>),
     /// `prepend as 65001 3`.
     Prepend(u32, u32),
+    /// `prepend "666.5 666.5 2.5 2.5 2.5"` — the policy places exactly these
+    /// ASNs in front of the `AS_PATH`, leftmost first (asplain or asdot).
+    PrependPath(Vec<u32>),
     /// `removes community 65001:999` (any kind) — present in the
     /// removes.
     Removes(Spanned<CommunityLit>),

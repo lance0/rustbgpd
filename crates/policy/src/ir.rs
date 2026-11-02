@@ -1142,6 +1142,14 @@ pub struct CompiledPolicy {
     pub default_action: PolicyAction,
     /// The frontend this policy was compiled from.
     pub source: PolicySource,
+    /// The most ASNs one evaluation of this policy can prepend, computed
+    /// when it is compiled: for `.rpol`, the largest total of the prepends
+    /// along any path to an `accept`, arguments substituted, `if` branches
+    /// that fall through counted together and a loop counted once per
+    /// iteration; for TOML, the largest statement's. Chain attachment sums
+    /// it across members against
+    /// [`MAX_PREPEND_ASNS`](crate::engine::MAX_PREPEND_ASNS). Zero for hand-built IR.
+    pub prepend_bound: u64,
 }
 
 /// A compiled policy chain plus the indexed match data its expression
@@ -1375,10 +1383,10 @@ impl CompiledChain {
                 TermAction::ForEach(node) if node.source == LoopSource::AsPath
             )
         }) || self.any_action_mods(&|mods| {
-            matches!(
-                mods.as_path_prepend_computed,
-                Some((crate::engine::PrependAs::PathFirst, _))
-            )
+            mods.as_path_prepend.iter().any(|prepend| {
+                prepend.asn
+                    == crate::engine::PrependAsn::Computed(crate::engine::PrependAs::PathFirst)
+            })
         })
     }
 
@@ -1399,7 +1407,9 @@ impl CompiledChain {
             let (TermAction::Permit(mods) | TermAction::Continue(mods)) = &term.action else {
                 return false;
             };
-            matches!(mods.as_path_prepend_computed, Some((PrependAs::PeerAs, _)))
+            mods.as_path_prepend.iter().any(|prepend| {
+                prepend.asn == crate::engine::PrependAsn::Computed(PrependAs::PeerAs)
+            })
         };
         for policy in &self.policies {
             for term in &policy.terms {
@@ -1611,7 +1621,10 @@ fn guard_truth(
 }
 
 fn clean_modifications(modifications: &RouteModifications) -> bool {
-    modifications.as_path_prepend_computed.is_none()
+    modifications
+        .as_path_prepend
+        .iter()
+        .all(|prepend| matches!(prepend.asn, crate::engine::PrependAsn::Asn(_)))
         && modifications.set_local_pref_computed.is_none()
         && modifications.set_med_computed.is_none()
 }
@@ -1770,6 +1783,7 @@ mod validation_posture_tests {
                 .collect(),
             default_action,
             source: PolicySource::Toml,
+            prepend_bound: 0,
         }
     }
 

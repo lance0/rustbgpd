@@ -464,6 +464,9 @@ fn resolve_rpol_chain_ref(
         .file
         .compile_policy_args(base, &args, store, datasets, true)
         .expect("registry entry names a policy defined in its file")
+        .map_err(|reason| ConfigError::InvalidPolicyEntry {
+            reason: format!("chain reference {reference:?}: {reason}"),
+        })?
         .map_err(|missing| ConfigError::InvalidPolicyEntry {
             // Unreachable through `Config::load` (bind_datasets runs
             // before validation and covers every declaration), kept
@@ -627,10 +630,12 @@ fn parse_modifications(
         large_communities_remove: remove.large,
         // Computed operands (LAN-296 prepend, LAN-299 set values) are
         // an `.rpol`-only surface; the TOML frontend stays literal-only.
-        as_path_prepend_computed: None,
         set_local_pref_computed: None,
         set_med_computed: None,
-        as_path_prepend,
+        as_path_prepend: as_path_prepend
+            .map(|(asn, count)| rustbgpd_policy::AsPathPrepend::asn(asn, count))
+            .into_iter()
+            .collect(),
     })
 }
 

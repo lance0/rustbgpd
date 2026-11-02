@@ -271,13 +271,15 @@ fn leftmost_asn(as_path: Option<&AsPath>) -> Option<u32> {
 pub(super) fn apply_rs_control_egress(route: &mut crate::route::Route, rs_asn: u32, prepend: u8) {
     let (communities_remove, large_communities_remove) =
         scrub_lists(route.communities(), route.large_communities(), rs_asn);
-    let as_path_prepend = (prepend > 0)
+    let as_path_prepend: Vec<_> = (prepend > 0)
         .then(|| leftmost_asn(route.as_path()))
         .flatten()
-        .map(|asn| (asn, prepend));
+        .map(|asn| rustbgpd_policy::AsPathPrepend::asn(asn, prepend))
+        .into_iter()
+        .collect();
     if communities_remove.is_empty()
         && large_communities_remove.is_empty()
-        && as_path_prepend.is_none()
+        && as_path_prepend.is_empty()
     {
         return;
     }

@@ -1394,7 +1394,7 @@ fn modification_actions_lower_to_route_modifications() {
         vec![rustbgpd_wire::COMMUNITY_NO_EXPORT]
     );
     assert_eq!(mods.large_communities_add.len(), 1);
-    assert_eq!(mods.as_path_prepend, Some((65001, 3)));
+    assert_eq!(mods.as_path_prepend, [crate::AsPathPrepend::asn(65001, 3)]);
     // RT:65001:100 with a 2-octet ASN admin → type 0x00, subtype 0x02.
     let ec = mods.extended_communities_add[0];
     assert_eq!(ec.type_byte(), 0x00);
@@ -3172,11 +3172,13 @@ fn computed_prepend_operands_lower_to_computed_slot() {
         ));
         let mods = first_term_mods(&chain);
         assert_eq!(
-            mods.as_path_prepend_computed,
-            Some((expected, 3)),
+            mods.as_path_prepend,
+            [crate::AsPathPrepend {
+                asn: crate::PrependAsn::Computed(expected),
+                count: 3
+            }],
             "operand {source_operand}"
         );
-        assert_eq!(mods.as_path_prepend, None, "operand {source_operand}");
     }
 }
 
@@ -3187,8 +3189,7 @@ fn computed_prepend_operands_lower_to_computed_slot() {
 fn fixed_prepend_forms_unchanged() {
     let chain = compile_ok("policy p { term t { prepend as 65001 3; accept } }");
     let mods = first_term_mods(&chain);
-    assert_eq!(mods.as_path_prepend, Some((65001, 3)));
-    assert_eq!(mods.as_path_prepend_computed, None);
+    assert_eq!(mods.as_path_prepend, [crate::AsPathPrepend::asn(65001, 3)]);
 
     let mut store = SetStore::new();
     let file = super::RpolFile::parse("policy p(asn: u32) { term t { prepend as asn 2; accept } }")
@@ -3196,8 +3197,10 @@ fn fixed_prepend_forms_unchanged() {
     let chain = file
         .compile_policy("p", &[64999], &mut store)
         .expect("policy exists");
-    assert_eq!(first_term_mods(&chain).as_path_prepend, Some((64999, 2)));
-    assert_eq!(first_term_mods(&chain).as_path_prepend_computed, None);
+    assert_eq!(
+        first_term_mods(&chain).as_path_prepend,
+        [crate::AsPathPrepend::asn(64999, 2)]
+    );
 
     for name in ["origin", "path-first"] {
         let (_, rendered) = diagnostics_of(&format!(
@@ -3249,7 +3252,10 @@ fn prepend_path_first_uses_only_a_valid_leading_sequence() {
         );
         assert_eq!(
             result.modifications.as_path_prepend,
-            expected.map(|asn| (asn, 2))
+            expected
+                .map(|asn| crate::AsPathPrepend::asn(asn, 2))
+                .into_iter()
+                .collect::<Vec<_>>()
         );
     }
     assert_eq!(
@@ -3284,8 +3290,10 @@ fn prepend_peer_resolves_to_peer_asn_on_import_eval() {
     let chain = compile_ok("policy p { term t { prepend as peer 3; accept } }");
     let result = chain.evaluate(&prepend_ctx(Some(65010), None));
     assert_eq!(result.action, PolicyAction::Permit);
-    assert_eq!(result.modifications.as_path_prepend, Some((65010, 3)));
-    assert_eq!(result.modifications.as_path_prepend_computed, None);
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        [crate::AsPathPrepend::asn(65010, 3)]
+    );
 }
 
 #[test]
@@ -3293,8 +3301,10 @@ fn prepend_origin_resolves_to_origin_asn() {
     let chain = compile_ok("policy p { term t { prepend as origin 2; accept } }");
     let result = chain.evaluate(&prepend_ctx(None, Some(64500)));
     assert_eq!(result.action, PolicyAction::Permit);
-    assert_eq!(result.modifications.as_path_prepend, Some((64500, 2)));
-    assert_eq!(result.modifications.as_path_prepend_computed, None);
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        [crate::AsPathPrepend::asn(64500, 2)]
+    );
 }
 
 #[test]
@@ -3303,8 +3313,10 @@ fn prepend_self_resolves_from_chain_local_asn() {
     chain.local_asn = Some(64512);
     let result = chain.evaluate(&prepend_ctx(None, None));
     assert_eq!(result.action, PolicyAction::Permit);
-    assert_eq!(result.modifications.as_path_prepend, Some((64512, 4)));
-    assert_eq!(result.modifications.as_path_prepend_computed, None);
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        [crate::AsPathPrepend::asn(64512, 4)]
+    );
 }
 
 /// Missing context fails the route CLOSED (uniform Deny) — and never
@@ -3348,7 +3360,10 @@ fn computed_prepend_failure_in_continue_term_denies() {
     // With an origin present the same chain permits.
     let result = chain.evaluate(&prepend_ctx(None, Some(64500)));
     assert_eq!(result.action, PolicyAction::Permit);
-    assert_eq!(result.modifications.as_path_prepend, Some((64500, 1)));
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        [crate::AsPathPrepend::asn(64500, 1)]
+    );
 }
 
 /// `prepend as peer` is peer-dependent for update-group
@@ -3372,10 +3387,10 @@ fn computed_prepend_peer_context_flags() {
     assert!(!literal.requires_peer_context());
 }
 
-/// Literal and computed prepends share one merge slot: the later term
-/// wins regardless of form.
+/// Literal and computed prepends accumulate across terms in statement
+/// order, each later one to the left, the computed one resolved in place.
 #[test]
-fn computed_and_literal_prepends_share_the_merge_slot() {
+fn computed_and_literal_prepends_accumulate_in_order() {
     let chain = compile_ok(
         "policy p {
             term tag { prepend as origin 2 }
@@ -3384,7 +3399,7 @@ fn computed_and_literal_prepends_share_the_merge_slot() {
     );
     let result = chain.evaluate(&prepend_ctx(None, Some(64500)));
     assert_eq!(result.action, PolicyAction::Permit);
-    assert_eq!(result.modifications.as_path_prepend, Some((65001, 1)));
+    assert_eq!(result.modifications.prepended_asns(), [65001, 64500, 64500]);
 
     let chain = compile_ok(
         "policy p {
@@ -3393,7 +3408,7 @@ fn computed_and_literal_prepends_share_the_merge_slot() {
         }",
     );
     let result = chain.evaluate(&prepend_ctx(None, Some(64500)));
-    assert_eq!(result.modifications.as_path_prepend, Some((64500, 2)));
+    assert_eq!(result.modifications.prepended_asns(), [64500, 64500, 65001]);
 }
 
 /// `evaluate_recording_hits` (the `rbgp policy test` backend) applies
@@ -4453,7 +4468,7 @@ fn let_origin_shadows_only_value_positions() {
     );
     assert_eq!(
         result.modifications.as_path_prepend,
-        Some((64496, 2)),
+        [crate::AsPathPrepend::asn(64496, 2)],
         "operand position: the route's origin AS"
     );
 }
@@ -7483,7 +7498,7 @@ test everything-is-set {
         "everything-is-set: customer-lp: expected no local-pref change, got 200",
         "expected no med change, got 5",
         "expected no next-hop change, got self",
-        "expected no prepend change, got as 65000 2",
+        "expected no prepend change, got \"65000 65000\"",
         "expected community 65000:200 not to be added",
     ] {
         assert!(failures[0].contains(expected), "{failures:?}");
@@ -9725,12 +9740,14 @@ test else-branch {
         );
     }
 
-    /// The new action stays inside the existing IR layout.
+    /// The new action stays inside the existing IR layout. The ordered
+    /// prepend list (a `Vec` in place of two optional pairs) is 16 bytes of
+    /// it.
     #[test]
     fn ir_layout_is_unchanged() {
         use std::mem::size_of;
-        assert_eq!(size_of::<crate::ir::TermAction>(), 216);
-        assert_eq!(size_of::<crate::ir::Term>(), 272);
+        assert_eq!(size_of::<crate::ir::TermAction>(), 232);
+        assert_eq!(size_of::<crate::ir::Term>(), 288);
         assert_eq!(size_of::<crate::ir::MatchExpr>(), 32);
     }
 }
@@ -10221,6 +10238,7 @@ fn compile_call(file: &RpolFile, name: &str, args: &[super::CallArg]) -> crate::
         false,
     )
     .expect("policy exists")
+    .expect("within the prepend cap")
     .expect("no datasets")
 }
 
@@ -10317,7 +10335,10 @@ fn prepend_count_parameter_is_range_checked_at_instantiation() {
     let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
     let chain = compile_call(&file, "pad", &[CallArg::Int(3)]);
     let result = chain.evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[], 1));
-    assert_eq!(result.modifications.as_path_prepend, Some((65000, 3)));
+    assert_eq!(
+        result.modifications.as_path_prepend,
+        [crate::AsPathPrepend::asn(65000, 3)]
+    );
     for bad in [0, 256] {
         let error = file
             .resolve_call("pad", &[CallArg::Int(bad)])
@@ -11489,7 +11510,7 @@ mod callable_policies_bounds {
              test both {
                  route { prefix 192.0.2.0/24 }
                  expect caller(3) == accept with community 65000:1, community 65000:2,
-                     prepend as 65000 3
+                     prepend as 65000 5
              }",
         )
         .unwrap_or_else(|d| panic!("{d:?}"));
@@ -13057,5 +13078,399 @@ test large-strip-all-cancels {
         let result = compiled.evaluate(&ctx);
         assert_eq!(result.action, crate::PolicyAction::Permit);
         assert_eq!(result.modifications.communities_add, [(65_000 << 16) + 1]);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Prepends accumulate in statement order, at most 255 ASNs per route
+// ─────────────────────────────────────────────────────────────────────
+
+mod ordered_prepends {
+    use super::super::{RpolFile, run_rpol_tests};
+    use super::{SetStore, compile_ok, diagnostics_of, failures_of};
+
+    fn assert_passes(source: &str, tests: usize) {
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, tests);
+        assert!(report.all_passed(), "{:#?}", report.failures);
+    }
+
+    /// IOS-XR's documented example: `prepend as-path 2.5 3` then
+    /// `prepend as-path 666.5 2` places `666.5 666.5 2.5 2.5 2.5`, each
+    /// later prepend to the left, within a term, across terms and across
+    /// chain members; computed operands take their place in the sequence.
+    #[test]
+    fn prepends_accumulate_in_statement_order() {
+        assert_passes(
+            r#"
+policy within-a-term { term t { prepend as 131077 3; prepend as 43646981 2; accept } }
+policy across-terms {
+    term first { prepend as 131077 3 }
+    term second { prepend as 43646981 2; accept }
+}
+policy first-member { term t { prepend as 131077 3 } }
+policy second-member { term t { prepend as 43646981 2 } }
+policy peer-then-literal { term t { prepend as peer 1; prepend as 65000 2; accept } }
+test within-a-term {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect within-a-term == accept with only prepend "666.5 666.5 2.5 2.5 2.5"
+}
+test across-terms {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect across-terms == accept with only prepend "666.5 666.5 2.5 2.5 2.5"
+}
+test across-chain-members {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect chain [first-member, second-member] == accept
+        with only prepend "43646981 43646981 131077 131077 131077"
+}
+test computed-operand-in-sequence {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    peer { asn 65010 }
+    expect peer-then-literal == accept with only prepend "65000 65000 65010"
+}
+"#,
+            4,
+        );
+    }
+
+    /// The upgrade note's example: a default 1x prepend and a per-peer 3x
+    /// override in separate members add up to 4; the `if`/`else` rewrite
+    /// applies exactly one.
+    #[test]
+    fn a_default_prepend_and_an_override_add_up() {
+        assert_passes(
+            r#"
+policy default-prepend { term t { prepend as 65000 1 } }
+policy peer-override { term t { if peer.asn == 64500 { prepend as 65000 3 } } }
+policy peer-prepend {
+    term t { if peer.asn == 64500 { prepend as 65000 3 } else { prepend as 65000 1 } }
+}
+test override-adds-up {
+    route { prefix 192.0.2.0/24 }
+    peer { asn 64500 }
+    expect chain [default-prepend, peer-override] == accept
+        with only prepend "65000 65000 65000 65000"
+}
+test rewrite-applies-one {
+    route { prefix 192.0.2.0/24 }
+    peer { asn 64500 }
+    expect peer-prepend == accept with only prepend as 65000 3
+}
+test rewrite-default {
+    route { prefix 192.0.2.0/24 }
+    peer { asn 64501 }
+    expect peer-prepend == accept with only prepend as 65000 1
+}
+"#,
+            3,
+        );
+    }
+
+    /// `with prepend as A N` pins the whole sequence, so it fails once a
+    /// second prepend adds to it.
+    #[test]
+    fn the_count_form_fails_on_an_extra_prepend() {
+        let failures = failures_of(
+            r#"
+policy first { term t { prepend as 65000 3 } }
+policy second { term t { prepend as 65001 2 } }
+test only-the-first {
+    route { prefix 192.0.2.0/24; as-path "65010" }
+    expect chain [first, second] == accept with prepend as 65000 3
+}
+"#,
+        );
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0]
+                .contains(r#"expected prepend as 65000 3, got "65001 65001 65000 65000 65000""#),
+            "{failures:?}"
+        );
+    }
+
+    /// The assertion string takes asplain or asdot ASNs, 1 to 255 of them,
+    /// none of them 0.
+    #[test]
+    fn the_sequence_assertion_rejects_malformed_strings() {
+        let policy = "policy p { term t { prepend as 65000 1; accept } }\n";
+        for (string, reason) in [
+            ("\"\"", "no ASNs"),
+            ("\"65000 0\"", "AS 0 cannot be prepended"),
+            ("\"65000 x\"", "`x` is not an ASN"),
+            ("\"65536.1\"", "`65536.1` is not an ASN"),
+        ] {
+            let source = format!(
+                "{policy}test t {{ route {{ prefix 192.0.2.0/24 }} expect p == accept with prepend {string} }}"
+            );
+            let (_, rendered) = diagnostics_of(&source);
+            assert!(rendered.contains(reason), "{string}: {rendered}");
+        }
+        let long = vec!["65000"; 256].join(" ");
+        let source = format!(
+            "{policy}test t {{ route {{ prefix 192.0.2.0/24 }} expect p == accept with prepend \"{long}\" }}"
+        );
+        let (_, rendered) = diagnostics_of(&source);
+        assert!(
+            rendered.contains("256 ASNs; a route takes at most 255"),
+            "{rendered}"
+        );
+    }
+
+    /// The typechecker bound: 255 fits, 256 does not, whether in one
+    /// prepend, across terms, across `if` branches that fall through or
+    /// through a loop's iteration bound; any prepend in a loop over a route
+    /// attribute exceeds it. An `accept` ends a path, so branches and terms
+    /// that each prepend and accept count one at a time, as IXP route-server
+    /// receive policies are generated.
+    #[test]
+    fn the_static_cap_is_255_at_compile_time() {
+        let fits = [
+            "policy p { term t { prepend as 65000 255; accept } }",
+            "policy p { term a { prepend as 65000 200 } term b { prepend as 65001 55; accept } }",
+            "asn-set three { 1, 2, 3 }
+             policy p { term t { for a in three { prepend as 65000 85 } accept } }",
+            "policy p { term t {
+                 if route.med == 1 { prepend as 65000 255; accept }
+                 else { prepend as 65001 255; accept }
+             } }",
+            "policy p {
+                 term a { if route.med == 1 { prepend as 65000 255; accept } }
+                 term b { if route.med == 2 { prepend as 65001 255; accept } }
+                 term c { prepend as 65002 255; accept }
+             }",
+            "policy p { term a { prepend as 65000 100 } term b { if route.med == 1 { prepend as 65001 155; accept } } }",
+        ];
+        for source in fits {
+            compile_ok(source);
+        }
+        let exceeds = [
+            (
+                "policy p { term a { prepend as 65000 200 } term b { prepend as 65001 56; accept } }",
+                256,
+            ),
+            (
+                "policy p { term t {
+                     if route.med == 1 { prepend as 65000 200 } else { prepend as 65001 56 }
+                     accept
+                 } }",
+                256,
+            ),
+            (
+                "asn-set three { 1, 2, 3 }
+                 policy p { term t { for a in three { prepend as 65000 86 } accept } }",
+                258,
+            ),
+            (
+                "policy p { term t { for c in route.communities { prepend as 65000 1 } accept } }",
+                4096,
+            ),
+            (
+                "policy p { term a { prepend as 65000 100 } term b { if route.med == 1 { prepend as 65001 156; accept } } }",
+                256,
+            ),
+        ];
+        for (source, bound) in exceeds {
+            let (_, rendered) = diagnostics_of(source);
+            assert!(
+                rendered.contains(&format!(
+                    "policy `p` can prepend {bound} ASNs to one route; at most 255 fit"
+                )),
+                "{rendered}"
+            );
+        }
+    }
+
+    /// The bound is the typechecker's walk, computed once at lowering, so a
+    /// statement that makes lowering flush staged prepends into a term of
+    /// their own (a scan, a nested `if`, a wildcard removal) does not count
+    /// them against a later term: each shape fits 255 on every path, at
+    /// typecheck, instantiation and in a test chain.
+    #[test]
+    fn lowering_flushes_do_not_inflate_the_bound() {
+        let flushes = [
+            "remove community in scrub",
+            "remove community *",
+            "remove large-community 65000:*:*",
+            "if route.med == 1 { set med 5 }",
+        ];
+        for flush in flushes {
+            let source = format!(
+                "community-set scrub {{ 65000:1 }}
+policy p {{
+    term a {{ if peer.asn == 64500 {{
+        prepend as 65000 200
+        {flush}
+        accept
+    }} }}
+    term b {{ prepend as 65001 200; accept }}
+}}
+test takes-b {{
+    route {{ prefix 192.0.2.0/24 }}
+    peer {{ asn 64501 }}
+    expect chain [p] == accept with prepend as 65001 200
+}}
+"
+            );
+            assert_passes(&source, 1);
+            let file = RpolFile::parse(&source).expect("typechecks");
+            let compiled = file.compile_policy("p", &[], &mut SetStore::new());
+            assert!(compiled.is_ok(), "{flush}: {:?}", compiled.err());
+        }
+        // Branches that each prepend, flush and accept, one at a time.
+        let source = "policy p { term t {
+            if route.med == 1 { prepend as 65000 200; remove community *; accept }
+            else { prepend as 65001 200; remove community *; accept }
+        } }";
+        let file = RpolFile::parse(source).expect("typechecks");
+        assert!(file.compile_policy("p", &[], &mut SetStore::new()).is_ok());
+    }
+
+    /// `with prepend as ASN COUNT` takes a count of 1 to 255, checked when
+    /// the file parses, so a huge count is a diagnostic, not an allocation.
+    #[test]
+    fn the_count_assertion_takes_1_to_255() {
+        let policy = "policy p { term t { prepend as 65000 255; accept } }\n";
+        let test = |count: &str| {
+            format!(
+                "{policy}test t {{ route {{ prefix 192.0.2.0/24 }} expect p == accept with prepend as 65000 {count} }}"
+            )
+        };
+        assert_passes(&test("255"), 1);
+        for count in ["0", "256", "4200000000"] {
+            let (_, rendered) = diagnostics_of(&test(count));
+            assert!(
+                rendered.contains(&format!("prepend count {count} out of range")),
+                "{count}: {rendered}"
+            );
+        }
+    }
+
+    /// A computed operand reads the path as it stands when its prepend
+    /// runs: `path-first` sees the latest earlier prepend, and `origin` of a
+    /// route that arrived without an ASN sees the first, within a policy and
+    /// across chain members.
+    #[test]
+    fn computed_operands_resolve_in_statement_order() {
+        assert_passes(
+            r#"
+policy within { term t { prepend as 65000 2; prepend as path-first 1; accept } }
+policy origin-within { term t { prepend as 65000 1; prepend as origin 1; accept } }
+policy first { term t { prepend as 65000 2 } }
+policy then-path-first { term t { prepend as path-first 1; accept } }
+policy then-origin { term t { prepend as origin 1; accept } }
+test path-first-within {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect within == accept with only prepend "65000 65000 65000"
+}
+test origin-of-an-empty-path-within {
+    route { prefix 192.0.2.0/24 }
+    expect origin-within == accept with only prepend "65000 65000"
+}
+test path-first-across-members {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect chain [first, then-path-first] == accept with only prepend "65000 65000 65000"
+}
+test origin-of-an-empty-path-across-members {
+    route { prefix 192.0.2.0/24 }
+    expect chain [first, then-origin] == accept with only prepend "65000 65000 65000"
+}
+test origin-of-a-path-is-unchanged {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect chain [first, then-origin] == accept with only prepend "64500 65000 65000"
+}
+test origin-of-an-as-set-only-path-within {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect origin-within == accept with only prepend "65000 65000"
+}
+test origin-of-an-as-set-only-path-across-members {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect chain [first, then-origin] == accept with only prepend "65000 65000 65000"
+}
+test origin-of-an-as-set-only-path-alone-fails-closed {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect then-origin == error absent-prepend-operand
+}
+"#,
+            8,
+        );
+    }
+
+    /// A parameter count counts 1 at compile time and its argument at
+    /// instantiation.
+    #[test]
+    fn instantiation_rechecks_a_parameter_count() {
+        let file = RpolFile::parse(
+            "policy p(n: u32) { term t { prepend as 65000 n; prepend as 65001 200; accept } }",
+        )
+        .expect("compiles: n counts 1");
+        let mut store = SetStore::new();
+        assert!(file.compile_policy("p", &[55], &mut store).is_ok());
+        let error = file
+            .compile_policy("p", &[56], &mut store)
+            .expect_err("256 ASNs");
+        assert!(
+            error.contains("policy \"p\" can prepend 256 ASNs to one route; at most 255 fit"),
+            "{error}"
+        );
+    }
+
+    /// A chain adds its members' bounds when it is assembled, as the daemon
+    /// attaches it.
+    #[test]
+    fn a_chain_adds_its_members_bounds() {
+        let failures = failures_of(
+            r"
+policy a { term t { prepend as 65000 200 } }
+policy b { term t { prepend as 65001 55 } }
+policy c { term t { prepend as 65001 56 } }
+test fits {
+    route { prefix 192.0.2.0/24 }
+    expect chain [a, b] == accept
+}
+test exceeds {
+    route { prefix 192.0.2.0/24 }
+    expect chain [a, c] == accept
+}
+",
+        );
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].contains("the chain can prepend 256 ASNs to one route; at most 255 fit"),
+            "{failures:?}"
+        );
+    }
+
+    /// A chain composed without the attach check (here every policy of a
+    /// file, which `compile_rpol` composes) fails a route closed above 255
+    /// prepended ASNs, on the evaluation-error rail, in the live walk and
+    /// the dry run alike.
+    #[test]
+    fn the_runtime_cap_fails_closed() {
+        let chain = compile_ok(
+            "policy a { term t { prepend as 65000 200 } }
+             policy b { term t { prepend as 65001 56; accept } }",
+        );
+        let ctx = super::route_ctx(
+            super::v4(192, 0, 2, 0, 24),
+            &[],
+            rustbgpd_wire::RpkiValidation::NotFound,
+        );
+        let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Deny);
+        assert_eq!(
+            evaluation.eval_error.map(|error| error.kind),
+            Some(crate::EvalErrorKind::PrependLimitExceeded)
+        );
+        let mut hits = chain.zero_term_hits();
+        assert_eq!(
+            chain.evaluate_recording_hits(&ctx, &mut hits),
+            crate::PolicyResult::deny()
+        );
+        let fits = compile_ok(
+            "policy a { term t { prepend as 65000 200 } }
+             policy b { term t { prepend as 65001 55; accept } }",
+        );
+        assert_eq!(fits.evaluate(&ctx).modifications.prepend_len(), 255);
     }
 }

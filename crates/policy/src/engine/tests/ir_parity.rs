@@ -67,9 +67,8 @@ fn full_mods() -> RouteModifications {
             local_data1: 1,
             local_data2: 2,
         }],
-        as_path_prepend: Some((65001, 2)),
         // TOML statements never carry computed operands (rpol-only).
-        as_path_prepend_computed: None,
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 2)],
         set_local_pref_computed: None,
         set_med_computed: None,
     }
