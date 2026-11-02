@@ -33,11 +33,13 @@ mod parser;
 mod testing;
 mod typeck;
 
+pub use ast::{CallArg, ParamType};
 pub use coverage::{
     CoverageReport, Lint, LintKind, PolicyCoverage, PolicyTestStatus, TermCoverage,
 };
 pub use diag::{Diagnostic, DiagnosticCode, Diagnostics, Span, Spanned, closest_matches};
 pub use fmt::{FmtError, format_rpol};
+pub use lower::PolicyArg;
 pub use modules::{
     DEFAULT_MAX_GRAPH_BYTES, LoadError, MAX_MODULE_DEPTH, MAX_MODULE_FILES, ModuleSource,
 };
@@ -265,47 +267,111 @@ impl RpolFile {
             .map(|p| (p.name.node.as_str(), p.params.len()))
     }
 
-    /// Monomorphize one policy with concrete arguments into a
+    /// Monomorphize one policy with concrete `u32` arguments into a
     /// single-policy [`CompiledChain`] carrying the file's set tables,
     /// binding dataset references (LAN-305) through an empty binding
     /// set — a convenience for dataset-free files (tests, benches).
-    /// Returns `None` for an unknown policy name.
+    ///
+    /// # Errors
+    ///
+    /// An unknown policy, or arguments that [`Self::resolve_call`]
+    /// rejects: a wrong count, a parameter of another type, or a value
+    /// out of a parameter's range (a `prepend` count of 300).
     ///
     /// # Panics
     ///
-    /// If `args.len()` does not match the policy's declared parameter
-    /// count — callers check arity first (via [`Self::policies`]) —
-    /// or if the policy references a dataset (use
+    /// If the policy references a dataset (use
     /// [`Self::compile_policy_bound`] with real bindings).
-    #[must_use]
     pub fn compile_policy(
         &self,
         name: &str,
         args: &[u32],
         store: &mut SetStore,
-    ) -> Option<CompiledChain> {
+    ) -> Result<CompiledChain, String> {
         self.compile_policy_bound(name, args, store, &DatasetBindings::new())
             .map(|result| result.expect("policy references no datasets"))
     }
 
-    /// [`Self::compile_policy`] with explicit dataset bindings
-    /// (LAN-305): referenced-but-unbound (or kind-mismatched) datasets yield
-    /// `Err` naming them. Literal sets are interned through
-    /// `store`, preserving content sharing with other sources compiled through
-    /// that same caller-owned store.
+    /// A policy's declared parameter types, or `None` for an unknown name.
+    #[must_use]
+    pub fn policy_signature(&self, name: &str) -> Option<&[ParamType]> {
+        self.file
+            .policies
+            .iter()
+            .find(|p| p.name.node == name)
+            .map(|p| p.param_types.as_slice())
+    }
+
+    /// Check a reference's arguments against policy `name`'s parameters
+    /// and convert them for instantiation: arity, each argument's type, a
+    /// set or dataset of the right kind for a set parameter, and the range
+    /// of a parameter used as a `prepend` count or `set next-hop` operand.
+    /// The same check a test `expect` gets at `rbgp policy check`.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable reason naming the policy and the argument.
+    pub fn resolve_call(&self, name: &str, args: &[CallArg]) -> Result<Vec<PolicyArg>, String> {
+        let def = self
+            .file
+            .policies
+            .iter()
+            .find(|p| p.name.node == name)
+            .ok_or_else(|| format!("policy {name:?} is not defined"))?;
+        if def.params.len() != args.len() {
+            return Err(format!(
+                "policy {name:?} takes {} parameter(s), {} given",
+                def.params.len(),
+                args.len()
+            ));
+        }
+        args.iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                typeck::check_call_arg(&self.file, def, index, arg)
+                    .map_err(|reason| format!("policy {name:?}: {reason}"))?;
+                Ok(PolicyArg::from_literal(arg))
+            })
+            .collect()
+    }
+
+    /// [`Self::compile_policy_bound`] with typed arguments from
+    /// [`Self::resolve_call`]. `cached_tables` selects the
+    /// [`Self::compile_policy_bound_cached_tables`] variant.
     ///
     /// # Panics
     ///
-    /// If `args.len()` does not match the policy's declared parameter
-    /// count — callers check arity first (via [`Self::policies`]).
+    /// If `args` were not resolved for this policy by
+    /// [`Self::resolve_call`].
     #[must_use]
+    pub fn compile_policy_args(
+        &self,
+        name: &str,
+        args: &[PolicyArg],
+        store: &mut SetStore,
+        datasets: &DatasetBindings,
+        cached_tables: bool,
+    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+        self.compile_policy_typed(name, args, store, datasets, cached_tables)
+    }
+
+    /// [`Self::compile_policy`] with explicit dataset bindings
+    /// (LAN-305): referenced-but-unbound (or kind-mismatched) datasets yield
+    /// the inner `Err` naming them. Literal sets are interned through
+    /// `store`, preserving content sharing with other sources compiled through
+    /// that same caller-owned store.
+    ///
+    /// # Errors
+    ///
+    /// The outer `Err`: an unknown policy, or arguments that
+    /// [`Self::resolve_call`] rejects.
     pub fn compile_policy_bound(
         &self,
         name: &str,
         args: &[u32],
         store: &mut SetStore,
         datasets: &DatasetBindings,
-    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+    ) -> Result<Result<CompiledChain, MissingDatasets>, String> {
         self.compile_policy_bound_impl(name, args, store, datasets, false)
     }
 
@@ -320,17 +386,16 @@ impl RpolFile {
     /// roster resolver uses this variant because one `RpolFile` fans out to
     /// hundreds of peer chains at IRR scale.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `args.len()` does not match the policy's declared parameter count.
-    #[must_use]
+    /// As [`Self::compile_policy_bound`].
     pub fn compile_policy_bound_cached_tables(
         &self,
         name: &str,
         args: &[u32],
         store: &mut SetStore,
         datasets: &DatasetBindings,
-    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+    ) -> Result<Result<CompiledChain, MissingDatasets>, String> {
         self.compile_policy_bound_impl(name, args, store, datasets, true)
     }
 
@@ -338,6 +403,23 @@ impl RpolFile {
         &self,
         name: &str,
         args: &[u32],
+        store: &mut SetStore,
+        datasets: &DatasetBindings,
+        cached_tables: bool,
+    ) -> Result<Result<CompiledChain, MissingDatasets>, String> {
+        // The same argument check a chain reference gets: arity, `u32`
+        // parameters only, and the range of each parameter's uses.
+        let args: Vec<CallArg> = args.iter().copied().map(CallArg::Int).collect();
+        let args = self.resolve_call(name, &args)?;
+        Ok(self
+            .compile_policy_typed(name, &args, store, datasets, cached_tables)
+            .expect("resolve_call found the policy"))
+    }
+
+    fn compile_policy_typed(
+        &self,
+        name: &str,
+        args: &[PolicyArg],
         store: &mut SetStore,
         datasets: &DatasetBindings,
         cached_tables: bool,
@@ -368,7 +450,7 @@ impl RpolFile {
 pub struct RpolPolicyEntry {
     /// The owning parsed file (shared across every policy it defines).
     pub file: Arc<RpolFile>,
-    /// Declared parameter count (all parameters are `u32` in V1).
+    /// Declared parameter count.
     pub params: usize,
     /// Display path of the source file, for error messages.
     pub path: String,
@@ -464,6 +546,30 @@ impl RpolPolicySet {
 ///
 /// A human-readable description of the malformed call-form.
 pub fn parse_call_form(reference: &str) -> Result<(&str, Vec<u32>), String> {
+    let (base, args) = parse_call_args(reference)?;
+    let args = args
+        .into_iter()
+        .map(|arg| match arg {
+            CallArg::Int(value) => Ok(value),
+            other => Err(format!(
+                "invalid reference {reference:?}: argument {:?} is not a u32",
+                other.to_string()
+            )),
+        })
+        .collect::<Result<Vec<u32>, _>>()?;
+    Ok((base, args))
+}
+
+/// Split a policy chain reference into base name + arguments, each an
+/// integer, a standard community (`65000:100`), an IP address, or a name
+/// (a set or dataset): `"customer-in(200, cust-65001)"` →
+/// `("customer-in", [Int(200), Name("cust-65001")])`. Types are checked
+/// against the policy's parameters by [`RpolFile::resolve_call`].
+///
+/// # Errors
+///
+/// A human-readable description of the malformed call-form.
+pub fn parse_call_args(reference: &str) -> Result<(&str, Vec<CallArg>), String> {
     let Some(open) = reference.find('(') else {
         return Ok((reference, Vec::new()));
     };
@@ -485,13 +591,23 @@ pub fn parse_call_form(reference: &str) -> Result<(&str, Vec<u32>), String> {
     let args = inner
         .split(',')
         .map(|arg| {
-            let arg = arg.trim();
-            arg.parse::<u32>().map_err(|e| {
-                format!("invalid reference {reference:?}: argument {arg:?} is not a u32: {e}")
-            })
+            parse_call_arg(arg.trim())
+                .map_err(|why| format!("invalid reference {reference:?}: {why}"))
         })
-        .collect::<Result<Vec<u32>, _>>()?;
+        .collect::<Result<Vec<CallArg>, _>>()?;
     Ok((base, args))
+}
+
+/// One call-form argument's text, read by the language's own lexer and
+/// argument grammar.
+fn parse_call_arg(arg: &str) -> Result<CallArg, String> {
+    if !arg.is_empty() && arg.bytes().all(|b| b.is_ascii_digit()) {
+        return arg
+            .parse::<u32>()
+            .map(CallArg::Int)
+            .map_err(|e| format!("argument {arg:?} is not a u32: {e}"));
+    }
+    parser::parse_call_arg_text(arg)
 }
 
 impl PartialEq for RpolPolicySet {

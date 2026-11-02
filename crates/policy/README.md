@@ -32,10 +32,11 @@ compilation pipeline:
 - **`datasets`** / **`sets`** — named prefix-set / community-set /
   AS-set datasets referenced from policy terms
 
-The frontend rejects literal AS 0 in prepend actions. Parameterized policies
-resolve their arguments at instantiation; the daemon checks the resulting
-chain at attachment with `CompiledChain::has_zero_as_path_prepend`, including
-loop bodies. The wire encoder independently rejects AS 0 under RFC 7607.
+The frontend rejects literal AS 0 in prepend actions. A parameter used as a
+prepend ASN has its argument checked wherever the policy is instantiated
+(`RpolFile::resolve_call`, a test `expect`, `apply`), so AS 0 is rejected
+before a chain is built. The wire encoder independently rejects AS 0 under
+RFC 7607.
 
 ## Key types
 

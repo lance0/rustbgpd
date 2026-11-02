@@ -21,11 +21,12 @@ use crate::sets::{
 };
 
 use super::ast::{
-    ActionStmt, AsnSetDef, CmpOp, CommunityArg, CommunityKind, CommunityLit, CommunitySetDef,
-    DatasetDecl, DatasetEntryAst, ElseBody, ExpectCall, ExpectDef, ExpectVerdict, Expr, FieldPath,
-    FieldRoot, FnDef, FnLet, ForSource, ForStmt, IfBranch, IfStmt, NextHopArg, PeerField,
-    PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, ScalarAttr, SourceFile,
-    Stmt, TermDef, TestDatasetDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
+    ActionStmt, AsnSetDef, CallArg, CmpOp, CommunityArg, CommunityKind, CommunityLit,
+    CommunitySetDef, DatasetDecl, DatasetEntryAst, ElseBody, ExpectCall, ExpectDef, ExpectVerdict,
+    Expr, FieldPath, FieldRoot, FnDef, FnLet, ForSource, ForStmt, IfBranch, IfStmt, NextHopArg,
+    ParamType, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField,
+    ScalarAttr, SourceFile, Stmt, TermDef, TestDatasetDef, TestDef, U32Arg, ValueExprAst,
+    WithAssertion,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned};
 use super::lexer::{Tok, Token, lex};
@@ -331,13 +332,13 @@ impl Parser<'_> {
                 // Well-known community names (standard and extended)
                 // share the TOML frontend's alias table via
                 // `parse_community_match`.
-                let well_known_shape = text.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+                let well_known = is_well_known_alias(&text);
                 match parse_community_match(&text) {
-                    Ok(CommunityMatch::Standard { value }) if well_known_shape => {
+                    Ok(CommunityMatch::Standard { value }) if well_known => {
                         self.bump();
                         CommunityLit::Standard(value)
                     }
-                    Ok(CommunityMatch::ExactExt(raw)) if well_known_shape => {
+                    Ok(CommunityMatch::ExactExt(raw)) if well_known => {
                         self.bump();
                         CommunityLit::ExtRaw(raw)
                     }
@@ -936,15 +937,87 @@ impl Parser<'_> {
 
     // ── policies ────────────────────────────────────────────────────
 
+    /// A policy parameter type: `u32`, `prefix-set`, `community-set`,
+    /// `asn-set`, `community` or `ip`.
+    fn param_type(&mut self) -> PResult<ParamType> {
+        const EXPECTED: &str =
+            "a parameter type (`u32`, `prefix-set`, `community-set`, `asn-set`, `community`, `ip`)";
+        let Some(token) = self.peek() else {
+            return Err(self.error_expected(EXPECTED));
+        };
+        let ty = match token.kind {
+            Tok::U32Kw => ParamType::U32,
+            Tok::PrefixSetKw => ParamType::PrefixSet,
+            Tok::CommunitySetKw => ParamType::CommunitySet,
+            Tok::AsnSetKw => ParamType::AsnSet,
+            Tok::Ident if self.text(token) == "community" => ParamType::Community,
+            Tok::Ident if self.text(token) == "ip" => ParamType::Ip,
+            _ => return Err(self.error_expected(EXPECTED)),
+        };
+        self.bump();
+        Ok(ty)
+    }
+
+    /// One argument of a policy reference (`apply(p(...))`, `expect`): an
+    /// integer, a name, a standard community or an IP address. Its type is
+    /// checked against the callee's parameters.
+    fn call_arg(&mut self) -> PResult<Spanned<CallArg>> {
+        const EXPECTED: &str = "an argument (an integer, a set name, a community such as `65000:100`, or an IP address)";
+        match self.peek().map(|t| t.kind) {
+            Some(Tok::Int) => {
+                let (value, span) = self.expect_u32(EXPECTED)?;
+                Ok(Spanned::new(CallArg::Int(value), span))
+            }
+            Some(Tok::Ident) => {
+                // A well-known name is that community; no set or parameter
+                // can take one (the typechecker reserves them).
+                if let Some(token) = self.peek()
+                    && self.is_well_known_community(token)
+                {
+                    let lit = self.community_lit()?;
+                    let CommunityLit::Standard(value) = lit.node else {
+                        let message = format!(
+                            "`{}` is an extended community; an argument takes a standard community",
+                            self.text(token)
+                        );
+                        self.diags.push(Diagnostic::coded(
+                            DiagnosticCode::Parse,
+                            lit.span,
+                            message,
+                            "not a standard community",
+                        ));
+                        return Err(Fail);
+                    };
+                    return Ok(Spanned::new(CallArg::Community(value), lit.span));
+                }
+                let name = self.expect_ident(EXPECTED)?;
+                Ok(Spanned::new(CallArg::Name(name.node), name.span))
+            }
+            Some(Tok::StdCommunityLit) => {
+                let lit = self.community_lit()?;
+                let CommunityLit::Standard(value) = lit.node else {
+                    unreachable!("a standard-community token lexes as a standard literal")
+                };
+                Ok(Spanned::new(CallArg::Community(value), lit.span))
+            }
+            Some(Tok::Ipv4Lit | Tok::Ipv6Lit) => {
+                let (addr, span) = self.expect_ip(EXPECTED)?;
+                Ok(Spanned::new(CallArg::Ip(addr), span))
+            }
+            _ => Err(self.error_expected(EXPECTED)),
+        }
+    }
+
     fn policy_def(&mut self) -> PResult<PolicyDef> {
         self.expect(Tok::PolicyKw, "`policy`")?;
         let name = self.expect_ident("a policy name")?;
         let mut params = Vec::new();
+        let mut param_types = Vec::new();
         if self.eat(Tok::LParen).is_some() {
             while !self.at(Tok::RParen) {
                 let param = self.expect_ident("a parameter name")?;
                 self.expect(Tok::Colon, "`:` and the parameter type")?;
-                self.expect(Tok::U32Kw, "`u32` (the only parameter type in V1)")?;
+                param_types.push(self.param_type()?);
                 params.push(param);
                 if self.eat(Tok::Comma).is_none() {
                     break;
@@ -996,6 +1069,7 @@ impl Parser<'_> {
         Ok(PolicyDef {
             name,
             params,
+            param_types,
             default_action,
             terms,
         })
@@ -1184,6 +1258,8 @@ impl Parser<'_> {
                     "next-hop" => {
                         let arg = if let Some(self_token) = self.eat(Tok::SelfKw) {
                             NextHopArg::Self_(self_token.span)
+                        } else if self.at(Tok::Ident) {
+                            NextHopArg::Param(self.expect_ident("an `ip` parameter")?)
                         } else {
                             let (addr, span) = self.expect_ip("an IP address or `self`")?;
                             if let Err(why) = NextHopAction::check_specific(addr) {
@@ -1199,6 +1275,7 @@ impl Parser<'_> {
                         };
                         let end = match &arg {
                             NextHopArg::Self_(span) | NextHopArg::Addr(_, span) => *span,
+                            NextHopArg::Param(name) => name.span,
                         };
                         Ok(ActionStmt::SetNextHop(arg, token.span.to(end)))
                     }
@@ -1345,9 +1422,7 @@ impl Parser<'_> {
     /// binding-vs-literal split in community actions (LAN-303) cannot
     /// disagree with literal parsing.
     fn is_well_known_community(&self, token: Token) -> bool {
-        let text = self.text(token);
-        text.chars().all(|c| c.is_ascii_uppercase() || c == '_')
-            && parse_community_match(text).is_ok()
+        is_well_known_alias(self.text(token))
     }
 
     /// `let <name> = <value expression>` (LAN-302); the caller has
@@ -1468,7 +1543,7 @@ impl Parser<'_> {
         let mut args = Vec::new();
         if self.eat(Tok::LParen).is_some() {
             while !self.at(Tok::RParen) {
-                args.push(self.u32_arg("a u32 argument")?);
+                args.push(self.call_arg()?);
                 if self.eat(Tok::Comma).is_none() {
                     break;
                 }
@@ -1776,6 +1851,15 @@ impl Parser<'_> {
             }
             Tok::HasKw => {
                 self.bump();
+                // A well-known name (`NO_EXPORT`) stays a literal; any other
+                // identifier, `TAG` included, names a `community` parameter.
+                if let Some(token) = self.peek()
+                    && token.kind == Tok::Ident
+                    && !self.is_well_known_community(token)
+                {
+                    let param = self.expect_ident("a community parameter")?;
+                    return Ok(Expr::HasParam { field, param });
+                }
                 let lit = self.community_lit()?;
                 Ok(Expr::Has { field, lit })
             }
@@ -2160,8 +2244,7 @@ impl Parser<'_> {
         let mut args = Vec::new();
         if self.eat(Tok::LParen).is_some() {
             while !self.at(Tok::RParen) {
-                let (value, span) = self.expect_u32("a u32 argument")?;
-                args.push(Spanned::new(value, span));
+                args.push(self.call_arg()?);
                 if self.eat(Tok::Comma).is_none() {
                     break;
                 }
@@ -2370,6 +2453,49 @@ fn address_bits(prefix: Prefix) -> u8 {
 // ---------------------------------------------------------------------
 // Dataset file parsing (LAN-305)
 // ---------------------------------------------------------------------
+
+/// Whether an identifier is spelled like a well-known community name
+/// (`NO_EXPORT`, `OV_INVALID`): upper case and underscores only.
+/// Whether `text` is a well-known community name (`NO_EXPORT`,
+/// `OV_INVALID`, …): the exact alias list the literal parser accepts,
+/// not any all-caps identifier. Parser and typechecker share it, so an
+/// argument, a `has` operand and a reserved name agree.
+pub(super) fn is_well_known_alias(text: &str) -> bool {
+    text.chars().all(|c| c.is_ascii_uppercase() || c == '_') && parse_community_match(text).is_ok()
+}
+
+/// One call-form argument from its text, through the language's own
+/// lexer and argument grammar: configured chain references and the
+/// policy dry-run RPCs accept exactly what an `expect` or `apply` does.
+///
+/// # Errors
+///
+/// The lexer or parser diagnostic for a malformed argument.
+pub(crate) fn parse_call_arg_text(text: &str) -> Result<CallArg, String> {
+    let (tokens, lex_diags) = lex(text, 0);
+    if let Some(diag) = lex_diags.first() {
+        return Err(diag.message.clone());
+    }
+    let mut parser = Parser {
+        src: text,
+        tokens,
+        pos: 0,
+        file: 0,
+        diags: Vec::new(),
+    };
+    let Ok(arg) = parser.call_arg() else {
+        return Err(parser.diags.first().map_or_else(
+            || format!("invalid argument {text:?}"),
+            |diag| diag.message.clone(),
+        ));
+    };
+    if parser.peek().is_some() {
+        return Err(format!(
+            "argument {text:?} is not a single integer, standard community, IP address or set name"
+        ));
+    }
+    Ok(arg.node)
+}
 
 /// Parse dataset file text as `kind` — the operator-facing file
 /// format: one entry per line, `#` comments (the rpol lexer's own

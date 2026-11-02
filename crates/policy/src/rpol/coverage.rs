@@ -37,12 +37,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ir::{CompiledPolicy, MatchExpr};
 
-use super::Span;
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, Expr, ForSource, IfStmt, Rhs, SourceFile, Stmt, TermDef,
-    ValueExprAst,
+    ActionStmt, CallArg, CmpOp, CommunityArg, Expr, ForSource, IfStmt, Rhs, SourceFile, Stmt,
+    TermDef, ValueExprAst,
 };
 use super::typeck::{Field, fold_const, optional_field, resolve_field, value_field_of};
+use super::{Span, Spanned};
 
 /// Coverage of one source term, aggregated over every test walk that
 /// ran its policy.
@@ -764,6 +764,7 @@ impl<'a> Refs<'a> {
         for test in &file.tests {
             for call in test.expects.iter().flat_map(|expect| &expect.calls) {
                 refs.policies.insert(&call.policy.node);
+                refs.call_args(&call.args);
             }
         }
         refs
@@ -792,6 +793,16 @@ impl<'a> Refs<'a> {
                     self.stmts(&for_stmt.body);
                     self.missing = scope;
                 }
+            }
+        }
+    }
+
+    /// A set passed as an argument counts as a use. (A configured chain's
+    /// arguments are not visible here, like its policy references.)
+    fn call_args(&mut self, args: &'a [Spanned<CallArg>]) {
+        for arg in args {
+            if let CallArg::Name(name) = &arg.node {
+                self.sets.insert(name);
             }
         }
     }
@@ -845,11 +856,13 @@ impl<'a> Refs<'a> {
                 self.value(lhs);
                 self.value(rhs);
             }
-            Expr::Apply { policy, .. } => {
+            Expr::Apply { policy, args, .. } => {
                 self.policies.insert(&policy.node);
+                self.call_args(args);
             }
             Expr::Cmp { .. }
             | Expr::Has { .. }
+            | Expr::HasParam { .. }
             | Expr::Exists { .. }
             | Expr::Matches { .. }
             | Expr::Contains { .. } => {}

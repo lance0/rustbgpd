@@ -826,6 +826,83 @@ fn rpol_chain_reference_arity_and_argument_errors() {
     assert!(error.contains("undefined policy"), "{error}");
 }
 
+const TYPED_RPOL_SOURCE: &str = r"
+prefix-set cust-65001 { 10.10.0.0/16 ge 24 le 28 }
+prefix-set cust-65002 { 10.20.0.0/16 ge 24 le 28 }
+
+policy typed-in(lp: u32, pfx: prefix-set, tag: community) {
+    default-action reject
+    term customer-routes {
+        if route.prefix in pfx { set local-pref lp; add community tag; accept }
+    }
+}
+";
+
+/// A typed call-form reference attaches through the real config load: the
+/// set argument selects the set and the community argument is added.
+#[test]
+fn rpol_typed_chain_reference_loads_and_evaluates() {
+    use rustbgpd_policy::{PolicyAction, RouteContext};
+
+    let dir = rpol_config_dir(
+        TYPED_RPOL_SOURCE,
+        r#""typed-in(200, cust-65001, 65000:100)""#,
+    );
+    let config = load_dir(&dir).expect("typed chain reference loads");
+    let (chain, _) = config
+        .effective_policy_chains_for_neighbor(&config.neighbors[0])
+        .expect("typed reference resolves");
+    let chain = chain.expect("configured chain");
+    let route = |prefix: &str| -> RouteContext<'_> {
+        route_server_test_context(
+            route_server_test_prefix(prefix),
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+        )
+    };
+    let accepted = chain.evaluate(&route("10.10.1.0/24"));
+    assert_eq!(accepted.action, PolicyAction::Permit);
+    assert_eq!(accepted.modifications.set_local_pref, Some(200));
+    assert_eq!(
+        accepted.modifications.communities_add,
+        [(65000 << 16) | 0x64]
+    );
+    assert_eq!(
+        chain.evaluate(&route("10.20.1.0/24")).action,
+        PolicyAction::Deny,
+        "the other set's prefix is not selected"
+    );
+}
+
+/// `--check` and reload reject a typed reference whose argument names no
+/// set of the parameter's kind, or has the wrong type.
+#[test]
+fn rpol_typed_chain_reference_argument_errors() {
+    for (reference, needle) in [
+        (
+            r#""typed-in(200, cust-65009, 65000:100)""#,
+            "unknown prefix-set `cust-65009`",
+        ),
+        (
+            r#""typed-in(200, 65000:1, 65000:100)""#,
+            "is not a prefix-set (parameter `pfx`)",
+        ),
+        (
+            r#""typed-in(200, cust-65001, 7)""#,
+            "is not a community (parameter `tag`)",
+        ),
+        (
+            r#""typed-in(cust-65001, cust-65001, 65000:100)""#,
+            "is not a u32 (parameter `lp`)",
+        ),
+    ] {
+        let error = load_dir(&rpol_config_dir(TYPED_RPOL_SOURCE, reference))
+            .expect_err("argument error must fail the load");
+        assert!(error.contains(needle), "{reference}: {error}");
+        assert!(error.contains("chain reference"), "{reference}: {error}");
+    }
+}
+
 /// ADR-0076 planner classification: an edited `.rpol` file whose
 /// compiled content differs is a `policy_chain` impact for exactly the
 /// peers referencing it; reloading unchanged content is a no-op.

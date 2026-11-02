@@ -81,3 +81,29 @@ test scrub-by-set {
         removes large-community 65000:1:1, not removed ext-community RT:65000:1,
         not removed ext-community OV_VALID, not removed large-community 64496:1:1
 }
+
+# Typed parameters: a `community` parameter in `has`, an `ip` parameter as
+# the next hop, and a `community-set` parameter as a removal set.
+community-set scrub-tags { 65000:666 }
+
+policy tag-forward(tag: community, nh: ip, scrub: community-set) {
+    term tagged {
+        if route.communities has tag {
+            remove community in scrub
+            set next-hop nh
+            accept
+        }
+    }
+    term rest { reject }
+}
+
+test tag-forward-hit {
+    route { prefix 192.0.2.0/24; communities [65000:7, 65000:666] }
+    expect tag-forward(65000:7, 192.0.2.9, scrub-tags) == accept with next-hop 192.0.2.9,
+        removes community 65000:666, not removed community 65000:7
+}
+
+test tag-forward-miss {
+    route { prefix 192.0.2.0/24; communities [65000:8] }
+    expect tag-forward(65000:7, 192.0.2.9, scrub-tags) == reject
+}
