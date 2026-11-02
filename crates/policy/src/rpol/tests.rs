@@ -11226,6 +11226,39 @@ mod callable_policies {
         );
     }
 
+    /// Both `apply` forms check arguments against typed parameters alike: a
+    /// standard community, an asn-set and the caller's own parameters pass;
+    /// a large community, a community-set or a loop's ASN binding does not.
+    #[test]
+    fn both_apply_forms_check_typed_arguments_alike() {
+        let lib = "asn-set peers { 64500 }
+            community-set marks { 65000:9 }
+            policy lib(c: community, s: asn-set, n: u32) {
+                term t { if route.origin-as in s { set med n; add community c } }
+            }";
+        let compile = |source: &str| {
+            super::super::compile_rpol(source, &mut crate::sets::SetStore::new())
+                .map(|_| ())
+                .map_err(|d| d.0.into_iter().map(|d| d.message).collect::<Vec<_>>())
+        };
+        for (args, ok) in [
+            ("65000:1, peers, 5", true),
+            ("c, s, 5", true),
+            ("65000:1:1, peers, 5", false),
+            ("65000:1, marks, 5", false),
+            ("x, peers, 5", false),
+        ] {
+            let statement = compile(&format!(
+                "{lib}\npolicy caller(c: community, s: asn-set) {{ term t {{ for x in peers {{ apply lib({args}) }} accept }} }}"
+            ));
+            let predicate = compile(&format!(
+                "{lib}\npolicy caller(c: community, s: asn-set) {{ term t {{ for x in peers {{ if apply(lib({args})) {{ accept }} }} }} }}"
+            ));
+            assert_eq!(statement.is_ok(), ok, "{args}: {statement:?}");
+            assert_eq!(statement, predicate, "{args}");
+        }
+    }
+
     /// Community operations keep statement order across a call boundary:
     /// whichever of the caller's and the callee's operations on a value
     /// runs later wins, whether the callee returns or falls through.
