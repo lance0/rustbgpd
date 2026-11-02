@@ -1325,7 +1325,7 @@ impl<'a> Checker<'a> {
                 kind,
                 arg: CommunityArg::InSet { set, negate },
                 ..
-            } => self.check_remove_in_set(*add, *kind, set, *negate),
+            } => self.check_remove_in_set(*add, *kind, set, *negate, scope),
             ActionStmt::Prepend { asn, count, .. } => {
                 // A computed operand (`self`, `peer`, `origin`,
                 // `path-first`) needs no parameter check. Parameters
@@ -2298,6 +2298,7 @@ impl<'a> Checker<'a> {
         kind: CommunityKind,
         set: &Spanned<String>,
         negate: bool,
+        scope: &Scope<'_>,
     ) {
         let keyword = kind_keyword(kind);
         let form = if negate { "not in" } else { "in" };
@@ -2311,6 +2312,13 @@ impl<'a> Checker<'a> {
                 )
                 .with_note(format!("use `remove {keyword} {form} {}`", set.node)),
             );
+            return;
+        }
+        // A set parameter stands for its argument here, as in every other
+        // set position. Its members are known only at instantiation, so
+        // the member-kind notes below apply to named sets.
+        if let Some(ty) = scope.typed_param(&set.node) {
+            self.check_set_param(set, ty, &[ParamType::CommunitySet]);
             return;
         }
         if let Some(def) = self
@@ -3078,16 +3086,42 @@ fn bound_policy<'a>(
     None
 }
 
-/// How a policy uses its parameters where a value has a range: as a
-/// `prepend` count (1–255), a `prepend` ASN (not 0, RFC 7607) or a `set
-/// next-hop` operand (a usable unicast address). A parameter passed on
-/// through `apply(q(...))` inherits the uses of `q`'s parameter, so an
-/// argument is checked against every place its value reaches.
+/// How a policy uses its parameters where an argument has a range: as a
+/// `prepend` count (1–255), a `prepend` ASN (not 0, RFC 7607), a `set
+/// next-hop` operand (a usable unicast address), or the set of `remove
+/// <kind> in` / `not in` (a community-set, not a dataset). A parameter
+/// passed on through `apply(q(...))` inherits the uses of `q`'s parameter,
+/// so an argument is checked against every place its value reaches.
 #[derive(Clone, Default)]
 pub(super) struct ValueUses<'a> {
     counts: Vec<&'a str>,
     prepend_asns: Vec<&'a str>,
     next_hops: Vec<&'a str>,
+    removal_sets: Vec<&'a str>,
+}
+
+impl<'a> ValueUses<'a> {
+    /// The parameter uses of one action.
+    fn record(&mut self, action: &'a ActionStmt) {
+        match action {
+            ActionStmt::Prepend { asn, count, .. } => {
+                if let U32Arg::Param(name) = count {
+                    self.counts.push(&name.node);
+                }
+                if asn.operand().is_none()
+                    && let PrependAsArg::Value(U32Arg::Param(name)) = asn
+                {
+                    self.prepend_asns.push(&name.node);
+                }
+            }
+            ActionStmt::SetNextHop(NextHopArg::Param(name), _) => self.next_hops.push(&name.node),
+            ActionStmt::Community {
+                arg: CommunityArg::InSet { set, .. },
+                ..
+            } => self.removal_sets.push(&set.node),
+            _ => {}
+        }
+    }
 }
 
 /// The [`ValueUses`] of `def`'s parameters, following `apply` arguments.
@@ -3147,22 +3181,7 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
         }
         let mut out = ValueUses::default();
         for action in actions {
-            match action {
-                ActionStmt::Prepend { asn, count, .. } => {
-                    if let U32Arg::Param(name) = count {
-                        out.counts.push(&name.node);
-                    }
-                    if asn.operand().is_none()
-                        && let PrependAsArg::Value(U32Arg::Param(name)) = asn
-                    {
-                        out.prepend_asns.push(&name.node);
-                    }
-                }
-                ActionStmt::SetNextHop(NextHopArg::Param(name), _) => {
-                    out.next_hops.push(&name.node);
-                }
-                _ => {}
-            }
+            out.record(action);
         }
         for apply in applies {
             let Expr::Apply { policy, args, .. } = apply else {
@@ -3185,6 +3204,7 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
                     (&inner.counts, &mut out.counts),
                     (&inner.prepend_asns, &mut out.prepend_asns),
                     (&inner.next_hops, &mut out.next_hops),
+                    (&inner.removal_sets, &mut out.removal_sets),
                 ] {
                     if theirs.contains(&param) && !ours.contains(&own) {
                         ours.push(own);
@@ -3250,7 +3270,15 @@ pub(super) fn check_call_arg(
                 .datasets
                 .iter()
                 .any(|d| d.name.node == *name && d.kind == kind);
-            if declared {
+            if declared
+                && uses.removal_sets.contains(&param)
+                && !file.community_sets.iter().any(|s| s.name.node == *name)
+            {
+                Err(format!(
+                    "`{name}` is a dataset, but parameter `{param}` is the set of a `remove ... in` \
+                     action, which takes a community-set"
+                ))
+            } else if declared {
                 Ok(())
             } else {
                 Err(format!(

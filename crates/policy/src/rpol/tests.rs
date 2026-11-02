@@ -10244,6 +10244,62 @@ mod typed_parameter_round_two {
         );
     }
 
+    /// A `community-set` parameter stands for its argument in `remove
+    /// community in` / `not in`, as in every other set position.
+    #[test]
+    fn set_parameters_in_remove_by_membership() {
+        passes(
+            "community-set scrub { 65000:* }
+             community-set keep { 64496:1 }
+             policy strip(s: community-set) { term t { remove community in s; accept } }
+             policy only(s: community-set) { term t { remove community not in s; accept } }
+             test strip-scrub {
+                 route { prefix 192.0.2.0/24; communities [65000:1, 64496:1] }
+                 expect strip(scrub) == accept with removes community 65000:1,
+                     not removed community 64496:1
+             }
+             test keep-only {
+                 route { prefix 192.0.2.0/24; communities [65000:1, 64496:1] }
+                 expect only(keep) == accept with removes community 65000:1,
+                     not removed community 64496:1
+             }",
+            2,
+        );
+        // The parameter must be a community-set, and a reserved name is no
+        // set: `NO_EXPORT` here is an unknown community-set.
+        let (_, rendered) =
+            diagnostics_of("policy p(s: prefix-set) { term t { remove community in s; accept } }");
+        assert!(
+            rendered
+                .contains("parameter `s` is a prefix-set, but this probe needs `community-set`"),
+            "{rendered}"
+        );
+        // A dataset cannot be the set of a removal, through an argument or
+        // passed on through `apply`.
+        for expect in ["strip(live)", "outer(live)"] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "dataset community-set live
+                 policy strip(s: community-set) {{ term t {{ remove community in s; accept }} }}
+                 policy outer(z: community-set) {{ term t {{ if apply(strip(z)) {{ accept }} }} }}
+                 test x {{ route {{ prefix 192.0.2.0/24 }} expect {expect} == accept }}"
+            ));
+            assert!(
+                rendered.contains("`live` is a dataset, but parameter"),
+                "{expect}: {rendered}"
+            );
+        }
+        let (_, rendered) =
+            diagnostics_of("policy p { term t { remove community in NO_EXPORT; accept } }");
+        assert!(rendered.contains("NO_EXPORT"), "{rendered}");
+        let (_, rendered) = diagnostics_of(
+            "policy p(BLACKHOLE: community-set) { term t { remove community in BLACKHOLE; accept } }",
+        );
+        assert!(
+            rendered.contains("parameter `BLACKHOLE` has the name of a well-known community"),
+            "{rendered}"
+        );
+    }
+
     /// The value-use analysis behind argument checks stays shallow over a
     /// long `apply` chain: validating a literal argument on a small stack
     /// reports the depth error instead of overflowing.

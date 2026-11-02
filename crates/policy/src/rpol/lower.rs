@@ -783,10 +783,7 @@ impl<'a> Lowerer<'a> {
                     ..
                 }) => {
                     flush_pending(&mut out, &mut pending);
-                    out.push((
-                        MatchExpr::True,
-                        self.remove_in_set(*kind, &set.node, *negate),
-                    ));
+                    out.push((MatchExpr::True, self.remove_in_set(*kind, set, *negate)));
                 }
                 Stmt::Action(ActionStmt::Community {
                     kind,
@@ -1649,7 +1646,7 @@ impl Lowerer<'_> {
                     ..
                 } => {
                     flush(&mut tail, &mut mods);
-                    tail.push(self.remove_in_set(*kind, &set.node, *negate));
+                    tail.push(self.remove_in_set(*kind, set, *negate));
                 }
                 ActionStmt::Community {
                     kind,
@@ -1835,12 +1832,12 @@ impl<'a> Lowerer<'a> {
     fn remove_in_set(
         &self,
         kind: super::ast::CommunityKind,
-        set: &str,
+        set: &Spanned<String>,
         negate: bool,
     ) -> TermAction {
         TermAction::RemoveCommunitiesInSet {
             attribute: community_attribute(kind),
-            set: self.community_set_ids[set],
+            set: self.community_set_ids[&self.bound_set(set).node],
             negate,
         }
     }

@@ -558,7 +558,7 @@ policy customer-in(lp: u32, pfx: prefix-set, tag: community, nh: ip) {
 |---|---|---|
 | `u32` | an integer | anywhere a u32 is expected: `set local-pref lp`, `route.local-pref >= lp`, `route.as-path contains asn`, a `prepend` operand or count |
 | `prefix-set` | a prefix-set or prefix dataset name | `route.prefix in pfx` |
-| `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists), `<binding> in tags` |
+| `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists), `<binding> in tags`, and, for a community-set argument, `remove community in tags` / `not in tags` |
 | `asn-set` | an asn-set or ASN dataset name | `route.origin-as in origins`, `peer.asn in origins`, `<binding> in origins` |
 | `community` | a standard community, `65000:100` or a well-known name such as `NO_EXPORT` | `route.communities has tag`, `add community tag`, `remove community tag` |
 | `ip` | an IPv4 or IPv6 address | `set next-hop nh`, `route.next-hop == nh`, `peer.address == nh` |
