@@ -1,0 +1,157 @@
+# Decision-corpus programs: one guard form per term, each pinned by tests.
+# `decision_corpus.golden` records every case; see `decision_corpus.rs`.
+
+policy not-bogon {
+    term bogon { if route.prefix != 10.0.0.0/8 { accept } }
+    term rest { reject }
+}
+
+policy origin-lock {
+    term ours { if route.origin-as == 64500 { set local-pref 200; accept } }
+    term foreign { if route.origin-as != 64501 { reject } }
+    term rest { accept }
+}
+
+policy path-contains {
+    term transit { if route.as-path contains 64501 { reject } }
+    term rest { accept }
+}
+
+policy preferred {
+    term high { if route.local-pref >= 200 { accept } }
+    term rest { reject }
+}
+
+policy next-hops {
+    term fixed { if route.next-hop == 192.0.2.1 { accept } }
+    term third-party { if route.next-hop != peer.address { reject } }
+    term other { if route.next-hop != 192.0.2.9 { set med 10; accept } }
+    term rest { reject }
+}
+
+policy next-hop-is-peer {
+    term own { if route.next-hop == peer.address { accept } }
+    term rest { reject }
+}
+
+policy not-from-leaf {
+    term leaf { if peer.group != "leaf" { accept } }
+    term rest { reject }
+}
+
+policy route-types {
+    term ibgp { if route.route-type == internal { set local-pref 100; accept } }
+    term not-ebgp { if route.route-type != external { reject } }
+    term rest { accept }
+}
+
+policy evpn-types {
+    term mac-ip { if route.evpn-route-type == 2 { accept } }
+    term not-imet { if route.evpn-route-type != 3 { reject } }
+    term rest { accept }
+}
+
+policy not-v4 {
+    term other { if route.family != ipv4-unicast { reject } }
+    term rest { accept }
+}
+
+test prefix-ne {
+    route { prefix 192.0.2.0/24 }
+    expect not-bogon == accept
+}
+test prefix-ne-bogon {
+    route { prefix 10.0.0.0/8 }
+    expect not-bogon == reject
+}
+test origin-eq {
+    route { prefix 192.0.2.0/24; as-path "64501 64500" }
+    expect origin-lock == accept with local-pref 200
+}
+test origin-ne {
+    route { prefix 192.0.2.0/24; as-path "64502" }
+    expect origin-lock == reject
+}
+test origin-other {
+    route { prefix 192.0.2.0/24; as-path "64501" }
+    expect origin-lock == accept
+}
+test as-path-contains {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502" }
+    expect path-contains == reject
+}
+test as-path-lacks {
+    route { prefix 192.0.2.0/24; as-path "64500 64502" }
+    expect path-contains == accept
+}
+test local-pref-ge {
+    route { prefix 192.0.2.0/24; local-pref 200 }
+    expect preferred == accept
+}
+test local-pref-below {
+    route { prefix 192.0.2.0/24; local-pref 199 }
+    expect preferred == reject
+}
+test next-hop-fixed {
+    route { prefix 192.0.2.0/24; next-hop 192.0.2.1 }
+    peer { address 198.51.100.1 }
+    expect next-hops == accept
+}
+test next-hop-third-party {
+    route { prefix 192.0.2.0/24; next-hop 192.0.2.7 }
+    peer { address 198.51.100.1 }
+    expect next-hops == reject
+}
+test next-hop-from-peer {
+    route { prefix 192.0.2.0/24; next-hop 198.51.100.1 }
+    peer { address 198.51.100.1 }
+    expect next-hops == accept with med 10
+    expect next-hop-is-peer == accept
+}
+test next-hop-not-peer {
+    route { prefix 192.0.2.0/24; next-hop 192.0.2.7 }
+    peer { address 198.51.100.1 }
+    expect next-hop-is-peer == reject
+}
+test group-ne {
+    route { prefix 192.0.2.0/24 }
+    peer { group "spine" }
+    expect not-from-leaf == accept
+}
+test group-leaf {
+    route { prefix 192.0.2.0/24 }
+    peer { group "leaf" }
+    expect not-from-leaf == reject
+}
+test route-type-internal {
+    route { prefix 192.0.2.0/24; route-type internal }
+    expect route-types == accept with local-pref 100
+}
+test route-type-local {
+    route { prefix 192.0.2.0/24; route-type local }
+    expect route-types == reject
+}
+test route-type-external {
+    route { prefix 192.0.2.0/24; route-type external }
+    expect route-types == accept
+}
+test evpn-mac-ip {
+    route { prefix 192.0.2.0/24; family evpn; evpn-route-type 2 }
+    expect evpn-types == accept
+}
+test evpn-prefix {
+    route { prefix 192.0.2.0/24; family evpn; evpn-route-type 5 }
+    expect evpn-types == reject
+}
+test evpn-imet {
+    route { prefix 192.0.2.0/24; family evpn; evpn-route-type 3 }
+    expect evpn-types == accept
+}
+test family-v6 {
+    route { prefix 2001:db8::/32; family ipv6-unicast }
+    expect not-v4 == reject
+}
+test family-v4 {
+    route { prefix 192.0.2.0/24; family ipv4-unicast }
+    expect not-v4 == accept
+}

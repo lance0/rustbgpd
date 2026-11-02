@@ -2870,6 +2870,19 @@ test other-paths-still-run-the-check {
 }
 ```
 
+## Compatibility
+
+Existing programs keep parsing and keep deciding the same way; a change to
+an existing program's verdict or modifications is breaking even when it still
+parses (see the [v1 compatibility rules](v1-stable-contract.md)). Two goldens
+in `crates/policy/src/rpol/` hold the line: `lex_corpus.golden` pins how
+every `.rpol` file in the tree lexes, and `decision_corpus.golden` pins the
+verdict and exact staged modifications of every tracked `.rpol` file and
+every `rpol` block in the repository's Markdown, run against their own `test` blocks and a fixed
+route matrix, together with a case count for every language construct. A
+change to `decision_corpus.golden` is a behaviour change; justify it in the
+PR.
+
 ## Deliberate V1 exclusions
 
 No `while` and no unbounded iteration of any kind — `for`

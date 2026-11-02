@@ -36,6 +36,16 @@ use crate::ir::{
 };
 use crate::sets::{CommunitySet, prefix_entry_matches};
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: while `Some`, the address of every guard node
+    /// [`CompiledChain::eval_expr`] visits on this thread, so the decision
+    /// corpus credits only the guard nodes an evaluation reached (`And` and
+    /// `Or` short-circuit).
+    pub(crate) static VISITED_GUARDS: std::cell::RefCell<Option<HashSet<usize>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The per-walk dataset pin frame (LAN-305, ADR-0103 Decision 8.5):
 /// slot `i` holds the snapshot pinned for the chain's `DatasetId(i)`.
 /// Built once at walk start by [`CompiledChain::pin_datasets`] and
@@ -2031,6 +2041,12 @@ impl CompiledChain {
         pinned: &PinnedDatasets,
         err: &mut Option<EvalErrorKind>,
     ) -> bool {
+        #[cfg(test)]
+        VISITED_GUARDS.with(|visited| {
+            if let Some(visited) = visited.borrow_mut().as_mut() {
+                visited.insert(std::ptr::from_ref(expr).addr());
+            }
+        });
         match expr {
             MatchExpr::True => true,
             MatchExpr::And(children) => children
