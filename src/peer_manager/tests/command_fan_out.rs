@@ -486,6 +486,56 @@ async fn toggles_during_a_stuck_refresh_queue_each_peer_once() {
     );
 }
 
+/// A toggle that lands while one peer's refresh is in flight and another's
+/// still waits: the in-flight peer is refreshed again, since its replay may
+/// have read the older state, and the waiting one is not, since its replay
+/// reads the newer state when it runs.
+#[tokio::test(start_paused = true)]
+async fn a_toggle_mid_refresh_refreshes_the_in_flight_peer_again() {
+    let (_commands_tx, commands_rx) = mpsc::channel(4);
+    let (rib_tx, mut rib_rx) = mpsc::channel(16);
+    let mut mgr = PeerManager::new(
+        commands_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for addr in &GSHUT_HEALTHY[..2] {
+        insert_test_managed_peer(&mut mgr, *addr, acking_gshut_session(), false);
+    }
+    mgr.set_graceful_shutdown(None, true).await.unwrap();
+    settle().await;
+    let Ok(RibUpdate::RefreshPeerOutbound {
+        peer: first,
+        reply: first_reply,
+    }) = rib_rx.try_recv()
+    else {
+        panic!("the first refresh is sent");
+    };
+    assert!(rib_rx.try_recv().is_err(), "one at a time");
+    mgr.set_graceful_shutdown(None, false).await.unwrap();
+    settle().await;
+    let mut order = vec![first];
+    first_reply.send(Ok(())).unwrap();
+    settle().await;
+    while let Ok(RibUpdate::RefreshPeerOutbound { peer, reply }) = rib_rx.try_recv() {
+        assert!(rib_rx.try_recv().is_err(), "still one at a time");
+        order.push(peer);
+        reply.send(Ok(())).unwrap();
+        settle().await;
+    }
+    assert_eq!(order.len(), 3, "{order:?}");
+    assert_eq!(
+        order[0], order[2],
+        "the in-flight peer gets a replay of its own after the clear"
+    );
+    assert_ne!(order[0], order[1]);
+}
+
 fn validation_dependents() -> (PeerManager, mpsc::Sender<PeerManagerReadinessQuery>) {
     let (mut mgr, readiness_tx) = readiness_manager(test_peer_manager());
     for addr in WEDGED {
