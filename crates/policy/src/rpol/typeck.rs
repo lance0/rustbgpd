@@ -359,55 +359,52 @@ struct Checker<'a> {
     diags: Vec<Diagnostic>,
 }
 
+/// How a prepend's count reads for the static bound: the typechecker counts
+/// a parameter at its smallest value, 1; lowering substitutes the argument.
+pub(super) type PrependCount<'a> = &'a dyn Fn(&U32Arg) -> u64;
+
 /// Every ASN `stmts` can prepend, as if each could run: every prepend's
 /// count, an `if`'s branches summed, a loop body times the loop's static
-/// iteration bound. A parameter count counts its smallest value, 1;
-/// instantiation re-checks with the argument
-/// ([`crate::ir::CompiledChain::prepend_bound`]).
-fn prepend_total(stmts: &[Stmt], file: &SourceFile) -> u64 {
+/// iteration bound.
+fn prepend_total(stmts: &[Stmt], file: &SourceFile, count: PrependCount<'_>) -> u64 {
     stmts
         .iter()
         .map(|stmt| match stmt {
-            Stmt::Action(ActionStmt::Prepend { count, .. }) => prepend_count(count),
+            Stmt::Action(ActionStmt::Prepend { count: n, .. }) => count(n),
             Stmt::Action(_) => 0,
             Stmt::If(if_stmt) => if_stmt
                 .branches
                 .iter()
-                .map(|branch| prepend_total(&branch.body, file))
+                .map(|branch| prepend_total(&branch.body, file, count))
                 .chain(
                     if_stmt
                         .else_body
                         .iter()
-                        .map(|body| prepend_total(&body.body, file)),
+                        .map(|body| prepend_total(&body.body, file, count)),
                 )
                 .fold(0, u64::saturating_add),
             Stmt::For(for_stmt) => loop_iteration_bound(&for_stmt.source, file)
-                .saturating_mul(prepend_total(&for_stmt.body, file)),
+                .saturating_mul(prepend_total(&for_stmt.body, file, count)),
         })
         .fold(0, u64::saturating_add)
 }
 
-/// A prepend's count for the static bound: a literal, or 1 for a parameter.
-fn prepend_count(count: &U32Arg) -> u64 {
-    match count {
-        U32Arg::Lit(value, _) => u64::from(*value),
-        U32Arg::Param(_) => 1,
-    }
-}
-
-/// Walk `stmts` from `running` prepended ASNs, the way the lowered terms
-/// run: prepends add up along a path and an `accept` ends one. Returns the
-/// running total for the paths that fall through (`None` when every path
-/// decides) and the largest total any `accept` reached. Branches that fall
-/// through add up, as if every guard matched, which is what the IR walk
-/// ([`crate::ir::CompiledChain::prepend_bound`]) sees in their `continue`
-/// terms; a loop adds its [`prepend_total`].
-fn prepend_walk(stmts: &[Stmt], mut running: u64, file: &SourceFile) -> (Option<u64>, u64) {
+/// Walk `stmts` from `running` prepended ASNs: prepends add up along a path
+/// and an `accept` ends one. Returns the running total for the paths that
+/// fall through (`None` when every path decides) and the largest total any
+/// `accept` reached. Branches that fall through add up, as if every guard
+/// matched; a loop adds its [`prepend_total`].
+fn prepend_walk(
+    stmts: &[Stmt],
+    mut running: u64,
+    file: &SourceFile,
+    count: PrependCount<'_>,
+) -> (Option<u64>, u64) {
     let mut peak = 0;
     for stmt in stmts {
         match stmt {
-            Stmt::Action(ActionStmt::Prepend { count, .. }) => {
-                running = running.saturating_add(prepend_count(count));
+            Stmt::Action(ActionStmt::Prepend { count: n, .. }) => {
+                running = running.saturating_add(count(n));
             }
             Stmt::Action(ActionStmt::Accept(_)) => return (None, peak.max(running)),
             Stmt::Action(ActionStmt::Reject(_)) => return (None, peak),
@@ -421,7 +418,7 @@ fn prepend_walk(stmts: &[Stmt], mut running: u64, file: &SourceFile) -> (Option<
                     .map(|branch| &branch.body)
                     .chain(if_stmt.else_body.iter().map(|body| &body.body));
                 for body in bodies {
-                    let (after, branch_peak) = prepend_walk(body, running, file);
+                    let (after, branch_peak) = prepend_walk(body, running, file, count);
                     peak = peak.max(branch_peak);
                     if let Some(after) = after {
                         added = added.saturating_add(after - running);
@@ -435,8 +432,11 @@ fn prepend_walk(stmts: &[Stmt], mut running: u64, file: &SourceFile) -> (Option<
             }
             Stmt::For(for_stmt) => {
                 running = running.saturating_add(
-                    loop_iteration_bound(&for_stmt.source, file)
-                        .saturating_mul(prepend_total(&for_stmt.body, file)),
+                    loop_iteration_bound(&for_stmt.source, file).saturating_mul(prepend_total(
+                        &for_stmt.body,
+                        file,
+                        count,
+                    )),
                 );
                 peak = peak.max(running);
             }
@@ -445,19 +445,36 @@ fn prepend_walk(stmts: &[Stmt], mut running: u64, file: &SourceFile) -> (Option<
     (Some(running), peak)
 }
 
+/// The most ASNs one evaluation of `def` can prepend: the largest total
+/// [`prepend_walk`] reaches over its terms in order (a term that always
+/// decides leaves the running total for the next one unchanged), or the
+/// total that falls through to the default action. The typechecker and
+/// lowering both compute it here, with their own [`PrependCount`], and
+/// lowering stores it on [`crate::ir::CompiledPolicy::prepend_bound`].
+pub(super) fn policy_prepend_bound(
+    def: &PolicyDef,
+    file: &SourceFile,
+    count: PrependCount<'_>,
+) -> u64 {
+    let (mut running, mut bound) = (0, 0);
+    for term in &def.terms {
+        let (after, peak) = prepend_walk(&term.stmts, running, file, count);
+        bound = bound.max(peak);
+        running = after.unwrap_or(running);
+    }
+    bound.max(running)
+}
+
 impl<'a> Checker<'a> {
     /// The static prepend cap: one evaluation of the policy can place at
     /// most [`crate::engine::MAX_PREPEND_ASNS`] ASNs in front of a path.
     fn check_prepend_bound(&mut self, def: &PolicyDef) {
-        // Terms run in order; a term that always decides leaves the running
-        // total for the next one unchanged, as its `accept` term does in IR.
-        let (mut running, mut bound) = (0, 0);
-        for term in &def.terms {
-            let (after, peak) = prepend_walk(&term.stmts, running, self.file);
-            bound = bound.max(peak);
-            running = after.unwrap_or(running);
-        }
-        let bound = bound.max(running);
+        // A parameter count counts its smallest value here; instantiation
+        // rechecks with the argument.
+        let bound = policy_prepend_bound(def, self.file, &|count| match count {
+            U32Arg::Lit(value, _) => u64::from(*value),
+            U32Arg::Param(_) => 1,
+        });
         let limit = crate::engine::MAX_PREPEND_ASNS;
         if bound > limit as u64 {
             self.diags.push(

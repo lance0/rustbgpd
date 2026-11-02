@@ -1807,11 +1807,7 @@ fn print_explain_advertised(
         if !mods.as_path_prepend.is_empty() {
             outln!(
                 "- as_path_prepend: {}",
-                mods.as_path_prepend
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                crate::output::format_as_path(&mods.as_path_prepend)
             )?;
         }
     }

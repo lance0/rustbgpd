@@ -2317,11 +2317,7 @@ fn modifications_summary(m: &proto::ExplainModifications) -> String {
     if !m.as_path_prepend.is_empty() {
         parts.push(format!(
             "prepend={}",
-            m.as_path_prepend
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
+            crate::output::format_as_path(&m.as_path_prepend)
         ));
     }
     parts.join(" ")

@@ -147,7 +147,7 @@ pub fn explain_chain_statements(
             // walks cannot disagree about a guard).
             let mut denied = false;
             for policy in &rpol.policies {
-                let (step, total) = trace_rpol_policy(
+                let (mut step, total) = trace_rpol_policy(
                     policy_index,
                     named.name.clone(),
                     policy,
@@ -157,6 +157,11 @@ pub fn explain_chain_statements(
                     &mut fuel,
                 );
                 accumulated = total;
+                if let Some(line) = prepend_limit_line(&accumulated) {
+                    step.action = PolicyAction::Deny;
+                    step.modifications.clear();
+                    step.term_traces.push(line);
+                }
                 denied = step.action == PolicyAction::Deny;
                 steps.push(step);
                 if denied {
@@ -206,6 +211,12 @@ pub fn explain_chain_statements(
                 modifications = Vec::new();
             }
         }
+        let mut term_traces = Vec::new();
+        if let Some(line) = prepend_limit_line(&accumulated) {
+            action = PolicyAction::Deny;
+            modifications = Vec::new();
+            term_traces.push(line);
+        }
         steps.push(StatementAttribution {
             policy_index,
             policy_name: named.name.clone(),
@@ -214,7 +225,7 @@ pub fn explain_chain_statements(
             matched_conditions,
             modifications,
             term_name: None,
-            term_traces: Vec::new(),
+            term_traces,
         });
         if action == PolicyAction::Deny {
             // Chain semantics: a Deny terminates evaluation. Later
@@ -225,14 +236,25 @@ pub fn explain_chain_statements(
             };
         }
     }
-    // The live walk's defence-in-depth prepend cap: over 255 prepended
-    // ASNs the route fails closed (`prepend-limit-exceeded`).
-    let action = if accumulated.prepend_len() > super::MAX_PREPEND_ASNS {
-        PolicyAction::Deny
-    } else {
-        PolicyAction::Permit
-    };
-    ChainStatementTrace { action, steps }
+    ChainStatementTrace {
+        action: PolicyAction::Permit,
+        steps,
+    }
+}
+
+/// The live walk's defence-in-depth prepend cap, as a trace line on the
+/// member whose prepends took the running total past
+/// [`MAX_PREPEND_ASNS`](super::MAX_PREPEND_ASNS): the route fails closed
+/// (`prepend-limit-exceeded`).
+fn prepend_limit_line(accumulated: &RouteModifications) -> Option<String> {
+    let prepended = accumulated.prepend_len();
+    (prepended > super::MAX_PREPEND_ASNS).then(|| {
+        format!(
+            "evaluation error: prepends reach {prepended} ASNs, more than {} \
+             (prepend-limit-exceeded) — fail closed => reject",
+            super::MAX_PREPEND_ASNS
+        )
+    })
 }
 
 /// Render a standard (RFC 1997) community as `ASN:VALUE`.
@@ -761,6 +783,7 @@ fn trace_rpol_policy(
                     mods,
                     ctx,
                     crate::eval::locals_slice(locals.as_ref()),
+                    continued.as_ref(),
                 ) {
                     Ok(resolved) => resolved,
                     Err(kind) => {
@@ -797,6 +820,7 @@ fn trace_rpol_policy(
                     mods,
                     ctx,
                     crate::eval::locals_slice(locals.as_ref()),
+                    continued.as_ref(),
                 ) {
                     Ok(resolved) => resolved,
                     Err(kind) => {
@@ -937,22 +961,36 @@ fn render_member_delta(
         own.set_next_hop.clone_from(&after.set_next_hop);
     }
     // Prepends only accumulate, so the member's own are the tail past the
-    // running total before it; the deciding term's, last in that tail,
-    // render from its source so a computed operand shows its spelling.
-    own.as_path_prepend = after
+    // running total before it, resolved as the live walk resolved them. The
+    // deciding term's, last in that tail, carry its source spelling, so a
+    // computed operand renders as `path-first=65000`.
+    let own_prepends = after
         .as_path_prepend
         .get(before.as_path_prepend.len()..)
-        .unwrap_or_default()
-        .to_vec();
-    if let Some(source) = source
-        && let Some(at) = own
-            .as_path_prepend
-            .len()
-            .checked_sub(source.as_path_prepend.len())
-    {
-        own.as_path_prepend
-            .splice(at.., source.as_path_prepend.iter().copied());
-    }
+        .unwrap_or_default();
+    let spelled = source.map_or(&[][..], |source| source.as_path_prepend.as_slice());
+    let spelled_from = own_prepends.len().saturating_sub(spelled.len());
+    let prepend_lines: Vec<String> = own_prepends
+        .iter()
+        .enumerate()
+        .map(|(index, prepend)| {
+            let asn = match prepend.asn {
+                PrependAsn::Asn(asn) => asn.to_string(),
+                PrependAsn::Computed(operand) => operand.as_str().to_string(),
+            };
+            let operand = index
+                .checked_sub(spelled_from)
+                .and_then(|at| spelled.get(at))
+                .and_then(|source| match source.asn {
+                    PrependAsn::Computed(operand) => Some(operand.as_str()),
+                    PrependAsn::Asn(_) => None,
+                });
+            match operand {
+                Some(operand) => format!("as_path prepend {operand}={asn} x{}", prepend.count),
+                None => format!("as_path prepend {asn} x{}", prepend.count),
+            }
+        })
+        .collect();
     let mut out = Vec::new();
     let standard = presence_delta(
         (&before.communities_add, &before.communities_remove),
@@ -992,6 +1030,7 @@ fn render_member_delta(
     own.large_communities_add = large.added;
     own.large_communities_remove = large.removed;
     out.extend(render_modifications(&own, ctx, Some(tables), locals));
+    out.extend(prepend_lines);
     out
 }
 

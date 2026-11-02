@@ -10245,6 +10245,7 @@ fn compile_call(file: &RpolFile, name: &str, args: &[super::CallArg]) -> crate::
         false,
     )
     .expect("policy exists")
+    .expect("within the prepend cap")
     .expect("no datasets")
 }
 
@@ -11786,6 +11787,109 @@ test only-the-first {
                 "{rendered}"
             );
         }
+    }
+
+    /// The bound is the typechecker's walk, computed once at lowering, so a
+    /// statement that makes lowering flush staged prepends into a term of
+    /// their own (a scan, a nested `if`, a wildcard removal) does not count
+    /// them against a later term: each shape fits 255 on every path, at
+    /// typecheck, instantiation and in a test chain.
+    #[test]
+    fn lowering_flushes_do_not_inflate_the_bound() {
+        let flushes = [
+            "remove community in scrub",
+            "remove community *",
+            "remove large-community 65000:*:*",
+            "if route.med == 1 { set med 5 }",
+        ];
+        for flush in flushes {
+            let source = format!(
+                "community-set scrub {{ 65000:1 }}
+policy p {{
+    term a {{ if peer.asn == 64500 {{
+        prepend as 65000 200
+        {flush}
+        accept
+    }} }}
+    term b {{ prepend as 65001 200; accept }}
+}}
+test takes-b {{
+    route {{ prefix 192.0.2.0/24 }}
+    peer {{ asn 64501 }}
+    expect chain [p] == accept with prepend as 65001 200
+}}
+"
+            );
+            assert_passes(&source, 1);
+            let file = RpolFile::parse(&source).expect("typechecks");
+            let compiled = file.compile_policy("p", &[], &mut SetStore::new());
+            assert!(compiled.is_ok(), "{flush}: {:?}", compiled.err());
+        }
+        // Branches that each prepend, flush and accept, one at a time.
+        let source = "policy p { term t {
+            if route.med == 1 { prepend as 65000 200; remove community *; accept }
+            else { prepend as 65001 200; remove community *; accept }
+        } }";
+        let file = RpolFile::parse(source).expect("typechecks");
+        assert!(file.compile_policy("p", &[], &mut SetStore::new()).is_ok());
+    }
+
+    /// `with prepend as ASN COUNT` takes a count of 1 to 255, checked when
+    /// the file parses, so a huge count is a diagnostic, not an allocation.
+    #[test]
+    fn the_count_assertion_takes_1_to_255() {
+        let policy = "policy p { term t { prepend as 65000 255; accept } }\n";
+        let test = |count: &str| {
+            format!(
+                "{policy}test t {{ route {{ prefix 192.0.2.0/24 }} expect p == accept with prepend as 65000 {count} }}"
+            )
+        };
+        assert_passes(&test("255"), 1);
+        for count in ["0", "256", "4200000000"] {
+            let (_, rendered) = diagnostics_of(&test(count));
+            assert!(
+                rendered.contains(&format!("prepend count {count} out of range")),
+                "{count}: {rendered}"
+            );
+        }
+    }
+
+    /// A computed operand reads the path as it stands when its prepend
+    /// runs: `path-first` sees the latest earlier prepend, and `origin` of a
+    /// route that arrived without an ASN sees the first, within a policy and
+    /// across chain members.
+    #[test]
+    fn computed_operands_resolve_in_statement_order() {
+        assert_passes(
+            r#"
+policy within { term t { prepend as 65000 2; prepend as path-first 1; accept } }
+policy origin-within { term t { prepend as 65000 1; prepend as origin 1; accept } }
+policy first { term t { prepend as 65000 2 } }
+policy then-path-first { term t { prepend as path-first 1; accept } }
+policy then-origin { term t { prepend as origin 1; accept } }
+test path-first-within {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect within == accept with only prepend "65000 65000 65000"
+}
+test origin-of-an-empty-path-within {
+    route { prefix 192.0.2.0/24 }
+    expect origin-within == accept with only prepend "65000 65000"
+}
+test path-first-across-members {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect chain [first, then-path-first] == accept with only prepend "65000 65000 65000"
+}
+test origin-of-an-empty-path-across-members {
+    route { prefix 192.0.2.0/24 }
+    expect chain [first, then-origin] == accept with only prepend "65000 65000 65000"
+}
+test origin-of-a-path-is-unchanged {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect chain [first, then-origin] == accept with only prepend "64500 65000 65000"
+}
+"#,
+            5,
+        );
     }
 
     /// A parameter count counts 1 at compile time and its argument at

@@ -439,6 +439,7 @@ fn bench_set_heavy(c: &mut Criterion) {
             }],
             default_action: PolicyAction::Deny,
             source: PolicySource::Toml,
+            prepend_bound: 0,
         }],
         prefix_sets: vec![set],
         ..CompiledChain::empty()

@@ -667,6 +667,9 @@ impl<'a> Lowerer<'a> {
                 .as_ref()
                 .map_or(PolicyAction::Permit, |action| action.node),
             source: PolicySource::Rpol,
+            prepend_bound: super::typeck::policy_prepend_bound(def, self.file, &|count| {
+                u64::from(resolve_u32(count, env))
+            }),
         }
     }
 

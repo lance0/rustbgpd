@@ -4,11 +4,14 @@
   and chain members, each later prepend to the left of the earlier ones, as
   IOS-XR RPL `prepend as-path` does: `prepend as 131077 3` then
   `prepend as 43646981 2` places `666.5 666.5 2.5 2.5 2.5` in front of the
-  path. A later prepend used to replace an earlier one. TOML
-  `set_as_path_prepend` statements in different chain members accumulate the
-  same way. One evaluation prepends at most 255 ASNs: the compiler adds up
-  the prepends along every path to an `accept`, counting `if` branches that
-  fall through together and a prepend inside a loop once per iteration, and
+  path. A later prepend used to replace an earlier one. A computed operand
+  reads the path as it stands when its prepend runs, so
+  `prepend as 65000 2; prepend as path-first 1` places `65000 65000 65000`.
+  TOML `set_as_path_prepend` statements in different chain members
+  accumulate the same way. One evaluation prepends at most 255 ASNs: the
+  compiler adds up the prepends along every path to an `accept`, counting
+  `if` branches that fall through together and a prepend inside a loop once
+  per iteration, and
   rejects a policy, or a chain when it is attached, that could exceed that,
   so a prepend inside a loop over a route attribute is a compile error; a
   chain composed without the check fails the route closed with the new

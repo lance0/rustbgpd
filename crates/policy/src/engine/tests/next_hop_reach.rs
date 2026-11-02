@@ -33,6 +33,7 @@ fn chain(guard: MatchExpr) -> CompiledChain {
         }],
         default_action: PolicyAction::Permit,
         source: PolicySource::Rpol,
+        prepend_bound: 0,
     });
     chain
 }

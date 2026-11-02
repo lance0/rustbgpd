@@ -11,7 +11,10 @@
   Two TOML policies with `set_as_path_prepend` in one chain add up the same
   way. A policy or chain whose prepends could exceed 255 ASNs, including any
   prepend inside a loop over `route.communities` or `route.as-path`, no longer
-  loads; `rustbgpd --check` and `rbgp policy check` name it. In-language tests
+  loads. `rbgp policy check` names a policy over the limit on its own; a
+  chain that goes over only once its members' prepends add up, or a policy
+  whose parameter argument takes it over, is reported by `rustbgpd --check`
+  and refused at config load or reload. In-language tests
   that pinned the replaced prepend with `with prepend as ASN COUNT` fail and
   need the whole sequence, for example `with prepend "65000 65000 65000 65000"`.
 - **gRPC and `rbgp` JSON clients** reading `as_path_prepend_asn` and

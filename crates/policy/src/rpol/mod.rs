@@ -337,7 +337,9 @@ impl RpolFile {
 
     /// [`Self::compile_policy_bound`] with typed arguments from
     /// [`Self::resolve_call`]. `cached_tables` selects the
-    /// [`Self::compile_policy_bound_cached_tables`] variant.
+    /// [`Self::compile_policy_bound_cached_tables`] variant. `None` for an
+    /// unknown policy; the outer `Err` when the instantiated policy can
+    /// prepend more than [`crate::engine::MAX_PREPEND_ASNS`] ASNs.
     ///
     /// # Panics
     ///
@@ -351,7 +353,7 @@ impl RpolFile {
         store: &mut SetStore,
         datasets: &DatasetBindings,
         cached_tables: bool,
-    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+    ) -> Option<Result<Result<CompiledChain, MissingDatasets>, String>> {
         self.compile_policy_typed(name, args, store, datasets, cached_tables)
     }
 
@@ -411,20 +413,8 @@ impl RpolFile {
         // parameters only, and the range of each parameter's uses.
         let args: Vec<CallArg> = args.iter().copied().map(CallArg::Int).collect();
         let args = self.resolve_call(name, &args)?;
-        let compiled = self
-            .compile_policy_typed(name, &args, store, datasets, cached_tables)
-            .expect("resolve_call found the policy");
-        // The static prepend cap with the arguments substituted.
-        if let Ok(chain) = &compiled {
-            let bound = chain.prepend_bound(&chain.policies[0]);
-            let limit = crate::engine::MAX_PREPEND_ASNS;
-            if bound > limit as u64 {
-                return Err(format!(
-                    "policy {name:?} can prepend {bound} ASNs to one route; at most {limit} fit"
-                ));
-            }
-        }
-        Ok(compiled)
+        self.compile_policy_typed(name, &args, store, datasets, cached_tables)
+            .expect("resolve_call found the policy")
     }
 
     fn compile_policy_typed(
@@ -434,7 +424,7 @@ impl RpolFile {
         store: &mut SetStore,
         datasets: &DatasetBindings,
         cached_tables: bool,
-    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+    ) -> Option<Result<Result<CompiledChain, MissingDatasets>, String>> {
         let def = self.file.policies.iter().find(|p| p.name.node == name)?;
         assert_eq!(
             def.params.len(),
@@ -447,12 +437,21 @@ impl RpolFile {
             lower::Lowerer::new(&self.file, store)
         };
         let chain = lowerer.instantiate_chain(name, args, store, datasets);
+        // The static prepend cap with the arguments substituted, on every
+        // instantiation path.
+        let bound = chain.policies[0].prepend_bound;
+        let limit = crate::engine::MAX_PREPEND_ASNS;
+        if bound > limit as u64 {
+            return Some(Err(format!(
+                "policy {name:?} can prepend {bound} ASNs to one route; at most {limit} fit"
+            )));
+        }
         let missing = lowerer.take_missing_datasets();
-        Some(if missing.is_empty() {
+        Some(Ok(if missing.is_empty() {
             Ok(chain)
         } else {
             Err(MissingDatasets(missing))
-        })
+        }))
     }
 }
 

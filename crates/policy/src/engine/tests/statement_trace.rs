@@ -824,6 +824,8 @@ policy med-b { term t { let x = route.med + 2; set med x; accept } }
 policy prepend-200 { term t { prepend as 65000 200 } }
 policy prepend-56 { term t { prepend as 65001 56; accept } }
 policy prepend-55 { term t { prepend as 65001 55; accept } }
+policy prepend-65000-twice { term t { prepend as 65000 2 } }
+policy then-path-first { term t { prepend as path-first 1; accept } }
 ";
 
 fn seeded_member(name: &str) -> NamedPolicy {
@@ -961,19 +963,31 @@ fn explain_resolves_scalars_before_seeding_the_next_member() {
 #[test]
 fn explain_agrees_with_live_on_the_prepend_cap() {
     let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    // A member after the one that crosses the limit is never reached.
     let over = PolicyChain::from_named(vec![
         seeded_member("prepend-200"),
         seeded_member("prepend-56"),
+        seeded_member("prepend-55"),
     ]);
     let (live, evaluation, _) = super::super::evaluate_chain_with_reject_term(Some(&over), &ctx);
     assert_eq!(live.action, PolicyAction::Deny);
-    assert_eq!(
-        evaluation.eval_error.map(|error| error.kind),
-        Some(crate::eval::EvalErrorKind::PrependLimitExceeded)
-    );
-    assert_eq!(
-        explain_chain_statements(Some(&over), &ctx).action,
-        PolicyAction::Deny
+    let error = evaluation.eval_error.expect("an evaluation error");
+    assert_eq!(error.kind, crate::eval::EvalErrorKind::PrependLimitExceeded);
+    // Attributed to the member whose prepends crossed the limit.
+    assert_eq!(error.policy.as_deref(), Some("prepend-56"));
+    let trace = explain_chain_statements(Some(&over), &ctx);
+    assert_eq!(trace.action, PolicyAction::Deny);
+    assert_eq!(trace.steps.len(), 2);
+    let crossing = trace.steps.last().expect("steps");
+    assert_eq!(crossing.policy_name.as_deref(), Some("prepend-56"));
+    assert_eq!(crossing.action, PolicyAction::Deny);
+    assert!(
+        crossing
+            .term_traces
+            .last()
+            .is_some_and(|line| line.contains("prepends reach 256 ASNs")),
+        "{:?}",
+        crossing.term_traces
     );
     let fits = PolicyChain::from_named(vec![
         seeded_member("prepend-200"),
@@ -985,6 +999,36 @@ fn explain_agrees_with_live_on_the_prepend_cap() {
     assert_eq!(
         explain_chain_statements(Some(&fits), &ctx).action,
         PolicyAction::Permit
+    );
+}
+
+/// A computed operand resolves against the path with the earlier members'
+/// prepends placed, alike in the live walk, the dry run and explain, which
+/// renders the operand with the value it resolved to.
+#[test]
+fn explain_agrees_with_live_on_sequential_operands() {
+    let chain = PolicyChain::from_named(vec![
+        seeded_member("prepend-65000-twice"),
+        seeded_member("then-path-first"),
+    ]);
+    let path = rustbgpd_wire::AsPath {
+        segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![64500])],
+    };
+    let ctx = RouteContext {
+        as_path: Some(&path),
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let live = chain.compiled().evaluate(&ctx);
+    assert_eq!(live.modifications.prepended_asns(), [65000, 65000, 65000]);
+    let compiled = chain.compiled();
+    let mut hits = compiled.zero_term_hits();
+    assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(trace.steps[0].modifications, ["as_path prepend 65000 x2"]);
+    assert_eq!(
+        trace.steps[1].modifications,
+        ["as_path prepend path-first=65000 x1"]
     );
 }
 

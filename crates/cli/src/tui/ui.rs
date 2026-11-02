@@ -1167,8 +1167,10 @@ fn explain_lines(
             ));
         }
         if !m.as_path_prepend.is_empty() {
-            let asns: Vec<String> = m.as_path_prepend.iter().map(u32::to_string).collect();
-            mods.push(format!("prepend={}", asns.join(",")));
+            mods.push(format!(
+                "prepend={}",
+                crate::output::format_as_path(&m.as_path_prepend)
+            ));
         }
         if !mods.is_empty() {
             lines.push(Line::styled(
@@ -2268,7 +2270,7 @@ mod tests {
             "Modifications",
             "local-pref=200",
             "MED=0",
-            "prepend=64512,64512",
+            "prepend=64512 64512",
             "communities+=65000:1",
             "extended-communities+=4294967297,4294967298",
             "extended-communities-=8589934593",

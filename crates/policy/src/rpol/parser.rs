@@ -275,6 +275,23 @@ impl Parser<'_> {
         Ok((addr, token.span))
     }
 
+    /// `with prepend as ASN COUNT`: COUNT copies of ASN, the count 1-255.
+    fn prepend_count_assertion(&mut self) -> PResult<WithAssertion> {
+        self.expect(Tok::AsKw, "`as` or a quoted ASN sequence")?;
+        let (asn, _) = self.expect_u32("an ASN")?;
+        let (count, span) = self.expect_u32("a prepend count")?;
+        if count == 0 || count > 255 {
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Parse,
+                span,
+                format!("prepend count {count} out of range"),
+                "must be 1-255",
+            ));
+            return Err(Fail);
+        }
+        Ok(WithAssertion::Prepend(asn, count))
+    }
+
     /// `with prepend "666.5 666.5 2.5"`: the whole prepended sequence.
     fn prepend_path_assertion(&mut self) -> PResult<WithAssertion> {
         let path = self.expect_str("the prepended ASNs")?;
@@ -2343,10 +2360,7 @@ impl Parser<'_> {
             if self.peek().is_some_and(|t| t.kind == Tok::Str) {
                 return self.prepend_path_assertion();
             }
-            self.expect(Tok::AsKw, "`as` or a quoted ASN sequence")?;
-            let (asn, _) = self.expect_u32("an ASN")?;
-            let (count, _) = self.expect_u32("a prepend count")?;
-            return Ok(WithAssertion::Prepend(asn, count));
+            return self.prepend_count_assertion();
         }
         let field =
             self.expect_ident("an assertion (`local-pref`, `med`, `next-hop`, `community`, ...)")?;

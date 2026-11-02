@@ -1190,6 +1190,43 @@ test no-advertise-terminates-before-later-as-is {
     );
 }
 
+/// Disjoint prepend filters render as fall-through terms while their
+/// prepends sum to 255, and as accepting cells past it, so the policy stays
+/// within the `.rpol` prepend bound and loads either way.
+#[test]
+fn v2_disjoint_receive_prepends_past_255_render_as_cells() {
+    let disjoint = |count: u64| {
+        let filters = (1..=count)
+            .map(|id| {
+                receive_filter(
+                    id,
+                    id,
+                    Some(65_000 + u32::try_from(id).unwrap()),
+                    None,
+                    "PREPEND_THRICE",
+                )
+            })
+            .collect::<Vec<_>>();
+        rendered_v2(&with_receive_filters(filters)).unwrap().files["policy/client-1.rpol"].clone()
+    };
+    let at_limit = disjoint(85);
+    assert!(at_limit.contains("term ui-receive-85 "), "{at_limit}");
+    assert!(!at_limit.contains("ui-receive-cell-"), "{at_limit}");
+    compile_with_empty_datasets(&at_limit, "client-1-receive");
+    let past_limit = disjoint(86);
+    assert!(past_limit.contains("ui-receive-cell-"), "{past_limit}");
+    compile_with_empty_datasets(&past_limit, "client-1-receive");
+    assert_policy_tests(
+        &past_limit,
+        r#"
+test one-cell-applies {
+    route { prefix 198.51.100.0/24; as-path "65086 64501" }
+    expect client-1-receive == accept with prepend as 65086 3
+}
+"#,
+    );
+}
+
 #[test]
 fn v2_overlapping_receive_prepend_and_cell_bounds_are_exact() {
     let mut filters = (1..=85)

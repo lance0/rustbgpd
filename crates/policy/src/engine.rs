@@ -412,6 +412,33 @@ impl PrependAs {
         }
         .filter(|&asn| asn != 0)
     }
+
+    /// [`resolve`](Self::resolve) against the path as it stands once the
+    /// prepends staged before this one have run, in statement order and
+    /// across chain members: `leftmost` is the ASN the latest of them
+    /// placed first, `earliest` the one the first of them placed. So
+    /// `path-first` reads the latest prepend, and `origin` of a route that
+    /// arrived without any ASN reads the first.
+    #[must_use]
+    pub fn resolve_after(
+        self,
+        local_asn: Option<u32>,
+        ctx: &RouteContext<'_>,
+        leftmost: Option<u32>,
+        earliest: Option<u32>,
+    ) -> Option<u32> {
+        let arrived_empty = ctx.as_path.is_none_or(|path| {
+            path.segments.iter().all(|segment| match segment {
+                AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns.is_empty(),
+            })
+        });
+        match self {
+            PrependAs::PathFirst if leftmost.is_some() => leftmost,
+            PrependAs::OriginAs if ctx.origin_asn.is_none() && arrived_empty => earliest,
+            _ => return self.resolve(local_asn, ctx),
+        }
+        .filter(|&asn| asn != 0)
+    }
 }
 
 /// The most ASNs one evaluation prepends to a route's `AS_PATH`: one wire
@@ -653,7 +680,12 @@ impl RouteModifications {
         if other.set_next_hop.is_some() {
             self.set_next_hop = other.set_next_hop;
         }
-        self.as_path_prepend.extend(other.as_path_prepend);
+        // The first prepending merge moves the list instead of copying it.
+        if self.as_path_prepend.is_empty() {
+            self.as_path_prepend = other.as_path_prepend;
+        } else {
+            self.as_path_prepend.extend(other.as_path_prepend);
+        }
         merge_exact_list(
             &mut self.communities_add,
             &mut self.communities_remove,

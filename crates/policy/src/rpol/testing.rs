@@ -680,16 +680,17 @@ fn check_assertion(
 
 /// Both prepend forms pin the whole sequence placed in front of the path.
 fn check_prepend(assertion: &WithAssertion, mods: &RouteModifications) -> Option<String> {
-    let (expected, written) = match assertion {
+    let actual = mods.prepended_asns();
+    let (matches, written) = match assertion {
+        // Compared without expanding the count.
         WithAssertion::Prepend(asn, count) => (
-            vec![*asn; usize::try_from(*count).unwrap_or(usize::MAX)],
+            u32::try_from(actual.len()) == Ok(*count) && actual.iter().all(|value| value == asn),
             format!("as {asn} {count}"),
         ),
-        WithAssertion::PrependPath(asns) => (asns.clone(), format!("\"{}\"", join_asns(asns))),
+        WithAssertion::PrependPath(asns) => (actual == *asns, format!("\"{}\"", join_asns(asns))),
         _ => return None,
     };
-    (mods.prepended_asns() != expected)
-        .then(|| format!("expected prepend {written}, got {}", render_prepend(mods)))
+    (!matches).then(|| format!("expected prepend {written}, got {}", render_prepend(mods)))
 }
 
 /// The prepended ASNs as a quoted sequence, or `none`.

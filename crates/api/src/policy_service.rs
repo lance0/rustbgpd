@@ -2210,6 +2210,7 @@ fn compile_candidate(
     let compiled = file.compile_policy_args(base, args, store, bindings, cached_tables);
     compiled
         .expect("candidate_call checked existence")
+        .map_err(Status::invalid_argument)?
         .map_err(|missing| {
             Status::invalid_argument(format!(
                 "policy {base:?} probes an unbound candidate dataset: {missing}"
@@ -4614,6 +4615,38 @@ policy customer-in(peer_lp: u32) {
             resp.diagnostics
         );
         assert_eq!(resp.routes_evaluated, 0);
+    }
+
+    /// A candidate whose parameter argument takes its prepends past 255
+    /// ASNs is refused before the dry run, as it would be at config load,
+    /// instead of compiling and denying every route at runtime.
+    #[tokio::test]
+    async fn test_policy_refuses_a_candidate_over_the_prepend_cap() {
+        let svc = test_policy_service(Vec::new());
+        let source =
+            "policy p(n: u32) { term t { prepend as 65000 n; prepend as 65001 200; accept } }";
+        let request = |n: u32| proto::TestPolicyRequest {
+            rpol_source: source.to_string(),
+            policy: format!("p({n})"),
+            direction: "import".to_string(),
+            ..Default::default()
+        };
+        let fits = PolicyServiceRpc::test_policy(&svc, Request::new(request(55)))
+            .await
+            .expect("255 prepended ASNs fit")
+            .into_inner();
+        assert!(fits.compiled);
+        let status = PolicyServiceRpc::test_policy(&svc, Request::new(request(56)))
+            .await
+            .expect_err("256 prepended ASNs are refused");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status
+                .message()
+                .contains("can prepend 256 ASNs to one route; at most 255 fit"),
+            "{}",
+            status.message()
+        );
     }
 
     /// A candidate source that references a dataset compiles per the

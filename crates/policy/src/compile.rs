@@ -130,7 +130,7 @@ impl ChainNodeBudget {
             Some(chain) => chain
                 .policies
                 .iter()
-                .map(|policy| chain.prepend_bound(policy))
+                .map(|policy| policy.prepend_bound)
                 .fold(0, u64::saturating_add),
             None => named
                 .policy
@@ -247,6 +247,14 @@ pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain
                 .collect(),
             default_action: named.policy.default_action,
             source: PolicySource::Toml,
+            // First match decides, so one statement's prepends apply.
+            prepend_bound: named
+                .policy
+                .entries
+                .iter()
+                .map(|statement| statement.modifications.prepend_len() as u64)
+                .max()
+                .unwrap_or(0),
         });
     }
     sets.into_chain(policies, local_asn)
@@ -290,6 +298,7 @@ fn splice_policy(
         terms: remap_terms(&policy.terms, donor, sets),
         default_action: policy.default_action,
         source: policy.source,
+        prepend_bound: policy.prepend_bound,
     }
 }
 
@@ -890,6 +899,7 @@ policy bogon-filter {
             }],
             default_action: crate::PolicyAction::Permit,
             source: PolicySource::Rpol,
+            prepend_bound: 0,
         };
         ChainNodeBudget::default().add_policy(&policy).unwrap();
         let MatchExpr::And(children) = &mut policy.terms[0].guard else {
@@ -968,6 +978,7 @@ policy bogon-filter {
             }],
             default_action: crate::PolicyAction::Permit,
             source: PolicySource::Rpol,
+            prepend_bound: 0,
         };
         // Policy 1 + outer term/action 2 + guard/value 10 + body (9 + 15).
         ChainNodeBudget {
@@ -1043,6 +1054,7 @@ policy bogon-filter {
                     }],
                     default_action: PolicyAction::Permit,
                     source: PolicySource::Rpol,
+                    prepend_bound: 0,
                 });
             }
             NamedPolicy::from_rpol("m".to_string(), Arc::new(chain))
