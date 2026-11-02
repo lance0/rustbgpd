@@ -8,7 +8,9 @@
 //! answered inside the 200 ms readiness deadline meanwhile.
 
 use super::*;
-use rustbgpd_api::peer_types::{PeerManagerReadinessQuery, PeerReconcileEffect};
+use rustbgpd_api::peer_types::{
+    PeerManagerReadinessQuery, PeerReconcileEffect, ReconcileFailureKind,
+};
 use rustbgpd_transport::PeerCommand;
 use std::collections::HashSet;
 
@@ -42,6 +44,16 @@ async fn settle() {
     }
 }
 
+/// Advance paused time 1 ms at a time, settling after each step, so a sweep
+/// phase that starts when an earlier one times out starts its timers at the
+/// right instant rather than at the end of one long jump.
+async fn advance_settled(by: Duration) {
+    for _ in 0..by.as_millis() {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+    }
+}
+
 /// Run `sweep` with a readiness probe already queued. The probe must be
 /// answered before `window` ends, while every command still waits; the sweep
 /// must still be running 1 ms before one `window` ends and finished when it
@@ -60,20 +72,17 @@ async fn one_readiness_serving_window<T: Send + 'static>(
     let sweep = tokio::spawn(sweep);
     settle().await;
     let probe = window * 3 / 10;
-    tokio::time::advance(probe).await;
-    settle().await;
+    advance_settled(probe).await;
     assert!(
         response.try_recv().is_ok(),
         "readiness must be answered while the sweep waits on wedged sessions"
     );
-    tokio::time::advance(window.saturating_sub(probe + Duration::from_millis(1))).await;
-    settle().await;
+    advance_settled(window.saturating_sub(probe + Duration::from_millis(1))).await;
     assert!(
         !sweep.is_finished(),
         "the sweep waits for the wedged sessions' command window"
     );
-    tokio::time::advance(Duration::from_millis(1)).await;
-    settle().await;
+    advance_settled(Duration::from_millis(1)).await;
     assert!(
         sweep.is_finished(),
         "every wedged session shares one {window:?} command window"
@@ -190,6 +199,71 @@ async fn sighup_reconcile_removes_wedged_peers_in_one_window() {
     );
     for addr in &WEDGED[2..] {
         assert_eq!(mgr.peers[&key(*addr)].description, "replaced");
+    }
+}
+
+/// A SIGHUP reconcile that changes changed peers' discard list purge-resets
+/// them all at once before their deletes: one window for the purges, then
+/// one for the deletes. A peer whose purge is not admitted stays installed
+/// with its old config.
+#[tokio::test(start_paused = true)]
+async fn sighup_reconcile_purges_changed_peers_in_one_window() {
+    let healthy = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 15));
+    let (mut mgr, readiness_tx) = readiness_manager(test_peer_manager());
+    for addr in WEDGED {
+        insert_test_managed_peer(&mut mgr, addr, wedged_session(), false);
+    }
+    insert_test_managed_peer(&mut mgr, healthy, draining_session(), false);
+    let removed = keys(WEDGED[..2].iter().copied());
+    let changed: Vec<_> = WEDGED[2..]
+        .iter()
+        .copied()
+        .chain([healthy])
+        .map(|addr| {
+            let mut config = make_config(addr, 65002);
+            config.description = "replaced".to_string();
+            config.discard_path_attributes = std::sync::Arc::from([16_u8]);
+            config
+        })
+        .collect();
+    let (outcome, mgr) = one_readiness_serving_window(&readiness_tx, 2 * WINDOW, async move {
+        let outcome = mgr.reconcile_peers(Vec::new(), removed, changed).await;
+        (outcome, mgr)
+    })
+    .await;
+    assert_eq!(
+        outcome.effects,
+        vec![
+            PeerReconcileEffect::Removed(key(WEDGED[0])),
+            PeerReconcileEffect::Removed(key(WEDGED[1])),
+            PeerReconcileEffect::Replaced(key(healthy)),
+        ]
+    );
+    assert_eq!(
+        outcome
+            .failures
+            .iter()
+            .map(|failure| (failure.kind, failure.peer.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (ReconcileFailureKind::ChangeRemove, key(WEDGED[2])),
+            (ReconcileFailureKind::ChangeRemove, key(WEDGED[3])),
+        ]
+    );
+    assert!(
+        outcome.failures.iter().all(|failure| failure
+            .error
+            .contains("failed to purge-reset primary session")),
+        "{:?}",
+        outcome.failures
+    );
+    assert_eq!(mgr.peers[&key(healthy)].description, "replaced");
+    for addr in &WEDGED[2..] {
+        assert_ne!(
+            mgr.peers[&key(*addr)].description,
+            "replaced",
+            "an unpurged peer keeps its old config"
+        );
     }
 }
 
