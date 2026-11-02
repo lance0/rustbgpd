@@ -3717,4 +3717,80 @@ mod tests {
         );
         assert_running_charges(&ledger);
     }
+
+    /// Probe, not a contract: how a churned key is charged across the
+    /// members of one shared universe. Each round announces `churn` keys
+    /// outside the universe and withdraws the previous round's, so a member's
+    /// live sparse set stays at `churn` keys while the universe never changes.
+    /// Prints the daemon charge per member per churned key.
+    #[test]
+    #[ignore = "probe: run with --ignored --nocapture"]
+    fn probe_churned_keys_charge_each_shared_member() {
+        const ROUTES: u32 = 4096;
+        const ROUNDS: u32 = 4;
+        let key_bytes = size_of::<EvpnRouteKey>();
+        println!("size_of::<EvpnRouteKey>() = {key_bytes}");
+        println!(
+            "replace members churn rounds  base_daemon  churned_daemon  delta  delta/(members*churn*key)  per_peer_retained"
+        );
+        for (replace, members, churn) in [
+            (true, 4_u8, 256_u32),
+            (true, 16, 256),
+            (true, 64, 256),
+            (true, 16, 64),
+            (true, 16, 1024),
+            (false, 16, 256),
+            (false, 64, 256),
+        ] {
+            let raw = (0..ROUTES).map(key).collect::<Vec<_>>();
+            let mut ledger =
+                EvpnRecoveryProvenance::with_limits(PEER_LIMIT_BYTES, DAEMON_LIMIT_BYTES);
+            let mut hint = None;
+            let mut owners = Vec::new();
+            for n in 1..=members {
+                let handle = ledger.register(owner(n, 7)).unwrap();
+                hint = Some(shared_capture(&mut ledger, handle, hint, &raw, &raw));
+                owners.push(handle);
+            }
+            assert_eq!(ledger.universes.len(), 1);
+            let base = ledger.daemon_usage().retained;
+            let base_peer = ledger.peer_usage(owners[0].owner.peer).retained;
+            let mut previous: Vec<EvpnRouteKey> = Vec::new();
+            for round in 0..ROUNDS {
+                let start = ROUTES + 1 + round * churn;
+                let announced = (start..start + churn).map(key).collect::<Vec<_>>();
+                // Replace-in-place churn withdraws the previous round's keys;
+                // growth churn withdraws universe keys, which only clears mask bits.
+                let withdrawn = if replace {
+                    previous.clone()
+                } else {
+                    (round * churn..(round + 1) * churn).map(key).collect()
+                };
+                for &handle in &owners {
+                    assert!(
+                        ledger
+                            .reserve_admission(handle, announced.iter().copied(), &withdrawn)
+                            .unwrap()
+                    );
+                    assert!(
+                        ledger
+                            .apply_admitted(handle, announced.iter().copied(), &withdrawn)
+                            .unwrap()
+                    );
+                }
+                previous = announced;
+            }
+            assert_running_charges(&ledger);
+            let after = ledger.daemon_usage().retained;
+            let delta = after - base;
+            let per_peer = ledger.peer_usage(owners[0].owner.peer).retained;
+            println!(
+                "{replace:>7} {members:>7} {churn:>5} {ROUNDS:>6} {base:>12} {after:>15} {delta:>6} {:>23}/100 {base_peer}->{per_peer}",
+                delta * 100 / (usize::from(members) * churn as usize * key_bytes),
+            );
+            for handle in owners {
+                assert!(ledger.retire_member(handle));
+            }
+        }
+    }
 }
