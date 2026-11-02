@@ -18,7 +18,15 @@
     `term pad { set med padded(route.as-path.len); accept }`, whose
     function call lowers to six rows, gives `pad.1.1` to `pad.1.6` and
     `pad` instead of `pad.1` to `pad.7`.
-- Dashboards and alerts that select `rbgp policy stats` or `GetPolicyStats`
-  rows by `.rpol` term name, and the evaluation-error text
-  `... in policy P term T`, need the new names; run `rbgp policy stats`
-  after the upgrade to read them.
+- **A name that still exists can now name a different row.** `.<n>` is now
+  a statement number, not a row position. In
+  `term t { set local-pref 500; let x = route.med - 100; set med x; accept }`
+  the `let` was `t.1` and the `accept` was `t.2`; now the `let` is `t.2`,
+  its statement number, and the `accept` is `t`. A dashboard or alert
+  keyed on `t.2` keeps resolving but reads another row, so check every
+  selected name against `rbgp policy stats` after the upgrade, not only
+  the missing ones.
+- The new names appear wherever a lowered term is named: explain traces,
+  `rbgp policy test` term hits, `rbgp policy stats` and `GetPolicyStats`
+  rows, the evaluation-error text `... in policy P term T`, and the
+  config-reload reason `import|export rpol policy P term T changed`.
