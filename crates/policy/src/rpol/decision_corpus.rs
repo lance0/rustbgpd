@@ -170,17 +170,20 @@ impl Corpus {
     ) {
         let mut evaluated = chain.zero_term_hits();
         let mut matched = chain.zero_term_hits();
+        crate::eval::VISITED_GUARDS
+            .with(|visited| *visited.borrow_mut() = Some(std::collections::HashSet::default()));
         let _ = chain.evaluate_recording_coverage(ctx, &mut evaluated, &mut matched);
+        let visited = crate::eval::VISITED_GUARDS
+            .with(|visited| visited.borrow_mut().take())
+            .unwrap_or_default();
         let mut seen = std::collections::BTreeSet::new();
         let mut matched_source_terms: Vec<std::collections::BTreeSet<&str>> = Vec::new();
         for (index, policy) in chain.policies.iter().enumerate() {
             let mut source_terms = std::collections::BTreeSet::new();
             for (term_index, term) in policy.terms.iter().enumerate() {
-                if evaluated[index][term_index] > 0 {
-                    ir_guard(&term.guard, &mut seen);
-                }
+                visited_guards(&term.guard, &visited, &mut seen);
                 if matched[index][term_index] > 0 {
-                    ir_action(term, &mut seen);
+                    ir_action(term, &mut seen, &visited);
                     if let Some(name) = &term.name {
                         source_terms.insert(name.split(['.', '/']).next().unwrap_or(name));
                     }
@@ -330,6 +333,10 @@ fn run_source(
 ) {
     let id = program.id.as_str();
     let Some(file) = file else {
+        assert!(
+            !id.starts_with(CURATED),
+            "{id}: a curated corpus program does not compile"
+        );
         corpus.skipped.push(format!(
             "{id}: does not compile (a deliberate error, or datasets bound by config)"
         ));
@@ -805,8 +812,42 @@ fn ast_value(value: &ValueExprAst, seen: &mut std::collections::BTreeSet<&'stati
     seen.insert(name);
 }
 
-/// The constructs an executed term's action uses.
-fn ir_action(term: &Term, seen: &mut std::collections::BTreeSet<&'static str>) {
+/// Credit the guard nodes of `expr` the evaluation visited: an `And` or
+/// `Or` child after the short-circuit point stays uncredited.
+fn visited_guards(
+    expr: &MatchExpr,
+    visited: &std::collections::HashSet<usize>,
+    seen: &mut std::collections::BTreeSet<&'static str>,
+) {
+    if !visited.contains(&std::ptr::from_ref(expr).addr()) {
+        return;
+    }
+    match expr {
+        MatchExpr::And(children) | MatchExpr::Or(children) => {
+            seen.insert(if matches!(expr, MatchExpr::And(_)) {
+                "ir.guard.and"
+            } else {
+                "ir.guard.or"
+            });
+            for child in children {
+                visited_guards(child, visited, seen);
+            }
+        }
+        MatchExpr::Not(inner) => {
+            seen.insert("ir.guard.not");
+            visited_guards(inner, visited, seen);
+        }
+        leaf => ir_guard(leaf, seen),
+    }
+}
+
+/// The constructs an executed term's action uses; loop bodies are walked
+/// with their visited guards.
+fn ir_action(
+    term: &Term,
+    seen: &mut std::collections::BTreeSet<&'static str>,
+    visited: &std::collections::HashSet<usize>,
+) {
     let mods = match &term.action {
         TermAction::Permit(mods) => {
             seen.insert("ir.action.permit");
@@ -828,8 +869,8 @@ fn ir_action(term: &Term, seen: &mut std::collections::BTreeSet<&'static str>) {
         TermAction::ForEach(node) => {
             seen.insert("ir.action.for-each");
             for body in &node.body {
-                ir_guard(&body.guard, seen);
-                ir_action(body, seen);
+                visited_guards(&body.guard, visited, seen);
+                ir_action(body, seen, visited);
             }
             None
         }
@@ -1053,4 +1094,34 @@ fn corpus_decisions_are_pinned() {
         "{shown} rpol corpus lines changed (first 40 shown). Bless only an \
          intentional change, with RPOL_DECISION_GOLDEN_BLESS=1:\n{diff}"
     );
+}
+
+/// Coverage follows the evaluator's short-circuit: the second child of an
+/// `Or` whose first child matched is not credited, and is once a route
+/// reaches it.
+#[test]
+fn short_circuited_guard_children_are_not_credited() {
+    let file = RpolFile::parse(
+        "policy p { term t { if route.rpki == valid || route.med >= 5 { accept } } }",
+    )
+    .expect("parses");
+    let mut store = SetStore::new();
+    let mut lowerer = lower::Lowerer::from_tables(&file.file, file.tables());
+    let chain = lowerer.instantiate_member("p", &[], &mut store, &DatasetBindings::new());
+    let routes = RpolFile::parse(
+        "policy q { term t { accept } }
+         test valid { route { prefix 192.0.2.0/24; rpki valid; med 1 } expect q == accept }
+         test invalid { route { prefix 192.0.2.0/24; rpki invalid; med 1 } expect q == accept }",
+    )
+    .expect("parses");
+    let count = |test: usize| {
+        let mut corpus = Corpus::default();
+        let fixture = Fixture::build(&routes.file.tests[test]);
+        corpus.count(&chain, &[&file.file.policies[0]], &fixture.context());
+        corpus.counts
+    };
+    let short_circuited = count(0);
+    assert_eq!(short_circuited.get("ir.guard.rpki-is"), Some(&1));
+    assert_eq!(short_circuited.get("ir.guard.med"), None);
+    assert_eq!(count(1).get("ir.guard.med"), Some(&1));
 }
