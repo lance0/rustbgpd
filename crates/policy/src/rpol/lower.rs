@@ -58,7 +58,7 @@ use crate::engine::{
     AsPathRegex, NeighborSetMatch, NextHopAction, PolicyAction, RouteExtendedCommunityAdmin,
     RouteExtendedCommunityKind, RouteModifications, encode_route_extended_community,
 };
-use crate::eval::checked_arith;
+use crate::eval::{arith, clamp};
 use crate::ir::{
     Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetProbe, DatasetSlot, ForEachNode,
     LoopSource, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction, ValueCmpNode,
@@ -1995,31 +1995,36 @@ impl Lowerer<'_> {
                 ..
             } => {
                 let value = self.community(name, env);
-                if *add {
-                    mods.communities_add.push(value);
-                } else {
-                    mods.communities_remove.push(value);
-                }
+                stage(mods, |step| {
+                    push_op(
+                        *add,
+                        value,
+                        &mut step.communities_add,
+                        &mut step.communities_remove,
+                    );
+                });
             }
             ActionStmt::Community {
                 add,
                 arg: CommunityArg::Lit(lit),
                 ..
             } => match lit.node {
-                CommunityLit::Standard(value) => {
-                    if *add {
-                        mods.communities_add.push(value);
-                    } else {
-                        mods.communities_remove.push(value);
-                    }
-                }
-                CommunityLit::Large(lc) => {
-                    if *add {
-                        mods.large_communities_add.push(lc);
-                    } else {
-                        mods.large_communities_remove.push(lc);
-                    }
-                }
+                CommunityLit::Standard(value) => stage(mods, |step| {
+                    push_op(
+                        *add,
+                        value,
+                        &mut step.communities_add,
+                        &mut step.communities_remove,
+                    );
+                }),
+                CommunityLit::Large(lc) => stage(mods, |step| {
+                    push_op(
+                        *add,
+                        lc,
+                        &mut step.large_communities_add,
+                        &mut step.large_communities_remove,
+                    );
+                }),
                 CommunityLit::Ext {
                     route_target,
                     global,
@@ -2027,21 +2032,13 @@ impl Lowerer<'_> {
                     ipv4_admin,
                 } => {
                     let value = ext_community_value(route_target, global, local, ipv4_admin);
-                    if *add {
-                        mods.extended_communities_add.push(value);
-                    } else {
-                        mods.extended_communities_remove.push(value);
-                    }
+                    stage(mods, |step| push_ext(*add, value, step));
                 }
                 // Well-known extended communities (RFC 8097 OV_* states):
                 // add/remove by exact raw wire value.
                 CommunityLit::ExtRaw(raw) => {
                     let value = ExtendedCommunity::new(raw);
-                    if *add {
-                        mods.extended_communities_add.push(value);
-                    } else {
-                        mods.extended_communities_remove.push(value);
-                    }
+                    stage(mods, |step| push_ext(*add, value, step));
                 }
             },
             ActionStmt::Prepend { asn, count, .. } => {
@@ -2073,6 +2070,35 @@ impl Lowerer<'_> {
     }
 }
 
+/// Stage one community action in statement order. The action merges into
+/// the term's modifications the way a later term's do, so the later
+/// operation on a value wins: `add X; remove X` leaves X absent and
+/// `remove X; add X` leaves it present.
+fn stage(mods: &mut RouteModifications, fill: impl FnOnce(&mut RouteModifications)) {
+    let mut step = RouteModifications::default();
+    fill(&mut step);
+    mods.merge_from(step);
+}
+
+/// Push `value` onto `adds` for an `add` statement, else onto `removes`.
+fn push_op<T>(add: bool, value: T, adds: &mut Vec<T>, removes: &mut Vec<T>) {
+    if add {
+        adds.push(value);
+    } else {
+        removes.push(value);
+    }
+}
+
+/// [`push_op`] for an extended community.
+fn push_ext(add: bool, value: ExtendedCommunity, step: &mut RouteModifications) {
+    push_op(
+        add,
+        value,
+        &mut step.extended_communities_add,
+        &mut step.extended_communities_remove,
+    );
+}
+
 impl<'a> Lowerer<'a> {
     /// `remove <kind> in SET` / `not in SET` as its scan action; the
     /// typechecker has resolved `set` to a community-set.
@@ -2091,15 +2117,13 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a value expression to IR: parameters substituted, `let`
     /// bindings resolved to frame slots (innermost first — LAN-302
-    /// shadowing), constant subtrees folded bottom-up with checked
-    /// arithmetic (LAN-299), and user-function calls fully inlined
+    /// shadowing), constant subtrees folded bottom-up with the evaluator's
+    /// saturating arithmetic (LAN-2791), and user-function calls fully inlined
     /// (LAN-304) — each call hoists `Bind` terms into `binds` (the
     /// caller emits them ahead of the reading term) and reads its
-    /// result slot. A constant step that fails its check (e.g.
-    /// `4294967295 + p` with `p = 1` at instantiation — invisible to
-    /// the typechecker, which only sees literals) is left unfolded and
-    /// fails per route on the eval-error rail: fail closed, never
-    /// wrap.
+    /// result slot. A constant step with a parameter folds with
+    /// saturation (`4294967295 + p` with `p = 1` folds to 4294967295), so
+    /// an argument value never decides whether a policy loads.
     fn lower_value(
         &self,
         expr: &ValueExprAst,
@@ -2154,7 +2178,7 @@ impl<'a> Lowerer<'a> {
                 let lhs = self.lower_value(lhs, names, lets, binds);
                 let rhs = self.lower_value(rhs, names, lets, binds);
                 if let (ValueExpr::Const(l), ValueExpr::Const(r)) = (&lhs, &rhs)
-                    && let Ok(folded) = checked_arith(*op, *l, *r)
+                    && let Ok(folded) = arith(*op, *l, *r)
                 {
                     return ValueExpr::Const(folded);
                 }
@@ -2184,8 +2208,8 @@ impl<'a> Lowerer<'a> {
                 match (name.node.as_str(), consts.as_slice()) {
                     ("min", [Some(a), Some(b)]) => ValueExpr::Const((*a).min(*b)),
                     ("max", [Some(a), Some(b)]) => ValueExpr::Const((*a).max(*b)),
-                    ("clamp", [Some(x), Some(lo), Some(hi)]) if lo <= hi => {
-                        ValueExpr::Const((*x).clamp(*lo, *hi))
+                    ("clamp", [Some(x), Some(lo), Some(hi)]) => {
+                        ValueExpr::Const(clamp(*x, *lo, *hi))
                     }
                     ("min", _) => {
                         let b = Box::new(args.pop().expect("typechecked arity"));
@@ -2197,9 +2221,8 @@ impl<'a> Lowerer<'a> {
                         let a = Box::new(args.pop().expect("typechecked arity"));
                         ValueExpr::Max(a, b)
                     }
-                    // Statically inverted constant clamps are typecheck
-                    // errors; a parameter-dependent inversion stays a
-                    // Clamp node and fails per route.
+                    // A literal-only inverted clamp is a typecheck
+                    // error; any other clamp is `min(max(x, lo), hi)`.
                     _ => {
                         let hi = Box::new(args.pop().expect("typechecked arity"));
                         let lo = Box::new(args.pop().expect("typechecked arity"));

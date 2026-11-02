@@ -79,11 +79,15 @@ pub struct StatementAttribution {
     /// Rendered modifications this statement contributes, with
     /// `before -> after` for scalar attributes. The "before" side is
     /// always the route's *pre-policy* value: chain semantics
-    /// accumulate modifications and apply them once after the walk, so
-    /// a later statement does not see an earlier statement's edits.
-    /// For an `.rpol` member this is the policy's merged contribution
-    /// (matched `Continue` terms folded under the deciding permit,
-    /// mirroring the live evaluator's merge).
+    /// accumulate modifications and apply them once after the walk, and
+    /// conditions read the route as received.
+    /// For an `.rpol` member this is the policy's own contribution
+    /// (matched `Continue` terms folded under the deciding permit): the
+    /// trace walks it from what the earlier members staged, as the live
+    /// walk does, and renders what it changed. An earlier addition or
+    /// removal it cancelled renders as the opposite operation with a
+    /// `(cancels an earlier addition)` / `(cancels an earlier removal)`
+    /// note.
     pub modifications: Vec<String>,
     /// `.rpol` term name of the deciding term (ADR-0096). `None` for
     /// TOML statements and for default-action fallthroughs.
@@ -132,6 +136,9 @@ pub fn explain_chain_statements(
     // LAN-303: the trace walk meters loop fuel exactly like the live
     // evaluation — one budget across the whole chain walk.
     let mut fuel: u64 = crate::eval::MAX_EVAL_COST;
+    // As in the live walk, each member starts from the modifications the
+    // earlier members staged, so its scans see and cancel them.
+    let mut accumulated = RouteModifications::default();
     for (policy_index, named) in chain.policies.iter().enumerate() {
         if let Some(rpol) = named.rpol.as_deref() {
             // `.rpol` member: walk the pre-compiled IR terms against
@@ -140,14 +147,16 @@ pub fn explain_chain_statements(
             // walks cannot disagree about a guard).
             let mut denied = false;
             for policy in &rpol.policies {
-                let step = trace_rpol_policy(
+                let (step, total) = trace_rpol_policy(
                     policy_index,
                     named.name.clone(),
                     policy,
                     rpol,
                     ctx,
+                    &accumulated,
                     &mut fuel,
                 );
+                accumulated = total;
                 denied = step.action == PolicyAction::Deny;
                 steps.push(step);
                 if denied {
@@ -163,7 +172,7 @@ pub fn explain_chain_statements(
             continue;
         }
         let matched = named.policy.entries.iter().position(|e| e.matches(ctx));
-        let (statement_index, action, matched_conditions, modifications) = match matched {
+        let (statement_index, mut action, matched_conditions, mut modifications) = match matched {
             Some(index) => {
                 let entry = &named.policy.entries[index];
                 // Live-path parity: a Deny terminator returns
@@ -184,6 +193,19 @@ pub fn explain_chain_statements(
             }
             None => (None, named.policy.default_action, Vec::new(), Vec::new()),
         };
+        if let Some(index) = matched
+            && action == PolicyAction::Permit
+        {
+            let mods = named.policy.entries[index].modifications.clone();
+            if crate::eval::charge_merge(&mut fuel, Some(&accumulated), &mods).is_ok() {
+                accumulated.merge_applicable(mods, ctx);
+            } else {
+                // Out of fuel merging into the staged total: the live walk
+                // fails the route closed on the evaluation-error rail.
+                action = PolicyAction::Deny;
+                modifications = Vec::new();
+            }
+        }
         steps.push(StatementAttribution {
             policy_index,
             policy_name: named.name.clone(),
@@ -431,12 +453,42 @@ fn render_modifications(
 // `.rpol` member tracing (ADR-0096 explain slice).
 // ---------------------------------------------------------------------
 
+/// The trace line for a term whose merge into the staged modifications ran
+/// out of evaluation fuel.
+fn merge_failure_trace(term: &Term, kind: crate::eval::EvalErrorKind) -> String {
+    format!(
+        "term {}: evaluation error: {kind} — fail closed => reject",
+        term.name.as_deref().unwrap_or("<unnamed>"),
+    )
+}
+
+/// The trace line for a community scan that stopped the walk: over its wire
+/// bound (`Ok(false)`, a plain fail-closed reject) or out of evaluation fuel
+/// (`Err`, the eval-error rail).
+fn scan_failure_trace(
+    term: &Term,
+    scanned: Result<bool, crate::eval::EvalErrorKind>,
+    bound: &str,
+) -> String {
+    let name = term.name.as_deref().unwrap_or("<unnamed>");
+    match scanned {
+        Err(kind) => format!("term {name}: evaluation error: {kind} — fail closed => reject"),
+        Ok(_) => format!("term {name}: {bound} — fail closed => reject"),
+    }
+}
+
 /// Trace one pre-compiled `.rpol` policy: walk its terms exactly like
 /// `CompiledChain::evaluate_policy` (first decider wins, matched
 /// `Continue` modifications accumulate under an eventual permit and are
 /// discarded by a deny), rendering a `term_traces` line per evaluated
 /// term. `tables` is the member's donor chain — its set/regex tables
 /// and names are self-contained.
+///
+/// The walk starts from `before`, the modifications the earlier members
+/// staged, exactly like the live walk, and returns the running total after
+/// this member. The member's `modifications` lines render the change from
+/// `before` to that total ([`render_member_delta`]), so a scan that cancels
+/// an earlier member's addition shows the cancellation on its own line.
 #[expect(
     clippy::too_many_lines,
     reason = "one walk mirroring the live evaluator's term loop; splitting would decouple them"
@@ -447,16 +499,21 @@ fn trace_rpol_policy(
     policy: &CompiledPolicy,
     tables: &CompiledChain,
     ctx: &RouteContext<'_>,
+    before: &RouteModifications,
     fuel: &mut u64,
-) -> StatementAttribution {
+) -> (StatementAttribution, RouteModifications) {
     let mut term_traces = Vec::new();
-    let mut continued: Option<RouteModifications> = None;
+    let mut continued: Option<RouteModifications> = (!before.is_empty()).then(|| before.clone());
     let mut decided: Option<(usize, &Term)> = None;
     // A permitting action's modifications travel with the decision so
     // the result never needs to inspect the original action again.
     // Loop permits are already resolved by the shared evaluator;
     // direct permits retain their source expressions for explain.
-    let mut deciding_permit: Option<RouteModifications> = None;
+    // The deciding permit's running total, with computed operands resolved
+    // as the live walk resolves them (the next member is seeded from it),
+    // plus the deciding term's own source modifications when they carry
+    // computed operands, so its line renders the source expression.
+    let mut deciding_permit: Option<(RouteModifications, Option<RouteModifications>)> = None;
     // LAN-302: the trace walk re-derives `let` bindings term by term
     // (explain may allocate/zero eagerly; the hot path never records)
     // and feeds the frame into the shared guard evaluation.
@@ -572,8 +629,16 @@ fn trace_rpol_policy(
                             crate::eval::LoopFlow::Completed => {}
                             crate::eval::LoopFlow::Permit(mods) => {
                                 let mut merged = continued.take().unwrap_or_default();
+                                if let Err(kind) =
+                                    crate::eval::charge_merge(fuel, Some(&merged), &mods)
+                                {
+                                    term_traces.push(merge_failure_trace(term, kind));
+                                    eval_failed = true;
+                                    decided = Some((index, term));
+                                    break;
+                                }
                                 merged.merge_applicable(mods, ctx);
-                                deciding_permit = Some(merged);
+                                deciding_permit = Some((merged, None));
                                 decided = Some((index, term));
                                 break;
                             }
@@ -601,9 +666,13 @@ fn trace_rpol_policy(
                 slot,
                 name: _name,
             } => {
-                if let Err(kind) =
-                    crate::eval::exec_community_var(add, slot, locals.as_ref(), &mut continued)
-                {
+                if let Err(kind) = crate::eval::exec_community_var(
+                    add,
+                    slot,
+                    locals.as_ref(),
+                    &mut continued,
+                    fuel,
+                ) {
                     term_traces.push(format!(
                         "term {}: evaluation error: {kind} — fail closed => reject",
                         term.name.as_deref().unwrap_or("<unnamed>"),
@@ -614,26 +683,36 @@ fn trace_rpol_policy(
                 }
             }
             TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
-                if !crate::eval::exec_remove_large_community_admin(
+                let scanned = crate::eval::exec_remove_large_community_admin(
                     global_admin,
                     ctx,
                     &mut continued,
-                ) {
-                    term_traces.push(format!(
-                        "term {}: large-community input exceeds the wildcard-removal bound — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
+                    fuel,
+                );
+                if scanned != Ok(true) {
+                    term_traces.push(scan_failure_trace(
+                        term,
+                        scanned,
+                        "large-community input exceeds the wildcard-removal bound",
                     ));
+                    eval_failed = scanned.is_err();
                     decided = Some((index, term));
                     break;
                 }
             }
             TermActionView::RemoveAllCommunities { attributes } => {
-                if !crate::eval::exec_remove_all_communities(attributes, ctx, &mut continued) {
-                    term_traces.push(format!(
-                        "term {}: community input exceeds the `{}` bound — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                        attributes.render(),
+                let scanned =
+                    crate::eval::exec_remove_all_communities(attributes, ctx, &mut continued, fuel);
+                if scanned != Ok(true) {
+                    term_traces.push(scan_failure_trace(
+                        term,
+                        scanned,
+                        &format!(
+                            "community input exceeds the `{}` bound",
+                            attributes.render()
+                        ),
                     ));
+                    eval_failed = scanned.is_err();
                     decided = Some((index, term));
                     break;
                 }
@@ -643,18 +722,24 @@ fn trace_rpol_policy(
                 set,
                 negate,
             } => {
-                if !crate::eval::exec_remove_communities_in_set(
+                let scanned = crate::eval::exec_remove_communities_in_set(
                     attribute,
                     &tables.community_sets[set.0 as usize],
                     negate,
                     ctx,
                     &mut continued,
-                ) {
-                    term_traces.push(format!(
-                        "term {}: community input exceeds the `{}` bound — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                        render_remove_in_set(attribute, set, negate, tables),
+                    fuel,
+                );
+                if scanned != Ok(true) {
+                    term_traces.push(scan_failure_trace(
+                        term,
+                        scanned,
+                        &format!(
+                            "community input exceeds the `{}` bound",
+                            render_remove_in_set(attribute, set, negate, tables)
+                        ),
                     ));
+                    eval_failed = scanned.is_err();
                     decided = Some((index, term));
                     break;
                 }
@@ -671,20 +756,34 @@ fn trace_rpol_policy(
                 break;
             }
             TermActionView::Permit(mods) => {
-                if let Err(kind) =
-                    tables.resolve_computed(mods, ctx, crate::eval::locals_slice(locals.as_ref()))
-                {
-                    term_traces.push(format!(
-                        "term {}: evaluation error: {kind} — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                    ));
+                let resolved = match tables.resolve_computed(
+                    mods,
+                    ctx,
+                    crate::eval::locals_slice(locals.as_ref()),
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(kind) => {
+                        term_traces.push(format!(
+                            "term {}: evaluation error: {kind} — fail closed => reject",
+                            term.name.as_deref().unwrap_or("<unnamed>"),
+                        ));
+                        eval_failed = true;
+                        decided = Some((index, term));
+                        break;
+                    }
+                };
+                let mut merged = continued.take().unwrap_or_default();
+                if let Err(kind) = crate::eval::charge_merge(fuel, Some(&merged), mods) {
+                    term_traces.push(merge_failure_trace(term, kind));
                     eval_failed = true;
                     decided = Some((index, term));
                     break;
                 }
-                let mut merged = continued.take().unwrap_or_default();
-                merged.merge_applicable(mods.clone(), ctx);
-                deciding_permit = Some(merged);
+                // Seed the next member with resolved values, as the live
+                // walk does; render this member's source expressions.
+                let source = resolved.is_some().then(|| mods.clone());
+                merged.merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                deciding_permit = Some((merged, source));
                 decided = Some((index, term));
                 break;
             }
@@ -711,9 +810,16 @@ fn trace_rpol_policy(
                 };
                 // Resolve at action time: later sibling scopes may
                 // reuse the frame slots this term read.
+                let mods = resolved.unwrap_or_else(|| mods.clone());
+                if let Err(kind) = crate::eval::charge_merge(fuel, continued.as_ref(), &mods) {
+                    term_traces.push(merge_failure_trace(term, kind));
+                    eval_failed = true;
+                    decided = Some((index, term));
+                    break;
+                }
                 continued
                     .get_or_insert_with(RouteModifications::default)
-                    .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                    .merge_applicable(mods, ctx);
             }
         }
     }
@@ -722,17 +828,18 @@ fn trace_rpol_policy(
         // modifications and contributes none of its own; a fail-closed
         // evaluation error denies regardless of the term's own action.
         let locals_view = crate::eval::locals_slice(locals.as_ref());
-        let (action, modifications) = if eval_failed {
-            (PolicyAction::Deny, Vec::new())
-        } else if let Some(merged) = &deciding_permit {
-            (
-                PolicyAction::Permit,
-                render_modifications(merged, ctx, Some(tables), locals_view),
-            )
-        } else {
-            (PolicyAction::Deny, Vec::new())
+        let (action, modifications, total) = match deciding_permit {
+            Some((merged, source)) if !eval_failed => {
+                let total = crate::eval::applicable(merged, ctx);
+                (
+                    PolicyAction::Permit,
+                    render_member_delta(before, &total, source.as_ref(), ctx, tables, locals_view),
+                    total,
+                )
+            }
+            _ => (PolicyAction::Deny, Vec::new(), before.clone()),
         };
-        StatementAttribution {
+        let step = StatementAttribution {
             policy_index,
             policy_name,
             statement_index: Some(index),
@@ -745,20 +852,29 @@ fn trace_rpol_policy(
             modifications,
             term_name: term.name.clone(),
             term_traces,
-        }
+        };
+        (step, total)
     } else {
         // Fallthrough to the policy default; a permitting default
         // keeps accumulated Continue modifications (live parity).
-        let modifications = match (policy.default_action, continued) {
-            (PolicyAction::Permit, Some(mods)) => render_modifications(
-                &mods,
-                ctx,
-                Some(tables),
-                crate::eval::locals_slice(locals.as_ref()),
-            ),
-            _ => Vec::new(),
+        let (modifications, total) = match policy.default_action {
+            PolicyAction::Permit => {
+                let total = crate::eval::applicable(continued.unwrap_or_default(), ctx);
+                (
+                    render_member_delta(
+                        before,
+                        &total,
+                        None,
+                        ctx,
+                        tables,
+                        crate::eval::locals_slice(locals.as_ref()),
+                    ),
+                    total,
+                )
+            }
+            PolicyAction::Deny => (Vec::new(), before.clone()),
         };
-        StatementAttribution {
+        let step = StatementAttribution {
             policy_index,
             policy_name,
             statement_index: None,
@@ -767,7 +883,204 @@ fn trace_rpol_policy(
             modifications,
             term_name: None,
             term_traces,
+        };
+        (step, total)
+    }
+}
+
+/// Render what one `.rpol` member changed: the running total `before` it
+/// against the total `after` it.
+///
+/// Scalars compare resolved values and render when the member changed them,
+/// from the deciding term's own `source` expression when it computed one.
+/// Communities compare by logical presence per kind: a value newly added or
+/// newly removed renders as usual; an earlier addition (removal) no longer
+/// present renders `- V (cancels an earlier addition)` (`+ V (cancels an
+/// earlier removal)`) in place of the member's own line for it; a value
+/// whose presence did not change renders nothing, so removing and re-adding
+/// an earlier addition is no change. Cancellations render first, then the
+/// member's surviving operations. Hash sets keep this linear in the staged
+/// entries.
+fn render_member_delta(
+    before: &RouteModifications,
+    after: &RouteModifications,
+    source: Option<&RouteModifications>,
+    ctx: &RouteContext<'_>,
+    tables: &CompiledChain,
+    locals: &[crate::eval::LocalSlot],
+) -> Vec<String> {
+    let mut own = RouteModifications::default();
+    if (after.set_local_pref, &after.set_local_pref_computed)
+        != (before.set_local_pref, &before.set_local_pref_computed)
+    {
+        if let Some(expr) =
+            source.and_then(|own_source| own_source.set_local_pref_computed.as_ref())
+        {
+            own.set_local_pref_computed = Some(expr.clone());
+        } else {
+            own.set_local_pref = after.set_local_pref;
+            own.set_local_pref_computed
+                .clone_from(&after.set_local_pref_computed);
         }
+    }
+    if (after.set_med, &after.set_med_computed) != (before.set_med, &before.set_med_computed) {
+        if let Some(expr) = source.and_then(|own_source| own_source.set_med_computed.as_ref()) {
+            own.set_med_computed = Some(expr.clone());
+        } else {
+            own.set_med = after.set_med;
+            own.set_med_computed.clone_from(&after.set_med_computed);
+        }
+    }
+    if after.set_next_hop != before.set_next_hop {
+        own.set_next_hop.clone_from(&after.set_next_hop);
+    }
+    if (after.as_path_prepend, after.as_path_prepend_computed)
+        != (before.as_path_prepend, before.as_path_prepend_computed)
+    {
+        if let Some(computed) = source.and_then(|own_source| own_source.as_path_prepend_computed) {
+            own.as_path_prepend_computed = Some(computed);
+        } else {
+            own.as_path_prepend = after.as_path_prepend;
+            own.as_path_prepend_computed = after.as_path_prepend_computed;
+        }
+    }
+    let mut out = Vec::new();
+    let standard = presence_delta(
+        (&before.communities_add, &before.communities_remove),
+        (&after.communities_add, &after.communities_remove),
+    );
+    let extended = presence_delta(
+        (
+            &before.extended_communities_add,
+            &before.extended_communities_remove,
+        ),
+        (
+            &after.extended_communities_add,
+            &after.extended_communities_remove,
+        ),
+    );
+    let large = presence_delta(
+        (
+            &before.large_communities_add,
+            &before.large_communities_remove,
+        ),
+        (
+            &after.large_communities_add,
+            &after.large_communities_remove,
+        ),
+    );
+    standard.render_cancellations(
+        "community",
+        |value| fmt_standard_community(*value),
+        &mut out,
+    );
+    extended.render_cancellations("extended_community", ToString::to_string, &mut out);
+    large.render_cancellations("large_community", ToString::to_string, &mut out);
+    own.communities_add = standard.added;
+    own.communities_remove = standard.removed;
+    own.extended_communities_add = extended.added;
+    own.extended_communities_remove = extended.removed;
+    own.large_communities_add = large.added;
+    own.large_communities_remove = large.removed;
+    out.extend(render_modifications(&own, ctx, Some(tables), locals));
+    out
+}
+
+/// One community kind's change in logical presence across a member.
+pub(super) struct PresenceDelta<T> {
+    /// Earlier additions no longer present.
+    pub(super) cancelled_adds: Vec<T>,
+    /// Earlier removals no longer present.
+    pub(super) cancelled_removes: Vec<T>,
+    /// Values newly added, other than those that cancel an earlier removal.
+    pub(super) added: Vec<T>,
+    /// Values newly removed, other than those that cancel an earlier addition.
+    pub(super) removed: Vec<T>,
+}
+
+impl<T> PresenceDelta<T> {
+    fn render_cancellations(
+        &self,
+        label: &str,
+        render: impl Fn(&T) -> String,
+        out: &mut Vec<String>,
+    ) {
+        for value in &self.cancelled_adds {
+            out.push(format!(
+                "{label} - {} (cancels an earlier addition)",
+                render(value)
+            ));
+        }
+        for value in &self.cancelled_removes {
+            out.push(format!(
+                "{label} + {} (cancels an earlier removal)",
+                render(value)
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Membership probes and entries visited by [`presence_delta`], for the
+    /// linear-bound test.
+    pub(super) static DELTA_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `steps` of delta work (tests only).
+fn delta_steps(steps: usize) {
+    #[cfg(test)]
+    DELTA_STEPS.with(|total| total.set(total.get() + steps as u64));
+    #[cfg(not(test))]
+    let _ = steps;
+}
+
+/// Whether `value` is in `set`: one hash probe.
+fn present<T: Eq + std::hash::Hash>(set: &std::collections::HashSet<T>, value: &T) -> bool {
+    delta_steps(1);
+    set.contains(value)
+}
+
+/// Each distinct value of `values` passing `keep`, in first-seen order: one
+/// hash probe per entry.
+fn distinct<T: Copy + Eq + std::hash::Hash>(values: &[T], keep: impl Fn(&T) -> bool) -> Vec<T> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .iter()
+        .copied()
+        .filter(|value| keep(value) && seen.insert(*value))
+        .collect()
+}
+
+/// The presence delta of one kind's staged `(adds, removes)`, linear in the
+/// entries.
+pub(super) fn presence_delta<T: Copy + Eq + std::hash::Hash>(
+    before: (&[T], &[T]),
+    after: (&[T], &[T]),
+) -> PresenceDelta<T> {
+    let set = |values: &[T]| -> std::collections::HashSet<T> {
+        delta_steps(values.len());
+        values.iter().copied().collect()
+    };
+    let (before_adds, before_removes) = (set(before.0), set(before.1));
+    let (after_adds, after_removes) = (set(after.0), set(after.1));
+    let cancelled_adds = distinct(before.0, |value| !present(&after_adds, value));
+    let cancelled_removes = distinct(before.1, |value| !present(&after_removes, value));
+    let added = distinct(after.0, |value| {
+        // Not already added, and not the cancellation of an earlier removal.
+        !present(&before_adds, value)
+            && (!present(&before_removes, value) || present(&after_removes, value))
+    });
+    let removed = distinct(after.1, |value| {
+        // Not already removed, and not the cancellation of an earlier addition.
+        !present(&before_removes, value)
+            && (!present(&before_adds, value) || present(&after_adds, value))
+    });
+    PresenceDelta {
+        cancelled_adds,
+        cancelled_removes,
+        added,
+        removed,
     }
 }
 

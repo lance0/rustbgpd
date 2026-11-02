@@ -153,16 +153,22 @@ pub(crate) const MAX_LOOP_ITERATIONS: u32 = 4096;
 /// here; the disposition never varies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvalErrorKind {
-    /// `+` or `*` exceeded `u32::MAX`.
+    /// `+` or `*` exceeded `u32::MAX`. No longer produced: `+ - *`
+    /// saturate (LAN-2791); the label stays valid in `expect` forms.
     Overflow,
-    /// `-` went below zero (no signed types in the value model).
+    /// `-` went below zero. No longer produced: `-` saturates at 0
+    /// (LAN-2791).
     Underflow,
-    /// `/` with a zero divisor.
+    /// `/` with a zero divisor. Unreachable through the compiler — a
+    /// divisor is a non-zero constant or `max(e, k)` with `k >= 1`
+    /// (LAN-2791) — so this is the fail-closed disposition of a
+    /// compiler bug.
     DivideByZero,
-    /// `%` with a zero divisor.
+    /// `%` with a zero divisor; unreachable like
+    /// [`DivideByZero`](Self::DivideByZero).
     RemainderByZero,
-    /// `clamp(x, lo, hi)` evaluated with `lo > hi` (the statically
-    /// known case is a compile error; this is the data-dependent one).
+    /// `clamp(x, lo, hi)` with `lo > hi`. No longer produced: `clamp`
+    /// is `min(max(x, lo), hi)` (LAN-2791).
     ClampInverted,
     /// A `u32` field operand with no default was absent (origin AS on
     /// an empty/`AS_SET`-only path, unknown peer ASN).
@@ -250,21 +256,16 @@ impl fmt::Display for EvalError {
 impl EvalErrorKind {
     /// Whether this kind fails the route closed wherever it occurs,
     /// conditions included: a compiler-bug rail or a resource limit.
-    /// Only the kinds listed here as a value that cannot be computed
-    /// make a condition false instead, with the deny left to an action
-    /// that needs the value (LAN-2790), so a kind added later fails
-    /// closed until it is listed.
+    /// Only a missing value (the kinds listed here) makes a condition
+    /// false instead, with the deny left to an action that needs the
+    /// value (LAN-2790), so a kind added later fails closed until it is
+    /// listed. Arithmetic saturates and divisors are never zero
+    /// (LAN-2791), so the arithmetic kinds are not values here.
     #[must_use]
     pub fn fails_closed(self) -> bool {
         !matches!(
             self,
-            EvalErrorKind::Overflow
-                | EvalErrorKind::Underflow
-                | EvalErrorKind::DivideByZero
-                | EvalErrorKind::RemainderByZero
-                | EvalErrorKind::ClampInverted
-                | EvalErrorKind::AbsentField(_)
-                | EvalErrorKind::AbsentPrependOperand(_)
+            EvalErrorKind::AbsentField(_) | EvalErrorKind::AbsentPrependOperand(_)
         )
     }
 
@@ -416,8 +417,9 @@ pub(crate) fn exec_bind(
 /// Evaluate a compiled value expression against a route context and
 /// the current `let`-binding frame (`&[]` when the caller has none —
 /// expressions without `Local` reads never index it). Pure and
-/// allocation-free; every arithmetic step is checked (ADR-0103
-/// Decision 2 — the SIGFPE class is unrepresentable). Recursion depth
+/// allocation-free; `+ - *` saturate and divisors are never zero
+/// (LAN-2791, amending ADR-0103 Decision 2), so the SIGFPE class stays
+/// unrepresentable. Recursion depth
 /// is bounded by the frontend (`MAX_EXPR_DEPTH`).
 pub(crate) fn eval_value(
     expr: &ValueExpr,
@@ -452,7 +454,7 @@ pub(crate) fn eval_value(
         },
         ValueExpr::Binary { op, lhs, rhs } => {
             let (lhs, rhs) = both(eval_value(lhs, ctx, locals), eval_value(rhs, ctx, locals))?;
-            checked_arith(*op, lhs, rhs)
+            arith(*op, lhs, rhs)
         }
         ValueExpr::Min(a, b) => {
             let (a, b) = both(eval_value(a, ctx, locals), eval_value(b, ctx, locals))?;
@@ -467,17 +469,33 @@ pub(crate) fn eval_value(
                 eval_value(x, ctx, locals),
                 both(eval_value(lo, ctx, locals), eval_value(hi, ctx, locals)),
             )?;
-            if lo > hi {
-                return Err(EvalErrorKind::ClampInverted);
-            }
-            Ok(x.clamp(lo, hi))
+            Ok(clamp(x, lo, hi))
         }
     }
 }
 
-/// One checked arithmetic step — the only place `u32` operators are
-/// applied, shared by evaluation and compile-time constant folding so
-/// the two can never disagree about what overflows.
+/// One arithmetic step as evaluated (LAN-2791): `+ - *` saturate at 0
+/// and `u32::MAX`; `/` and `%` fail only on a zero divisor, which the
+/// typechecker rules out. Shared by evaluation and the lowerer's
+/// constant folding so the two can never disagree.
+pub(crate) fn arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> {
+    match op {
+        ArithOp::Add => Ok(lhs.saturating_add(rhs)),
+        ArithOp::Sub => Ok(lhs.saturating_sub(rhs)),
+        ArithOp::Mul => Ok(lhs.saturating_mul(rhs)),
+        ArithOp::Div => lhs.checked_div(rhs).ok_or(EvalErrorKind::DivideByZero),
+        ArithOp::Rem => lhs.checked_rem(rhs).ok_or(EvalErrorKind::RemainderByZero),
+    }
+}
+
+/// `clamp(x, lo, hi)` as `min(max(x, lo), hi)` (LAN-2791): total, so
+/// inverted bounds yield `hi` instead of failing.
+pub(crate) fn clamp(x: u32, lo: u32, hi: u32) -> u32 {
+    x.max(lo).min(hi)
+}
+
+/// The same step without saturation, for the typechecker's literal-only
+/// diagnostic: `4294967295 + 1` can only be a typo.
 pub(crate) fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> {
     match op {
         ArithOp::Add => lhs.checked_add(rhs).ok_or(EvalErrorKind::Overflow),
@@ -622,7 +640,8 @@ impl PolicyHitCounters {
     }
 
     /// Routes denied by an evaluation error (LAN-299, ADR-0103
-    /// Decision 4: checked-arithmetic failure or absent operand) since
+    /// Decision 4: an action that needs an absent operand, or a
+    /// fail-closed rail) since
     /// chain install. A nonzero value means some policy is erroring —
     /// the rate-limited WARN log and explain traces name where and
     /// why.
@@ -765,6 +784,7 @@ pub(crate) fn exec_community_var(
     slot: u8,
     locals: Option<&LocalFrame>,
     continued: &mut Option<RouteModifications>,
+    fuel: &mut u64,
 ) -> Result<(), EvalErrorKind> {
     let value = locals_slice(locals)
         .get(usize::from(slot))
@@ -776,26 +796,89 @@ pub(crate) fn exec_community_var(
     } else {
         mods.communities_remove.push(value);
     }
+    charge_merge(fuel, continued.as_ref(), &mods)?;
     continued
         .get_or_insert_with(RouteModifications::default)
         .merge_from(mods);
     Ok(())
 }
 
-/// Execute the bounded `.rpol` global-admin wildcard removal. The arrived
-/// route is the sole authority: one scan produces stable, deduplicated concrete
-/// removals, which then merge through the ordinary policy-local accumulator.
-/// Input beyond the pre-paid wire bound fails closed before the scan.
+/// Charge merging `new` into the staged `target` for the staged entries the
+/// later-wins merge traverses: for each kind `new` adds (removes), one pass
+/// over `target`'s staged removals (additions) of that kind to cancel the
+/// opposite operation. Staged lists have no compile-time bound and a loop
+/// merges once per iteration, so without this the work would grow with
+/// iterations times staged entries, outside the budget.
+pub(crate) fn charge_merge(
+    fuel: &mut u64,
+    target: Option<&RouteModifications>,
+    new: &RouteModifications,
+) -> Result<(), EvalErrorKind> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let pass = |staged: usize, touched: bool| if touched { staged } else { 0 };
+    charge_staged_scan(
+        fuel,
+        pass(
+            target.communities_add.len(),
+            !new.communities_remove.is_empty(),
+        ) + pass(
+            target.communities_remove.len(),
+            !new.communities_add.is_empty(),
+        ) + pass(
+            target.extended_communities_add.len(),
+            !new.extended_communities_remove.is_empty(),
+        ) + pass(
+            target.extended_communities_remove.len(),
+            !new.extended_communities_add.is_empty(),
+        ) + pass(
+            target.large_communities_add.len(),
+            !new.large_communities_remove.is_empty(),
+        ) + pass(
+            target.large_communities_remove.len(),
+            !new.large_communities_add.is_empty(),
+        ),
+    )
+}
+
+/// Charge a scan one fuel step per staged entry of its kind it visits: the
+/// adds it cancels in statement order and the removals it dedups its own
+/// against. The compile-time cost pre-pays the arrived values only; staged
+/// lists have no static bound (a loop stages one entry per iteration, and a
+/// chain carries them from member to member), so each scan pays for them
+/// here and fails closed when the evaluation budget runs out.
+fn charge_staged_scan(fuel: &mut u64, staged: usize) -> Result<(), EvalErrorKind> {
+    *fuel = u64::try_from(staged)
+        .ok()
+        .and_then(|steps| fuel.checked_sub(steps))
+        .ok_or(EvalErrorKind::FuelExhausted)?;
+    Ok(())
+}
+
+/// Execute the bounded `.rpol` global-admin wildcard removal. One scan of the
+/// arrived route produces stable, deduplicated concrete removals, which merge
+/// through the ordinary policy-local accumulator; in statement order the scan
+/// also cancels the earlier staged adds with that administrator. The staged
+/// large-community entries it visits are metered by [`charge_staged_scan`]. Input beyond the pre-paid wire bound fails closed
+/// (`Ok(false)`) before the scan; fuel exhaustion is an evaluation error.
 pub(crate) fn exec_remove_large_community_admin(
     global_admin: u32,
     ctx: &RouteContext<'_>,
     continued: &mut Option<RouteModifications>,
-) -> bool {
+    fuel: &mut u64,
+) -> Result<bool, EvalErrorKind> {
     if ctx.large_communities.len()
         > usize::try_from(MAX_LARGE_COMMUNITIES_PER_ROUTE).expect("fixed bound fits usize")
     {
-        return false;
+        return Ok(false);
     }
+    charge_staged_scan(
+        fuel,
+        continued.as_ref().map_or(0, |current| {
+            staged_entries(current, CommunityAttribute::Large)
+        }),
+    )?;
     let mut mods = RouteModifications::default();
     let mut seen: HashSet<_> = continued.as_ref().map_or_else(HashSet::new, |current| {
         current.large_communities_remove.iter().copied().collect()
@@ -805,12 +888,19 @@ pub(crate) fn exec_remove_large_community_admin(
             mods.large_communities_remove.push(*community);
         }
     }
+    // Statement order: the scan also cancels an earlier staged add it
+    // matches, as a named removal would.
+    if let Some(current) = continued.as_mut() {
+        current
+            .large_communities_add
+            .retain(|community| community.global_admin != global_admin);
+    }
     if !mods.large_communities_remove.is_empty() {
         continued
             .get_or_insert_with(RouteModifications::default)
             .merge_from(mods);
     }
-    true
+    Ok(true)
 }
 
 /// Stage a removal of every arrived community of each listed attribute not
@@ -818,13 +908,15 @@ pub(crate) fn exec_remove_large_community_admin(
 /// ([`is_well_known_community`]): `remove community *` never strips
 /// `NO_EXPORT` and its kin unless they are named. Like
 /// [`exec_remove_large_community_admin`], a route carrying more values of a
-/// listed attribute than its wire bound fails closed (`false`) before any
-/// scan, so the compile-time pre-payment holds.
+/// listed attribute than its wire bound fails closed (`Ok(false)`) before
+/// any scan, so the compile-time pre-payment holds. The staged entries of
+/// the listed attributes it visits are metered by [`charge_staged_scan`].
 pub(crate) fn exec_remove_all_communities(
     attributes: CommunityAttributes,
     ctx: &RouteContext<'_>,
     continued: &mut Option<RouteModifications>,
-) -> bool {
+    fuel: &mut u64,
+) -> Result<bool, EvalErrorKind> {
     let arrived = |attribute| match attribute {
         CommunityAttribute::Standard => ctx.communities.len(),
         CommunityAttribute::Extended => ctx.extended_communities.len(),
@@ -833,9 +925,18 @@ pub(crate) fn exec_remove_all_communities(
     if attributes.iter().any(|attribute| {
         u64::try_from(arrived(attribute)).unwrap_or(u64::MAX) > max_communities_per_route(attribute)
     }) {
-        return false;
+        return Ok(false);
     }
     let staged = continued.as_ref();
+    charge_staged_scan(
+        fuel,
+        staged.map_or(0, |current| {
+            attributes
+                .iter()
+                .map(|attribute| staged_entries(current, attribute))
+                .sum()
+        }),
+    )?;
     let mut mods = RouteModifications::default();
     if attributes.standard {
         stage_removals(
@@ -861,12 +962,57 @@ pub(crate) fn exec_remove_all_communities(
             &mut mods.large_communities_remove,
         );
     }
+    // Statement order: the scan also cancels every earlier staged add of a
+    // listed attribute, except a well-known standard community, which
+    // `remove community *` keeps even when the policy just added it.
+    if let Some(current) = continued.as_mut() {
+        if attributes.standard {
+            current
+                .communities_add
+                .retain(|&value| is_well_known_community(value));
+        }
+        if attributes.extended {
+            current.extended_communities_add.clear();
+        }
+        if attributes.large {
+            current.large_communities_add.clear();
+        }
+    }
     if !mods.is_empty() {
         continued
             .get_or_insert_with(RouteModifications::default)
             .merge_from(mods);
     }
-    true
+    Ok(true)
+}
+
+/// How many adds and removals of `attribute` are staged in `mods`.
+fn staged_entries(mods: &RouteModifications, attribute: CommunityAttribute) -> usize {
+    match attribute {
+        CommunityAttribute::Standard => mods.communities_add.len() + mods.communities_remove.len(),
+        CommunityAttribute::Extended => {
+            mods.extended_communities_add.len() + mods.extended_communities_remove.len()
+        }
+        CommunityAttribute::Large => {
+            mods.large_communities_add.len() + mods.large_communities_remove.len()
+        }
+    }
+}
+
+/// `mods` with a next-hop action that does not apply to the route dropped,
+/// as [`RouteModifications::merge_applicable`] drops one.
+pub(crate) fn applicable(
+    mut mods: RouteModifications,
+    ctx: &RouteContext<'_>,
+) -> RouteModifications {
+    if mods
+        .set_next_hop
+        .as_ref()
+        .is_some_and(|action| !action.applies_to(ctx))
+    {
+        mods.set_next_hop = None;
+    }
+    mods
 }
 
 /// Append to `out` every arrived value that `keep` rejects and that is not
@@ -897,70 +1043,102 @@ fn stage_removals<T: Copy + Eq + std::hash::Hash>(
 /// allow-list `not in` scrub cannot strip `NO_EXPORT`. Likewise `not in`
 /// over extended communities considers only route targets and route
 /// origins (every encoding) and keeps every other extended type. A route carrying more
-/// values of the attribute than its wire bound fails closed (`false`)
+/// values of the attribute than its wire bound fails closed (`Ok(false)`)
 /// before any scan, so the compile-time pre-payment holds. Each value costs
 /// one exact probe plus at most
 /// [`MAX_COMMUNITY_PATTERN_SCAN`](crate::sets::MAX_COMMUNITY_PATTERN_SCAN)
-/// pattern comparisons.
+/// pattern comparisons; the staged entries of the attribute it visits (the
+/// adds it probes the same way, the removals it dedups against) are metered
+/// by [`charge_staged_scan`].
 pub(crate) fn exec_remove_communities_in_set(
     attribute: CommunityAttribute,
     set: &CommunitySet,
     negate: bool,
     ctx: &RouteContext<'_>,
     continued: &mut Option<RouteModifications>,
-) -> bool {
+    fuel: &mut u64,
+) -> Result<bool, EvalErrorKind> {
     let arrived = match attribute {
         CommunityAttribute::Standard => ctx.communities.len(),
         CommunityAttribute::Extended => ctx.extended_communities.len(),
         CommunityAttribute::Large => ctx.large_communities.len(),
     };
     if u64::try_from(arrived).unwrap_or(u64::MAX) > max_communities_per_route(attribute) {
-        return false;
+        return Ok(false);
     }
+    charge_staged_scan(
+        fuel,
+        continued
+            .as_ref()
+            .map_or(0, |current| staged_entries(current, attribute)),
+    )?;
+    // Which values the scan keeps; it removes the rest, among the arrived
+    // values and, in statement order, among the earlier staged adds.
+    let keep_standard = |value: u32| {
+        if is_well_known_community(value) {
+            negate || !set.contains_standard_exact(value)
+        } else {
+            set.contains_standard(value) == negate
+        }
+    };
+    // `not in` scrubs route targets and route origins only: every other
+    // extended type (encapsulation, color, EVPN, link bandwidth, origin
+    // validation) stays, as a set cannot name most of them.
+    let keep_extended = |value: rustbgpd_wire::ExtendedCommunity| {
+        if negate && value.route_target().is_none() && value.route_origin().is_none() {
+            true
+        } else {
+            set.contains_ext(&value) == negate
+        }
+    };
+    let keep_large = |value: rustbgpd_wire::LargeCommunity| set.contains_large(&value) == negate;
     let staged = continued.as_ref();
     let mut mods = RouteModifications::default();
     match attribute {
         CommunityAttribute::Standard => stage_removals(
             ctx.communities,
             staged.map_or(&[], |mods| &mods.communities_remove),
-            |value| {
-                if is_well_known_community(value) {
-                    negate || !set.contains_standard_exact(value)
-                } else {
-                    set.contains_standard(value) == negate
-                }
-            },
+            keep_standard,
             &mut mods.communities_remove,
         ),
         CommunityAttribute::Extended => stage_removals(
             ctx.extended_communities,
             staged.map_or(&[], |mods| &mods.extended_communities_remove),
-            // `not in` scrubs route targets and route origins only: every
-            // other extended type (encapsulation, color, EVPN, link
-            // bandwidth, origin validation) stays, as a set cannot name
-            // most of them.
-            |value| {
-                if negate && value.route_target().is_none() && value.route_origin().is_none() {
-                    true
-                } else {
-                    set.contains_ext(&value) == negate
-                }
-            },
+            keep_extended,
             &mut mods.extended_communities_remove,
         ),
         CommunityAttribute::Large => stage_removals(
             ctx.large_communities,
             staged.map_or(&[], |mods| &mods.large_communities_remove),
-            |value| set.contains_large(&value) == negate,
+            keep_large,
             &mut mods.large_communities_remove,
         ),
+    }
+    if let Some(current) = continued.as_mut() {
+        match attribute {
+            CommunityAttribute::Standard => {
+                current
+                    .communities_add
+                    .retain(|&value| keep_standard(value));
+            }
+            CommunityAttribute::Extended => {
+                current
+                    .extended_communities_add
+                    .retain(|&value| keep_extended(value));
+            }
+            CommunityAttribute::Large => {
+                current
+                    .large_communities_add
+                    .retain(|&value| keep_large(value));
+            }
+        }
     }
     if !mods.is_empty() {
         continued
             .get_or_insert_with(RouteModifications::default)
             .merge_from(mods);
     }
-    true
+    Ok(true)
 }
 
 /// A policy's disposition of the route, borrowing the matched term's
@@ -1176,7 +1354,12 @@ impl CompiledChain {
             } else {
                 None
             };
-            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel, pinned) {
+            // Each member starts from the modifications the earlier members
+            // staged, so its statements apply after theirs: a later scan or
+            // removal cancels an earlier member's add, as within a policy.
+            let seed = (!accumulated.is_empty()).then(|| std::mem::take(&mut accumulated));
+            let seeded = seed.is_some();
+            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel, pinned, seed) {
                 PolicyDecision::Deny { term_index } => {
                     let matched_term = if TERM {
                         term_index.and_then(|index| policy.terms.get(index))
@@ -1232,15 +1415,19 @@ impl CompiledChain {
                         if TERM { term } else { None },
                     );
                 }
+                // Unseeded (nothing staged before this member): merge as the
+                // only contribution. A seeded member always returns
+                // `PermitOwned`, so these arms never drop the seed.
                 PolicyDecision::Permit(Some(mods)) if !mods.is_empty() => {
+                    debug_assert!(!seeded, "a seeded member permits with owned mods");
                     accumulated.merge_applicable(mods.clone(), ctx);
                 }
-                PolicyDecision::Permit(_) => {}
-                PolicyDecision::PermitOwned(mods) => {
-                    if !mods.is_empty() {
-                        accumulated.merge_applicable(mods, ctx);
-                    }
+                PolicyDecision::Permit(_) => {
+                    debug_assert!(!seeded, "a seeded member permits with owned mods");
                 }
+                // Seeded or owned: the member's result already includes the
+                // earlier members' modifications.
+                PolicyDecision::PermitOwned(mods) => accumulated = applicable(mods, ctx),
             }
         }
         // A nonempty chain that completes without rejection has no
@@ -1372,7 +1559,10 @@ impl CompiledChain {
         let mut fuel: u64 = MAX_EVAL_COST;
         let mut accumulated = RouteModifications::default();
         for (policy_index, policy) in self.policies.iter().enumerate() {
-            let mut continued: Option<RouteModifications> = None;
+            // As in the live walk, each member starts from what the earlier
+            // members staged.
+            let mut continued: Option<RouteModifications> =
+                (!accumulated.is_empty()).then(|| std::mem::take(&mut accumulated));
             // `Some(None)` = permit with no deciding-term mods;
             // `None` after the loop = fell through to default_action.
             let mut permit_mods: Option<Option<RouteModifications>> = None;
@@ -1423,19 +1613,20 @@ impl CompiledChain {
                             break;
                         }
                         TermActionView::Continue(mods) => {
-                            if let Ok(resolved) =
+                            let Ok(resolved) =
                                 self.resolve_computed(mods, ctx, locals_slice(locals.as_ref()))
-                            {
-                                continued
-                                    .get_or_insert_with(RouteModifications::default)
-                                    .merge_applicable(
-                                        resolved.unwrap_or_else(|| mods.clone()),
-                                        ctx,
-                                    );
-                            } else {
+                            else {
+                                denied = true;
+                                break;
+                            };
+                            let mods = resolved.unwrap_or_else(|| mods.clone());
+                            if charge_merge(&mut fuel, continued.as_ref(), &mods).is_err() {
                                 denied = true;
                                 break;
                             }
+                            continued
+                                .get_or_insert_with(RouteModifications::default)
+                                .merge_applicable(mods, ctx);
                         }
                         // LAN-302: eager `let`, identical to the live
                         // walk — an uncomputable value is bound as its
@@ -1484,22 +1675,45 @@ impl CompiledChain {
                             slot,
                             name: _name,
                         } => {
-                            if exec_community_var(add, slot, locals.as_ref(), &mut continued)
-                                .is_err()
+                            if exec_community_var(
+                                add,
+                                slot,
+                                locals.as_ref(),
+                                &mut continued,
+                                &mut fuel,
+                            )
+                            .is_err()
                             {
                                 denied = true;
                                 break;
                             }
                         }
                         TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
-                            if !exec_remove_large_community_admin(global_admin, ctx, &mut continued)
-                            {
+                            // Over the wire bound or out of fuel: fail
+                            // closed, as the live walk does.
+                            if !matches!(
+                                exec_remove_large_community_admin(
+                                    global_admin,
+                                    ctx,
+                                    &mut continued,
+                                    &mut fuel,
+                                ),
+                                Ok(true)
+                            ) {
                                 denied = true;
                                 break;
                             }
                         }
                         TermActionView::RemoveAllCommunities { attributes } => {
-                            if !exec_remove_all_communities(attributes, ctx, &mut continued) {
+                            if !matches!(
+                                exec_remove_all_communities(
+                                    attributes,
+                                    ctx,
+                                    &mut continued,
+                                    &mut fuel,
+                                ),
+                                Ok(true)
+                            ) {
                                 denied = true;
                                 break;
                             }
@@ -1509,12 +1723,16 @@ impl CompiledChain {
                             set,
                             negate,
                         } => {
-                            if !exec_remove_communities_in_set(
-                                attribute,
-                                &self.community_sets[set.0 as usize],
-                                negate,
-                                ctx,
-                                &mut continued,
+                            if !matches!(
+                                exec_remove_communities_in_set(
+                                    attribute,
+                                    &self.community_sets[set.0 as usize],
+                                    negate,
+                                    ctx,
+                                    &mut continued,
+                                    &mut fuel,
+                                ),
+                                Ok(true)
                             ) {
                                 denied = true;
                                 break;
@@ -1534,11 +1752,12 @@ impl CompiledChain {
             }
             let mut merged = continued.unwrap_or_default();
             if let Some(Some(mods)) = permit_mods {
+                if charge_merge(&mut fuel, Some(&merged), &mods).is_err() {
+                    return PolicyResult::deny();
+                }
                 merged.merge_applicable(mods, ctx);
             }
-            if !merged.is_empty() {
-                accumulated.merge_applicable(merged, ctx);
-            }
+            accumulated = applicable(merged, ctx);
         }
         PolicyResult {
             action: PolicyAction::Permit,
@@ -1564,8 +1783,9 @@ impl CompiledChain {
         hits: Option<&[AtomicU64]>,
         fuel: &mut u64,
         pinned: &PinnedDatasets,
+        seed: Option<RouteModifications>,
     ) -> PolicyDecision<'a> {
-        let mut continued: Option<RouteModifications> = None;
+        let mut continued: Option<RouteModifications> = seed;
         // LAN-302: the `let`-binding register file, materialized (one
         // stack zeroing, no heap) only when the walk reaches a Bind
         // term — binding-free policies never touch it.
@@ -1608,7 +1828,11 @@ impl CompiledChain {
                             };
                         return match (continued, resolved) {
                             (Some(mut acc), resolved) => {
-                                acc.merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                                let mods = resolved.unwrap_or_else(|| mods.clone());
+                                if let Err(kind) = charge_merge(fuel, Some(&acc), &mods) {
+                                    return PolicyDecision::Error { kind, term_index };
+                                }
+                                acc.merge_applicable(mods, ctx);
                                 PolicyDecision::PermitOwned(acc)
                             }
                             (None, Some(owned)) => PolicyDecision::PermitOwned(owned),
@@ -1628,9 +1852,13 @@ impl CompiledChain {
                                 Ok(resolved) => resolved,
                                 Err(kind) => return PolicyDecision::Error { kind, term_index },
                             };
+                        let mods = resolved.unwrap_or_else(|| mods.clone());
+                        if let Err(kind) = charge_merge(fuel, continued.as_ref(), &mods) {
+                            return PolicyDecision::Error { kind, term_index };
+                        }
                         continued
                             .get_or_insert_with(RouteModifications::default)
-                            .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                            .merge_applicable(mods, ctx);
                     }
                     // LAN-302: eager `let` — evaluate the initializer
                     // (against the frame as written so far; earlier
@@ -1667,6 +1895,10 @@ impl CompiledChain {
                                 LoopFlow::Permit(mods) => {
                                     return match continued {
                                         Some(mut acc) => {
+                                            if let Err(kind) = charge_merge(fuel, Some(&acc), &mods)
+                                            {
+                                                return PolicyDecision::Error { kind, term_index };
+                                            }
                                             acc.merge_applicable(mods, ctx);
                                             PolicyDecision::PermitOwned(acc)
                                         }
@@ -1699,23 +1931,36 @@ impl CompiledChain {
                         name: _name,
                     } => {
                         if let Err(kind) =
-                            exec_community_var(add, slot, locals.as_ref(), &mut continued)
+                            exec_community_var(add, slot, locals.as_ref(), &mut continued, fuel)
                         {
                             return PolicyDecision::Error { kind, term_index };
                         }
                     }
                     TermActionView::RemoveLargeCommunityAdmin { global_admin } => {
-                        if !exec_remove_large_community_admin(global_admin, ctx, &mut continued) {
-                            return PolicyDecision::Deny {
-                                term_index: Some(term_index),
-                            };
+                        match exec_remove_large_community_admin(
+                            global_admin,
+                            ctx,
+                            &mut continued,
+                            fuel,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return PolicyDecision::Deny {
+                                    term_index: Some(term_index),
+                                };
+                            }
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
                         }
                     }
                     TermActionView::RemoveAllCommunities { attributes } => {
-                        if !exec_remove_all_communities(attributes, ctx, &mut continued) {
-                            return PolicyDecision::Deny {
-                                term_index: Some(term_index),
-                            };
+                        match exec_remove_all_communities(attributes, ctx, &mut continued, fuel) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return PolicyDecision::Deny {
+                                    term_index: Some(term_index),
+                                };
+                            }
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
                         }
                     }
                     TermActionView::RemoveCommunitiesInSet {
@@ -1723,16 +1968,21 @@ impl CompiledChain {
                         set,
                         negate,
                     } => {
-                        if !exec_remove_communities_in_set(
+                        match exec_remove_communities_in_set(
                             attribute,
                             &self.community_sets[set.0 as usize],
                             negate,
                             ctx,
                             &mut continued,
+                            fuel,
                         ) {
-                            return PolicyDecision::Deny {
-                                term_index: Some(term_index),
-                            };
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return PolicyDecision::Deny {
+                                    term_index: Some(term_index),
+                                };
+                            }
+                            Err(kind) => return PolicyDecision::Error { kind, term_index },
                         }
                     }
                 }
@@ -1757,8 +2007,10 @@ impl CompiledChain {
     /// cost is pre-paid by the compile-time DP) and counts against the
     /// hard per-loop cap [`MAX_LOOP_ITERATIONS`]; exhausting either
     /// fails closed. The iterated collection is the arrived route
-    /// (staged modifications are never read back — Decision 2), so a
-    /// body `add community` cannot extend its own iteration source.
+    /// (conditions and loop sources never read staged modifications back —
+    /// Decision 2; only a community scan consults the staged adds it
+    /// cancels), so a body `add community` cannot extend its own
+    /// iteration source.
     ///
     /// `Err` carries the iteration index at which evaluation failed,
     /// for explain rendering; the live walk uses only the kind.
@@ -1844,20 +2096,25 @@ impl CompiledChain {
                         let resolved = self
                             .resolve_computed(mods, ctx, locals_slice(locals.as_ref()))
                             .map_err(|kind| (kind, iterations - 1))?;
+                        let mods = resolved.unwrap_or_else(|| mods.clone());
+                        charge_merge(fuel, continued.as_ref(), &mods)
+                            .map_err(|kind| (kind, iterations - 1))?;
                         continued
                             .get_or_insert_with(RouteModifications::default)
-                            .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                            .merge_applicable(mods, ctx);
                     }
                     TermAction::Bind { slot, expr, .. } => {
                         exec_bind(*slot, expr, ctx, locals)
                             .map_err(|kind| (kind, iterations - 1))?;
                     }
                     TermAction::CommunityVar { add, slot, .. } => {
-                        exec_community_var(*add, *slot, locals.as_ref(), continued)
+                        exec_community_var(*add, *slot, locals.as_ref(), continued, fuel)
                             .map_err(|kind| (kind, iterations - 1))?;
                     }
                     TermAction::RemoveLargeCommunityAdmin { global_admin } => {
-                        if !exec_remove_large_community_admin(*global_admin, ctx, continued) {
+                        if !exec_remove_large_community_admin(*global_admin, ctx, continued, fuel)
+                            .map_err(|kind| (kind, iterations - 1))?
+                        {
                             return Ok(LoopOutcome {
                                 iterations,
                                 decided_at: Some(iterations - 1),
@@ -1866,7 +2123,9 @@ impl CompiledChain {
                         }
                     }
                     TermAction::RemoveAllCommunities { attributes } => {
-                        if !exec_remove_all_communities(*attributes, ctx, continued) {
+                        if !exec_remove_all_communities(*attributes, ctx, continued, fuel)
+                            .map_err(|kind| (kind, iterations - 1))?
+                        {
                             return Ok(LoopOutcome {
                                 iterations,
                                 decided_at: Some(iterations - 1),
@@ -1885,7 +2144,10 @@ impl CompiledChain {
                             *negate,
                             ctx,
                             continued,
-                        ) {
+                            fuel,
+                        )
+                        .map_err(|kind| (kind, iterations - 1))?
+                        {
                             return Ok(LoopOutcome {
                                 iterations,
                                 decided_at: Some(iterations - 1),
@@ -1945,8 +2207,8 @@ impl CompiledChain {
     /// - `Ok(Some(owned))` — a clone with every operand folded into
     ///   its literal field, so downstream consumers (merge, apply,
     ///   memoization, API surfaces) only ever see concrete values.
-    /// - `Err(kind)` — an operand is unresolvable (absent context
-    ///   value, checked-arithmetic failure): the caller fails the
+    /// - `Err(kind)` — an operand is unresolvable (an absent context
+    ///   value): the caller fails the
     ///   route **closed** on the eval-error rail (uniform Deny +
     ///   counter + rate-limited WARN + explain error trace, ADR-0103
     ///   Decision 4). ASN 0 is never prepended (RFC 7607).
@@ -2451,6 +2713,93 @@ mod tests {
         assert_eq!(evaluation.eval_error, None);
     }
 
+    /// The compiler never emits a zero divisor (divisors are non-zero
+    /// constants or `max(e, k)` with `k >= 1`), so one in hand-built IR is
+    /// a compiler bug: it fails the route closed in a guard, a `set` and a
+    /// `let`, and explain agrees.
+    #[test]
+    fn a_zero_divisor_fails_closed_in_every_position() {
+        use super::EvalErrorKind;
+        use crate::engine::PolicyChain;
+        use crate::engine::explain::explain_chain_statements;
+        use crate::ir::{ArithOp, ValueCmpNode, ValueCmpOp, ValueExpr, ValueField};
+
+        let chain_of = |terms: Vec<(MatchExpr, TermAction)>| CompiledChain {
+            policies: vec![CompiledPolicy {
+                name: None,
+                terms: terms
+                    .into_iter()
+                    .map(|(guard, action)| Term {
+                        name: None,
+                        guard,
+                        action,
+                    })
+                    .collect(),
+                default_action: PolicyAction::Permit,
+                source: PolicySource::Rpol,
+            }],
+            ..CompiledChain::empty()
+        };
+        for (op, kind) in [
+            (ArithOp::Div, EvalErrorKind::DivideByZero),
+            (ArithOp::Rem, EvalErrorKind::RemainderByZero),
+        ] {
+            let zero = || ValueExpr::Binary {
+                op,
+                lhs: Box::new(ValueExpr::Field(ValueField::Med)),
+                rhs: Box::new(ValueExpr::Const(0)),
+            };
+            let accept = || TermAction::Permit(RouteModifications::default());
+            let guard = MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+                op: ValueCmpOp::Ge,
+                lhs: zero(),
+                rhs: ValueExpr::Const(0),
+            }));
+            let set = TermAction::Permit(RouteModifications {
+                set_med_computed: Some(Arc::new(zero())),
+                ..RouteModifications::default()
+            });
+            let bind = TermAction::Bind {
+                slot: 0,
+                name: "x".into(),
+                expr: zero(),
+            };
+            for (position, chain) in [
+                ("guard", chain_of(vec![(guard, accept())])),
+                ("set", chain_of(vec![(MatchExpr::True, set)])),
+                (
+                    "let",
+                    chain_of(vec![(MatchExpr::True, bind), (MatchExpr::True, accept())]),
+                ),
+            ] {
+                let mut route = ctx(None);
+                route.med = Some(7);
+                let (result, evaluation) = chain.evaluate_with_attribution(&route);
+                assert_eq!(result.action, PolicyAction::Deny, "{kind:?} in {position}");
+                assert_eq!(
+                    evaluation.eval_error.map(|error| error.kind),
+                    Some(kind),
+                    "{position}"
+                );
+                let policy = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+                    "p".to_string(),
+                    Arc::new(chain),
+                )]);
+                let trace = explain_chain_statements(Some(&policy), &route);
+                assert_eq!(trace.action, PolicyAction::Deny, "explain, {position}");
+                assert!(
+                    trace
+                        .steps
+                        .iter()
+                        .flat_map(|step| &step.term_traces)
+                        .any(|line| line.contains(&format!("evaluation error: {kind}"))),
+                    "explain renders {kind} in {position}: {:?}",
+                    trace.steps
+                );
+            }
+        }
+    }
+
     /// Only the listed value kinds make a condition false; everything else,
     /// including a kind added later, fails closed.
     #[test]
@@ -2458,16 +2807,19 @@ mod tests {
         use super::EvalErrorKind as Kind;
         use crate::ir::ValueField;
         for kind in [
+            Kind::AbsentField(ValueField::OriginAs),
+            Kind::AbsentPrependOperand(crate::engine::PrependAs::OriginAs),
+        ] {
+            assert!(!kind.fails_closed(), "{kind:?}");
+        }
+        // Arithmetic no longer produces these (LAN-2791); a zero divisor
+        // would be a compiler bug.
+        for kind in [
             Kind::Overflow,
             Kind::Underflow,
             Kind::DivideByZero,
             Kind::RemainderByZero,
             Kind::ClampInverted,
-            Kind::AbsentField(ValueField::OriginAs),
-        ] {
-            assert!(!kind.fails_closed(), "{kind:?}");
-        }
-        for kind in [
             Kind::UnboundLocal,
             Kind::DatasetUnpinned,
             Kind::StrayLoopControl,

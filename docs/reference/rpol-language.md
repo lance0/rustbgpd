@@ -128,7 +128,7 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked**, never wraps or traps: a value that cannot be computed makes a condition false and denies the route only in an action (see "Conditions never fail") |
+| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — `+ - *` **saturate** at 0 and 4294967295, never wrap or trap, and a divisor can never be zero (see "Saturating u32 value expressions") |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -614,7 +614,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.origin-as in customers` | asn-set membership (one hash probe) |
 | `peer.asn in customers` | evaluation-peer ASN against the same asn-sets |
 | `route.local-pref >= 200`, `route.med <= 50` | u32 comparisons; `==`/`!=` also allowed |
-| `route.med + 50 >= threshold`, `route.as-path.len * 10 >= route.med` | checked-arithmetic comparison (see "Value expressions"); an operand that is missing or cannot be computed makes it false |
+| `route.med + 50 >= threshold`, `route.as-path.len * 10 >= route.med` | saturating-arithmetic comparison (see "Saturating u32 value expressions"); a missing operand makes it false |
 | `exists route.origin-as` | the route carries the value; also `peer.asn`, `route.med`, `route.local-pref` and `route.next-hop` (see "Conditions never fail") |
 | `route.next-hop == 10.0.0.1` | next-hop equality (`==`/`!=` only) |
 | `route.next-hop == peer.address` | strict next-hop — the one field-vs-field comparison; reads peer identity, so an export chain using it makes the peer ineligible for update-group sharing (`policy_peer_context`) |
@@ -667,7 +667,7 @@ the negation and test an absent-field fixture when it is intentional. The
 lint does not flag defaulted `route.local-pref` or `route.med`, total fields
 such as `route.rpki`, or field-to-field comparisons.
 
-### Checked u32 value expressions
+### Saturating u32 value expressions
 
 u32 value positions — either side of a u32 comparison, and the
 `set local-pref` / `set med` arguments — accept **value expressions**
@@ -694,25 +694,37 @@ if route.med >= threshold + 20 { set local-pref 90 }
   permanent maximal munch, so `route.med - 1` is subtraction and
   `route.med-1` is an unknown-field error.
 - **Builtins**: `min(a, b)`, `max(a, b)`, `clamp(x, lo, hi)`.
-  Statically inverted clamp bounds (`lo > hi` with both constant) are
-  a compile error; a data-dependent inversion is an evaluation error.
-- **Everything is checked.** All arithmetic is checked u32: overflow,
-  underflow, and division/modulo by zero are **evaluation errors**,
-  never wraps or process traps.
-- **Constant folding.** Constant subexpressions fold at compile time
-  with the same checked operators: `set med 25 + 25` compiles to
-  exactly what `set med 50` does, and a statically invalid constant
-  expression (`4294967295 + 1`, `1 / 0`) is a compile error at its
-  source span.
+  `clamp(x, lo, hi)` is `min(max(x, lo), hi)`, so it never fails;
+  literal-only inverted bounds (`clamp(x, 10, 2)`) are a compile error,
+  as a typo.
+- **Arithmetic saturates.** `+`, `-` and `*` saturate per operation at 0
+  and 4294967295 in every value position — comparisons, `let` and
+  `set` — and never wrap, trap or fail: `set med route.med - 10` on a
+  route with MED 4 sets 0, and `route.med - 100 <= 5` matches every MED
+  below 100. There is no per-field ceiling.
+- **Divisors cannot be zero.** The divisor of `/` or `%` must be a
+  non-zero constant, or `max(e, k)` with a constant `k >= 1`; anything
+  else is a compile error. Bound a variable divisor explicitly:
+  `route.med / max(route.as-path.len, 1)`.
+- **Constant folding.** Constant subexpressions fold at compile time:
+  `set med 25 + 25` compiles to exactly what `set med 50` does. A
+  literal-only expression that leaves u32 (`4294967295 + 1`, `5 - 10`)
+  can only be a typo and is a compile error at its source span; an
+  expression with a parameter folds with saturation, so an argument
+  value never decides whether a policy loads.
+- **The top of the range.** RFC 4451 notes that some implementations
+  treat MED 4294967295 as "infinity" and ignore or rewrite it. Saturation
+  can produce that value, so where a peer must not see it, cap one below
+  it: `set med min(route.med + 50, 4294967294)`.
 
 ### Conditions never fail
 
 **A condition never fails: a comparison or probe whose operand is missing
 or cannot be computed is false, and only an action that needs a value it
 cannot compute denies the route.** A missing operand is `route.origin-as`
-on an empty or `AS_SET`-only path or an unknown `peer.asn`; a value that
-cannot be computed is a checked-arithmetic failure (overflow, underflow,
-division or modulo by zero) or a data-dependent inverted `clamp`.
+on an empty or `AS_SET`-only path or an unknown `peer.asn`. Arithmetic
+saturates, divisors are never zero and `clamp` is total, so a value that
+cannot be computed is one built from a missing operand.
 `route.local-pref` and `route.med` read their implicit defaults (100 / 0)
 when absent, consistent with comparisons. Every form of a comparison
 agrees: `route.origin-as == 64500`, `route.origin-as == (64500)`,
@@ -792,10 +804,9 @@ policy pad-med {
 
 The difference under the syntax: BIRD's integer arithmetic evaluates
 in a general-purpose interpreter, and an out-of-range result is
-whatever the interpreter does that day; `.rpol` arithmetic is checked
-u32 with a pinned failure contract (deny + counter + explain), and
-the `min` cap makes the local-pref doubling total instead of relying
-on it.
+whatever the interpreter does that day; `.rpol` arithmetic is saturating
+u32, so an out-of-range result sticks at 0 or 4294967295, and the `min`
+cap keeps the local-pref doubling at 400.
 
 ### Bindings — `let`
 
@@ -855,8 +866,8 @@ error naming the u32 field set.
 **Evaluation is eager.** The initializer evaluates when its statement
 executes — reached in the term walk, branch taken — whether or not the
 value is ever read. An initializer that is missing or cannot be computed
-(an absent `route.origin-as` or `peer.asn`, overflow, underflow,
-division/modulo by zero) binds that state instead of a value: a condition
+(an absent `route.origin-as` or `peer.asn`) binds that state instead of
+a value: a condition
 that reads the binding is false, and an action that needs it (`set med x`,
 `add community x`) denies the route with the original error kind (see
 "Conditions never fail"). Explain notes the binding as having no value. A
@@ -993,9 +1004,10 @@ at that iteration, exactly as in an `if` body; staged modifications
 from earlier iterations merge under an `accept` and are discarded by a
 `reject`, the ordinary rules.
 
-**Iterated collections cannot change mid-loop.** Reads always see the
-route as it arrived — staged modifications are never read back
-(ADR-0103 Decision 2) — so `add community` inside a
+**Iterated collections cannot change mid-loop.** Conditions and loop
+sources always read the route as it arrived — staged modifications are
+never read back there (ADR-0103 Decision 2); only a community scan consults
+the staged additions it cancels — so `add community` inside a
 `for c in route.communities` body cannot extend its own iteration
 (pinned by test).
 
@@ -1035,12 +1047,21 @@ and evaluation enforce the following bounds:
   1,000,000-step worst-case budget (`MAX_EVAL_COST`), not metered per
   route. Nest small set loops, or restructure with membership probes.
 - **Runtime fuel.** Every evaluation starts with `MAX_EVAL_COST` fuel,
-  decremented **only at loop iteration steps** — straight-line code is
-  pre-paid by the compile-time bound, so a chain with no loops pays
-  exactly zero (fuel is one register write, never read again).
-  Exhaustion — reachable only by compounding data-dependent iteration
-  across a chain — is an evaluation error on the same uniform-Deny
-  rail (`fuel-exhausted` in the error counters and explain traces).
+  decremented at loop iteration steps and for the staged community
+  entries that work traverses: a community scan pays one step per staged
+  addition and removal of its kind, and merging a community action into
+  the staged modifications pays one step per staged entry of the opposite
+  operation it checks for cancellation. Staged entries have no
+  compile-time bound — loops stage one per iteration and chain members
+  carry them forward — so this is the work the compile-time bound cannot
+  pre-pay. Other straight-line code is pre-paid, so a chain with no loops
+  pays only for the few staged entries its community actions traverse.
+  The trade-off is quadratic staging: a policy that loops removals over
+  the route's n communities and then loops re-adding them pays roughly
+  n²/2 steps, so it fails closed above about 1,400 communities.
+  Exhaustion — reachable only by compounding data-dependent iteration or
+  staging — is an evaluation error on the same uniform-Deny rail
+  (`fuel-exhausted` in the error counters and explain traces).
 
 **Explain.** Traces render a bounded loop summary — iteration count
 plus the deciding iteration (`loop reject at iteration 3 of 3`), never
@@ -1137,22 +1158,22 @@ Consequences:
 
 - **Evaluation is eager, like `let`.** Arguments and the body evaluate
   when the walk reaches the statement containing the call — even if a
-  `&&` short-circuit would have skipped the value. A call whose value
-  cannot be computed (checked arithmetic; functions are pure and
-  terminating but *not* total) has no value, like a `let`: a condition
-  on it is false, and an action that needs it denies the route on the
-  uniform eval-error rail.
+  `&&` short-circuit would have skipped the value. A body's arithmetic
+  saturates and its divisors cannot be zero, so a call has no value only
+  when an argument has none (an absent `route.origin-as` or `peer.asn`),
+  like a `let`: a condition on it is false, and an action that needs it
+  denies the route on the uniform eval-error rail.
 - **Term identity survives.** The inlined binds become `<term>.<n>`
   IR terms of the *calling* term (the established multi-term split
   naming), so the counter grid and trace skeleton stay a function of
   the source; per-function hit counting is explicitly out of scope
   (Decision 6.3 — it would need runtime call frames).
-- **Attribution names both sides.** An error inside a body renders
-  with the calling term's name and the qualified binding, e.g.
-  `term compute.3: let share.each = share.total / share.parts [matched]`
-  followed by
-  `term compute.3: evaluation error: division by zero — fail closed => reject`;
-  the live-path WARN carries the same `(let share.each)` label.
+- **Attribution names both sides.** A body's bindings render with the
+  calling term's name and the qualified binding, e.g.
+  `term compute.3: let share.each = share.total / max(share.parts, 1)`,
+  and an action that needs a call without a value fails closed on the
+  calling term, e.g.
+  `term compute.4: evaluation error: `route.origin-as` has no value for this route — fail closed => reject`.
   Guards render calls source-level:
   `penalty(route.as-path.len, 10) >= route.med`.
 - **Budgets compound honestly.** The cost DP charges the fully-inlined
@@ -1375,10 +1396,14 @@ the daemon evaluates routes with it; a computed operand that evaluates to 0
 denies the route, and the wire encoder also rejects AS 0 under RFC 7607.
 
 The kind keyword must match the literal's kind (`add community
-RT:...` is a compile error pointing at `add ext-community`). Within a
-policy, later `set`s of the same attribute win; across a chain, the
-existing merge semantics apply (later policy wins scalars, add/remove
-lists merge with later-policy-wins cancellation). Literal and computed
+RT:...` is a compile error pointing at `add ext-community`).
+
+**Actions apply in statement order,** within a term, across terms and
+across the members of a chain: each chain member starts from the
+modifications the earlier members staged. For a community value the later
+operation wins: `add community X; remove community X` leaves X absent and
+`remove community X; add community X` leaves it present. Later `set`s of the
+same attribute win. Literal and computed
 prepends share one scalar slot: a later prepend of either form
 replaces an earlier one of either form; computed `set` values share
 their attribute's slot the same way. A computed `set` value resolves
@@ -1389,17 +1414,20 @@ route; see "Value expressions").
 
 The large-community wildcard is deliberately removal-only and accepts exactly
 one decimal `u32` global administrator followed by `:*:*`, with no spaces or
-prefix. It scans only the arrived route, preserves foreign administrators, and
-stages concrete, first-seen deduplicated removals. An input with more than 5,461
+prefix. It removes the arrived values with that administrator as concrete,
+first-seen deduplicated removals, cancels the earlier staged additions with that
+administrator (statement order), and preserves foreign administrators. An input
+with more than 5,461
 arrived large communities fails the route closed before scanning; the compiler
 pre-pays that same conservative wire-derived bound.
 
 The strip-all forms follow the same rules: removal-only, `*` for standard and
-extended communities and `*:*:*` for large communities, arrived route only,
-concrete deduplicated removals. A later `add` of an arrived value, in the same
-policy or a later chain member, cancels its removal under the merge rule above;
-a value added earlier and absent from the arrived route is kept. On a route
-without the attribute they do nothing. Each fails the route closed above its
+extended communities and `*:*:*` for large communities, concrete deduplicated
+removals of the arrived values. In statement order they also cancel every
+addition of the kind that an earlier statement or chain member staged, except a
+well-known standard community: `add community NO_EXPORT; remove community *`
+keeps `NO_EXPORT`. A later `add`, in the same policy or a later chain member,
+stays. On a route without the attribute they remove nothing. Each fails the route closed above its
 wire-derived bound (16,383 standard, 8,191 extended, 5,461 large communities),
 and the compiler pre-pays that scan.
 
@@ -1488,17 +1516,24 @@ test scrubbed {
   every value, and both are compile errors. For `ext-community not in` the
   set needs a route-target or route-origin member. Datasets are not accepted
   here yet; probe a dataset in a guard instead.
-- **Removal only, arrived route only.** `add <kind> in` is a compile error.
-  The scan reads the route as it arrived and stages concrete, deduplicated
-  removals; values staged by earlier actions are not staged again. As with
-  the strip-all forms, a later `add` of an arrived value cancels its removal.
+- **Removal only, in statement order.** `add <kind> in` is a compile error.
+  The scan stages concrete, deduplicated removals of the arrived values it
+  selects, and cancels the earlier staged additions it selects by the same
+  rule, including those of earlier chain members; values staged for removal
+  by earlier actions are not staged again. As with the strip-all forms, a
+  later `add` stays.
 - **Cost.** One pass over the route's arrived values of the kind, bounded by
   the wire (16,383 standard, 8,191 extended, 5,461 large communities); a route
   carrying more fails closed before the scan. The compiler pre-pays one
   evaluation step per value, as for `remove community *`. Each step is one
   exact-member hash probe plus at most 64 pattern comparisons, so a set at
   the pattern limit costs up to about 1.05 million comparisons per route for
-  one standard-community scan.
+  one standard-community scan. The scan also visits the earlier staged
+  additions and removals of its kind: it probes the additions the same way
+  and skips values already staged for removal. Staged entries have no
+  compile-time bound, so each costs one step of the evaluation's runtime
+  budget, and a route that exhausts it fails closed on the evaluation-error
+  rail.
 
 ### Routes that carry too many communities
 
@@ -1703,8 +1738,8 @@ fail-closed rail; a condition never fails) FAILS an `accept` *or* `reject` expec
 the error kind and the failing policy/term rendered — a test cannot
 accidentally pin a broken policy as "rejects correctly". To pin the
 rail itself, expect it: `expect p == error` passes on any evaluation
-error, and `expect p == error KIND` pins the kind (`error overflow`,
-`error divide-by-zero`, `error absent-prepend-operand`, ...; unknown
+error, and `expect p == error KIND` pins the kind (`error absent-operand`,
+`error absent-prepend-operand`, ...; unknown
 kinds are compile diagnostics with a suggestion). `with` assertions
 cannot follow `== error` — an error discards every staged
 modification. In the daemon the same route is denied; the test form
@@ -1982,7 +2017,7 @@ predicate   := field (("=="|"!="|">="|"<=") (rhs | value) | "in" IDENT | "has" c
              | "matches" STRING | "contains" u32arg)
              | field arith-tail ("=="|"!="|">="|"<=") value    # LHS arithmetic
              | "exists" field                                  # contextual `exists`
-value       := mul (("+"|"-") mul)*                            # checked u32
+value       := mul (("+"|"-") mul)*                            # saturating u32
 mul         := atom (("*"|"/"|"%") atom)*
 atom        := INT | STD-COMMUNITY | IDENT | field | "(" value ")"   # IDENT: parameter or binding
              | ("min"|"max") "(" value "," value ")"
@@ -2331,7 +2366,7 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
 - Chains that have denied routes through the **evaluation-error rail**
   (ADR-0103 Decision 4) report the count and the most recent blame
   line above the term table — `2 routes denied by evaluation errors
-  (fail closed); last: overflow in policy pad-med term pad` — the
+  (fail closed); last: absent-operand in policy origin-med term t` — the
   drill-down for a nonzero `bgp_policy_eval_errors_total{direction,
   kind}` rate. Error counts reset with the chain instance, like every
   other counter here.
@@ -2464,9 +2499,10 @@ hit counters — those come free after the rewrite.
 
 ## Migrating from IOS-XR RPL
 
-Most RPL constructs have a direct `.rpol` spelling. Four of them have
+Most RPL constructs have a direct `.rpol` spelling. Three of them have
 different semantics, and a line-by-line port changes routing in those
-places. The RPL behavior below is taken from the
+places (1 to 3 below); replacing communities, which once differed too, now
+ports directly (4). The RPL behavior below is taken from the
 [IOS XR 24.x routing configuration guide for ASR 9000, "Implementing Routing Policy"](https://www.cisco.com/c/en/us/td/docs/routers/asr9000/software/24xx/routing/configuration/guide/b-routing-cg-asr9000-24xx/implementing-routing-policy.html)
 and the
 [Cisco 8000 RPL command reference](https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/routing/cumulative/command/reference/b-routing-cr-cisco8000/m-rpl-commands-1.html)
@@ -2486,7 +2522,7 @@ and the
 | `set local-preference 200` | `set local-pref 200` |
 | `set med 50` | `set med 50` |
 | `set community (65000:100) additive` | `add community 65000:100` |
-| `set community (65000:100)` | `remove community *; add community 65000:100`, when nothing earlier on the path added a community the route did not arrive with (see 4 below) |
+| `set community (65000:100)` | `remove community *; add community 65000:100` (see 4 below) |
 | `delete community all` | `remove community *` |
 | `delete community in NAME` / `delete community not in NAME` | `remove community in NAME` / `remove community not in NAME` (well-known values: see [Removing by set membership](#removing-by-set-membership)) |
 | `delete extcommunity rt in NAME` / `delete extcommunity rt not in NAME` | `remove ext-community in NAME` / `remove ext-community not in NAME`; `not in` acts on route targets and route origins only, so other extended communities stay |
@@ -2676,30 +2712,17 @@ test unmatched-route-is-accepted {
 
 **2. `set med +N` and `set med -N`.** RPL saturates: a subtraction that
 would go below zero sets 0, and an addition that would exceed
-4294967295 sets 4294967295. `.rpol` arithmetic is checked, so
-`set med route.med - 10` on a route with MED 4 is an evaluation error and
-the route is denied (see "Checked u32 value expressions"). Write the
-saturation out:
+4294967295 sets 4294967295. `.rpol` arithmetic saturates the same way
+(see "Saturating u32 value expressions"), so the literal port is exact:
 
 ```rpol
-# A literal port of `set med -10`.
-policy med-minus-literal {
+# `set med -10` and `set med +10`.
+policy med-minus {
     term t { set med route.med - 10; accept }
 }
 
-# RPL's floor at zero, written out.
-policy med-minus {
-    term t { set med max(route.med, 10) - 10; accept }
-}
-
-# RPL's ceiling at 4294967295, written out for `set med +10`.
 policy med-plus {
-    term t { set med min(route.med, 4294967285) + 10; accept }
-}
-
-test literal-underflow-denies {
-    route { prefix 192.0.2.0/24; med 4 }
-    expect med-minus-literal == error underflow
+    term t { set med route.med + 10; accept }
 }
 
 test floor-at-zero {
@@ -2764,20 +2787,15 @@ test mixed-asn-prepends-keep-only-the-last {
 
 **4. Replacing communities.** RPL `set community` without `additive`
 replaces the route's communities, keeping the well-known ones, and discards
-the communities that earlier statements in the policy added.
-`remove community *` keeps the same RFC 1997 well-known range (see
-"Actions"), but it removes only the communities the route arrived with. A
-value that an earlier `add community` in the same policy, or an earlier
-member of the chain, added stays on the route unless the route arrived with
-it; an arrived value is removed even when it was added earlier. The replace
-idiom therefore ports directly only when nothing on the path added a
-community the route did not arrive with. When something did, the faithful
-port omits those additions on that path, because RPL discards them. Moving
-an `add community` after the replacement does not help: the value then
-stays on the route as well. A full scrub that
-also removes `NO_EXPORT` and the other well-known values is the loop form,
-which, like any loop over a route attribute, denies a route carrying more
-than 4,096 standard communities:
+the communities that earlier statements in the policy added. `.rpol` does the
+same: actions apply in statement order, and `remove community *` removes every
+non-well-known community the route arrived with and cancels every addition an
+earlier statement, or an earlier member of the chain, staged (see "Actions").
+`remove community *; add community 65000:100` is therefore the port, and an
+`add community` after the replacement stays on the route, as in RPL. A full
+scrub that also removes `NO_EXPORT` and the other well-known values is the
+loop form, which, like any loop over a route attribute, denies a route
+carrying more than 4,096 standard communities:
 
 ```rpol
 # RPL `set community (65000:100)`: replace, keeping well-known values.
@@ -2797,9 +2815,9 @@ policy scrub-all {
     }
 }
 
-# A literal port of RPL `set community (65000:1) additive` followed by
-# `set community (65000:100)`: the earlier addition survives, where RPL
-# discards it. The faithful port is `retag` above, without the addition.
+# RPL `set community (65000:1) additive` followed by
+# `set community (65000:100)`: the replacement discards the earlier
+# addition, as in RPL.
 policy tag-then-retag {
     term early { add community 65000:1 }
     term t {
@@ -2809,7 +2827,7 @@ policy tag-then-retag {
     }
 }
 
-# Reordering is not a port: 65000:1 still ends up on the route.
+# An addition after the replacement stays, as in RPL.
 policy retag-then-tag {
     term t {
         remove community *
@@ -2829,19 +2847,13 @@ test retag-keeps-no-export {
         community 65000:100, not removed community NO_EXPORT
 }
 
-test earlier-addition-survives-the-replacement {
+test the-replacement-discards-an-earlier-addition {
     route { prefix 192.0.2.0/24; communities [65010:1] }
     expect tag-then-retag == accept with only removes community 65010:1,
-        community 65000:1, community 65000:100
+        community 65000:100, without community 65000:1
 }
 
-test faithful-port-omits-the-discarded-addition {
-    route { prefix 192.0.2.0/24; communities [65010:1] }
-    expect retag == accept with only removes community 65010:1,
-        community 65000:100
-}
-
-test reordering-keeps-the-addition {
+test a-later-addition-stays {
     route { prefix 192.0.2.0/24; communities [65010:1] }
     expect retag-then-tag == accept with only removes community 65010:1,
         community 65000:1, community 65000:100
@@ -2853,10 +2865,10 @@ test arrived-value-added-earlier-is-removed {
         removes community 65010:1, community 65000:100
 }
 
-test earlier-chain-member-addition-survives {
+test the-replacement-discards-an-earlier-chain-member-addition {
     route { prefix 192.0.2.0/24; communities [65010:1] }
     expect chain [tag-only, retag] == accept with only removes community 65010:1,
-        community 65000:1, community 65000:100
+        community 65000:100, without community 65000:1
 }
 
 test scrub-all-removes-no-export {
@@ -3034,7 +3046,7 @@ IPv6 literals (use `::` compression). These are scope decisions, not
 parser accidents; each has an error message steering to the
 supported form.
 
-The ADR-0103 v2 extension program is **complete**: checked
+The ADR-0103 v2 extension program is **complete**: u32
 arithmetic, `let` bindings, bounded loops, pure functions, modules
 and imports, external datasets, and the metered-runtime operator
 surface — eval-error counters, `rbgp policy stats` exposure,

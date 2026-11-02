@@ -645,7 +645,15 @@ fn large_community_admin_wildcard_is_route_only_and_concrete_end_to_end() {
         live.modifications.large_communities_remove,
         vec![own_a, own_b]
     );
-    assert_eq!(live.modifications.large_communities_add, vec![staged]);
+    // Statement order: the scan cancels the earlier staged add it matches.
+    assert_eq!(live.modifications.large_communities_add, vec![]);
+    let later = compile_ok(
+        "policy scrub { term remove-own { remove large-community 65501:*:* } term stage { add large-community 65501:9:9 } term allow { accept } }",
+    );
+    assert_eq!(
+        later.evaluate(&ctx).modifications.large_communities_add,
+        vec![staged]
+    );
     let mut hits = compiled.zero_term_hits();
     assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
     let oversized = vec![own_a; 5_462];
@@ -657,7 +665,7 @@ fn large_community_admin_wildcard_is_route_only_and_concrete_end_to_end() {
     assert_eq!(dry, crate::PolicyResult::deny());
     let mut attrs = vec![PathAttribute::LargeCommunities(communities.to_vec())];
     apply_modifications(&mut attrs, &live.modifications);
-    let expected = vec![PathAttribute::LargeCommunities(vec![foreign, staged])];
+    let expected = vec![PathAttribute::LargeCommunities(vec![foreign])];
     assert_eq!(attrs, expected);
 
     compiled.policies[0].terms.remove(0);
@@ -815,9 +823,9 @@ fn community_counts_compare_and_strip_at_exact_boundaries() {
     }
 }
 
-/// Strip-all stages concrete removals from the arrived route only: an
-/// earlier add of a value the route lacks survives, a later add of an
-/// arrived value cancels its removal (same term or a later chain member),
+/// Strip-all stages concrete removals from the arrived route and cancels
+/// the earlier staged adds (statement order), a later add of an arrived
+/// value cancels its removal (same term or a later chain member),
 /// an empty list is a no-op, the scan fails closed above each wire bound,
 /// and nothing reads peer context.
 #[test]
@@ -845,10 +853,7 @@ fn strip_all_communities_are_route_only_concrete_and_bounded() {
     );
     let live = compiled.evaluate(&ctx);
     assert_eq!(live.modifications.communities_remove, vec![0xFDE8_0001]);
-    assert_eq!(
-        live.modifications.communities_add,
-        vec![0xFDE8_0009, 0xFDE8_0002]
-    );
+    assert_eq!(live.modifications.communities_add, vec![0xFDE8_0002]);
     assert_eq!(live.modifications.large_communities_remove, large.to_vec());
     assert_eq!(live.modifications.extended_communities_remove, ext.to_vec());
     let mut hits = compiled.zero_term_hits();
@@ -858,10 +863,7 @@ fn strip_all_communities_are_route_only_concrete_and_bounded() {
         PathAttribute::LargeCommunities(large.to_vec()),
     ];
     apply_modifications(&mut attrs, &live.modifications);
-    assert_eq!(
-        attrs,
-        vec![PathAttribute::Communities(vec![0xFDE8_0002, 0xFDE8_0009])]
-    );
+    assert_eq!(attrs, vec![PathAttribute::Communities(vec![0xFDE8_0002])]);
 
     // An empty route stages nothing.
     let empty = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
@@ -1442,6 +1444,13 @@ fn route_community_actions_lower_to_exact_rfc_bytes() {
                  add ext-community RT:192.0.2.1:100;
                  add ext-community RO:192.0.2.1:200;
                  add ext-community RT:65535:70000;
+                 accept
+             }
+         }",
+    );
+    let removing = compile_ok(
+        "policy p {
+             term t {
                  remove ext-community RT:65001:100;
                  remove ext-community RO:65001:200;
                  remove ext-community RT:100000:100;
@@ -1470,7 +1479,10 @@ fn route_community_actions_lower_to_exact_rfc_bytes() {
         .iter()
         .map(|community| community.as_u64())
         .collect();
-    let removed: Vec<u64> = mods
+    let TermAction::Permit(removing) = &removing.policies[0].terms[0].action else {
+        panic!("expected permit")
+    };
+    let removed: Vec<u64> = removing
         .extended_communities_remove
         .iter()
         .map(|community| community.as_u64())
@@ -3686,7 +3698,7 @@ fn eval_error_denies_discards_mods_and_counts() {
     let chain = compile_ok(
         "policy p {
             term tag { set local-pref 200 }
-            term guard { set med route.med + 1; accept }
+            term guard { set med route.origin-as; accept }
             term rest { accept }
          }",
     );
@@ -3694,15 +3706,16 @@ fn eval_error_denies_discards_mods_and_counts() {
 
     // Normal route: Continue mods merge under the eventual accept.
     let mut ctx = absent_ctx();
-    ctx.med = Some(5);
+    ctx.origin_asn = Some(64500);
     let result = chain.evaluate_counting(&ctx, &counters);
     assert_eq!(result.action, PolicyAction::Permit);
     assert_eq!(result.modifications.set_local_pref, Some(200));
     assert_eq!(counters.eval_errors(), 0);
 
-    // Overflowing route: `u32::MAX + 1` is an evaluation error →
-    // uniform Deny, staged Continue mods discarded, counter bumped.
-    ctx.med = Some(u32::MAX);
+    // A route without an origin AS: the `set` cannot be computed, an
+    // evaluation error → uniform Deny, staged Continue mods discarded,
+    // counter bumped.
+    ctx.origin_asn = None;
     let result = chain.evaluate_counting(&ctx, &counters);
     assert_eq!(result.action, PolicyAction::Deny);
     assert!(result.modifications.is_empty(), "staged mods discarded");
@@ -3711,10 +3724,13 @@ fn eval_error_denies_discards_mods_and_counts() {
     // LAN-301: the counters retain the last error with blame context
     // for the stats surface.
     let last = counters.last_error().expect("last error retained");
-    assert_eq!(last.kind, crate::eval::EvalErrorKind::Overflow);
+    assert_eq!(
+        last.kind,
+        crate::eval::EvalErrorKind::AbsentField(crate::ir::ValueField::OriginAs)
+    );
     assert_eq!(last.policy.as_deref(), Some("p"));
     assert_eq!(last.term.as_deref(), Some("guard"));
-    assert_eq!(last.to_string(), "overflow in policy p term guard");
+    assert_eq!(last.to_string(), "absent-operand in policy p term guard");
 
     // The recording walk (dry runs) agrees on the verdict.
     let mut hits = chain.zero_term_hits();
@@ -3767,10 +3783,10 @@ fn absent_operand_is_a_non_match_in_every_form() {
     }
 }
 
-/// min/max/clamp evaluate per route with checked operand evaluation;
-/// a data-dependent inverted clamp is an eval error.
+/// min/max/clamp evaluate per route; a data-dependent inverted clamp is
+/// `min(max(x, lo), hi)` and never fails (LAN-2791).
 #[test]
-fn builtin_edges_evaluate_and_inverted_clamp_fails_closed() {
+fn builtin_edges_evaluate_and_inverted_clamp_is_min_of_max() {
     let chain = compile_ok("policy p { term t { set med clamp(route.med, 10, 20); accept } }");
     for (med, expected) in [(5u32, 10u32), (15, 15), (25, 20), (10, 10), (20, 20)] {
         let mut ctx = absent_ctx();
@@ -3781,8 +3797,8 @@ fn builtin_edges_evaluate_and_inverted_clamp_fails_closed() {
             "clamp({med}, 10, 20)"
         );
     }
-    // Parameter-dependent inversion is invisible to the typechecker
-    // (it only folds literals) and fails per route, closed.
+    // LAN-2791: a parameter-dependent inversion is `min(max(x, lo), hi)`,
+    // so it yields `hi` instead of failing the route.
     let mut store = SetStore::new();
     let file = super::RpolFile::parse(
         "policy q(lo: u32, hi: u32) { term t { set med clamp(route.med, lo, hi); accept } }",
@@ -3791,7 +3807,9 @@ fn builtin_edges_evaluate_and_inverted_clamp_fails_closed() {
     let inverted = file
         .compile_policy("q", &[20, 10], &mut store)
         .expect("exists");
-    assert_eq!(inverted.evaluate(&absent_ctx()).action, PolicyAction::Deny);
+    let result = inverted.evaluate(&absent_ctx());
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(10));
 }
 
 /// Statically invalid constant expressions are compile errors at the
@@ -3801,7 +3819,7 @@ fn constant_folding_diagnostics_carry_spans() {
     let src = "policy p { term t { set med 4294967295 + 1; accept } }";
     let (diags, rendered) = diagnostics_of(src);
     assert!(
-        rendered.contains("this expression always fails: arithmetic overflow"),
+        rendered.contains("this constant expression is invalid: arithmetic overflow"),
         "{rendered}"
     );
     let (span, _) = diags.0[0].labels[0];
@@ -3912,7 +3930,7 @@ fn eval_error_explain_renders_and_agrees() {
     let guard = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
         "p".to_string(),
         std::sync::Arc::new(compile_ok(
-            "policy p { term big-med { if route.med + 1 >= 1 { reject } } term rest { accept } }",
+            "policy p { term no-origin { if route.origin-as + 1 >= 1 { reject } } term rest { accept } }",
         )),
     )]);
     let mut ctx = absent_ctx();
@@ -3924,29 +3942,28 @@ fn eval_error_explain_renders_and_agrees() {
         trace.steps[0]
             .term_traces
             .iter()
-            .any(|line| line.contains("route.med + 1 >= 1") && line.contains("[not matched]")),
+            .any(|line| line.contains("route.origin-as + 1 >= 1") && line.contains("[not matched]")),
         "{:?}",
         trace.steps[0].term_traces
     );
 
     let compiled = compile_ok(
-        "policy p { term big-med { set med route.med + 1; accept } term rest { accept } }",
+        "policy p { term no-origin { set med route.origin-as + 1; accept } term rest { accept } }",
     );
     let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
         "p".to_string(),
         std::sync::Arc::new(compiled),
     )]);
 
-    let mut ctx = absent_ctx();
-    ctx.med = Some(u32::MAX);
+    let ctx = absent_ctx();
     let trace = explain_chain_statements(Some(&chain), &ctx);
     assert_eq!(trace.action, chain.evaluate(&ctx).action);
     assert_eq!(trace.action, PolicyAction::Deny);
     let step = &trace.steps[0];
-    assert_eq!(step.term_name.as_deref(), Some("big-med"));
+    assert_eq!(step.term_name.as_deref(), Some("no-origin"));
     assert!(
         step.term_traces.iter().any(|line| line
-            .contains("term big-med: evaluation error: arithmetic overflow")
+            .contains("term no-origin: evaluation error: `route.origin-as` has no value")
             && line.contains("fail closed")),
         "error renders in place of a verdict: {:?}",
         step.term_traces
@@ -3984,33 +4001,33 @@ fn eval_error_explain_renders_and_agrees() {
 #[test]
 fn in_language_tests_cover_arithmetic_boundaries() {
     let source = r#"
-policy overflow-guard { term t { set med route.med + 1; accept } }
-policy div-zero { term t { set med route.med / 0; accept } }
-policy mod-zero { term t { set med route.med % route.med; accept } }
+policy saturating { term t { set med route.med + 1; set local-pref route.local-pref - 200; accept } }
+policy halves { term t { set med route.med / 2; accept } }
+policy bounded-divisor(d: u32) { term t { set med route.med % max(d, 1); accept } }
 policy absent-origin { term t { set med route.origin-as * 1; accept } }
 policy folded-parity(bump: u32) { term t { set med 25 + 25; set local-pref bump * 2; accept } }
 policy builtin-edges {
     term t { set med max(min(route.med, 400), 100); accept }
 }
 
-test overflow-denies {
-    route { med 4294967295 }
-    expect overflow-guard == error overflow
+test overflow-saturates {
+    route { med 4294967295; local-pref 100 }
+    expect saturating == accept with med 4294967295, local-pref 0
 }
 
 test no-overflow-accepts {
     route { med 5 }
-    expect overflow-guard == accept
+    expect saturating == accept with med 6, local-pref 0
 }
 
-test divide-by-zero-denies {
+test constant-divisor-divides {
     route { med 5 }
-    expect div-zero == error divide-by-zero
+    expect halves == accept with med 2
 }
 
-test modulo-zero-denies {
-    route { }
-    expect mod-zero == error remainder-by-zero
+test bounded-zero-divisor-is-one {
+    route { med 7 }
+    expect bounded-divisor(0) == accept with med 0
 }
 
 test absent-origin-denies {
@@ -4048,6 +4065,127 @@ test builtin-passes-middle {
     assert!(report.all_passed(), "failures: {:?}", report.failures);
 }
 
+/// LAN-2791: `+ - *` saturate at 0 and `u32::MAX` in every value position
+/// (comparison, `let`, `set`), so arithmetic never decides an error. A
+/// subtraction inside a guard now matches values below the subtrahend.
+#[test]
+fn arithmetic_saturates_in_every_position() {
+    let source = r"
+policy guard-sub { term t { if route.med - 100 <= 5 { reject } } term rest { accept } }
+policy let-add { term t { let x = route.med + 10; set local-pref x; accept } }
+policy set-mul { term t { set med route.med * 2; accept } }
+
+test guard-subtraction-floors-at-zero {
+    route { med 4 }
+    expect guard-sub == reject
+}
+
+test guard-subtraction-ordinary {
+    route { med 200 }
+    expect guard-sub == accept
+}
+
+test let-ceiling {
+    route { med 4294967290 }
+    expect let-add == accept with local-pref 4294967295
+}
+
+test set-ceiling {
+    route { med 3000000000 }
+    expect set-mul == accept with med 4294967295
+}
+";
+    let report = run_rpol_tests(source).expect("compiles cleanly");
+    assert_eq!(report.total, 4);
+    assert!(report.all_passed(), "failures: {:?}", report.failures);
+}
+
+/// Explain shows the saturated value of a computed `set` (LAN-2791).
+#[test]
+fn explain_renders_the_saturated_value() {
+    use crate::engine::PolicyChain;
+    use crate::engine::explain::explain_chain_statements;
+
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compile_ok(
+            "policy p { term t { set med route.med - 10; accept } }",
+        )),
+    )]);
+    let mut ctx = absent_ctx();
+    ctx.med = Some(4);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, chain.evaluate(&ctx).action);
+    assert_eq!(chain.evaluate(&ctx).modifications.set_med, Some(0));
+    assert!(
+        trace.steps[0]
+            .modifications
+            .iter()
+            .any(|line| line.contains("med 4 -> route.med - 10 = 0")),
+        "{:?}",
+        trace.steps[0].modifications
+    );
+}
+
+/// LAN-2791: a divisor must be a non-zero constant or `max(e, k)` with a
+/// constant `k >= 1`, so division never fails at runtime; literal-only
+/// overflow stays a compile error, while an expression with a parameter
+/// folds with saturation, so no argument value decides whether a policy
+/// loads.
+#[test]
+fn divisors_cannot_be_zero_and_parameters_fold_saturating() {
+    for bad in [
+        "set med route.med / route.local-pref",
+        "set med route.med % route.med",
+        "set med route.med / 0",
+        "set med route.med / max(route.local-pref, 0)",
+        "set med route.med / min(route.local-pref, 1)",
+    ] {
+        let (_, rendered) = diagnostics_of(&format!("policy p {{ term t {{ {bad}; accept }} }}"));
+        assert!(rendered.contains("can be zero"), "{bad}: {rendered}");
+    }
+    for source in [
+        "policy p(d: u32) { term t { set med route.med / d; accept } }",
+        "policy p { term t { let d = route.local-pref; set med route.med / d; accept } }",
+        "fn f(x: u32) -> u32 { x } policy p { term t { set med route.med % f(route.local-pref); accept } }",
+    ] {
+        let (_, rendered) = diagnostics_of(source);
+        assert!(rendered.contains("can be zero"), "{source}: {rendered}");
+    }
+    for good in [
+        "set med route.med / 3",
+        "set med route.med % 2",
+        "set med route.med / max(route.local-pref, 1)",
+        "set med route.med / max(4, route.local-pref)",
+    ] {
+        compile_ok(&format!("policy p {{ term t {{ {good}; accept }} }}"));
+    }
+
+    let (_, rendered) = diagnostics_of("policy p { term t { set med 4294967295 + 1; accept } }");
+    assert!(rendered.contains("arithmetic overflow"), "{rendered}");
+    let (_, rendered) = diagnostics_of("policy p { term t { set med 5 - 10; accept } }");
+    assert!(rendered.contains("arithmetic underflow"), "{rendered}");
+
+    let mut store = SetStore::new();
+    let file = super::RpolFile::parse(
+        "policy q(bump: u32) { term t { set med bump + 1; set local-pref bump - 5; accept } }",
+    )
+    .expect("clean");
+    for (bump, med, local_pref) in [(u32::MAX, u32::MAX, u32::MAX - 5), (2, 3, 0)] {
+        let chain = file
+            .compile_policy("q", &[bump], &mut store)
+            .expect("loads");
+        let result = chain.evaluate(&absent_ctx());
+        assert_eq!(result.action, PolicyAction::Permit, "bump {bump}");
+        assert_eq!(result.modifications.set_med, Some(med), "bump {bump}");
+        assert_eq!(
+            result.modifications.set_local_pref,
+            Some(local_pref),
+            "bump {bump}"
+        );
+    }
+}
+
 // ── LAN-301: `expect ... == error [KIND]` and eval-error observability ──
 
 /// The bare and kind-pinned `error` expectation forms pass on the
@@ -4055,16 +4193,16 @@ test builtin-passes-middle {
 #[test]
 fn error_expectation_pins_the_fail_closed_rail() {
     let source = r"
-policy overflowing { term t { set med route.med + 1; accept } }
+policy failing { term t { set med route.origin-as; accept } }
 
 test any-error-passes {
-    route { med 4294967295 }
-    expect overflowing == error
+    route { }
+    expect failing == error
 }
 
 test kind-pinned-passes {
-    route { med 4294967295 }
-    expect overflowing == error overflow
+    route { }
+    expect failing == error absent-operand
 }
 ";
     let report = run_rpol_tests(source).expect("compiles cleanly");
@@ -4079,7 +4217,7 @@ test kind-pinned-passes {
 fn error_expectation_mismatches_render_the_divergence() {
     let source = r"
 policy clean-reject { term t { reject } }
-policy overflowing { term t { set med route.med + 1; accept } }
+policy failing { term t { set med route.origin-as; accept } }
 
 test clean-reject-is-not-an-error {
     route { }
@@ -4087,13 +4225,13 @@ test clean-reject-is-not-an-error {
 }
 
 test error-is-not-a-clean-reject {
-    route { med 4294967295 }
-    expect overflowing == reject
+    route { }
+    expect failing == reject
 }
 
 test wrong-kind-fails {
-    route { med 4294967295 }
-    expect overflowing == error divide-by-zero
+    route { }
+    expect failing == error divide-by-zero
 }
 ";
     let report = run_rpol_tests(source).expect("compiles cleanly");
@@ -4117,17 +4255,17 @@ test wrong-kind-fails {
     let msg = by_name("error-is-not-a-clean-reject");
     assert!(
         msg.contains(
-            "expected reject, got evaluation error: overflow in policy overflowing term t"
+            "expected reject, got evaluation error: absent-operand in policy failing term t"
         ),
         "{msg}"
     );
     assert!(
-        msg.contains("use `== error overflow`"),
+        msg.contains("use `== error absent-operand`"),
         "steers to the pinning form: {msg}"
     );
     let msg = by_name("wrong-kind-fails");
     assert!(
-        msg.contains("expected error divide-by-zero, got error overflow"),
+        msg.contains("expected error divide-by-zero, got error absent-operand"),
         "{msg}"
     );
 }
@@ -4184,20 +4322,22 @@ test error-policy-accepts {
 fn evaluation_carries_eval_error_on_the_error_rail_only() {
     let chain = compile_ok(
         "policy p {
-            term guard { set med route.med + 1; accept }
+            term guard { set med route.origin-as; accept }
             term rest { reject }
          }",
     );
     let mut ctx = absent_ctx();
-    ctx.med = Some(u32::MAX);
     let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
     assert_eq!(result.action, PolicyAction::Deny);
     let error = evaluation.eval_error.expect("error rail carries blame");
-    assert_eq!(error.kind, crate::eval::EvalErrorKind::Overflow);
+    assert_eq!(
+        error.kind,
+        crate::eval::EvalErrorKind::AbsentField(crate::ir::ValueField::OriginAs)
+    );
     assert_eq!(error.policy.as_deref(), Some("p"));
     assert_eq!(error.term.as_deref(), Some("guard"));
 
-    ctx.med = Some(1);
+    ctx.origin_asn = Some(64500);
     let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
     assert_eq!(result.action, PolicyAction::Permit);
     assert_eq!(evaluation.eval_error, None);
@@ -4417,7 +4557,7 @@ fn initializer_errors_deny_and_discard_staged_mods() {
         "policy p {
             term t {
                 set local-pref 500
-                let x = route.med - 100
+                let x = route.origin-as - 100
                 set med x
                 accept
             }
@@ -4425,19 +4565,19 @@ fn initializer_errors_deny_and_discard_staged_mods() {
     );
     let counters = PolicyHitCounters::for_chain(&chain);
 
-    // med 200: x = 100, everything applies.
+    // origin 64600: x = 64500, everything applies.
     let mut ctx = absent_ctx();
-    ctx.med = Some(200);
+    ctx.origin_asn = Some(64_600);
     let result = chain.evaluate_counting(&ctx, &counters);
     assert_eq!(result.action, PolicyAction::Permit);
     assert_eq!(result.modifications.set_local_pref, Some(500));
-    assert_eq!(result.modifications.set_med, Some(100));
+    assert_eq!(result.modifications.set_med, Some(64_500));
     assert_eq!(counters.eval_errors(), 0);
 
-    // med 5: `5 - 100` underflows in the initializer, so `x` has no
-    // value and `set med x` needs one → uniform Deny, the staged
+    // No origin AS: the initializer has no value, so `x` carries that
+    // state and `set med x` needs a value → uniform Deny, the staged
     // local-pref discarded, counter bumped.
-    ctx.med = Some(5);
+    ctx.origin_asn = None;
     let result = chain.evaluate_counting(&ctx, &counters);
     assert_eq!(result.action, PolicyAction::Deny);
     assert!(result.modifications.is_empty(), "staged mods discarded");
@@ -4697,14 +4837,14 @@ fn let_explain_renders_and_agrees() {
 
     // An erroring initializer renders the error in place of a verdict
     // and the trace verdict agrees with the live Deny.
-    let compiled =
-        compile_ok("policy p { term t { let x = route.med - 100; accept } term rest { accept } }");
+    let compiled = compile_ok(
+        "policy p { term t { let x = route.origin-as - 100; accept } term rest { accept } }",
+    );
     let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
         "p".to_string(),
         std::sync::Arc::new(compiled),
     )]);
-    let mut ctx = absent_ctx();
-    ctx.med = Some(5);
+    let ctx = absent_ctx();
     let trace = explain_chain_statements(Some(&chain), &ctx);
     assert_eq!(trace.action, chain.evaluate(&ctx).action);
     // An initializer that cannot be computed binds the missing state; no
@@ -4715,7 +4855,7 @@ fn let_explain_renders_and_agrees() {
         trace.steps[0]
             .term_traces
             .iter()
-            .any(|line| line.contains("`x` has no value (arithmetic underflow)")),
+            .any(|line| line.contains("`x` has no value (`route.origin-as` has no value")),
         "{:?}",
         trace.steps[0].term_traces
     );
@@ -5845,37 +5985,40 @@ fn fn_expansion_bomb_rejected() {
     );
 }
 
-/// An evaluation error inside an inlined body denies the route on the
-/// uniform rail and counts, exactly like any checked-arithmetic error.
+/// A call whose argument has no value denies the route on the uniform
+/// rail when an action needs the result, and counts; in a condition the
+/// same call is simply false (LAN-2790). A body can no longer fail on its
+/// own: its arithmetic saturates and its divisors cannot be zero
+/// (LAN-2791).
 #[test]
-fn fn_eval_error_inside_body_denies_and_counts() {
+fn fn_call_without_a_value_denies_in_an_action_and_counts() {
     let chain = compile_ok(
         "
-        fn share(total: u32, parts: u32) -> u32 { total / parts }
+        fn share(total: u32, parts: u32) -> u32 { total / max(parts, 1) }
         policy p {
-            term t { set local-pref share(100, route.med); accept }
+            term t { set local-pref share(100, route.origin-as); accept }
         }
         ",
     );
     let hits = crate::eval::PolicyHitCounters::for_chain(&chain);
-    // med absent -> implicit 0 -> divide-by-zero inside the body, and the
-    // action needs the value -> Deny, error counted.
-    let denied = chain.evaluate_counting(&ctx_with_path_and_med(0, None), &hits);
+    let mut ctx = absent_ctx();
+    let denied = chain.evaluate_counting(&ctx, &hits);
     assert_eq!(denied.action, PolicyAction::Deny);
     assert_eq!(hits.eval_errors(), 1);
     // A resolvable call sets the value. 100 / 20 = 5.
-    let permitted = chain.evaluate_counting(&ctx_with_path_and_med(0, Some(20)), &hits);
+    ctx.origin_asn = Some(20);
+    let permitted = chain.evaluate_counting(&ctx, &hits);
     assert_eq!(permitted.action, PolicyAction::Permit);
     assert_eq!(permitted.modifications.set_local_pref, Some(5));
     assert_eq!(hits.eval_errors(), 1, "no new error");
     // In a condition the same call is simply false (LAN-2790).
     let guard = compile_ok(
         "
-        fn share(total: u32, parts: u32) -> u32 { total / parts }
-        policy p { term t { if share(100, route.med) >= 1 { reject } accept } }
+        fn share(total: u32, parts: u32) -> u32 { total / max(parts, 1) }
+        policy p { term t { if share(100, route.origin-as) >= 1 { reject } accept } }
         ",
     );
-    let result = guard.evaluate_counting(&ctx_with_path_and_med(0, None), &hits);
+    let result = guard.evaluate_counting(&absent_ctx(), &hits);
     assert_eq!(result.action, PolicyAction::Permit);
 }
 
@@ -7699,7 +7842,7 @@ fn exact_assertions_compile_and_format_without_ordering_community_sets() {
 policy p { term t {
     set local-pref 200; set med 5; set next-hop self; prepend as 65000 2
     add community 65000:1; add community 65000:2; remove community 65000:3
-    add large-community 65000:1:2; remove large-community 65000:*:*
+    remove large-community 65000:*:*; add large-community 65000:1:2
     add ext-community RT:65000:1; remove ext-community OV_VALID; accept
 } }
 test exact { route { large-communities [65000:3:4, 65000:5:6, 65001:7:8] }
@@ -8409,21 +8552,21 @@ fn deciding_branch_with_a_missing_operand_falls_to_the_next_branch() {
 
 /// An `else if` guard's function call evaluates only where the walk reaches
 /// the branch. A modify-only first branch that matches skips it; reached,
-/// the call's division by zero makes the condition false (LAN-2790), so
+/// the call's missing argument makes the condition false (LAN-2790), so
 /// the route is never denied. The same holds for a guard nested inside an
 /// enclosing branch.
 #[test]
 fn skipped_else_if_guard_never_runs_its_function_call() {
     let chain = compile_ok(
-        "fn per(x: u32) -> u32 { 10 / x }
+        "fn per(x: u32) -> u32 { 10 / max(x, 1) }
          policy p {
              term t {
                  if route.local-pref >= 500 { set med 1 }
-                 else if per(route.med) == 10 { set med 2 }
+                 else if per(route.origin-as) == 10 { set med 2 }
              }
              term nested {
                  if route.local-pref >= 900 {
-                     if per(route.med) == 10 { set med 3 }
+                     if per(route.origin-as) == 10 { set med 3 }
                  }
              }
          }",
@@ -9663,15 +9806,18 @@ mod condition_truth {
     /// side: a regex, a prefix-set probe, a plain comparison, `exists`.
     #[test]
     fn missing_operands_never_decide_and_or_in_either_order() {
+        // Saturating arithmetic, non-zero divisors and a total `clamp`
+        // (LAN-2791) leave missing values as the only operands that
+        // cannot be computed.
         let failing = [
             "route.origin-as + 0 == 1",
             "route.origin-as == (1)",
             "route.origin-as * 1 >= 0",
             "peer.asn + 0 == 1",
-            "route.med / 0 >= 0",
-            "route.med % (route.med - route.med) >= 0",
-            "route.med + 4294967295 >= 1",
-            "clamp(route.med, 10, route.med) >= 0",
+            "route.med / max(route.origin-as, 1) >= 0",
+            "route.med % max(peer.asn, 1) >= 0",
+            "min(route.med, route.origin-as) >= 0",
+            "clamp(route.med, 10, peer.asn) >= 0",
         ];
         let falsy = [
             "route.as-path matches \"^65000\"",
@@ -9796,10 +9942,13 @@ mod condition_truth {
                 EvalErrorKind::AbsentField(OriginAs),
             ),
             (
-                "set local-pref route.med / 0; accept",
-                EvalErrorKind::DivideByZero,
+                "set local-pref route.med / max(route.origin-as, 1); accept",
+                EvalErrorKind::AbsentField(OriginAs),
             ),
-            ("set med route.med - 1; accept", EvalErrorKind::Underflow),
+            (
+                "set med peer.asn - 1; accept",
+                EvalErrorKind::AbsentField(crate::ir::ValueField::PeerAsn),
+            ),
             (
                 "prepend as origin 1; accept",
                 EvalErrorKind::AbsentPrependOperand(crate::engine::PrependAs::OriginAs),
@@ -11860,5 +12009,393 @@ mod callable_policies_nested_cost {
                 "levels={levels} guard={guard} inner={inner}: {steps} steps"
             );
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Community actions apply in statement order
+// ─────────────────────────────────────────────────────────────────────
+
+mod statement_order {
+    use super::super::run_rpol_tests;
+    use super::{compile_ok, route_ctx, v4};
+    use rustbgpd_wire::RpkiValidation;
+
+    fn assert_passes(source: &str, tests: usize) {
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, tests);
+        assert!(report.all_passed(), "{:#?}", report.failures);
+    }
+
+    /// Within a term the later operation on a value wins, for every kind,
+    /// with extended communities compared by their decoded identity: an
+    /// IPv4-admin and a 2-octet-AS route target with the same administrator
+    /// value are one community.
+    #[test]
+    fn the_later_operation_wins_within_a_term() {
+        assert_passes(
+            r"
+policy add-then-remove {
+    term t {
+        add community 65000:1; remove community 65000:1
+        add large-community 65000:1:1; remove large-community 65000:1:1
+        add ext-community RT:65000:1; remove ext-community RT:65000:1
+        add ext-community RT:0.0.253.232:2; remove ext-community RT:65000:2
+        accept
+    }
+}
+policy remove-then-add {
+    term t {
+        remove community 65000:1; add community 65000:1
+        remove large-community 65000:1:1; add large-community 65000:1:1
+        remove ext-community RT:65000:1; add ext-community RT:65000:1
+        remove ext-community RT:0.0.253.232:2; add ext-community RT:65000:2
+        accept
+    }
+}
+test add-then-remove {
+    route { prefix 192.0.2.0/24; communities [65000:1]; large-communities [65000:1:1]
+        ext-communities [RT:65000:1, RT:65000:2] }
+    expect add-then-remove == accept with only removes community 65000:1,
+        removes large-community 65000:1:1, removes ext-community RT:65000:1,
+        removes ext-community RT:65000:2
+}
+test remove-then-add {
+    route { prefix 192.0.2.0/24 }
+    expect remove-then-add == accept with only community 65000:1,
+        large-community 65000:1:1, ext-community RT:65000:1, ext-community RT:65000:2
+}
+",
+            2,
+        );
+    }
+
+    /// Across terms and across chain members, a scan cancels the earlier
+    /// staged additions it selects, while a later addition stays. The
+    /// well-known range survives `remove community *` even when just added.
+    #[test]
+    fn scans_cancel_earlier_additions_across_terms_and_chain_members() {
+        assert_passes(
+            r"
+community-set own { 65000:* }
+community-set allow { 65001:* }
+policy tag { term t { add community 65000:7; add community 65001:7; add community NO_EXPORT } }
+policy tag-large { term t { add large-community 65000:1:1; add large-community 64496:1:1 } }
+policy tag-ext { term t { add ext-community RT:65000:1 } }
+policy strip { term t { remove community *; accept } }
+policy strip-large-own { term t { remove large-community 65000:*:*; accept } }
+policy strip-ext { term t { remove ext-community *; accept } }
+policy scrub-own { term t { remove community in own; accept } }
+policy keep-allowed { term t { remove community not in allow; accept } }
+policy strip-then-tag {
+    term s { remove community * }
+    term t { add community 65000:7; accept }
+}
+test strip-cancels-an-earlier-member {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, strip] == accept with only community NO_EXPORT,
+        without community 65000:7, without community 65001:7
+}
+test in-set-cancels-what-it-selects {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, scrub-own] == accept with only community 65001:7,
+        community NO_EXPORT, without community 65000:7
+}
+test not-in-cancels-the-rest-but-not-well-known {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, keep-allowed] == accept with only community 65001:7,
+        community NO_EXPORT
+}
+test admin-wildcard-cancels-its-administrator {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-large, strip-large-own] == accept with only
+        large-community 64496:1:1
+}
+test ext-strip-cancels {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-ext, strip-ext] == accept with only without ext-community RT:65000:1
+}
+test a-later-addition-stays {
+    route { prefix 192.0.2.0/24; communities [65000:7] }
+    expect strip-then-tag == accept with only community 65000:7
+}
+",
+            6,
+        );
+    }
+
+    /// A later chain member's literal removal of an earlier member's
+    /// addition, and the reverse, follow the same rule. This holds through
+    /// the later-wins chain merge alone; the scan tests above are the ones
+    /// that need each member seeded with the earlier members' staging.
+    #[test]
+    fn chain_members_merge_literal_operations_later_wins() {
+        assert_passes(
+            r"
+policy add-it { term t { add community 65000:1 } }
+policy remove-it { term t { remove community 65000:1 } }
+test add-then-remove {
+    route { prefix 192.0.2.0/24 }
+    expect chain [add-it, remove-it] == accept with only removes community 65000:1
+}
+test remove-then-add {
+    route { prefix 192.0.2.0/24 }
+    expect chain [remove-it, add-it] == accept with only community 65000:1
+}
+",
+            2,
+        );
+    }
+
+    /// The extended and large scans cancel the earlier staged adds they
+    /// select, and only those: `in` by set membership, `not in` over route
+    /// targets and route origins only, and the large strip-all form.
+    #[test]
+    fn extended_and_large_scans_cancel_what_they_select() {
+        assert_passes(
+            r"
+community-set ext { RT:64496:* }
+community-set big { 65000:*:* }
+policy tag-ext { term t { add ext-community RT:64496:1; add ext-community RT:65000:1; add ext-community OV_VALID } }
+policy tag-large { term t { add large-community 65000:1:1; add large-community 64496:1:1 } }
+policy scrub-ext { term t { remove ext-community in ext; accept } }
+policy keep-ext { term t { remove ext-community not in ext; accept } }
+policy scrub-big { term t { remove large-community in big; accept } }
+policy strip-large { term t { remove large-community *:*:*; accept } }
+test ext-in-cancels-what-it-selects {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-ext, scrub-ext] == accept with only ext-community RT:65000:1,
+        ext-community OV_VALID, without ext-community RT:64496:1
+}
+test ext-not-in-keeps-staged-non-rt-ro {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-ext, keep-ext] == accept with only ext-community RT:64496:1,
+        ext-community OV_VALID, without ext-community RT:65000:1
+}
+test large-in-cancels-what-it-selects {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-large, scrub-big] == accept with only large-community 64496:1:1,
+        without large-community 65000:1:1
+}
+test large-strip-all-cancels {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-large, strip-large] == accept with only
+        without large-community 65000:1:1, without large-community 64496:1:1
+}
+",
+            4,
+        );
+    }
+
+    /// The coverage walk behind the live-RIB dry run and the installed-vs-
+    /// candidate diff seeds each chain member like the live walk, so a later
+    /// member's scan cancels an earlier member's add there too.
+    #[test]
+    fn the_coverage_walk_seeds_chain_members_like_the_live_walk() {
+        let chain = compile_ok(
+            "policy tag { term t { add community 65000:7 } } \
+             policy strip { term t { remove community *; accept } }",
+        );
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound);
+        let live = chain.evaluate(&ctx);
+        assert_eq!(live.action, crate::PolicyAction::Permit);
+        assert!(
+            live.modifications.communities_add.is_empty(),
+            "the strip cancels the earlier member's add: {:?}",
+            live.modifications
+        );
+        let mut hits = chain.zero_term_hits();
+        assert_eq!(chain.evaluate_recording_hits(&ctx, &mut hits), live);
+    }
+
+    /// A scan pays one fuel step per staged add it visits: those adds have
+    /// no compile-time bound, so repeated scans over many staged adds hit the
+    /// evaluation budget and fail closed instead of running unmetered.
+    #[test]
+    fn scans_pay_fuel_for_the_staged_adds_they_visit() {
+        use crate::eval::{MAX_EVAL_COST, PolicyHitCounters};
+        use std::fmt::Write as _;
+        let stage = "community-set own { 65000:1 } \
+             policy stage { term t { for c in route.communities { add community c } } }";
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+
+        // Exact accounting: 4096 loop iterations, then one scan over the
+        // 4096 staged adds it keeps.
+        let one = compile_ok(&format!(
+            "{stage} policy scan {{ term t {{ remove community in own; accept }} }}"
+        ));
+        let (result, consumed) = one.evaluate_measuring_fuel(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_add.len(), 4096);
+        assert_eq!(consumed, 4096 + 4096);
+
+        // 250 scans over the same 4096 staged adds exceed the budget.
+        let mut source = stage.to_owned();
+        for i in 0..250 {
+            let _ = write!(
+                source,
+                " policy scan{i} {{ term t {{ remove community in own; accept }} }}"
+            );
+        }
+        let many = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&many);
+        assert_eq!(
+            many.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "scan fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+        let mut hits = many.zero_term_hits();
+        assert_eq!(
+            many.evaluate_recording_hits(&ctx, &mut hits),
+            crate::PolicyResult::deny(),
+            "the dry run is metered identically"
+        );
+        let (_, consumed) = many.evaluate_measuring_fuel(&ctx);
+        assert!(consumed <= MAX_EVAL_COST);
+    }
+
+    /// A scan also pays for the staged removals of its kind it dedups its
+    /// own against: loops append removals without deduplication, so chain
+    /// members can carry hundreds of thousands of them into later scans.
+    #[test]
+    fn scans_pay_fuel_for_carried_staged_removals() {
+        use crate::eval::PolicyHitCounters;
+        use std::fmt::Write as _;
+        let unstage = |i: usize| {
+            format!(
+                " policy unstage{i} {{ term t {{ for c in route.communities {{ remove community c }} }} }}"
+            )
+        };
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+
+        // Exact accounting: 4096 loop iterations, then one scan over the
+        // 4096 staged removals.
+        let one = compile_ok(&format!(
+            "community-set own {{ 65000:1 }}{} policy scan {{ term t {{ remove community in own; accept }} }}",
+            unstage(0)
+        ));
+        let (result, consumed) = one.evaluate_measuring_fuel(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_remove.len(), 4096);
+        assert_eq!(consumed, 4096 + 4096);
+
+        // 50 loops stage 204,800 removals; four scans over them exceed the
+        // budget, though the loops alone spend about a fifth of it.
+        let mut source = "community-set own { 65000:1 }".to_owned();
+        for i in 0..50 {
+            source.push_str(&unstage(i));
+        }
+        for i in 0..4 {
+            let _ = write!(
+                source,
+                " policy scan{i} {{ term t {{ remove community in own; accept }} }}"
+            );
+        }
+        let many = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&many);
+        assert_eq!(
+            many.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "scan fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+    }
+
+    /// Merging an addition into the staged modifications cancels a staged
+    /// removal of the same value, a pass over the staged removals. That pass
+    /// pays fuel per entry: chain members carry removals forward and a loop
+    /// merges once per iteration, so the work would otherwise grow with
+    /// iterations times carried entries.
+    #[test]
+    fn merges_pay_fuel_for_the_staged_entries_they_traverse() {
+        use crate::eval::PolicyHitCounters;
+        let unstage = |i: usize| {
+            format!(
+                " policy unstage{i} {{ term t {{ for c in route.communities {{ remove community c }} }} }}"
+            )
+        };
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+
+        // Exact accounting: 4096 loop iterations, then one literal addition
+        // merged across the 4096 staged removals.
+        let one = compile_ok(&format!(
+            "{} policy tag {{ term t {{ add community 65000:1 }} }}",
+            unstage(0)
+        ));
+        let (result, consumed) = one.evaluate_measuring_fuel(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(consumed, 4096 + 4096);
+
+        // Ten loops carry 40,960 removals into a loop that adds each route
+        // community back: each iteration's merge traverses them.
+        let mut source = String::new();
+        for i in 0..10 {
+            source.push_str(&unstage(i));
+        }
+        source.push_str(
+            " policy readd { term t { for c in route.communities { add community c } } }",
+        );
+        let many = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&many);
+        assert_eq!(
+            many.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "merge fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+        let mut hits = many.zero_term_hits();
+        assert_eq!(
+            many.evaluate_recording_hits(&ctx, &mut hits),
+            crate::PolicyResult::deny(),
+            "the dry run is metered identically"
+        );
+    }
+
+    /// Fifty members carry 204,800 additions into a loop that removes a
+    /// value none of them added: each iteration's merge still traverses the
+    /// carried additions to look for one to cancel, so the loop exhausts the
+    /// fuel instead of doing about 839 million unmetered comparisons.
+    #[test]
+    fn merges_pay_fuel_for_carried_additions_a_loop_traverses() {
+        use crate::eval::PolicyHitCounters;
+        use std::fmt::Write as _;
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+        let mut source = String::new();
+        for i in 0..50 {
+            let _ = write!(
+                source,
+                " policy stage{i} {{ term t {{ for c in route.communities {{ add community c }} }} }}"
+            );
+        }
+        source.push_str(
+            " policy absent { term t { for c in route.communities { remove community 65000:9 } } }",
+        );
+        let carried = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&carried);
+        assert_eq!(
+            carried.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "merge fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+    }
+
+    /// Conditions read the route as received: a later term's guard does not
+    /// see an earlier term's addition.
+    #[test]
+    fn conditions_read_the_received_route() {
+        let compiled = compile_ok(
+            "policy p { term t { add community 65000:1 } \
+             term u { if route.communities has 65000:1 { reject } } term r { accept } }",
+        );
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound);
+        let result = compiled.evaluate(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_add, [(65_000 << 16) + 1]);
     }
 }
