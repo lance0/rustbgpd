@@ -546,18 +546,22 @@ to one or more IR terms:
   evaluate the initializer and write its frame slot. Like `Continue`
   it never decides; body bindings re-evaluate the branch guard, which
   is pure and cannot diverge.
-- IR terms are named after the source statement they execute. The name is
-  the term name, then `.<statement>`, the 1-based position of the statement
-  in the term body (omitted when the body has one statement), then `.<k>`
-  when that statement lowers to more than one IR term. A run of
-  modifications flushed as one `Continue` term is named after its last
-  statement, and an `accept` that carries staged modifications after the
-  `accept`: `term tag { add community 65000:1; accept }` lowers to `tag.2`,
-  and `term t { if A { accept } else { reject } }` to `t.1` and `t.2`. A
-  change to how one statement lowers can renumber only that statement's
-  `.<k>` rows; every other row keeps its name. Explain traces,
-  `rbgp policy test` term hits, and `rbgp policy stats` render these names,
-  and the [decision corpus](#compatibility) pins them.
+- IR terms are named after the source statement they execute. One row of
+  the term's final statement owns the bare term name: the last of its rows
+  that holds the statement's own `accept` or `reject`, or, when none does,
+  its last row. Every other row is the term name, then `.<statement>`, the
+  1-based position of the statement in the term body (omitted when the body
+  has one statement), then `.<k>`, the row's 1-based position among its
+  statement's rows, when that statement lowers to more than one IR term. A
+  run of modifications flushed as one `Continue` term is named after its
+  last statement, and an `accept` that carries staged modifications after
+  the `accept`: `term tag { add community 65000:1; accept }` lowers to
+  `tag`, `term t { set med 10; if A { accept } }` to `t.1` and `t`, and
+  `term t { if A { accept } else { reject } }` to `t.1` and `t`. The
+  [term-name rulings](#term-name-rulings) give the stability promise and
+  the edge cases. Explain traces, `rbgp policy test` term hits, and
+  `rbgp policy stats` render these names, and the
+  [decision corpus](#compatibility) pins every row's name and contents.
 
 ### Parameters
 
@@ -1424,7 +1428,8 @@ policy's frame.
 **Names.** Inlined terms are named under the call statement, as the
 [lowering](#lowering-into-the-ir-normative) names any statement that lowers
 to several IR terms: `<term>[.<statement>].<k>/<call>:<called-term>`, for
-example `common.3/customer-common(200):tag.1`.
+example `common.3/customer-common(200):tag.1`, and a final call's last row
+takes the bare term name, `common/customer-common(200):tag`.
 Nested calls compose, and the flag's own terms are named `:#enter`,
 `:#return` and `:#default` (`#` cannot begin a term name, so no source term
 can collide with them). A `:#return` term follows each called loop that
@@ -3133,10 +3138,66 @@ families, declarations, set members and test forms a program can use, and
 the compiled IR kinds they lower to. A `v1` construct is part of the frozen
 language: programs that use it keep parsing and keep their decisions.
 `outside_v1` makes no promise of its own. The IR kinds are internal: a
-lowering change may split, merge or rename them, as long as every pinned
-decision holds. `scripts/check-v1-stable-surface.py` fails when the corpus
-names a construct the inventory does not classify, when the inventory names
-one that no longer exists, and when this table differs from the inventory.
+lowering change may split, merge or rename them, but every change to them
+must preserve the public semantics the corpus pins, the verdict and exact
+modifications of every program, and the term names and row contents below.
+A `v1` entry rests on the same evidence for every construct: the
+typechecker validates it, the lowering compiles it, and corpus cases
+execute it with real decisions. `route.evpn-route-type` and
+`route.family == evpn`, for the scoped EVPN route-reflector role, are
+checked against the supported types 1 to 6 with `==` and `!=` only, and
+corpus cases run them against EVPN routes in the route matrix and the
+curated programs. `scripts/check-v1-stable-surface.py` fails when the
+corpus names a construct the inventory does not classify, when the
+inventory names one that no longer exists, and when this table differs
+from the inventory.
+
+#### Term-name rulings
+
+Lowered term names are part of the frozen surface: explain, test term hits
+and policy stats rows show them, and the decision corpus pins each row's
+name and contents. The [lowering rule](#lowering-into-the-ir-normative)
+settles these cases:
+
+- **Stability.** A lowering change that keeps the source term and its final
+  statement never renames the bare row, and renames no row of any other
+  statement. It can add rows, such as a staged run split off the final
+  row (`tag` gains `tag.1`), and it can renumber the `.<k>` rows of the
+  one statement whose lowering changed. A source edit can rename rows:
+  inserting, removing or reordering statements moves their `.<statement>`
+  numbers, and replacing the final statement moves the bare name.
+- **Collisions.** A source term name cannot contain `.` or `/` (names are
+  kebab-case identifiers), and two terms in one policy cannot share a
+  name, so a generated row such as `tag.1` or `t.1/lib:x` never matches a
+  source term name. `term tag.1 { ... }` is a parse error.
+- **A final statement that lowers to several IR terms** gives the bare
+  name to the last row holding its own `accept` or `reject`, or, when none
+  does, to its last row. Its other rows keep `.<k>`:
+  `term w { set med 4; if A { accept } else { reject } }` lowers to `w.1`,
+  `w.2.1` (the `accept`) and `w` (the `reject`), and
+  `term q { set med 7; if A { reject } else { set med 8 } }` to `q.1`, `q`
+  (the `reject`) and `q.2.2`. A row inlined from a called policy is not
+  the statement's own verdict.
+- **A final statement that lowers to no IR term**, such as an `if` with an
+  empty body and no `else`, leaves no bare row.
+- **Nested `if`, `else if` and `for`** belong to the term-body statement
+  that contains them: their rows share its `.<statement>` and are told
+  apart by `.<k>`. Rows inside a loop body run under the loop's one row
+  and have no names of their own.
+- **`apply` as a statement** names each inlined row
+  `<term>[.<statement>].<k>/<call>:<called-term>`, where the called term's
+  name follows the same rules inside the called policy. When the call is
+  the final statement, its last row is bare, `t/lib:tag`, because a called
+  policy's rows hold no verdict of the calling statement. A call whose
+  policy emits no term lowers to its `:#enter` row alone.
+- **A staged run that reaches the end of the term**, such as
+  `term t { set med 1; add community 65000:1 }`, is named after its last
+  statement, so it is the bare `t` when that statement is the final one.
+- **Merged strip-all removals** (`remove community *` followed by
+  `remove large-community *:*:*`) form one row named after the later
+  statement.
+
+#### Construct table
 
 <!-- rpol-construct-inventory:start -->
 | Construct | Class | Source form or reason |

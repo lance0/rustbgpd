@@ -552,7 +552,7 @@ fn u32_equality_lowers_to_ge_and_le() {
 #[test]
 fn term_fallthrough_encoding() {
     // A bare modification run + an if with a verdictless body + a
-    // final verdict term: exercises Continue flushing and `<term>.<n>`
+    // final verdict term: exercises Continue flushing and statement
     // naming.
     let chain = compile_ok(
         "policy p {
@@ -571,7 +571,7 @@ fn term_fallthrough_encoding() {
         panic!("bare mods flush as Continue, got {:?}", terms[0].action)
     };
     assert_eq!(mods.set_med, Some(10));
-    assert_eq!(terms[1].name.as_deref(), Some("shape.2"));
+    assert_eq!(terms[1].name.as_deref(), Some("shape"));
     let TermAction::Continue(mods) = &terms[1].action else {
         panic!("verdictless if body is Continue, got {:?}", terms[1].action)
     };
@@ -603,36 +603,84 @@ fn term_fallthrough_encoding() {
     assert_eq!(result.modifications.communities_add.len(), 0);
 }
 
-/// IR term names are anchored to the source statement they execute: a
-/// statement that lowers to more IR terms renumbers only its own rows, so
-/// the `if` row of a later statement keeps its explain and stats name. A
-/// staged run is named after its last statement, so a verdict that carries
-/// staged modifications keeps the verdict statement's name.
+/// IR term names are anchored to the source statement they execute, and
+/// each name is pinned with what its row holds. A statement that lowers to
+/// more rows renumbers only its own rows, so the `if` row of a later
+/// statement keeps its name (`t`). One row of the final statement owns the
+/// bare name: its last row holding its own `accept` or `reject` (`v`, `w`,
+/// and `q`, where the `reject` row is not the last), else its last row
+/// (`z`, and `y`, a staged run that reaches the end). A staged run is named
+/// after its last statement, so a modify-then-accept term stays `u` and a
+/// split-off staged run could only add `u.2`. A final statement with no row
+/// leaves no bare row (`x.1`).
 #[test]
 fn term_names_are_anchored_to_source_statements() {
-    let names = |members: &str, remove: &str| -> Vec<String> {
+    let rows = |members: &str, remove: &str| -> Vec<String> {
         let chain = compile_ok(&format!(
             "community-set s {{ {members} }}
              policy p {{
                  term t {{ set med 1; {remove} in s; if route.med >= 5 {{ accept }} }}
                  term u {{ set med 2; add community 65000:2; accept }}
                  term v {{ if route.med >= 9 {{ set med 3; accept }} else {{ reject }} }}
+                 term w {{ set med 4; if route.med >= 9 {{ accept }} else {{ reject }} }}
+                 term q {{ set med 7; if route.med >= 9 {{ reject }} else {{ set med 8 }} }}
+                 term z {{ if route.med >= 9 {{ set med 1 }} else {{ set med 2 }} }}
+                 term x {{ set med 5; if route.med >= 9 {{ }} }}
+                 term y {{ set med 6; add community 65000:6 }}
              }}"
         ));
         chain.policies[0]
             .terms
             .iter()
-            .map(|term| term.name.clone().unwrap())
+            .map(|term| {
+                let contents = super::decision_corpus::row_contents(&term.action, &chain);
+                format!("{} = {contents}", term.name.as_deref().unwrap())
+            })
             .collect()
     };
+    let tail = [
+        "u = accept with set med 2; add community 65000:2",
+        "v.1 = accept with set med 3",
+        "v = reject",
+        "w.1 = continue with set med 4",
+        "w.2.1 = accept",
+        "w = reject",
+        "q.1 = continue with set med 7",
+        "q = reject",
+        "q.2.2 = continue with set med 8",
+        "z.1 = continue with set med 1",
+        "z = continue with set med 2",
+        "x.1 = continue with set med 5",
+        "y = continue with set med 6; add community 65000:6",
+    ];
+    let head = [
+        "t.1 = continue with set med 1",
+        "t.2 = remove community in s",
+        "t = accept",
+    ];
     assert_eq!(
-        names("65000:1", "remove community"),
-        ["t.1", "t.2", "t.3", "u.3", "v.1", "v.2"]
+        rows("65000:1", "remove community"),
+        [&head[..], &tail].concat()
     );
+    let head = [
+        "t.1 = continue with set med 1",
+        "t.2.1 = remove community in s",
+        "t.2.2 = remove large-community in s",
+        "t = accept",
+    ];
     assert_eq!(
-        names("65000:1, 65000:1:1", "remove any-community"),
-        ["t.1", "t.2.1", "t.2.2", "t.3", "u.3", "v.1", "v.2"]
+        rows("65000:1, 65000:1:1", "remove any-community"),
+        [&head[..], &tail].concat()
     );
+}
+
+/// A source term name cannot contain `.`, so no source term can take a
+/// generated row name such as `tag.1`.
+#[test]
+fn term_names_cannot_contain_a_dot() {
+    let (diags, rendered) =
+        diagnostics_of("policy p { term tag.1 { accept } term tag { reject } }");
+    assert!(!diags.is_empty(), "{rendered}");
 }
 
 #[test]
@@ -3781,8 +3829,8 @@ fn eval_error_denies_discards_mods_and_counts() {
         crate::eval::EvalErrorKind::AbsentField(crate::ir::ValueField::OriginAs)
     );
     assert_eq!(last.policy.as_deref(), Some("p"));
-    assert_eq!(last.term.as_deref(), Some("guard.2"));
-    assert_eq!(last.to_string(), "absent-operand in policy p term guard.2");
+    assert_eq!(last.term.as_deref(), Some("guard"));
+    assert_eq!(last.to_string(), "absent-operand in policy p term guard");
 
     // The recording walk (dry runs) agrees on the verdict.
     let mut hits = chain.zero_term_hits();
@@ -4012,10 +4060,10 @@ fn eval_error_explain_renders_and_agrees() {
     assert_eq!(trace.action, chain.evaluate(&ctx).action);
     assert_eq!(trace.action, PolicyAction::Deny);
     let step = &trace.steps[0];
-    assert_eq!(step.term_name.as_deref(), Some("no-origin.2"));
+    assert_eq!(step.term_name.as_deref(), Some("no-origin"));
     assert!(
         step.term_traces.iter().any(|line| line
-            .contains("term no-origin.2: evaluation error: `route.origin-as` has no value")
+            .contains("term no-origin: evaluation error: `route.origin-as` has no value")
             && line.contains("fail closed")),
         "error renders in place of a verdict: {:?}",
         step.term_traces
@@ -4515,7 +4563,7 @@ fn evaluation_carries_eval_error_on_the_error_rail_only() {
         crate::eval::EvalErrorKind::AbsentField(crate::ir::ValueField::OriginAs)
     );
     assert_eq!(error.policy.as_deref(), Some("p"));
-    assert_eq!(error.term.as_deref(), Some("guard.2"));
+    assert_eq!(error.term.as_deref(), Some("guard"));
 
     ctx.origin_asn = Some(64500);
     let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
@@ -6215,16 +6263,20 @@ fn fn_peer_argument_sets_requires_peer_context() {
 fn fn_explain_renders_call_source_level() {
     let chain = compile_ok(FN_EXAMPLE);
     let terms = &chain.policies[0].terms;
-    // The source term `t` lowers to bind terms + the guard term, all
-    // named `t.<n>` — term identity stays a function of the source.
+    // The source term `t` lowers to bind terms named `t.<n>` and the
+    // guard term holding the verdict, which keeps the bare name — term
+    // identity stays a function of the source.
     let guard_term = terms
         .iter()
         .find(|term| matches!(term.guard, MatchExpr::ValueCmp(_)))
         .expect("the comparison term");
+    assert_eq!(guard_term.name.as_deref(), Some("t"));
     assert!(
-        guard_term.name.as_deref().unwrap_or("").starts_with("t."),
-        "{:?}",
-        guard_term.name
+        terms
+            .iter()
+            .filter(|term| matches!(term.action, TermAction::Bind { .. }))
+            .all(|term| term.name.as_deref().unwrap_or("").starts_with("t.")),
+        "{terms:?}"
     );
     let rendered = crate::engine::explain::render_expr(&guard_term.guard, &chain);
     assert_eq!(rendered, "penalty(route.as-path.len, 10) >= route.med");
@@ -8185,7 +8237,7 @@ fn med_lp_ctx(med: Option<u32>, local_pref: Option<u32>) -> RouteContext<'static
 /// in the compiled form. Every branch here decides, so first-match alone
 /// keeps the walk from reaching a later term after an earlier branch
 /// matched: each branch is guarded by its own guard only, and the `else` is
-/// unconditional. Explain names them `t.1`, `t.2`, ...
+/// unconditional. Explain names them `t.1`, `t.2` and, for the `else`, `t`.
 #[test]
 fn else_if_chain_lowers_to_first_match_terms() {
     use crate::engine::PolicyChain;
@@ -8202,7 +8254,7 @@ fn else_if_chain_lowers_to_first_match_terms() {
     );
     let terms = &compiled.policies[0].terms;
     let names: Vec<_> = terms.iter().map(|term| term.name.as_deref()).collect();
-    assert_eq!(names, [Some("t.1"), Some("t.2"), Some("t.3")]);
+    assert_eq!(names, [Some("t.1"), Some("t.2"), Some("t")]);
     for term in &terms[..2] {
         assert!(
             !matches!(term.guard, MatchExpr::And(_) | MatchExpr::Not(_)),
@@ -8220,7 +8272,7 @@ fn else_if_chain_lowers_to_first_match_terms() {
     for (med, action, local_pref, term) in [
         (120, PolicyAction::Permit, Some(10), "t.1"),
         (60, PolicyAction::Permit, Some(20), "t.2"),
-        (10, PolicyAction::Deny, None, "t.3"),
+        (10, PolicyAction::Deny, None, "t"),
     ] {
         let ctx = med_lp_ctx(Some(med), None);
         let result = chain.evaluate(&ctx);
@@ -11818,7 +11870,7 @@ mod callable_policies_naming {
                 "t.2.2/strict:ok",
                 "t.2.3/strict:ok:#return",
                 "t.2.4/strict:#default",
-                "t.3",
+                "t",
             ]
         );
         assert_eq!(
@@ -11830,8 +11882,8 @@ mod callable_policies_naming {
                 "o.1.4/middle:t.1.3/lib:good",
                 "o.1.5/middle:t.1.4/lib:good:#return",
                 "o.1.6/middle:t.1.5/lib:tag",
-                "o.1.7/middle:t.2",
-                "o.2",
+                "o.1.7/middle:t",
+                "o",
             ]
         );
     }

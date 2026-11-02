@@ -1,10 +1,10 @@
-# rpol decision corpus: 269 programs, 1743 cases. Regenerate with
+# rpol decision corpus: 269 programs, 1758 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 31
-ast.stmt.if 536
+ast.stmt.if 541
 ast.stmt.else-if 18
 ast.stmt.else 27
 ast.stmt.nested-if 13
@@ -12,14 +12,14 @@ ast.stmt.for 75
 ast.stmt.call 25
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1207
-ast.action.reject 388
-ast.action.set-local-pref 126
-ast.action.set-med 201
+ast.action.accept 1211
+ast.action.reject 399
+ast.action.set-local-pref 128
+ast.action.set-med 202
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.set-next-hop-parameter 1
-ast.action.community-literal 517
+ast.action.community-literal 518
 ast.action.large-community-admin-wildcard 22
 ast.action.community-all 56
 ast.action.community-binding 43
@@ -30,9 +30,9 @@ ast.action.let 63
 ast.action.break 33
 ast.action.continue 22
 ast.expr.or 11
-ast.expr.and 32
+ast.expr.and 36
 ast.expr.not 5
-ast.expr.cmp 236
+ast.expr.cmp 241
 ast.expr.in 115
 ast.expr.ident-in 42
 ast.expr.has 5
@@ -42,7 +42,7 @@ ast.expr.matches 37
 ast.expr.contains 5
 ast.expr.value-cmp 120
 ast.expr.apply 1
-ast.value.literal 328
+ast.value.literal 331
 ast.value.community 22
 ast.value.identifier 106
 ast.value.field 139
@@ -53,8 +53,8 @@ ast.arith.sub 35
 ast.arith.mul 28
 ast.arith.div 11
 ast.arith.rem 11
-ast.cmp.eq 203
-ast.cmp.ne 39
+ast.cmp.eq 208
+ast.cmp.ne 40
 ast.cmp.ge 144
 ast.cmp.le 4
 ast.field.route.prefix 148
@@ -74,8 +74,8 @@ ast.field.route.next-hop 18
 ast.field.route.rpki 39
 ast.field.route.aspa 12
 ast.field.route.route-type 5
-ast.field.route.evpn-route-type 3
-ast.field.route.family 21
+ast.field.route.evpn-route-type 7
+ast.field.route.family 26
 ast.field.peer.address 9
 ast.field.peer.asn 2
 ast.field.peer.group 9
@@ -87,7 +87,7 @@ ast.family.vpnv4 13
 ast.family.vpnv6 13
 ast.family.ipv4-flowspec 13
 ast.family.ipv6-flowspec 13
-ast.family.evpn 12
+ast.family.evpn 27
 ast.family.rtc 10
 ast.family.bgp-ls 10
 ast.family.bgp-ls-vpn 10
@@ -102,63 +102,63 @@ ast.param.asn-set 2
 ast.param.community 2
 ast.param.ip 2
 ast.decl.import 20
-ast.decl.prefix-set 551
+ast.decl.prefix-set 566
 ast.decl.prefix-set.ge-le 337
-ast.decl.community-set 566
-ast.decl.asn-set 267
+ast.decl.community-set 581
+ast.decl.asn-set 282
 ast.decl.dataset.prefix-set 4
 ast.decl.dataset.asn-set 5
-ast.decl.dataset.community-set 61
+ast.decl.dataset.community-set 76
 ast.decl.fn 31
 ast.decl.fn.let 21
-ast.decl.test 1063
-ast.set.community.standard 566
+ast.decl.test 1078
+ast.set.community.standard 581
 ast.set.community.large 149
-ast.set.community.route-target 61
-ast.set.community.route-origin 61
-ast.set.community.well-known-ext 61
+ast.set.community.route-target 76
+ast.set.community.route-origin 76
+ast.set.community.well-known-ext 76
 ast.set.pattern.standard 11
 ast.set.pattern.large 71
-ast.set.pattern.route-target 121
-ast.set.pattern.route-origin 61
-ast.set.pattern-field.range 132
-ast.set.pattern-field.private-as 61
-ast.test.dataset-override 66
-ast.test.route.prefix 973
-ast.test.route.communities 681
-ast.test.route.large-communities 309
-ast.test.route.ext-communities 121
-ast.test.route.as-path 773
+ast.set.pattern.route-target 136
+ast.set.pattern.route-origin 76
+ast.set.pattern-field.range 147
+ast.set.pattern-field.private-as 76
+ast.test.dataset-override 81
+ast.test.route.prefix 988
+ast.test.route.communities 696
+ast.test.route.large-communities 324
+ast.test.route.ext-communities 136
+ast.test.route.as-path 788
 ast.test.route.next-hop 137
 ast.test.route.local-pref 197
 ast.test.route.med 315
 ast.test.route.rpki 108
 ast.test.route.aspa 144
 ast.test.route.route-type 137
-ast.test.route.evpn-route-type 198
-ast.test.route.family 272
-ast.test.peer.address 198
-ast.test.peer.asn 121
-ast.test.peer.local-as 61
+ast.test.route.evpn-route-type 213
+ast.test.route.family 287
+ast.test.peer.address 213
+ast.test.peer.asn 136
+ast.test.peer.local-as 76
 ast.test.peer.group 162
 ast.test.expect.chain 161
-ast.test.expect.with-only 293
-ast.test.expect.accept 1052
-ast.test.expect.reject 838
+ast.test.expect.with-only 369
+ast.test.expect.accept 1067
+ast.test.expect.reject 853
 ast.test.expect.error 23
-ast.test.with.local-pref 526
-ast.test.with.med 502
+ast.test.with.local-pref 602
+ast.test.with.med 517
 ast.test.with.next-hop 60
-ast.test.with.community 394
+ast.test.with.community 470
 ast.test.with.prepend 60
-ast.test.with.prepend-path 93
+ast.test.with.prepend-path 108
 ast.test.with.removes 300
-ast.test.with.removes-large-admin 61
-ast.test.with.removes-all 61
+ast.test.with.removes-large-admin 76
+ast.test.with.removes-all 76
 ast.test.with.not-removed 200
 ast.test.with.without-community 56
 ast.test.with.without 232
-ir.guard.true 1246
+ir.guard.true 1256
 ir.guard.prefix-in-set 222
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
@@ -181,9 +181,9 @@ ir.guard.neighbor-in 12
 ir.guard.neighbor-ne 12
 ir.guard.route-type-is 13
 ir.guard.route-type-ne 10
-ir.guard.evpn-route-type-is 13
-ir.guard.evpn-route-type-ne 11
-ir.guard.family-is 64
+ir.guard.evpn-route-type-is 18
+ir.guard.evpn-route-type-ne 13
+ir.guard.family-is 79
 ir.guard.family-ne 12
 ir.guard.rpki-is 52
 ir.guard.aspa-is 76
@@ -192,7 +192,7 @@ ir.guard.exists 12
 ir.guard.local-in-asn-set 22
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 6
-ir.guard.and 165
+ir.guard.and 180
 ir.guard.or 15
 ir.guard.not 64
 ir.value.const 200
@@ -203,8 +203,8 @@ ir.value.binary 137
 ir.value.min 40
 ir.value.max 11
 ir.value.clamp 11
-ir.action.permit 1184
-ir.action.deny 356
+ir.action.permit 1188
+ir.action.deny 367
 ir.action.continue 200
 ir.action.bind 109
 ir.action.for-each 75
@@ -214,14 +214,14 @@ ir.action.community-var 43
 ir.action.remove-large-community-admin 22
 ir.action.remove-all-communities 56
 ir.action.remove-communities-in-set 35
-ir.mod.set-local-pref 119
+ir.mod.set-local-pref 121
 ir.mod.set-local-pref-computed 19
-ir.mod.set-med 91
+ir.mod.set-med 92
 ir.mod.set-med-computed 87
 ir.mod.set-next-hop 13
 ir.mod.prepend 32
 ir.mod.prepend-computed 22
-ir.mod.community-add 451
+ir.mod.community-add 452
 ir.mod.community-remove 33
 ir.mod.large-community-add 11
 ir.mod.large-community-remove 17
@@ -433,181 +433,444 @@ tests/fixtures/v1-stable/v0.79.0/route-server/hygiene.rpol = examples/route-serv
 tests/fixtures/v1-stable/v0.80.0/route-server/hygiene.rpol = examples/route-server/hygiene.rpol
 tests/fixtures/v1-stable/v0.81.0/route-server/hygiene.rpol = examples/route-server/hygiene.rpol
 
-## term names (per instantiation; chain members split by ;)
-bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-a.rpol | member-in => drop-blocked default
-bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-a.rpol | member-out => tag.2
-bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-in => drop-blocked default
-bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out => tag.2
-crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins => action.1 action.2 action.3
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges => t
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error => t
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing => t.2
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score => t.1 t.2 t.3 t.4 rest
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager => t.2 t.4
-crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | bogon-path-guard => walk.1 walk.2
-crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | strip-scrub => walk.1 walk.2
-crates/policy/fuzz/seeds/rpol_compile/lan-303-nested-loops.rpol | nested => t.1 t.2
-crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p => t.1.1 t.1.2 t.1.3 t.1.4 t.1.5 t.1.6 t.1.7 t.1.8 t.1.9 t.2 t.3
-crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p => dampen.1 dampen.2 dampen.3 dampen.4 dampen.5 pad.1.1 pad.1.2 pad.1.3 pad.1.4 pad.1.5 pad.1.6 pad.2
-crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(200) => transit-guard med-scrub customer-routes default-accept
-crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(300) => transit-guard med-scrub customer-routes default-accept
-crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | edge-out => no-leak tag-and-med.3
-crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | src-default => baseline
-crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(200) => transit-guard med-scrub customer-routes default-accept
-crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(300) => transit-guard med-scrub customer-routes default-accept
-crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | edge-out => no-leak tag-and-med.3
-crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | src-default => baseline
-crates/policy/tests/decision_corpus/actions.rpol | branches => t.1.1 t.1.2 t.1.3 t.2
-crates/policy/tests/decision_corpus/actions.rpol | computed-prepend => t.2
-crates/policy/tests/decision_corpus/actions.rpol | next-hop-rewrite => own fixed.2
-crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set => t.1 t.2 t.3
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub => t.3
-crates/policy/tests/decision_corpus/actions.rpol | tag-forward(65000:7, 192.0.2.9, scrub-tags) => tagged.1 tagged.2 rest
-crates/policy/tests/decision_corpus/control-flow.rpol | call-guard => bad good tag
-crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard => t.1.1/call-guard:#enter t.1.2/call-guard:bad t.1.3/call-guard:good t.1.4/call-guard:good:#return t.1.5/call-guard:tag t.2 rest
-crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts => drop keep late.2
-crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop => t.1 t.2
-crates/policy/tests/decision_corpus/control-flow.rpol | tiers => tier.1 tier.2 tier.3 tier.4 mark rest
-crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins => actions rest
-crates/policy/tests/decision_corpus/guards.rpol | evpn-types => mac-ip not-imet rest
-crates/policy/tests/decision_corpus/guards.rpol | next-hop-is-peer => own rest
-crates/policy/tests/decision_corpus/guards.rpol | next-hops => fixed third-party other rest
-crates/policy/tests/decision_corpus/guards.rpol | not-bogon => bogon rest
-crates/policy/tests/decision_corpus/guards.rpol | not-from-leaf => leaf rest
-crates/policy/tests/decision_corpus/guards.rpol | not-v4 => other rest
-crates/policy/tests/decision_corpus/guards.rpol | origin-lock => ours foreign rest
-crates/policy/tests/decision_corpus/guards.rpol | path-contains => transit rest
-crates/policy/tests/decision_corpus/guards.rpol | preferred => high rest
-crates/policy/tests/decision_corpus/guards.rpol | route-types => ibgp not-ebgp rest
-crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only => t rest
-crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only => t rest
-crates/policy/tests/decision_corpus/surface.rpol | by-family => v4lu v6lu v4vpn v6vpn v4fs v6fs evpn rtc ls lsvpn rest
-crates/policy/tests/decision_corpus/surface.rpol | communities-by-kind => large ext fed rest
-crates/policy/tests/decision_corpus/surface.rpol | community-counts => few large ext rest
-crates/policy/tests/decision_corpus/surface.rpol | computed-prepends => pad.4
-crates/policy/tests/decision_corpus/surface.rpol | from-transit => peer-asn rest
-crates/policy/tests/decision_corpus/surface.rpol | only-prefixes(docs, transit) => listed rest
-crates/policy/tests/decision_corpus/surface.rpol | scrub => large all.1 all.2
-docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in => drop-blocked default
-docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-out => tag.2
-docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | stable-out => tag.2
-docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol | member-in => drop-blocked default
-docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol | member-out => tag.2
-docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol | stable-out => tag.2
-docs/cookbook/manrs-ixp-action1.md#c50e2b751c466af7 | member-a-irr => accept-authorized reject-unauthorized
-docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | bogon-filter => drop-bogons clean
-docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | customer-in(150) => bogon-guard transit-guard scrub customer-routes default-reject
-docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | edge-out => no-internal-leak tag.2
-docs/cookbook/route-server-shadow-pilot.md#7a27f06c66df4ca8 | shadow-receive-only => everything
-docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-a.rpol | member-in => drop-blocked default
-docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-a.rpol | member-out => tag.2
-docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-b.rpol | member-in => drop-blocked default
-docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-b.rpol | member-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-a.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-a.rpol | member-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-a.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-b.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-b.rpol | member-out => drop-filtered tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-b.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/rustbgpd/scenario/gen-b.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/rustbgpd/scenario/gen-b.rpol | member-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/rustbgpd/scenario/gen-b.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-a.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-a.rpol | member-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-a.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-b.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-b.rpol | member-out => drop-filtered tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-b.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-a.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-a.rpol | member-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-a.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-b.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-b.rpol | member-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-b.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09/rung1-20-F/scenario/gen-b.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-2026-09/rung1-20-F/scenario/gen-b.rpol | member-out => drop-filtered tag.2
-docs/perf/artifacts/ixp-dualstack-2026-09/rung1-20-F/scenario/gen-b.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/20-50-F/rustbgpd/scenario/gen-b.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/20-50-F/rustbgpd/scenario/gen-b.rpol | member-out => drop-filtered tag.2
-docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/20-50-F/rustbgpd/scenario/gen-b.rpol | stable-out => tag.2
-docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/700-A-50-P/rustbgpd/scenario/gen-b.rpol | member-in => drop-blocked default
-docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/700-A-50-P/rustbgpd/scenario/gen-b.rpol | member-out => tag.2
-docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/700-A-50-P/rustbgpd/scenario/gen-b.rpol | stable-out => tag.2
-docs/reference/rpol-language.md#01a0dec67ca64dc2 | route-server-in => scrub-communities bogon-path-guard.1 bogon-path-guard.2
-docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default => tag
-docs/reference/rpol-language.md#175e8e41e847bda5 | customer-in => too-long rpki-invalid customer rest
-docs/reference/rpol-language.md#181b749f48378d70 | chain [prepend-65000, prepend-65001] => t ; t
-docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 => t
-docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 => t
-docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice => t.3
-docs/reference/rpol-language.md#18fe62d24c72b97d | chain [tag-only, retag] => t ; t.1 t.3
-docs/reference/rpol-language.md#18fe62d24c72b97d | retag => t.1 t.3
-docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag => t.1 t.4
-docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all => t.1 t.2
-docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only => t
-docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag => early t.1 t.3
-docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen => score.1 score.2 score.3 score.4 rest
-docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med => pad.1 pad.2 pad.4
-docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline => dampen pad.2
-docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus => t.2
-docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus => t.2
-docs/reference/rpol-language.md#44f6dee15d76fa13 | strip-many-communities => too-many rest
-docs/reference/rpol-language.md#5385c4f5957c146c | origin-guard => customers rest
-docs/reference/rpol-language.md#58f815b259096878 | p => dampen.1 dampen.2 dampen.3 dampen.4 dampen.5 rest
-docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out => scrub.1 scrub.2 scrub.3
-docs/reference/rpol-language.md#6765c1041b72308b | chain [finish, later-member] => t.2 ; t.2
-docs/reference/rpol-language.md#6765c1041b72308b | chain [finish, reject-long] => t.2 ; t
-docs/reference/rpol-language.md#6765c1041b72308b | chain [later-member, finish] => t.2 ; t.2
-docs/reference/rpol-language.md#6765c1041b72308b | chain [reject-long, finish] => t ; t.2
-docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks => done-path too-long
-docs/reference/rpol-language.md#6765c1041b72308b | finish => t.2
-docs/reference/rpol-language.md#6765c1041b72308b | from-65001 => t rest
-docs/reference/rpol-language.md#6765c1041b72308b | later-member => t.2
-docs/reference/rpol-language.md#6765c1041b72308b | reject-long => t
-docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check => tiers.1 tiers.2 too-long rest
-docs/reference/rpol-language.md#6fb3d78db189b2d7 | authorized-customers => authorized
-docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med => dampen pad.3
-docs/reference/rpol-language.md#886e2221d941a139 | partner-in => partner-v4 partner-v6 rest
-docs/reference/rpol-language.md#8ca6cc38727ea3ec | scrub => internal.1 internal.2 rest
-docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag => t.1 t.3
-docs/reference/rpol-language.md#9cf7d38d857da79b | accept-at-end => tag too-long pass-customers
-docs/reference/rpol-language.md#9cf7d38d857da79b | accept-too-early => tag too-long
-docs/reference/rpol-language.md#9ea347e0d0bb861e | bogon-filter => bogons everything-else
-docs/reference/rpol-language.md#9ea347e0d0bb861e | customer-in(200) => rpki-guard customer-routes bogon-guard
-docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins => match rest
-docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins-old => match rest
-docs/reference/rpol-language.md#abe95d01360e284b | bogon-guard => walk.1 walk.2
-docs/reference/rpol-language.md#abe95d01360e284b | bogon-guard-regex => walk.1 walk.2
-docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 => no-origin blocked rest
-docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in => common.1/customer-common(200):#enter common.2/customer-common(200):bad common.3/customer-common(200):tag.1 common.4/customer-common(200):tag.2 done
-docs/reference/rpol-language.md#c22f23e15ebcdbde | edge => dampen-v4 dampen-v6 rest
-docs/reference/rpol-language.md#c33ecfd1812a442e | edge-v4 => dampen rest
-docs/reference/rpol-language.md#c33ecfd1812a442e | edge-v6 => dampen rest
-docs/reference/rpol-language.md#e36f3aa580bc8183 | literal-port => tag
-docs/reference/rpol-language.md#e36f3aa580bc8183 | ported => tag
-docs/reference/rpol-language.md#f78466098ad857e2 | strip-many-communities => standard extended large rest
-examples/manrs-action1/member-a-irr.rpol | member-a-irr => accept-authorized reject-unauthorized
-examples/route-server/hygiene.rpol | ixp-hygiene => reject-aspa-invalid
-examples/route-server/hygiene.rpol | reject-special-purpose => preserve-active-parent-exception reject-non-global
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene => reject-as-set reject-aspa-invalid tag-ov-valid tag-ov-not-found tag-ov-invalid
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene => reject-as-set reject-aspa-invalid tag-ov-valid tag-ov-not-found tag-ov-invalid
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene => reject-as-set reject-aspa-invalid tag-ov-valid tag-ov-not-found tag-ov-invalid
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | reject-special-purpose => preserve-active-parent-exception reject-non-global
-tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | ixp-hygiene => reject-as-set reject-aspa-invalid
-tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | reject-special-purpose => preserve-active-parent-exception reject-non-global
-tests/interop/configs/m81-bmp-policy-rejects.rpol | m81-bmp-policy-rejects => reject-v4 reject-v6 accept-existing-receipt
-tests/interop/configs/m83-hygiene.rpol | ixp-hygiene => reject-aspa-invalid
-tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(200) => transit-guard med-scrub customer-routes partner-v4 partner-v6 default-accept
-tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(300) => transit-guard med-scrub customer-routes partner-v4 partner-v6 default-accept
-tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | edge-out => no-leak med-v6 tag-and-med.3
-tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | src-default => baseline
-tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(200) => transit-guard med-scrub customer-routes partner-v4 partner-v6 default-accept
-tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(300) => transit-guard med-scrub customer-routes partner-v4 partner-v6 default-accept
-tests/interop/configs/rustbgpd-m80-policy.rpol | edge-out => no-leak med-v6 tag-and-med.3
-tests/interop/configs/rustbgpd-m80-policy.rpol | src-default => baseline
-tools/rs-config-render/tests/golden/client-as197000-1.rpol | client-as197000-1 => accept-authorized rest
-tools/rs-config-render/tests/golden/client-as4242-1.rpol | client-as4242-1 => accept-authorized rest
-tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene => scrub-arin-whois-tag.2 scrub-rpki-ov-unknown.2 scrub-reject-cause-map scrub-custom-communities reject-invalid-asn reject-transit-free-in-path reject-never-via-rs reject-long-as-path reject-bogon-prefix reject-black-list-prefix reject-v4-len-outside-window reject-v6-len-outside-window reject-rpki-invalid
+## term names (every lowered row of every instantiation, with what it holds)
+bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-a.rpol | member-in | row member-in default => accept
+bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-a.rpol | member-in | row member-in drop-blocked => reject
+bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-a.rpol | member-out | row member-out tag => accept with add community 65500:1000
+bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-in | row member-in default => accept
+bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65500:2000
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | row twins action => accept with set local-pref 50
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | row twins action.1 => remove community in rs-no-export
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | row twins action.2 => remove large-community in rs-no-export
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | row edges t => accept with UNRESOLVED-COMPUTED
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | row error t => accept
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | failing | row failing t => accept with UNRESOLVED-COMPUTED
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | row score rest => accept
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | row score t => accept with UNRESOLVED-COMPUTED
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | row score t.1 => let origin
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | row score t.2 => let penalty
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | row score t.3 => reject
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | row eager t => accept with set local-pref 500; UNRESOLVED-COMPUTED
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | row eager t.2 => let x
+crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | bogon-path-guard | row bogon-path-guard walk => accept
+crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | bogon-path-guard | row bogon-path-guard walk.1 => for asn (2 body rows)
+crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | strip-scrub | row strip-scrub walk => accept
+crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | strip-scrub | row strip-scrub walk.1 => for c (2 body rows)
+crates/policy/fuzz/seeds/rpol_compile/lan-303-nested-loops.rpol | nested | row nested t => accept
+crates/policy/fuzz/seeds/rpol_compile/lan-303-nested-loops.rpol | nested | row nested t.1 => for a (1 body rows)
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t => accept
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.1 => let f1.x
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.2 => let f2.x
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.3 => let f3.x
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.4 => let f4.x
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.5 => let f4(x)
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.6 => let f3(x)
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.7 => let f2(x)
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.8 => let f1(route.med)
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.1.9 => let total
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | row p t.2 => reject
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p dampen => reject
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p dampen.1 => let penalty.len
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p dampen.2 => let penalty.weight
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p dampen.3 => let penalty.base
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p dampen.4 => let penalty(route.as-path.len, 10)
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p pad => accept with UNRESOLVED-COMPUTED
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p pad.1.1 => let padded.x
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p pad.1.2 => let penalty.len
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p pad.1.3 => let penalty.weight
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p pad.1.4 => let penalty.base
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p pad.1.5 => let penalty(x, 10)
+crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | p | row p pad.1.6 => let padded(route.as-path.len)
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) customer-routes => accept with set local-pref 200; add community 65001:999
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) default-accept => accept
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) med-scrub => continue with set med 0; remove community 65000:666
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) transit-guard => reject
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) customer-routes => accept with set local-pref 300; add community 65001:999
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) default-accept => accept
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) med-scrub => continue with set med 0; remove community 65000:666
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) transit-guard => reject
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | edge-out | row edge-out no-leak => reject
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | edge-out | row edge-out tag-and-med => accept with set med 50; add community 65001:777
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy-lp150.rpol | src-default | row src-default baseline => continue with set local-pref 150
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) customer-routes => accept with set local-pref 200; add community 65001:999
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) default-accept => accept
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) med-scrub => continue with set med 0; remove community 65000:666
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) transit-guard => reject
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) customer-routes => accept with set local-pref 300; add community 65001:999
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) default-accept => accept
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) med-scrub => continue with set med 0; remove community 65000:666
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) transit-guard => reject
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | edge-out | row edge-out no-leak => reject
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | edge-out | row edge-out tag-and-med => accept with set med 50; add community 65001:777
+crates/policy/fuzz/seeds/rpol_compile/rustbgpd-m80-policy.rpol | src-default | row src-default baseline => continue with set local-pref 100
+crates/policy/tests/decision_corpus/actions.rpol | branches | row branches t => accept
+crates/policy/tests/decision_corpus/actions.rpol | branches | row branches t.1.1 => continue with set med 1
+crates/policy/tests/decision_corpus/actions.rpol | branches | row branches t.1.2 => continue with set med 2
+crates/policy/tests/decision_corpus/actions.rpol | branches | row branches t.1.3 => continue with set med 3
+crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | row computed-prepend t => accept with UNRESOLVED-COMPUTED
+crates/policy/tests/decision_corpus/actions.rpol | next-hop-rewrite | row next-hop-rewrite fixed => accept with set next-hop 198.51.100.254
+crates/policy/tests/decision_corpus/actions.rpol | next-hop-rewrite | row next-hop-rewrite own => accept with set next-hop self
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | row scrub-by-set t => accept
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | row scrub-by-set t.1 => remove ext-community not in route-targets
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | row scrub-by-set t.2 => remove large-community in own-large
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | row tag-and-scrub t => accept with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-forward(65000:7, 192.0.2.9, scrub-tags) | row tag-forward(65000:7, 192.0.2.9, scrub-tags) rest => reject
+crates/policy/tests/decision_corpus/actions.rpol | tag-forward(65000:7, 192.0.2.9, scrub-tags) | row tag-forward(65000:7, 192.0.2.9, scrub-tags) tagged => accept with set next-hop 192.0.2.9
+crates/policy/tests/decision_corpus/actions.rpol | tag-forward(65000:7, 192.0.2.9, scrub-tags) | row tag-forward(65000:7, 192.0.2.9, scrub-tags) tagged.1 => remove community in scrub-tags
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | row call-guard bad => reject
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | row call-guard good => accept with set local-pref 300
+crates/policy/tests/decision_corpus/control-flow.rpol | call-guard | row call-guard tag => continue with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | row calls-guard rest => accept
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | row calls-guard t => continue with set med 7
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | row calls-guard t.1.1/call-guard:#enter => let #return
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | row calls-guard t.1.2/call-guard:bad => reject
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | row calls-guard t.1.3/call-guard:good => let #return
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | row calls-guard t.1.4/call-guard:good:#return => continue with set local-pref 300
+crates/policy/tests/decision_corpus/control-flow.rpol | calls-guard | row calls-guard t.1.5/call-guard:tag => continue with add community 65000:1
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | row early-verdicts drop => reject
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | row early-verdicts keep => accept with set local-pref 150
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | row early-verdicts late => accept with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | row scrub-loop t => accept
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | row scrub-loop t.1 => for c (3 body rows)
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | row tiers mark => continue with add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | row tiers rest => accept
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | row tiers tier => continue with set local-pref 50
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | row tiers tier.1 => continue with set local-pref 300
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | row tiers tier.2 => continue with set local-pref 200
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | row tiers tier.3 => continue with set local-pref 100
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | row any-kind-twins actions => accept with set local-pref 50
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | row any-kind-twins rest => accept
+crates/policy/tests/decision_corpus/guards.rpol | evpn-types | row evpn-types mac-ip => accept
+crates/policy/tests/decision_corpus/guards.rpol | evpn-types | row evpn-types not-imet => reject
+crates/policy/tests/decision_corpus/guards.rpol | evpn-types | row evpn-types rest => accept
+crates/policy/tests/decision_corpus/guards.rpol | next-hop-is-peer | row next-hop-is-peer own => accept
+crates/policy/tests/decision_corpus/guards.rpol | next-hop-is-peer | row next-hop-is-peer rest => reject
+crates/policy/tests/decision_corpus/guards.rpol | next-hops | row next-hops fixed => accept
+crates/policy/tests/decision_corpus/guards.rpol | next-hops | row next-hops other => accept with set med 10
+crates/policy/tests/decision_corpus/guards.rpol | next-hops | row next-hops rest => reject
+crates/policy/tests/decision_corpus/guards.rpol | next-hops | row next-hops third-party => reject
+crates/policy/tests/decision_corpus/guards.rpol | not-bogon | row not-bogon bogon => accept
+crates/policy/tests/decision_corpus/guards.rpol | not-bogon | row not-bogon rest => reject
+crates/policy/tests/decision_corpus/guards.rpol | not-from-leaf | row not-from-leaf leaf => accept
+crates/policy/tests/decision_corpus/guards.rpol | not-from-leaf | row not-from-leaf rest => reject
+crates/policy/tests/decision_corpus/guards.rpol | not-v4 | row not-v4 other => reject
+crates/policy/tests/decision_corpus/guards.rpol | not-v4 | row not-v4 rest => accept
+crates/policy/tests/decision_corpus/guards.rpol | origin-lock | row origin-lock foreign => reject
+crates/policy/tests/decision_corpus/guards.rpol | origin-lock | row origin-lock ours => accept with set local-pref 200
+crates/policy/tests/decision_corpus/guards.rpol | origin-lock | row origin-lock rest => accept
+crates/policy/tests/decision_corpus/guards.rpol | path-contains | row path-contains rest => accept
+crates/policy/tests/decision_corpus/guards.rpol | path-contains | row path-contains transit => reject
+crates/policy/tests/decision_corpus/guards.rpol | preferred | row preferred high => accept
+crates/policy/tests/decision_corpus/guards.rpol | preferred | row preferred rest => reject
+crates/policy/tests/decision_corpus/guards.rpol | route-types | row route-types ibgp => accept with set local-pref 100
+crates/policy/tests/decision_corpus/guards.rpol | route-types | row route-types not-ebgp => reject
+crates/policy/tests/decision_corpus/guards.rpol | route-types | row route-types rest => accept
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | row tagged-only rest => reject
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | row tagged-only t => accept
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | row tagged-only rest => reject
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | row tagged-only t => accept
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family evpn => accept with set med 7
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family ls => accept with set med 9
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family lsvpn => accept with set med 10
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family rest => accept
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family rtc => accept with set med 8
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v4fs => accept with set med 5
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v4lu => accept with set med 1
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v4vpn => accept with set med 3
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v6fs => accept with set med 6
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v6lu => accept with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family v6vpn => accept with set med 4
+crates/policy/tests/decision_corpus/surface.rpol | communities-by-kind | row communities-by-kind ext => accept with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | communities-by-kind | row communities-by-kind fed => reject
+crates/policy/tests/decision_corpus/surface.rpol | communities-by-kind | row communities-by-kind large => accept with set med 1
+crates/policy/tests/decision_corpus/surface.rpol | communities-by-kind | row communities-by-kind rest => accept
+crates/policy/tests/decision_corpus/surface.rpol | community-counts | row community-counts ext => continue with set med 3
+crates/policy/tests/decision_corpus/surface.rpol | community-counts | row community-counts few => continue with set med 1
+crates/policy/tests/decision_corpus/surface.rpol | community-counts | row community-counts large => continue with set med 2
+crates/policy/tests/decision_corpus/surface.rpol | community-counts | row community-counts rest => accept
+crates/policy/tests/decision_corpus/surface.rpol | computed-prepends | row computed-prepends pad => accept with UNRESOLVED-COMPUTED
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr imet => reject
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr mac-ip => accept with set local-pref 200
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr not-prefix => accept with add community 65000:5
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr prefix => accept with set med 5
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr rest => reject
+crates/policy/tests/decision_corpus/surface.rpol | from-transit | row from-transit peer-asn => accept with set local-pref 50
+crates/policy/tests/decision_corpus/surface.rpol | from-transit | row from-transit rest => accept
+crates/policy/tests/decision_corpus/surface.rpol | only-prefixes(docs, transit) | row only-prefixes(docs, transit) listed => accept
+crates/policy/tests/decision_corpus/surface.rpol | only-prefixes(docs, transit) | row only-prefixes(docs, transit) rest => reject
+crates/policy/tests/decision_corpus/surface.rpol | scrub | row scrub all => accept
+crates/policy/tests/decision_corpus/surface.rpol | scrub | row scrub all.1 => remove community *
+crates/policy/tests/decision_corpus/surface.rpol | scrub | row scrub large => remove large-community 65000:*:*
+docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in | row member-in default => accept
+docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in | row member-in drop-blocked => reject
+docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-out | row member-out tag => accept with add community 65400:1000
+docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol | member-in | row member-in default => accept
+docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-b.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/cookbook/manrs-ixp-action1.md#c50e2b751c466af7 | member-a-irr | row member-a-irr accept-authorized => accept
+docs/cookbook/manrs-ixp-action1.md#c50e2b751c466af7 | member-a-irr | row member-a-irr reject-unauthorized => reject
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | bogon-filter | row bogon-filter clean => accept
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | bogon-filter | row bogon-filter drop-bogons => reject
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | customer-in(150) | row customer-in(150) bogon-guard => reject
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | customer-in(150) | row customer-in(150) customer-routes => accept with set local-pref 150; add community 65000:100
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | customer-in(150) | row customer-in(150) default-reject => reject
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | customer-in(150) | row customer-in(150) scrub => continue with set med 0; remove community 65000:666
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | customer-in(150) | row customer-in(150) transit-guard => reject
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | edge-out | row edge-out no-internal-leak => reject
+docs/cookbook/policy-quickstart.md#a3fd935127a98e08 | edge-out | row edge-out tag => accept with add community 65000:200
+docs/cookbook/route-server-shadow-pilot.md#7a27f06c66df4ca8 | shadow-receive-only | row shadow-receive-only everything => reject
+docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-a.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-a.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-a.rpol | member-out | row member-out tag => accept with add community 65400:1000
+docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-b.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/idle-readiness-checkpoint-2026-10-10/inputs/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-a.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-a.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-a.rpol | member-out | row member-out tag => accept with add community 65400:1000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-a.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-b.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-b.rpol | member-out | row member-out drop-filtered => reject
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-F/rustbgpd/scenario/gen-b.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/rustbgpd/scenario/gen-b.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/rustbgpd/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/rustbgpd/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/rustbgpd/scenario/gen-b.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-a.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-a.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-a.rpol | member-out | row member-out tag => accept with add community 65400:1000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-a.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-b.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-b.rpol | member-out | row member-out drop-filtered => reject
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/perf/artifacts/ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/scenario/gen-b.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-a.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-a.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-a.rpol | member-out | row member-out tag => accept with add community 65400:1000
+docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-a.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-b.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/perf/artifacts/ixp-dualstack-2026-09/negative-20-v4only/scenario/gen-b.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-2026-09/rung1-20-F/scenario/gen-b.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-2026-09/rung1-20-F/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-2026-09/rung1-20-F/scenario/gen-b.rpol | member-out | row member-out drop-filtered => reject
+docs/perf/artifacts/ixp-dualstack-2026-09/rung1-20-F/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/perf/artifacts/ixp-dualstack-2026-09/rung1-20-F/scenario/gen-b.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/20-50-F/rustbgpd/scenario/gen-b.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/20-50-F/rustbgpd/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/20-50-F/rustbgpd/scenario/gen-b.rpol | member-out | row member-out drop-filtered => reject
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/20-50-F/rustbgpd/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/20-50-F/rustbgpd/scenario/gen-b.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/700-A-50-P/rustbgpd/scenario/gen-b.rpol | member-in | row member-in default => accept
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/700-A-50-P/rustbgpd/scenario/gen-b.rpol | member-in | row member-in drop-blocked => reject
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/700-A-50-P/rustbgpd/scenario/gen-b.rpol | member-out | row member-out tag => accept with add community 65400:2000
+docs/perf/artifacts/ixp-dualstack-final-campaign-2026-09/700-A-50-P/rustbgpd/scenario/gen-b.rpol | stable-out | row stable-out tag => accept with add community 65400:9000
+docs/reference/rpol-language.md#01a0dec67ca64dc2 | route-server-in | row route-server-in bogon-path-guard => accept
+docs/reference/rpol-language.md#01a0dec67ca64dc2 | route-server-in | row route-server-in bogon-path-guard.1 => for asn (1 body rows)
+docs/reference/rpol-language.md#01a0dec67ca64dc2 | route-server-in | row route-server-in scrub-communities => for c (1 body rows)
+docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | row no-default tag => continue with set local-pref 200
+docs/reference/rpol-language.md#175e8e41e847bda5 | customer-in | row customer-in customer => accept with set local-pref 200; add community 65000:100
+docs/reference/rpol-language.md#175e8e41e847bda5 | customer-in | row customer-in rest => reject
+docs/reference/rpol-language.md#175e8e41e847bda5 | customer-in | row customer-in rpki-invalid => reject
+docs/reference/rpol-language.md#175e8e41e847bda5 | customer-in | row customer-in too-long => reject
+docs/reference/rpol-language.md#181b749f48378d70 | chain [prepend-65000, prepend-65001] | row prepend-65000 t => continue with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | chain [prepend-65000, prepend-65001] | row prepend-65001 t => continue with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65000 | row prepend-65000 t => continue with prepend as 65000 1
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-65001 | row prepend-65001 t => continue with prepend as 65001 2
+docs/reference/rpol-language.md#181b749f48378d70 | prepend-twice | row prepend-twice t => accept with prepend as 131077 3; prepend as 43646981 2
+docs/reference/rpol-language.md#18fe62d24c72b97d | chain [tag-only, retag] | row retag t => accept with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | chain [tag-only, retag] | row retag t.1 => remove community *
+docs/reference/rpol-language.md#18fe62d24c72b97d | chain [tag-only, retag] | row tag-only t => continue with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | row retag t => accept with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | row retag t.1 => remove community *
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | row retag-then-tag t => accept with add community 65000:100; add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | row retag-then-tag t.1 => remove community *
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | row scrub-all t => accept
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | row scrub-all t.1 => for c (1 body rows)
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | row tag-only t => continue with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | row tag-then-retag early => continue with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | row tag-then-retag t => accept with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | row tag-then-retag t.1 => remove community *
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | row dampen rest => accept
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | row dampen score => accept with UNRESOLVED-COMPUTED
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | row dampen score.1 => let origin
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | row dampen score.2 => let penalty
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | row dampen score.3 => reject
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | row pad-med pad => accept with UNRESOLVED-COMPUTED
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | row pad-med pad.1 => let padded
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | row pad-med pad.2 => reject
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | row pad-med-inline dampen => reject
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | row pad-med-inline pad => accept with UNRESOLVED-COMPUTED
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-minus | row med-minus t => accept with UNRESOLVED-COMPUTED
+docs/reference/rpol-language.md#2eb648d1b1173957 | med-plus | row med-plus t => accept with UNRESOLVED-COMPUTED
+docs/reference/rpol-language.md#44f6dee15d76fa13 | strip-many-communities | row strip-many-communities rest => accept
+docs/reference/rpol-language.md#44f6dee15d76fa13 | strip-many-communities | row strip-many-communities too-many => remove community *; remove ext-community *; remove large-community *:*:*
+docs/reference/rpol-language.md#5385c4f5957c146c | origin-guard | row origin-guard customers => accept
+docs/reference/rpol-language.md#5385c4f5957c146c | origin-guard | row origin-guard rest => reject
+docs/reference/rpol-language.md#58f815b259096878 | p | row p dampen => reject
+docs/reference/rpol-language.md#58f815b259096878 | p | row p dampen.1 => let penalty.len
+docs/reference/rpol-language.md#58f815b259096878 | p | row p dampen.2 => let penalty.weight
+docs/reference/rpol-language.md#58f815b259096878 | p | row p dampen.3 => let penalty.base
+docs/reference/rpol-language.md#58f815b259096878 | p | row p dampen.4 => let penalty(route.as-path.len, 10)
+docs/reference/rpol-language.md#58f815b259096878 | p | row p rest => accept
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | row customer-out scrub => accept
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | row customer-out scrub.1 => remove community in scrub
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | row customer-out scrub.2 => remove large-community not in customer-tags
+docs/reference/rpol-language.md#6765c1041b72308b | chain [finish, later-member] | row finish t => accept with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | chain [finish, later-member] | row later-member t => accept with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | chain [finish, reject-long] | row finish t => accept with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | chain [finish, reject-long] | row reject-long t => reject
+docs/reference/rpol-language.md#6765c1041b72308b | chain [later-member, finish] | row finish t => accept with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | chain [later-member, finish] | row later-member t => accept with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | chain [reject-long, finish] | row finish t => accept with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | chain [reject-long, finish] | row reject-long t => reject
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | row done-then-checks done-path => accept with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | row done-then-checks too-long => reject
+docs/reference/rpol-language.md#6765c1041b72308b | finish | row finish t => accept with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | row from-65001 rest => accept
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | row from-65001 t => accept with set local-pref 150
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | row later-member t => accept with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | row reject-long t => reject
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | row tiers-then-check rest => accept
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | row tiers-then-check tiers => continue with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | row tiers-then-check tiers.1 => continue with set local-pref 300
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | row tiers-then-check too-long => reject
+docs/reference/rpol-language.md#6fb3d78db189b2d7 | authorized-customers | row authorized-customers authorized => accept
+docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | row pad-med dampen => reject
+docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | row pad-med pad => accept with UNRESOLVED-COMPUTED
+docs/reference/rpol-language.md#886e2221d941a139 | partner-in | row partner-in partner-v4 => accept with set local-pref 210; add community 65001:604
+docs/reference/rpol-language.md#886e2221d941a139 | partner-in | row partner-in partner-v6 => accept with set local-pref 220; add community 65001:606
+docs/reference/rpol-language.md#886e2221d941a139 | partner-in | row partner-in rest => accept
+docs/reference/rpol-language.md#8ca6cc38727ea3ec | scrub | row scrub internal => remove large-community 65500:*:*
+docs/reference/rpol-language.md#8ca6cc38727ea3ec | scrub | row scrub internal.1 => continue with remove community 65530:4
+docs/reference/rpol-language.md#8ca6cc38727ea3ec | scrub | row scrub rest => accept
+docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | row retag t => accept with add community 65000:100
+docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | row retag t.1 => remove community *
+docs/reference/rpol-language.md#9cf7d38d857da79b | accept-at-end | row accept-at-end pass-customers => accept
+docs/reference/rpol-language.md#9cf7d38d857da79b | accept-at-end | row accept-at-end tag => continue with set local-pref 200
+docs/reference/rpol-language.md#9cf7d38d857da79b | accept-at-end | row accept-at-end too-long => reject
+docs/reference/rpol-language.md#9cf7d38d857da79b | accept-too-early | row accept-too-early tag => accept with set local-pref 200
+docs/reference/rpol-language.md#9cf7d38d857da79b | accept-too-early | row accept-too-early too-long => reject
+docs/reference/rpol-language.md#9ea347e0d0bb861e | bogon-filter | row bogon-filter bogons => accept
+docs/reference/rpol-language.md#9ea347e0d0bb861e | bogon-filter | row bogon-filter everything-else => reject
+docs/reference/rpol-language.md#9ea347e0d0bb861e | customer-in(200) | row customer-in(200) bogon-guard => reject
+docs/reference/rpol-language.md#9ea347e0d0bb861e | customer-in(200) | row customer-in(200) customer-routes => accept with set local-pref 200; add community 65001:999
+docs/reference/rpol-language.md#9ea347e0d0bb861e | customer-in(200) | row customer-in(200) rpki-guard => reject
+docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins | row customer-origins match => accept
+docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins | row customer-origins rest => reject
+docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins-old | row customer-origins-old match => accept
+docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins-old | row customer-origins-old rest => reject
+docs/reference/rpol-language.md#abe95d01360e284b | bogon-guard | row bogon-guard walk => accept
+docs/reference/rpol-language.md#abe95d01360e284b | bogon-guard | row bogon-guard walk.1 => for asn (1 body rows)
+docs/reference/rpol-language.md#abe95d01360e284b | bogon-guard-regex | row bogon-guard-regex walk => accept
+docs/reference/rpol-language.md#abe95d01360e284b | bogon-guard-regex | row bogon-guard-regex walk.1 => reject
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | row block-64500 blocked => reject
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | row block-64500 no-origin => reject
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | row block-64500 rest => accept
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | row customer-in common.1/customer-common(200):#enter => let #return
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | row customer-in common.2/customer-common(200):bad => reject
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | row customer-in common.3/customer-common(200):tag.1 => remove community in scrub-tags
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | row customer-in common/customer-common(200):tag => continue with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | row customer-in done => accept
+docs/reference/rpol-language.md#c22f23e15ebcdbde | edge | row edge dampen-v4 => reject
+docs/reference/rpol-language.md#c22f23e15ebcdbde | edge | row edge dampen-v6 => reject
+docs/reference/rpol-language.md#c22f23e15ebcdbde | edge | row edge rest => accept
+docs/reference/rpol-language.md#c33ecfd1812a442e | edge-v4 | row edge-v4 dampen => reject
+docs/reference/rpol-language.md#c33ecfd1812a442e | edge-v4 | row edge-v4 rest => accept
+docs/reference/rpol-language.md#c33ecfd1812a442e | edge-v6 | row edge-v6 dampen => reject
+docs/reference/rpol-language.md#c33ecfd1812a442e | edge-v6 | row edge-v6 rest => accept
+docs/reference/rpol-language.md#e36f3aa580bc8183 | literal-port | row literal-port tag => continue with set local-pref 200
+docs/reference/rpol-language.md#e36f3aa580bc8183 | ported | row ported tag => accept with set local-pref 200
+docs/reference/rpol-language.md#f78466098ad857e2 | strip-many-communities | row strip-many-communities extended => remove ext-community *
+docs/reference/rpol-language.md#f78466098ad857e2 | strip-many-communities | row strip-many-communities large => remove large-community *:*:*
+docs/reference/rpol-language.md#f78466098ad857e2 | strip-many-communities | row strip-many-communities rest => accept
+docs/reference/rpol-language.md#f78466098ad857e2 | strip-many-communities | row strip-many-communities standard => remove community *
+examples/manrs-action1/member-a-irr.rpol | member-a-irr | row member-a-irr accept-authorized => accept
+examples/manrs-action1/member-a-irr.rpol | member-a-irr | row member-a-irr reject-unauthorized => reject
+examples/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-aspa-invalid => reject
+examples/route-server/hygiene.rpol | reject-special-purpose | row reject-special-purpose preserve-active-parent-exception => accept
+examples/route-server/hygiene.rpol | reject-special-purpose | row reject-special-purpose reject-non-global => reject
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-as-set => reject
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-aspa-invalid => reject
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-invalid => continue with add ext-community OV_INVALID (0x4300000000000002)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-not-found => continue with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-valid => continue with add ext-community OV_VALID (0x4300000000000000)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-as-set => reject
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-aspa-invalid => reject
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-invalid => continue with add ext-community OV_INVALID (0x4300000000000002)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-not-found => continue with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-valid => continue with add ext-community OV_VALID (0x4300000000000000)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-as-set => reject
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-aspa-invalid => reject
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-invalid => continue with add ext-community OV_INVALID (0x4300000000000002)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-not-found => continue with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene tag-ov-valid => continue with add ext-community OV_VALID (0x4300000000000000)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | reject-special-purpose | row reject-special-purpose preserve-active-parent-exception => accept
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | reject-special-purpose | row reject-special-purpose reject-non-global => reject
+tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-as-set => reject
+tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-aspa-invalid => reject
+tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | reject-special-purpose | row reject-special-purpose preserve-active-parent-exception => accept
+tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | reject-special-purpose | row reject-special-purpose reject-non-global => reject
+tests/interop/configs/m81-bmp-policy-rejects.rpol | m81-bmp-policy-rejects | row m81-bmp-policy-rejects accept-existing-receipt => accept
+tests/interop/configs/m81-bmp-policy-rejects.rpol | m81-bmp-policy-rejects | row m81-bmp-policy-rejects reject-v4 => reject
+tests/interop/configs/m81-bmp-policy-rejects.rpol | m81-bmp-policy-rejects | row m81-bmp-policy-rejects reject-v6 => reject
+tests/interop/configs/m83-hygiene.rpol | ixp-hygiene | row ixp-hygiene reject-aspa-invalid => reject
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) customer-routes => accept with set local-pref 200; add community 65001:999
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) default-accept => accept
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) med-scrub => continue with set med 0; remove community 65000:666
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) partner-v4 => accept with set local-pref 210; add community 65001:604
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) partner-v6 => accept with set local-pref 220; add community 65001:606
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(200) | row customer-in(200) transit-guard => reject
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) customer-routes => accept with set local-pref 300; add community 65001:999
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) default-accept => accept
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) med-scrub => continue with set med 0; remove community 65000:666
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) partner-v4 => accept with set local-pref 210; add community 65001:604
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) partner-v6 => accept with set local-pref 220; add community 65001:606
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | customer-in(300) | row customer-in(300) transit-guard => reject
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | edge-out | row edge-out med-v6 => accept with set med 60; add community 65001:777
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | edge-out | row edge-out no-leak => reject
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | edge-out | row edge-out tag-and-med => accept with set med 50; add community 65001:777
+tests/interop/configs/rustbgpd-m80-policy-lp150.rpol | src-default | row src-default baseline => continue with set local-pref 150
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) customer-routes => accept with set local-pref 200; add community 65001:999
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) default-accept => accept
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) med-scrub => continue with set med 0; remove community 65000:666
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) partner-v4 => accept with set local-pref 210; add community 65001:604
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) partner-v6 => accept with set local-pref 220; add community 65001:606
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(200) | row customer-in(200) transit-guard => reject
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) customer-routes => accept with set local-pref 300; add community 65001:999
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) default-accept => accept
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) med-scrub => continue with set med 0; remove community 65000:666
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) partner-v4 => accept with set local-pref 210; add community 65001:604
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) partner-v6 => accept with set local-pref 220; add community 65001:606
+tests/interop/configs/rustbgpd-m80-policy.rpol | customer-in(300) | row customer-in(300) transit-guard => reject
+tests/interop/configs/rustbgpd-m80-policy.rpol | edge-out | row edge-out med-v6 => accept with set med 60; add community 65001:777
+tests/interop/configs/rustbgpd-m80-policy.rpol | edge-out | row edge-out no-leak => reject
+tests/interop/configs/rustbgpd-m80-policy.rpol | edge-out | row edge-out tag-and-med => accept with set med 50; add community 65001:777
+tests/interop/configs/rustbgpd-m80-policy.rpol | src-default | row src-default baseline => continue with set local-pref 100
+tools/rs-config-render/tests/golden/client-as197000-1.rpol | client-as197000-1 | row client-as197000-1 accept-authorized => accept
+tools/rs-config-render/tests/golden/client-as197000-1.rpol | client-as197000-1 | row client-as197000-1 rest => reject
+tools/rs-config-render/tests/golden/client-as4242-1.rpol | client-as4242-1 | row client-as4242-1 accept-authorized => accept
+tools/rs-config-render/tests/golden/client-as4242-1.rpol | client-as4242-1 | row client-as4242-1 rest => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-black-list-prefix => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-bogon-prefix => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-invalid-asn => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-long-as-path => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-never-via-rs => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-rpki-invalid => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-transit-free-in-path => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-v4-len-outside-window => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-v6-len-outside-window => reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene scrub-arin-whois-tag => continue with remove community 65530:4; remove large-community 65500:65530:4
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene scrub-custom-communities => continue with remove community 65530:100
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene scrub-reject-cause-map => continue with remove large-community 65500:65521:3
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene scrub-rpki-ov-unknown => continue with remove community 65530:31; remove large-community 65500:65530:31
 
 ## cases
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-a.rpol | member-in | m01-v4-transit => deny
@@ -1102,6 +1365,11 @@ crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m07-defa
 crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m08-host-routes => permit
 crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m09-evpn => deny
 crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m10-v6-bogon => deny
+crates/policy/tests/decision_corpus/surface.rpol | test evpn-imet-dropped | evpn-rr => deny
+crates/policy/tests/decision_corpus/surface.rpol | test evpn-mac-ip-preferred | evpn-rr => permit with set local-pref 200
+crates/policy/tests/decision_corpus/surface.rpol | test evpn-ethernet-segment-tagged | evpn-rr => permit with add community 65000:5
+crates/policy/tests/decision_corpus/surface.rpol | test evpn-ip-prefix | evpn-rr => permit with set med 5
+crates/policy/tests/decision_corpus/surface.rpol | test unicast-not-evpn | evpn-rr => deny
 crates/policy/tests/decision_corpus/surface.rpol | test labeled | by-family => permit with set med 1
 crates/policy/tests/decision_corpus/surface.rpol | test evpn-family | by-family => permit with set med 7
 crates/policy/tests/decision_corpus/surface.rpol | test flowspec-v6 | by-family => permit with set med 6
@@ -1163,6 +1431,16 @@ crates/policy/tests/decision_corpus/surface.rpol | scrub | m07-default => permit
 crates/policy/tests/decision_corpus/surface.rpol | scrub | m08-host-routes => permit with remove community 65000:100; remove community 65000:200; remove community 65000:300
 crates/policy/tests/decision_corpus/surface.rpol | scrub | m09-evpn => permit
 crates/policy/tests/decision_corpus/surface.rpol | scrub | m10-v6-bogon => permit with remove community 65000:666
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m01-v4-transit => deny
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m02-v4-invalid-long => deny
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m03-v6-tagged => deny
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m04-bare => deny
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m05-internal => deny
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m06-local-as-set => deny
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m07-default => deny
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m08-host-routes => deny
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m09-evpn => permit with set local-pref 200
+crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m10-v6-bogon => deny
 docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in | m01-v4-transit => deny
 docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in | m02-v4-invalid-long => permit
 docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in | m03-v6-tagged => permit

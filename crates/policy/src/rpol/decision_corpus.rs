@@ -47,7 +47,9 @@ use crate::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
 use crate::engine::{
     CommunityMatch, NextHopAction, PolicyAction, PrependAs, RouteFamily, RouteModifications,
 };
-use crate::ir::{ArithOp, CompiledChain, MatchExpr, Term, TermAction, ValueExpr};
+use crate::ir::{
+    ArithOp, CommunityAttribute, CompiledChain, MatchExpr, Term, TermAction, ValueExpr,
+};
 use crate::sets::{CommunityField, CommunityMember, CommunityPattern, SetStore};
 
 /// The curated programs that give every construct a case.
@@ -174,21 +176,19 @@ fn content_id(text: &str) -> String {
 }
 
 impl Corpus {
-    /// Record the term names of every member of `chain` under `key`.
+    /// Record every row of every member of `chain` under `key`: its name and
+    /// what it holds, so a rename and a moved action both show.
     fn record_names(&mut self, key: &str, chain: &CompiledChain) {
-        let members: Vec<String> = chain
-            .policies
-            .iter()
-            .map(|policy| {
-                let names: Vec<&str> = policy
-                    .terms
-                    .iter()
-                    .map(|term| term.name.as_deref().unwrap_or("-"))
-                    .collect();
-                names.join(" ")
-            })
-            .collect();
-        self.names.insert(key.to_string(), members.join(" ; "));
+        for policy in &chain.policies {
+            let member = policy.name.as_deref().unwrap_or("-");
+            for term in &policy.terms {
+                let name = term.name.as_deref().unwrap_or("-");
+                self.names.insert(
+                    format!("{key} | row {member} {name}"),
+                    row_contents(&term.action, chain),
+                );
+            }
+        }
     }
 
     /// Credit one case to every construct its evaluation of `ctx` reached:
@@ -276,6 +276,53 @@ fn verdict(result: &crate::PolicyResult, evaluation: &crate::PolicyEvaluation) -
         out.push_str(&mods);
     }
     out
+}
+
+/// What one lowered row does, in `.rpol` action spelling: its verdict or
+/// action and the modifications it stages.
+pub(super) fn row_contents(action: &TermAction, chain: &CompiledChain) -> String {
+    let staged = |verb: &str, mods: &RouteModifications| {
+        let mods = render_mods(mods);
+        if mods.is_empty() {
+            verb.to_string()
+        } else {
+            format!("{verb} with {mods}")
+        }
+    };
+    match action {
+        TermAction::Permit(mods) => staged("accept", mods),
+        TermAction::Deny => "reject".to_string(),
+        TermAction::Continue(mods) => staged("continue", mods),
+        TermAction::Bind { name, .. } => format!("let {name}"),
+        TermAction::ForEach(node) => format!("for {} ({} body rows)", node.var, node.body.len()),
+        TermAction::Break => "break".to_string(),
+        TermAction::ContinueLoop => "next iteration".to_string(),
+        TermAction::CommunityVar { add, name, .. } => {
+            format!("{} community {name}", if *add { "add" } else { "remove" })
+        }
+        TermAction::RemoveLargeCommunityAdmin { global_admin } => {
+            format!("remove large-community {global_admin}:*:*")
+        }
+        TermAction::RemoveAllCommunities { attributes } => attributes
+            .iter()
+            .map(CommunityAttribute::remove_all_str)
+            .collect::<Vec<_>>()
+            .join("; "),
+        TermAction::RemoveCommunitiesInSet {
+            attribute,
+            set,
+            negate,
+        } => format!(
+            "remove {}{} in {}",
+            attribute.keyword(),
+            if *negate { " not" } else { "" },
+            chain
+                .community_set_names
+                .get(set.0 as usize)
+                .and_then(Option::as_deref)
+                .unwrap_or("?")
+        ),
+    }
 }
 
 /// Staged modifications in `.rpol` action spelling, in a fixed field
@@ -620,7 +667,9 @@ fn render(root: &Path) -> (String, Vec<&'static str>) {
     for line in &duplicates {
         writeln!(out, "{line}").unwrap();
     }
-    out.push_str("\n## term names (per instantiation; chain members split by ;)\n");
+    out.push_str(
+        "\n## term names (every lowered row of every instantiation, with what it holds)\n",
+    );
     for (key, names) in &corpus.names {
         writeln!(out, "{key} => {names}").unwrap();
     }

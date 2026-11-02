@@ -17,8 +17,8 @@
 //!   modify); a body with no verdict lowers to `Continue` — matched
 //!   modifications apply and evaluation falls through to the next term.
 //! - IR terms are named after the source statement they execute
-//!   (`<term>.<statement>[.<k>]`, see [`term_names`]); a one-statement
-//!   term that lowers to one IR term keeps the plain term name. Explain,
+//!   (`<term>.<statement>[.<k>]`, see [`term_names`]); one row of the
+//!   final statement keeps the plain term name. Explain,
 //!   test term hits and policy stats render these names.
 //!
 //! End of policy uses its declared `default-action`, or `Permit` when
@@ -1723,13 +1723,17 @@ impl Lowered {
     }
 }
 
-/// The names of one source term's IR terms: `<term>`, then `.<statement>`
-/// (the 1-based term-body statement the IR term executes; omitted when the
-/// body has one statement), then `.<k>` when that statement lowers to more
-/// than one IR term, then any call suffix. A staged run of modifications is
-/// anchored to its last statement. A name therefore depends on the source
-/// statement and on how that one statement lowers: a lowering change to one
-/// statement renumbers only that statement's rows.
+/// The names of one source term's IR terms. Each row is anchored to the
+/// 1-based term-body statement it executes (a staged run of modifications
+/// to its last statement). One row of the final statement owns the bare
+/// term name: its last row holding its own `accept` or `reject` (a row
+/// inlined from a called policy is not its own), else its last row. Every
+/// other row is `<term>.<statement>` (`.<statement>` omitted when the body
+/// has one statement), then `.<k>`, its 1-based position among its
+/// statement's rows, when that statement lowers to more than one row, then
+/// any call suffix. A lowering change to one statement can renumber only
+/// that statement's `.<k>` rows, and one that splits a staged run off the
+/// final row adds an earlier row: the bare row keeps its name.
 fn term_names(
     term: &str,
     statements: usize,
@@ -1739,23 +1743,35 @@ fn term_names(
     for (.., anchor) in lowered {
         *group_sizes.entry(*anchor).or_default() += 1;
     }
+    let final_rows = || (0..lowered.len()).filter(|&i| lowered[i].3 == statements);
+    let bare = final_rows()
+        .rev()
+        .find(|&i| {
+            lowered[i].2.is_none()
+                && matches!(lowered[i].1, TermAction::Permit(_) | TermAction::Deny)
+        })
+        .or_else(|| final_rows().next_back());
     let mut ordinals: HashMap<usize, usize> = HashMap::new();
     lowered
         .iter()
-        .map(|(_, _, suffix, anchor)| {
+        .enumerate()
+        .map(|(index, (_, _, suffix, anchor))| {
+            let ordinal = ordinals.entry(*anchor).or_default();
+            *ordinal += 1;
+            let suffix = suffix.as_deref().unwrap_or_default();
+            if bare == Some(index) {
+                return format!("{term}{suffix}");
+            }
             let statement = if statements > 1 {
                 format!(".{anchor}")
             } else {
                 String::new()
             };
             let ordinal = if group_sizes[anchor] > 1 {
-                let ordinal = ordinals.entry(*anchor).or_default();
-                *ordinal += 1;
                 format!(".{ordinal}")
             } else {
                 String::new()
             };
-            let suffix = suffix.as_deref().unwrap_or_default();
             format!("{term}{statement}{ordinal}{suffix}")
         })
         .collect()

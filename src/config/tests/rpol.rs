@@ -1104,7 +1104,7 @@ fn rpol_term_diff_preserves_generated_names_and_requires_the_same_expansion() {
     let old = load_dir(&dir).unwrap();
     for (before, after, term) in [
         ("set med 10", "set med 11", "edits.1"),
-        ("local-pref >= 500", "local-pref >= 501", "edits.2"),
+        ("local-pref >= 500", "local-pref >= 501", "edits"),
     ] {
         fs::write(
             dir.path().join("policies/core.rpol"),

@@ -5896,7 +5896,7 @@ policy client-x {
         assert_eq!(chain.routes_evaluated, 7);
         assert_eq!(chain.terms.len(), 2);
         assert_eq!(chain.terms[0].policy, "customer-in");
-        assert_eq!(chain.terms[0].term, "customer-routes.2");
+        assert_eq!(chain.terms[0].term, "customer-routes");
         assert_eq!(chain.terms[0].hits, 7);
         assert_eq!(chain.terms[1].term, "rest");
         assert_eq!(chain.terms[1].term_index, 1);
@@ -5911,7 +5911,7 @@ policy client-x {
         assert_eq!(chain.eval_errors, 2);
         assert_eq!(
             chain.last_error,
-            "absent-operand in policy customer-in term customer-routes.2"
+            "absent-operand in policy customer-in term customer-routes"
         );
         // LAN-305: dataset status rides the same response.
         assert_eq!(resp.datasets.len(), 1);

@@ -54,6 +54,43 @@ policy scrub {
     term all { remove community *; accept }
 }
 
+# EVPN route-reflector policy: every decision depends on the EVPN route
+# type, and the family guard keeps unicast routes out of it.
+policy evpn-rr {
+    term imet { if route.family == evpn && route.evpn-route-type == 3 { reject } }
+    term mac-ip { if route.family == evpn && route.evpn-route-type == 2 { set local-pref 200; accept } }
+    term not-prefix {
+        if route.family == evpn && route.evpn-route-type != 5 { add community 65000:5; accept }
+    }
+    term prefix { if route.family == evpn { set med 5; accept } }
+    term rest { reject }
+}
+
+test evpn-imet-dropped {
+    route { prefix 192.0.2.0/24; family evpn; evpn-route-type 3 }
+    expect evpn-rr == reject
+}
+
+test evpn-mac-ip-preferred {
+    route { prefix 192.0.2.0/24; family evpn; evpn-route-type 2 }
+    expect evpn-rr == accept with only local-pref 200
+}
+
+test evpn-ethernet-segment-tagged {
+    route { prefix 192.0.2.0/24; family evpn; evpn-route-type 4 }
+    expect evpn-rr == accept with only community 65000:5
+}
+
+test evpn-ip-prefix {
+    route { prefix 192.0.2.0/24; family evpn; evpn-route-type 5 }
+    expect evpn-rr == accept with only med 5
+}
+
+test unicast-not-evpn {
+    route { prefix 192.0.2.0/24; family ipv4-unicast }
+    expect evpn-rr == reject
+}
+
 test labeled {
     route { prefix 192.0.2.0/24; family ipv4-labeled-unicast }
     expect by-family == accept with med 1
