@@ -2262,10 +2262,38 @@ fn merge_validation_deltas(
         (Aspa(Some(older)), Aspa(Some(newer))) => Aspa(Some(std::sync::Arc::new(
             older.union(&newer).copied().collect(),
         ))),
-        // A full re-evaluation covers everything; one forwarder never mixes
-        // the two caches, but the safe answer for either is a full one.
-        (_, Rpki(_)) => Rpki(None),
-        (_, Aspa(_)) => Aspa(None),
+        // A full re-evaluation of the cache covers any delta of it.
+        (Rpki(_), Rpki(_)) => Rpki(None),
+        (Aspa(_), Aspa(_)) => Aspa(None),
+        (older, newer) => {
+            unreachable!("one forwarder carries one validation cache, not {older:?} then {newer:?}")
+        }
+    }
+}
+
+/// Forward one validation cache's table updates: `split` turns each into
+/// the RIB's update and the sessions' delta. The RIB gets each update in
+/// order as it arrives; the peer manager gets the deltas through a
+/// [`ValidationRefreshQueue`]. Ends when the cache's channel closes.
+async fn forward_validation_cache<U>(
+    mut updates: mpsc::Receiver<U>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    mut split: impl FnMut(U) -> (RibUpdate, rustbgpd_transport::ValidationDelta),
+) {
+    let mut refresh = ValidationRefreshQueue::new(peer_mgr_tx);
+    loop {
+        let update = tokio::select! {
+            update = updates.recv() => update,
+            outcome = refresh.finished() => {
+                refresh.complete(outcome).await;
+                continue;
+            }
+        };
+        let Some(update) = update else { break };
+        let (rib_update, delta) = split(update);
+        let _ = rib_tx.send(rib_update).await;
+        refresh.push(delta).await;
     }
 }
 
@@ -4979,10 +5007,10 @@ async fn run<T>(
         && !rpki_config.cache_servers.is_empty()
     {
         let (vrp_update_tx, vrp_update_rx) = mpsc::channel(256);
-        let (rpki_table_tx, mut rpki_table_rx) = mpsc::channel(16);
+        let (rpki_table_tx, rpki_table_rx) = mpsc::channel(16);
 
         // ASPA table channel (VrpManager → RIB)
-        let (aspa_table_tx, mut aspa_table_rx) = mpsc::channel(16);
+        let (aspa_table_tx, aspa_table_rx) = mpsc::channel(16);
 
         let configured_cache_addrs: Vec<std::net::SocketAddr> = rpki_config
             .cache_servers
@@ -5020,21 +5048,15 @@ async fn run<T>(
         let rpki_rib_tx = rib_tx.clone();
         let rpki_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_vrp = validation_watch_tx.clone();
-        let handle = rpki_tasks.spawn(async move {
-            // Routes evaluated before the first table saw no VRPs, so the
-            // first table re-evaluates everything (the RIB applies the same
-            // rule to its own revalidation).
-            let mut first_table = true;
-            let mut refresh = ValidationRefreshQueue::new(rpki_peer_mgr_tx);
-            loop {
-                let update = tokio::select! {
-                    update = rpki_table_rx.recv() => update,
-                    outcome = refresh.finished() => {
-                        refresh.complete(outcome).await;
-                        continue;
-                    }
-                };
-                let Some(update) = update else { break };
+        // Routes evaluated before the first table saw no VRPs, so the first
+        // table re-evaluates everything (the RIB applies the same rule to its
+        // own revalidation).
+        let mut first_table = true;
+        let handle = rpki_tasks.spawn(forward_validation_cache(
+            rpki_table_rx,
+            rpki_rib_tx,
+            rpki_peer_mgr_tx,
+            move |update: rustbgpd_rpki::RpkiTableUpdate| {
                 validation_tx_vrp.send_modify(|snapshot| {
                     snapshot.vrp_table = Some(std::sync::Arc::clone(&update.table));
                 });
@@ -5044,17 +5066,15 @@ async fn run<T>(
                     .filter(|_| !first_table)
                     .map(std::sync::Arc::<[rustbgpd_rpki::VrpEntry]>::from);
                 first_table = false;
-                let _ = rpki_rib_tx
-                    .send(RibUpdate::RpkiCacheUpdate {
+                (
+                    RibUpdate::RpkiCacheUpdate {
                         table: update.table,
                         delta: update.delta,
-                    })
-                    .await;
-                refresh
-                    .push(rustbgpd_transport::ValidationDelta::Rpki(session_delta))
-                    .await;
-            }
-        });
+                    },
+                    rustbgpd_transport::ValidationDelta::Rpki(session_delta),
+                )
+            },
+        ));
         register_rpki_task_kind(
             &mut rpki_task_registry,
             handle.id(),
@@ -5065,18 +5085,12 @@ async fn run<T>(
         let aspa_rib_tx = rib_tx.clone();
         let aspa_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_aspa = validation_watch_tx.clone();
-        let handle = rpki_tasks.spawn(async move {
-            let mut first_table = true;
-            let mut refresh = ValidationRefreshQueue::new(aspa_peer_mgr_tx);
-            loop {
-                let update = tokio::select! {
-                    update = aspa_table_rx.recv() => update,
-                    outcome = refresh.finished() => {
-                        refresh.complete(outcome).await;
-                        continue;
-                    }
-                };
-                let Some(update) = update else { break };
+        let mut first_table = true;
+        let handle = rpki_tasks.spawn(forward_validation_cache(
+            aspa_table_rx,
+            aspa_rib_tx,
+            aspa_peer_mgr_tx,
+            move |update: rustbgpd_rpki::AspaTableUpdate| {
                 validation_tx_aspa.send_modify(|snapshot| {
                     snapshot.aspa_table = Some(std::sync::Arc::clone(&update.table));
                 });
@@ -5086,17 +5100,15 @@ async fn run<T>(
                     .filter(|_| !first_table)
                     .map(std::sync::Arc::new);
                 first_table = false;
-                let _ = aspa_rib_tx
-                    .send(RibUpdate::AspaTableUpdate {
+                (
+                    RibUpdate::AspaTableUpdate {
                         table: update.table,
                         changed_customer_asns: update.changed_customer_asns,
-                    })
-                    .await;
-                refresh
-                    .push(rustbgpd_transport::ValidationDelta::Aspa(session_delta))
-                    .await;
-            }
-        });
+                    },
+                    rustbgpd_transport::ValidationDelta::Aspa(session_delta),
+                )
+            },
+        ));
         register_rpki_task_kind(
             &mut rpki_task_registry,
             handle.id(),
@@ -7765,7 +7777,7 @@ mod tests {
 
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
         let mut queue = ValidationRefreshQueue::new(peer_mgr_tx);
-        for delta in [asns(&[1]), asns(&[2]), asns(&[3, 2])] {
+        for delta in [asns(&[1]), asns(&[2]), asns(&[3])] {
             assert!(
                 queue.push(delta).now_or_never().is_some(),
                 "forwarding never waits for a revalidation pass"
@@ -7788,6 +7800,127 @@ mod tests {
             "the deltas that waited go as one"
         );
         assert!(peer_mgr_rx.try_recv().is_err());
+    }
+
+    fn vrp(prefix_len: u8) -> rustbgpd_rpki::VrpEntry {
+        rustbgpd_rpki::VrpEntry {
+            prefix: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 0)),
+            prefix_len,
+            max_len: 32,
+            origin_asn: 64500,
+        }
+    }
+
+    fn rpki_delta(entries: &[rustbgpd_rpki::VrpEntry]) -> rustbgpd_transport::ValidationDelta {
+        rustbgpd_transport::ValidationDelta::Rpki(Some(entries.iter().cloned().collect()))
+    }
+
+    /// Merged deltas keep every entry of both, and a full re-evaluation in
+    /// either position wins over a concrete delta.
+    #[test]
+    fn validation_deltas_merge_without_losing_either() {
+        use rustbgpd_transport::ValidationDelta::{Aspa, Rpki};
+
+        let Rpki(Some(merged)) =
+            merge_validation_deltas(rpki_delta(&[vrp(24)]), rpki_delta(&[vrp(25)]))
+        else {
+            panic!("two concrete VRP deltas merge into one");
+        };
+        assert_eq!(
+            merged
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([vrp(24), vrp(25)])
+        );
+        let Aspa(Some(merged)) = merge_validation_deltas(
+            Aspa(Some(Arc::new([2].into_iter().collect()))),
+            Aspa(Some(Arc::new([3].into_iter().collect()))),
+        ) else {
+            panic!("two concrete ASPA deltas merge into one");
+        };
+        assert_eq!(
+            merged.iter().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([2, 3])
+        );
+        assert!(matches!(
+            merge_validation_deltas(rpki_delta(&[vrp(24)]), Rpki(None)),
+            Rpki(None)
+        ));
+        assert!(matches!(
+            merge_validation_deltas(Rpki(None), rpki_delta(&[vrp(24)])),
+            Rpki(None)
+        ));
+    }
+
+    /// The forwarding loop sends each table update to the RIB as it arrives
+    /// and, when the pass in flight ends, the deltas that waited for it as
+    /// one.
+    #[tokio::test]
+    async fn validation_forwarder_sends_the_merged_delta_when_the_pass_ends() {
+        let (updates_tx, updates_rx) = mpsc::channel(8);
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let forwarder = tokio::spawn(forward_validation_cache(
+            updates_rx,
+            rib_tx,
+            peer_mgr_tx,
+            |(peer, delta): (PeerId, rustbgpd_transport::ValidationDelta)| {
+                (
+                    RibUpdate::PeerDown {
+                        peer,
+                        session_id: 0,
+                    },
+                    delta,
+                )
+            },
+        ));
+        let peer = |last| {
+            PeerId::from_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                192, 0, 2, last,
+            )))
+        };
+        for (index, entry) in [24, 25, 26].into_iter().enumerate() {
+            let index = u8::try_from(index).unwrap();
+            updates_tx
+                .send((peer(index), rpki_delta(&[vrp(entry)])))
+                .await
+                .unwrap();
+        }
+        for index in 0..3 {
+            let Some(RibUpdate::PeerDown { peer: sent, .. }) = rib_rx.recv().await else {
+                panic!("each table update reaches the RIB");
+            };
+            assert_eq!(sent, peer(index), "in arrival order");
+        }
+        let Some(PeerManagerCommand::SoftResetImportValidationDependents {
+            delta: rustbgpd_transport::ValidationDelta::Rpki(Some(first)),
+            reply,
+        }) = peer_mgr_rx.recv().await
+        else {
+            panic!("the first delta reaches the peer manager");
+        };
+        assert_eq!(first.to_vec(), vec![vrp(24)]);
+        assert!(peer_mgr_rx.try_recv().is_err(), "one pass in flight");
+
+        reply.send(Ok(())).unwrap();
+        let Some(PeerManagerCommand::SoftResetImportValidationDependents {
+            delta: rustbgpd_transport::ValidationDelta::Rpki(Some(merged)),
+            reply,
+        }) = peer_mgr_rx.recv().await
+        else {
+            panic!("the deltas that waited follow when the pass ends");
+        };
+        assert_eq!(
+            merged
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([vrp(25), vrp(26)])
+        );
+        reply.send(Ok(())).unwrap();
+        drop(updates_tx);
+        forwarder.await.unwrap();
     }
 
     #[test]
