@@ -99,7 +99,7 @@ class DependencyChecks(unittest.TestCase):
                  mock.patch.object(terminal.subprocess, "run"), mock.patch.object(terminal.subprocess, "Popen", side_effect=spawn), \
                  mock.patch.object(terminal, "controller_type", return_value=lambda *_: controller), \
                  mock.patch.object(self.q, "cleanup_cell", side_effect=cleanup):
-                record = terminal.run_cell(output, manifest, self.q, self.r, self.wire, "private", 0, True)
+                record = terminal.run_cell(output, manifest, self.q, self.r, self.wire, "no-refusal", "private", 0, True)
             self.assertEqual(seen, [False], "runner precreated the driver's exclusive capture directory")
             self.assertEqual(record["driver_exit_before_cleanup"], 17)
 
@@ -128,22 +128,34 @@ class DependencyChecks(unittest.TestCase):
                     (root / "link").unlink()
                     (root / "link").symlink_to("file")
 
-    def write_wire_fixture(self, leg, early=False):
+    def write_wire_fixture(self, leg, eor_split=None, forced=False):
+        """No-refusal: refresh replay, its EoR, then churn (the fixed build's
+        order). eor_split puts the EoR before part of the replay. Forced: fill,
+        replay with the fill, EoR from the tick, then the fill's withdrawal."""
         wire = leg / "wire"
         wire.mkdir()
+        final = [0, 0, 0] if forced else [1, 0, 0]
         boundaries = {name: {"boundary": name, "offsets": [], "eors": [], "shifts": shifts}
                       for name, shifts in (("loaded", [0, 0, 0]), ("refresh-start", [0, 0, 0]),
-                                            ("settled", [1, 0, 0]), ("finished", [1, 0, 0]))}
+                                            ("settled", final), ("finished", final))}
         for peer in range(3):
             community = 2000 if peer == 1 else 1000
-            inventory = b"".join(self.fixture_wire.announce(kind, origin, index, community)
-                                  for origin in range(3) if origin != peer
-                                  for kind, width in ((2, 8), (5, 2)) for index in range(width))
+            routes = [self.fixture_wire.announce(kind, origin, index, community)
+                      for origin in range(3) if origin != peer
+                      for kind, width in ((2, 8), (5, 2)) for index in range(width)]
+            inventory = b"".join(routes)
             loaded = inventory + self.fixture_wire.EOR
             churn = b"".join(self.fixture_wire.withdraw(kind, 0, 0)
                              + self.fixture_wire.announce(kind, 0, width, community)
                              for kind, width in ((2, 8), (5, 2))) if peer != 0 else b""
-            refresh = inventory + (self.fixture_wire.EOR + churn if early else churn + self.fixture_wire.EOR)
+            if forced:
+                fill = b"".join(self.fixture_wire.announce(2, 0, index, community) for index in (8, 9)) if peer else b""
+                unfill = b"".join(self.fixture_wire.withdraw(2, 0, index) for index in (8, 9)) if peer else b""
+                refresh = fill + inventory + fill + self.fixture_wire.EOR + unfill
+            elif eor_split is not None:
+                refresh = b"".join(routes[:eor_split]) + self.fixture_wire.EOR + b"".join(routes[eor_split:]) + churn
+            else:
+                refresh = inventory + self.fixture_wire.EOR + churn
             data = loaded + refresh
             (wire / f"peer-{peer}.bgp").write_bytes(data)
             (wire / f"raw-240.1.0.{peer + 1}.bgp").write_bytes(data)
@@ -156,14 +168,23 @@ class DependencyChecks(unittest.TestCase):
                     {"command": "source-barrier", "result": {"input_barrier_generation": 1}},
                     {"command": "terminal-baseline", "result": {**boundaries["loaded"], "boundary": "baseline"}},
                     {"command": "mark refresh-start", "result": boundaries["refresh-start"]},
-                    {"command": "pause", "result": {"socket_read_acks": 3}},
-                    {"command": "refresh", "result": {"refreshes": 3, "eor_baseline": [1, 1, 1]}},
-                    {"command": "terminal-churn", "result": {"source": 0, "messages": 1, "events": 4,
-                                                               "write_started_us": 180, "writers_drained_us": 199}},
-                    {"command": "source-barrier", "result": {"input_barrier_generation": 2}},
-                    {"command": "resume", "result": {"socket_read_acks": 3}},
-                    {"command": "settle", "result": boundaries["settled"]},
-                    {"command": "finish", "result": boundaries["finished"]}]
+                    {"command": "pause", "result": {"socket_read_acks": 3}}]
+        refresh = {"command": "refresh", "result": {"refreshes": 3, "eor_baseline": [1, 1, 1]}}
+        barrier = {"command": "source-barrier", "result": {"input_barrier_generation": 2}}
+        resume = {"command": "resume", "result": {"socket_read_acks": 3}}
+        if forced:
+            controls += [{"command": "terminal-fill 2", "result": {"source": 0, "routes": 2, "total": 2,
+                                                                   "write_started_us": 61, "writers_drained_us": 62}},
+                         refresh, resume,
+                         {"command": "terminal-unfill", "result": {"source": 0, "routes": 2, "messages": 1,
+                                                                   "write_started_us": 565, "writers_drained_us": 585}},
+                         barrier]
+        else:
+            controls += [refresh, {"command": "terminal-churn", "result": {"source": 0, "messages": 1, "events": 4,
+                                                                           "write_started_us": 180, "writers_drained_us": 199}},
+                         barrier, resume]
+        controls += [{"command": "settle", "result": boundaries["settled"]},
+                     {"command": "finish", "result": boundaries["finished"]}]
         receiver_rows = [{"peer": self.q.COMMON.peer(peer), "cookie": 116 + peer, "receive_buffer": 8192,
                           "local": f"{self.q.COMMON.peer(peer)}:{1234 + peer}", "remote": "127.0.0.1:17986"} for peer in range(3)]
         content = "".join("evpn_terminal_receiver " + json.dumps(row) + "\n" for row in receiver_rows)
@@ -174,16 +195,20 @@ class DependencyChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             leg = Path(directory)
             self.write_wire_fixture(leg)
-            rows = terminal.wire_receipt(leg, 3, 10, self.wire, "candidate")
-            self.assertTrue(all(row["terminal_after_churn"] for row in rows))
+            rows = terminal.wire_receipt(leg, 3, 10, self.wire, self.q)
+            self.assertEqual([row["eors"] for row in rows], [2, 2, 2])
+            with tempfile.TemporaryDirectory() as forced:
+                self.write_wire_fixture(Path(forced), forced=True)
+                terminal.wire_receipt(Path(forced), 3, 10, self.wire, self.q)
             original = (leg / "wire/peer-1.bgp").read_bytes()
-            for mode in ("raw-mismatch", "early-eor", "unknown-withdraw", "missing-coverage", "missing-initial-eor"):
+            for mode in ("raw-mismatch", "eor-before-covered-route", "unknown-withdraw", "missing-coverage", "missing-initial-eor"):
                 with self.subTest(mode=mode), tempfile.TemporaryDirectory() as altered:
                     target = Path(altered)
-                    self.write_wire_fixture(target, early=mode == "early-eor")
-                    if mode == "early-eor":
-                        result = terminal.wire_receipt(target, 3, 10, self.wire, "candidate")
-                        self.assertFalse(all(row["terminal_after_churn"] for row in result))
+                    self.write_wire_fixture(target, eor_split=19 if mode == "eor-before-covered-route" else None)
+                    if mode == "eor-before-covered-route":
+                        # The EoR precedes the last route its refresh covers: a bar miss.
+                        with self.assertRaisesRegex(self.q.AcceptanceFailure, "EoR reached the wire before a route it covers"):
+                            terminal.wire_receipt(target, 3, 10, self.wire, self.q)
                         continue
                     if mode == "raw-mismatch":
                         (target / "wire/raw-240.1.0.2.bgp").write_bytes(original[:-1])
@@ -216,7 +241,7 @@ class DependencyChecks(unittest.TestCase):
                                 row["result"]["offsets"][1] = len(data)
                         (target / "driver.log").write_text("".join("evpn_control " + json.dumps(row) + "\n" for row in controls))
                     with self.assertRaises(ValueError):
-                        terminal.wire_receipt(target, 3, 10, self.wire, "candidate")
+                        terminal.wire_receipt(target, 3, 10, self.wire, self.q)
 
     def test_final_raw_consumer_rejects_settlement_reset_and_hidden_headroom_defects(self):
         # Keep this a real consumer test: actual pinned validators, metrics and
@@ -247,7 +272,7 @@ class DependencyChecks(unittest.TestCase):
                       {"event": "complete", "command": "resume", "wall_us": 550, "at": 5.5},
                       {"event": "complete", "command": "settle", "wall_us": 600, "at": 6.0}]
             churn = next(value["result"] for value in controls if value["command"] == "terminal-churn")
-            record = {"arm": "candidate", "settled": row, "applied": applied, "churn": churn,
+            record = {"shape": "no-refusal", "arm": "candidate", "settled": row, "applied": applied, "churn": churn,
                       "correctness_only": True, "churn-applied-seconds": None, "convergence-seconds": None,
                       "cell_started_monotonic_ns": 0, "cell_finished_monotonic_ns": 7_000_000_000}
             # 20 Hz readiness from load dispatch through finish completion.
@@ -277,6 +302,11 @@ class DependencyChecks(unittest.TestCase):
             current = feed_fixture("sample", 160)
             current["peer"] = self.q.COMMON.peer(1)
             feed.insert(1, current)
+            # The fixed build's refresh tail sends each debtor's markers at once.
+            for peer in (1, 2):
+                sent = feed_fixture("refresh_sent", 95, owed=0, peer=self.q.COMMON.peer(peer))
+                sent["markers"]["refresh_attempts"] = 1
+                feed.insert(1, sent)
             barriers = [{"peer": self.q.COMMON.peer(peer), "session": "same-session", "wall_us": wall,
                          "pending_batches": 0, "window_open": False, "window_messages": 0,
                          "window_routes": 0, "pending_withdrawals": 0}
@@ -286,17 +316,16 @@ class DependencyChecks(unittest.TestCase):
                    "rows": [sample]} for sample in samples]
             (leg / "ss.jsonl").write_text("".join(json.dumps(sample) + "\n" for sample in ss))
             before = {"event": "pressure-before", "at": 1.65, "wall_us": 165, "peer": self.q.COMMON.peer(1),
-                      "write_id": 55, "cookie": 17, "pending": writes[0], "sample": samples[0], "admitted": feed[0], "current": current}
-            debt = terminal.check.debt_receipt([value for value in feed if value["peer"] == before["peer"]], work,
-                                               sockets, writes, samples, 400, self.q.COMMON.peer(0))
-            after = {"event": "pressure-after", "at": 5.2, "wall_us": 520, "peer": before["peer"], "kernel": debt["kernel"], "debt": debt}
+                      "write_id": 55, "cookie": 17, "pending": writes[0], "sample": samples[0]}
+            kernel = terminal.check.kernel_pressure(sockets, writes, samples, before["peer"], writes[0]["wall_us"], 520, 165, 400)
+            after = {"event": "pressure-after", "at": 5.2, "wall_us": 520, "peer": before["peer"], "kernel": kernel}
             events.insert(9, before)
             events.insert(-2, after)
             events.insert(-2, {"event": "command", "command": "resume", "wall_us": 530, "at": 5.3})
             events += [{"event": "command", "command": "finish", "wall_us": 605, "at": 6.05},
                        {"event": "complete", "command": "finish", "wall_us": 610, "at": 6.1}]
             (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
-            record.update(admitted=feed[0], pressure_before=before, pressure_after=after)
+            record.update(pressure_before=before, pressure_after=after)
 
             def observer(observed):
                 content = "".join("evpn_qualification " + json.dumps(value) + "\n" for value in observed)
@@ -308,7 +337,16 @@ class DependencyChecks(unittest.TestCase):
 
             observer([row])
             good = terminal.evidence(leg, record, self.q, self.r, self.wire)
-            self.assertEqual(good["debt"]["work"]["inventory_visits"], 32)
+            self.assertEqual(good["work"]["inventory_visits"], 32)
+            # A refused refresh-site send means this is not a no-refusal cell.
+            refused = copy.deepcopy(feed)
+            refused[-1]["markers"].update(refresh_attempts=1, refresh_refused=1)
+            feed[:], kept = refused, feed[:]
+            observer([row])
+            with self.assertRaisesRegex(ValueError, "did not send its markers at the refresh"):
+                terminal.evidence(leg, record, self.q, self.r, self.wire)
+            feed[:] = kept
+            observer([row])
             with self.assertRaises(self.q.AcceptanceFailure):
                 terminal.accept_report(good, "candidate", self.q)
             # A shifted readiness file keeps its cadence but misses the raw load clock.
@@ -391,30 +429,134 @@ class DependencyChecks(unittest.TestCase):
                     barriers[:] = copy.deepcopy(original_barriers)
                     (leg / "driver.log").write_text(original_driver)
 
+    def test_forced_refusal_consumer_measures_refusal_drain_and_tick(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(terminal.BARS, routes_per_source=10):
+            leg = Path(directory)
+            self.write_wire_fixture(leg, forced=True)
+            peer = self.q.COMMON.peer(1)
+            row = {name: 0 for name in ("dirty", "marker_debt", "pending_resets", "retained_recovery", "completion_receipts",
+                                        "refresh_pending", "eor_pending", "protocol_obligations", "retained", "peak", "owned_routes", "private_routes")}
+            row.update(members=3, owned_groups=2, owned_members=3, peer_budget=16777216, daemon_budget=268435456,
+                       peers=[[self.q.COMMON.peer(index), 1 if index == 1 else 0, False, 0, 0, 0, False, False, False, False]
+                              for index in range(3)])
+            (leg / "readiness.jsonl").write_text("".join(
+                json.dumps({"scheduled": index * .05, "at": index * .05 + .001, "seconds": .01, "status": 200}) + "\n"
+                for index in range(143)))
+            (leg / "metrics.txt").write_text("jemalloc_allocated_bytes 12345\n" + "".join(
+                f'bgp_evpn_recovery_provenance_exhausted_total{{cause="{cause}"}} 0\n' for cause in self.q.CAUSES))
+            self.q.write_json(leg / "cgroup.json", {"memory.current": 100, "memory.peak": 100, "memory.max": self.q.DAEMON_BYTES,
+                                                   "memory.swap.current": 0, "memory.swap.peak": 0, "memory.swap.max": 0,
+                                                   "events": {name: "0" for name in ("max", "oom", "oom_kill", "oom_group_kill")}})
+            (leg / "ss.jsonl").write_text("")
+
+            def debt(event, at, owed=1, capacity=0, rows=0, root=0, **markers):
+                value = feed_fixture(event, at, root=root, rows=rows, peer=peer, owed=owed, capacity=capacity)
+                value["markers"].update(markers)
+                return value
+            refused = dict(refresh_attempts=1, refresh_refused=1)
+            filled = debt("data_admitted", 63, owed=0, capacity=1, rows=1)
+            full = debt("data_admitted", 95, rows=30)
+            refusal = debt("refresh_refused", 96, **refused)
+            feed = [debt("sample", 60, owed=0, capacity=4096), debt("data_admitted", 62, owed=0, capacity=2, rows=1), filled,
+                    full, refusal, debt("retry_refused", 120, retry_attempts=1, retry_refused=1, **refused),
+                    debt("sample", 540, capacity=4096, retry_attempts=1, retry_refused=1, **refused),
+                    debt("retry_sent", 545, owed=0, capacity=4095, retry_attempts=2, retry_refused=1, **refused),
+                    debt("root_before", 570, owed=0, capacity=4096, root=1, retry_attempts=2, retry_refused=1, **refused)]
+            work = {name: 0 for name in terminal.check.COUNTERS}
+            work.update(id=1, wall_us=575, group=1, keys=2, debtors_before=0, stage_rows=2, delta_rows=2, elapsed_us=3)
+            sockets = [{"peer": self.q.COMMON.peer(index), "cookie": 16 + index, "send_buffer": 8192, "notsent_lowat": 4096,
+                        "local": "127.0.0.1:17986", "remote": f"{self.q.COMMON.peer(index)}:{1234 + index}"} for index in range(3)]
+            pending = {"event": "pending", "id": 9, "cookie": 17, "started_us": 61, "wall_us": 62}
+            barriers = [{"peer": self.q.COMMON.peer(index), "session": "same-session", "wall_us": wall,
+                         "pending_batches": 0, "window_open": False, "window_messages": 0,
+                         "window_routes": 0, "pending_withdrawals": 0} for index in range(3) for wall in (10, 610)]
+
+            def observer(rows):
+                content = "evpn_qualification " + json.dumps(row) + "\n"
+                content += "".join("evpn_input_barrier " + json.dumps(value) + "\n" for value in barriers)
+                for prefix, values in (("evpn_terminal_feed ", rows), ("evpn_terminal_work ", [work]),
+                                       ("evpn_terminal_socket ", sockets), ("evpn_terminal_write ", [pending])):
+                    content += "".join(prefix + json.dumps(value) + "\n" for value in values)
+                (leg / "observer.log").write_text(content)
+
+            fill = {"event": "fill-complete", "at": .64, "wall_us": 64, "peer": peer, "routes": 2,
+                    "capacity": {peer: 1, self.q.COMMON.peer(2): 1}, "pending": pending, "admitted": filled}
+            refresh_full = {"event": "refresh-full", "at": .97, "wall_us": 97, "peer": peer, "admitted": full, "refusal": refusal}
+            applied = {"event": "input-applied", "generation": 2, "wall_us": 630, "at": 6.3}
+            events = [{"event": "command", "command": "load", "wall_us": 0, "at": 0.0},
+                      {"event": "complete", "command": "load", "wall_us": 1, "at": .01},
+                      {"event": "command", "command": "source-barrier", "wall_us": 2, "at": .02},
+                      {"event": "complete", "command": "source-barrier", "wall_us": 8, "at": .08},
+                      {"event": "input-applied", "generation": 1, "wall_us": 15, "at": .15},
+                      {"event": "command", "command": "terminal-baseline", "wall_us": 20, "at": .2},
+                      {"event": "complete", "command": "terminal-baseline", "wall_us": 50, "at": .5}, fill,
+                      {"event": "command", "command": "refresh", "wall_us": 70, "at": .7},
+                      {"event": "complete", "command": "refresh", "wall_us": 90, "at": .9}, refresh_full,
+                      {"event": "command", "command": "resume", "wall_us": 530, "at": 5.3},
+                      {"event": "complete", "command": "resume", "wall_us": 550, "at": 5.5},
+                      {"event": "command", "command": "terminal-unfill", "wall_us": 560, "at": 5.6},
+                      {"event": "complete", "command": "terminal-unfill", "wall_us": 590, "at": 5.9},
+                      {"event": "command", "command": "source-barrier", "wall_us": 600, "at": 6.0},
+                      {"event": "complete", "command": "source-barrier", "wall_us": 620, "at": 6.2}, applied,
+                      {"event": "complete", "command": "settle", "wall_us": 700, "at": 7.0},
+                      {"event": "command", "command": "finish", "wall_us": 705, "at": 7.05},
+                      {"event": "complete", "command": "finish", "wall_us": 710, "at": 7.1}]
+            (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+            record = {"shape": "forced-refusal", "arm": "candidate", "settled": row, "applied": applied, "fill": fill,
+                      "refresh_full": refresh_full, "correctness_only": False, "churn-applied-seconds": None,
+                      "convergence-seconds": None, "cell_started_monotonic_ns": 0, "cell_finished_monotonic_ns": 8_000_000_000}
+            observer(feed)
+            good = terminal.evidence(leg, record, self.q, self.r, self.wire)
+            self.assertEqual(good["fill"], {"peer": peer, "routes": 2, "capacity": fill["capacity"], "refresh_capacity_after": 0})
+            self.assertEqual((good["fallback"]["drain_us"], good["fallback"]["tick_us"], good["fallback"]["sent_event"]),
+                             (10, 15, "retry_sent"))
+            self.assertEqual(good["work"]["inventory_visits"], 0)
+            terminal.accept_report(good, "candidate", self.q)
+            for mode, failure in (("no-refusal", "no refused refresh-site"), ("no-drain-clock", "missing drain clock"),
+                                  ("late-tick", "resync tick within 1 s"), ("free-slot", "last outbound slot")):
+                with self.subTest(mode=mode):
+                    rows, current, raw = copy.deepcopy(feed), copy.deepcopy(record), copy.deepcopy(events)
+                    if mode == "no-refusal":
+                        rows.remove(refusal)
+                    elif mode == "no-drain-clock":
+                        rows[6]["capacity"] = 4095
+                    elif mode == "late-tick":
+                        # One microsecond past resume + 1 s + the 10 us drain.
+                        rows[7]["wall_us"] = 530 + 1_000_000 + 10 + 1
+                    else:
+                        rows[3]["capacity"] = 1
+                        current["refresh_full"]["admitted"]["capacity"] = 1
+                        raw[raw.index(refresh_full)] = current["refresh_full"]
+                    observer(rows)
+                    (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in raw))
+                    with self.assertRaisesRegex(ValueError, failure) as raised:
+                        terminal.accept_report(terminal.evidence(leg, current, self.q, self.r, self.wire), "candidate", self.q)
+                    self.assertEqual(isinstance(raised.exception, self.q.AcceptanceFailure), mode == "late-tick")
+
     def test_final_summary_reapplies_raw_work_bar_and_rejects_incomplete_pass_or_cleanup(self):
         manifest = {"head": "a" * 40, "bars": terminal.BARS}
         for defect, expected in (("positive-work", "FAIL"), ("private-partial-fail", "FAIL"),
                                   ("private-partial-pass", "INVALID"), ("private-cleanup", "INVALID")):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
                 output, rows = Path(directory), []
-                for index, arm in enumerate(("private", "candidate")):
-                    row = {"status": "PASS", "arm": arm, "correctness_only": True, "head": manifest["head"],
+                for index, (shape, arm) in enumerate(terminal.BARS["correctness_schedule"]):
+                    row = {"status": "PASS", "shape": shape, "arm": arm, "correctness_only": True, "head": manifest["head"],
                            "qualification_head": source.PINNED, "scope": terminal.SCOPE, "production_activation": False,
-                           "driver_exit": 0, "settled": {}, "evidence": {"debt": {"work": {"inventory_visits": 0}}},
+                           "driver_exit": 0, "settled": {}, "evidence": {"work": {"inventory_visits": 0}},
                            "boot_id": "00000000-0000-0000-0000-000000000001",
                            "daemon_owner": {"pid": 100 + index, "starttime": 1000 + index, "binary_sha256": arm},
                            "cell_started_monotonic_ns": (index * 10 + 1) * 1000000000,
                            "cell_finished_monotonic_ns": (index * 10 + 9) * 1000000000}
-                    if arm == "candidate" and defect == "positive-work":
-                        row["evidence"]["debt"]["work"]["inventory_visits"] = 32
-                    if arm == "private" and defect.startswith("private-"):
+                    if index == 1 and defect == "positive-work":
+                        row["evidence"]["work"]["inventory_visits"] = 32
+                    if index == 0 and defect.startswith("private-"):
                         row.pop("settled")
                         row.pop("evidence")
                         if defect != "private-partial-pass":
                             row.update(status="FAIL", error="retained private acceptance miss")
                         if defect == "private-cleanup":
                             row["cleanup_errors"] = ["daemon: owned child remains"]
-                    leg = output / f"terminal-{index:02}-{arm}"
+                    leg = output / f"terminal-{index:02}-{shape}-{arm}"
                     leg.mkdir()
                     self.q.write_json(leg / "result.json", row)
                     (leg / "events.jsonl").write_text(json.dumps({"at": index * 10 + 2}) + "\n")
@@ -434,24 +576,26 @@ class DependencyChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output, rows = Path(directory), []
             manifest = {"head": "a" * 40, "bars": terminal.BARS}
-            for index, arm in enumerate(("private", "candidate")):
-                row = {"status": "FAIL" if arm == "private" else "PASS", "error": "headroom", "arm": arm,
+            for index, (shape, arm) in enumerate(terminal.BARS["correctness_schedule"]):
+                row = {"status": "FAIL" if index == 0 else "PASS", "error": "headroom", "shape": shape, "arm": arm,
                        "correctness_only": True, "head": manifest["head"], "qualification_head": source.PINNED,
                        "scope": terminal.SCOPE, "production_activation": False, "driver_exit": 0, "settled": {}, "evidence": {},
                        "boot_id": "00000000-0000-0000-0000-000000000001",
                        "daemon_owner": {"pid": index + 100, "starttime": index + 1000, "binary_sha256": arm},
                        "cell_started_monotonic_ns": (index * 10 + 1) * 1000000000,
                        "cell_finished_monotonic_ns": (index * 10 + 9) * 1000000000}
-                leg = output / f"terminal-{index:02}-{arm}"
+                leg = output / f"terminal-{index:02}-{shape}-{arm}"
                 leg.mkdir()
                 self.q.write_json(leg / "result.json", row)
                 (leg / "events.jsonl").write_text(json.dumps({"at": index * 10 + 2}) + "\n")
                 rows.append(row)
+            outcomes = [self.q.AcceptanceFailure("private headroom"), ValueError("candidate truncated wire"), {}, {}]
             with mock.patch.object(source, "verify_build", return_value={"rustbgpd-private": "private", "rustbgpd-candidate": "candidate"}), \
-                 mock.patch.object(terminal, "evidence", side_effect=[self.q.AcceptanceFailure("private headroom"), ValueError("candidate truncated wire")]) as consumer:
+                 mock.patch.object(terminal, "evidence", side_effect=outcomes) as consumer, \
+                 mock.patch.object(terminal, "accept_report"):
                 terminal.summarize(output, manifest, rows, self.q, self.r, self.wire, True)
             summary = json.loads((output / "summary.json").read_text())
-            self.assertEqual(consumer.call_count, 2)
+            self.assertEqual(consumer.call_count, 4)
             self.assertEqual(summary["status"], "INVALID")
             self.assertEqual(len(summary["failures"]), 1)
             self.assertIn("truncated wire", summary["invalid_cells"][0]["error"])
@@ -461,16 +605,16 @@ class DependencyChecks(unittest.TestCase):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
                 output, rows = Path(directory), []
                 manifest = {"head": "a" * 40, "bars": terminal.BARS}
-                for index, arm in enumerate(terminal.BARS["schedule"]):
-                    row = {"status": "PASS", "arm": arm, "correctness_only": False, "head": manifest["head"],
+                for index, (shape, arm) in enumerate(terminal.BARS["schedule"]):
+                    row = {"status": "PASS", "shape": shape, "arm": arm, "correctness_only": False, "head": manifest["head"],
                            "qualification_head": source.PINNED, "scope": terminal.SCOPE, "production_activation": False,
-                           "driver_exit": 0, "settled": {}, "evidence": {"debt": {"work": {"inventory_visits": 0}}},
+                           "driver_exit": 0, "settled": {}, "evidence": {"work": {"inventory_visits": 0}},
                            "churn-applied-seconds": 1.0, "convergence-seconds": 1.0,
                            "boot_id": "00000000-0000-0000-0000-000000000001",
                            "daemon_owner": {"pid": 100 + index, "starttime": 1000 + index, "binary_sha256": arm},
                            "cell_started_monotonic_ns": (index * 10 + 1) * 1000000000,
                            "cell_finished_monotonic_ns": (index * 10 + 9) * 1000000000}
-                    leg = output / f"terminal-{index:02}-{arm}"
+                    leg = output / f"terminal-{index:02}-{shape}-{arm}"
                     leg.mkdir()
                     (leg / "events.jsonl").write_text(json.dumps({"at": index * 10 + 2}) + "\n")
                     if index == 2:

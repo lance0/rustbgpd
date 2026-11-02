@@ -4,13 +4,6 @@ import unittest
 import check
 
 
-def feed(event, at, root=0, revision=1, rows=0, stamp=10):
-    return {"event": event, "wall_us": at, "root": root, "revision": revision, "rows": rows,
-            "peer": "127.1.0.2", "session": 7, "record_session": 7, "channel": 1, "channel_match": True,
-            "complete": True, "current": True, "owed": 1, "dirty": False, "capacity": 4095, "max_capacity": 4096,
-            "target_group": 1, "table_stamp": stamp, "markers": {name: 0 for name in check.MARKER_COUNTERS}}
-
-
 def fixture():
     feeds = [feed("data_admitted", 100, rows=20000), feed("root_before", 200, root=1),
              feed("data_admitted", 300, root=1, rows=4, stamp=11), feed("sample", 500, stamp=11)]
@@ -33,7 +26,7 @@ class DebtChecks(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["work"]["inventory_visits"], 16)
         self.assertEqual(result["marker_refusals"], 0)
-        self.assertEqual(result["marker_refusals_by_site"], {"flush": 0, "retry": 0, "initial": 0})
+        self.assertEqual(result["marker_refusals_by_site"], {"flush": 0, "retry": 0, "initial": 0, "refresh": 0})
         # A passing fixture still fails the predeclared zero-inventory-work bar.
         self.assertGreater(result["work"]["inventory_visits"], 0)
 
@@ -196,7 +189,7 @@ class DebtChecks(unittest.TestCase):
         self.assertFalse(any(row["event"] == "marker_refused" for row in args[0]))
         result = check.debt_receipt(*args)
         self.assertEqual(result["marker_refusals"], 1)
-        self.assertEqual(result["marker_refusals_by_site"], {"flush": 0, "retry": 1, "initial": 0})
+        self.assertEqual(result["marker_refusals_by_site"], {"flush": 0, "retry": 1, "initial": 0, "refresh": 0})
 
     def test_missing_retry_or_any_send_site_counter_is_invalid(self):
         for name in check.MARKER_COUNTERS:
@@ -224,6 +217,124 @@ class DebtChecks(unittest.TestCase):
         args[4][1]["rwnd_limited_us"] = 0
         with self.assertRaisesRegex(ValueError, "nonmonotone"):
             check.debt_receipt(*args)
+
+
+def forced_feed():
+    """Debtor rows of a forced cell: refusal while paused, tick send after resume."""
+    def row(event, at, owed=1, capacity=4096, **markers):
+        value = feed(event, at, owed=0, rows=0)
+        value.update(owed=owed, capacity=capacity)
+        value["markers"].update(markers)
+        return value
+    refused = dict(refresh_attempts=1, refresh_refused=1)
+    return [row("sample", 50, owed=0, capacity=4096),
+            row("data_admitted", 95, capacity=0),
+            row("refresh_refused", 96, capacity=0, **refused),
+            row("retry_refused", 1_000_096, capacity=0, retry_attempts=1, retry_refused=1, **refused),
+            row("sample", 2_100_000, capacity=4096, retry_attempts=1, retry_refused=1, **refused),
+            row("retry_sent", 2_200_000, owed=0, retry_attempts=2, retry_refused=1, **refused)]
+
+
+def feed(event, at, root=0, revision=1, rows=0, stamp=10, **fields):
+    row = {"event": event, "wall_us": at, "root": root, "revision": revision, "rows": rows,
+           "peer": "127.1.0.2", "session": 7, "record_session": 7, "channel": 1, "channel_match": True,
+           "complete": True, "current": True, "owed": 1, "dirty": False, "capacity": 4095, "max_capacity": 4096,
+           "target_group": 1, "table_stamp": stamp, "markers": {name: 0 for name in check.MARKER_COUNTERS}}
+    row.update(fields)
+    return row
+
+
+RESUME, UNFILL = 2_000_000, 3_000_000  # controller wall-clock dispatches, microseconds
+
+
+class ForcedRefusalChecks(unittest.TestCase):
+    def test_refusal_drain_and_tick_clocks(self):
+        rows = forced_feed()
+        refusal = check.refusal_witness(rows, "127.1.0.2", 70)
+        result = check.fallback(rows, refusal, RESUME, UNFILL)
+        self.assertEqual((result["drain_us"], result["tick_us"], result["sent_event"], result["retry_refusals"]),
+                         (100_000, 200_000, "retry_sent", 1))
+        self.assertTrue(check.fallback_within_bar(result))
+
+    def test_forced_cell_without_a_refusal_is_invalid(self):
+        rows = [row for row in forced_feed() if row["event"] != "refresh_refused"]
+        with self.assertRaisesRegex(ValueError, "no refused refresh-site marker send"):
+            check.refusal_witness(rows, "127.1.0.2", 70)
+        for field, value in (("capacity", 1), ("owed", 0), ("current", False)):
+            with self.subTest(field=field):
+                rows = forced_feed()
+                rows[2][field] = value
+                with self.assertRaisesRegex(ValueError, "refusal is not a full channel"):
+                    check.refusal_witness(rows, "127.1.0.2", 70)
+
+    def test_missing_refresh_refusal_counter_is_invalid(self):
+        for position in range(len(forced_feed())):
+            with self.subTest(position=position):
+                rows = forced_feed()
+                del rows[position]["markers"]["refresh_refused"]
+                with self.assertRaisesRegex(ValueError, "missing terminal-marker send-site counter"):
+                    check.validate_feed(rows, {"127.1.0.2"})
+                with self.assertRaisesRegex(ValueError, "missing terminal-marker send-site counter"):
+                    check.fallback(rows, forced_feed()[2] if position != 2 else rows[2], RESUME, UNFILL)
+
+    def test_tick_send_later_than_retry_interval_plus_drain_fails(self):
+        rows = forced_feed()
+        refusal = check.refusal_witness(rows, "127.1.0.2", 70)
+        rows[-1]["wall_us"] = RESUME + check.MARKER_RETRY_US + 100_000
+        self.assertTrue(check.fallback_within_bar(check.fallback(rows, refusal, RESUME, UNFILL)))
+        rows[-1]["wall_us"] += 1
+        self.assertFalse(check.fallback_within_bar(check.fallback(rows, refusal, RESUME, UNFILL)))
+
+    def test_markers_settled_outside_the_tick_fail(self):
+        for event in ("refresh_sent", "sample"):
+            with self.subTest(event=event):
+                rows = forced_feed()
+                rows[-1]["event"] = event
+                result = check.fallback(rows, check.refusal_witness(rows, "127.1.0.2", 70), RESUME, UNFILL)
+                self.assertFalse(check.fallback_within_bar(result))
+        rows = forced_feed()[:-1]
+        result = check.fallback(rows, check.refusal_witness(rows, "127.1.0.2", 70), RESUME, UNFILL)
+        self.assertIsNone(result["sent_event"])
+        self.assertFalse(check.fallback_within_bar(result))
+
+    def test_missing_drain_clock_is_invalid(self):
+        for mode in ("absent", "not-empty", "after-unfill", "before-resume"):
+            with self.subTest(mode=mode):
+                rows = forced_feed()
+                if mode == "absent":
+                    del rows[4]
+                elif mode == "not-empty":
+                    rows[4]["capacity"] = 4095
+                elif mode == "after-unfill":
+                    rows[4]["wall_us"] = UNFILL + 1
+                else:
+                    rows[4]["wall_us"] = RESUME - 1
+                with self.assertRaisesRegex(ValueError, "missing drain clock"):
+                    check.fallback(rows, rows[2], RESUME, UNFILL)
+
+    def test_refusal_after_resume_is_invalid(self):
+        rows = forced_feed()
+        with self.assertRaisesRegex(ValueError, "refusal does not precede"):
+            check.fallback(rows, rows[2], 90, UNFILL)
+
+
+class TimingMedianChecks(unittest.TestCase):
+    def rows(self, candidate):
+        return [{"arm": arm, "churn-applied-seconds": value, "convergence-seconds": value}
+                for arm, value in (("private", 1.0), ("candidate", candidate)) * 3]
+
+    def test_no_refusal_timing_ratio_over_bar_fails(self):
+        self.assertTrue(all(field["pass"] for field in check.timing_medians(self.rows(1.03), 1.03).values()))
+        self.assertFalse(any(field["pass"] for field in check.timing_medians(self.rows(1.0301), 1.03).values()))
+
+    def test_each_field_is_compared_separately(self):
+        rows = self.rows(1.0)
+        for row in rows:
+            if row["arm"] == "candidate":
+                row["convergence-seconds"] = 3.6
+        result = check.timing_medians(rows, 1.03)
+        self.assertTrue(result["churn-applied-seconds"]["pass"])
+        self.assertFalse(result["convergence-seconds"]["pass"])
 
 
 WORKLOAD = (0.0, 2.0, (-1, 3))  # load dispatch, finish completion, physical cell

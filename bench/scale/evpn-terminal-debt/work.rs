@@ -104,8 +104,8 @@ pub(super) fn count(kind: &str, rows: usize) {
 
 // Cumulative per-peer attempts and refusals at every standalone terminal-marker
 // `try_send` site, in `MARKER_SITES` order. Absent sites are never reported as zero.
-const MARKER_SITES: [&str; 3] = ["flush", "retry", "initial"];
-static MARKERS: std::sync::Mutex<Vec<(crate::PeerId, [u64; 6])>> =
+const MARKER_SITES: [&str; 4] = ["flush", "retry", "initial", "refresh"];
+static MARKERS: std::sync::Mutex<Vec<(crate::PeerId, [u64; 8])>> =
     std::sync::Mutex::new(Vec::new());
 
 pub(super) fn marker(peer: crate::PeerId, site: &str, refused: bool) {
@@ -118,7 +118,7 @@ pub(super) fn marker(peer: crate::PeerId, site: &str, refused: bool) {
         .iter()
         .position(|(key, _)| *key == peer)
         .unwrap_or_else(|| {
-            rows.push((peer, [0; 6]));
+            rows.push((peer, [0; 8]));
             rows.len() - 1
         });
     rows[row].1[2 * index] += 1;
@@ -130,7 +130,7 @@ pub(super) fn markers(peer: crate::PeerId) -> String {
     let counts = rows
         .iter()
         .find(|(key, _)| *key == peer)
-        .map_or([0; 6], |(_, counts)| *counts);
+        .map_or([0; 8], |(_, counts)| *counts);
     let fields: Vec<String> = MARKER_SITES
         .iter()
         .enumerate()

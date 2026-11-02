@@ -12,9 +12,10 @@ import time
 
 import patches
 
-# Qualification a5da4df merged into the owned-feed renewal fix 288e12769;
-# the 2026-10-27 receipt used a5da4df26898b3658511babd3cb919e130b7fc40 itself.
-PINNED = "8de125af1384e61d8fdb31268bc26a710507a72d"
+# Qualification a5da4df merged into the owned-feed marker fix 3c7339027; the
+# 2026-11-02 rerun used 8de125af1 (fix 288e12769) and the 2026-10-27 receipt
+# used a5da4df26898b3658511babd3cb919e130b7fc40 itself.
+PINNED = "8a501cba8d1234b14d902be85dd06cc58a02ec07"
 BASE = "110dd43f9be38901fc7826eb74673b7c6d2bc0d6"
 PREFIX = "bench/scale/evpn-terminal-debt/"
 HERE = Path(__file__).resolve().parent

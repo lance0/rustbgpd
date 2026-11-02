@@ -1,6 +1,6 @@
 # EVPN terminal-debt qualification
 
-This separate harness tests timer-deferred terminal-marker debt after an ordinary
+This separate harness tests EVPN terminal-marker (EoR) debt after an ordinary
 EVPN refresh feed has actually entered the outbound channel. It uses three real
 TCP peers and observes the complete producer called by incremental distribution.
 Production EVPN group ownership remains disabled. This receipt cannot authorize
@@ -9,10 +9,56 @@ activation, replace a soak, or qualify RTC or enhanced route refresh.
 The harness is independent of the qualification branch. Its required input is
 one explicit clean commit. The 2026-10-27 receipt used qualification commit
 `a5da4df26898b3658511babd3cb919e130b7fc40` from
-[the qualification PR](https://github.com/lance0/rustbgpd/pull/3440). The current
-input, `8de125af1384e61d8fdb31268bc26a710507a72d`, merges that commit into the
-owned-feed renewal fix `288e12769ec20e56f01ed30b26471c2f1678d35e`; it changes no
-product file of the fix.
+[the qualification PR](https://github.com/lance0/rustbgpd/pull/3440). The
+2026-11-02 rerun used `8de125af1384e61d8fdb31268bc26a710507a72d`, which merges
+it into the owned-feed renewal fix `288e12769`. The current input,
+`8a501cba8d1234b14d902be85dd06cc58a02ec07`, merges it into the owned-feed marker
+fix `3c733902746d1390822994282a6e7cc815d49b96`, whose refresh tail sends the
+markers a complete feed owes right behind its data and leaves a refused send to
+the one-second resync tick. The merge changes no product file of the fix.
+
+## Cell types
+
+Each campaign runs two cell types with the same N, alternation, no-retry and
+INVALID rules: private/candidate three times for no-refusal cells, then three
+times for forced-refusal cells. A correctness-only campaign runs one pair of each.
+All feed clocks are the daemon's wall clock (`SystemTime`, microseconds) in its
+`evpn_terminal_feed` rows; controller dispatches use the controller's wall clock on
+the same host. Timing medians use the controller's monotonic clock as before.
+
+- **No-refusal** keeps the workload below. The candidate's refresh tail must
+  send each non-source debtor's markers at once: a `refresh_sent` row after the
+  refresh dispatch and zero `refresh_refused`. Its EoR therefore precedes the
+  churn on the wire. Every root called for the churn must report its work counters
+  and visit zero repeated inventory rows; a root with no debtor owing markers owes
+  no renewal. Candidate medians must be at most private × 1.03, separately for
+  churn application and resume-to-wire convergence.
+- **Forced refusal** keeps the queue sizes, timer and actor state. After the
+  readers pause, source zero announces real single-route UPDATEs from its unused
+  pool indices (Type 2 `8000..15999`, then Type 5 `2000..3999`; at most 10,000).
+  Each step sends at most the lowest observed debtor capacity minus one, only after
+  every earlier route is admitted to both debtors, so it cannot overfill. The fill
+  stops when a debtor's outbound channel has one free slot and its writer holds
+  an unfinished Pending write; failing that within 60 seconds is INVALID. The
+  ordinary refresh's data then takes the last slot (an admitted refresh row with
+  `capacity == 0`). The candidate must record a `refresh_refused` row for that
+  debtor whose complete, current feed owes markers, with the `refresh` refusal
+  counter at least one; its absence is INVALID. After the readers resume and every
+  receiver has its refresh EoR, source zero withdraws the fill and a source
+  barrier proves the withdrawal applied, so the final inventory is unchanged.
+  - Drain clock: the first debtor `sample` row at or after the resume dispatch,
+    and no later than the withdrawal dispatch, whose channel is empty
+    (`capacity == max_capacity`). Its absence is INVALID.
+  - Tick clock: the first debtor row after the refusal that no longer owes
+    markers. It must be the resync tick's `retry_sent`, and
+    `tick − resume ≤ 1 s + (drain − resume)`; otherwise the cell FAILs.
+  - The private arm runs the same fill and must also show the refresh taking the
+    last slot; it carries no debt and has no timing comparison.
+  - Every root from the refresh dispatch to settlement, including the fill
+    withdrawal, must report its counters and visit zero repeated inventory rows.
+
+In both cell types every receiver's raw EVPN EoR must follow every route its
+refresh covers (FAIL otherwise). ERR is not negotiated, so no EoRR is on this wire.
 Preparation archives that input and this harness separately, records both source
 commits and archive hashes, and derives two independent source exports. Verification
 compares every export input with both archives and the reviewed derivations.
@@ -54,7 +100,7 @@ the same instrumentation and real socket settings. No actor state, queue size,
 timer, or selection-deferral state is synthesized or changed.
 
 The fixed workload and bars are also recorded on the working ticket before any
-dispatch:
+dispatch. Forced-refusal cells replace the churn with the fill described above:
 
 - Three peers, each with 8,000 Type 2 and 2,000 Type 5 routes; two stable export
   policy groups; ordinary refresh, without negotiating ERR.
@@ -70,8 +116,10 @@ dispatch:
   marker retry timer remains one second. The daemon alone has a 12 GiB cgroup and
   zero swap. Provenance budgets stay 16 MiB per peer and 256 MiB per daemon, with
   every raw observation at or below 80% and all five reset causes zero.
-- A real nonempty data admission must produce a complete, current completion with
-  positive owed markers, current session identity and matching channel. An actual
+- Runs before the marker fix (2026-10-27, 2026-11-02) also required admitted
+  debt spanning the churn; the fixed build sends the markers at once, so
+  no-refusal cells no longer check it. That witness was: a real nonempty data
+  admission must produce a complete, current completion with positive owed markers, current session identity and matching channel. An actual
   incremental root call must retain that state before work and admit the changed
   keys with a changed completion target table stamp. The completion revision is a
   provenance fence and can be reused; it is not a route revision counter.
@@ -89,8 +137,7 @@ dispatch:
   complete admission; it is not mistaken for an externally stale session/feed.
 - Kernel evidence requires a first-Pending write event and an increase in the
   kernel's cumulative `rwnd_limited` or `sndbuf_limited` duration. Both `ss` samples
-  must be wholly inside that unfinished write and the continuous positive-debt
-  interval, matched by the live socket cookie. The same write must already be
+  must be wholly inside that unfinished write, matched by the live socket cookie. The same write must already be
   Pending at the actual root's before-state and remain unfinished through actor
   application. The sample-pair interval must overlap that root-to-application
   interval; earlier pressure alone cannot qualify later churn. `notsent`, Pending, and a reader
@@ -102,8 +149,7 @@ dispatch:
   A current feed renewed from its member delta payload counts its sparse seal and
   staged-key verification instead; a root with neither renewal path is INVALID.
   After a complete current feed is admitted, the repeated full-inventory visit
-  bar is **zero**. The pinned implementation is expected to breach this bar;
-  source evidence is not a substitute for the retained live receipt.
+  bar is **zero**; source evidence is not a substitute for the retained live receipt.
 - Readiness runs at 20 Hz through all workload phases: all HTTP 200, every request
   below 200 ms, no missing probe and no scheduling lag of 50 ms or more. The series
   is bound to the controller's monotonic clock: the first probe is scheduled at most
@@ -117,7 +163,8 @@ dispatch:
   coverage before EoR, terminal ordering, final route set and complete settlement.
   Raw BGP type 5 is rejected because this leg does not negotiate ERR. An ERR leg
   would require capability, capture, BoRR/EoRR parser and ordering extensions.
-- Measured order is private/candidate, three pairs. Candidate medians for
+- Measured order is private/candidate, three pairs per cell type. For no-refusal
+  cells only, candidate medians for
   controller dispatch of the source-UPDATE command through actor application
   (including actual source write/drain), and resume-to-wire-convergence must each be at
   most private × 1.03. Private bar misses remain baseline evidence; technical
@@ -126,16 +173,15 @@ dispatch:
 
 The raw consumer runs online and again during `analyze`. `FAIL` means an observed
 bar miss or absent required witness; malformed or inconsistent evidence is
-`INVALID`. Failed directories are retained and cannot be reused. If the natural
-timer window closes during churn, the fixture fails without changing its timer,
-buffers, workload or bars. Marker refusals come from per-peer attempt/refusal
-counters at every standalone terminal-marker `try_send` site: the deferred-EoR
-flush, the one-second marker retry and the initial-table EoR. A marker carried in
-a data batch shares that batch's channel reservation, so its refusal is a data
-refusal. A missing site counter is INVALID, never zero. A zero
-marker-admission-refusal count is allowed: call the result **timer-deferred
-terminal debt under kernel backpressure**. Claim that
-backpressure prevented marker admission only if a real refusal was observed.
+`INVALID`. Failed directories are retained and cannot be reused. Marker refusals
+come from per-peer attempt/refusal counters at every standalone terminal-marker
+`try_send` site: the deferred-EoR flush, the initial-table EoR,
+and the shared `try_send_evpn_feed_markers`, attributed by its caller: `retry`
+for the one-second resync tick and `refresh` for the PeerRefresh tail. A marker
+carried in a data batch shares that batch's channel reservation, so its refusal
+is a data refusal. A missing site counter is INVALID, never zero. Claim that
+backpressure prevented marker admission only from a forced-refusal cell's
+observed `refresh` refusal.
 Analysis continues checking later raw cells after a private acceptance miss;
 technical corruption overrides `FAIL` with `INVALID`. A partial private failure
 is retained as unvalidated evidence and never supplies comparative medians.

@@ -3,6 +3,7 @@
 from decimal import Decimal
 import json
 import re
+import statistics
 
 
 def require(ok, message):
@@ -23,7 +24,8 @@ def positive(row):
 def validate_feed(rows, peers):
     for row in rows:
         require(row["peer"] in peers and row["event"] in {
-            "sample", "root_before", "data_admitted", "terminal_admitted", "marker_refused", "complete_noop"},
+            "sample", "root_before", "data_admitted", "terminal_admitted", "marker_refused", "complete_noop",
+            "refresh_refused", "refresh_sent", "retry_refused", "retry_sent"},
             "unknown feed identity/event")
         require(all(type(row[name]) is bool for name in ("complete", "current", "channel_match", "dirty"))
                 and all(type(row[name]) is int and row[name] >= 0 for name in
@@ -34,8 +36,9 @@ def validate_feed(rows, peers):
         marker_counts(row)
 
 
-# Every standalone terminal-marker try_send site instrumented by patches.py.
-MARKER_SITES = ("flush", "retry", "initial")
+# Every standalone terminal-marker try_send site instrumented by patches.py;
+# "refresh" is the PeerRefresh tail's immediate send, "retry" the resync tick.
+MARKER_SITES = ("flush", "retry", "initial", "refresh")
 MARKER_COUNTERS = tuple(f"{site}_{kind}" for site in MARKER_SITES for kind in ("attempts", "refused"))
 
 
@@ -161,10 +164,11 @@ def work_receipt(rows, root_ids):
         require(all(type(row.get(name)) is int and row[name] >= 0 for name in COUNTERS),
                 "missing or malformed work counter")
         attempts, sparse = row["prepare_attempts"], row["sparse_seals"]
-        # Each root renews through the full producer or a sparse delta seal;
-        # a root with neither has uncounted producer work.
-        require(row["debtors_before"] > 0 and row["keys"] > 0 and row["stage_rows"] >= row["keys"]
-                and row["delta_rows"] >= row["keys"] and attempts + sparse > 0,
+        # While a current complete feed owes markers, each root renews it through
+        # the full producer or a sparse delta seal; a root with neither has
+        # uncounted producer work. Without such a debtor no renewal is due.
+        require(row["keys"] > 0 and row["stage_rows"] >= row["keys"] and row["delta_rows"] >= row["keys"]
+                and (row["debtors_before"] == 0 or attempts + sparse > 0),
                 "root work omitted staging, delta or complete producer")
         require(row["projection_walks"] == 2 * attempts and row["current_walks"] == attempts
                 and row["old_walks"] == attempts and row["success_walks"] == attempts,
@@ -271,3 +275,64 @@ def raw_updates(data):
             result.extend(data[cursor:cursor + size])
         cursor += size
     return bytes(result)
+
+
+MARKER_RETRY_US = 1_000_000  # DIRTY_RESYNC_INTERVAL, unchanged
+
+
+def refusal_witness(feed, peer, after_us):
+    """The first refused refresh-site marker send after the refresh dispatch.
+
+    Feed clocks are the daemon's wall clock (wall_us, microseconds). A forced
+    cell without this refusal did not reach its predeclared shape: INVALID.
+    """
+    refused = [row for row in feed if row["peer"] == peer and row["wall_us"] >= after_us
+               and row["event"] == "refresh_refused"]
+    require(refused, "forced cell observed no refused refresh-site marker send")
+    row = refused[0]
+    require(marker_counts(row)["refresh_refused"] >= 1 and positive(row) and row["capacity"] == 0,
+            "refusal is not a full channel whose current complete feed owes markers")
+    return row
+
+
+def fallback(feed, refusal, resume_us, limit_us):
+    """Clocks for the resync-tick fallback after a refused refresh-site send.
+
+    resume_us is the controller's wall-clock dispatch of the reader resume. The
+    drain clock is the first daemon sample at or after it, and no later than
+    limit_us (the unfill dispatch), showing the debtor's outbound channel empty
+    (capacity == max_capacity). The send clock is the first feed row after the
+    refusal whose feed no longer owes markers; the bar requires it to be the
+    tick's successful send.
+    """
+    rows = [row for row in feed if row["peer"] == refusal["peer"]]
+    counts = [marker_counts(row) for row in rows]
+    require(all(right[name] >= left[name] for left, right in zip(counts, counts[1:]) for name in MARKER_COUNTERS),
+            "nonmonotone terminal-marker send-site counter")
+    require(refusal in rows and refusal["wall_us"] < resume_us <= limit_us,
+            "refusal does not precede the reader resume")
+    empty = next((row for row in rows if resume_us <= row["wall_us"] <= limit_us and row["event"] == "sample"
+                  and row["capacity"] == row["max_capacity"]), None)
+    require(empty is not None, "missing drain clock: no empty-channel sample after resume")
+    later = rows[rows.index(refusal) + 1:]
+    sent = next((row for row in later if row["owed"] == 0), None)
+    return {"refused_us": refusal["wall_us"], "resume_us": resume_us, "empty_us": empty["wall_us"],
+            "drain_us": empty["wall_us"] - resume_us,
+            "sent_event": sent["event"] if sent else None, "sent_us": sent["wall_us"] if sent else None,
+            "tick_us": sent["wall_us"] - resume_us if sent else None,
+            "retry_refusals": marker_counts(sent or rows[-1])["retry_refused"] - marker_counts(refusal)["retry_refused"]}
+
+
+def fallback_within_bar(result):
+    """The tick, not another path, sent the markers within 1 s plus the drain."""
+    return result["sent_event"] == "retry_sent" and result["tick_us"] <= MARKER_RETRY_US + result["drain_us"]
+
+
+def timing_medians(rows, ratio):
+    """No-refusal cells only; each field is compared separately, never pooled."""
+    result = {}
+    for field in ("churn-applied-seconds", "convergence-seconds"):
+        medians = {arm: statistics.median(row[field] for row in rows if row["arm"] == arm)
+                   for arm in ("candidate", "private")}
+        result[field] = {**medians, "pass": medians["candidate"] <= medians["private"] * ratio}
+    return result

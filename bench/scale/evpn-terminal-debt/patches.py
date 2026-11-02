@@ -111,7 +111,8 @@ def instrument(files, here):
          "        if owns_refresh_prior\n")
     path = manager + "route_refresh.rs"
     # Count every standalone terminal-marker try_send site: deferred-EoR flush,
-    # the timer retry and the initial-table EoR. A batch-carried marker shares
+    # the timer retry, the initial-table EoR and the refresh tail's immediate
+    # send (attributed below by caller). A batch-carried marker shares
     # its data reservation, so a refusal there is a data refusal, not a marker one.
     edit(path, "        if tx.try_send(eor).is_err() {\n            warn!",
          "        let terminal_sent = tx.try_send(eor).is_ok();\n"
@@ -121,13 +122,26 @@ def instrument(files, here):
     edit(path, "            self.evpn_feed_markers_admitted(peer, &tx, bits);",
          "            self.evpn_feed_markers_admitted(peer, &tx, bits);\n"
          "            self.bench_terminal_event(peer, \"terminal_admitted\", 0);")
+    # The resync tick and the PeerRefresh tail share try_send_evpn_feed_markers;
+    # its pending_families argument names the caller (tick true, refresh false),
+    # so one edit attributes each attempt to its own site.
     edit(manager + "evpn_recovery.rs",
-         "            if sender.try_send(update).is_ok()\n"
-         "                && self.outbound_session_ids.get(&peer).copied() == session_id",
-         "            let terminal_sent = sender.try_send(update).is_ok();\n"
-         "            if bits != 0 { super::terminal_debt::marker(peer, \"retry\", !terminal_sent); }\n"
-         "            if terminal_sent\n"
-         "                && self.outbound_session_ids.get(&peer).copied() == session_id")
+         "        if sender.try_send(update).is_ok()\n"
+         "            && self.outbound_session_ids.get(&peer).copied() == session_id",
+         "        let terminal_sent = sender.try_send(update).is_ok();\n"
+         "        let terminal_site = if pending_families { \"retry\" } else { \"refresh\" };\n"
+         "        if bits != 0 {\n"
+         "            super::terminal_debt::marker(peer, terminal_site, !terminal_sent);\n"
+         "            if !terminal_sent {\n"
+         "                self.bench_terminal_event(peer, if pending_families { \"retry_refused\" } else { \"refresh_refused\" }, 0);\n"
+         "            }\n        }\n"
+         "        if terminal_sent\n"
+         "            && self.outbound_session_ids.get(&peer).copied() == session_id")
+    edit(manager + "evpn_recovery.rs", "            self.evpn_feed_markers_admitted(peer, &sender, bits);\n",
+         "            self.evpn_feed_markers_admitted(peer, &sender, bits);\n"
+         "            if bits != 0 {\n"
+         "                self.bench_terminal_event(peer, if pending_families { \"retry_sent\" } else { \"refresh_sent\" }, 0);\n"
+         "            }\n")
     edit(manager + "peer_lifecycle.rs",
          "            if tx.try_send(eor).is_err() {\n                warn!(%peer, \"outbound channel full — `EoR` deferred\");",
          "            let terminal_sent = tx.try_send(eor).is_ok();\n"
@@ -206,7 +220,44 @@ def instrument(files, here):
          '                client.shifts += 1;\n'
          '                drained(clients).await?;\n'
          '                serde_json::json!({"events": 4, "source": 0, "messages": 1, "write_started_us": started, "writers_drained_us": super::wall_us()})\n'
-         '            }\n            ["source-barrier"] if loaded => {')
+         '            }\n'
+         # Forced refusal: real single-route announcements from source zero's
+         # unused pool indices, one UPDATE each, while every reader is paused.
+         '            ["terminal-fill", count] if loaded && paused => {\n'
+         '                let count: usize = count.parse()?;\n'
+         '                let started = super::wall_us();\n'
+         '                let client = &mut clients[0];\n'
+         '                let spare = (shape.type2 + shape.type5) as usize;\n'
+         '                anyhow::ensure!(client.shifts == 0 && count > 0 && terminal_fill.len() + count <= spare, "terminal fill exceeds the unused route pool");\n'
+         '                let mut messages = Vec::with_capacity(count);\n'
+         '                for _ in 0..count {\n'
+         '                    let next = u32::try_from(terminal_fill.len())?;\n'
+         '                    let route = if next < shape.type2 { super::type2_route(client.index, shape.type2 + next) }\n'
+         '                        else { super::type5_route(client.index, shape.type5 + next - shape.type2) };\n'
+         '                    messages.push(super::build_update(client.index, vec![route.clone()], vec![]));\n'
+         '                    terminal_fill.push(route);\n'
+         '                }\n'
+         '                send_all(client, messages).await;\n'
+         '                drained(clients).await?;\n'
+         '                serde_json::json!({"source": 0, "routes": count, "total": terminal_fill.len(), "write_started_us": started, "writers_drained_us": super::wall_us()})\n'
+         '            }\n'
+         # After every receiver has the refresh EoR, withdraw the fill so the
+         # fixed final inventory is unchanged.
+         '            ["terminal-unfill"] if loaded && !paused => {\n'
+         '                let before = refresh_before.clone().ok_or_else(|| anyhow::anyhow!("refresh not issued"))?;\n'
+         '                wait_until(Duration::from_secs(args.converge_cap_secs), lost, || eors(clients).iter().zip(&before).all(|(now, then)| now > then)).await?;\n'
+         '                anyhow::ensure!(!terminal_fill.is_empty(), "no terminal fill to withdraw");\n'
+         '                let started = super::wall_us();\n'
+         '                let client = &mut clients[0];\n'
+         '                let messages = super::updates(client.index, &terminal_fill, true);\n'
+         '                let count = messages.len();\n'
+         '                send_all(client, messages).await;\n'
+         '                drained(clients).await?;\n'
+         '                serde_json::json!({"source": 0, "routes": std::mem::take(&mut terminal_fill).len(), "messages": count, "write_started_us": started, "writers_drained_us": super::wall_us()})\n'
+         '            }\n'
+         '            ["source-barrier"] if loaded => {')
+    edit(path, "    let mut input_barrier_generation = 0_u64;\n",
+         "    let mut input_barrier_generation = 0_u64;\n    let mut terminal_fill = Vec::new();\n")
     # Capture framed bytes before decoding as a separate, bounded raw stream.
     # The consumer checks these against the existing view's UPDATE boundaries.
     path = "bench/evpn-load/src/lib.rs"

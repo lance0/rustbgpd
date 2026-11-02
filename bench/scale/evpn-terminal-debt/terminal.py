@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Timer-deferred admitted EVPN terminal debt under actual TCP backpressure."""
+"""EVPN terminal-marker debt: immediate refresh send and forced refusal under real backpressure."""
 
 import argparse
 import json
 import os
 from pathlib import Path
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -28,10 +27,22 @@ BARS = {"clients": 3, "routes_per_source": 10000, "type2_fraction": .8,
         "readiness_hz": 20, "readiness_seconds": .2, "max_schedule_lag_seconds": .05,
         "convergence_seconds": 60, "initial_seconds": 900, "debt_witness_seconds": 2,
         "kernel_sample_hz": 20, "max_repeated_inventory_visits": 0,
-        "candidate_median_ratio": 1.03, "schedule": ["private", "candidate"] * 3}
+        "candidate_median_ratio": 1.03,
+        # Same N=3 private/candidate alternation for each cell type; timing
+        # medians compare no-refusal cells only.
+        "schedule": [["no-refusal", "private"], ["no-refusal", "candidate"]] * 3
+        + [["forced-refusal", "private"], ["forced-refusal", "candidate"]] * 3,
+        "correctness_schedule": [["no-refusal", "private"], ["no-refusal", "candidate"],
+                                 ["forced-refusal", "private"], ["forced-refusal", "candidate"]],
+        # Forced refusal fills the unchanged 4,096-entry outbound channel with
+        # single-route announcements from source zero's unused pool indices,
+        # stopping when a debtor has one free slot for the refresh's data.
+        "fill_target_capacity": 1, "fill_spare_routes": 10000, "fill_seconds": 60,
+        "marker_retry_seconds": 1}
 SCOPE = ("non-RTC Type 2/5, three real TCP peers, ordinary route refresh; "
-         "timer-deferred admitted current-feed terminal debt concurrent with kernel backpressure; "
-         "complete actual-caller producer work and raw receiver UPDATE/EoR order; "
+         "no-refusal cells: immediate refresh-tail EVPN marker send concurrent with kernel backpressure; "
+         "forced-refusal cells: refresh-site marker refused by a full 4,096-entry outbound channel and "
+         "sent by the 1 s resync tick; complete actual-caller producer work and raw receiver UPDATE/EoR order; "
          "not ERR, RTC, full-fleet recovery, soak or production activation")
 
 
@@ -98,47 +109,86 @@ def controller_type(r):
                     pending = check.pending_write(self.writes, socket["cookie"], after)
                     if pending is None:
                         continue
-                    admitted, latest = None, None
-                    upper = time.time_ns() // 1000
-                    if self.arm == "candidate":
-                        actual = [row for row in self.feed if row["peer"] == socket["peer"]]
-                        if not actual or not check.positive(actual[-1]):
-                            continue
-                        latest = actual[-1]
-                        admissions = [row for row in actual if row["event"] == "data_admitted" and row["root"] == 0
-                                      and row["rows"] > 0 and row["wall_us"] > after and check.positive(row)
-                                      and row["session"] == latest["session"] and row["channel"] == latest["channel"]]
-                        if not admissions:
-                            continue
-                        admitted = admissions[-1]
-                        upper = latest["wall_us"]
+                    # The fixed build sends the refresh's markers at once, so a
+                    # no-refusal cell carries no debt into the churn; both arms
+                    # take the same live Pending/kernel baseline.
                     pre = [row for row in self.kernel.rows if row["cookie"] == socket["cookie"]
-                           and max(after, pending["wall_us"], admitted["wall_us"] if admitted else after)
-                           <= row["started_us"] <= row["ended_us"] <= upper]
+                           and max(after, pending["wall_us"]) <= row["started_us"] <= row["ended_us"]
+                           <= time.time_ns() // 1000]
                     if pre:
                         self.event("pressure-before", peer=socket["peer"], write_id=pending["id"], cookie=socket["cookie"],
-                                   pending=pending, sample=pre[-1], admitted=admitted, current=latest)
+                                   pending=pending, sample=pre[-1])
                         return self.last_event.copy()
-            raise r.MissingWitness("refresh did not establish admitted current debt and live Pending/kernel baseline before churn")
+            raise r.MissingWitness("refresh did not establish a live Pending/kernel baseline before churn")
 
         def after_applied(self, applied, before):
             end = time.monotonic() + BARS["debt_witness_seconds"]
             while time.monotonic() < end:
                 self.poll()
-                if self.arm == "candidate":
-                    feed = [row for row in self.feed if row["peer"] == before["peer"]]
-                    receipt = check.debt_receipt(feed, self.work, self.sockets, self.writes, self.kernel.rows,
-                                                  applied["wall_us"], r.Q.COMMON.peer(0))
-                    kernel = receipt["kernel"] if receipt else None
-                else:
-                    receipt = None
-                    kernel = check.kernel_pressure(self.sockets, self.writes, self.kernel.rows, before["peer"],
-                                                    before["pending"]["wall_us"], time.time_ns() // 1000,
-                                                    before["wall_us"], applied["wall_us"])
+                kernel = check.kernel_pressure(self.sockets, self.writes, self.kernel.rows, before["peer"],
+                                                before["pending"]["wall_us"], time.time_ns() // 1000,
+                                                before["wall_us"], applied["wall_us"])
                 if kernel and kernel["pending"]["id"] == before["write_id"]:
-                    self.event("pressure-after", peer=before["peer"], kernel=kernel, debt=receipt)
+                    self.event("pressure-after", peer=before["peer"], kernel=kernel)
                     return self.last_event.copy()
-            raise r.MissingWitness("same admitted terminal debt/live write/kernel limiting did not span actually applied churn")
+            raise r.MissingWitness("same live write/kernel limiting did not span actually applied churn")
+
+        def fill(self):
+            """Raise route volume until a debtor's outbound channel has one slot.
+
+            Each step sends at most (lowest observed capacity - 1) single-route
+            UPDATEs, after every earlier one is admitted to both debtors, so the
+            channel cannot overfill: one UPDATE commits at most one message per
+            member and only the writer, blocked by the paused reader, frees room.
+            Failing to reach the shape is INVALID, never retried.
+            """
+            debtors = [r.Q.COMMON.peer(index) for index in range(1, BARS["clients"])]
+            started, total = time.time_ns() // 1000, 0
+            end = time.monotonic() + BARS["fill_seconds"]
+            target = BARS["fill_target_capacity"]
+            capacity = {}
+            while time.monotonic() < end:
+                self.poll()
+                rows = {peer: [row for row in self.feed if row["peer"] == peer] for peer in debtors}
+                admitted = {peer: sum(row["rows"] for row in rows[peer]
+                                      if row["event"] == "data_admitted" and row["wall_us"] >= started)
+                            for peer in debtors}
+                check.require(all(value <= total for value in admitted.values()), "fill admitted unsent routes")
+                if not all(rows.values()) or any(value != total for value in admitted.values()):
+                    continue
+                capacity = {peer: rows[peer][-1]["capacity"] for peer in debtors}
+                low = min(capacity.values())
+                check.require(low >= target, f"outbound channel filled before the refresh: {capacity}")
+                if low == target:
+                    debtor = min(debtors, key=capacity.get)
+                    cookie = [row["cookie"] for row in self.sockets if row["peer"] == debtor]
+                    check.require(len(cookie) == 1, "missing debtor socket identity")
+                    pending = check.pending_write(self.writes, cookie[0], started)
+                    if pending is None:
+                        continue
+                    self.event("fill-complete", peer=debtor, routes=total, capacity=capacity,
+                               pending=pending, admitted=rows[debtor][-1])
+                    return self.last_event.copy()
+                send = min(low - target, BARS["fill_spare_routes"] - total)
+                check.require(send > 0, f"route volume exhausted before the channel filled: {total} routes, {capacity}")
+                self.command(f"terminal-fill {send}", BARS["fill_seconds"])
+                total += send
+            raise ValueError(f"outbound channel did not fill by route volume: {total} routes, {capacity}")
+
+        def refusal(self, after, debtor):
+            """The refresh's data takes the last slot; the candidate's marker is refused."""
+            end = time.monotonic() + BARS["debt_witness_seconds"]
+            while time.monotonic() < end:
+                self.poll()
+                rows = [row for row in self.feed if row["peer"] == debtor and row["wall_us"] >= after]
+                full = [row for row in rows if row["event"] == "data_admitted" and row["root"] == 0
+                        and row["rows"] > 0 and row["capacity"] == 0]
+                refused = any(row["event"] == "refresh_refused" for row in rows)
+                if full and (self.arm == "private" or refused):
+                    witness = check.refusal_witness(self.feed, debtor, after) if self.arm == "candidate" else None
+                    self.event("refresh-full", peer=debtor, admitted=full[0], refusal=witness)
+                    return self.last_event.copy()
+            raise ValueError("refresh did not take the last outbound slot with a refused marker send")
 
         def close(self):
             try:
@@ -149,7 +199,7 @@ def controller_type(r):
     return Controller
 
 
-def wire_receipt(leg, clients, routes, wire, arm):
+def wire_receipt(leg, clients, routes, wire, q):
     controls = check.lines(leg / "driver.log", "evpn_control ")
     boundaries = {row["result"]["boundary"]: row["result"] for row in controls
                   if "boundary" in row.get("result", {})}
@@ -162,7 +212,7 @@ def wire_receipt(leg, clients, routes, wire, arm):
         actual = (leg / "wire" / f"raw-240.1.{peer // 200}.{peer % 200 + 1}.bgp").read_bytes()
         check.require(check.raw_updates(actual) == path.read_bytes(), "raw TCP UPDATE bytes differ from checked capture")
         receiver = wire.Receiver(peer, clients, routes * 4 // 5, routes // 5)
-        cursor, ordered = 0, True
+        cursor = 0
         data = path.read_bytes()
         for name in ("loaded", "baseline", "refresh-start", "settled", "finished"):
             boundary = boundaries[name]
@@ -175,10 +225,14 @@ def wire_receipt(leg, clients, routes, wire, arm):
                 while offset < len(chunk):
                     size = int.from_bytes(chunk[offset + 16:offset + 18], "big")
                     check.require(size >= 23 and offset + size <= len(chunk), "malformed captured UPDATE")
-                    previous = receiver.eors
-                    receiver.consume(chunk[offset:offset + size], {2000 if peer == 1 else 1000})
-                    if receiver.eors > previous and arm == "candidate":
-                        ordered &= set(receiver.state) == receiver.expected(boundary["shifts"], 1, 1)
+                    frame = chunk[offset:offset + size]
+                    attrs, _ = next(wire.frames(frame))
+                    if set(attrs) == {15} and len(attrs[15][1]) == 3 and receiver.coverage is not None:
+                        # The EVPN EoR covers the refreshed table; ERR is not
+                        # negotiated, so no EoRR reaches this wire.
+                        q.accept(receiver.coverage <= receiver.replay_seen,
+                                 f"peer {peer}: EVPN EoR reached the wire before a route it covers")
+                    receiver.consume(frame, {2000 if peer == 1 else 1000})
                     offset += size
                 receiver.end_replay()
             else:
@@ -191,7 +245,7 @@ def wire_receipt(leg, clients, routes, wire, arm):
             if name == "refresh-start":
                 receiver.begin_replay()
         check.require(cursor == len(data), "unvalidated trailing receiver bytes")
-        result.append({"peer": peer, "state": state, "eors": receiver.eors, "terminal_after_churn": ordered})
+        result.append({"peer": peer, "state": state, "eors": receiver.eors})
     return result
 
 
@@ -223,7 +277,7 @@ def evidence(leg, record, q, r, wire):
     q.accept(all(int(cgroup["events"][name]) == 0 for name in ("max", "oom", "oom_kill", "oom_group_kill")),
              "cgroup max/OOM event breached the bar")
     report = {"readiness_requests": len(samples), "executed_resets": resets,
-              "wire": wire_receipt(leg, clients, BARS["routes_per_source"], wire, record["arm"])}
+              "wire": wire_receipt(leg, clients, BARS["routes_per_source"], wire, q)}
     socket_rows = check.lines(leg / "observer.log", "evpn_terminal_socket ")
     report["sockets"] = check.socket_roster(socket_rows, check.lines(leg / "driver.log", "evpn_terminal_receiver "),
                                            {q.COMMON.peer(peer) for peer in range(clients)})
@@ -233,19 +287,35 @@ def evidence(leg, record, q, r, wire):
         parsed = check.ss_rows(row["raw"], row["started_us"], row["ended_us"])
         check.require(parsed == row["rows"], "retained kernel observations differ from raw ss")
         ss.extend(parsed)
-    q.accept(all(row["terminal_after_churn"] for row in report["wire"]), "terminal marker preceded applied churn on the wire")
+    forced = record["shape"] == "forced-refusal"
     controls = check.lines(leg / "driver.log", "evpn_control ")
-    check.require([row["command"] for row in controls] == ["connected", "load", "source-barrier", "terminal-baseline",
-                  "mark refresh-start", "pause", "refresh", "terminal-churn", "source-barrier", "resume", "settle", "finish"],
-                  "missing, repeated or reordered fixed workload command")
-    churn = [row["result"] for row in controls if row["command"] == "terminal-churn"]
+    commands = ["terminal-fill" if row["command"].startswith("terminal-fill ") else row["command"] for row in controls]
+    fills = commands.count("terminal-fill")
+    head = ["connected", "load", "source-barrier", "terminal-baseline", "mark refresh-start", "pause"]
+    if forced:
+        burst = "terminal-unfill"
+        expected = head + ["terminal-fill"] * fills + ["refresh", "resume", burst, "source-barrier", "settle", "finish"]
+    else:
+        burst = "terminal-churn"
+        expected = head + ["refresh", burst, "source-barrier", "resume", "settle", "finish"]
+    check.require((fills > 0) == forced and commands == expected, "missing, repeated or reordered fixed workload command")
+    bursts = [row["result"] for row in controls if row["command"] == burst]
     applied = [row for row in events if row["event"] == "input-applied" and row["generation"] == 2]
-    starts = [row for row in events if row["event"] == "command" and row.get("command") == "terminal-churn"]
-    ends = [row for row in events if row["event"] == "complete" and row.get("command") == "terminal-churn"]
-    check.require(len(applied) == len(starts) == len(ends) == 1 and record["churn"] == churn[0]
-                  and record["applied"] == applied[0], "churn/applied receipt differs from raw controls")
-    check.require(churn[0]["source"] == 0 and churn[0]["messages"] == 1 and churn[0]["events"] == 4
-                  and starts[0]["wall_us"] <= churn[0]["write_started_us"] <= churn[0]["writers_drained_us"]
+    starts = [row for row in events if row["event"] == "command" and row.get("command") == burst]
+    ends = [row for row in events if row["event"] == "complete" and row.get("command") == burst]
+    check.require(len(applied) == len(starts) == len(ends) == len(bursts) == 1
+                  and record["applied"] == applied[0], "source burst/applied receipt differs from raw controls")
+    if forced:
+        filled = [row["result"] for row in controls if row["command"].startswith("terminal-fill ")]
+        check.require(all(row["source"] == 0 and row["routes"] > 0 for row in filled)
+                      and [row["total"] for row in filled] == [sum(row["routes"] for row in filled[:index + 1])
+                                                               for index in range(len(filled))]
+                      and bursts[0]["source"] == 0 and bursts[0]["routes"] == filled[-1]["total"]
+                      and bursts[0]["messages"] > 0, "fill/unfill route volume differs")
+    else:
+        check.require(record["churn"] == bursts[0] and bursts[0]["source"] == 0 and bursts[0]["messages"] == 1
+                      and bursts[0]["events"] == 4, "fixed source UPDATE differs")
+    check.require(starts[0]["wall_us"] <= bursts[0]["write_started_us"] <= bursts[0]["writers_drained_us"]
                   <= ends[0]["wall_us"] < applied[0]["wall_us"], "fixed source UPDATE/application ordering differs")
     barriers = check.lines(leg / "observer.log", "evpn_input_barrier ")
     q.accept(r.input_applied(barriers, clients, 2), "source EoR did not prove all route work actually applied")
@@ -264,13 +334,15 @@ def evidence(leg, record, q, r, wire):
         for generation, row in enumerate(actual):
             check.require(barrier_starts[generation]["wall_us"] <= row["wall_us"] <= applied_events[generation]["wall_us"],
                           "actor input receipt does not follow its actual source-barrier dispatch")
-        check.require(actual[1]["wall_us"] > churn[0]["writers_drained_us"], "old input receipt was substituted for applied churn")
+        check.require(actual[1]["wall_us"] > bursts[0]["writers_drained_us"], "old input receipt was substituted for applied source work")
+    timed = not record["correctness_only"] and not forced
     churn_seconds = applied[0]["at"] - starts[0]["at"]
-    q.accept(0 <= churn_seconds <= BARS["convergence_seconds"], "churn application exceeded convergence bar")
-    check.require(record["churn-applied-seconds"] == (None if record["correctness_only"] else churn_seconds),
+    q.accept(0 <= churn_seconds <= BARS["convergence_seconds"], "source work application exceeded convergence bar")
+    check.require(record["churn-applied-seconds"] == (churn_seconds if timed else None),
                   "churn duration differs from raw monotonic controller clocks")
-    for command, cap in (("load", BARS["initial_seconds"]), ("terminal-baseline", BARS["convergence_seconds"]),
-                         ("refresh", BARS["convergence_seconds"])):
+    phases = [("load", BARS["initial_seconds"]), ("terminal-baseline", BARS["convergence_seconds"]),
+              ("refresh", BARS["convergence_seconds"])] + ([(burst, BARS["convergence_seconds"])] if forced else [])
+    for command, cap in phases:
         phase_start = [row for row in events if row["event"] == "command" and row.get("command") == command]
         phase_end = [row for row in events if row["event"] == "complete" and row.get("command") == command]
         check.require(len(phase_start) == len(phase_end) == 1, f"missing raw {command} controller clocks")
@@ -280,69 +352,91 @@ def evidence(leg, record, q, r, wire):
     check.require(len(resumed) == len(converged) == 1, "missing raw resume/convergence clocks")
     convergence = converged[0]["at"] - resumed[0]["at"]
     q.accept(0 <= convergence <= BARS["convergence_seconds"], "resume convergence exceeded bar")
-    check.require(record["convergence-seconds"] == (None if record["correctness_only"] else convergence),
+    check.require(record["convergence-seconds"] == (convergence if timed else None),
                   "convergence duration differs from raw monotonic controller clocks")
-    before_events = [row for row in events if row["event"] == "pressure-before"]
-    after_events = [row for row in events if row["event"] == "pressure-after"]
     resume_start = [row for row in events if row["event"] == "command" and row.get("command") == "resume"]
-    check.require(len(before_events) == len(after_events) == len(resume_start) == 1
-                  and record["pressure_before"] == before_events[0] and record["pressure_after"] == after_events[0],
-                  "pressure handshake differs from actual controller events")
-    before, after = before_events[0], after_events[0]
-    check.require(before["wall_us"] <= starts[0]["wall_us"] < applied[0]["wall_us"] < after["wall_us"] <= resume_start[0]["wall_us"]
-                  and before["sample"] in ss and before["sample"]["ended_us"] <= before["wall_us"]
-                  and before["pending"]["wall_us"] <= before["sample"]["started_us"]
-                  and before["cookie"] == before["sample"]["cookie"] == before["pending"]["cookie"]
-                  and before["write_id"] == before["pending"]["id"],
-                  "actual Pending/kernel handshakes do not bracket source application and resume")
-    if record["arm"] == "candidate":
-        feed = check.lines(leg / "observer.log", "evpn_terminal_feed ")
-        check.validate_feed(feed, {q.COMMON.peer(index) for index in range(clients)})
-        work = check.lines(leg / "observer.log", "evpn_terminal_work ")
-        check.require(record["admitted"] == before["admitted"] and record["admitted"] in feed
-                      and before["current"] in feed and check.positive(before["current"])
-                      and record["admitted"]["wall_us"] <= before["sample"]["started_us"]
-                      <= before["sample"]["ended_us"] <= before["current"]["wall_us"] <= before["wall_us"],
-                      "admitted before-state is absent from actual feed events")
-        debt = check.debt_receipt([row for row in feed if row["peer"] == before["peer"]], work, socket_rows,
-                                  check.lines(leg / "observer.log", "evpn_terminal_write "), ss, record["applied"]["wall_us"], q.COMMON.peer(0))
-        q.accept(debt is not None, "admitted current debt spanning applied churn under kernel pressure was not proved")
-        check.require(debt["before"] == record["admitted"] and debt["kernel"]["pending"] == before["pending"]
-                      and debt == after["debt"] and debt["kernel"] == after["kernel"]
-                      and debt["after"]["wall_us"] <= after["wall_us"],
-                      "selected live write/debt changed across the actual handshakes")
-        # Include every root called for this applied source UPDATE, across both
-        # groups. The selected debtor is only the interleaving witness.
-        roots = {row["root"] for row in feed if row["event"] == "root_before"
-                 and record["churn"]["write_started_us"] <= row["wall_us"] <= record["applied"]["wall_us"]}
-        debt["work"] = check.work_receipt(work, sorted(roots))
-        groups = {row["group"] for row in work if row["id"] in roots}
-        check.require(len(groups) == 2 and all(sum(row["keys"] for row in work if row["id"] in roots and row["group"] == group) == 4
-                                              for group in groups), "producer roots do not cover the four changed keys in both groups")
-        report["debt"] = debt
-    else:
+    refresh_start = [row for row in events if row["event"] == "command" and row.get("command") == "refresh"]
+    check.require(len(resume_start) == len(refresh_start) == 1, "missing raw refresh/resume dispatch")
+    feed = check.lines(leg / "observer.log", "evpn_terminal_feed ")
+    check.validate_feed(feed, {q.COMMON.peer(index) for index in range(clients)})
+    work = check.lines(leg / "observer.log", "evpn_terminal_work ")
+    debtors = [q.COMMON.peer(index) for index in range(1, clients)]
+    if not forced:
+        before_events = [row for row in events if row["event"] == "pressure-before"]
+        after_events = [row for row in events if row["event"] == "pressure-after"]
+        check.require(len(before_events) == len(after_events) == 1
+                      and record["pressure_before"] == before_events[0] and record["pressure_after"] == after_events[0],
+                      "pressure handshake differs from actual controller events")
+        before, after = before_events[0], after_events[0]
+        check.require(before["wall_us"] <= starts[0]["wall_us"] < applied[0]["wall_us"] < after["wall_us"] <= resume_start[0]["wall_us"]
+                      and before["sample"] in ss and before["sample"]["ended_us"] <= before["wall_us"]
+                      and before["pending"]["wall_us"] <= before["sample"]["started_us"]
+                      and before["cookie"] == before["sample"]["cookie"] == before["pending"]["cookie"]
+                      and before["write_id"] == before["pending"]["id"],
+                      "actual Pending/kernel handshakes do not bracket source application and resume")
         kernel = check.kernel_pressure(socket_rows, check.lines(leg / "observer.log", "evpn_terminal_write "), ss,
                                        before["peer"], before["pending"]["wall_us"], after["wall_us"],
                                        before["wall_us"], applied[0]["wall_us"])
-        q.accept(kernel is not None, "private baseline did not prove real kernel backpressure across churn")
+        q.accept(kernel is not None, "no real kernel backpressure across churn")
         check.require(kernel == after["kernel"] and kernel["pending"] == before["pending"],
-                      "private live-write/kernel handshake differs from raw evidence")
+                      "live-write/kernel handshake differs from raw evidence")
         report["kernel"] = kernel
+        if record["arm"] == "candidate":
+            # The no-refusal shape: every debtor's refresh-tail send succeeded.
+            for peer in debtors:
+                rows = [row for row in feed if row["peer"] == peer]
+                check.require(rows and check.marker_counts(rows[-1])["refresh_refused"] == 0
+                              and any(row["event"] == "refresh_sent" and row["wall_us"] >= refresh_start[0]["wall_us"]
+                                      for row in rows),
+                              "no-refusal cell did not send its markers at the refresh")
+            # Every root called for this applied source UPDATE, across both groups.
+            roots = {row["root"] for row in feed if row["event"] == "root_before"
+                     and record["churn"]["write_started_us"] <= row["wall_us"] <= record["applied"]["wall_us"]}
+            report["work"] = check.work_receipt(work, sorted(roots))
+            groups = {row["group"] for row in work if row["id"] in roots}
+            check.require(len(groups) == 2 and all(sum(row["keys"] for row in work if row["id"] in roots and row["group"] == group) == 4
+                                                  for group in groups), "producer roots do not cover the four changed keys in both groups")
+        return report
+    fill = [row for row in events if row["event"] == "fill-complete"]
+    full = [row for row in events if row["event"] == "refresh-full"]
+    check.require(len(fill) == len(full) == 1 and record["fill"] == fill[0] and record["refresh_full"] == full[0],
+                  "fill/refusal handshake differs from actual controller events")
+    fill, full = fill[0], full[0]
+    peer = fill["peer"]
+    check.require(peer in debtors and full["peer"] == peer and fill["capacity"][peer] == BARS["fill_target_capacity"]
+                  and fill["routes"] == bursts[0]["routes"] and fill["admitted"] in feed and full["admitted"] in feed
+                  and refresh_start[0]["wall_us"] <= full["admitted"]["wall_us"] < resume_start[0]["wall_us"]
+                  and full["admitted"]["event"] == "data_admitted" and full["admitted"]["root"] == 0
+                  and full["admitted"]["peer"] == peer and full["admitted"]["capacity"] == 0,
+                  "refresh did not take the debtor's last outbound slot after the route-volume fill")
+    report["fill"] = {"peer": peer, "routes": fill["routes"], "capacity": fill["capacity"],
+                      "refresh_capacity_after": full["admitted"]["capacity"]}
+    if record["arm"] == "candidate":
+        refusal = check.refusal_witness(feed, peer, refresh_start[0]["wall_us"])
+        check.require(refusal == full["refusal"], "refusal handshake differs from raw feed")
+        unfill = starts[0]["wall_us"]
+        report["fallback"] = check.fallback(feed, refusal, resume_start[0]["wall_us"], unfill)
+        settle_end = converged[0]["wall_us"]
+        roots = {row["root"] for row in feed if row["event"] == "root_before"
+                 and refresh_start[0]["wall_us"] <= row["wall_us"] <= settle_end}
+        report["work"] = check.work_receipt(work, sorted(roots))
     return report
 
 
 def accept_report(report, arm, q):
     if arm == "candidate":
-        q.accept(report["debt"]["work"]["inventory_visits"] <= BARS["max_repeated_inventory_visits"],
+        q.accept(report["work"]["inventory_visits"] <= BARS["max_repeated_inventory_visits"],
                  "complete current-feed churn repeated full-inventory producer work")
+    if "fallback" in report:
+        q.accept(check.fallback_within_bar(report["fallback"]),
+                 "markers did not leave the refusal through the resync tick within 1 s plus the measured drain")
 
-
-def run_cell(output, manifest, q, r, wire, arm, index, correctness):
-    leg = output / f"terminal-{index:02}-{arm}"
+def run_cell(output, manifest, q, r, wire, shape, arm, index, correctness):
+    leg = output / f"terminal-{index:02}-{shape}-{arm}"
     leg.mkdir()
     fixture = Path(tempfile.mkdtemp(prefix="evpn-terminal-"))
     daemon = driver = controller = None
-    record = {"status": "INVALID", "arm": arm, "correctness_only": correctness,
+    record = {"status": "INVALID", "shape": shape, "arm": arm, "correctness_only": correctness,
               "head": manifest["head"], "qualification_head": manifest["qualification_head"],
               "scope": SCOPE, "production_activation": False,
               "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
@@ -389,24 +483,37 @@ def run_cell(output, manifest, q, r, wire, arm, index, correctness):
             record["baseline"] = controller.witness(r.settled)
             controller.command("mark refresh-start")
             controller.command("pause")
-            controller.command("refresh", BARS["convergence_seconds"])
-            refresh_started = controller.last_command_start["wall_us"]
-            record["pressure_before"] = controller.before_churn(refresh_started)
-            if arm == "candidate":
-                record["admitted"] = record["pressure_before"]["admitted"]
-            record["churn"] = controller.command("terminal-churn", BARS["convergence_seconds"])
-            churn_started = controller.last_command_start.copy()
-            record["applied"] = controller.source_barrier()
-            churn_seconds = record["applied"]["at"] - churn_started["at"]
-            q.accept(churn_seconds <= BARS["convergence_seconds"], "churn application exceeded convergence bar")
-            record["churn-applied-seconds"] = None if correctness else churn_seconds
-            record["pressure_after"] = controller.after_applied(record["applied"], record["pressure_before"])
-            controller.command("resume")
-            started = controller.last_completion
+            timed = not correctness and shape == "no-refusal"
+            if shape == "no-refusal":
+                controller.command("refresh", BARS["convergence_seconds"])
+                refresh_started = controller.last_command_start["wall_us"]
+                record["pressure_before"] = controller.before_churn(refresh_started)
+                record["churn"] = controller.command("terminal-churn", BARS["convergence_seconds"])
+                churn_started = controller.last_command_start.copy()
+                record["applied"] = controller.source_barrier()
+                churn_seconds = record["applied"]["at"] - churn_started["at"]
+                q.accept(churn_seconds <= BARS["convergence_seconds"], "churn application exceeded convergence bar")
+                record["churn-applied-seconds"] = churn_seconds if timed else None
+                record["pressure_after"] = controller.after_applied(record["applied"], record["pressure_before"])
+                controller.command("resume")
+                started = controller.last_completion
+            else:
+                record["fill"] = controller.fill()
+                controller.command("refresh", BARS["convergence_seconds"])
+                refresh_started = controller.last_command_start["wall_us"]
+                record["refresh_full"] = controller.refusal(refresh_started, record["fill"]["peer"])
+                controller.command("resume")
+                started = controller.last_completion
+                controller.command("terminal-unfill", BARS["convergence_seconds"])
+                unfill_started = controller.last_command_start.copy()
+                record["applied"] = controller.source_barrier()
+                q.accept(record["applied"]["at"] - unfill_started["at"] <= BARS["convergence_seconds"],
+                         "fill withdrawal exceeded convergence bar")
+                record["churn-applied-seconds"] = None
             controller.command("settle", BARS["convergence_seconds"])
             elapsed = controller.last_completion - started
             q.accept(elapsed <= BARS["convergence_seconds"], "resume convergence exceeded bar")
-            record["convergence-seconds"] = None if correctness else elapsed
+            record["convergence-seconds"] = elapsed if timed else None
             record["settled"] = controller.witness(r.settled)
             (leg / "metrics.txt").write_text(q.fetch(19186, "/metrics")[1])
             q.write_json(leg / "cgroup.json", q.COMMON.snapshot_cgroup(pid, q.DAEMON_BYTES))
@@ -439,12 +546,12 @@ def run(args):
     check.require(manifest["bars"] == BARS, "predeclared bars changed")
     lock = os.environ.get("RUSTBGPD_HOST_LOCK_FD")
     check.require(lock is not None and Path(f"/proc/self/fd/{int(lock)}").exists(), "use run.sh to hold the host lock")
-    schedule = ["private", "candidate"] if args.correctness_only else BARS["schedule"]
+    schedule = BARS["correctness_schedule"] if args.correctness_only else BARS["schedule"]
     results = []
     q.write_json(output / "summary.json", {"status": "INVALID", "scope": SCOPE,
                                            "production_activation": False, "error": "campaign incomplete"})
-    for index, arm in enumerate(schedule):
-        record = run_cell(output, manifest, q, r, wire, arm, index, args.correctness_only)
+    for index, (shape, arm) in enumerate(schedule):
+        record = run_cell(output, manifest, q, r, wire, shape, arm, index, args.correctness_only)
         results.append(record)
         if record["status"] == "INVALID" or (record["status"] == "FAIL" and arm == "candidate"):
             break
@@ -458,14 +565,15 @@ def summarize(output, manifest, rows, q, r, wire, correctness):
     try:
         check.require(manifest["bars"] == BARS, "predeclared campaign bars changed")
         identities = source.verify_build(output, manifest, q)
-        expected = ["private", "candidate"] if correctness else BARS["schedule"]
+        expected = BARS["correctness_schedule"] if correctness else BARS["schedule"]
         check.require(rows and all(row["status"] in ("PASS", "FAIL") and not row.get("cleanup_errors")
                                   and "retained_fixture" not in row for row in rows),
                       "technical/cleanup cell failure; inspect retained result")
         check.require(all(row["correctness_only"] == correctness and row["head"] == manifest["head"]
                           and row["qualification_head"] == source.PINNED and row["scope"] == SCOPE
                           and row["production_activation"] is False for row in rows), "mixed cell source/scope/mode")
-        check.require([row["arm"] for row in rows] == expected[:len(rows)], "reordered campaign prefix")
+        cells = [[row["shape"], row["arm"]] for row in rows]
+        check.require(cells == expected[:len(rows)], "reordered campaign prefix")
         paths = sorted(output.glob("terminal-*/result.json"))
         check.require(len(paths) == len(rows), "missing/extra retained cell records")
         processes, boots, previous_end, previous_raw_end = set(), set(), 0, 0
@@ -496,7 +604,8 @@ def summarize(output, manifest, rows, q, r, wire, correctness):
         check.require(len(boots) == 1, "campaign combines different host boots")
         partial, failures, invalids = [], [], []
         for index, (path, row) in enumerate(zip(paths, rows, strict=True)):
-            check.require(path.parent.name == f'terminal-{index:02}-{row["arm"]}', "cell path differs from ordered arm")
+            check.require(path.parent.name == f'terminal-{index:02}-{row["shape"]}-{row["arm"]}',
+                          "cell path differs from ordered arm")
             try:
                 if row["status"] == "PASS":
                     check.require("settled" in row and "evidence" in row and row.get("driver_exit") == 0,
@@ -520,12 +629,14 @@ def summarize(output, manifest, rows, q, r, wire, correctness):
         elif failures:
             summary.update(status="FAIL", failures=failures, partial_failures_unvalidated=partial)
         else:
-            check.require([row["arm"] for row in rows] == expected, "incomplete/reordered campaign")
+            check.require(cells == expected, "incomplete/reordered campaign")
             if not correctness:
-                for field in ("churn-applied-seconds", "convergence-seconds"):
-                    medians = {arm: statistics.median(row[field] for row in rows if row["arm"] == arm) for arm in ("candidate", "private")}
-                    summary["medians"][field] = medians
-                    q.accept(medians["candidate"] <= medians["private"] * BARS["candidate_median_ratio"], f"{field} exceeded 1.03 bar")
+                # Forced-refusal cells carry debt the private arm cannot; they
+                # are never compared on time.
+                summary["medians"] = check.timing_medians([row for row in rows if row["shape"] == "no-refusal"],
+                                                          BARS["candidate_median_ratio"])
+                for field, medians in summary["medians"].items():
+                    q.accept(medians["pass"], f"{field} exceeded 1.03 bar")
             summary["status"] = "PASS"
     except Exception as error:
         summary.update(status="FAIL" if isinstance(error, q.AcceptanceFailure) else "INVALID", error=str(error))
