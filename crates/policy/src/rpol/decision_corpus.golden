@@ -1,4 +1,4 @@
-# rpol decision corpus: 261 programs, 1631 cases. Regenerate with
+# rpol decision corpus: 261 programs, 1630 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
@@ -11,15 +11,15 @@ ast.stmt.nested-if 13
 ast.stmt.for 75
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1122
+ast.action.accept 1121
 ast.action.reject 374
 ast.action.set-local-pref 114
 ast.action.set-med 170
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
-ast.action.community-literal 511
+ast.action.community-literal 510
 ast.action.large-community-admin-wildcard 11
-ast.action.community-all 46
+ast.action.community-all 45
 ast.action.community-binding 43
 ast.action.community-in-set 22
 ast.action.community-not-in-set 22
@@ -43,7 +43,7 @@ ast.value.identifier 106
 ast.value.field 141
 ast.value.arithmetic 121
 ast.value.call 69
-ir.guard.true 1159
+ir.guard.true 1158
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
@@ -85,7 +85,7 @@ ir.value.binary 165
 ir.value.min 47
 ir.value.max 19
 ir.value.clamp 7
-ir.action.permit 1090
+ir.action.permit 1089
 ir.action.deny 329
 ir.action.continue 167
 ir.action.bind 84
@@ -94,7 +94,7 @@ ir.action.break 33
 ir.action.continue-loop 22
 ir.action.community-var 43
 ir.action.remove-large-community-admin 11
-ir.action.remove-all-communities 46
+ir.action.remove-all-communities 45
 ir.action.remove-communities-in-set 22
 ir.mod.set-local-pref 90
 ir.mod.set-local-pref-computed 15
@@ -103,7 +103,7 @@ ir.mod.set-med-computed 73
 ir.mod.set-next-hop 12
 ir.mod.prepend 43
 ir.mod.prepend-computed 11
-ir.mod.community-add 437
+ir.mod.community-add 436
 ir.mod.community-remove 33
 ir.mod.large-community-add 11
 ir.mod.large-community-remove 17
@@ -1559,63 +1559,62 @@ docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m07-default =
 docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m08-host-routes => permit with prepend as 65001 2
 docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m09-evpn => permit with prepend as 65001 2
 docs/reference/rpol-language.md#f77d7a4d3578017b | prepend-65001 | m10-v6-bogon => permit with prepend as 65001 2
-docs/reference/rpol-language.md#676dbec9960661f7 | test retag-keeps-no-export | retag => permit with add community 65000:100; remove community 65010:1
-docs/reference/rpol-language.md#676dbec9960661f7 | test earlier-addition-survives-the-replacement | tag-then-retag => permit with add community 65000:1; add community 65000:100; remove community 65010:1
-docs/reference/rpol-language.md#676dbec9960661f7 | test faithful-port-omits-the-discarded-addition | retag => permit with add community 65000:100; remove community 65010:1
-docs/reference/rpol-language.md#676dbec9960661f7 | test reordering-keeps-the-addition | retag-then-tag => permit with add community 65000:100; add community 65000:1; remove community 65010:1
-docs/reference/rpol-language.md#676dbec9960661f7 | test arrived-value-added-earlier-is-removed | tag-then-retag => permit with add community 65000:100; remove community 65000:1; remove community 65010:1
-docs/reference/rpol-language.md#676dbec9960661f7 | test earlier-chain-member-addition-survives | chain [tag-only, retag] => permit with add community 65000:1; add community 65000:100; remove community 65010:1
-docs/reference/rpol-language.md#676dbec9960661f7 | test scrub-all-removes-no-export | scrub-all => permit with remove community 65535:65281; remove community 65010:1
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m01-v4-transit => permit with add community 65000:100; remove community 64500:1
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m02-v4-invalid-long => permit with add community 65000:100; remove community 65000:666; remove community 64512:7
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m03-v6-tagged => permit with add community 65000:100; remove community 65000:200; remove community 65001:999
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m04-bare => permit with add community 65000:100
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m05-internal => permit with add community 65000:100; remove community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m06-local-as-set => permit with add community 65000:100; remove community 64512:1; remove community 65534:65535
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m07-default => permit with add community 65000:100
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m08-host-routes => permit with add community 65000:100; remove community 65000:200; remove community 65000:300
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m09-evpn => permit with add community 65000:100
-docs/reference/rpol-language.md#676dbec9960661f7 | retag | m10-v6-bogon => permit with add community 65000:100; remove community 65000:666
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m01-v4-transit => permit with remove community 65000:100; remove community 64500:1
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m02-v4-invalid-long => permit with remove community 65000:666; remove community 65535:666; remove community 64512:7
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m03-v6-tagged => permit with remove community 65535:65281; remove community 65000:200; remove community 65001:999
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m04-bare => permit
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m05-internal => permit with remove community 65000:1; remove community 65535:0
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m06-local-as-set => permit with remove community 65535:666; remove community 64512:1; remove community 65534:65535
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m07-default => permit
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m08-host-routes => permit with remove community 65000:100; remove community 65000:200; remove community 65000:300
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m09-evpn => permit
-docs/reference/rpol-language.md#676dbec9960661f7 | scrub-all | m10-v6-bogon => permit with remove community 65000:666
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m01-v4-transit => permit with add community 65000:1; add community 65000:100; remove community 64500:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m02-v4-invalid-long => permit with add community 65000:1; add community 65000:100; remove community 65000:666; remove community 64512:7
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m03-v6-tagged => permit with add community 65000:1; add community 65000:100; remove community 65000:200; remove community 65001:999
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m04-bare => permit with add community 65000:1; add community 65000:100
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m05-internal => permit with add community 65000:100; remove community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m06-local-as-set => permit with add community 65000:1; add community 65000:100; remove community 64512:1; remove community 65534:65535
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m07-default => permit with add community 65000:1; add community 65000:100
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m08-host-routes => permit with add community 65000:1; add community 65000:100; remove community 65000:200; remove community 65000:300
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m09-evpn => permit with add community 65000:1; add community 65000:100
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-then-retag | m10-v6-bogon => permit with add community 65000:1; add community 65000:100; remove community 65000:666
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m01-v4-transit => permit with add community 65000:100; add community 65000:1; remove community 64500:1
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m02-v4-invalid-long => permit with add community 65000:100; add community 65000:1; remove community 65000:666; remove community 64512:7
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m03-v6-tagged => permit with add community 65000:100; add community 65000:1; remove community 65000:200; remove community 65001:999
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m04-bare => permit with add community 65000:100; add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m05-internal => permit with add community 65000:100; add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m06-local-as-set => permit with add community 65000:100; add community 65000:1; remove community 64512:1; remove community 65534:65535
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m07-default => permit with add community 65000:100; add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m08-host-routes => permit with add community 65000:100; add community 65000:1; remove community 65000:200; remove community 65000:300
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m09-evpn => permit with add community 65000:100; add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | retag-then-tag | m10-v6-bogon => permit with add community 65000:100; add community 65000:1; remove community 65000:666
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m01-v4-transit => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m02-v4-invalid-long => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m03-v6-tagged => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m04-bare => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m05-internal => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m06-local-as-set => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m07-default => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m08-host-routes => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m09-evpn => permit with add community 65000:1
-docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m10-v6-bogon => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | test retag-keeps-no-export | retag => permit with add community 65000:100; remove community 65010:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | test the-replacement-discards-an-earlier-addition | tag-then-retag => permit with add community 65000:100; remove community 65010:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | test a-later-addition-stays | retag-then-tag => permit with add community 65000:100; add community 65000:1; remove community 65010:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | test arrived-value-added-earlier-is-removed | tag-then-retag => permit with add community 65000:100; remove community 65000:1; remove community 65010:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | test the-replacement-discards-an-earlier-chain-member-addition | chain [tag-only, retag] => permit with add community 65000:100; remove community 65010:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | test scrub-all-removes-no-export | scrub-all => permit with remove community 65535:65281; remove community 65010:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m01-v4-transit => permit with add community 65000:100; remove community 64500:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m02-v4-invalid-long => permit with add community 65000:100; remove community 65000:666; remove community 64512:7
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m03-v6-tagged => permit with add community 65000:100; remove community 65000:200; remove community 65001:999
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m04-bare => permit with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m05-internal => permit with add community 65000:100; remove community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m06-local-as-set => permit with add community 65000:100; remove community 64512:1; remove community 65534:65535
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m07-default => permit with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m08-host-routes => permit with add community 65000:100; remove community 65000:200; remove community 65000:300
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m09-evpn => permit with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag | m10-v6-bogon => permit with add community 65000:100; remove community 65000:666
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m01-v4-transit => permit with remove community 65000:100; remove community 64500:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m02-v4-invalid-long => permit with remove community 65000:666; remove community 65535:666; remove community 64512:7
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m03-v6-tagged => permit with remove community 65535:65281; remove community 65000:200; remove community 65001:999
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m04-bare => permit
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m05-internal => permit with remove community 65000:1; remove community 65535:0
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m06-local-as-set => permit with remove community 65535:666; remove community 64512:1; remove community 65534:65535
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m07-default => permit
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m08-host-routes => permit with remove community 65000:100; remove community 65000:200; remove community 65000:300
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m09-evpn => permit
+docs/reference/rpol-language.md#18fe62d24c72b97d | scrub-all | m10-v6-bogon => permit with remove community 65000:666
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m01-v4-transit => permit with add community 65000:100; remove community 64500:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m02-v4-invalid-long => permit with add community 65000:100; remove community 65000:666; remove community 64512:7
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m03-v6-tagged => permit with add community 65000:100; remove community 65000:200; remove community 65001:999
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m04-bare => permit with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m05-internal => permit with add community 65000:100; remove community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m06-local-as-set => permit with add community 65000:100; remove community 64512:1; remove community 65534:65535
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m07-default => permit with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m08-host-routes => permit with add community 65000:100; remove community 65000:200; remove community 65000:300
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m09-evpn => permit with add community 65000:100
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-then-retag | m10-v6-bogon => permit with add community 65000:100; remove community 65000:666
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m01-v4-transit => permit with add community 65000:100; add community 65000:1; remove community 64500:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m02-v4-invalid-long => permit with add community 65000:100; add community 65000:1; remove community 65000:666; remove community 64512:7
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m03-v6-tagged => permit with add community 65000:100; add community 65000:1; remove community 65000:200; remove community 65001:999
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m04-bare => permit with add community 65000:100; add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m05-internal => permit with add community 65000:100; add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m06-local-as-set => permit with add community 65000:100; add community 65000:1; remove community 64512:1; remove community 65534:65535
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m07-default => permit with add community 65000:100; add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m08-host-routes => permit with add community 65000:100; add community 65000:1; remove community 65000:200; remove community 65000:300
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m09-evpn => permit with add community 65000:100; add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | retag-then-tag | m10-v6-bogon => permit with add community 65000:100; add community 65000:1; remove community 65000:666
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m01-v4-transit => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m02-v4-invalid-long => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m03-v6-tagged => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m04-bare => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m05-internal => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m06-local-as-set => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m07-default => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m08-host-routes => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m09-evpn => permit with add community 65000:1
+docs/reference/rpol-language.md#18fe62d24c72b97d | tag-only | m10-v6-bogon => permit with add community 65000:1
 docs/reference/rpol-language.md#6765c1041b72308b | test first-branch-wins-over-a-later-branch | tiers-then-check => permit with set local-pref 300
 docs/reference/rpol-language.md#6765c1041b72308b | test later-check-runs-after-a-modifying-branch | tiers-then-check => deny
 docs/reference/rpol-language.md#6765c1041b72308b | test second-branch-applies-alone | tiers-then-check => permit with set local-pref 200
