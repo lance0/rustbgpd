@@ -2671,13 +2671,13 @@ impl PeerManager {
     ///    bool; the next outbound advertise carries (or stops carrying)
     ///    the community. Every session is told at once, so sessions that
     ///    stopped draining commands share one deadline.
-    /// 3. **Issue one `RibUpdate::RefreshPeersOutbound`** for every peer
-    ///    whose session acknowledged — forces re-emission of routes already
-    ///    in `AdjRibOut` in one distribution pass so the wire form updates
-    ///    immediately. Without this, an operator running
-    ///    `rbgp gshut` against an Established session with active
-    ///    routes would see no change until something else triggered a
-    ///    re-advertise.
+    /// 3. **Issue `RibUpdate::RefreshPeerOutbound`** for every peer whose
+    ///    session acknowledged — forces re-emission of routes already in
+    ///    `AdjRibOut` so the wire form updates immediately. Each peer is its
+    ///    own RIB turn; the replies share one batch deadline. Without this,
+    ///    an operator running `rbgp gshut` against an Established session
+    ///    with active routes would see no change until something else
+    ///    triggered a re-advertise.
     ///
     /// `Some(peer)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
     /// so callers can distinguish that from a session/RIB failure.
@@ -2752,22 +2752,37 @@ impl PeerManager {
         }
 
         // (3) Force re-emission of already-advertised routes so the toggle
-        // is visible on the wire without waiting for an unrelated RIB event:
-        // one RIB command and one distribution pass for every peer whose
-        // session acknowledged. The RIB skips peers not yet registered for
-        // outbound (newly added, not Established yet); their next PeerUp
-        // emits fresh.
-        if !acknowledged.is_empty()
-            && let Err(error) = self.refresh_peers_outbound_in_rib(&acknowledged).await
-        {
-            warn!(peers = acknowledged.len(), %error, "RIB refresh failed after gshut toggle");
-            failures.extend(
-                acknowledged
-                    .iter()
-                    .map(|peer| format!("{}: {error}", peer.address)),
-            );
+        // is visible on the wire without waiting for an unrelated RIB event,
+        // for every peer whose session acknowledged, each after its own
+        // toggle. The RIB declines peers not yet registered for outbound
+        // (newly added, not Established yet); their next PeerUp emits fresh.
+        let mut refresh_failure = None;
+        if !acknowledged.is_empty() {
+            match self.refresh_peers_outbound_in_rib(&acknowledged).await {
+                Ok(failed) => {
+                    for (peer, error) in failed {
+                        warn!(peer = %peer.address, %error, "RIB refresh failed after gshut toggle");
+                        failures.push(format!("{}: {error}", peer.address));
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        peers = acknowledged.len(),
+                        %error,
+                        "RIB refresh failed after gshut toggle"
+                    );
+                    refresh_failure = Some(error);
+                }
+            }
         }
 
+        if let Some(error) = refresh_failure {
+            // One failure for the whole walk, not one per peer it covered.
+            failures.push(format!(
+                "RIB refresh of {} peers: {error}",
+                acknowledged.len()
+            ));
+        }
         if failures.is_empty() {
             info!(
                 count = targets.len(),
@@ -2805,10 +2820,27 @@ impl PeerManager {
         admission: OperatorReadAdmission,
         confirm_unlock: bool,
     ) -> Result<Result<(), RibCommandError>, String> {
+        let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
         let rib_peer = self.rib_peer_of(peer);
         let session_id = self.peers.get(peer).map_or(0, ManagedPeer::session_id);
-        self.outbound_refresh_round_trip(&format!("peer {peer}"), admission, |reply| {
-            if confirm_unlock {
+        let timed_out = || {
+            format!(
+                "outbound refresh for peer {peer} timed out after {:?}",
+                super::RIB_REPLY_TIMEOUT
+            )
+        };
+        let rib_tx = self.rib_tx.clone();
+        let round_trip = async {
+            let permit = rib_tx.reserve().await.map_err(|_| {
+                format!("RIB channel closed before outbound refresh for peer {peer}")
+            })?;
+            // Never admit after the absolute deadline when capacity returns
+            // during read servicing.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(timed_out());
+            }
+            let (reply, response) = oneshot::channel();
+            permit.send(if confirm_unlock {
                 RibUpdate::ConfirmPeerOutbound {
                     peer: rib_peer,
                     session_id,
@@ -2819,59 +2851,10 @@ impl PeerManager {
                     peer: rib_peer,
                     reply,
                 }
-            }
-        })
-        .await
-    }
-
-    /// Re-emit several managed peers' outbound inventories with one RIB
-    /// command and one distribution pass. Peers the RIB has not registered
-    /// for outbound updates are skipped.
-    async fn refresh_peers_outbound_in_rib(&mut self, peers: &[PeerKey]) -> Result<(), String> {
-        let rib_peers = peers.iter().map(|peer| self.rib_peer_of(peer)).collect();
-        let target = match peers {
-            [peer] => format!("peer {peer}"),
-            _ => format!("{} peers", peers.len()),
-        };
-        self.outbound_refresh_round_trip(&target, OperatorReadAdmission::Served, |reply| {
-            RibUpdate::RefreshPeersOutbound {
-                peers: rib_peers,
-                reply,
-            }
-        })
-        .await?
-        .map_err(|error| error.to_string())
-    }
-
-    async fn outbound_refresh_round_trip(
-        &mut self,
-        target: &str,
-        admission: OperatorReadAdmission,
-        update: impl FnOnce(oneshot::Sender<Result<(), RibCommandError>>) -> RibUpdate,
-    ) -> Result<Result<(), RibCommandError>, String> {
-        let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
-        let timed_out = || {
-            format!(
-                "outbound refresh for {target} timed out after {:?}",
-                super::RIB_REPLY_TIMEOUT
-            )
-        };
-        let rib_tx = self.rib_tx.clone();
-        let round_trip = async {
-            let permit = rib_tx
-                .reserve()
-                .await
-                .map_err(|_| format!("RIB channel closed before outbound refresh for {target}"))?;
-            // Never admit after the absolute deadline when capacity returns
-            // during read servicing.
-            if tokio::time::Instant::now() >= deadline {
-                return Err(timed_out());
-            }
-            let (reply, response) = oneshot::channel();
-            permit.send(update(reply));
+            });
             response
                 .await
-                .map_err(|_| format!("RIB dropped reply for outbound refresh of {target}"))
+                .map_err(|_| format!("RIB dropped reply for outbound refresh of peer {peer}"))
         };
         let bounded = async {
             tokio::select! {
@@ -2881,6 +2864,63 @@ impl PeerManager {
             }
         };
         self.await_with_readiness(bounded, admission).await
+    }
+
+    /// Re-emit several managed peers' outbound inventories after a toggle
+    /// they acknowledged. Each peer is its own `RefreshPeerOutbound`, so the
+    /// RIB replays one peer's table per turn and keeps taking route updates
+    /// between them. All replies share one [`super::RIB_BATCH_REPLY_TIMEOUT`]
+    /// deadline: the walk is `O(peers)` RIB work. A peer the RIB has not
+    /// registered for outbound updates answers `NotFound`; its next `PeerUp`
+    /// emits fresh, so that is not a failure. Returns the peers whose refresh
+    /// failed, or one error for the whole walk when it timed out or the RIB
+    /// is gone.
+    async fn refresh_peers_outbound_in_rib(
+        &mut self,
+        peers: &[PeerKey],
+    ) -> Result<Vec<(PeerKey, RibCommandError)>, String> {
+        let deadline = tokio::time::Instant::now() + super::RIB_BATCH_REPLY_TIMEOUT;
+        let rib_peers: Vec<_> = peers.iter().map(|peer| self.rib_peer_of(peer)).collect();
+        let rib_tx = self.rib_tx.clone();
+        let round_trips = async {
+            let mut responses = Vec::with_capacity(rib_peers.len());
+            for peer in rib_peers {
+                let permit = rib_tx
+                    .reserve()
+                    .await
+                    .map_err(|_| "RIB channel closed before outbound refresh".to_string())?;
+                let (reply, response) = oneshot::channel();
+                permit.send(RibUpdate::RefreshPeerOutbound { peer, reply });
+                responses.push(response);
+            }
+            Ok(futures::future::join_all(responses).await)
+        };
+        let bounded = async {
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => Err(format!(
+                    "outbound refresh for {} peers timed out after {:?}",
+                    peers.len(),
+                    super::RIB_BATCH_REPLY_TIMEOUT
+                )),
+                result = round_trips => result,
+            }
+        };
+        let replies = self
+            .await_with_readiness(bounded, OperatorReadAdmission::Served)
+            .await?;
+        Ok(peers
+            .iter()
+            .zip(replies)
+            .filter_map(|(peer, reply)| match reply {
+                Ok(Ok(()) | Err(RibCommandError::NotFound(_))) => None,
+                Ok(Err(error)) => Some((peer.clone(), error)),
+                Err(_) => Some((
+                    peer.clone(),
+                    RibCommandError::Internal("RIB dropped reply for outbound refresh".into()),
+                )),
+            })
+            .collect())
     }
 
     /// Re-emit the current exportable outbound inventory for one managed peer.

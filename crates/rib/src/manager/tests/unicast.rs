@@ -766,34 +766,6 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         "refreshing another peer must preserve this sibling's denial inventory"
     );
 
-    // The batched form forces every registered target in one pass and skips
-    // an unregistered one instead of failing the batch.
-    let unregistered = PeerId::from_addr("192.0.2.39".parse().unwrap());
-    let (reply, result) = oneshot::channel();
-    tx.send(RibUpdate::RefreshPeersOutbound {
-        peers: vec![target, unregistered],
-        reply,
-    })
-    .await
-    .unwrap();
-    assert_eq!(result.await.unwrap(), Ok(()));
-    let (_, target_rx) = receivers
-        .iter_mut()
-        .find(|(peer, _)| *peer == target)
-        .unwrap();
-    let refreshed = tokio::time::timeout(Duration::from_millis(100), target_rx.recv())
-        .await
-        .expect("a batched force refresh must enqueue the target's exportable routes")
-        .expect("target outbound channel stays open");
-    assert_eq!(
-        refreshed
-            .announce
-            .iter()
-            .map(|route| route.prefix)
-            .collect::<HashSet<_>>(),
-        HashSet::from([Prefix::V4(kept_prefix), Prefix::V6(v6)])
-    );
-
     drop(tx);
     handle.await.unwrap();
 }

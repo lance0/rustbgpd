@@ -250,10 +250,7 @@ fn hold_first_replay(command: &PeerCommand, index: usize) -> SessionAction {
 }
 
 fn is_outbound_refresh(update: &RibUpdate) -> bool {
-    matches!(
-        update,
-        RibUpdate::RefreshPeerOutbound { .. } | RibUpdate::RefreshPeersOutbound { .. }
-    )
+    matches!(update, RibUpdate::RefreshPeerOutbound { .. })
 }
 
 fn is_prestage(update: &RibUpdate) -> bool {
@@ -756,7 +753,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "lifecycle.rs::outbound_refresh_round_trip",
+        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
         awaits: "RibUpdate::RefreshPeerOutbound acknowledgement",
         drive: Drive::OutboundRefresh,
         rib: RibHold::Reply(is_outbound_refresh),
@@ -767,7 +764,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "lifecycle.rs::outbound_refresh_round_trip",
+        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
         awaits: "RibUpdate::RefreshPeerOutbound after acknowledged export-knob update",
         drive: Drive::HotExportKnobs,
         rib: RibHold::Reply(is_outbound_refresh),
@@ -781,12 +778,12 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "lifecycle.rs::outbound_refresh_round_trip",
-        awaits: "RibUpdate::RefreshPeersOutbound after acknowledged GSHUT toggles",
+        site: "lifecycle.rs::refresh_peers_outbound_in_rib",
+        awaits: "RibUpdate::RefreshPeerOutbound of each peer that acknowledged its GSHUT toggle",
         drive: Drive::GracefulShutdown,
         rib: RibHold::Reply(is_outbound_refresh),
         session: answer_all,
-        additional_entry: Some("set_graceful_shutdown"),
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::Finished,
@@ -1029,7 +1026,6 @@ fn answer_rib(
         RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
         | RibUpdate::ReplacePeerExportPolicy { reply, .. }
         | RibUpdate::RefreshPeerOutbound { reply, .. }
-        | RibUpdate::RefreshPeersOutbound { reply, .. }
         | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
             let _ = reply.send(Ok(()));
         }

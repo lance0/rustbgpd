@@ -26,7 +26,7 @@ async fn gshut_toggle_times_out_when_rib_reply_wedges() {
     tokio::spawn(async move {
         let mut held = Vec::new();
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::RefreshPeersOutbound { reply, .. } = update {
+            if let RibUpdate::RefreshPeerOutbound { reply, .. } = update {
                 // Wedged RIB: hold the reply channel open, never answer.
                 held.push(reply);
             }

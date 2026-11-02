@@ -7149,28 +7149,6 @@ impl RibManager {
             ))));
             return;
         }
-        self.force_outbound_refresh(peer);
-        self.distribute_changes(&HashSet::new(), &HashSet::new());
-        let _ = reply.send(Ok(()));
-    }
-
-    /// [`Self::handle_refresh_peer_outbound`] for several peers, with one
-    /// distribution pass. Unregistered peers are skipped.
-    pub(super) fn handle_refresh_peers_outbound(
-        &mut self,
-        peers: Vec<PeerId>,
-        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
-    ) {
-        for peer in peers {
-            if self.outbound_peers.contains_key(&peer) {
-                self.force_outbound_refresh(peer);
-            }
-        }
-        self.distribute_changes(&HashSet::new(), &HashSet::new());
-        let _ = reply.send(Ok(()));
-    }
-
-    fn force_outbound_refresh(&mut self, peer: PeerId) {
         // `force_outbound_peers` (not `dirty_peers`) — a force-only
         // resync bypasses AdjRibOut equality suppression for currently-
         // advertised exportable routes, which is exactly what GShut and
@@ -7185,6 +7163,8 @@ impl RibManager {
         }
         self.set_selection_partial_caught_up(peer, false);
         self.force_outbound_peers.insert(peer);
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        let _ = reply.send(Ok(()));
     }
 
     /// The ORF filter `peer` installed for `family`, if any.

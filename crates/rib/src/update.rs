@@ -3756,16 +3756,6 @@ pub enum RibUpdate {
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
-    /// [`Self::RefreshPeerOutbound`] for several peers in one distribution
-    /// pass, as one operator toggle across every peer needs. Peers not
-    /// registered for outbound updates are skipped: their next `PeerUp`
-    /// emits fresh.
-    RefreshPeersOutbound {
-        /// The target peers.
-        peers: Vec<PeerId>,
-        /// Answers `Ok` once the pass has run.
-        reply: oneshot::Sender<Result<(), RibCommandError>>,
-    },
     /// Acknowledge that an earlier `PeerFamilySendable` has finished its RIB
     /// turn, without encoding the table again. Sent on the same RIB channel.
     ConfirmPeerOutbound {
@@ -4306,7 +4296,6 @@ impl RibUpdate {
             | Self::ReobserveConditionalAdvertisements { .. } => RibActorTurnKind::OutboundPolicy,
             Self::ReplayPeerOutbound { .. }
             | Self::RefreshPeerOutbound { .. }
-            | Self::RefreshPeersOutbound { .. }
             | Self::ConfirmPeerOutbound { .. } => RibActorTurnKind::OutboundReplay,
             Self::RouteRefreshRequest { .. }
             | Self::BeginRouteRefresh { .. }

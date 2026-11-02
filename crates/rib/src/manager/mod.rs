@@ -3757,7 +3757,6 @@ impl RibManager {
             | RibUpdate::InstallConditionalAdvertisements { .. }
             | RibUpdate::RestoreConditionalAdvertisements { .. }
             | RibUpdate::RefreshPeerOutbound { .. }
-            | RibUpdate::RefreshPeersOutbound { .. }
             | RibUpdate::ReplayPeerOutbound { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
             | RibUpdate::PeerDeleted { .. }
@@ -5208,9 +5207,6 @@ impl RibManager {
             }
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);
-            }
-            RibUpdate::RefreshPeersOutbound { peers, reply } => {
-                self.handle_refresh_peers_outbound(peers, reply);
             }
             RibUpdate::ConfirmPeerOutbound {
                 peer,
