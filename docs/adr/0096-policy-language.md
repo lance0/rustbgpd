@@ -314,3 +314,245 @@ closer, one day, plan-to-main:
 Still deferred, unchanged from the Deferred section: Luau tier,
 bytecode VM, loops/maps/user types, `as-path-set`, gNMI paths for
 `.rpol` content (gNMI Set remains TOML-surface-only).
+
+## Amendment (2026-11-01): callable policies — `apply p(args)` as a statement
+
+Decision 4 made `apply` predicate-only: `apply(p)` asks whether `p` would
+permit the route, and `p`'s actions do not run. This amendment adds the
+IOS-XR RPL policy-library idiom alongside it. `apply p` and `apply p(args)`
+in statement position run `p` in place, as RPL's `apply` pastes the child
+policy into the parent. The predicate form keeps its meaning, and statement
+position admitted no `apply` before, so no existing program changes
+(ADR-0103 Decision 2, grammar rule 2). No breaking change makes this
+design simpler or safer, so none is proposed.
+
+This amendment depends on typed policy parameters, which add set,
+community and address arguments to policy calls. Calls and their
+examples below use those argument types; the implementation lands after
+them.
+
+### Semantics
+
+1. **Paste-inline under the call-site guard.** A call runs `p`'s terms in
+   order, under the path condition of the place it is written: the term,
+   the enclosing `if` branches and the negations an `else if` chain
+   carries. Arguments bind as in a chain reference, with typed
+   parameters. A caller's own parameter passes through when its type
+   matches.
+2. **Modifications stage into the caller.** A callee `set`, `add`,
+   `remove` or `prepend` joins the caller's staged modifications in
+   execution order. The rules are those of successive statements in one
+   policy: a later scalar write replaces an earlier one, and community
+   additions and removals apply in order. They carry through to the
+   policy's outcome: a later caller statement can override them, or the
+   route can still be rejected. Conditions do not observe them, in the
+   callee or in the caller's later statements and terms. Every condition
+   reads the route as received, as before and as RPL conditions read the
+   route's initial data.
+3. **A callee `reject` denies the route.** A deny from any depth ends the
+   evaluation, and staged modifications are discarded, as with a
+   top-level `reject`.
+4. **A callee `accept` returns to the caller.** It ends the callee: no
+   later callee term runs, and its staged modifications are kept.
+   Evaluation continues with the caller's next statement after the call,
+   then the caller's later terms. An `accept` inside a callee therefore
+   never ends the caller and never permits the route on its own; the
+   caller's own verdict, or its `default-action`, decides.
+5. **Fall-through runs the callee's `default-action`.** A callee that
+   reaches its end without a verdict applies its declared default:
+   - `accept`, or no declaration, returns, like an explicit `accept`;
+   - `default-action reject` denies.
+
+   A policy therefore means the same thing as a callee, as a chain
+   member and under its own `expect` tests. RPL has no per-policy
+   default, so an RPL child that falls through always returns; port such
+   a child without `default-action reject`.
+6. **`else if` first-match is unchanged.** The branch's guard alone
+   decides which branch runs; the callee's outcome does not. A branch
+   whose body calls a policy can fall through, because the callee may
+   return, so later branches keep its negation. After a callee returns,
+   evaluation continues after the whole `if` statement, never in a later
+   branch of the same chain.
+
+### Scope
+
+- **Position.** A call is allowed wherever an action statement is
+  allowed: in a term body, an `if` body or a `for` body. In a loop body
+  the call runs once per iteration, and the loop's cost bound multiplies
+  it.
+- **Callee contents.** A callee may hold `let` bindings, `for` loops,
+  function calls, `accept` inside its loops, and its own `apply`
+  statements, because a statement call has a term walk to run them in.
+- **Predicate targets.** A policy that contains an `apply` statement
+  cannot be the target of `apply(p)`, the same rule as for `let`, `for`
+  and function calls: the predicate has no term walk to run the callee
+  in.
+- **One composition graph.** Statement calls and predicate applies are
+  edges of the same `apply` DAG. A cycle through any mix of the two is a
+  compile error naming it, `MAX_APPLY_DEPTH` (8) counts both kinds of
+  nesting, and the inlined terms count against `MAX_APPLY_EXPANSION` and
+  `MAX_CHAIN_NODES`.
+
+### Lowering
+
+A call adds no IR node kind; the evaluator, the IR analyses and the
+live-impact planner are unchanged. The return is a frame-slot flag, built
+from the existing `Bind` term and a guard that reads a local.
+
+- The callee lowers on its own, monomorphized with the call's arguments,
+  to its IR term list. Its frame slots are offset above every caller slot
+  live at the call site, and one more slot, the call's return flag, is
+  reserved above them.
+- The call emits, in order:
+  - a `Bind` that clears the flag, guarded by the call-site path;
+  - each callee term, guarded by the call-site path, then "flag is
+    clear", then the term's own guard, as one flat conjunction in that
+    order.
+- A callee term that ends in `accept`, its `Permit(mods)`, becomes a
+  `Bind` that sets the flag to that term's ordinal, then a `Continue(mods)`
+  guarded by the path and "flag equals that ordinal". The modifications
+  apply exactly when that term returned, and every later callee term sees
+  the flag set and is skipped.
+- Inside a callee loop body, `accept` sets the flag the same way and then
+  breaks out of the loop. An enclosing callee loop gets a `Break` guarded
+  by "flag is set" after each inner loop.
+- `Deny` stays `Deny`. A fall-through `default-action reject` adds one
+  final `Deny` guarded by the path and "flag is clear".
+- **No callee guard is evaluated again after its own term.** Standalone
+  lowering reuses frame slots across source terms and sibling scopes. A
+  design that re-evaluated an earlier callee guard in later terms, for
+  example by conjoining the negation of each earlier returning guard,
+  would extend the lifetime of every binding that guard reads. A later
+  binding could then overwrite one of them, flip the guard and suppress
+  a required rejection.
+  - A plain callee-to-caller slot remap is sound only because the flag
+    removes those re-evaluations.
+  - Any lowering that re-evaluates a callee guard across terms must
+    allocate the slots it reads with their extended lifetime, live until
+    the callee ends, and charge them to the caller's frame. A plain
+    remap is insufficient there.
+- Peer-context and other `requires_*` flags propagate with no extra
+  rule, because the analyses read the inlined terms. A callee that reads
+  `peer.*` makes every chain that calls it peer-context-dependent, which
+  removes those peers from update-group sharing, as if the guard were
+  written in the caller.
+- Reload diffs the caller's compiled chain as before (ADR-0103
+  Decision 5). Editing a callee therefore refreshes exactly the peers
+  whose chains call it, and a callee's datasets are referenced by the
+  caller's chain.
+
+Two alternatives were rejected:
+- **The negation encoding.** Each callee term would carry the negations
+  of the earlier returning guards. It needs lifetime-extended slots for
+  every binding those guards read. It re-evaluates every earlier
+  returning guard, function calls included, in each later term, so its
+  cost grows with the square of the returning terms. It also cannot
+  express a return from inside a loop.
+- **A runtime call node.** This is a `TermAction` that walks the callee
+  as a sub-walk. It grows the public IR, the evaluator, explain and every
+  IR analysis, and the flag already gives the same walk with existing
+  nodes. It stays the upgrade path if a measured shape needs it.
+
+### Frame budget
+
+- At each call site, the caller's frame must hold every slot live there
+  plus the callee's standalone frame high-water mark plus the return flag.
+- Nested calls add their own frames and flags the same way.
+- The existing per-term frame-slot check enforces this at the call site,
+  under the same `LOCAL_FRAME_SLOTS` limit. The diagnostic names the call.
+
+### Explain, stats and coverage
+
+Inlined callee terms keep their identity under the call site. This
+amends ADR-0103 Decision 6.3, which stays true for predicate `apply`.
+
+- The caller term's IR terms are numbered `<term>.<n>` as today.
+- An inlined term is named
+  `<term>.<n>/<call>:<callee-term>`, for example
+  `ours.3/tag-customer(65000:100):mark`:
+  - `<call>` is the call as written, with canonical arguments;
+  - `<callee-term>` is the callee's own IR term name.
+  - Nested calls compose: `ours.3/a:x.2/b:y`.
+- The flag's own terms are named after what they serve:
+  - `<call>:enter` clears the flag;
+  - `<callee-term>:return` applies a returning term's modifications;
+  - `<call>:default` is a fall-through deny.
+- The name is a pure function of the source, so counters keep their
+  positional key and the term grid changes only when the operator edits
+  a caller or a callee (ADR-0103 Decisions 5.2 and 6.1).
+- `rbgp policy stats`, `rbgp policy test` term hits and the explain
+  traces show these names. In-language test coverage credits a hit to
+  the callee's source term.
+- **Exception: a call inside a `for` body.** The call is inlined into the
+  loop's body terms, which sit outside the policy's term and counter grid,
+  and the loop evaluator reports neither body-term coverage nor
+  per-body-term explain traces. A loop-contained call is therefore
+  attributed at the loop level, like any other loop-body term today:
+  counters, coverage and explain name the enclosing loop term, not the
+  inlined callee terms. Per-term attribution inside loops remains a
+  possible later extension, for loop bodies in general.
+
+### Cost model
+
+Every call is charged where it is written:
+
+- **Charged at every call site.** An inlined callee is charged where it is
+  written. Each callee IR term costs its own guard, plus the call-site path,
+  plus the flag check. Each call adds its entry `Bind`, each returning term
+  adds its flag `Bind` and `Continue`, and a default deny adds one term.
+  Action value costs count toward `MAX_EVAL_COST`, and a call in a loop
+  body is multiplied by the loop bound.
+- **Charged per instantiation.** A parameterized callee is charged once
+  for each instantiation, because each call site monomorphizes it.
+- **No allocation per inlined term.** Each policy's inlinable cost is
+  recorded once, in the existing Kahn-ordered DP, as saturating totals. A
+  call site adds those totals with its path cost scaled by the term count.
+  Nothing is allocated per inlined term: the per-term record is capped one
+  past the budget, so the budget check still fires.
+- **Never below the lowering.** A probe over the call shapes compares the
+  charge with the lowered node count, and the boundary tests below pin it.
+
+With the flag, a callee's cost is linear in its size at each call site.
+
+### Tests the implementation must carry
+
+- Semantics:
+  - a callee `reject` denies, and its staged writes are discarded;
+  - a callee `accept` returns, so later callee terms do not run and the
+    caller's later statements and terms do;
+  - fall-through returns, and fall-through with `default-action reject`
+    denies;
+  - staged writes reach the outcome, and a later caller write overrides
+    them;
+  - a condition after the call reads the original route.
+- **Slot clobbering.** A returning callee term's guard reads a binding
+  whose slot a later callee term reuses, and a later callee `reject` must
+  still fire for a route that does not return.
+  - Prove it red against a lowering that re-evaluates the earlier guard
+    after the plain slot remap.
+  - Cover the same shape across sibling `if` scopes inside one callee
+    term.
+- **Loops and branches.**
+  - An `accept` inside a callee loop returns from the callee, including
+    from a nested loop.
+  - A call in a caller loop body runs once per iteration.
+  - A call inside an `else if` branch never lets a later branch run after
+    the callee returns.
+- **Composition.**
+  - Nested calls.
+  - A cycle through statement calls, and one through a statement call
+    and a predicate apply.
+  - The depth cap.
+  - A parameterized callee called with two argument lists.
+  - A policy with an `apply` statement rejected as a predicate target.
+- **Context, budgets and naming.**
+  - A callee reading `peer.*` makes its caller's export chain ineligible
+    for update-group sharing.
+  - The frame budget at a call site, just under and just over.
+  - The size budget for a deciding, a returning, a nested and a
+    parameterized callee, just under and just over.
+  - The agreement probe over the call shapes.
+  - Explain, stats and test term-hit names for inlined terms and the
+    flag terms.
+  - A call inside a `for` body attributes its hits, coverage and explain
+    trace to the enclosing loop term.
