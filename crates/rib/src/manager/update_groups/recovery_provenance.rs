@@ -90,6 +90,17 @@ struct SlotSpace {
     free: Slots,
     /// Open addressing with linear probing: zero is empty, else slot + 1.
     index: Slots,
+    /// A per-space random key for `SipHash`. Keys are peer-chosen, and an
+    /// unkeyed hash lets a peer place any number of distinct keys in one
+    /// probe run. Keyed, every chain has expected constant length, so the
+    /// probe loops need no checkpoint of their own.
+    hasher: std::collections::hash_map::RandomState,
+    /// Probe and shift steps, for work-bound regressions.
+    #[cfg(test)]
+    probes: std::sync::atomic::AtomicU64,
+    /// Entries moved from the start of the table back to its end.
+    #[cfg(test)]
+    wrapped_moves: std::sync::atomic::AtomicU64,
 }
 
 impl SlotSpace {
@@ -114,13 +125,24 @@ impl SlotSpace {
 
     fn bucket(&self, key: &EvpnRouteKey) -> usize {
         use std::hash::BuildHasher;
-        let hash = crate::fast_hash::FastState::default()
-            .hash_one(key)
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        // Multiply-shift maps the mixed hash onto any table length.
+        let hash = self.hasher.hash_one(key);
+        // Multiply-shift maps the keyed hash onto any table length.
         usize::try_from((u128::from(hash) * self.index.len() as u128) >> 64)
             .expect("bucket is below the table length")
     }
+
+    #[cfg(test)]
+    fn probed(&self) {
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(not(test))]
+    #[expect(
+        clippy::unused_self,
+        reason = "only test builds count probe steps for work-bound regressions"
+    )]
+    fn probed(&self) {}
 
     fn next(&self, bucket: usize) -> usize {
         if bucket + 1 == self.index.len() {
@@ -131,11 +153,18 @@ impl SlotSpace {
     }
 
     fn find(&self, key: &EvpnRouteKey) -> Option<u32> {
-        if self.index.is_empty() {
-            return None;
-        }
-        let mut bucket = self.bucket(key);
+        self.find_from(self.bucket_or_empty(key)?, key)
+    }
+
+    /// The key's bucket, or none while the table is unallocated.
+    fn bucket_or_empty(&self, key: &EvpnRouteKey) -> Option<usize> {
+        (!self.index.is_empty()).then(|| self.bucket(key))
+    }
+
+    /// Probe from a bucket the caller hashed once for this key.
+    fn find_from(&self, mut bucket: usize, key: &EvpnRouteKey) -> Option<u32> {
         loop {
+            self.probed();
             let entry = self.index[bucket];
             if entry == 0 {
                 return None;
@@ -148,8 +177,12 @@ impl SlotSpace {
     }
 
     fn insert_index(&mut self, slot: u32) {
-        let mut bucket = self.bucket(&self.keys[slot as usize]);
+        self.insert_at(self.bucket(&self.keys[slot as usize]), slot);
+    }
+
+    fn insert_at(&mut self, mut bucket: usize, slot: u32) {
         while self.index[bucket] != 0 {
+            self.probed();
             bucket = self.next(bucket);
         }
         self.index[bucket] = slot + 1;
@@ -160,10 +193,12 @@ impl SlotSpace {
         let length = self.index.len();
         let mut hole = self.bucket(&self.keys[slot as usize]);
         while self.index[hole] != slot + 1 {
+            self.probed();
             hole = self.next(hole);
         }
         let mut probe = hole;
         loop {
+            self.probed();
             probe = self.next(probe);
             let entry = self.index[probe];
             if entry == 0 {
@@ -174,6 +209,11 @@ impl SlotSpace {
             let distance = |from: usize, to: usize| (to + length - from) % length;
             // Move the entry back unless the hole precedes its preferred bucket.
             if distance(preferred, probe) >= distance(hole, probe) {
+                #[cfg(test)]
+                if probe < hole {
+                    self.wrapped_moves
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.index[hole] = entry;
                 hole = probe;
             }
@@ -190,11 +230,9 @@ impl SlotSpace {
         u32::try_from(slot).expect("slot capacity fits u32")
     }
 
-    /// Callers have already reserved capacity for a new key.
-    fn intern(&mut self, key: EvpnRouteKey) -> u32 {
-        if let Some(slot) = self.find(&key) {
-            return slot;
-        }
+    /// Insert a key the caller just failed to find from `home`, its bucket
+    /// in the current table. Callers have already reserved capacity.
+    fn insert_new(&mut self, home: usize, key: EvpnRouteKey) -> u32 {
         let slot = if let Some(slot) = self.free.pop() {
             self.keys[slot as usize] = key;
             slot
@@ -204,7 +242,7 @@ impl SlotSpace {
             self.holders.push(0);
             u32::try_from(self.keys.len() - 1).expect("slot capacity fits u32")
         };
-        self.insert_index(slot);
+        self.insert_at(home, slot);
         slot
     }
 
@@ -242,8 +280,12 @@ impl SlotSpace {
         Ok(())
     }
 
+    /// Free every array; the hasher key and test counters remain.
     fn clear(&mut self) {
-        *self = Self::default();
+        self.keys = Keys::new();
+        self.holders = Slots::new();
+        self.free = Slots::new();
+        self.index = Slots::new();
     }
 }
 
@@ -1053,7 +1095,10 @@ impl EvpnRecoveryProvenance {
         key: EvpnRouteKey,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Exhaustion> {
-        let existing = self.space.find(&key);
+        // One keyed hash per key; a new key reuses it to insert unless growth
+        // rebuilt the table in between.
+        let mut home = self.space.bucket_or_empty(&key);
+        let existing = home.and_then(|home| self.space.find_from(home, &key));
         if existing.is_some_and(|slot| bit(&self.records[index].words, slot)) {
             return Ok(());
         }
@@ -1061,12 +1106,19 @@ impl EvpnRecoveryProvenance {
         let slot = if let Some(slot) = existing {
             slot
         } else {
+            let buckets = self.space.index.len();
             self.ensure_space(peer, 1, checkpoint)?;
+            if self.space.index.len() != buckets {
+                home = None;
+            }
             self.space.next_new_slot(0)
         };
         self.grow_words(index, slot, checkpoint)?;
         self.credit_slots(peer, 1)?;
-        let slot = self.space.intern(key);
+        let slot = existing.unwrap_or_else(|| {
+            let home = home.unwrap_or_else(|| self.space.bucket(&key));
+            self.space.insert_new(home, key)
+        });
         self.space.hold(slot);
         let record = &mut self.records[index];
         set_bit(&mut record.words, slot);
@@ -1352,13 +1404,12 @@ impl EvpnRecoveryProvenance {
             if n % CHECKPOINT_STRIDE == 0 {
                 checkpoint(false);
             }
-            if space
-                .find(&key)
-                .is_some_and(|slot| bit(&record.words, slot))
-            {
-                continue;
-            }
-            let slot = space.intern(key);
+            let home = space.bucket(&key);
+            let slot = match space.find_from(home, &key) {
+                Some(slot) if bit(&record.words, slot) => continue,
+                Some(slot) => slot,
+                None => space.insert_new(home, key),
+            };
             space.hold(slot);
             record.pins.push(slot);
         }
@@ -1598,7 +1649,7 @@ mod tests {
     use std::net::IpAddr;
     use std::net::Ipv4Addr;
 
-    use rustbgpd_wire::{EthernetTagId, RouteDistinguisher};
+    use rustbgpd_wire::{EthernetTagId, MacAddress, RouteDistinguisher};
 
     fn owner(peer: u8, session_id: u64) -> PeerSession {
         PeerSession {
@@ -2522,7 +2573,7 @@ mod tests {
                 if let Some(slot) = model.remove(&candidate) {
                     space.release(slot);
                 } else if space.live() < 64 {
-                    let slot = space.intern(candidate);
+                    let slot = space.insert_new(space.bucket(&candidate), candidate);
                     space.hold(slot);
                     model.insert(candidate, slot);
                 }
@@ -2530,6 +2581,156 @@ mod tests {
                     assert_eq!(space.find(&key(n)), model.get(&key(n)).copied());
                 }
             }
+        }
+    }
+
+    /// A MAC/IP key whose MAC and IP bytes a peer chooses freely.
+    fn mac_key(n: u64) -> EvpnRouteKey {
+        let b = n.to_be_bytes();
+        EvpnRouteKey::MacIp {
+            rd: RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 1]),
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress([b[2], b[3], b[4], b[5], b[6], b[7]]),
+            ip: Some(IpAddr::V4(Ipv4Addr::new(10, b[5], b[6], b[7]))),
+        }
+    }
+
+    /// Distinct keys whose unkeyed Fx hash, mixed and mapped as the first
+    /// version of this index did, homes in the first 1/256 of any table.
+    fn unkeyed_colliding_keys(count: usize) -> Vec<EvpnRouteKey> {
+        use std::hash::BuildHasher;
+        (0_u64..)
+            .map(mac_key)
+            .filter(|key| {
+                crate::fast_hash::FastState::default()
+                    .hash_one(key)
+                    .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    >> 56
+                    == 0
+            })
+            .take(count)
+            .collect()
+    }
+
+    /// Keys a peer built to collide under the unkeyed index form one probe
+    /// run, making every insert, rebuild, lookup and delete O(n). Keyed, the
+    /// total probe work across two captures, every growth rebuild, lookups,
+    /// withdrawals and both releases stays a small multiple of the keys.
+    #[test]
+    fn colliding_keys_cost_linear_index_work() {
+        const KEYS: usize = 2048;
+        let keys = unkeyed_colliding_keys(KEYS);
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let first = ledger.register(owner(1, 7)).unwrap();
+        let second = ledger.register(owner(2, 7)).unwrap();
+        capture(&mut ledger, first, &keys);
+        capture(&mut ledger, second, &keys);
+        let proof = ledger.proof(second).unwrap().unwrap();
+        assert!(keys.iter().all(|key| proof.contains(key)));
+        admit(&mut ledger, first, &[], &keys);
+        assert!(ledger.finish_recovery(first).unwrap());
+        assert!(ledger.finish_recovery(second).unwrap());
+        assert_eq!(ledger.slot_usage().live, 0);
+        let probes = ledger
+            .space
+            .probes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // About ten index operations per key, each expected O(1).
+        assert!(
+            probes < 64 * KEYS as u64,
+            "{probes} probe steps for {KEYS} keys"
+        );
+    }
+
+    /// Six keys homed to the second-last bucket wrap past the table's end.
+    /// Deleting the first shifts the whole run back, across the wrap.
+    #[test]
+    fn deletion_shifts_a_full_run_back_across_the_wrap() {
+        let mut space = SlotSpace::default();
+        space.try_grow(64).unwrap();
+        let buckets = space.index.len();
+        let run: Vec<_> = (0_u32..)
+            .map(key)
+            .filter(|key| space.bucket(key) == buckets - 2)
+            .take(6)
+            .collect();
+        let slots: Vec<_> = run
+            .iter()
+            .map(|key| {
+                let slot = space.insert_new(space.bucket(key), *key);
+                space.hold(slot);
+                slot
+            })
+            .collect();
+        let position = |space: &SlotSpace, slot: u32| {
+            space
+                .index
+                .iter()
+                .position(|entry| *entry == slot + 1)
+                .unwrap()
+        };
+        assert_eq!(position(&space, slots[5]), 3, "the run wraps");
+        space.release(slots[0]);
+        assert!(
+            space
+                .wrapped_moves
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 1
+        );
+        for (offset, slot) in slots[1..].iter().enumerate() {
+            assert_eq!(
+                position(&space, *slot),
+                (buckets - 2 + offset) % buckets,
+                "the whole run moved back one bucket"
+            );
+        }
+        assert_eq!(space.find(&run[0]), None);
+        assert!(
+            run[1..]
+                .iter()
+                .zip(&slots[1..])
+                .all(|(key, slot)| space.find(key) == Some(*slot))
+        );
+    }
+
+    /// Random inserts and deletes of keys homed near the table's end match a
+    /// model, moving entries across the wrap many times.
+    #[test]
+    fn index_matches_a_model_through_wrapping_deletions() {
+        for seed in [1, 7, 42] {
+            let mut next = rng(seed);
+            let mut space = SlotSpace::default();
+            space.try_grow(64).unwrap();
+            let buckets = space.index.len();
+            let near_wrap: Vec<_> = (0_u32..)
+                .map(key)
+                .filter(|key| {
+                    let bucket = space.bucket(key);
+                    bucket + 6 >= buckets || bucket < 2
+                })
+                .take(96)
+                .collect();
+            let mut model = std::collections::HashMap::new();
+            for _ in 0..20_000 {
+                let candidate = near_wrap[usize::try_from(next(96)).unwrap()];
+                if let Some(slot) = model.remove(&candidate) {
+                    space.release(slot);
+                } else if space.live() < 64 {
+                    let slot = space.insert_new(space.bucket(&candidate), candidate);
+                    space.hold(slot);
+                    model.insert(candidate, slot);
+                }
+                for key in &near_wrap {
+                    assert_eq!(space.find(key), model.get(key).copied());
+                }
+            }
+            assert!(
+                space
+                    .wrapped_moves
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    > 100,
+                "seed {seed}"
+            );
         }
     }
 
