@@ -196,18 +196,38 @@ pub enum EvalErrorKind {
 }
 
 impl EvalErrorKind {
-    /// Whether this kind is a compiler-bug rail, which fails the route
-    /// closed wherever it occurs. Every other kind is a value that
-    /// cannot be computed: a condition reading it is false, and only
-    /// an action that needs it denies the route (LAN-2790).
+    /// Whether this kind fails the route closed wherever it occurs,
+    /// conditions included: a compiler-bug rail or a resource limit.
+    /// Only the kinds listed here as a value that cannot be computed
+    /// make a condition false instead, with the deny left to an action
+    /// that needs the value (LAN-2790), so a kind added later fails
+    /// closed until it is listed.
     #[must_use]
-    pub fn is_compiler_rail(self) -> bool {
-        matches!(
+    pub fn fails_closed(self) -> bool {
+        !matches!(
             self,
-            EvalErrorKind::UnboundLocal
-                | EvalErrorKind::DatasetUnpinned
-                | EvalErrorKind::StrayLoopControl
+            EvalErrorKind::Overflow
+                | EvalErrorKind::Underflow
+                | EvalErrorKind::DivideByZero
+                | EvalErrorKind::RemainderByZero
+                | EvalErrorKind::ClampInverted
+                | EvalErrorKind::AbsentField(_)
+                | EvalErrorKind::AbsentPrependOperand(_)
         )
+    }
+}
+
+/// Both operands of a value node, each evaluated, so a value that cannot
+/// be computed on one side never hides a fail-closed kind on the other;
+/// otherwise the left error wins.
+fn both<A, B>(
+    lhs: Result<A, EvalErrorKind>,
+    rhs: Result<B, EvalErrorKind>,
+) -> Result<(A, B), EvalErrorKind> {
+    match (lhs, rhs) {
+        (Ok(lhs), Ok(rhs)) => Ok((lhs, rhs)),
+        (Err(lhs), Err(rhs)) if rhs.fails_closed() && !lhs.fails_closed() => Err(rhs),
+        (Err(kind), _) | (_, Err(kind)) => Err(kind),
     }
 }
 
@@ -366,8 +386,9 @@ pub(crate) fn locals_slice(locals: Option<&LocalFrame>) -> &[LocalSlot] {
 
 /// Evaluate a `let` initializer into its slot (LAN-2790). A value that
 /// cannot be computed is stored as its error kind, so the binding
-/// carries the state instead of denying here; only a compiler-bug rail
-/// is terminal. Shared by every walk and by explain.
+/// carries the state instead of denying here; only a fail-closed kind
+/// (see [`EvalErrorKind::fails_closed`]) is terminal. Shared by every
+/// walk and by explain.
 pub(crate) fn exec_bind(
     slot: u8,
     expr: &ValueExpr,
@@ -376,7 +397,7 @@ pub(crate) fn exec_bind(
 ) -> Result<(), EvalErrorKind> {
     let value = eval_value(expr, ctx, locals_slice(locals.as_ref()));
     if let Err(kind) = value
-        && kind.is_compiler_rail()
+        && kind.fails_closed()
     {
         return Err(kind);
     }
@@ -422,16 +443,22 @@ pub(crate) fn eval_value(
                 .ok_or(EvalErrorKind::AbsentField(ValueField::PeerAsn)),
         },
         ValueExpr::Binary { op, lhs, rhs } => {
-            let lhs = eval_value(lhs, ctx, locals)?;
-            let rhs = eval_value(rhs, ctx, locals)?;
+            let (lhs, rhs) = both(eval_value(lhs, ctx, locals), eval_value(rhs, ctx, locals))?;
             checked_arith(*op, lhs, rhs)
         }
-        ValueExpr::Min(a, b) => Ok(eval_value(a, ctx, locals)?.min(eval_value(b, ctx, locals)?)),
-        ValueExpr::Max(a, b) => Ok(eval_value(a, ctx, locals)?.max(eval_value(b, ctx, locals)?)),
+        ValueExpr::Min(a, b) => {
+            let (a, b) = both(eval_value(a, ctx, locals), eval_value(b, ctx, locals))?;
+            Ok(a.min(b))
+        }
+        ValueExpr::Max(a, b) => {
+            let (a, b) = both(eval_value(a, ctx, locals), eval_value(b, ctx, locals))?;
+            Ok(a.max(b))
+        }
         ValueExpr::Clamp(x, lo, hi) => {
-            let x = eval_value(x, ctx, locals)?;
-            let lo = eval_value(lo, ctx, locals)?;
-            let hi = eval_value(hi, ctx, locals)?;
+            let (x, (lo, hi)) = both(
+                eval_value(x, ctx, locals),
+                both(eval_value(lo, ctx, locals), eval_value(hi, ctx, locals)),
+            )?;
             if lo > hi {
                 return Err(EvalErrorKind::ClampInverted);
             }
@@ -2055,21 +2082,22 @@ impl CompiledChain {
             // LAN-2790: a condition never fails. An operand that is
             // missing or cannot be computed makes the comparison false,
             // exactly like the plain scalar nodes, so `&&`, `||` and `!`
-            // combine plain values in any order. Only a compiler-bug
-            // rail sets the error slot.
+            // combine plain values in any order. Only a fail-closed kind
+            // (a compiler-bug rail) sets the error slot, from either
+            // operand.
             MatchExpr::ValueCmp(node) => {
-                match (
+                match both(
                     eval_value(&node.lhs, ctx, locals),
                     eval_value(&node.rhs, ctx, locals),
                 ) {
-                    (Ok(lhs), Ok(rhs)) => match node.op {
+                    Ok((lhs, rhs)) => match node.op {
                         ValueCmpOp::Eq => lhs == rhs,
                         ValueCmpOp::Ne => lhs != rhs,
                         ValueCmpOp::Ge => lhs >= rhs,
                         ValueCmpOp::Le => lhs <= rhs,
                     },
-                    (Err(kind), _) | (_, Err(kind)) => {
-                        if kind.is_compiler_rail() {
+                    Err(kind) => {
+                        if kind.fails_closed() {
                             err.get_or_insert(kind);
                         }
                         false
@@ -2343,6 +2371,96 @@ mod tests {
             }],
             prefix_sets,
             ..CompiledChain::empty()
+        }
+    }
+
+    /// A value that cannot be computed on one operand never hides a
+    /// compiler-bug rail on the other: an absent origin AS beside an
+    /// unbound local fails the guard closed in either order, as a
+    /// comparison operand or inside arithmetic, `min`, `max` and `clamp`.
+    #[test]
+    fn a_missing_operand_never_masks_a_rail_on_the_other_operand() {
+        use super::EvalErrorKind;
+        use crate::ir::{ArithOp, ValueCmpNode, ValueCmpOp, ValueExpr, ValueField};
+
+        let absent = || ValueExpr::Field(ValueField::OriginAs);
+        let unbound = || ValueExpr::Local {
+            slot: 0,
+            name: "x".into(),
+        };
+        let cmp = |lhs, rhs| {
+            MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+                op: ValueCmpOp::Eq,
+                lhs,
+                rhs,
+            }))
+        };
+        let of = |value| cmp(value, ValueExpr::Const(1));
+        let add = |lhs, rhs| ValueExpr::Binary {
+            op: ArithOp::Add,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        };
+        let boxed = |value| Box::new(value);
+        let guards = [
+            cmp(absent(), unbound()),
+            cmp(unbound(), absent()),
+            of(add(absent(), unbound())),
+            of(add(unbound(), absent())),
+            of(ValueExpr::Min(boxed(absent()), boxed(unbound()))),
+            of(ValueExpr::Max(boxed(absent()), boxed(unbound()))),
+            of(ValueExpr::Clamp(
+                boxed(absent()),
+                boxed(ValueExpr::Const(0)),
+                boxed(unbound()),
+            )),
+            of(ValueExpr::Clamp(
+                boxed(absent()),
+                boxed(unbound()),
+                boxed(ValueExpr::Const(9)),
+            )),
+        ];
+        for guard in guards {
+            let chain = single_term_chain(guard.clone(), Vec::new());
+            let (result, evaluation) = chain.evaluate_with_attribution(&ctx(None));
+            assert_eq!(result.action, PolicyAction::Deny, "{guard:?}");
+            assert_eq!(
+                evaluation.eval_error.map(|error| error.kind),
+                Some(EvalErrorKind::UnboundLocal),
+                "{guard:?}"
+            );
+        }
+        // Control: the missing operand alone is a clean miss.
+        let chain = single_term_chain(of(add(absent(), ValueExpr::Const(1))), Vec::new());
+        let (result, evaluation) = chain.evaluate_with_attribution(&ctx(None));
+        assert_eq!(result.action, PolicyAction::Deny);
+        assert_eq!(evaluation.eval_error, None);
+    }
+
+    /// Only the listed value kinds make a condition false; everything else,
+    /// including a kind added later, fails closed.
+    #[test]
+    fn only_value_kinds_leave_a_condition_false() {
+        use super::EvalErrorKind as Kind;
+        use crate::ir::ValueField;
+        for kind in [
+            Kind::Overflow,
+            Kind::Underflow,
+            Kind::DivideByZero,
+            Kind::RemainderByZero,
+            Kind::ClampInverted,
+            Kind::AbsentField(ValueField::OriginAs),
+        ] {
+            assert!(!kind.fails_closed(), "{kind:?}");
+        }
+        for kind in [
+            Kind::UnboundLocal,
+            Kind::DatasetUnpinned,
+            Kind::StrayLoopControl,
+            Kind::FuelExhausted,
+            Kind::LoopLimitExceeded,
+        ] {
+            assert!(kind.fails_closed(), "{kind:?}");
         }
     }
 
