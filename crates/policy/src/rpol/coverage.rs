@@ -298,9 +298,9 @@ impl CoverageAccum {
         // term lowers to several — group greedily by that contract
         // (term names are identifiers and cannot contain `.`).
         let mut src = 0usize;
-        // Terms inlined at `apply` statements also credit the called
-        // policy's own source terms, named under the call site.
-        let mut callee_hits: Vec<(&str, &str, bool, bool)> = Vec::new();
+        // Terms inlined at `apply` statements credit the called policy's
+        // own source terms, named under the call site.
+        let mut calls = CallWalk::default();
         for (i, term) in policy.terms.iter().enumerate() {
             let Some(ir_name) = term.name.as_deref() else {
                 continue;
@@ -318,16 +318,16 @@ impl CoverageAccum {
             if was_reached {
                 reached[src] = true;
             }
-            if !matches!(term.guard, MatchExpr::True) {
+            // Only the caller's own terms, and the entry of a call it makes,
+            // say whether its source term matched; a called term's guard is
+            // the called policy's condition.
+            let own = calls.step(ir_name, &term.guard, was_reached, was_hit);
+            if own && !own_guard_is_true(&term.guard) {
                 conditional[src] = true;
                 if was_hit {
                     hit[src] = true;
                 }
             }
-            callee_hits.extend(
-                called_terms(ir_name)
-                    .map(|(policy, callee_term)| (policy, callee_term, was_reached, was_hit)),
-            );
         }
         for (term, ((reached, hit), conditional)) in entry
             .terms
@@ -342,34 +342,39 @@ impl CoverageAccum {
                 }
             }
         }
-        self.credit_calls(&callee_hits);
+        self.credit_calls(&calls.credits);
     }
 
     /// Credit the called policies' source terms with this walk's facts,
-    /// each source term at most once per walk.
-    fn credit_calls(&mut self, hits: &[(&str, &str, bool, bool)]) {
-        let mut credited: HashMap<(usize, usize), (bool, bool)> = HashMap::new();
-        for &(policy, ir_term, reached, hit) in hits {
-            let Some(&slot) = self.index.get(policy) else {
+    /// each source term at most once per walk, by the rules a policy's own
+    /// terms follow: reached if any of its terms was, matched if one of its
+    /// conditional terms matched or it has none.
+    fn credit_calls(&mut self, credits: &[Credit<'_>]) {
+        let mut folded: HashMap<(usize, usize), (bool, bool, bool)> = HashMap::new();
+        for credit in credits {
+            let Some(&slot) = self.index.get(credit.policy) else {
                 continue;
             };
             let Some(src) = self.policies[slot]
                 .terms
                 .iter()
-                .position(|term| belongs(ir_term, &term.name))
+                .position(|term| belongs(credit.term, &term.name))
             else {
                 continue;
             };
-            let entry = credited.entry((slot, src)).or_default();
-            entry.0 |= reached;
-            entry.1 |= reached && hit;
+            let entry = folded.entry((slot, src)).or_default();
+            entry.0 |= credit.reached;
+            if credit.conditional {
+                entry.1 = true;
+                entry.2 |= credit.reached && credit.hit;
+            }
         }
-        for ((slot, src), (reached, hit)) in credited {
+        for ((slot, src), (reached, conditional, hit)) in folded {
             let policy = &mut self.policies[slot];
             policy.status = PolicyTestStatus::Tested;
             if reached {
                 policy.terms[src].evaluated += 1;
-                if hit {
+                if hit || !conditional {
                     policy.terms[src].matched += 1;
                 }
             }
@@ -447,28 +452,143 @@ fn collect_expr_applies<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
     }
 }
 
-/// The called policies an inlined IR term name passes through, with the
-/// callee's IR term at each: `t.3/a(1):x.2/b:y` gives `(a, x.2)` and
-/// `(b, y)`. A call's own flag terms (`:enter`, `:default`) name no callee
-/// term, and `:return` belongs to the term before it.
-fn called_terms(ir: &str) -> impl Iterator<Item = (&str, &str)> {
-    ir.split('/').skip(1).filter_map(|segment| {
-        // `<call>:<callee-term>`; a call's arguments may hold `:`.
-        let mut depth = 0usize;
-        let colon = segment.char_indices().find_map(|(i, c)| {
-            match c {
-                '(' => depth += 1,
-                ')' => depth = depth.saturating_sub(1),
-                ':' if depth == 0 => return Some(i),
-                _ => {}
+/// One walk fact for a called policy's source term.
+struct Credit<'a> {
+    policy: &'a str,
+    term: &'a str,
+    reached: bool,
+    conditional: bool,
+    hit: bool,
+}
+
+/// The per-walk state of the calls in one caller's term list: which call
+/// instances were entered and which have returned. Inlined term names say
+/// where each term came from (`t.3/a(1):x.2/b:y`), and the flag's own terms
+/// (`#enter`, `#return`, `#default`) mark a call's entry, its returns and
+/// its fall-through deny. `#` cannot begin a source term name.
+#[derive(Default)]
+struct CallWalk<'a> {
+    /// Call instance → (entered, returned) in this walk.
+    instances: HashMap<String, (bool, bool)>,
+    credits: Vec<Credit<'a>>,
+}
+
+impl<'a> CallWalk<'a> {
+    /// Fold one IR term. Returns whether the term belongs to the caller's
+    /// own source term for matching: a term of its own, or the entry of a
+    /// call it makes.
+    fn step(&mut self, ir: &'a str, guard: &MatchExpr, reached: bool, hit: bool) -> bool {
+        let segments = call_segments(ir);
+        let Some(&(_, innermost_term)) = segments.last() else {
+            return true;
+        };
+        let depth = segments.len();
+        let key = instance_key(ir, &segments);
+        if innermost_term == "#enter" {
+            self.instances.insert(key, (hit, false));
+            if depth > 1 {
+                // The entry of a nested call is a term of the call around it.
+                self.credit(&segments[..depth - 1], ir, guard, reached, hit);
             }
-            None
-        })?;
-        let call = &segment[..colon];
-        let policy = call.split('(').next().unwrap_or(call);
-        let term = segment[colon + 1..].split(':').next().unwrap_or("");
-        (!matches!(term, "enter" | "default" | "")).then_some((policy, term))
-    })
+            return depth == 1;
+        }
+        if innermost_term == "#default" {
+            return false;
+        }
+        if ir.ends_with(":#return") {
+            if hit && let Some(state) = self.instances.get_mut(&key) {
+                state.1 = true;
+            }
+            return false;
+        }
+        self.credit(&segments, ir, guard, reached, hit);
+        false
+    }
+
+    /// Credit the innermost callee of `segments` when its call instance is
+    /// entered and has not returned.
+    fn credit(
+        &mut self,
+        segments: &[(&'a str, &'a str)],
+        ir: &'a str,
+        guard: &MatchExpr,
+        reached: bool,
+        hit: bool,
+    ) {
+        let key = instance_key(ir, segments);
+        let live = self
+            .instances
+            .get(&key)
+            .is_some_and(|&(entered, returned)| entered && !returned);
+        let &(policy, term) = segments.last().expect("non-empty");
+        self.credits.push(Credit {
+            policy,
+            term,
+            reached: reached && live,
+            conditional: !own_guard_is_true(guard),
+            hit,
+        });
+    }
+}
+
+/// The `(called policy, callee IR term)` of each call an inlined IR term
+/// name passes through: `t.3/a(1):x.2/b:y` gives `(a, x.2)` and `(b, y)`.
+fn call_segments(ir: &str) -> Vec<(&str, &str)> {
+    ir.split('/')
+        .skip(1)
+        .filter_map(|segment| {
+            // `<call>:<callee-term>`; a call's arguments may hold `:`.
+            let mut depth = 0usize;
+            let colon = segment.char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    ':' if depth == 0 => return Some(i),
+                    _ => {}
+                }
+                None
+            })?;
+            let call = &segment[..colon];
+            let policy = call.split('(').next().unwrap_or(call);
+            let term = segment[colon + 1..].split(":#").next().unwrap_or("");
+            Some((policy, term))
+        })
+        .collect()
+}
+
+/// A call instance in one walk: the caller's source term, each enclosing
+/// call with its source term, and the call itself. Repeated calls of one
+/// policy from one term are told apart by walk order (each entry resets).
+fn instance_key(ir: &str, segments: &[(&str, &str)]) -> String {
+    let caller = ir.split(['.', '/']).next().unwrap_or(ir);
+    let mut key = caller.to_string();
+    for (index, (policy, term)) in segments.iter().enumerate() {
+        key.push('/');
+        key.push_str(policy);
+        if index + 1 < segments.len() {
+            key.push(':');
+            key.push_str(term.split('.').next().unwrap_or(term));
+        }
+    }
+    key
+}
+
+/// Whether the part of a guard that belongs to its own policy is `True`:
+/// the conditions after the last call's flag check (a flag check alone, as
+/// on a binding, adds no condition of its own).
+fn own_guard_is_true(guard: &MatchExpr) -> bool {
+    let is_flag = |expr: &MatchExpr| {
+        matches!(expr, MatchExpr::ValueCmp(node)
+            if matches!(&node.lhs, crate::ir::ValueExpr::Local { name, .. } if name.starts_with('#')))
+    };
+    match guard {
+        MatchExpr::True => true,
+        MatchExpr::And(children) => {
+            let start = children.iter().rposition(is_flag).map_or(0, |i| i + 1);
+            children[start..].is_empty()
+        }
+        other => is_flag(other),
+    }
 }
 
 /// Does IR term name `ir` belong to source term `src`? Either the name

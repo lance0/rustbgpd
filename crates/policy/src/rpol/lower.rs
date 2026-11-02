@@ -658,7 +658,10 @@ impl<'a> Lowerer<'a> {
         let mut terms = Vec::new();
         for term_def in &def.terms {
             let lowered = self.lower_term(term_def, env, store);
-            let multi = lowered.len() > 1;
+            // A term inlined at a call is always numbered, so the name
+            // keeps its caller term even when the call emits a single term.
+            let multi =
+                lowered.len() > 1 || lowered.0.iter().any(|(_, _, suffix)| suffix.is_some());
             for (index, (guard, action, suffix)) in lowered.into_iter().enumerate() {
                 let mut name = if multi {
                     format!("{}.{}", term_def.name.node, index + 1)
@@ -1344,7 +1347,7 @@ impl<'a> Lowerer<'a> {
                 name: RETURN_FLAG.into(),
                 expr: ValueExpr::Const(0),
             },
-            format!("/{call_name}:enter"),
+            format!("/{call_name}:#enter"),
         );
         let mut ordinal: u32 = 0;
         for term in callee.terms {
@@ -1357,7 +1360,7 @@ impl<'a> Lowerer<'a> {
             out.push_named(
                 flag_is(flag, 0),
                 TermAction::Deny,
-                format!("/{call_name}:default"),
+                format!("/{call_name}:#default"),
             );
         }
     }
@@ -1712,7 +1715,7 @@ fn emit_returning(
             out.push_named(
                 flag_is(flag, ordinal),
                 TermAction::Continue(mods),
-                format!("{suffix}:return"),
+                format!("{suffix}:#return"),
             );
         }
         TermAction::ForEach(mut node) => {

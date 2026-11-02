@@ -11353,32 +11353,32 @@ mod callable_policies_naming {
 
     /// Inlined terms are named under the call site,
     /// `<term>.<n>/<call>:<callee-term>`, with the flag's own terms as
-    /// `:enter`, `:return` and `:default`, and nested calls compose.
+    /// `:#enter`, `:#return` and `:#default`, and nested calls compose.
     #[test]
     fn inlined_terms_are_named_under_the_call() {
         assert_eq!(
             names("caller"),
             [
-                "t.1/lib:enter",
+                "t.1/lib:#enter",
                 "t.2/lib:bad",
                 "t.3/lib:good",
-                "t.4/lib:good:return",
+                "t.4/lib:good:#return",
                 "t.5/lib:tag",
-                "t.6/strict:enter",
+                "t.6/strict:#enter",
                 "t.7/strict:ok",
-                "t.8/strict:ok:return",
-                "t.9/strict:default",
+                "t.8/strict:ok:#return",
+                "t.9/strict:#default",
                 "t.10",
             ]
         );
         assert_eq!(
             names("outer"),
             [
-                "o.1/middle:enter",
-                "o.2/middle:t.1/lib:enter",
+                "o.1/middle:#enter",
+                "o.2/middle:t.1/lib:#enter",
                 "o.3/middle:t.2/lib:bad",
                 "o.4/middle:t.3/lib:good",
-                "o.5/middle:t.4/lib:good:return",
+                "o.5/middle:t.4/lib:good:#return",
                 "o.6/middle:t.5/lib:tag",
                 "o.7/middle:t.6",
                 "o.8",
@@ -11407,6 +11407,13 @@ mod callable_policies_naming {
             .filter_map(|s| s.term_name.clone())
             .collect();
         assert!(names.iter().any(|n| n == "t.2/lib:bad"), "{names:?}");
+        // The return flag is bookkeeping: no trace line binds it.
+        let lines: Vec<&String> = trace.steps.iter().flat_map(|s| &s.term_traces).collect();
+        assert_ne!(lines.len(), 0);
+        assert!(
+            !lines.iter().any(|line| line.contains("let #return")),
+            "{lines:#?}"
+        );
     }
 
     /// In-language coverage credits the called policy's source terms.
@@ -11416,11 +11423,16 @@ mod callable_policies_naming {
         let (report, coverage) = file.run_tests_with_coverage();
         assert!(report.failures.is_empty(), "{:#?}", report.failures);
         let lib = coverage.policies.iter().find(|p| p.name == "lib").unwrap();
-        let term = |name: &str| lib.terms.iter().find(|t| t.name == name).unwrap();
-        assert!(term("bad").evaluated > 0, "{lib:#?}");
-        assert!(term("good").matched > 0, "{lib:#?}");
-        // The `hit` route returns at `good`, the `nested` route reaches `tag`.
-        assert!(term("tag").evaluated > 0, "{lib:#?}");
+        let term = |name: &str| {
+            let term = lib.terms.iter().find(|t| t.name == name).unwrap();
+            (term.evaluated, term.matched)
+        };
+        // Both routes reach `bad` and `good`; only `hit` (MED 60) matches
+        // `good` and returns there, so only `nested` (MED 20, through
+        // `middle`) reaches the unconditional `tag`.
+        assert_eq!(term("bad"), (2, 0), "{lib:#?}");
+        assert_eq!(term("good"), (2, 1), "{lib:#?}");
+        assert_eq!(term("tag"), (1, 1), "{lib:#?}");
     }
 }
 
@@ -11553,10 +11565,13 @@ mod callable_policies_lowering {
                       policy mid { term m { apply lib; set med 1 } }";
         let typed =
             "policy lib(n: u32) { term a { if route.med >= n { reject } } term b { set med n } }";
+        let looped = "community-set marks { 65000:9 }
+                      policy lib { term a { for c in route.communities { if c in marks { accept } } } }";
         let got = [
             longest(deciding, "apply lib"),
             longest(nested, "apply mid"),
             longest(typed, "apply lib(3)"),
+            longest(looped, "apply lib"),
         ];
         assert_eq!(got, EXPECTED_LONGEST, "pinned call-site size charges");
     }
@@ -11565,11 +11580,285 @@ mod callable_policies_lowering {
     /// With 100,000 nodes: the deciding callee costs 28 nodes a call (its
     /// two 4-node guards, then five terms at 4 nodes each: the two callee
     /// terms, one return, the entry and the fall-through), so 3,571 calls
-    /// fit with the caller's own `accept`.
-    const EXPECTED_LONGEST: [usize; 3] = [3571, 2222, 4761];
+    /// fit with the caller's own `accept`. A nested call is charged for every
+    /// term it emits, and a callee returning from inside a loop for the flag
+    /// terms its loop gains, run up to the loop bound.
+    const EXPECTED_LONGEST: [usize; 4] = [3571, 1538, 4761, 10];
 
     fn diagnostics_of_ok(source: &str) -> bool {
         let mut store = crate::sets::SetStore::new();
         super::super::compile_rpol(source, &mut store).is_ok()
+    }
+}
+
+mod callable_policies_review_one {
+    use super::super::{RpolFile, run_rpol_tests};
+    use super::{SetStore, compile_ok, diagnostics_of};
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(report.total, total, "test count");
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    fn coverage_of(report: &super::super::CoverageReport, policy: &str, term: &str) -> (u64, u64) {
+        let policy = report.policies.iter().find(|p| p.name == policy).unwrap();
+        let term = policy.terms.iter().find(|t| t.name == term).unwrap();
+        (term.evaluated, term.matched)
+    }
+
+    /// A call whose callee emits no term of its own still names the
+    /// caller's term by position, so the caller keeps its coverage.
+    #[test]
+    fn a_lone_call_keeps_the_caller_attribution() {
+        let source = "policy empty { }
+            policy caller { term t { apply empty } term u { if route.med >= 5 { accept } } }
+            test x { route { prefix 192.0.2.0/24; med 9 } expect caller == accept }";
+        let file = RpolFile::parse(source).expect("clean");
+        let (report, coverage) = file.run_tests_with_coverage();
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+        assert_eq!(coverage_of(&coverage, "caller", "t"), (1, 1));
+        assert_eq!(coverage_of(&coverage, "caller", "u"), (1, 1));
+        let chain = compile_ok(source);
+        let caller = chain
+            .policies
+            .iter()
+            .find(|p| p.name.as_deref() == Some("caller"))
+            .unwrap();
+        assert_eq!(
+            caller.terms[0].name.as_deref(),
+            Some("t.1/empty:#enter"),
+            "{:?}",
+            caller
+                .terms
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Callee terms named like the flag's own terms keep their coverage:
+    /// the flag terms use a name no source term can take.
+    #[test]
+    fn callee_terms_named_enter_and_default_keep_their_coverage() {
+        let source =
+            "policy lib { term enter { set med 1 } term default { if route.med >= 5 { accept } } }
+            policy caller { term t { apply lib; accept } }
+            test x { route { prefix 192.0.2.0/24; med 9 } expect caller == accept }";
+        let file = RpolFile::parse(source).expect("clean");
+        let (report, coverage) = file.run_tests_with_coverage();
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+        assert_eq!(coverage_of(&coverage, "lib", "enter"), (1, 1));
+        assert_eq!(coverage_of(&coverage, "lib", "default"), (1, 1));
+    }
+
+    /// After the callee returns, its later terms are not reached, and
+    /// a binding behind only the flag check is unconditional.
+    #[test]
+    fn coverage_stops_at_a_return() {
+        let source = "policy lib {
+                term a { if route.med >= 5 { accept } }
+                term never { set med 5 }
+                term guarded { if route.med >= 1 { set local-pref 1 } }
+            }
+            policy binds { term b { let x = 1; set med x } term c { if route.med >= 100 { reject } } }
+            policy caller { term t { apply lib; apply binds; accept } }
+            test returns { route { prefix 192.0.2.0/24; med 9 } expect caller == accept }
+            test falls { route { prefix 192.0.2.0/24; med 2 } expect caller == accept }";
+        let file = RpolFile::parse(source).expect("clean");
+        let (report, coverage) = file.run_tests_with_coverage();
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+        // `a` is reached by both routes and matched by one.
+        assert_eq!(coverage_of(&coverage, "lib", "a"), (2, 1));
+        // `never` and `guarded` run only when `a` did not return.
+        assert_eq!(coverage_of(&coverage, "lib", "never"), (1, 1));
+        assert_eq!(coverage_of(&coverage, "lib", "guarded"), (1, 1));
+        // `b` is unconditional; `c` is reached twice and never matches.
+        assert_eq!(coverage_of(&coverage, "binds", "b"), (2, 2));
+        assert_eq!(coverage_of(&coverage, "binds", "c"), (2, 0));
+    }
+
+    /// The flag is cleared on every call: two calls in sequence, a call
+    /// in each branch of a loop body, and a flag slot an earlier term's
+    /// binding left non-zero.
+    #[test]
+    fn the_flag_is_cleared_on_every_call() {
+        passes(
+            "community-set marks { 65000:9 }
+             policy lib(n: u32) { term a { if route.med >= n { accept } } term b { add community 65000:5 } }
+             policy twice { term t { apply lib(10); apply lib(50); accept } }
+             policy looped {
+                 term t {
+                     for c in route.communities {
+                         if c in marks { apply lib(10) } else { apply lib(50) }
+                     }
+                     accept
+                 }
+             }
+             policy stale { term s { let z = 7; set local-pref z } term t { apply lib(50); accept } }
+             test sequence {
+                 route { prefix 192.0.2.0/24; med 20 }
+                 expect twice == accept with community 65000:5
+             }
+             test loop-branches {
+                 route { prefix 192.0.2.0/24; med 20; communities [65000:9, 65000:1] }
+                 expect looped == accept with community 65000:5
+             }
+             test stale-slot {
+                 route { prefix 192.0.2.0/24; med 20 }
+                 expect stale == accept with local-pref 7, community 65000:5
+             }",
+            3,
+        );
+    }
+
+    /// A `let` named like a parameter cannot be a call argument: the
+    /// binding would win, and a binding is not a compile-time value.
+    #[test]
+    fn a_shadowing_let_cannot_be_an_argument() {
+        for call in ["apply lib(n); accept", "if apply(lib(n)) { accept }"] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "policy lib(n: u32) {{ default-action reject term t {{ if route.med == n {{ accept }} }} }}
+                 policy caller(n: u32) {{ term t {{ let n = 7; {call} }} }}"
+            ));
+            assert!(
+                rendered.contains("`n` is a `let` binding"),
+                "{call}: {rendered}"
+            );
+        }
+        let _ = SetStore::new();
+    }
+}
+
+mod callable_policies_nested_cost {
+    use std::cell::Cell;
+    use std::fmt::Write as _;
+
+    use super::super::compile_rpol;
+    use super::{SetStore, compile_ok};
+    use crate::ir::{CompiledChain, MatchExpr, Term};
+
+    /// Guard nodes of policy `name`, value operands included, at every
+    /// loop depth.
+    fn guard_nodes(chain: &CompiledChain, name: &str) -> u64 {
+        let n = Cell::new(0u64);
+        let policy = chain
+            .policies
+            .iter()
+            .find(|p| p.name.as_deref() == Some(name))
+            .unwrap();
+        for term in &policy.terms {
+            term.any_term(&|t: &Term| {
+                t.guard.any_node(&|g| {
+                    n.set(n.get() + 1);
+                    if let MatchExpr::ValueCmp(node) = g {
+                        node.lhs.any_node(&|_| {
+                            n.set(n.get() + 1);
+                            false
+                        });
+                        node.rhs.any_node(&|_| {
+                            n.set(n.get() + 1);
+                            false
+                        });
+                    }
+                    false
+                });
+                false
+            });
+        }
+        n.get()
+    }
+
+    /// `levels` policies, each calling the next under a `guard`-conjunct
+    /// condition, over a callee of `inner` modify-only terms; `top` calls
+    /// the chain once, or once per route community.
+    fn nested(levels: usize, guard: usize, inner: usize, looped: bool) -> String {
+        let mut s = String::from("policy p0 {\n");
+        for k in 0..inner {
+            writeln!(
+                s,
+                "term t{k} {{ if route.med == {k} {{ set local-pref {k} }} }}"
+            )
+            .unwrap();
+        }
+        s.push_str("}\n");
+        let condition = (0..guard)
+            .map(|k| format!("route.local-pref != {}", 100_000 + k))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        for level in 1..=levels {
+            writeln!(
+                s,
+                "policy p{level} {{ term t {{ if {condition} {{ apply p{} }} }} }}",
+                level - 1
+            )
+            .unwrap();
+        }
+        if looped {
+            writeln!(
+                s,
+                "policy top {{ term t {{ for c in route.communities {{ apply p{levels} }} accept }} }}"
+            )
+            .unwrap();
+        } else {
+            writeln!(s, "policy top {{ term t {{ apply p{levels}; accept }} }}").unwrap();
+        }
+        s
+    }
+
+    fn compiles(source: &str) -> bool {
+        compile_rpol(source, &mut SetStore::new()).is_ok()
+    }
+
+    /// The largest inner callee the chain accepts.
+    fn largest_accepted(levels: usize, guard: usize, looped: bool) -> usize {
+        let (mut lo, mut hi) = (0usize, 2_000usize);
+        while hi - lo > 1 {
+            let mid = usize::midpoint(lo, hi);
+            if compiles(&nested(levels, guard, mid, looped)) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// Every IR term a nested call emits carries every enclosing call-site
+    /// path and flag check, and the size budget charges them all: at the
+    /// largest accepted callee, the lowered guards stay within the
+    /// 100,000-node budget. Counting a nested call as one term let a
+    /// three-level chain compile to several times the budget.
+    #[test]
+    fn nested_calls_stay_within_the_size_budget() {
+        for (levels, guard) in [(1, 20), (3, 20), (7, 20)] {
+            let inner = largest_accepted(levels, guard, false);
+            assert!(inner > 0, "levels={levels}: something fits");
+            let chain = compile_ok(&nested(levels, guard, inner, false));
+            let nodes = guard_nodes(&chain, "top");
+            assert!(
+                nodes <= 100_000,
+                "levels={levels} guard={guard} inner={inner}: {nodes} guard nodes"
+            );
+        }
+    }
+
+    /// Inside a loop the same terms run once per iteration (up to 4,096),
+    /// and the evaluation budget charges that: at the largest accepted
+    /// callee, guard nodes × 4,096 stay within 1,000,000 steps.
+    #[test]
+    fn nested_calls_in_a_loop_stay_within_the_step_budget() {
+        for (levels, guard) in [(1, 2), (3, 2), (3, 8)] {
+            let inner = largest_accepted(levels, guard, true);
+            if inner == 0 {
+                continue;
+            }
+            let chain = compile_ok(&nested(levels, guard, inner, true));
+            let steps = guard_nodes(&chain, "top") * 4_096;
+            assert!(
+                steps <= 1_000_000,
+                "levels={levels} guard={guard} inner={inner}: {steps} steps"
+            );
+        }
     }
 }

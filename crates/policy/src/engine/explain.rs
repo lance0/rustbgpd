@@ -496,14 +496,20 @@ fn trace_rpol_policy(
                 break;
             }
         };
-        term_traces.push(format!(
-            "term {}: {}{} => {} [{}]",
-            term.name.as_deref().unwrap_or("<unnamed>"),
-            render_expr(&term.guard, tables),
-            dataset_note(&term.guard, tables, pinned),
-            render_term_action(&term.action, tables),
-            if matched { "matched" } else { "not matched" },
-        ));
+        // A called policy's return flag is compiler bookkeeping: its binds
+        // run as in the live walk but get no trace line of their own.
+        let flag_bind =
+            matches!(&term.action, TermAction::Bind { name, .. } if name.starts_with('#'));
+        if !flag_bind {
+            term_traces.push(format!(
+                "term {}: {}{} => {} [{}]",
+                term.name.as_deref().unwrap_or("<unnamed>"),
+                render_expr(&term.guard, tables),
+                dataset_note(&term.guard, tables, pinned),
+                render_term_action(&term.action, tables),
+                if matched { "matched" } else { "not matched" },
+            ));
+        }
         if !matched {
             continue;
         }

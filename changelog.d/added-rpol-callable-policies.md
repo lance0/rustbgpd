@@ -10,5 +10,6 @@
   depth and size limits. Inlined terms appear in explain, test hits and
   `rbgp policy stats` as `<term>.<n>/<call>:<called-term>`. `apply(NAME)`
   stays the predicate, and a policy that holds an `apply` statement cannot
-  be one. See
+  be one. A `let` that shadows a parameter can no longer be passed as an
+  argument to either form; it used to pass the parameter's value. See
   [`apply` as a statement](../docs/reference/rpol-language.md#apply-as-a-statement--calling-a-policy).

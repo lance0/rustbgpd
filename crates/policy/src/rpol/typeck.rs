@@ -343,9 +343,17 @@ pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
     // Functions first (LAN-304): their Kahn DP produces the per-fn
     // cost/slot/depth table the policy bounds below fold in.
     let fn_costs = checker.check_fns();
+    // One name index and one frame memo for every call site: a called
+    // policy's frame does not depend on its caller.
+    let policies: HashMap<&str, &PolicyDef> = file
+        .policies
+        .iter()
+        .map(|p| (p.name.node.as_str(), p))
+        .collect();
+    let mut frames = HashMap::new();
     for policy in &file.policies {
         checker.check_policy(policy);
-        checker.check_policy_frames(policy, &fn_costs);
+        checker.check_policy_frames(policy, &fn_costs, &policies, &mut frames);
     }
     checker.check_apply_dag();
     checker.check_apply_bounds(&fn_costs);
@@ -719,16 +727,15 @@ impl<'a> Checker<'a> {
     /// lowerer's monotonic allocation with body-level scope reuse
     /// exactly — must fit the register file. Deep call chains × locals
     /// exceed it at compile time, never at the lowerer's assert.
-    fn check_policy_frames(&mut self, policy: &PolicyDef, fns: &HashMap<&'a str, FnCost>) {
-        let file = self.file;
-        let mut frames = HashMap::new();
+    fn check_policy_frames(
+        &mut self,
+        policy: &PolicyDef,
+        fns: &HashMap<&'a str, FnCost>,
+        policies: &HashMap<&'a str, &'a PolicyDef>,
+        frames: &mut HashMap<&'a str, Option<u64>>,
+    ) {
         for term in &policy.terms {
-            let mut frame_of = |callee: &str| {
-                file.policies
-                    .iter()
-                    .find(|p| p.name.node == callee)
-                    .map_or(0, |p| policy_frame(file, &p.name.node, fns, &mut frames, 1))
-            };
+            let mut frame_of = |callee: &str| policy_frame(policies, callee, fns, frames, 1);
             let hw = stmts_slot_high_water(&term.stmts, 0, fns, &mut frame_of);
             let frame = crate::eval::LOCAL_FRAME_SLOTS as u64;
             if hw > frame {
@@ -1778,6 +1785,26 @@ impl<'a> Checker<'a> {
     ) {
         for (index, arg) in args.iter().enumerate().take(target.param_types.len()) {
             let ty = target.param_types[index];
+            if let (Some(scope), CallArg::Name(name)) = (scope, &arg.node)
+                && scope.is_local(name)
+            {
+                // A `let` shadows a parameter of the same name here as in
+                // value positions, and a binding is a runtime value, not a
+                // compile-time argument.
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        arg.span,
+                        format!("`{name}` is a `let` binding"),
+                        "a call argument needs a literal, a set or a parameter",
+                    )
+                    .with_note(
+                        "bindings are runtime values; arguments are fixed at compile time. \
+                         A `let` of the same name shadows a parameter here, so rename it",
+                    ),
+                );
+                continue;
+            }
             if let (Some(scope), CallArg::Name(name)) = (scope, &arg.node) {
                 // A u32 position keeps its established checks: parameter,
                 // `let` binding, or unknown name.
@@ -3103,9 +3130,11 @@ fn bound_policy<'a>(
                     action_cost = action_cost.saturating_add(action_value_cost(action, fns));
                 }
                 Stmt::Call(call) => {
-                    let (nodes, steps) = call_cost(call, PathCost::default(), calls);
-                    push_arms(&mut arms, nodes, 1);
-                    action_cost = action_cost.saturating_add(steps.saturating_sub(nodes));
+                    let charge = call_cost(call, PathCost::default(), calls);
+                    push_arms(&mut arms, charge.lump_nodes, 1);
+                    push_arms(&mut arms, charge.per_term, charge.emitted);
+                    action_cost = action_cost
+                        .saturating_add(charge.lump_steps.saturating_sub(charge.lump_nodes));
                 }
                 // LAN-303: one IR term for the loop itself; the body
                 // charges the eval-cost budget at bound × per-iteration
@@ -3172,6 +3201,7 @@ fn bound_policy<'a>(
     // first-match-faithful — arm i carries every prior decision arm's
     // guard negated — so it is a quadratic prefix sum over arm costs
     // (the trailing `prior` is the default-permit arm).
+    let (loop_terms, loop_returns, loop_execs) = loop_facts(&def.terms, file, calls);
     calls.insert(
         name,
         InlineCost {
@@ -3179,10 +3209,9 @@ fn bound_policy<'a>(
             steps: lowered.saturating_add(action_cost),
             terms: arms.len() as u64,
             returns: count_accepts(&def.terms),
-            loop_returns: def.terms.iter().fold((0, 0), |(nodes, steps), term| {
-                let (n, s) = loop_return_cost(&term.stmts, file);
-                (nodes.saturating_add(n), steps.saturating_add(s))
-            }),
+            loop_terms,
+            loop_returns,
+            loop_execs,
         },
     );
     let mut prior: u64 = 0;
@@ -3506,43 +3535,116 @@ struct InlineCost {
     nodes: u64,
     /// Its worst-case evaluation steps, at least `nodes`.
     steps: u64,
-    /// Its IR terms outside loop bodies, each of which gains the call-site
-    /// path and the flag check.
+    /// The IR terms it emits outside loop bodies, its own calls' expansion
+    /// included. Each gains the call-site path and the flag check.
     terms: u64,
     /// Its `accept`s outside loops, each adding a flag `Bind` and a
     /// `Continue`.
     returns: u64,
-    /// The flag terms a return from inside its loops adds: their nodes,
-    /// and their steps multiplied by the loop bounds.
-    loop_returns: (u64, u64),
+    /// Loop terms in its emitted IR, at any depth and through its calls:
+    /// a caller adds a flag `Break` after each one inside a loop body.
+    loop_terms: u64,
+    /// Its own `accept`s inside loop bodies, each adding a flag `Bind`, a
+    /// `Continue` and a `Break` there.
+    loop_returns: u64,
+    /// Loop-body executions in its emitted IR, through its calls: the most
+    /// times a flag term inside a loop body can run per route.
+    loop_execs: u64,
 }
 
-/// The `(IR nodes, worst-case steps)` of one `apply` statement under
-/// `path`: the callee's own cost, plus the call-site path and the flag
-/// check on every inlined term, plus the entry, return and fall-through
-/// terms. Saturating totals, charged as one arm.
-fn call_cost(call: &CallStmt, path: PathCost, calls: &HashMap<&str, InlineCost>) -> (u64, u64) {
+/// One `apply` statement's charge under `path`: a lump of the callee's own
+/// nodes and steps (with the flag terms its loops gain), and `emitted`
+/// terms each costing `per_term` nodes for the call-site path and the flag
+/// check. A caller records the lump as one term and the rest as `emitted`
+/// terms, so its own emitted-term count includes the nested expansion.
+struct CallCharge {
+    lump_nodes: u64,
+    lump_steps: u64,
+    per_term: u64,
+    emitted: u64,
+}
+
+fn call_cost(call: &CallStmt, path: PathCost, calls: &HashMap<&str, InlineCost>) -> CallCharge {
     let Some(callee) = calls.get(call.policy.node.as_str()) else {
         // Unknown or on a diagnosed cycle: the file already has errors.
-        return (1, 1);
+        return CallCharge {
+            lump_nodes: 1,
+            lump_steps: 1,
+            per_term: 1,
+            emitted: 1,
+        };
     };
-    // Entry clear, a fall-through deny, and each return's extra term.
-    let terms = callee
-        .terms
-        .saturating_add(callee.returns)
-        .saturating_add(2);
-    let per_term = path.with(CALL_FLAG_NODES).cost().saturating_add(1);
-    let added = terms.saturating_mul(per_term);
-    (
-        callee
+    let flag_term = CALL_FLAG_NODES.saturating_add(2);
+    let loop_flag_terms = callee
+        .loop_terms
+        .saturating_add(callee.loop_returns.saturating_mul(3));
+    CallCharge {
+        lump_nodes: callee
             .nodes
-            .saturating_add(added)
-            .saturating_add(callee.loop_returns.0),
-        callee
-            .steps
-            .saturating_add(added)
-            .saturating_add(callee.loop_returns.1),
-    )
+            .saturating_add(loop_flag_terms.saturating_mul(flag_term)),
+        lump_steps: callee.steps.saturating_add(
+            callee
+                .loop_execs
+                .saturating_mul(flag_term)
+                .saturating_mul(loop_flag_terms.max(1)),
+        ),
+        per_term: path.with(CALL_FLAG_NODES).cost().saturating_add(1),
+        // Entry clear, a fall-through deny, and each return's extra term.
+        emitted: callee
+            .terms
+            .saturating_add(callee.returns)
+            .saturating_add(2),
+    }
+}
+
+/// The loop facts of a policy's emitted IR, for [`InlineCost`]:
+/// `(loop_terms, loop_returns, loop_execs)`, through its calls.
+fn loop_facts(
+    terms: &[super::ast::TermDef],
+    file: &SourceFile,
+    calls: &HashMap<&str, InlineCost>,
+) -> (u64, u64, u64) {
+    fn walk(
+        stmts: &[Stmt],
+        multiplier: u64,
+        file: &SourceFile,
+        calls: &HashMap<&str, InlineCost>,
+        facts: &mut (u64, u64, u64),
+    ) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::For(for_stmt) => {
+                    let execs =
+                        multiplier.saturating_mul(loop_iteration_bound(&for_stmt.source, file));
+                    facts.0 = facts.0.saturating_add(1);
+                    facts.2 = facts.2.saturating_add(execs);
+                    walk(&for_stmt.body, execs, file, calls, facts);
+                }
+                Stmt::If(if_stmt) => {
+                    for body in if_stmt.bodies() {
+                        walk(body, multiplier, file, calls, facts);
+                    }
+                }
+                Stmt::Action(ActionStmt::Accept(_)) if multiplier > 1 => {
+                    facts.1 = facts.1.saturating_add(1);
+                }
+                Stmt::Action(_) => {}
+                Stmt::Call(call) => {
+                    if let Some(callee) = calls.get(call.policy.node.as_str()) {
+                        facts.0 = facts.0.saturating_add(callee.loop_terms);
+                        facts.2 = facts
+                            .2
+                            .saturating_add(multiplier.saturating_mul(callee.loop_execs.max(1)));
+                    }
+                }
+            }
+        }
+    }
+    let mut facts = (0, 0, 0);
+    for term in terms {
+        walk(&term.stmts, 1, file, calls, &mut facts);
+    }
+    facts
 }
 
 /// The `accept` statements of `terms` outside loop bodies.
@@ -3561,52 +3663,6 @@ fn count_accepts(terms: &[super::ast::TermDef]) -> u64 {
         .iter()
         .map(|term| in_stmts(&term.stmts))
         .fold(0, u64::saturating_add)
-}
-
-/// The `(IR nodes, worst-case steps)` a return from inside loops adds when
-/// the policy is called: per `accept` in a loop body, a flag `Bind`, a
-/// `Continue` and a `Break`; per inner loop, a `Break` on the flag. The
-/// nodes count once; the steps run up to the loop bound, and nested loops
-/// multiply.
-fn loop_return_cost(stmts: &[Stmt], file: &SourceFile) -> (u64, u64) {
-    fn add(a: (u64, u64), b: (u64, u64)) -> (u64, u64) {
-        (a.0.saturating_add(b.0), a.1.saturating_add(b.1))
-    }
-    fn in_body(stmts: &[Stmt], file: &SourceFile) -> (u64, u64) {
-        let per_term = CALL_FLAG_NODES.saturating_add(2);
-        stmts
-            .iter()
-            .map(|stmt| match stmt {
-                Stmt::Action(ActionStmt::Accept(_)) => {
-                    (per_term.saturating_mul(3), per_term.saturating_mul(3))
-                }
-                Stmt::If(if_stmt) => if_stmt
-                    .bodies()
-                    .map(|body| in_body(body, file))
-                    .fold((0, 0), add),
-                Stmt::For(inner) => add(loop_cost(inner, file), (per_term, per_term)),
-                Stmt::Action(_) | Stmt::Call(_) => (0, 0),
-            })
-            .fold((0, 0), add)
-    }
-    fn loop_cost(for_stmt: &ForStmt, file: &SourceFile) -> (u64, u64) {
-        let (nodes, steps) = in_body(&for_stmt.body, file);
-        (
-            nodes,
-            loop_iteration_bound(&for_stmt.source, file).saturating_mul(steps),
-        )
-    }
-    stmts
-        .iter()
-        .map(|stmt| match stmt {
-            Stmt::For(for_stmt) => loop_cost(for_stmt, file),
-            Stmt::If(if_stmt) => if_stmt
-                .bodies()
-                .map(|body| loop_return_cost(body, file))
-                .fold((0, 0), add),
-            Stmt::Action(_) | Stmt::Call(_) => (0, 0),
-        })
-        .fold((0, 0), add)
 }
 
 /// One loop's `(body IR nodes, worst-case evaluation steps)` for the
@@ -3662,9 +3718,14 @@ fn for_costs(
             }
             // The whole inlined callee, per iteration.
             Stmt::Call(call) => {
-                let (call_nodes, call_steps) = call_cost(call, PathCost::default(), calls);
-                nodes = nodes.saturating_add(call_nodes);
-                body_steps = body_steps.saturating_add(call_steps);
+                let charge = call_cost(call, PathCost::default(), calls);
+                let terms = charge.per_term.saturating_mul(charge.emitted);
+                nodes = nodes
+                    .saturating_add(charge.lump_nodes)
+                    .saturating_add(terms);
+                body_steps = body_steps
+                    .saturating_add(charge.lump_steps)
+                    .saturating_add(terms);
             }
         }
     }
@@ -3748,8 +3809,14 @@ fn if_terms<'a>(
                 ),
                 Stmt::If(inner) => if_terms(inner, path, pred_cost, calls, fns, out),
                 Stmt::Call(call) => {
-                    let (nodes, steps) = call_cost(call, path, calls);
-                    out(nodes, 1, None, steps.saturating_sub(nodes));
+                    let charge = call_cost(call, path, calls);
+                    out(
+                        charge.lump_nodes,
+                        1,
+                        None,
+                        charge.lump_steps.saturating_sub(charge.lump_nodes),
+                    );
+                    out(charge.per_term, charge.emitted, None, 0);
                 }
                 // Rejected by the typechecker; nothing lowers.
                 Stmt::For(_) => {}
@@ -4046,8 +4113,8 @@ fn stmts_slot_high_water(
 /// cycle, or a chain past [`MAX_APPLY_DEPTH`], contributes nothing here
 /// and is rejected on its own.
 fn policy_frame<'a>(
-    file: &'a SourceFile,
-    name: &'a str,
+    policies: &HashMap<&'a str, &'a PolicyDef>,
+    name: &str,
     fns: &HashMap<&str, FnCost>,
     memo: &mut HashMap<&'a str, Option<u64>>,
     depth: u32,
@@ -4055,28 +4122,21 @@ fn policy_frame<'a>(
     if depth > MAX_APPLY_DEPTH {
         return 0;
     }
-    match memo.get(name) {
+    let Some((&key, def)) = policies.get_key_value(name) else {
+        return 0;
+    };
+    match memo.get(key) {
         Some(Some(frame)) => return *frame,
         Some(None) => return 0,
         None => {}
     }
-    let Some(def) = file.policies.iter().find(|p| p.name.node == name) else {
-        return 0;
-    };
-    memo.insert(name, None);
+    memo.insert(key, None);
     let mut frame = 0;
     for term in &def.terms {
-        let mut frame_of = |callee: &str| {
-            file.policies
-                .iter()
-                .find(|p| p.name.node == callee)
-                .map_or(0, |p| {
-                    policy_frame(file, &p.name.node, fns, memo, depth + 1)
-                })
-        };
+        let mut frame_of = |callee: &str| policy_frame(policies, callee, fns, memo, depth + 1);
         frame = frame.max(stmts_slot_high_water(&term.stmts, 0, fns, &mut frame_of));
     }
-    memo.insert(name, Some(frame));
+    memo.insert(key, Some(frame));
     frame
 }
 

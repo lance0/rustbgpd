@@ -1316,7 +1316,10 @@ test customer-route-is-scrubbed {
   hold `let`, `for`, function calls, `accept` inside its loops, and its own
   `apply` statements.
 - **Arguments** are checked against the called policy's parameters like any
-  other reference, and range-checked against every use they reach.
+  other reference, and range-checked against every use they reach. An
+  argument is fixed at compile time, so it cannot be a `let` binding; a
+  `let` that shadows a parameter makes that name the binding, in a call
+  and in `apply(...)` alike.
 - **Composition bounds.** Calls and `apply(...)` predicates are edges of one
   graph: a cycle through either is a compile error, and both count toward
   the eight-level depth limit and the inline size budget.
@@ -1341,8 +1344,9 @@ policy's frame.
 
 **Names.** Inlined terms are named under the call:
 `<term>.<n>/<call>:<called-term>`, for example `common.3/customer-common(200):tag`.
-Nested calls compose, and the flag's own terms are named `:enter`,
-`:return` and `:default`. Explain traces, `rbgp policy test` term hits and
+Nested calls compose, and the flag's own terms are named `:#enter`,
+`:#return` and `:#default` (`#` cannot begin a term name, so no source term
+can collide with them). Explain traces, `rbgp policy test` term hits and
 `rbgp policy stats` show these names, and in-language test coverage credits
 the called policy's source terms. A call inside a `for` body is attributed
 to the loop term, like any loop body.
