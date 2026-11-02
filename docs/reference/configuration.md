@@ -3656,8 +3656,10 @@ peer's Adj-RIB-In, including stale and losing Add-Path paths, plus locally
 injected routes; the candidate need not be the best path.
 `condition_policy` sees the candidate's source peer address, ASN, and peer
 group; an injected route has none of them, so match route type `local` to
-select it. A `condition_policy` evaluation error makes the condition
-`unknown`, which holds the applied state.
+select it. A `condition_policy` evaluation error (an action that needs a
+value it cannot compute; a condition on a missing value is simply false, see
+[Conditions never fail](rpol-language.md#conditions-never-fail)) makes the
+condition `unknown`, which holds the applied state.
 
 **Timing.** A changed condition applies once it has stayed unchanged for
 `settle_time`; a shorter blip changes nothing. At startup every definition
@@ -3669,9 +3671,11 @@ settled (and RFC 4724 selection deferral, when active, has released). With
 **The gate.** For an attached neighbor, each candidate route that reaches
 the export chain is first checked against every attached definition that is
 not advertising. A definition's `advertise_policy` permit suppresses the
-route; an evaluation error also suppresses it (fail closed); only a clean
-reject lets the route continue to the neighbor's export chain, which still
-applies its modifications. Earlier export checks (split horizon, route
+route; an evaluation error also suppresses it (fail closed: an action that
+needs a value it cannot compute; a condition on a missing value is simply
+false, see [Conditions never fail](rpol-language.md#conditions-never-fail));
+only a clean reject lets the route continue to the neighbor's export chain,
+which still applies its modifications. Earlier export checks (split horizon, route
 reflection, family, LLGR, ORF, RFC 1997, route-server control) keep their
 order and their first denial. Suppression is a silent withdraw: it is not an
 export-policy denial and does not appear in policy counters. Under Add-Path
@@ -3824,17 +3828,23 @@ rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
   policies share the named-policy namespace. A name defined by both —
   or by two `.rpol` files — is a load error naming both sources.
 - **Chain references:** chains mix TOML and `.rpol` policies freely.
-  Parameterized `.rpol` policies are referenced in call-form with
-  `u32` arguments, monomorphized at load:
+  Parameterized `.rpol` policies are referenced in call-form, monomorphized
+  at load. An argument is an integer, a standard community (`65000:100`),
+  an IP address, or the name of a set or dataset for a set-typed
+  parameter
+  ([parameter types](rpol-language.md#parameters)):
 
 ```toml
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
-import_policy_chain = ["customer-in(200)", "bogon-filter", "toml-defined"]
+import_policy_chain = ["customer-in(200, cust-65001)", "bogon-filter", "toml-defined"]
 ```
 
-  Unknown names, wrong arity, and non-`u32` arguments are load errors.
+  Unknown names, wrong arity, an argument of the wrong type, a set
+  argument that names no set or dataset of the parameter's kind, and an
+  out-of-range `prepend` count or unusable `set next-hop` address are load
+  errors.
 - **Reload:** editing a referenced `.rpol` file and sending SIGHUP
   recompiles it and hot-applies the changed chains to exactly the
   peers whose resolved policy actually changed (Route Refresh fires

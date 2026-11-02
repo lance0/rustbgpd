@@ -70,10 +70,11 @@ fn tagged_predicate() -> PolicyChain {
     )
 }
 
-/// Selects MED 0, rejects any other MED, and errors on MED `u32::MAX`.
+/// Selects MED 0, rejects any other MED, and errors on MED `u32::MAX` in the
+/// fall-through `set med` action (a condition never fails; only an action can).
 fn med_predicate() -> PolicyChain {
     rpol(
-        "policy guard { term t3 { if route.med + 1 == 1 { accept } } term rest { reject } }",
+        "policy guard { term t { if route.med == 0 { accept } } term t3 { set med route.med + 1 } term rest { reject } }",
         "guard",
     )
 }
@@ -888,6 +889,43 @@ async fn evaluation_error_fails_closed_and_differs_from_a_clean_reject() {
     assert_eq!(
         step.detail,
         "route not selected by any attached advertise policy"
+    );
+}
+
+/// An `advertise_policy` guard whose operand is missing is a clean reject,
+/// not a fail-closed error: an `AS_SET`-only route has no origin AS, so it
+/// reaches the export chain.
+#[tokio::test(start_paused = true)]
+async fn a_missing_operand_in_the_advertise_policy_is_a_clean_reject() {
+    let predicate = rpol(
+        "policy guard { term t { if route.origin-as + 0 == 65100 { accept } } term rest { reject } }",
+        "guard",
+    );
+    let mut manager = manager_with(install_set(
+        definition(predicate, ConditionalAdvertiseIf::Present),
+        &[TARGET],
+    ));
+    let mut set_only = route(controlled(), SOURCE, 100, false);
+    AttrSet::edit(&mut set_only.attributes, |attrs| {
+        for attr in attrs.iter_mut() {
+            if let PathAttribute::AsPath(path) = attr {
+                *path = AsPath {
+                    segments: vec![AsPathSegment::AsSet(vec![65100, 65101])],
+                };
+            }
+        }
+    });
+    announce(&mut manager, SOURCE, vec![set_only]);
+    let mut rx = peer_up(&mut manager, TARGET, Shape::default());
+    assert_eq!(drain(&mut rx), wire(&[(controlled(), 0)], &[]));
+
+    let explained = explain(&mut manager, TARGET, controlled());
+    assert_eq!(explained.decision, ExplainDecision::Advertise);
+    let step = conditional_step(&explained);
+    assert_eq!(step.code, "conditional_advertisement");
+    assert_eq!(
+        step.verdict,
+        crate::update::ExportGateVerdict::NotApplicable
     );
 }
 

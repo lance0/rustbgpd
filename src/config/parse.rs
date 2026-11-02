@@ -418,8 +418,10 @@ pub(super) fn resolve_chain_with_store(
 }
 
 /// Resolve one `.rpol` chain reference — `"name"` or a call-form
-/// `"name(arg, ...)"` with `u32` arguments — into a pre-compiled chain
-/// member. Arity is checked against the policy's declaration.
+/// `"name(arg, ...)"` — into a pre-compiled chain member. Arity and each
+/// argument's type (an integer, a standard community, an IP address, or the
+/// name of a set or dataset of the parameter's kind) are checked against
+/// the policy's declaration.
 fn resolve_rpol_chain_ref(
     reference: &str,
     rpol: &rustbgpd_policy::rpol::RpolPolicySet,
@@ -427,7 +429,7 @@ fn resolve_rpol_chain_ref(
     store: &mut rustbgpd_policy::sets::SetStore,
     local_asn: u32,
 ) -> Result<rustbgpd_policy::NamedPolicy, ConfigError> {
-    let (base, args) = rustbgpd_policy::rpol::parse_call_form(reference).map_err(|detail| {
+    let (base, args) = rustbgpd_policy::rpol::parse_call_args(reference).map_err(|detail| {
         ConfigError::InvalidPolicyEntry {
             reason: format!("invalid chain reference: {detail}"),
         }
@@ -448,9 +450,19 @@ fn resolve_rpol_chain_ref(
             ),
         });
     }
+    let args =
+        entry
+            .file
+            .resolve_call(base, &args)
+            .map_err(|reason| ConfigError::InvalidPolicyEntry {
+                reason: format!(
+                    "chain reference {reference:?} (policy defined in {:?}): {reason}",
+                    entry.path
+                ),
+            })?;
     let mut compiled = entry
         .file
-        .compile_policy_bound_cached_tables(base, &args, store, datasets)
+        .compile_policy_args(base, &args, store, datasets, true)
         .expect("registry entry names a policy defined in its file")
         .map_err(|missing| ConfigError::InvalidPolicyEntry {
             // Unreachable through `Config::load` (bind_datasets runs
@@ -458,11 +470,6 @@ fn resolve_rpol_chain_ref(
             // as a real error for direct callers.
             reason: format!("chain reference {reference:?}: {missing}"),
         })?;
-    if compiled.has_zero_as_path_prepend() {
-        return Err(ConfigError::InvalidPolicyEntry {
-            reason: format!("chain reference {reference:?}: AS 0 cannot be prepended (RFC 7607)"),
-        });
-    }
     // Attach-time stamp backing `prepend as self` (LAN-296): the
     // daemon's `[global] asn`. Deterministic from config, so reloads
     // of an unchanged file still diff as no-ops.

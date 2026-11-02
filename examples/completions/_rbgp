@@ -3670,7 +3670,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (test)
 _arguments "${_arguments_options[@]}" : \
-'--policy=[Policy to evaluate\: a name, or a call-form with u32 arguments for parameterized policies, e.g. "customer-in(200)"]:POLICY:_default' \
+'--policy=[Policy to evaluate\: a name, or a call-form for parameterized policies, e.g. "customer-in(200, cust-65001)"]:POLICY:_default' \
 '--direction=[Evaluation direction\: import (retained post-policy Adj-RIB-In\: routes admitted when received or last re-evaluated; newly admitted routes are not visible) or export (Loc-RIB best routes)]:DIRECTION:_default' \
 '--neighbor=[Neighbor address\: restricts the import snapshot to one peer'\''s retained post-policy Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \
 '--peer=[Neighbor address\: restricts the import snapshot to one peer'\''s retained post-policy Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \

@@ -12,7 +12,7 @@ crates/policy/fuzz/seeds/rpol_compile/lan-299-arithmetic.rpol 62 38c30b6daf7a4b9
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol 75 61ff95cd068e2aa3
 crates/policy/fuzz/seeds/rpol_compile/lan-299-fold-errors.rpol 57 bd747b07f8eb5fc4
 crates/policy/fuzz/seeds/rpol_compile/lan-300-imports.rpol 28 79eb24dc0c86604d
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol 71 d64a4cbcf33b7a6e
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol 64 15aa433dba8ae3d0
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol 49 fedacec7c7ca664b
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol 55 2b198a877dbb5bd2
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-shadowing.rpol 67 ea5d2cd10bd1597b

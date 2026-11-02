@@ -128,7 +128,7 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked** (overflow/underflow/division-by-zero are evaluation errors, never wraps or traps) |
+| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked**, never wraps or traps: a value that cannot be computed makes a condition false and denies the route only in an action (see "Conditions never fail") |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -540,14 +540,59 @@ to one or more IR terms:
 
 ### Parameters
 
-Parameters are `u32` only in V1 and can appear anywhere a u32 is
-expected (`set local-pref peer_lp`, `route.local-pref >= peer_lp`,
-`apply(p(peer_lp))`, `route.as-path contains asn_param`). A
-parameterized policy is a **template**: each use site with concrete
+A parameterized policy is a **template**: each use site with concrete
 arguments is monomorphized at compile time (clone-with-substitution;
 policies are small, this is microseconds). The evaluator only ever
-sees constants. The `prepend` count must be a literal (1–255, it is
-wire-encoded as u8).
+sees constants and interned sets, so a parameter costs nothing per
+route.
+
+```rpol
+policy customer-in(lp: u32, pfx: prefix-set, tag: community, nh: ip) {
+    term ours {
+        if route.prefix in pfx { set local-pref lp; add community tag; set next-hop nh; accept }
+    }
+}
+```
+
+| Type | Argument | Where the parameter goes |
+|---|---|---|
+| `u32` | an integer | anywhere a u32 is expected: `set local-pref lp`, `route.local-pref >= lp`, `route.as-path contains asn`, a `prepend` operand or count |
+| `prefix-set` | a prefix-set or prefix dataset name | `route.prefix in pfx` |
+| `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists), `<binding> in tags`, and, for a community-set argument, `remove community in tags` / `not in tags` (the argument gets the member checks a named set gets) |
+| `asn-set` | an asn-set or ASN dataset name | `route.origin-as in origins`, `peer.asn in origins`, `<binding> in origins` |
+| `community` | a standard community, `65000:100` or a well-known name such as `NO_EXPORT` | `route.communities has tag`, `add community tag`, `remove community tag` |
+| `ip` | an IPv4 or IPv6 address | `set next-hop nh`, `route.next-hop == nh`, `peer.address == nh` |
+
+Arguments are written the same way everywhere a policy is instantiated:
+in `apply(p(...))`, in a test `expect p(...)`, and in a configured chain
+reference such as `"customer-in(200, cust-65001, 65000:100, 192.0.2.1)"`.
+Inside `apply`, a caller's own parameter of the same type passes through
+(`apply(member(pfx))`). Each argument is checked against the parameter's
+type: a set argument must name a set or dataset of that kind in the
+compilation unit, and a parameter used as a `prepend` count or a
+`set next-hop` operand has its argument range-checked at instantiation
+(1–255 for the count, a usable unicast address for the next hop), the
+same checks a literal gets at compile time. In a test the check runs at
+`rbgp policy check`; in a configured chain, at load, so `rustbgpd --check`
+and a SIGHUP reload reject a bad argument without runtime effect.
+
+A set parameter cannot share a name with a set or dataset, and it is
+not a loop source: a loop's bound is its set's size at compile time.
+
+**Reserved names.** Some names already have a fixed meaning in the
+positions a parameter could fill, so no parameter can take them:
+- a well-known community name: `NO_EXPORT`, `NO_ADVERTISE`,
+  `NO_EXPORT_SUBCONFED`, `BLACKHOLE`, `GRACEFUL_SHUTDOWN`, `OV_VALID`,
+  `OV_NOT_FOUND`, `OV_INVALID`;
+- an enum value of `route.rpki`, `route.aspa`, `route.route-type` or
+  `route.family` (`valid`, `internal`, `ipv4-unicast`, …);
+- the `prepend as` operands `origin` and `path-first`.
+
+A set or dataset cannot take a well-known community name either: as
+an argument the name is that community.
+
+A `let` binding still shadows a parameter of the same name in value
+positions and in `add`/`remove community`.
 
 ## Expressions
 
@@ -568,7 +613,8 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.origin-as in customers` | asn-set membership (one hash probe) |
 | `peer.asn in customers` | evaluation-peer ASN against the same asn-sets |
 | `route.local-pref >= 200`, `route.med <= 50` | u32 comparisons; `==`/`!=` also allowed |
-| `route.med + 50 >= threshold`, `route.as-path.len * 10 >= route.med` | checked-arithmetic comparison (see "Value expressions"); an unresolvable operand **denies** the route |
+| `route.med + 50 >= threshold`, `route.as-path.len * 10 >= route.med` | checked-arithmetic comparison (see "Value expressions"); an operand that is missing or cannot be computed makes it false |
+| `exists route.origin-as` | the route carries the value; also `peer.asn`, `route.med`, `route.local-pref` and `route.next-hop` (see "Conditions never fail") |
 | `route.next-hop == 10.0.0.1` | next-hop equality (`==`/`!=` only) |
 | `route.next-hop == peer.address` | strict next-hop — the one field-vs-field comparison; reads peer identity, so an export chain using it makes the peer ineligible for update-group sharing (`policy_peer_context`) |
 | `route.rpki == invalid` | RPKI origin validation state |
@@ -606,16 +652,19 @@ attributes when testing guards over optional fields. `route.local-pref`
 and `route.med` use their implicit defaults, so they do not have the
 absent-field behavior in the last row.
 
-`rbgp policy check` reports `optional-field-negation` for a direct
-`!(optional-field == literal)` guard. It points at the negated expression,
-including inside compound guards and loops. Use `!=` when absence must not
-match, or keep the negation and test an absent-field fixture when it is
-intentional. The lint does not flag defaulted `route.local-pref` or
-`route.med`, total fields such as `route.rpki`, arithmetic comparisons, or
-field-to-field comparisons.
-Parameters and local bindings on the right-hand side are outside this
-literal-only lint; local numeric comparisons use checked evaluation, where
-an absent operand fails the walk rather than matching through negation.
+`rbgp policy check` reports `optional-field-negation` for a negated test
+that is false on a route without the value, so the negation matches that
+route: `!(optional-field == literal)`, and for `route.origin-as` and
+`peer.asn` also a comparison against a binding or parameter with any
+operator, any computed comparison such as
+`!(route.origin-as + 0 >= 64512)`, and a `let` binding
+of such a value compared or probed (`let o = route.origin-as;` then
+`!(o == 64500)` or `!(o in bogons)`). It points at the negated expression,
+including inside compound guards and loops. Use `!=` for an equality when
+absence must not match, test `exists` where the field supports it, or keep
+the negation and test an absent-field fixture when it is intentional. The
+lint does not flag defaulted `route.local-pref` or `route.med`, total fields
+such as `route.rpki`, or field-to-field comparisons.
 
 ### Checked u32 value expressions
 
@@ -655,31 +704,60 @@ if route.med >= threshold + 20 { set local-pref 90 }
   expression (`4294967295 + 1`, `1 / 0`) is a compile error at its
   source span.
 
-**Failure is closed (the evaluation-error contract).** Any evaluation
-error — checked-arithmetic failure, inverted clamp, or an **absent
-operand** (`route.origin-as` on an empty/`AS_SET`-only path, unknown
-`peer.asn`) — denies the route: staged modifications are discarded,
-`bgp_policy_eval_errors_total{direction, kind}` and the chain's
-eval-error counter increment (the latter with the failing
-policy/term retained, surfaced by `rbgp policy stats`), a
-rate-limited WARN names the failing policy and term, and explain
-traces render the error in place of a verdict. `route.local-pref` and `route.med` read their
-implicit defaults (100 / 0) when absent, consistent with comparisons.
-Note the deliberate divergence from plain comparisons:
-`route.origin-as == 64500` on an origin-less route
-matches neither `==` nor `!=` (never-match), while
-`route.origin-as * 1 == 64500` is unresolvable and **denies** — the
-computed form has no non-verdict to fall back to, exactly like
-computed prepend operands.
+### Conditions never fail
 
-A value comparison does not need arithmetic: `route.origin-as == (64500)`
-also reads a checked value and denies an absent origin with
-`absent-operand`. A runtime `let` binding on the right has the same
-behavior. Grouping the whole condition, `(route.origin-as == 64500)`,
-keeps the plain comparison's no-match behavior. Explicit `!` does not
-suppress an evaluation error: `!(route.origin-as == (64500))` still
-denies an absent origin. Test errors with `expect … == error absent-operand`;
-a plain `reject` expectation does not count an evaluation error as a pass.
+**A condition never fails: a comparison or probe whose operand is missing
+or cannot be computed is false, and only an action that needs a value it
+cannot compute denies the route.** A missing operand is `route.origin-as`
+on an empty or `AS_SET`-only path or an unknown `peer.asn`; a value that
+cannot be computed is a checked-arithmetic failure (overflow, underflow,
+division or modulo by zero) or a data-dependent inverted `clamp`.
+`route.local-pref` and `route.med` read their implicit defaults (100 / 0)
+when absent, consistent with comparisons. Every form of a comparison
+agrees: `route.origin-as == 64500`, `route.origin-as == (64500)`,
+`route.origin-as + 0 == 64500` and `route.origin-as == x` with a `let`
+binding are all false on an origin-less route, and match neither `==` nor
+`!=` there. `&&`, `||` and `!` therefore combine plain true and false
+values: an operand's evaluation order never changes a verdict, and `!`
+follows the truth table above (`!(route.origin-as + 0 == 64500)` is true
+on an origin-less route).
+
+**Rejecting when a value is missing.** Say so with `exists`, which tests
+whether the route carries the value (`route.origin-as`, `peer.asn`,
+`route.med`, `route.local-pref`, `route.next-hop`):
+
+```rpol
+policy block-64500 {
+    term no-origin { if !exists route.origin-as { reject } }
+    term blocked { if route.origin-as == 64500 { reject } }
+    term rest { accept }
+}
+
+test as-set-only-is-rejected {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect block-64500 == reject
+}
+
+test others-are-accepted {
+    route { prefix 192.0.2.0/24; as-path "65010 64501" }
+    expect block-64500 == accept
+}
+```
+
+Without the `no-origin` term the `AS_SET`-only route is accepted, because
+`route.origin-as == 64500` is false on it. `exists route.med` and
+`exists route.local-pref` are the only way to tell an absent attribute from
+its default.
+
+**Actions fail closed (the evaluation-error contract).** A computed `set`
+value, a computed prepend operand or a community binding that cannot be
+computed denies the route: staged modifications are discarded,
+`bgp_policy_eval_errors_total{direction, kind}` and the chain's eval-error
+counter increment (the latter with the failing policy/term retained,
+surfaced by `rbgp policy stats`), a rate-limited WARN names the failing
+policy and term, and explain traces render the error in place of a
+verdict. Test errors with `expect … == error KIND`; a plain `reject`
+expectation does not count an evaluation error as a pass.
 
 **Update-group note.** `peer.asn` as an operand (guard or computed
 `set` value) reads peer identity and keeps its peers out of shared
@@ -761,9 +839,8 @@ error naming the u32 field set.
   at each use. The initializer is resolved *before* its own name is
   declared, so `let x = x + 1` reads the outer `x` — shadowing, never
   self-reference.
-- Resolution is **position-typed**, the same rule that lets a
-  parameter named `origin` keep its meaning under `prepend as`:
-  bindings are readable only in value positions. Enum
+- Resolution is **position-typed**: bindings are readable only in
+  value positions. Enum
   members (`valid`, `internal`, …) still win in enum comparisons,
   `min`/`max`/`clamp` followed by `(` are still builtin calls, and
   `prepend as origin` still means the origin operand even with a
@@ -774,18 +851,16 @@ error naming the u32 field set.
   is any unknown name (with did-you-mean suggestions over parameters
   and visible bindings).
 
-**Evaluation is eager and fail-closed.** The initializer evaluates
-when its statement executes — reached in the term walk, branch taken —
-whether or not the value is ever read. It rides the same rails as all
-checked arithmetic: overflow, underflow, division/modulo by
-zero, or an absent operand (`route.origin-as` on an origin-less route,
-unknown `peer.asn`) **denies the route** — staged modifications are
-discarded, the eval-error counter increments, explain renders the
-error in place of a verdict. A statement position the walk never
-reaches (an earlier verdict decided, the branch not taken) never
-evaluates. A binding whose comparison uses a plain u32 field
-(`route.origin-as == x`) makes that comparison a *value* comparison:
-fail-closed on absent operands, unlike the never-match plain form.
+**Evaluation is eager.** The initializer evaluates when its statement
+executes — reached in the term walk, branch taken — whether or not the
+value is ever read. An initializer that is missing or cannot be computed
+(an absent `route.origin-as` or `peer.asn`, overflow, underflow,
+division/modulo by zero) binds that state instead of a value: a condition
+that reads the binding is false, and an action that needs it (`set med x`,
+`add community x`) denies the route with the original error kind (see
+"Conditions never fail"). Explain notes the binding as having no value. A
+statement position the walk never reaches (an earlier verdict decided, the
+branch not taken) never evaluates.
 
 **Reads see the original route — never staged writes.** Route
 mutation stays transactional: `set`/`add`/`remove`/`prepend` stage
@@ -1071,10 +1146,11 @@ Consequences:
 
 - **Evaluation is eager, like `let`.** Arguments and the body evaluate
   when the walk reaches the statement containing the call — even if a
-  `&&` short-circuit would have skipped the value — so a call that
-  errors (checked arithmetic; functions are pure and terminating but
-  *not* total) denies the route on the uniform eval-error rail
-  whenever its statement executes.
+  `&&` short-circuit would have skipped the value. A call whose value
+  cannot be computed (checked arithmetic; functions are pure and
+  terminating but *not* total) has no value, like a `let`: a condition
+  on it is false, and an action that needs it denies the route on the
+  uniform eval-error rail.
 - **Term identity survives.** The inlined binds become `<term>.<n>`
   IR terms of the *calling* term (the established multi-term split
   naming), so the counter grid and trace skeleton stay a function of
@@ -1414,11 +1490,10 @@ must remove those too. Pin the threshold with fixtures on both sides of it and
 - **`peer`** — the evaluation peer's ASN.
 - **`origin`** — the route's origin AS: the last ASN of the rightmost
   non-empty `AS_SEQUENCE` (the same value `route.origin-as` reads).
-  A policy *parameter* named `origin` shadows the operand — the
-  parameter keeps its existing meaning.
+  No parameter can be named `origin` (see "Parameters").
 - **`path-first`** — the first ASN of a non-empty leading
-  `AS_SEQUENCE` in the typed route `AS_PATH`. A parameter with this
-  name also shadows the operand.
+  `AS_SEQUENCE` in the typed route `AS_PATH`. No parameter can be
+  named `path-first` either.
 
 **Direction legality.** `self`, `origin`, and `path-first` are legal on import and
 export chains. `peer` is **import-only**: on an export chain it would
@@ -1550,9 +1625,9 @@ during evaluation, so the assertion states the **resolved** ASN:
 `prepend as self` resolves to (omitted ⇒ it fails closed and the
 expectation is a `reject`).
 
-**Errors are not verdicts.** An evaluation error (checked-arithmetic
-failure, absent operand, budget exhaustion — the ADR-0103 Decision 4
-fail-closed rail) FAILS an `accept` *or* `reject` expectation, with
+**Errors are not verdicts.** An evaluation error (an action that needs
+a value it cannot compute, or budget exhaustion — the ADR-0103 Decision 4
+fail-closed rail; a condition never fails) FAILS an `accept` *or* `reject` expectation, with
 the error kind and the failing policy/term rendered — a test cannot
 accidentally pin a broken policy as "rejects correctly". To pin the
 rail itself, expect it: `expect p == error` passes on any evaluation
@@ -1661,8 +1736,10 @@ Static lints ride the same pass and need no fixtures:
   folds to true. The same constant folding, no reachability proof.
 - `unreferenced-policy` — no test and no `apply` names it in the
   compilation unit (with the config-chain caveat above).
-- `optional-field-negation` — `!(optional-field == literal)` also matches
-  absence; see [optional comparison semantics](#expressions).
+- `optional-field-negation` — a negated test on an optional value, such as
+  `!(optional-field == literal)` or `!(route.origin-as + 0 >= 64512)`, also
+  matches a route without the value; see
+  [optional comparison semantics](#expressions).
 
 Coverage is a report: it never changes the exit code by itself. For
 CI, `--coverage-min PCT` (which implies `--coverage`) exits **3**
@@ -1830,6 +1907,7 @@ unary       := "!" unary | "(" expr ")" | "apply" "(" IDENT ["(" u32arg,* ")"] "
 predicate   := field (("=="|"!="|">="|"<=") (rhs | value) | "in" IDENT | "has" community
              | "matches" STRING | "contains" u32arg)
              | field arith-tail ("=="|"!="|">="|"<=") value    # LHS arithmetic
+             | "exists" field                                  # contextual `exists`
 value       := mul (("+"|"-") mul)*                            # checked u32
 mul         := atom (("*"|"/"|"%") atom)*
 atom        := INT | STD-COMMUNITY | IDENT | field | "(" value ")"   # IDENT: parameter or binding
@@ -1936,8 +2014,8 @@ import_policy_chain = ["customer-in(200)", "bogon-filter"]
 Every file compiles (parse + typecheck) at config load; diagnostics
 are load errors. Policies join the same namespace as
 `[policy.definitions]` TOML policies — chains mix both freely, and
-parameterized policies are instantiated by call-form (`u32` arguments,
-arity-checked at load). Editing a referenced file + SIGHUP hot-applies
+parameterized policies are instantiated by call-form (typed arguments,
+checked at load; see [Parameters](#parameters)). Editing a referenced file + SIGHUP hot-applies
 the change to exactly the peers whose resolved chains moved, with
 Route Refresh for materially changed import policy.
 
@@ -2722,9 +2800,9 @@ compiles now:
   caller's statements, inline the callee's logic at the guarded call
   site, or split the caller so that the guards, the action order and the
   dispositions stay as they were.
-- **`$parameter` of a set, address or community type** — parameters are
-  `u32` only; write one policy per set, or keep the set content in a
-  [dataset](#datasets--external-set-content).
+- **`$parameter` of a set, address or community type** — declare the
+  parameter with its type, such as `pfx: prefix-set`, `tag: community` or
+  `nh: ip` (see "Parameters"), and pass the set name or value in the call.
 - **`done`** — differs. RPL `done` accepts the route and runs no further
   policy statements. A `.rpol` `accept` ends only the current policy, and
   the neighbor's chain continues: a later member's `set` overrides the

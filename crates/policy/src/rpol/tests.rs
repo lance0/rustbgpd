@@ -3175,9 +3175,9 @@ fn computed_prepend_operands_lower_to_computed_slot() {
     }
 }
 
-/// Zero source-compatibility break: the literal and parameter forms
-/// still lower to the literal slot, and a policy parameter named
-/// `origin` keeps its parameter meaning (grammar-evolution rule).
+/// The literal and parameter forms lower to the literal slot. A parameter
+/// cannot be named `origin` or `path-first`, so those names always mean
+/// their operands, in the typechecker and in lowering alike.
 #[test]
 fn fixed_prepend_forms_unchanged() {
     let chain = compile_ok("policy p { term t { prepend as 65001 3; accept } }");
@@ -3185,17 +3185,25 @@ fn fixed_prepend_forms_unchanged() {
     assert_eq!(mods.as_path_prepend, Some((65001, 3)));
     assert_eq!(mods.as_path_prepend_computed, None);
 
-    for name in ["origin", "path-first"] {
-        let mut store = SetStore::new();
-        let set = super::RpolFile::parse(&format!(
-            "policy p({name}: u32) {{ term t {{ prepend as {name} 2; accept }} }}"
-        ))
+    let mut store = SetStore::new();
+    let file = super::RpolFile::parse("policy p(asn: u32) { term t { prepend as asn 2; accept } }")
         .expect("compiles");
-        let chain = set
-            .compile_policy("p", &[64999], &mut store)
-            .expect("policy exists");
-        assert_eq!(first_term_mods(&chain).as_path_prepend, Some((64999, 2)));
-        assert_eq!(first_term_mods(&chain).as_path_prepend_computed, None);
+    let chain = file
+        .compile_policy("p", &[64999], &mut store)
+        .expect("policy exists");
+    assert_eq!(first_term_mods(&chain).as_path_prepend, Some((64999, 2)));
+    assert_eq!(first_term_mods(&chain).as_path_prepend_computed, None);
+
+    for name in ["origin", "path-first"] {
+        let (_, rendered) = diagnostics_of(&format!(
+            "policy p({name}: u32) {{ term t {{ prepend as {name} 2; accept }} }}"
+        ));
+        assert!(
+            rendered.contains(&format!(
+                "parameter `{name}` has the name of the `prepend as {name}` operand"
+            )),
+            "{rendered}"
+        );
     }
 }
 
@@ -3681,7 +3689,8 @@ fn computed_set_values_resolve_per_route() {
 /// The eval-error rail end to end on the counting path: uniform Deny,
 /// staged modifications (an earlier Continue term's) discarded, the
 /// per-chain error counter incremented, hit counters untouched by the
-/// error itself.
+/// error itself. Since LAN-2790 only an action can fail, so the error
+/// comes from a computed `set` value.
 #[test]
 fn eval_error_denies_discards_mods_and_counts() {
     use crate::eval::PolicyHitCounters;
@@ -3689,7 +3698,7 @@ fn eval_error_denies_discards_mods_and_counts() {
     let chain = compile_ok(
         "policy p {
             term tag { set local-pref 200 }
-            term guard { if route.med + 1 >= 1 { accept } }
+            term guard { set med route.med + 1; accept }
             term rest { accept }
          }",
     );
@@ -3728,29 +3737,32 @@ fn eval_error_denies_discards_mods_and_counts() {
     assert_eq!(counters.eval_errors(), 1);
 }
 
-/// An absent operand without a documented default (origin-as on an
-/// AS_SET-only path, unknown peer.asn) is unresolvable → the same
-/// eval-error rail. Plain field/literal comparisons keep their
-/// legacy never-match semantics — the two deliberately diverge.
+/// A missing value without a documented default (origin-as on an
+/// AS_SET-only path, unknown peer.asn) makes a comparison false in every
+/// form (LAN-2790): computed, parenthesized and binding forms agree with
+/// the plain comparison, and none of them is an evaluation error.
 #[test]
-fn absent_operand_is_an_eval_error_not_a_non_match() {
-    use crate::eval::EvalErrorKind;
-    use crate::ir::ValueField;
+fn absent_operand_is_a_non_match_in_every_form() {
     use PolicyAction::{Deny, Permit};
 
     // Verdicts are ordered: absent, present/equal, present/different.
     let cases = [
-        ("FIELD == 64500", [Permit, Deny, Permit], false),
-        ("FIELD != 64500", [Permit, Permit, Deny], false),
-        ("!(FIELD == 64500)", [Deny, Permit, Deny], false),
-        ("(FIELD == 64500)", [Permit, Deny, Permit], false),
-        ("FIELD * 1 == 64500", [Deny, Deny, Permit], true),
-        ("FIELD + 0 == 64500", [Deny, Deny, Permit], true),
-        ("FIELD == (64500)", [Deny, Deny, Permit], true),
-        ("!(FIELD == (64500))", [Deny, Permit, Deny], true),
+        ("FIELD == 64500", [Permit, Deny, Permit]),
+        ("FIELD != 64500", [Permit, Permit, Deny]),
+        ("!(FIELD == 64500)", [Deny, Permit, Deny]),
+        ("(FIELD == 64500)", [Permit, Deny, Permit]),
+        ("FIELD * 1 == 64500", [Permit, Deny, Permit]),
+        ("FIELD + 0 == 64500", [Permit, Deny, Permit]),
+        ("FIELD == (64500)", [Permit, Deny, Permit]),
+        ("!(FIELD == (64500))", [Deny, Permit, Deny]),
+        ("FIELD + 0 != 64500", [Permit, Permit, Deny]),
+        ("FIELD + 0 >= 64500", [Permit, Deny, Deny]),
     ];
-    for field in [ValueField::OriginAs, ValueField::PeerAsn] {
-        for (template, actions, absent_error) in cases {
+    for field in [
+        crate::ir::ValueField::OriginAs,
+        crate::ir::ValueField::PeerAsn,
+    ] {
+        for (template, actions) in cases {
             let guard = template.replace("FIELD", field.as_str());
             let chain = reject_if(&guard);
             for (index, value) in [None, Some(64500), Some(64501)].into_iter().enumerate() {
@@ -3761,11 +3773,7 @@ fn absent_operand_is_an_eval_error_not_a_non_match() {
                 };
                 let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
                 assert_eq!(result.action, actions[index], "{guard}, field={value:?}");
-                assert_eq!(
-                    evaluation.eval_error.map(|error| error.kind),
-                    (absent_error && value.is_none()).then_some(EvalErrorKind::AbsentField(field)),
-                    "{guard}, field={value:?}"
-                );
+                assert_eq!(evaluation.eval_error, None, "{guard}, field={value:?}");
             }
         }
     }
@@ -3905,15 +3913,36 @@ fn peer_asn_operand_registers_peer_context() {
     assert!(!route_action.requires_peer_context());
 }
 
-/// Guard evaluation errors render in explain traces in place of a
-/// verdict, in agreement with the live walk (ADR-0103 Decision 6.4).
+/// Action evaluation errors render in explain traces in place of a
+/// verdict, in agreement with the live walk (ADR-0103 Decision 6.4). A
+/// condition never fails (LAN-2790); its explain trace agrees too.
 #[test]
 fn eval_error_explain_renders_and_agrees() {
     use crate::engine::PolicyChain;
     use crate::engine::explain::explain_chain_statements;
 
+    let guard = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compile_ok(
+            "policy p { term big-med { if route.med + 1 >= 1 { reject } } term rest { accept } }",
+        )),
+    )]);
+    let mut ctx = absent_ctx();
+    ctx.med = Some(u32::MAX);
+    let trace = explain_chain_statements(Some(&guard), &ctx);
+    assert_eq!(trace.action, guard.evaluate(&ctx).action);
+    assert_eq!(trace.action, PolicyAction::Permit, "the condition is false");
+    assert!(
+        trace.steps[0]
+            .term_traces
+            .iter()
+            .any(|line| line.contains("route.med + 1 >= 1") && line.contains("[not matched]")),
+        "{:?}",
+        trace.steps[0].term_traces
+    );
+
     let compiled = compile_ok(
-        "policy p { term big-med { if route.med + 1 >= 1 { reject } } term rest { accept } }",
+        "policy p { term big-med { set med route.med + 1; accept } term rest { accept } }",
     );
     let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
         "p".to_string(),
@@ -3929,7 +3958,7 @@ fn eval_error_explain_renders_and_agrees() {
     assert_eq!(step.term_name.as_deref(), Some("big-med"));
     assert!(
         step.term_traces.iter().any(|line| line
-            .contains("route.med + 1 >= 1 => evaluation error: arithmetic overflow")
+            .contains("term big-med: evaluation error: arithmetic overflow")
             && line.contains("fail closed")),
         "error renders in place of a verdict: {:?}",
         step.term_traces
@@ -3967,10 +3996,10 @@ fn eval_error_explain_renders_and_agrees() {
 #[test]
 fn in_language_tests_cover_arithmetic_boundaries() {
     let source = r#"
-policy overflow-guard { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
-policy div-zero { term t { if route.med / 0 >= 0 { accept } } term rest { reject } }
-policy mod-zero { term t { if route.med % route.med >= 0 { accept } } term rest { reject } }
-policy absent-origin { term t { if route.origin-as * 1 >= 0 { accept } } term rest { reject } }
+policy overflow-guard { term t { set med route.med + 1; accept } }
+policy div-zero { term t { set med route.med / 0; accept } }
+policy mod-zero { term t { set med route.med % route.med; accept } }
+policy absent-origin { term t { set med route.origin-as * 1; accept } }
 policy folded-parity(bump: u32) { term t { set med 25 + 25; set local-pref bump * 2; accept } }
 policy builtin-edges {
     term t { set med max(min(route.med, 400), 100); accept }
@@ -4038,7 +4067,7 @@ test builtin-passes-middle {
 #[test]
 fn error_expectation_pins_the_fail_closed_rail() {
     let source = r"
-policy overflowing { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
+policy overflowing { term t { set med route.med + 1; accept } }
 
 test any-error-passes {
     route { med 4294967295 }
@@ -4062,7 +4091,7 @@ test kind-pinned-passes {
 fn error_expectation_mismatches_render_the_divergence() {
     let source = r"
 policy clean-reject { term t { reject } }
-policy overflowing { term t { if route.med + 1 >= 1 { accept } } term rest { reject } }
+policy overflowing { term t { set med route.med + 1; accept } }
 
 test clean-reject-is-not-an-error {
     route { }
@@ -4167,7 +4196,7 @@ test error-policy-accepts {
 fn evaluation_carries_eval_error_on_the_error_rail_only() {
     let chain = compile_ok(
         "policy p {
-            term guard { if route.med + 1 >= 1 { accept } }
+            term guard { set med route.med + 1; accept }
             term rest { reject }
          }",
     );
@@ -4417,8 +4446,9 @@ fn initializer_errors_deny_and_discard_staged_mods() {
     assert_eq!(result.modifications.set_med, Some(100));
     assert_eq!(counters.eval_errors(), 0);
 
-    // med 5: `5 - 100` underflows in the initializer → uniform Deny,
-    // the staged local-pref discarded, counter bumped.
+    // med 5: `5 - 100` underflows in the initializer, so `x` has no
+    // value and `set med x` needs one → uniform Deny, the staged
+    // local-pref discarded, counter bumped.
     ctx.med = Some(5);
     let result = chain.evaluate_counting(&ctx, &counters);
     assert_eq!(result.action, PolicyAction::Deny);
@@ -4431,13 +4461,13 @@ fn initializer_errors_deny_and_discard_staged_mods() {
     assert_eq!(recorded.action, PolicyAction::Deny);
     assert!(recorded.modifications.is_empty());
 
-    // An initializer that never reads its binding still errors: eager,
-    // not lazy (an unused erroring binding denies).
+    // A binding no action uses never denies (LAN-2790): it carries the
+    // missing state, and only an action that needs the value fails.
     let chain = compile_ok(
         "policy p { term t { let unused = route.origin-as; accept } term rest { accept } }",
     );
     let ctx = absent_ctx(); // no origin → absent operand
-    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
 }
 
 /// A `let` executes at its statement position: a decision *before* it
@@ -4458,13 +4488,14 @@ fn let_after_a_decision_never_evaluates() {
     let mut ctx = absent_ctx();
     ctx.med = Some(200);
     assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
-    // med 5, absent origin: the let runs and errors → Deny.
+    // med 5, absent origin: the let runs, `x` has no value, and the
+    // condition on it is false (LAN-2790) → the trailing accept.
     ctx.med = Some(5);
-    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
-    // Same rule inside a branch: an untaken branch's binding never
-    // evaluates; a taken branch's binding evaluates even if unused.
-    let chain =
-        compile_ok("policy p { term t { if route.med >= 10 { let x = route.origin-as } accept } }");
+    assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
+    // An action that needs the value denies; skipped, it never runs.
+    let chain = compile_ok(
+        "policy p { term t { if route.med >= 10 { let x = route.origin-as; set med x } accept } }",
+    );
     let mut ctx = absent_ctx();
     ctx.med = Some(5);
     assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit);
@@ -4581,10 +4612,7 @@ fn apply_of_a_let_policy_is_rejected() {
 fn let_in_const_position_is_rejected() {
     let (_, rendered) =
         diagnostics_of("policy p { term t { let x = 3; prepend as 65001 x; accept } }");
-    assert!(
-        rendered.contains("prepend count must be a literal"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("`x` is a `let` binding"), "{rendered}");
 
     let (_, rendered) = diagnostics_of("policy p { term t { let x = 3; prepend as x 2; accept } }");
     assert!(rendered.contains("`x` is a `let` binding"), "{rendered}");
@@ -4601,8 +4629,8 @@ fn let_in_const_position_is_rejected() {
 }
 
 /// A binding read on the RIGHT of a plain u32-field comparison lowers
-/// to the checked value-comparison node — fail-closed absent-operand
-/// semantics, like every computed form.
+/// to the checked value-comparison node, which treats a missing operand
+/// as false, like every form (LAN-2790).
 #[test]
 fn cmp_against_a_binding_lowers_to_value_cmp() {
     let chain = compile_ok(
@@ -4621,9 +4649,8 @@ fn cmp_against_a_binding_lowers_to_value_cmp() {
     let mut ctx = absent_ctx();
     ctx.origin_asn = Some(64500);
     assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Deny);
-    // Absent origin: computed form denies (eval error), unlike the
-    // never-match scalar node.
-    assert_eq!(chain.evaluate(&absent_ctx()).action, PolicyAction::Deny);
+    // Absent origin: false, like the never-match scalar node.
+    assert_eq!(chain.evaluate(&absent_ctx()).action, PolicyAction::Permit);
 }
 
 /// `peer.asn` in a `let` initializer reads peer identity — the chain
@@ -4692,11 +4719,15 @@ fn let_explain_renders_and_agrees() {
     ctx.med = Some(5);
     let trace = explain_chain_statements(Some(&chain), &ctx);
     assert_eq!(trace.action, chain.evaluate(&ctx).action);
-    assert_eq!(trace.action, PolicyAction::Deny);
+    // An initializer that cannot be computed binds the missing state; no
+    // action needs it, so the route is accepted (LAN-2790) and the trace
+    // says why the binding has no value.
+    assert_eq!(trace.action, PolicyAction::Permit);
     assert!(
-        trace.steps[0].term_traces.iter().any(|line| line
-            .contains("evaluation error: arithmetic underflow")
-            && line.contains("fail closed")),
+        trace.steps[0]
+            .term_traces
+            .iter()
+            .any(|line| line.contains("`x` has no value (arithmetic underflow)")),
         "{:?}",
         trace.steps[0].term_traces
     );
@@ -4741,7 +4772,7 @@ policy shadow(base: u32) {
     }
 }
 policy eager-error {
-    term t { let x = route.origin-as; accept }
+    term t { let x = route.origin-as; set med x; accept }
     term rest { accept }
 }
 
@@ -5834,21 +5865,30 @@ fn fn_eval_error_inside_body_denies_and_counts() {
         "
         fn share(total: u32, parts: u32) -> u32 { total / parts }
         policy p {
-            term t { if share(100, route.med) >= 1 { reject } accept }
+            term t { set local-pref share(100, route.med); accept }
         }
         ",
     );
     let hits = crate::eval::PolicyHitCounters::for_chain(&chain);
-    // med absent -> implicit 0 -> divide-by-zero inside the body ->
-    // Deny, error counted.
+    // med absent -> implicit 0 -> divide-by-zero inside the body, and the
+    // action needs the value -> Deny, error counted.
     let denied = chain.evaluate_counting(&ctx_with_path_and_med(0, None), &hits);
     assert_eq!(denied.action, PolicyAction::Deny);
     assert_eq!(hits.eval_errors(), 1);
-    // A resolvable call decides normally.
-    // 100 / 200 = 0; `0 >= 1` is false -> falls through to accept.
-    let permitted = chain.evaluate_counting(&ctx_with_path_and_med(0, Some(200)), &hits);
+    // A resolvable call sets the value. 100 / 20 = 5.
+    let permitted = chain.evaluate_counting(&ctx_with_path_and_med(0, Some(20)), &hits);
     assert_eq!(permitted.action, PolicyAction::Permit);
+    assert_eq!(permitted.modifications.set_local_pref, Some(5));
     assert_eq!(hits.eval_errors(), 1, "no new error");
+    // In a condition the same call is simply false (LAN-2790).
+    let guard = compile_ok(
+        "
+        fn share(total: u32, parts: u32) -> u32 { total / parts }
+        policy p { term t { if share(100, route.med) >= 1 { reject } accept } }
+        ",
+    );
+    let result = guard.evaluate_counting(&ctx_with_path_and_med(0, None), &hits);
+    assert_eq!(result.action, PolicyAction::Permit);
 }
 
 /// `requires_peer_context` is a property of the CALL SITE's arguments —
@@ -6596,6 +6636,18 @@ mod coverage {
             assert_eq!(lints.len(), 1, "{condition}: {:?}", cov.lints);
             // Parentheses have no AST node; the range ends at the comparison.
             assert_eq!(&source[lints[0].span.range()], format!("!({condition}"));
+            // `exists` is suggested only for a field it can test.
+            let field = condition.split_whitespace().next().unwrap();
+            let advice = if matches!(field, "route.origin-as" | "route.next-hop" | "peer.asn") {
+                format!("test `exists {field}` explicitly")
+            } else {
+                "test the absent case explicitly".to_string()
+            };
+            assert!(
+                lints[0].message.ends_with(&advice),
+                "{condition}: {}",
+                lints[0].message
+            );
         }
     }
 
@@ -6622,24 +6674,135 @@ mod coverage {
         }
     }
 
-    #[test]
-    fn optional_field_negation_does_not_flag_checked_local_comparisons() {
-        let source = r"
-policy p {
-    term t {
-        let target = 64500;
-        if !(route.origin-as == target) { accept }
-        if !(peer.asn == target) { accept }
-    }
-}
-test absent { route { med 0 } expect p == error }
-";
-        let cov = coverage_of(source);
-        assert!(
-            !cov.lints
-                .iter()
-                .any(|lint| lint.kind == LintKind::OptionalFieldNegation)
+    /// The `optional-field-negation` messages for one term body.
+    fn negation_messages(body: &str) -> Vec<String> {
+        let source = format!(
+            "asn-set bogons {{ 64496 }}\n\
+             policy p {{ term t {{ {body} accept }} }}\n\
+             test absent {{ route {{ med 0 }} expect p == accept }}"
         );
+        coverage_of(&source)
+            .lints
+            .into_iter()
+            .filter(|lint| lint.kind == LintKind::OptionalFieldNegation)
+            .map(|lint| lint.message)
+            .collect()
+    }
+
+    /// Since LAN-2790 a comparison or probe on a missing value is false in
+    /// every form, so a negated binding, binding probe or computed
+    /// comparison matches a route without the value, like the plain
+    /// equality, and the lint flags each of them.
+    #[test]
+    fn optional_field_negation_flags_bindings_probes_and_computed_comparisons() {
+        let exists = "test `exists route.origin-as` explicitly";
+        for (body, message) in [
+            (
+                "let target = 64500; if !(route.origin-as == target) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "let target = 64500; if !(peer.asn == target) { accept }",
+                "negated equality matches when peer.asn is absent; use != to require its presence, or test `exists peer.asn` explicitly".to_string(),
+            ),
+            (
+                "if !(route.origin-as + 0 == 64500) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "if !(route.origin-as + 0 >= 64512) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(o == 64500) { accept }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(o in bogons) { accept }",
+                format!("negated membership test matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if !(route.med >= o) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; let p = o + 1; if !(p <= 9) { accept }",
+                format!("negated comparison matches when route.origin-as is absent; {exists}"),
+            ),
+            (
+                "let o = route.origin-as; if route.med == 0 { if !(o == 1) { accept } }",
+                format!("negated equality matches when route.origin-as is absent; use != to require its presence, or {exists}"),
+            ),
+        ] {
+            assert_eq!(negation_messages(body), [message], "{body}");
+        }
+        // `exists` is suggested only for a field it can test.
+        assert_eq!(
+            negation_messages("if !(route.prefix == 192.0.2.0/24) { accept }"),
+            [
+                "negated equality matches when route.prefix is absent; use != to require its presence, or test the absent case explicitly"
+            ],
+        );
+    }
+
+    /// An origin AS or peer ASN compared against a binding, with any
+    /// operator, or against a parameter is false when the field is absent,
+    /// so its negation is flagged. `route.med` and `route.local-pref` read
+    /// their defaults and are not.
+    #[test]
+    fn optional_field_negation_flags_every_operator_against_an_identifier() {
+        for field in ["route.origin-as", "peer.asn"] {
+            let exists = format!("test `exists {field}` explicitly");
+            for op in ["==", "!=", ">=", "<="] {
+                let message = if op == "==" {
+                    format!(
+                        "negated equality matches when {field} is absent; use != to require its presence, or {exists}"
+                    )
+                } else {
+                    format!("negated comparison matches when {field} is absent; {exists}")
+                };
+                let body = format!("let target = 64500; if !({field} {op} target) {{ accept }}");
+                assert_eq!(
+                    negation_messages(&body),
+                    std::slice::from_ref(&message),
+                    "{body}"
+                );
+                if matches!(op, "==" | "!=") {
+                    let source = format!(
+                        "policy p(target: u32) {{ term t {{ if !({field} {op} target) {{ accept }} accept }} }}\n\
+                         test absent {{ route {{ med 0 }} expect p(64500) == accept }}"
+                    );
+                    let messages: Vec<String> = coverage_of(&source)
+                        .lints
+                        .into_iter()
+                        .filter(|lint| lint.kind == LintKind::OptionalFieldNegation)
+                        .map(|lint| lint.message)
+                        .collect();
+                    assert_eq!(messages, [message], "parameter: {field} {op}");
+                }
+            }
+        }
+        for body in [
+            "let floor = 100; if !(route.local-pref >= floor) { accept }",
+            "let cap = 50; if !(route.med <= cap) { accept }",
+        ] {
+            assert_eq!(negation_messages(body), Vec::<String>::new(), "{body}");
+        }
+    }
+
+    /// A binding stops counting as missing once a later `let` shadows it
+    /// with a present value, inside a `for` over a loop variable of the
+    /// same name, and outside the body that declared it.
+    #[test]
+    fn optional_field_negation_follows_binding_scope() {
+        for body in [
+            "let o = route.origin-as; let o = 5; if !(o == 1) { accept }",
+            "let o = route.origin-as; for o in route.communities { if !(o == 1) { accept } }",
+            "let o = 5; if route.med == 5 { let o = route.origin-as; set med o; accept } if !(o == 1) { accept }",
+            "let o = route.med; if !(o == 0) { accept }",
+        ] {
+            assert_eq!(negation_messages(body), Vec::<String>::new(), "{body}");
+        }
     }
 
     fn term<'a>(cov: &'a CoverageReport, policy: &str, name: &str) -> &'a TermCoverage {
@@ -7687,9 +7850,14 @@ fn chain_expect_members_retain_only_referenced_tables() {
             .calls
             .iter()
             .map(|call| {
-                let args: Vec<u32> = call.args.iter().map(|arg| arg.node).collect();
-                let full =
-                    lowerer.instantiate_chain(&call.policy.node, &args, &mut store, &bindings);
+                let args: Vec<super::CallArg> =
+                    call.args.iter().map(|arg| arg.node.clone()).collect();
+                let full = lowerer.instantiate_chain(
+                    &call.policy.node,
+                    &super::testing::policy_args(&args),
+                    &mut store,
+                    &bindings,
+                );
                 assert_eq!(full.asn_sets.len(), SETS);
                 NamedPolicy::from_rpol(
                     super::testing::render_call(&call.policy.node, &args),
@@ -8232,11 +8400,10 @@ fn modify_only_chain_paths_are_flat_and_in_source_order() {
     }
 }
 
-/// Dropping a deciding branch's negation is safe when its guard fails
-/// closed: the guard errors at the branch's own term, so the route is
-/// denied there and a later branch never decides it.
+/// A deciding branch whose guard reads a missing value is false
+/// (LAN-2790), so the walk reaches the next branch, which decides.
 #[test]
-fn deciding_branch_with_a_failing_guard_still_denies() {
+fn deciding_branch_with_a_missing_operand_falls_to_the_next_branch() {
     let chain = compile_ok(
         "policy p {
              term t {
@@ -8247,20 +8414,16 @@ fn deciding_branch_with_a_failing_guard_still_denies() {
     );
     let ctx = med_lp_ctx(Some(5), None);
     let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
-    assert_eq!(result.action, PolicyAction::Deny);
-    assert_eq!(
-        evaluation.eval_error.map(|error| error.kind),
-        Some(crate::eval::EvalErrorKind::AbsentField(
-            crate::ir::ValueField::OriginAs
-        ))
-    );
-    assert_eq!(result.modifications.set_local_pref, None);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(evaluation.eval_error, None);
+    assert_eq!(result.modifications.set_local_pref, Some(7));
 }
 
 /// An `else if` guard's function call evaluates only where the walk reaches
-/// the branch. A modify-only first branch that matches skips it, so the
-/// call's division by zero never runs; reached, it denies with the error.
-/// The same holds for the guard inside an enclosing branch that is skipped.
+/// the branch. A modify-only first branch that matches skips it; reached,
+/// the call's division by zero makes the condition false (LAN-2790), so
+/// the route is never denied. The same holds for a guard nested inside an
+/// enclosing branch.
 #[test]
 fn skipped_else_if_guard_never_runs_its_function_call() {
     let chain = compile_ok(
@@ -8290,22 +8453,18 @@ fn skipped_else_if_guard_never_runs_its_function_call() {
 
     let reached = med_lp_ctx(Some(0), Some(100));
     let (result, evaluation) = chain.evaluate_with_attribution(&reached);
-    assert_eq!(result.action, PolicyAction::Deny);
-    assert_eq!(
-        evaluation.eval_error.map(|error| error.kind),
-        Some(crate::eval::EvalErrorKind::DivideByZero)
-    );
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(evaluation.eval_error, None);
+    assert_eq!(result.modifications.set_med, None, "the condition is false");
 
     let nested = med_lp_ctx(Some(0), Some(950));
     let (result, evaluation) = chain.evaluate_with_attribution(&nested);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(evaluation.eval_error, None);
     assert_eq!(
-        result.action,
-        PolicyAction::Deny,
-        "the enclosing branch reaches it"
-    );
-    assert_eq!(
-        evaluation.eval_error.map(|error| error.kind),
-        Some(crate::eval::EvalErrorKind::DivideByZero)
+        result.modifications.set_med,
+        Some(1),
+        "the first term's set, not the nested branch's"
     );
 }
 
@@ -9448,6 +9607,1439 @@ test else-branch {
         assert_eq!(size_of::<crate::ir::TermAction>(), 216);
         assert_eq!(size_of::<crate::ir::Term>(), 272);
         assert_eq!(size_of::<crate::ir::MatchExpr>(), 32);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// LAN-2790: a condition never fails
+// ─────────────────────────────────────────────────────────────────────
+
+mod condition_truth {
+    use std::sync::Arc;
+
+    use super::super::{format_rpol, run_rpol_tests};
+    use super::{absent_ctx, compile_ok, diagnostics_of, reject_if};
+    use crate::engine::explain::explain_chain_statements;
+    use crate::engine::{PolicyAction, PolicyChain, RouteContext};
+    use crate::eval::EvalErrorKind;
+
+    fn chain_of(source: &str) -> PolicyChain {
+        PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+            "p".to_string(),
+            Arc::new(compile_ok(source)),
+        )])
+    }
+
+    /// An `AS_SET`-only route: no origin AS, no peer ASN, no MED or `LOCAL_PREF`.
+    fn set_only() -> RouteContext<'static> {
+        RouteContext {
+            prefix: Some(super::v4(198, 51, 100, 0, 24)),
+            as_path_str: "{64500 64501}",
+            as_path_len: 1,
+            ..absent_ctx()
+        }
+    }
+
+    /// The verdict, with explain agreeing with live evaluation on both the
+    /// action and the error: explain renders exactly the live error, and
+    /// no error when the live walk raised none.
+    fn verdict(
+        chain: &PolicyChain,
+        ctx: &RouteContext<'_>,
+    ) -> (PolicyAction, Option<EvalErrorKind>) {
+        let (result, evaluation) = chain.compiled().evaluate_with_attribution(ctx);
+        let trace = explain_chain_statements(Some(chain), ctx);
+        assert_eq!(
+            trace.action, result.action,
+            "explain agrees with live evaluation"
+        );
+        let kind = evaluation.eval_error.map(|error| error.kind);
+        let errors: Vec<&String> = trace
+            .steps
+            .iter()
+            .flat_map(|step| step.term_traces.iter().chain(&step.matched_conditions))
+            .filter(|line| line.contains("evaluation error"))
+            .collect();
+        match kind {
+            Some(kind) => assert!(
+                errors.len() == 1 && errors[0].contains(&kind.to_string()),
+                "explain renders the live error {kind}: {errors:?}"
+            ),
+            None => assert!(errors.is_empty(), "explain renders no error: {errors:?}"),
+        }
+        (result.action, kind)
+    }
+
+    /// A missing or uncomputable operand never decides a conjunction or a
+    /// disjunction, whichever side it is on and whatever decides the other
+    /// side: a regex, a prefix-set probe, a plain comparison, `exists`.
+    #[test]
+    fn missing_operands_never_decide_and_or_in_either_order() {
+        let failing = [
+            "route.origin-as + 0 == 1",
+            "route.origin-as == (1)",
+            "route.origin-as * 1 >= 0",
+            "peer.asn + 0 == 1",
+            "route.med / 0 >= 0",
+            "route.med % (route.med - route.med) >= 0",
+            "route.med + 4294967295 >= 1",
+            "clamp(route.med, 10, route.med) >= 0",
+        ];
+        let falsy = [
+            "route.as-path matches \"^65000\"",
+            "route.prefix in customers",
+            "route.local-pref >= 500",
+            "exists route.origin-as",
+        ];
+        let mut ctx = set_only();
+        ctx.med = Some(5);
+        for fail in failing {
+            for other in falsy {
+                for guard in [format!("{fail} && {other}"), format!("{other} && {fail}")] {
+                    let chain = chain_of(&format!(
+                        "prefix-set customers {{ 192.0.2.0/24 }} \
+                         policy p {{ term t {{ if {guard} {{ reject }} }} term rest {{ accept }} }}"
+                    ));
+                    assert_eq!(
+                        verdict(&chain, &ctx),
+                        (PolicyAction::Permit, None),
+                        "{guard}"
+                    );
+                }
+                // `||` with a true side is true, whichever side fails.
+                for guard in [
+                    format!("{fail} || !({other})"),
+                    format!("!({other}) || {fail}"),
+                ] {
+                    let chain = chain_of(&format!(
+                        "prefix-set customers {{ 192.0.2.0/24 }} \
+                         policy p {{ term t {{ if {guard} {{ reject }} }} term rest {{ accept }} }}"
+                    ));
+                    assert_eq!(verdict(&chain, &ctx), (PolicyAction::Deny, None), "{guard}");
+                }
+            }
+            // Alone, the comparison is false; negated, true.
+            let chain = chain_of(&format!(
+                "policy p {{ term t {{ if {fail} {{ reject }} }} term rest {{ accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &ctx),
+                (PolicyAction::Permit, None),
+                "{fail}"
+            );
+            let chain = chain_of(&format!(
+                "policy p {{ term t {{ if !({fail}) {{ reject }} }} term rest {{ accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &ctx),
+                (PolicyAction::Deny, None),
+                "!({fail})"
+            );
+        }
+    }
+
+    /// The forms of one comparison agree on a route without an origin AS:
+    /// plain, parenthesized, computed, a `let` on the right, a `let` holding
+    /// the missing value, and a nested `if` — none denies the route.
+    #[test]
+    fn every_form_of_a_comparison_agrees_on_a_missing_value() {
+        let forms = [
+            "if route.origin-as == 64500 { reject }",
+            "if (route.origin-as == 64500) { reject }",
+            "if route.origin-as == (64500) { reject }",
+            "if route.origin-as + 0 == 64500 { reject }",
+            "if route.origin-as * 1 == 64500 { reject }",
+            "let x = 64500; if route.origin-as == x { reject }",
+            "let o = route.origin-as; if o == 64500 { reject }",
+            "let o = route.origin-as + 0; if o >= 1 { reject }",
+            "if route.as-path.len >= 1 { if route.origin-as + 0 == 64500 { reject } }",
+            "if route.origin-as + 0 == 64500 { reject } else if route.med >= 1 { reject }",
+        ];
+        for form in forms {
+            let chain = chain_of(&format!("policy p {{ term t {{ {form} accept }} }}"));
+            assert_eq!(
+                verdict(&chain, &set_only()),
+                (PolicyAction::Permit, None),
+                "{form}"
+            );
+            // A present origin still decides.
+            let ctx = RouteContext {
+                origin_asn: Some(64500),
+                med: Some(1),
+                ..set_only()
+            };
+            assert_eq!(verdict(&chain, &ctx).0, PolicyAction::Deny, "{form}");
+        }
+    }
+
+    /// Binding probes (`x in set`) on a binding without a value are false.
+    #[test]
+    fn binding_probes_on_a_missing_value_are_false() {
+        for probe in ["o in peers", "!(o in peers)", "o in tags", "!(o in tags)"] {
+            let chain = chain_of(&format!(
+                "asn-set peers {{ 64500 }} community-set tags {{ 0:64500 }} \
+                 policy p {{ term t {{ let o = route.origin-as; if {probe} {{ reject }} accept }} }}"
+            ));
+            let expected = if probe.starts_with('!') {
+                PolicyAction::Deny
+            } else {
+                PolicyAction::Permit
+            };
+            assert_eq!(verdict(&chain, &set_only()), (expected, None), "{probe}");
+        }
+    }
+
+    /// Actions keep the deny: a value an action needs and cannot compute
+    /// fails the route closed, with the error kind that made it missing.
+    #[test]
+    fn actions_that_need_a_missing_value_still_deny() {
+        use crate::ir::ValueField::OriginAs;
+        let cases: [(&str, EvalErrorKind); 6] = [
+            (
+                "set med route.origin-as + 0; accept",
+                EvalErrorKind::AbsentField(OriginAs),
+            ),
+            (
+                "let o = route.origin-as; set med o; accept",
+                EvalErrorKind::AbsentField(OriginAs),
+            ),
+            (
+                "let o = route.origin-as; add community o; accept",
+                EvalErrorKind::AbsentField(OriginAs),
+            ),
+            (
+                "set local-pref route.med / 0; accept",
+                EvalErrorKind::DivideByZero,
+            ),
+            ("set med route.med - 1; accept", EvalErrorKind::Underflow),
+            (
+                "prepend as origin 1; accept",
+                EvalErrorKind::AbsentPrependOperand(crate::engine::PrependAs::OriginAs),
+            ),
+        ];
+        for (body, kind) in cases {
+            let chain = chain_of(&format!("policy p {{ term t {{ {body} }} }}"));
+            assert_eq!(
+                verdict(&chain, &set_only()),
+                (PolicyAction::Deny, Some(kind)),
+                "{body}"
+            );
+        }
+        // A skipped action never runs.
+        let chain = chain_of(
+            "policy p { term t { let o = route.origin-as; if exists route.origin-as { set med o } accept } }",
+        );
+        assert_eq!(verdict(&chain, &set_only()), (PolicyAction::Permit, None));
+    }
+
+    /// `exists` tells a missing value from a present one for every optional
+    /// field, `route.med` and `route.local-pref` included (their comparisons
+    /// read the defaults). Each field is tested on a route where only it is
+    /// present, so a probe of the wrong field cannot pass.
+    #[test]
+    fn exists_tests_each_optional_field() {
+        let fields = [
+            "route.origin-as",
+            "peer.asn",
+            "route.med",
+            "route.local-pref",
+            "route.next-hop",
+        ];
+        let only = |field: &str| {
+            let mut ctx = set_only();
+            match field {
+                "route.origin-as" => ctx.origin_asn = Some(64500),
+                "peer.asn" => ctx.peer_asn = Some(64501),
+                "route.med" => ctx.med = Some(0),
+                "route.local-pref" => ctx.local_pref = Some(100),
+                _ => ctx.next_hop = Some("192.0.2.1".parse().unwrap()),
+            }
+            ctx
+        };
+        for probed in fields {
+            let chain = chain_of(&format!(
+                "policy p {{ term t {{ if exists {probed} {{ reject }} }} term rest {{ accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &set_only()),
+                (PolicyAction::Permit, None),
+                "{probed}"
+            );
+            for present in fields {
+                let expected = if present == probed {
+                    PolicyAction::Deny
+                } else {
+                    PolicyAction::Permit
+                };
+                assert_eq!(
+                    verdict(&chain, &only(present)),
+                    (expected, None),
+                    "exists {probed} on a route with only {present}"
+                );
+            }
+        }
+        let peer = compile_ok("policy p { term t { if exists peer.asn { reject } } }");
+        assert!(
+            peer.requires_peer_context(),
+            "exists peer.asn reads the peer"
+        );
+        let route = compile_ok("policy p { term t { if exists route.med { reject } } }");
+        assert!(!route.requires_peer_context());
+    }
+
+    #[test]
+    fn exists_rejects_unsupported_fields_and_stays_contextual() {
+        let (_, rendered) =
+            diagnostics_of("policy p { term t { if exists route.prefix { reject } } }");
+        assert!(
+            rendered.contains("`exists` does not support `route.prefix`"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("presence tests support only: route.origin-as, peer.asn"),
+            "{rendered}"
+        );
+        // A binding or parameter named `exists` keeps working.
+        compile_ok("policy p(exists: u32) { term t { if exists >= 1 { reject } } }");
+        compile_ok("policy p { term t { let exists = 3; set med exists; accept } }");
+        // `fmt` keeps the form and is idempotent.
+        let source =
+            "policy p {term t {if !exists route.origin-as||route.origin-as+0==1 {reject}}}\n";
+        let formatted = format_rpol(source).expect("formats");
+        assert!(
+            formatted.contains("!exists route.origin-as || route.origin-as + 0 == 1"),
+            "{formatted}"
+        );
+        assert_eq!(format_rpol(&formatted).expect("reformats"), formatted);
+    }
+
+    /// The docs example: reject a route when the value cannot be told.
+    #[test]
+    fn rejecting_when_a_value_is_missing() {
+        let example = r#"
+policy block-64500 {
+    term no-origin { if !exists route.origin-as { reject } }
+    term blocked { if route.origin-as == 64500 { reject } }
+    term rest { accept }
+}
+test as-set-only-is-rejected {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect block-64500 == reject
+}
+test blocked-is-rejected {
+    route { prefix 192.0.2.0/24; as-path "65010 64500" }
+    expect block-64500 == reject
+}
+test others-are-accepted {
+    route { prefix 192.0.2.0/24; as-path "65010 64501" }
+    expect block-64500 == accept
+}
+"#;
+        let report = run_rpol_tests(example).expect("compiles");
+        assert_eq!(report.total, 3);
+        assert!(report.all_passed(), "{:?}", report.failures);
+        // The presence test is load-bearing: without it the missing origin
+        // decides nothing and the route reaches `accept`.
+        let without = r#"
+policy block-64500 {
+    term blocked { if route.origin-as == 64500 { reject } }
+    term rest { accept }
+}
+test as-set-only-is-accepted {
+    route { prefix 192.0.2.0/24; as-path "{64500 64501}" }
+    expect block-64500 == accept
+}
+"#;
+        let report = run_rpol_tests(without).expect("compiles");
+        assert_eq!(report.total, 1);
+        assert!(report.all_passed(), "{:?}", report.failures);
+    }
+
+    /// Inside a `for` body a binding or guard on a missing value behaves the
+    /// same: the condition is false on every iteration, and an action that
+    /// needs the value denies with its kind (the loop error rail).
+    #[test]
+    fn loop_bodies_follow_the_same_rule() {
+        use crate::ir::ValueField::OriginAs;
+        let communities = [(65_000 << 16) | 1, (65_000 << 16) | 2];
+        let ctx = RouteContext {
+            communities: &communities,
+            ..set_only()
+        };
+        for body in [
+            "let o = route.origin-as; if o == 1 { reject }",
+            "if route.origin-as + 0 == 1 { reject }",
+            "let o = route.origin-as; if o in peers { reject }",
+        ] {
+            let chain = chain_of(&format!(
+                "asn-set peers {{ 1 }} \
+                 policy p {{ term t {{ for c in route.communities {{ {body} }} accept }} }}"
+            ));
+            assert_eq!(
+                verdict(&chain, &ctx),
+                (PolicyAction::Permit, None),
+                "{body}"
+            );
+        }
+        let chain = chain_of(
+            "policy p { term t { for c in route.communities { let o = route.origin-as; set med o } accept } }",
+        );
+        assert_eq!(
+            verdict(&chain, &ctx),
+            (
+                PolicyAction::Deny,
+                Some(EvalErrorKind::AbsentField(OriginAs))
+            )
+        );
+    }
+
+    /// Cost pin: `exists` is one cheapest-tier IR node, the rule adds no IR
+    /// node, and the typechecker's evaluation-cost DP charges `exists` one
+    /// step like `has`: the longest loop-body conjunction within the
+    /// per-route budget is the same for both.
+    #[test]
+    fn cost_model_is_unchanged() {
+        use crate::ir::{MatchExpr, OptionalField};
+        assert_eq!(MatchExpr::Exists(OptionalField::Med).cost_class(), 0);
+        let chain = reject_if("route.origin-as + 0 == 1 && route.med >= 1");
+        let guard = &chain.policies[0].terms[0].guard;
+        let MatchExpr::And(children) = guard else {
+            panic!("one And of two leaves: {guard:?}");
+        };
+        assert_eq!(children.len(), 2, "no node added: {guard:?}");
+        let chain = reject_if("exists route.med");
+        assert_eq!(
+            chain.policies[0].terms[0].guard,
+            MatchExpr::Exists(OptionalField::Med)
+        );
+
+        let source = |leaf: &str, n: usize| {
+            let guard = vec![leaf; n].join(" && ");
+            format!(
+                "policy p {{ term t {{ for c in route.communities {{ if {guard} {{ set med 1 }} }} accept }} }}"
+            )
+        };
+        let longest = |leaf: &str| {
+            (1..1_000)
+                .take_while(|&n| {
+                    super::super::compile_rpol(&source(leaf, n), &mut crate::sets::SetStore::new())
+                        .is_ok()
+                })
+                .last()
+                .expect("one leaf fits")
+        };
+        let has = longest("route.communities has 65000:1");
+        let (_, rendered) = diagnostics_of(&source("route.communities has 65000:1", has + 1));
+        assert!(
+            rendered.contains("exceeds the worst-case evaluation budget"),
+            "the evaluation budget binds: {rendered}"
+        );
+        assert_eq!(longest("exists route.med"), has);
+    }
+}
+
+// ─── typed policy parameters ────────────────────────────────────────
+
+const TYPED_SOURCE: &str = "
+prefix-set cust-65001 { 10.10.0.0/16 le 24 }
+prefix-set cust-65002 { 10.20.0.0/16 le 24 }
+community-set blocked { 65000:666 }
+asn-set origins-65001 { 65001 }
+
+policy customer-in(lp: u32, pfx: prefix-set, block: community-set, origins: asn-set,
+                   tag: community, nh: ip) {
+    default-action reject
+    term blocked { if route.communities in block { reject } }
+    term ours {
+        if route.prefix in pfx && route.origin-as in origins {
+            set local-pref lp
+            add community tag
+            set next-hop nh
+            accept
+        }
+    }
+}
+
+policy tagged-only(tag: community) {
+    default-action reject
+    term t { if route.communities has tag { accept } }
+}
+
+policy from-peer(addr: ip) {
+    default-action reject
+    term t { if peer.address == addr && route.next-hop != addr { accept } }
+}
+
+policy pad(n: u32) {
+    term t { prepend as 65000 n; accept }
+}
+";
+
+fn typed_ctx(prefix: Prefix, communities: &[u32], origin: u32) -> RouteContext<'static> {
+    let mut ctx = route_ctx(prefix, communities, RpkiValidation::NotFound);
+    ctx.origin_asn = Some(origin);
+    ctx
+}
+
+fn compile_call(file: &RpolFile, name: &str, args: &[super::CallArg]) -> crate::ir::CompiledChain {
+    let args = file.resolve_call(name, args).expect("arguments resolve");
+    file.compile_policy_args(
+        name,
+        &args,
+        &mut SetStore::new(),
+        &crate::datasets::DatasetBindings::new(),
+        false,
+    )
+    .expect("policy exists")
+    .expect("no datasets")
+}
+
+/// Every parameter type binds at instantiation: the set arguments select
+/// sets, the community and address arguments are constants, and two
+/// argument lists instantiate two independent policies from one template.
+#[test]
+fn typed_parameters_bind_sets_communities_and_addresses() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let args = |prefixes: &str| {
+        vec![
+            CallArg::Int(200),
+            CallArg::Name(prefixes.to_string()),
+            CallArg::Name("blocked".to_string()),
+            CallArg::Name("origins-65001".to_string()),
+            CallArg::Community((65000 << 16) | 0x64),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+        ]
+    };
+    let first = compile_call(&file, "customer-in", &args("cust-65001"));
+    let second = compile_call(&file, "customer-in", &args("cust-65002"));
+    let in_first = typed_ctx(v4(10, 10, 1, 0, 24), &[], 65001);
+    let in_second = typed_ctx(v4(10, 20, 1, 0, 24), &[], 65001);
+
+    let result = first.evaluate(&in_first);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_local_pref, Some(200));
+    assert_eq!(result.modifications.communities_add, [(65000 << 16) | 0x64]);
+    assert_eq!(
+        result.modifications.set_next_hop,
+        Some(crate::engine::NextHopAction::Specific(
+            "192.0.2.1".parse().unwrap()
+        ))
+    );
+    assert_eq!(first.evaluate(&in_second).action, PolicyAction::Deny);
+    assert_eq!(second.evaluate(&in_second).action, PolicyAction::Permit);
+    // Explain renders the set the argument bound.
+    let chain = crate::engine::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "customer-in".to_string(),
+        Arc::new(second.clone()),
+    )]);
+    let trace = crate::engine::explain::explain_chain_statements(Some(&chain), &in_second);
+    let rendered = format!("{:?}", trace.steps);
+    assert!(rendered.contains("cust-65002"), "{rendered}");
+    assert!(!rendered.contains("pfx"), "{rendered}");
+    assert_eq!(second.evaluate(&in_first).action, PolicyAction::Deny);
+    // The community-set and asn-set arguments.
+    let blocked = typed_ctx(v4(10, 10, 1, 0, 24), &[(65000 << 16) | 0x29A], 65001);
+    assert_eq!(first.evaluate(&blocked).action, PolicyAction::Deny);
+    let other_origin = typed_ctx(v4(10, 10, 1, 0, 24), &[], 65009);
+    assert_eq!(first.evaluate(&other_origin).action, PolicyAction::Deny);
+
+    // `has <community>`.
+    let tagged = compile_call(
+        &file,
+        "tagged-only",
+        &[CallArg::Community((65000 << 16) | 0x7)],
+    );
+    assert_eq!(
+        tagged
+            .evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[(65000 << 16) | 0x7], 1))
+            .action,
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        tagged
+            .evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[(65000 << 16) | 0x8], 1))
+            .action,
+        PolicyAction::Deny
+    );
+
+    // `ip` in comparisons.
+    let from = compile_call(
+        &file,
+        "from-peer",
+        &[CallArg::Ip("192.0.2.9".parse().unwrap())],
+    );
+    let mut ctx = typed_ctx(v4(10, 0, 0, 0, 8), &[], 1);
+    ctx.peer_address = Some("192.0.2.9".parse().unwrap());
+    ctx.next_hop = Some("192.0.2.10".parse().unwrap());
+    assert_eq!(from.evaluate(&ctx).action, PolicyAction::Permit);
+    ctx.peer_address = Some("192.0.2.8".parse().unwrap());
+    assert_eq!(from.evaluate(&ctx).action, PolicyAction::Deny);
+}
+
+/// A `prepend` count may be a `u32` parameter. Its argument is range-checked
+/// where the policy is instantiated, as a literal count is at typecheck.
+#[test]
+fn prepend_count_parameter_is_range_checked_at_instantiation() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let chain = compile_call(&file, "pad", &[CallArg::Int(3)]);
+    let result = chain.evaluate(&typed_ctx(v4(10, 0, 0, 0, 8), &[], 1));
+    assert_eq!(result.modifications.as_path_prepend, Some((65000, 3)));
+    for bad in [0, 256] {
+        let error = file
+            .resolve_call("pad", &[CallArg::Int(bad)])
+            .expect_err("out-of-range count");
+        assert!(error.contains("prepend count"), "{error}");
+        assert!(error.contains("1-255"), "{error}");
+    }
+    let (_, rendered) = diagnostics_of(&format!(
+        "{TYPED_SOURCE}\ntest t {{ route {{ prefix 10.0.0.0/8 }} expect pad(300) == accept }}"
+    ));
+    assert!(
+        rendered.contains("prepend count 300 out of range"),
+        "{rendered}"
+    );
+}
+
+/// Attach-time checks: arity, each argument's type, an unknown set, a set
+/// of the wrong kind, and an unusable `set next-hop` address.
+#[test]
+fn typed_call_resolution_rejects_mismatches() {
+    use super::CallArg;
+
+    let file = RpolFile::parse(TYPED_SOURCE).expect("parses");
+    let good = |index: usize, arg: CallArg| {
+        let mut args = vec![
+            CallArg::Int(200),
+            CallArg::Name("cust-65001".to_string()),
+            CallArg::Name("blocked".to_string()),
+            CallArg::Name("origins-65001".to_string()),
+            CallArg::Community(1),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+        ];
+        args[index] = arg;
+        file.resolve_call("customer-in", &args)
+    };
+    assert!(good(0, CallArg::Int(200)).is_ok());
+    for (index, arg, needle) in [
+        (0, CallArg::Name("cust-65001".to_string()), "is not a u32"),
+        (
+            1,
+            CallArg::Name("nope".to_string()),
+            "unknown prefix-set `nope`",
+        ),
+        (
+            1,
+            CallArg::Name("blocked".to_string()),
+            "unknown prefix-set `blocked`",
+        ),
+        (1, CallArg::Int(5), "is not a prefix-set"),
+        (
+            2,
+            CallArg::Name("cust-65001".to_string()),
+            "unknown community-set",
+        ),
+        (3, CallArg::Community(1), "is not an asn-set"),
+        (4, CallArg::Int(1), "is not a community"),
+        (
+            5,
+            CallArg::Ip("224.0.0.1".parse().unwrap()),
+            "invalid next hop 224.0.0.1",
+        ),
+        (5, CallArg::Name("x".to_string()), "is not an ip"),
+    ] {
+        let error = good(index, arg.clone()).expect_err("mismatch rejected");
+        assert!(error.contains(needle), "{arg:?}: {error}");
+    }
+    let error = file
+        .resolve_call("customer-in", &[CallArg::Int(1)])
+        .expect_err("arity");
+    assert!(error.contains("takes 6 parameter(s), 1 given"), "{error}");
+}
+
+/// Check-time errors: a typed parameter in a position of another type, a set
+/// parameter in the wrong probe, a set parameter as a loop source, a
+/// parameter named like a set, and an `expect` argument of the wrong type.
+#[test]
+fn typed_parameter_misuse_is_a_compile_error() {
+    for (source, needle) in [
+        (
+            "prefix-set s { 10.0.0.0/8 } policy p(x: prefix-set) { term t { set med x } }",
+            "parameter `x` is a prefix-set, but this position needs a u32 value",
+        ),
+        (
+            "policy p(x: prefix-set) { term t { if route.communities in x { accept } } }",
+            "but this probe needs `community-set`",
+        ),
+        (
+            "policy p(x: asn-set) { term t { for a in x { break } } }",
+            "a set parameter is not a loop source",
+        ),
+        (
+            "prefix-set s { 10.0.0.0/8 } policy p(s: prefix-set) { term t { accept } }",
+            "parameter `s` has the name of a prefix-set",
+        ),
+        (
+            "policy p(x: u32) { term t { set next-hop x } }",
+            "parameter `x`",
+        ),
+        (
+            "policy p(x: ip) { term t { add community x } }",
+            "parameter `x` is an ip, but this position needs a community",
+        ),
+        (
+            "policy p(x: community) { term t { if route.large-communities has x { accept } } }",
+            "cannot be probed with a `community` parameter",
+        ),
+        (
+            "prefix-set s { 10.0.0.0/8 }
+             policy p(x: prefix-set) { term t { if route.prefix in x { accept } } }
+             test t { route { prefix 10.0.0.0/8 } expect p(65000:1) == accept }",
+            "is not a prefix-set",
+        ),
+        (
+            "policy p(x: prefix-set) { term t { if route.prefix in x { accept } } }
+             test t { route { prefix 10.0.0.0/8 } expect p(missing) == accept }",
+            "unknown prefix-set `missing`",
+        ),
+    ] {
+        let (_, rendered) = diagnostics_of(source);
+        assert!(rendered.contains(needle), "{source}\n{rendered}");
+    }
+}
+
+/// `apply` passes a caller's typed parameter through, or a set name, and
+/// type-checks both against the target; the in-language test runner
+/// instantiates typed policies from `expect` arguments.
+#[test]
+fn typed_parameters_flow_through_apply_and_tests() {
+    let source = "
+prefix-set ours { 10.0.0.0/8 le 24 }
+prefix-set theirs { 192.0.2.0/24 }
+
+policy member(s: prefix-set) {
+    default-action reject
+    term t { if route.prefix in s { accept } }
+}
+
+policy wrap(s: prefix-set, tag: community) {
+    term t { if apply(member(s)) { add community tag; accept } }
+}
+
+policy fixed {
+    term t { if apply(member(theirs)) { reject } }
+}
+
+test wraps-ours {
+    route { prefix 10.1.0.0/16 }
+    expect wrap(ours, 65000:5) == accept with community 65000:5
+    expect wrap(theirs, 65000:5) == accept
+    expect member(theirs) == reject
+}
+
+test fixed-rejects-theirs {
+    route { prefix 192.0.2.0/24 }
+    expect fixed == reject
+}
+";
+    let file = RpolFile::parse(source).expect("parses");
+    let report = file.run_tests();
+    assert!(report.all_passed(), "{report:?}");
+    assert_eq!(report.total, 2);
+    // Sets used only as arguments are uses, not unused sets.
+    assert!(
+        !file
+            .lints()
+            .iter()
+            .any(|lint| lint.kind == super::LintKind::UnusedSet),
+        "{:?}",
+        file.lints()
+    );
+    let (_, rendered) = diagnostics_of(
+        "policy member(s: prefix-set) { term t { if route.prefix in s { accept } } }
+         policy wrap(tag: community) { term t { if apply(member(tag)) { accept } } }",
+    );
+    assert!(
+        rendered.contains("parameter `tag` is a community, but `s` takes a prefix-set"),
+        "{rendered}"
+    );
+}
+
+/// The configured-chain call form: integers, names, communities and
+/// addresses, with the u32-only reader keeping its error for a name.
+#[test]
+fn call_form_arguments_parse_by_shape() {
+    use super::{CallArg, parse_call_args, parse_call_form};
+
+    let (base, args) = parse_call_args(
+        "customer-in(200, cust-65001, 65000:100, 192.0.2.1, 2001:db8::1, NO_EXPORT)",
+    )
+    .expect("parses");
+    assert_eq!(base, "customer-in");
+    assert_eq!(
+        args,
+        [
+            CallArg::Int(200),
+            CallArg::Name("cust-65001".to_string()),
+            CallArg::Community((65000 << 16) | 0x64),
+            CallArg::Ip("192.0.2.1".parse().unwrap()),
+            CallArg::Ip("2001:db8::1".parse().unwrap()),
+            CallArg::Community(0xFFFF_FF01),
+        ]
+    );
+    for bad in ["p(4294967296)", "p(70000:1)", "p(@x)"] {
+        assert!(parse_call_args(bad).is_err(), "{bad}");
+    }
+    let error = parse_call_form("p(high)").expect_err("u32 only");
+    assert!(error.contains("is not a u32"), "{error}");
+}
+
+/// Typed parameter lists and arguments format canonically.
+#[test]
+fn typed_parameters_format_canonically() {
+    let source = "policy p( lp:u32,s :prefix-set , t: community,a:ip ) { term t { accept } }
+test x { route { prefix 10.0.0.0/8 } expect p(1,s,65000:1,192.0.2.1) == accept }";
+    let formatted = super::format_rpol(source).expect("formats");
+    assert!(
+        formatted.starts_with("policy p(lp: u32, s: prefix-set, t: community, a: ip) {"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("expect p(1, s, 65000:1, 192.0.2.1) == accept"),
+        "{formatted}"
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+}
+
+/// Typed parameters combine with `else if` chains, nested `if` and
+/// community patterns: a `community-set` parameter binds a set with
+/// pattern members, and parameters inside `else if` and nested bodies
+/// substitute and range-check like top-level ones.
+#[test]
+fn typed_parameters_bind_pattern_sets_inside_else_if_chains() {
+    const GOOD: &str = "exact, pats, 300, 65000:9, 2, 192.0.2.9";
+    let source = |edge_args: &str| {
+        format!(
+            r"
+community-set pats {{ 64496:*, 64497:100..199, PRIVATE_AS:666 }}
+community-set exact {{ 64496:1 }}
+
+policy tiers(top: community-set, rest: community-set, lp: u32, tag: community, n: u32, nh: ip) {{
+    term t {{
+        if route.communities in top {{ set local-pref lp }}
+        else if route.communities in rest {{
+            if route.med >= 10 {{ prepend as 65000 n }} else {{ add community tag }}
+            set next-hop nh
+        }}
+        else {{ reject }}
+        accept
+    }}
+}}
+
+test exact-first {{
+    route {{ prefix 192.0.2.0/24; communities [64496:1] }}
+    expect tiers({GOOD}) == accept with local-pref 300
+}}
+test range-member {{
+    route {{ prefix 192.0.2.0/24; communities [64497:150] }}
+    expect tiers({GOOD}) == accept with community 65000:9
+}}
+test private-pattern-nested {{
+    route {{ prefix 192.0.2.0/24; communities [64600:666]; med 20 }}
+    expect tiers({GOOD}) == accept with prepend as 65000 2
+}}
+test range-edge {{
+    route {{ prefix 192.0.2.0/24; communities [64497:200] }}
+    expect tiers({edge_args}) == reject
+}}
+"
+        )
+    };
+    let report = super::run_rpol_tests(&source(GOOD)).expect("compiles");
+    assert_eq!(report.total, 4);
+    assert!(report.failures.is_empty(), "{:#?}", report.failures);
+
+    // A nested `prepend` count and `set next-hop` operand are still
+    // range-checked at instantiation.
+    for (args, needle) in [
+        (
+            "exact, pats, 300, 65000:9, 0, 192.0.2.9",
+            "prepend count 0 out of range",
+        ),
+        (
+            "exact, pats, 300, 65000:9, 2, 0.0.0.0",
+            "invalid next hop 0.0.0.0",
+        ),
+    ] {
+        let (_, rendered) = diagnostics_of(&source(args));
+        assert!(rendered.contains(needle), "{needle}: {rendered}");
+    }
+
+    // A pattern is a set member, not a `community` argument, in a test
+    // `expect` and in a configured chain reference.
+    let file = RpolFile::parse(&source(GOOD)).expect("parses");
+    for bad in ["65000:*", "PRIVATE_AS"] {
+        let args = format!("exact, pats, 300, {bad}, 2, 192.0.2.9");
+        let (diags, rendered) = diagnostics_of(&source(&args));
+        assert!(!diags.is_empty(), "{bad}: {rendered}");
+        let reference = format!("tiers({args})");
+        let resolved = super::parse_call_args(&reference)
+            .and_then(|(name, args)| file.resolve_call(name, &args).map(|_| ()));
+        assert!(resolved.is_err(), "{bad}");
+    }
+}
+
+// ─── typed parameters: one name resolution ─────────────────────────
+
+/// Every reviewed source that put a parameter name to a second meaning:
+/// the rejection, then the policy around the shape that still compiles.
+mod typed_parameter_names {
+    use super::super::{CallArg, RpolFile, check_rpol, parse_call_args, run_rpol_tests};
+    use super::{SetStore, diagnostics_of};
+    use crate::rpol::typeck::{ASPA_MEMBERS, FAMILY_MEMBERS, ROUTE_TYPE_MEMBERS, RPKI_MEMBERS};
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(report.total, total);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// An enum value cannot name a parameter. Before the reservation, an
+    /// `ip` parameter named like the compared member typechecked as the
+    /// member and panicked in lowering.
+    #[test]
+    fn enum_values_are_reserved_parameter_names() {
+        for (field, members) in [
+            ("rpki", RPKI_MEMBERS),
+            ("aspa", ASPA_MEMBERS),
+            ("route-type", ROUTE_TYPE_MEMBERS),
+            ("family", FAMILY_MEMBERS),
+        ] {
+            for member in members {
+                for ty in ["ip", "u32", "community", "prefix-set"] {
+                    let source = format!(
+                        "policy p({member}: {ty}) {{ term t {{ if route.{field} == {member} {{ accept }} }} }}"
+                    );
+                    let (_, rendered) = diagnostics_of(&source);
+                    assert!(
+                        rendered
+                            .contains(&format!("parameter `{member}` has the name of a `route.")),
+                        "{source}: {rendered}"
+                    );
+                }
+            }
+        }
+        // The member itself still compares.
+        passes(
+            "policy p(a: ip) { term t { if route.rpki == valid && route.next-hop == a { accept } } \
+             term rest { reject } }
+             test v { route { prefix 192.0.2.0/24; rpki valid; next-hop 192.0.2.1 } \
+                 expect p(192.0.2.1) == accept }
+             test n { route { prefix 192.0.2.0/24; rpki valid; next-hop 192.0.2.2 } \
+                 expect p(192.0.2.1) == reject }",
+            2,
+        );
+    }
+
+    /// `origin` and `path-first` always mean their `prepend as` operands:
+    /// a `community` parameter of that name once lowered as an ASN
+    /// (65000:100 prepended as 4259840100).
+    #[test]
+    fn prepend_operand_names_are_reserved() {
+        for name in ["origin", "path-first"] {
+            for ty in ["community", "u32", "ip"] {
+                let (_, rendered) = diagnostics_of(&format!(
+                    "policy p({name}: {ty}) {{ term t {{ prepend as {name} 1; accept }} }}"
+                ));
+                assert!(
+                    rendered.contains(&format!(
+                        "parameter `{name}` has the name of the `prepend as {name}` operand"
+                    )),
+                    "{name}: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// A well-known community name cannot name a parameter or a set: as an
+    /// argument it is always that community. `NO_EXPORT` forwards as the
+    /// community through a parameter, and as a literal.
+    #[test]
+    fn well_known_names_are_reserved_and_forward_as_communities() {
+        let (_, rendered) = diagnostics_of(
+            "policy p(NO_EXPORT: community) { term t { if route.communities has NO_EXPORT { accept } } }",
+        );
+        assert!(
+            rendered.contains("parameter `NO_EXPORT` has the name of a well-known community"),
+            "{rendered}"
+        );
+        for kind in ["community-set", "prefix-set", "asn-set"] {
+            let entry = match kind {
+                "community-set" => "65000:1",
+                "prefix-set" => "192.0.2.0/24",
+                _ => "65000",
+            };
+            let (_, rendered) = diagnostics_of(&format!("{kind} BLACKHOLE {{ {entry} }}"));
+            assert!(
+                rendered.contains(&format!(
+                    "{kind} `BLACKHOLE` has the name of a well-known community"
+                )),
+                "{rendered}"
+            );
+        }
+        let (_, rendered) = diagnostics_of("dataset community-set GRACEFUL_SHUTDOWN");
+        assert!(
+            rendered.contains("dataset `GRACEFUL_SHUTDOWN` has the name of a well-known community"),
+            "{rendered}"
+        );
+        passes(
+            "policy inner(t: community) { term x { if route.communities has t { accept } } term rest { reject } }
+             policy forward(t: community) { term x { if apply(inner(t)) { accept } } term rest { reject } }
+             policy literal { term x { if apply(inner(NO_EXPORT)) { accept } } term rest { reject } }
+             test forwarded { route { prefix 192.0.2.0/24; communities [NO_EXPORT] } expect forward(NO_EXPORT) == accept }
+             test forwarded-other { route { prefix 192.0.2.0/24; communities [65000:1] } expect forward(NO_EXPORT) == reject }
+             test literal-arg { route { prefix 192.0.2.0/24; communities [NO_EXPORT] } expect literal == accept }
+             test literal-other { route { prefix 192.0.2.0/24; communities [65000:1] } expect literal == reject }",
+            4,
+        );
+        // An extended well-known community is not a `community` argument.
+        let (_, rendered) = diagnostics_of(
+            "policy p(t: community) { term x { if route.communities has t { accept } } }
+             test x { route { prefix 192.0.2.0/24 } expect p(OV_VALID) == accept }",
+        );
+        assert!(
+            rendered.contains("`OV_VALID` is an extended community"),
+            "{rendered}"
+        );
+    }
+
+    /// Only the alias list is a literal: any other all-caps name is a
+    /// parameter, in `has` and in `add community`.
+    #[test]
+    fn all_caps_parameter_names_resolve_as_parameters() {
+        passes(
+            "policy p(TAG: community) { term t { if route.communities has TAG { accept } } term rest { reject } }
+             policy q(TAG: community) { term t { add community TAG; accept } }
+             test hit { route { prefix 192.0.2.0/24; communities [65000:7] } expect p(65000:7) == accept }
+             test miss { route { prefix 192.0.2.0/24; communities [65000:8] } expect p(65000:7) == reject }
+             test added { route { prefix 192.0.2.0/24 } expect q(65000:7) == accept with community 65000:7 }",
+            3,
+        );
+    }
+
+    /// A `let` shadows an outer parameter of any type at `add community`,
+    /// as it does in value positions.
+    #[test]
+    fn let_shadows_typed_parameters_in_community_actions() {
+        passes(
+            "policy c(x: community) { term t { let x = 7; add community x; accept } }
+             policy i(x: ip) { term t { let x = 65000; add community x; set med x; accept } }
+             test community { route { prefix 192.0.2.0/24 } expect c(65000:1) == accept with community 0:7 }
+             test ip { route { prefix 192.0.2.0/24 } expect i(192.0.2.1) == accept with community 0:65000, med 65000 }",
+            2,
+        );
+    }
+
+    /// The `&[u32]` compile APIs check their arguments like a chain
+    /// reference: no silent prepend count of 1 for 300, and an error, not
+    /// a panic, for a parameter of another type.
+    #[test]
+    fn u32_compile_apis_check_arguments() {
+        let file = RpolFile::parse("policy cnt(n: u32) { term t { prepend as 65000 n; accept } }")
+            .expect("clean");
+        let error = file
+            .compile_policy("cnt", &[300], &mut SetStore::new())
+            .unwrap_err();
+        assert!(error.contains("prepend count 300 out of range"), "{error}");
+        assert!(
+            file.compile_policy("cnt", &[3], &mut SetStore::new())
+                .is_ok()
+        );
+        let error = file
+            .compile_policy("cnt", &[], &mut SetStore::new())
+            .unwrap_err();
+        assert!(error.contains("takes 1 parameter(s), 0 given"), "{error}");
+        let error = file
+            .compile_policy("missing", &[], &mut SetStore::new())
+            .unwrap_err();
+        assert!(error.contains("is not defined"), "{error}");
+
+        let typed = RpolFile::parse(
+            "prefix-set cust { 192.0.2.0/24 } policy ps(s: prefix-set) { term t { if route.prefix in s { accept } } }",
+        )
+        .expect("clean");
+        let error = typed
+            .compile_policy("ps", &[5], &mut SetStore::new())
+            .unwrap_err();
+        assert!(error.contains("is not a prefix-set"), "{error}");
+    }
+
+    /// A parameter passed on through `apply` is checked against the uses
+    /// it reaches there: the prepend count, the prepend ASN and the next
+    /// hop.
+    #[test]
+    fn apply_arguments_inherit_value_ranges() {
+        let source = |args: &str| {
+            format!(
+                "policy inner(n: u32, a: u32, h: ip) {{ term t {{ prepend as a n; set next-hop h; accept }} }}
+                 policy outer(m: u32, b: u32, g: ip) {{ term t {{ if apply(inner(m, b, g)) {{ accept }} }} }}
+                 test x {{ route {{ prefix 192.0.2.0/24 }} expect outer({args}) == accept }}"
+            )
+        };
+        assert_eq!(check_rpol(&source("3, 65001, 192.0.2.1")).diagnostics.0, []);
+        for (args, needle) in [
+            ("300, 65001, 192.0.2.1", "prepend count 300 out of range"),
+            ("3, 0, 192.0.2.1", "AS 0 cannot be prepended (RFC 7607)"),
+            ("3, 65001, 224.0.0.1", "invalid next hop 224.0.0.1"),
+        ] {
+            let (_, rendered) = diagnostics_of(&source(args));
+            assert!(rendered.contains(needle), "{args}: {rendered}");
+        }
+    }
+
+    /// A parameter used as a `prepend` ASN rejects AS 0 in a test `expect`
+    /// and through `resolve_call`, before any chain is built.
+    #[test]
+    fn prepend_asn_parameter_rejects_as_zero() {
+        let policy = "policy p(a: u32) { term t { prepend as a 1; accept } }";
+        let (_, rendered) = diagnostics_of(&format!(
+            "{policy} test x {{ route {{ prefix 192.0.2.0/24 }} expect p(0) == accept }}"
+        ));
+        assert!(
+            rendered.contains("AS 0 cannot be prepended (RFC 7607) for parameter `a`"),
+            "{rendered}"
+        );
+        let file = RpolFile::parse(policy).expect("clean");
+        let error = file.resolve_call("p", &[CallArg::Int(0)]).unwrap_err();
+        assert!(error.contains("AS 0 cannot be prepended"), "{error}");
+        assert!(file.resolve_call("p", &[CallArg::Int(65001)]).is_ok());
+    }
+
+    /// Call-form arguments read exactly as the language does, so a set
+    /// name may start with `_`.
+    #[test]
+    fn call_form_arguments_follow_the_language_lexer() {
+        assert_eq!(
+            parse_call_args("p(_cust, NO_EXPORT, 65000:1, 2001:db8::1, 7)").unwrap(),
+            (
+                "p",
+                vec![
+                    CallArg::Name("_cust".to_string()),
+                    CallArg::Community(0xFFFF_FF01),
+                    CallArg::Community((65000 << 16) | 1),
+                    CallArg::Ip("2001:db8::1".parse().unwrap()),
+                    CallArg::Int(7),
+                ]
+            )
+        );
+        for bad in ["p(a b)", "p(65000:*)", "p(OV_VALID)", "p(-x)"] {
+            assert!(parse_call_args(bad).is_err(), "{bad}");
+        }
+        let source = "prefix-set _cust { 192.0.2.0/24 }
+                      policy p(s: prefix-set) { term t { if route.prefix in s { accept } } term rest { reject } }
+                      test x { route { prefix 192.0.2.0/24 } expect p(_cust) == accept }";
+        passes(source, 1);
+        let file = RpolFile::parse(source).expect("clean");
+        let (name, args) = parse_call_args("p(_cust)").unwrap();
+        assert!(file.resolve_call(name, &args).is_ok());
+    }
+
+    /// The set-argument diagnostic uses the right article.
+    #[test]
+    fn unknown_set_argument_names_its_kind() {
+        let file = RpolFile::parse(
+            "policy p(a: asn-set) { term t { if route.origin-as in a { accept } } }",
+        )
+        .expect("clean");
+        let error = file
+            .resolve_call("p", &[CallArg::Name("nope".to_string())])
+            .unwrap_err();
+        assert!(
+            error.contains("(name an asn-set or an asn-set dataset)"),
+            "{error}"
+        );
+    }
+}
+
+// ─── typed parameters: round-2 regressions ─────────────────────────
+
+mod typed_parameter_round_two {
+    use super::super::run_rpol_tests;
+    use super::diagnostics_of;
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(report.total, total);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// A set argument keeps the kind of its parameter. With an asn-set and
+    /// a community-set of the same name, a `community-set` parameter
+    /// probes the community-set, for a binding and for a `u32` constant.
+    #[test]
+    fn set_arguments_keep_their_parameter_kind() {
+        passes(
+            "asn-set shared { 65000 }
+             community-set shared { 65000:1 }
+             policy binding(s: community-set) {
+                 term t { for c in route.communities { if c in s { reject } } }
+             }
+             policy constant(s: community-set, x: u32) {
+                 term t { if x in s { reject } }
+             }
+             policy asn(s: asn-set, x: u32) {
+                 term t { if x in s { reject } }
+             }
+             test community-binding {
+                 route { prefix 192.0.2.0/24; communities [65000:1] }
+                 expect binding(shared) == reject
+             }
+             test asn-value-binding {
+                 route { prefix 192.0.2.0/24; communities [0:65000] }
+                 expect binding(shared) == accept
+             }
+             test community-constant {
+                 route { prefix 192.0.2.0/24 }
+                 expect constant(shared, 4259840001) == reject
+             }
+             test asn-value-constant {
+                 route { prefix 192.0.2.0/24 }
+                 expect constant(shared, 65000) == accept
+             }
+             test asn-kind {
+                 route { prefix 192.0.2.0/24 }
+                 expect asn(shared, 65000) == reject
+             }",
+            5,
+        );
+    }
+
+    /// A `u32` parameter in `add`/`remove community` is the community with
+    /// that value.
+    #[test]
+    fn u32_parameters_add_and_remove_communities() {
+        passes(
+            "policy plus(x: u32) { term t { add community x; accept } }
+             policy minus(x: u32) { term t { remove community x; accept } }
+             test added { route { prefix 192.0.2.0/24 } expect plus(7) == accept with community 0:7 }
+             test removed {
+                 route { prefix 192.0.2.0/24; communities [0:7, 0:8] }
+                 expect minus(7) == accept with removes community 0:7, not removed community 0:8
+             }",
+            2,
+        );
+    }
+
+    /// A `community-set` parameter stands for its argument in `remove
+    /// community in` / `not in`, as in every other set position.
+    #[test]
+    fn set_parameters_in_remove_by_membership() {
+        passes(
+            "community-set scrub { 65000:* }
+             community-set keep { 64496:1 }
+             policy strip(s: community-set) { term t { remove community in s; accept } }
+             policy only(s: community-set) { term t { remove community not in s; accept } }
+             test strip-scrub {
+                 route { prefix 192.0.2.0/24; communities [65000:1, 64496:1] }
+                 expect strip(scrub) == accept with removes community 65000:1,
+                     not removed community 64496:1
+             }
+             test keep-only {
+                 route { prefix 192.0.2.0/24; communities [65000:1, 64496:1] }
+                 expect only(keep) == accept with removes community 65000:1,
+                     not removed community 64496:1
+             }",
+            2,
+        );
+        // The parameter must be a community-set, and a reserved name is no
+        // set: `NO_EXPORT` here is an unknown community-set.
+        let (_, rendered) =
+            diagnostics_of("policy p(s: prefix-set) { term t { remove community in s; accept } }");
+        assert!(
+            rendered
+                .contains("parameter `s` is a prefix-set, but this probe needs `community-set`"),
+            "{rendered}"
+        );
+        // A dataset cannot be the set of a removal, through an argument or
+        // passed on through `apply`.
+        for expect in ["strip(live)", "outer(live)"] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "dataset community-set live
+                 policy strip(s: community-set) {{ term t {{ remove community in s; accept }} }}
+                 policy outer(z: community-set) {{ term t {{ if apply(strip(z)) {{ accept }} }} }}
+                 test x {{ route {{ prefix 192.0.2.0/24 }} expect {expect} == accept }}"
+            ));
+            assert!(
+                rendered.contains("`live` is a dataset, but parameter"),
+                "{expect}: {rendered}"
+            );
+        }
+        let (_, rendered) =
+            diagnostics_of("policy p { term t { remove community in NO_EXPORT; accept } }");
+        assert!(rendered.contains("NO_EXPORT"), "{rendered}");
+        let (_, rendered) = diagnostics_of(
+            "policy p(BLACKHOLE: community-set) { term t { remove community in BLACKHOLE; accept } }",
+        );
+        assert!(
+            rendered.contains("parameter `BLACKHOLE` has the name of a well-known community"),
+            "{rendered}"
+        );
+    }
+
+    /// The value-use analysis behind argument checks stays shallow over a
+    /// long `apply` chain: validating a literal argument on a small stack
+    /// reports the depth error instead of overflowing.
+    #[test]
+    fn deep_apply_chain_checks_arguments_on_a_small_stack() {
+        use std::fmt::Write as _;
+        const DEPTH: usize = 5_000;
+        let mut source = String::new();
+        for level in 0..DEPTH {
+            writeln!(
+                source,
+                "policy p{level} {{ term t {{ if apply(p{}) {{ accept }} }} }}",
+                level + 1
+            )
+            .unwrap();
+        }
+        writeln!(source, "policy p{DEPTH} {{ term t {{ accept }} }}").unwrap();
+        source.push_str(
+            "policy w(n: u32) { term t { prepend as 65000 n; if apply(p0) { accept } } }
+             test x { route { prefix 192.0.2.0/24 } expect w(1) == accept }\n",
+        );
+        let rendered = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || diagnostics_of(&source).1)
+            .unwrap()
+            .join()
+            .expect("validation finishes on a 1 MiB stack");
+        assert!(
+            rendered.contains("composition depth limit"),
+            "{}",
+            &rendered[..rendered.len().min(400)]
+        );
+    }
+}
+
+// ─── typed parameters: round-3 regressions ─────────────────────────
+
+mod typed_parameter_round_three {
+    use super::super::{CallArg, RpolFile, check_rpol};
+    use super::diagnostics_of;
+
+    /// The check diagnostics of `source`, rendered (empty when clean).
+    fn check(source: &str) -> String {
+        let report = check_rpol(source);
+        report
+            .diagnostics
+            .0
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    const SETS: &str = "community-set std { 65000:1 }
+                        community-set big { 65000:1:1 }
+                        community-set rt { RT:65000:1 }
+                        community-set ov { OV_VALID }
+                        community-set mixed { 65000:1, 65000:1:1, RT:65000:1 }";
+
+    /// A removal set reached through a parameter gets the member checks a
+    /// named set gets, for every kind and both forms, directly and
+    /// forwarded through `apply`. Before, `remove large-community not in s`
+    /// with `s` bound to a standard-only set stripped every large
+    /// community, while naming that set directly was rejected.
+    #[test]
+    fn parameter_removal_sets_get_the_named_set_checks() {
+        let mut compared = 0;
+        for kind in ["community", "large-community", "ext-community"] {
+            for form in ["in", "not in"] {
+                for set in ["std", "big", "rt", "ov", "mixed"] {
+                    let direct = check(&format!(
+                        "{SETS}\npolicy p {{ term t {{ remove {kind} {form} {set}; accept }} }}"
+                    ))
+                    .is_empty();
+                    let body = format!("remove {kind} {form} s; accept");
+                    let template = format!(
+                        "{SETS}
+                         policy p(s: community-set) {{ term t {{ {body} }} }}
+                         policy outer(z: community-set) {{ term t {{ if apply(p(z)) {{ accept }} }} }}"
+                    );
+                    for call in [format!("p({set})"), format!("outer({set})")] {
+                        let source = format!(
+                            "{template}
+                             test x {{ route {{ prefix 192.0.2.0/24 }} expect {call} == accept }}"
+                        );
+                        let rendered = check(&source);
+                        assert_eq!(
+                            rendered.is_empty(),
+                            direct,
+                            "remove {kind} {form}: {call} vs naming `{set}`: {rendered}"
+                        );
+                        compared += 1;
+                    }
+                    let file = RpolFile::parse(&template).expect("the template checks clean");
+                    assert_eq!(
+                        file.resolve_call("p", &[CallArg::Name(set.to_string())])
+                            .is_ok(),
+                        direct,
+                        "remove {kind} {form}: resolve_call p({set})"
+                    );
+                }
+            }
+        }
+        assert_eq!(compared, 60);
+        let (_, rendered) = diagnostics_of(&format!(
+            "{SETS}
+             policy p(s: community-set) {{ term t {{ remove large-community not in s; accept }} }}
+             test x {{ route {{ prefix 192.0.2.0/24 }} expect p(std) == accept }}"
+        ));
+        assert!(
+            rendered.contains("has no large-community members"),
+            "{rendered}"
+        );
+    }
+
+    /// A well-known community name cannot reach a position that would
+    /// read it as a community alias before the caller's scope: no
+    /// parameter can take one, in any type. (Copilot review, first round,
+    /// "resolve community aliases after checking caller scope".)
+    #[test]
+    fn caller_scope_never_holds_an_alias_name() {
+        for alias in [
+            "NO_EXPORT",
+            "NO_ADVERTISE",
+            "NO_EXPORT_SUBCONFED",
+            "BLACKHOLE",
+            "GRACEFUL_SHUTDOWN",
+            "OV_VALID",
+            "OV_NOT_FOUND",
+            "OV_INVALID",
+        ] {
+            for ty in [
+                "community",
+                "u32",
+                "community-set",
+                "prefix-set",
+                "asn-set",
+                "ip",
+            ] {
+                let (_, rendered) = diagnostics_of(&format!(
+                    "policy inner(t: {ty}) {{ term t {{ accept }} }}
+                     policy outer({alias}: {ty}) {{ term t {{ if apply(inner({alias})) {{ accept }} }} }}"
+                ));
+                assert!(
+                    rendered.contains(&format!(
+                        "parameter `{alias}` has the name of a well-known community"
+                    )),
+                    "{alias}: {ty}: {rendered}"
+                );
+            }
+        }
     }
 }
 

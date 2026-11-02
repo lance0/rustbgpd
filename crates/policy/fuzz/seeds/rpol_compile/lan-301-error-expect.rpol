@@ -1,6 +1,5 @@
 policy overflowing {
-    term guard { if route.med + 1 >= 1 { accept } }
-    term rest { reject }
+    term bump { set med route.med + 1; accept }
 }
 
 policy error { term t { accept } }

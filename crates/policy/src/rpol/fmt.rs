@@ -388,11 +388,9 @@ fn is_starter(children: &[Node<'_>], i: usize, ctx: Ctx, prev: Tok, expr_head: b
     };
     match ctx {
         Ctx::Top => match kind {
-            Tok::PolicyKw
-            | Tok::TestKw
-            | Tok::PrefixSetKw
-            | Tok::CommunitySetKw
-            | Tok::AsnSetKw => true,
+            Tok::PolicyKw | Tok::TestKw => true,
+            // After `:` a set keyword is a parameter type, not a definition.
+            Tok::PrefixSetKw | Tok::CommunitySetKw | Tok::AsnSetKw => prev != Tok::Colon,
             Tok::Ident => match *text {
                 "import" => peek_kind(children, i, 1) == Some(Tok::Str),
                 "fn" => {
