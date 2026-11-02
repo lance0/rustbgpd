@@ -460,6 +460,32 @@ async fn gshut_does_not_wait_for_a_rib_that_never_answers() {
     assert_eq!(started.elapsed(), Duration::ZERO);
 }
 
+/// Toggles that keep arriving while the RIB holds a refresh merge into the
+/// refresher's queue: it holds each waiting peer once, however many toggles
+/// named it.
+#[tokio::test(start_paused = true)]
+async fn toggles_during_a_stuck_refresh_queue_each_peer_once() {
+    let (mut mgr, mut rib_rx, _sessions_rib_tx) = gshut_manager_with_rib_queue();
+    for round in 0..50 {
+        mgr.set_graceful_shutdown(None, round % 2 == 0)
+            .await
+            .expect("every session acknowledges");
+        settle().await;
+    }
+    let Ok(RibUpdate::RefreshPeerOutbound { reply: _held, .. }) = rib_rx.try_recv() else {
+        panic!("the first refresh is in flight");
+    };
+    assert!(rib_rx.try_recv().is_err(), "and only that one");
+    assert_eq!(
+        mgr.outbound_refresher
+            .as_ref()
+            .expect("the refresher started")
+            .waiting(),
+        GSHUT_HEALTHY.len(),
+        "each peer waits once, the in-flight one included again"
+    );
+}
+
 fn validation_dependents() -> (PeerManager, mpsc::Sender<PeerManagerReadinessQuery>) {
     let (mut mgr, readiness_tx) = readiness_manager(test_peer_manager());
     for addr in WEDGED {

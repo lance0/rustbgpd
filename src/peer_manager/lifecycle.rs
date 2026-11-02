@@ -72,6 +72,79 @@ async fn send_session_command(
     }
 }
 
+/// Peers waiting for a forced outbound refresh, each at most once.
+#[derive(Default)]
+struct OutboundRefreshQueue {
+    pending: std::collections::VecDeque<PeerId>,
+    waiting: std::collections::HashSet<PeerId>,
+}
+
+impl OutboundRefreshQueue {
+    fn extend(&mut self, peers: Vec<PeerId>) {
+        for peer in peers {
+            if self.waiting.insert(peer) {
+                self.pending.push_back(peer);
+            }
+        }
+    }
+
+    /// The next peer to refresh. From here on a toggle for it asks for a
+    /// replay of its own: the one about to run may read the older state.
+    fn pop(&mut self) -> Option<PeerId> {
+        let peer = self.pending.pop_front()?;
+        self.waiting.remove(&peer);
+        Some(peer)
+    }
+}
+
+fn lock_refresh_queue(
+    queue: &std::sync::Mutex<OutboundRefreshQueue>,
+) -> std::sync::MutexGuard<'_, OutboundRefreshQueue> {
+    queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The peer manager's handle on the outbound refresher. Requests merge
+/// straight into the refresher's queue, so however many toggles arrive while
+/// a refresh waits on the RIB, it holds each waiting peer once. Dropping the
+/// handle stops the refresher.
+pub(super) struct OutboundRefresher {
+    queue: std::sync::Arc<std::sync::Mutex<OutboundRefreshQueue>>,
+    wake: std::sync::Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl OutboundRefresher {
+    fn start(rib_tx: tokio::sync::mpsc::Sender<RibUpdate>) -> Self {
+        let queue = std::sync::Arc::default();
+        let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(run_outbound_refresher(
+            rib_tx,
+            std::sync::Arc::clone(&queue),
+            std::sync::Arc::clone(&wake),
+        ));
+        Self { queue, wake, task }
+    }
+
+    fn request(&self, peers: Vec<PeerId>) {
+        lock_refresh_queue(&self.queue).extend(peers);
+        self.wake.notify_one();
+    }
+
+    /// Peers waiting for a refresh, not counting one in flight.
+    #[cfg(test)]
+    pub(super) fn waiting(&self) -> usize {
+        lock_refresh_queue(&self.queue).pending.len()
+    }
+}
+
+impl Drop for OutboundRefresher {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// Drain forced outbound refreshes one peer at a time: each
 /// `RefreshPeerOutbound` is sent only after the RIB answered the one before,
 /// so the RIB's FIFO lane carries at most one replay ahead of the sessions'
@@ -82,20 +155,13 @@ async fn send_session_command(
 /// queue empties, one log line counts what it refreshed and what failed.
 async fn run_outbound_refresher(
     rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
-    mut requests: tokio::sync::mpsc::UnboundedReceiver<Vec<PeerId>>,
+    queue: std::sync::Arc<std::sync::Mutex<OutboundRefreshQueue>>,
+    wake: std::sync::Arc<tokio::sync::Notify>,
 ) {
-    let mut pending = std::collections::VecDeque::new();
-    let mut waiting = std::collections::HashSet::new();
     let (mut refreshed, mut skipped, mut failed) = (0_usize, 0_usize, 0_usize);
     loop {
-        while let Ok(peers) = requests.try_recv() {
-            for peer in peers {
-                if waiting.insert(peer) {
-                    pending.push_back(peer);
-                }
-            }
-        }
-        let Some(peer) = pending.pop_front() else {
+        let next = lock_refresh_queue(&queue).pop();
+        let Some(peer) = next else {
             if refreshed + skipped + failed > 0 {
                 info!(
                     refreshed,
@@ -103,20 +169,9 @@ async fn run_outbound_refresher(
                 );
                 (refreshed, skipped, failed) = (0, 0, 0);
             }
-            match requests.recv().await {
-                Some(peers) => {
-                    for peer in peers {
-                        if waiting.insert(peer) {
-                            pending.push_back(peer);
-                        }
-                    }
-                    continue;
-                }
-                None => return,
-            }
+            wake.notified().await;
+            continue;
         };
-        // A toggle after this point asks for a replay of its own.
-        waiting.remove(&peer);
         let (reply, response) = oneshot::channel();
         if rib_tx
             .send(RibUpdate::RefreshPeerOutbound { peer, reply })
@@ -3063,14 +3118,9 @@ impl PeerManager {
     /// started on first use.
     fn request_outbound_refresh(&mut self, peers: Vec<PeerId>) {
         let rib_tx = self.rib_tx.clone();
-        let refresher = self.outbound_refresher.get_or_insert_with(|| {
-            let (requests, pending) = tokio::sync::mpsc::unbounded_channel();
-            tokio::spawn(run_outbound_refresher(rib_tx, pending));
-            requests
-        });
-        // The refresher ends only when the RIB has exited; nothing is left
-        // to refresh then.
-        let _ = refresher.send(peers);
+        self.outbound_refresher
+            .get_or_insert_with(|| OutboundRefresher::start(rib_tx))
+            .request(peers);
     }
 
     /// Re-emit the current exportable outbound inventory for one managed peer.
