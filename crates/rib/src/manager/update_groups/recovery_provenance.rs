@@ -737,6 +737,7 @@ impl EvpnRecoveryProvenance {
     }
 
     pub(in crate::manager) fn mark_reset_admitted(&mut self, handle: ProvenanceHandle) -> bool {
+        self.debug_check();
         let Some(index) = self.index(handle) else {
             return false;
         };
@@ -798,10 +799,12 @@ impl EvpnRecoveryProvenance {
     }
 
     pub(in crate::manager) fn fail_admission(&mut self, handle: ProvenanceHandle) -> bool {
+        self.debug_check();
         self.fail_control(handle, ExhaustionCause::AdmissionInvariant, false)
     }
 
     pub(in crate::manager) fn abort_capture(&mut self, handle: ProvenanceHandle) -> bool {
+        self.debug_check();
         self.fail_control(handle, ExhaustionCause::CaptureUnavailable, true)
     }
 
@@ -1023,11 +1026,29 @@ impl EvpnRecoveryProvenance {
     }
 
     /// Fresh registration starts with a sealed empty proof, never desired keys.
+    /// Every public ledger call first rechecks the whole ledger in tests,
+    /// so manager-level flows run the same recount as the ledger's own tests.
+    #[cfg(test)]
+    fn debug_check(&self) {
+        if self.space.keys.len() <= 512 && self.records.len() <= 64 {
+            self.assert_consistent();
+        }
+    }
+
+    #[cfg(not(test))]
+    #[expect(
+        clippy::unused_self,
+        reason = "only test builds recheck the ledger on every call"
+    )]
+    fn debug_check(&self) {}
+
     /// Recompute every holder count, free bit, index entry and credit from
     /// scratch and compare them with the running values.
     #[cfg(test)]
     pub(in crate::manager) fn assert_consistent(&self) {
         let space = &self.space;
+        // Lookups here are not work the regressions measure.
+        let probes = space.probes.load(std::sync::atomic::Ordering::Relaxed);
         let high_water = space.keys.len();
         assert!(high_water <= space.capacity());
         assert_eq!(space.holders.len(), high_water);
@@ -1097,12 +1118,16 @@ impl EvpnRecoveryProvenance {
         );
         assert_eq!(self.daemon_used, daemon);
         assert!(self.daemon_peak >= daemon);
+        space
+            .probes
+            .store(probes, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(in crate::manager) fn register(
         &mut self,
         owner: PeerSession,
     ) -> Result<ProvenanceHandle, Exhaustion> {
+        self.debug_check();
         if let Some(handle) = self.primary_handle(owner) {
             return Ok(handle);
         }
@@ -1525,6 +1550,7 @@ impl EvpnRecoveryProvenance {
         &mut self,
         handle: ProvenanceHandle,
     ) -> Result<bool, Exhaustion> {
+        self.debug_check();
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
         };
@@ -1545,6 +1571,7 @@ impl EvpnRecoveryProvenance {
         key: EvpnRouteKey,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Exhaustion> {
+        self.debug_check();
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
         };
@@ -1607,6 +1634,7 @@ impl EvpnRecoveryProvenance {
         handle: ProvenanceHandle,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Exhaustion> {
+        self.debug_check();
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
         };
@@ -1732,6 +1760,7 @@ impl EvpnRecoveryProvenance {
         &self,
         handle: ProvenanceHandle,
     ) -> Result<Option<EvpnProofView<'_>>, Exhaustion> {
+        self.debug_check();
         Ok(self.checked_handle_index(handle)?.and_then(|index| {
             matches!(self.records[index].state, State::Ready).then(|| self.view(index))
         }))
@@ -1779,6 +1808,7 @@ impl EvpnRecoveryProvenance {
         handle: ProvenanceHandle,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<ProvenanceHandle>, Exhaustion> {
+        self.debug_check();
         if self.proof(handle)?.is_none() {
             return Ok(None);
         }
@@ -1950,6 +1980,7 @@ impl EvpnRecoveryProvenance {
     where
         A: Iterator<Item = EvpnRouteKey> + Clone,
     {
+        self.debug_check();
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
         };
@@ -2039,6 +2070,7 @@ impl EvpnRecoveryProvenance {
     where
         A: Iterator<Item = EvpnRouteKey> + Clone,
     {
+        self.debug_check();
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
         };
@@ -2224,6 +2256,7 @@ impl EvpnRecoveryProvenance {
     where
         A: Iterator<Item = EvpnRouteKey> + Clone,
     {
+        self.debug_check();
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
         };
@@ -2316,6 +2349,7 @@ impl EvpnRecoveryProvenance {
         handle: ProvenanceHandle,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Exhaustion> {
+        self.debug_check();
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
         };
@@ -2360,6 +2394,7 @@ impl EvpnRecoveryProvenance {
         handle: ProvenanceHandle,
         checkpoint: &mut impl FnMut(bool),
     ) -> bool {
+        self.debug_check();
         let Some(index) = self.index(handle) else {
             return false;
         };
@@ -2384,6 +2419,7 @@ impl EvpnRecoveryProvenance {
         handle: ProvenanceHandle,
         checkpoint: &mut impl FnMut(bool),
     ) -> bool {
+        self.debug_check();
         let Some(index) = self.index(handle) else {
             return false;
         };
@@ -2419,6 +2455,16 @@ fn copy_held(held: &Held) -> Option<Held> {
             Held::Dense(copied)
         }
     })
+}
+
+/// The last state a test leaves is checked too.
+#[cfg(test)]
+impl Drop for EvpnRecoveryProvenance {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            self.debug_check();
+        }
+    }
 }
 
 #[cfg(test)]
