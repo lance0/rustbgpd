@@ -1089,7 +1089,11 @@ impl EvpnRecoveryProvenance {
                     entries.iter().all(|entry| entry & MARK == 0),
                     "no mark left"
                 );
-                if !matches!(record.state, State::Capturing) {
+                // Only sealing sorts. A capture that is still open, or was
+                // aborted or refused before sealing, keeps its entries in
+                // capture order with a hold for each repeat; nothing reads an
+                // exhausted record's order.
+                if matches!(record.state, State::Ready | State::Dormant) {
                     assert!(entries.windows(2).all(|pair| pair[0] < pair[1]), "sorted");
                 }
             }
@@ -3776,6 +3780,43 @@ mod tests {
         );
         assert_eq!(ledger.proof_keys(slow).unwrap().unwrap(), [key(255)]);
         assert_running_charges(&ledger);
+    }
+
+    /// A capture aborted, or refused for allocation, before sealing keeps
+    /// its unsorted and repeated entries with a hold for each. The ledger
+    /// stays consistent, refuses the proof and releases every hold.
+    #[test]
+    fn unsealed_failed_captures_stay_consistent_and_release_their_holds() {
+        for refused in [false, true] {
+            let mut ledger = EvpnRecoveryProvenance::new();
+            let other = ledger.register(owner(1, 7)).unwrap();
+            let target = ledger.register(owner(2, 7)).unwrap();
+            // Keys 1 and 2 take slots 0 and 1 first.
+            capture(&mut ledger, other, &[key(1), key(2)]);
+            assert!(ledger.finish_recovery(target).unwrap());
+            assert!(ledger.begin_capture(target).unwrap());
+            // Slots 2, 0, 1 and a repeat of 0: unsorted, with a duplicate.
+            for n in [3, 1, 2, 1] {
+                assert!(ledger.capture_key(target, key(n)).unwrap());
+            }
+            if refused {
+                // The 17th entry needs a larger buffer, and that is refused.
+                for n in 4..16 {
+                    assert!(ledger.capture_key(target, key(n)).unwrap());
+                }
+                ledger.fail_next_allocation_for_test();
+                let error = ledger.capture_key(target, key(16)).unwrap_err();
+                assert_eq!(error.cause, ExhaustionCause::AllocationFailure);
+            } else {
+                assert!(ledger.abort_capture(target));
+            }
+            ledger.assert_consistent();
+            assert!(ledger.proof(target).is_err());
+            assert!(ledger.retire_member(target));
+            assert_eq!(ledger.slot_usage().live, 2);
+            assert_eq!(ledger.proof_keys(other).unwrap().unwrap(), [key(1), key(2)]);
+            assert_running_charges(&ledger);
+        }
     }
 
     /// Guarantee 1: a key and its mapping outlive churn, other members'
