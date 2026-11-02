@@ -1,4 +1,4 @@
-# rpol decision corpus: 261 programs, 1631 cases. Regenerate with
+# rpol decision corpus: 262 programs, 1643 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
@@ -11,10 +11,10 @@ ast.stmt.nested-if 13
 ast.stmt.for 75
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1122
-ast.action.reject 374
-ast.action.set-local-pref 114
-ast.action.set-med 170
+ast.action.accept 1134
+ast.action.reject 381
+ast.action.set-local-pref 117
+ast.action.set-med 186
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.community-literal 511
@@ -27,23 +27,24 @@ ast.action.prepend 54
 ast.action.let 63
 ast.action.break 33
 ast.action.continue 22
-ast.expr.or 7
+ast.expr.or 9
 ast.expr.and 20
-ast.expr.not 1
-ast.expr.cmp 217
+ast.expr.not 5
+ast.expr.cmp 220
 ast.expr.in 107
 ast.expr.ident-in 42
 ast.expr.has 4
+ast.expr.exists 4
 ast.expr.matches 37
 ast.expr.contains 5
-ast.expr.value-cmp 123
+ast.expr.value-cmp 116
 ast.expr.apply 1
-ast.value.literal 330
+ast.value.literal 337
 ast.value.identifier 106
-ast.value.field 141
-ast.value.arithmetic 121
-ast.value.call 69
-ir.guard.true 1159
+ast.value.field 148
+ast.value.arithmetic 128
+ast.value.call 72
+ir.guard.true 1178
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
@@ -51,7 +52,7 @@ ir.guard.community-contains 24
 ir.guard.community-in-set 53
 ir.guard.as-path-matches 148
 ir.guard.as-path-len 77
-ir.guard.origin-as-eq 13
+ir.guard.origin-as-eq 21
 ir.guard.origin-as-ne 9
 ir.guard.origin-as-in-set 52
 ir.guard.peer-as-in-set 8
@@ -71,22 +72,23 @@ ir.guard.family-is 50
 ir.guard.family-ne 12
 ir.guard.rpki-is 52
 ir.guard.aspa-is 76
-ir.guard.value-cmp 150
+ir.guard.value-cmp 146
+ir.guard.exists 12
 ir.guard.local-in-asn-set 22
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 5
 ir.guard.and 127
 ir.guard.or 15
-ir.guard.not 52
-ir.value.const 198
+ir.guard.not 64
+ir.value.const 204
 ir.value.field 170
-ir.value.local 91
-ir.value.binary 165
-ir.value.min 47
-ir.value.max 19
-ir.value.clamp 7
-ir.action.permit 1090
-ir.action.deny 329
+ir.value.local 107
+ir.value.binary 171
+ir.value.min 50
+ir.value.max 21
+ir.value.clamp 9
+ir.action.permit 1113
+ir.action.deny 342
 ir.action.continue 167
 ir.action.bind 84
 ir.action.for-each 75
@@ -96,10 +98,10 @@ ir.action.community-var 43
 ir.action.remove-large-community-admin 11
 ir.action.remove-all-communities 46
 ir.action.remove-communities-in-set 22
-ir.mod.set-local-pref 90
-ir.mod.set-local-pref-computed 15
+ir.mod.set-local-pref 99
+ir.mod.set-local-pref-computed 18
 ir.mod.set-med 68
-ir.mod.set-med-computed 73
+ir.mod.set-med-computed 99
 ir.mod.set-next-hop 12
 ir.mod.prepend 43
 ir.mod.prepend-computed 11
@@ -350,30 +352,30 @@ bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m08-host-routes => permit with add community 65500:2000
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m09-evpn => permit with add community 65500:2000
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m10-v6-bogon => permit with add community 65500:2000
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | test boundary | edges => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | test boundary | edges => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m01-v4-transit => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m02-v4-invalid-long => permit with set local-pref 100; set med 400
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m03-v6-tagged => permit with set local-pref 150; set med 50
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m04-bare => deny (error absent-operand)
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m05-internal => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m04-bare => permit
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m05-internal => permit with set local-pref 300; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m06-local-as-set => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m07-default => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m08-host-routes => permit with set local-pref 400; set med 400
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m09-evpn => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m09-evpn => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m10-v6-bogon => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test any-error | overflowing => deny (error overflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test kind-pinned | overflowing => deny (error overflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test contextual-error-name | error => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m01-v4-transit => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m02-v4-invalid-long => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m03-v6-tagged => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m04-bare => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m05-internal => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m06-local-as-set => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m07-default => permit
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m01-v4-transit => permit with set med 51
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m02-v4-invalid-long => permit with set med 1001
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m03-v6-tagged => permit with set med 1
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m04-bare => permit with set med 1
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m05-internal => permit with set med 1
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m06-local-as-set => permit with set med 1
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m07-default => permit with set med 1
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m08-host-routes => deny (error overflow)
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m09-evpn => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m10-v6-bogon => permit
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m09-evpn => permit with set med 1
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m10-v6-bogon => permit with set med 1
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m01-v4-transit => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m02-v4-invalid-long => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m03-v6-tagged => permit
@@ -387,12 +389,12 @@ crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m10-v6
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m01-v4-transit => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m02-v4-invalid-long => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m03-v6-tagged => deny
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m04-bare => deny (error absent-operand)
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m05-internal => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m04-bare => deny
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m05-internal => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m06-local-as-set => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m07-default => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m08-host-routes => permit with set med 20
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m09-evpn => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m09-evpn => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m10-v6-bogon => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | test underflow-denies | eager => deny (error underflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | test ok-applies | eager => permit with set local-pref 500; set med 100
@@ -446,7 +448,7 @@ crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m04-bare => pe
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m05-internal => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m06-local-as-set => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m07-default => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m08-host-routes => deny (error overflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m08-host-routes => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m09-evpn => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m10-v6-bogon => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | test penalty-rejects-long-paths | p => deny
@@ -1239,6 +1241,18 @@ docs/reference/rpol-language.md#6fb3d78db189b2d7 | authorized-customers | m07-de
 docs/reference/rpol-language.md#6fb3d78db189b2d7 | authorized-customers | m08-host-routes => deny
 docs/reference/rpol-language.md#6fb3d78db189b2d7 | authorized-customers | m09-evpn => permit
 docs/reference/rpol-language.md#6fb3d78db189b2d7 | authorized-customers | m10-v6-bogon => deny
+docs/reference/rpol-language.md#acbc24b01a712bbc | test as-set-only-is-rejected | block-64500 => deny
+docs/reference/rpol-language.md#acbc24b01a712bbc | test others-are-accepted | block-64500 => permit
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m01-v4-transit => permit
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m02-v4-invalid-long => permit
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m03-v6-tagged => permit
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m04-bare => deny
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m05-internal => deny
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m06-local-as-set => deny
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m07-default => deny
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m08-host-routes => deny
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m09-evpn => deny
+docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | m10-v6-bogon => permit
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m01-v4-transit => permit with set local-pref 200; set med 100
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m02-v4-invalid-long => deny
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m03-v6-tagged => permit with set local-pref 300; set med 50
@@ -1252,12 +1266,12 @@ docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m10-v6-bogon => per
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m01-v4-transit => permit
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m02-v4-invalid-long => permit
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m03-v6-tagged => deny
-docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m04-bare => deny (error absent-operand)
-docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m05-internal => deny (error absent-operand)
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m04-bare => deny
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m05-internal => deny
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m06-local-as-set => deny
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m07-default => deny
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m08-host-routes => permit with set med 20
-docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m09-evpn => deny (error absent-operand)
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m09-evpn => deny
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m10-v6-bogon => deny
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m01-v4-transit => permit with set med 100
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m02-v4-invalid-long => deny

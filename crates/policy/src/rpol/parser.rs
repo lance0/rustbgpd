@@ -1419,6 +1419,9 @@ impl Parser<'_> {
         if self.at(Tok::RouteKw) || self.at(Tok::PeerKw) {
             return self.predicate_expr();
         }
+        if self.at_exists() {
+            return self.exists_expr();
+        }
         if self.at(Tok::Ident) {
             return self.ident_condition(depth);
         }
@@ -1681,6 +1684,28 @@ impl Parser<'_> {
             return Err(self.error_expected("`.` and a field name"));
         }
         Ok(FieldPath { root, segs, span })
+    }
+
+    /// `exists` followed by a field (LAN-2790). A contextual keyword: an
+    /// identifier followed by `route`/`peer` was a parse error before,
+    /// so a binding or parameter named `exists` keeps working.
+    fn at_exists(&self) -> bool {
+        self.peek()
+            .is_some_and(|t| t.kind == Tok::Ident && self.text(t) == "exists")
+            && self
+                .peek_nth(1)
+                .is_some_and(|t| matches!(t.kind, Tok::RouteKw | Tok::PeerKw))
+    }
+
+    /// `exists route.<field>` / `exists peer.<field>`. Kept out of
+    /// [`unary_expr`](Self::unary_expr) for the same stack-frame reason
+    /// as [`ident_condition`](Self::ident_condition).
+    #[inline(never)]
+    fn exists_expr(&mut self) -> PResult<Expr> {
+        let keyword = self.expect_ident("`exists`")?;
+        let field = self.field_path()?;
+        let span = keyword.span.to(field.span);
+        Ok(Expr::Exists { field, span })
     }
 
     fn predicate_expr(&mut self) -> PResult<Expr> {

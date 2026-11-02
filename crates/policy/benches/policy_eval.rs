@@ -566,9 +566,9 @@ fn bench_value_expr(c: &mut Criterion) {
     )
     .expect("compiles");
     // Folded constant ACTIONS are IR-identical to the literal form
-    // (guards with arithmetic keep their ValueCmp shape by design —
-    // different absent-operand semantics); the bench then contrasts
-    // real arithmetic (field operands, builtins).
+    // (guards with arithmetic keep their ValueCmp shape by design);
+    // the bench then contrasts real arithmetic (field operands,
+    // builtins).
     let folded = rustbgpd_policy::rpol::compile_rpol(
         "policy p { term t { if route.med >= 10 { set med 25 + 25; set local-pref 2 * 100; accept } } }",
         &mut store,

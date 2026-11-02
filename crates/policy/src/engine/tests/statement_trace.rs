@@ -676,10 +676,12 @@ fn deciding_term_reports_the_validation_states_it_tests() {
     );
     let plain = rpol("policy p { term t { if route.med == 0 { reject } } }");
     assert_eq!(tests(&plain, &invalid), (PolicyAction::Deny, vec![]));
-    // A reject term whose guard fails closed names the term but no
-    // validation state: the error, not the reject, decided.
-    let failing =
-        rpol("policy p { term t { if route.rpki == invalid && route.med - 100 >= 1 { reject } } }");
+    // A term whose action fails closed names the term but no validation
+    // state: the error, not a verdict, decided. (A condition never fails,
+    // LAN-2790, so the failing operand sits in the action.)
+    let failing = rpol(
+        "policy p { term t { if route.rpki == invalid { set med route.med - 100; accept } } }",
+    );
     let mut underflow = invalid;
     underflow.med = Some(5);
     let (result, evaluation, term, tested) = failing
@@ -688,7 +690,7 @@ fn deciding_term_reports_the_validation_states_it_tests() {
     assert_eq!(result.action, PolicyAction::Deny);
     assert!(
         evaluation.eval_error.is_some(),
-        "the guard must fail closed"
+        "the action must fail closed"
     );
     assert_eq!((term, tested), (Some("t"), vec![]));
 }
@@ -721,7 +723,7 @@ fn share(total: u32, parts: u32) -> u32 {
     each
 }
 policy divide {
-    term compute { if share(100, route.med) >= 1 { reject } accept }
+    term compute { set local-pref share(100, route.med); accept }
 }
 ";
     let file = crate::rpol::RpolFile::parse(FN_RPOL).expect("clean rpol");
@@ -749,14 +751,14 @@ policy divide {
     assert!(traces.contains("division by zero"), "{traces}");
     assert!(traces.contains("fail closed => reject"), "{traces}");
 
-    // On a resolvable route the walk reaches the comparison, which
-    // renders the call source-level (the result slot's name).
+    // On a resolvable route the action renders the call source-level
+    // (the result slot's name) with its value.
     let mut ok = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
     ok.med = Some(50);
     let trace = explain_chain_statements(Some(&chain), &ok);
-    assert_eq!(trace.action, PolicyAction::Deny, "100/50 = 2 >= 1 rejects");
-    let traces = trace.steps[0].term_traces.join("\n");
-    assert!(traces.contains("share(100, route.med) >= 1"), "{traces}");
+    assert_eq!(trace.action, PolicyAction::Permit, "100/50 = 2");
+    let rendered = format!("{:?}", trace.steps[0]);
+    assert!(rendered.contains("share(100, route.med)"), "{rendered}");
 }
 
 /// The rpol agreement matrix: mixed TOML + rpol chains, contexts that

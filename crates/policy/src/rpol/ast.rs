@@ -753,6 +753,14 @@ pub enum Expr {
         /// The community literal to probe for.
         lit: Spanned<CommunityLit>,
     },
+    /// `exists route.med`: the route (or evaluation peer) carries the
+    /// optional value (LAN-2790).
+    Exists {
+        /// The optional field.
+        field: FieldPath,
+        /// Whole-predicate span, `exists` included.
+        span: Span,
+    },
     /// `route.as-path matches "regex"`
     Matches {
         /// Left-hand field (must be `route.as-path`).
@@ -770,9 +778,9 @@ pub enum Expr {
     /// A comparison containing arithmetic or a builtin on either side
     /// (LAN-299): `route.med + 50 >= p`, `route.as-path.len * 10 >=
     /// route.med`, `route.med == min(a, b)`. Plain comparisons keep
-    /// the [`Cmp`](Self::Cmp) shape (and its never-match absent
-    /// semantics); this shape evaluates checked, and an unresolvable
-    /// operand denies the route (ADR-0103 Decision 4).
+    /// the [`Cmp`](Self::Cmp) shape. This shape evaluates checked; an
+    /// operand that is missing or cannot be computed makes it false,
+    /// like the plain shape's absent field (LAN-2790).
     ValueCmp {
         /// Left value expression.
         lhs: ValueExprAst,
@@ -803,7 +811,8 @@ impl Expr {
             Expr::Not(_, span)
             | Expr::Cmp { span, .. }
             | Expr::ValueCmp { span, .. }
-            | Expr::Apply { span, .. } => *span,
+            | Expr::Apply { span, .. }
+            | Expr::Exists { span, .. } => *span,
             Expr::In { field, set } => field.span.to(set.span),
             Expr::IdentIn { ident, set } => ident.span.to(set.span),
             Expr::Has { field, lit } => field.span.to(lit.span),

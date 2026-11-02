@@ -5782,7 +5782,8 @@ policy client-x {
     }
 
     /// An installed `.rpol` export chain, `customer-in`, that has evaluated 7
-    /// routes: 5 matched `customer-routes` and 2 overflowed its guard.
+    /// routes, all matching `customer-routes`: 2 overflowed its computed `set`
+    /// value (a condition never fails, so the error sits in the action).
     fn stats_export_chain() -> rustbgpd_policy::PolicyChain {
         use rustbgpd_policy::rpol::compile_rpol;
         use rustbgpd_policy::sets::SetStore;
@@ -5790,7 +5791,7 @@ policy client-x {
 
         let compiled = compile_rpol(
             "policy customer-in {\n\
-             term customer-routes { if route.med + 1 >= 1 { accept } }\n\
+             term customer-routes { set med route.med + 1; accept }\n\
              term rest { accept }\n\
              }",
             &mut SetStore::new(),
@@ -5865,7 +5866,7 @@ policy client-x {
         assert_eq!(chain.terms.len(), 2);
         assert_eq!(chain.terms[0].policy, "customer-in");
         assert_eq!(chain.terms[0].term, "customer-routes");
-        assert_eq!(chain.terms[0].hits, 5);
+        assert_eq!(chain.terms[0].hits, 7);
         assert_eq!(chain.terms[1].term, "rest");
         assert_eq!(chain.terms[1].term_index, 1);
         assert_eq!(chain.terms[1].hits, 0);

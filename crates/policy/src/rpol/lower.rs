@@ -1026,10 +1026,10 @@ impl<'a> Lowerer<'a> {
             }
             Expr::Cmp { field, op, rhs, .. } => lower_cmp(field, *op, rhs, env, lets),
             // LAN-299: value comparisons keep their shape (constant
-            // subtrees folded) — deliberately NOT rewritten to the
-            // legacy scalar nodes even when one side folds to a
-            // constant, because the two have different absent-operand
-            // semantics (never-match vs. fail-closed eval error).
+            // subtrees folded) even when one side folds to a constant.
+            // Since LAN-2790 a missing operand makes both shapes false,
+            // so the shape changes only the IR and its rendering, never
+            // the verdict.
             Expr::ValueCmp { lhs, op, rhs, .. } => MatchExpr::ValueCmp(Box::new(ValueCmpNode {
                 op: match op {
                     CmpOp::Eq => ValueCmpOp::Eq,
@@ -1128,6 +1128,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Expr::Has { lit, .. } => MatchExpr::CommunityContains(lit.node.to_match()),
+            Expr::Exists { field, .. } => MatchExpr::Exists(
+                resolve_field(field)
+                    .ok()
+                    .and_then(super::typeck::optional_field)
+                    .expect("typechecked: `exists` takes an optional field"),
+            ),
             Expr::Matches { pattern, .. } => {
                 MatchExpr::AsPathMatches(self.intern_regex(&pattern.node, store))
             }
@@ -1179,9 +1185,9 @@ fn lower_cmp(
     let resolved = resolve_field(field).expect("typechecked");
     // LAN-302: a `let` binding on the right of a u32-field comparison
     // is a runtime value, so the comparison lowers to the checked
-    // value-comparison node (fail-closed absent-operand semantics,
-    // like every computed form) rather than a constant-bound scalar
-    // node. Gated on u32 fields: on enum-typed fields the member
+    // value-comparison node (a missing operand on either side makes it
+    // false, like every computed form) rather than a constant-bound
+    // scalar node. Gated on u32 fields: on enum-typed fields the member
     // spelling wins (position-typed resolution — bindings are read
     // only in value positions), mirroring the typechecker.
     if let Rhs::Ident(name) = rhs
