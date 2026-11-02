@@ -10,6 +10,6 @@
   lowered renamed the rows of every later statement; now a lowering change
   that keeps the source term and its final statement never renames the
   bare row. A term name cannot contain `.`, so no source term can take a
-  generated name. The decision corpus now pins every row's name and
-  contents. See
+  generated name. The decision corpus now pins every row's name, position
+  and action. See
   [Term-name rulings](../docs/reference/rpol-language.md#term-name-rulings).
