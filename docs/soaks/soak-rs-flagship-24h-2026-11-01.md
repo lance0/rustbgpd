@@ -54,8 +54,8 @@ LLGR or FlowSpec, so the v0.81.0 changes in those areas are not covered here.
 | `trip_accounting` | executed == planned; full evidence chain | 6 == 6; 0 defects | **PASS** |
 | `exceeded_exact` | exceeded counter == executed trips | 6 == 6 | **PASS** |
 | `flap_budget` | flap delta == executed trips | 6 == 6 | **PASS** |
-| `rss_peak_mb` | < 3072 MB | 698.8 MB | **PASS** |
-| `rss_late_slope_per_hour` | < 10 MB/h, final 25 % | +1.62 MB/h | **PASS** |
+| `rss_peak_mb` | < 3072 MiB | 698.8 MiB | **PASS** |
+| `rss_late_slope_per_hour` | < 10 MiB/h, final 25 % | +1.62 MiB/h | **PASS** |
 | `intern_late_slope_per_hour` | < 100 entries/h, same window | −0.0034 entries/h | **PASS** |
 | `msgs_sent_monotone` | never decreases | 0 breaks; final 5,566,844,434 | **PASS** |
 | `readyz` | < 3 consecutive misses of HTTP 200 within 250 ms; no scrape failure or gap | 0 bad samples, 0 scrape failures, 0 gaps | **PASS** |
@@ -74,13 +74,13 @@ LLGR or FlowSpec, so the v0.81.0 changes in those areas are not covered here.
 
 ## Other observations
 
-- RSS: 5th–95th percentile 508.8–573.3 MB; the 698.8 MB peak is a sample
+- RSS: 5th–95th percentile 508.8–573.3 MiB; the 698.8 MiB peak is a sample
   inside reload 37. Outside reload windows (from `issued` to 30 s after
-  `complete`) the maximum is 581.8 MB, against 554.0 MB on the v0.80.1 run
-  and 485.9 MB on the [v0.76.0 run](soak-rs-flagship-24h-2026-10-11.md),
+  `complete`) the maximum is 581.8 MiB, against 554.0 MiB on the v0.80.1 run
+  and 485.9 MiB on the [v0.76.0 run](soak-rs-flagship-24h-2026-10-11.md),
   computed the same way from the archived samples. The between-reload median
-  rose from 526.9 MB in the first quarter of the run to 561.4 MB in the last;
-  on v0.80.1 the same medians were 526.5 and 541.0 MB. The late slope stayed
+  rose from 526.9 MiB in the first quarter of the run to 561.4 MiB in the last;
+  on v0.80.1 the same medians were 526.5 and 541.0 MiB. The late slope stayed
   inside its gate. The cause of either difference is not established.
 - Management reads: p99 `/metrics` 271.7 ms, `neighbor` 106.3 ms,
   `policy stats` 53.6 ms, RIB lookup 74.0 ms, `doctor` 657.0 ms. All 36 reads
