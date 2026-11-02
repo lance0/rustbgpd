@@ -137,7 +137,7 @@ fn stride_work() {
 fn stride_work() {}
 
 /// The ledger's key slots. A free slot has zero holders, a free bit and no
-/// index entry; the highest slot is never free.
+/// index entry. Free slots at the top stay until settlement trims them.
 #[derive(Debug, Default)]
 struct SlotSpace {
     /// Slot to key; its length is the slot high-water mark.
