@@ -736,7 +736,13 @@ impl RibManager {
             return false;
         }
         let handle = completion.provenance;
-        if self.evpn_recovery.finish_recovery(handle) != Ok(true) {
+        if self
+            .evpn_recovery
+            .finish_recovery_with_checkpoint(handle, &mut |force| {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+            })
+            != Ok(true)
+        {
             return false;
         }
         self.replace_evpn_feed_completion(peer, None);
@@ -1150,7 +1156,14 @@ impl RibManager {
                 if !fresh {
                     // An existing session needs G2's filtered prior capture;
                     // a new record's sealed empty proof is for fresh sessions.
-                    let _ = self.evpn_recovery.finish_recovery(handle);
+                    let _ =
+                        self.evpn_recovery
+                            .finish_recovery_with_checkpoint(handle, &mut |force| {
+                                super::replacement_readiness_checkpoint(
+                                    &self.replacement_readiness,
+                                    force,
+                                );
+                            });
                 }
                 true
             }
@@ -1212,10 +1225,6 @@ impl RibManager {
         self.capture_evpn_admitted(peer, false, old_deltas, None)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "old projection validation, optional sharing and authoritative flat fallback form one capture transaction"
-    )]
     fn capture_evpn_admitted(
         &mut self,
         peer: PeerId,
@@ -1256,21 +1265,19 @@ impl RibManager {
         let checkpoint = std::cell::RefCell::new(|| {
             super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", false);
         });
+        let mut ledger_checkpoint = |force| {
+            super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", force);
+        };
         let captured = if private {
             let rib = self.adj_ribs_out.get(&peer);
-            self.evpn_recovery
-                .reserve_capture(handle, rib.map_or(0, AdjRibOut::evpn_len), &mut |force| {
-                    super::replacement_readiness_checkpoint(&readiness, force);
-                })
-                .is_ok_and(|reserved| reserved)
-                && capture_admitted_keys(
-                    &mut self.evpn_recovery,
-                    handle,
-                    rib.into_iter()
-                        .flat_map(AdjRibOut::iter_evpn)
-                        .map(EvpnRibRoute::key),
-                    &mut || checkpoint.borrow_mut()(),
-                )
+            capture_admitted_keys(
+                &mut self.evpn_recovery,
+                handle,
+                rib.into_iter()
+                    .flat_map(AdjRibOut::iter_evpn)
+                    .map(EvpnRibRoute::key),
+                &mut ledger_checkpoint,
+            )
         } else {
             let gid = gid.expect("shared capture has an owned group");
             // A family-enable may have published NEW before OLD is captured.
@@ -1278,7 +1285,7 @@ impl RibManager {
                 .rtc_export_filter(peer, self.group_ribs.get(&gid).map(|group| &group.sendable));
             let group = self
                 .group_ribs
-                .get_mut(&gid)
+                .get(&gid)
                 .expect("owned group remains installed");
             // Desired state is usable only before mutation and after a complete transfer.
             if !group.evpn_projection_complete_with_checkpoint(&mut || checkpoint.borrow_mut()())
@@ -1289,100 +1296,23 @@ impl RibManager {
             {
                 false
             } else {
-                let projected: &super::update_groups::GroupRibOut = group;
-                let cluster_id = self.cluster_id;
-                let rejected = self.peer_unexportable.get(&peer);
-                let actual = || {
-                    projected.evpn_member_projection_before_deltas(
+                // One walk of actual OLD: each key is one slot probe and a bit.
+                let actual = group
+                    .evpn_member_projection_before_deltas(
                         old_deltas,
                         peer,
-                        cluster_id,
+                        self.cluster_id,
                         filter.as_ref(),
-                        rejected,
+                        self.peer_unexportable.get(&peer),
                         || checkpoint.borrow_mut()(),
                     )
-                };
-                let mut allocation_checkpoint =
-                    |force| super::replacement_readiness_checkpoint(&readiness, force);
-                let ledger = &mut self.evpn_recovery;
-                let captured = (|| {
-                    let count = actual().count();
-                    // A fresh universe uses NEW keys, which may omit displaced OLD.
-                    let shared = if !old_deltas.is_empty()
-                        && !group
-                            .evpn_recovery_universe
-                            .is_some_and(|hint| ledger.universe_is_live(hint))
-                    {
-                        None
-                    } else {
-                        ledger.with_ordered_capture(
-                            handle,
-                            count,
-                            actual(),
-                            &mut allocation_checkpoint,
-                            |ledger, ordered, checkpoint| {
-                                let shape = ledger.capture_shape(
-                                    group.evpn_recovery_universe,
-                                    ordered.iter().map(|route| route.key()),
-                                    checkpoint,
-                                )?;
-                                let shared = ledger
-                                    .share_capture(
-                                        handle,
-                                        group.evpn_recovery_universe,
-                                        group.table.evpn_len(),
-                                        group.table.iter_evpn().map(EvpnRibRoute::key),
-                                        shape,
-                                        checkpoint,
-                                    )
-                                    .ok()
-                                    .flatten();
-                                if shared.is_some()
-                                    && !ledger.capture_batch_with_checkpoint(
-                                        handle,
-                                        ordered.iter().map(|route| route.key()),
-                                        checkpoint,
-                                    )?
-                                {
-                                    return Err(
-                                        super::update_groups::recovery_provenance::Exhaustion {
-                                            cause: super::update_groups::recovery_provenance::ExhaustionCause::CaptureUnavailable,
-                                            limiting_peer: None,
-                                            attempted_peer_bytes: 0,
-                                            attempted_daemon_bytes: 0,
-                                        },
-                                    );
-                                }
-                                Ok(shared)
-                            },
-                        )?
-                    };
-                    let populated = if shared.is_some() {
-                        true
-                    } else {
-                        ledger.reserve_capture(handle, count, &mut allocation_checkpoint)?;
-                        capture_admitted_keys(
-                            ledger,
-                            handle,
-                            actual().map(EvpnRibRoute::key),
-                            &mut || {
-                                checkpoint.borrow_mut()();
-                            },
-                        )
-                    };
-                    Ok::<_, super::update_groups::recovery_provenance::Exhaustion>((
-                        populated, shared,
-                    ))
-                })();
-                match captured {
-                    Ok((true, shared)) => {
-                        if let Some(shared) = shared {
-                            group.evpn_recovery_universe = Some(shared);
-                        }
-                        true
-                    }
-                    Ok((false, _)) | Err(_) => false,
-                }
+                    .map(EvpnRibRoute::key);
+                capture_admitted_keys(
+                    &mut self.evpn_recovery,
+                    handle,
+                    actual,
+                    &mut ledger_checkpoint,
+                )
             }
         };
         if !captured
@@ -1617,13 +1547,6 @@ impl RibManager {
             return self.evpn_grouped_member_of(peer).is_none()
                 || !self.dirty_peers.contains(&peer);
         }
-        if self
-            .evpn_recovery
-            .proof(handle)
-            .is_ok_and(|proof| proof.is_some_and(EvpnProofView::is_empty))
-        {
-            self.prepare_empty_evpn_admission(peer, handle, announce);
-        }
         let Ok(Some(proof)) = self.evpn_recovery.proof(handle) else {
             self.evpn_recovery.fail_admission(handle);
             self.mark_outbound_dirty_inner(peer, false);
@@ -1651,46 +1574,6 @@ impl RibManager {
         self.mark_outbound_dirty_inner(peer, false);
         self.retry_evpn_recovery_reset(peer);
         false
-    }
-
-    fn prepare_empty_evpn_admission(
-        &mut self,
-        peer: PeerId,
-        handle: ProvenanceHandle,
-        candidates: &[EvpnRibRoute],
-    ) {
-        let Some(gid) = self.evpn_grouped_member_of(peer) else {
-            return;
-        };
-        let group = self.group_ribs.get_mut(&gid).expect("owned group exists");
-        let readiness = self.replacement_readiness.clone();
-        let mut checkpoint = |force| super::replacement_readiness_checkpoint(&readiness, force);
-        let sparse = candidates
-            .iter()
-            .filter(|route| {
-                checkpoint(false);
-                let key = route.key();
-                !self
-                    .evpn_recovery
-                    .candidate_universe_contains(
-                        handle,
-                        group.evpn_recovery_universe,
-                        &key,
-                        &mut checkpoint,
-                    )
-                    .unwrap_or_else(|| group.table.get_evpn(&key).is_some())
-            })
-            .count();
-        if let Ok(Some(universe)) = self.evpn_recovery.share_capture(
-            handle,
-            group.evpn_recovery_universe,
-            group.table.evpn_len(),
-            group.table.iter_evpn().map(EvpnRibRoute::key),
-            (candidates.len(), sparse),
-            &mut checkpoint,
-        ) {
-            group.evpn_recovery_universe = Some(universe);
-        }
     }
 
     pub(in crate::manager) fn admit_evpn_recovery_batch(
@@ -1824,7 +1707,13 @@ impl RibManager {
             self.mark_outbound_dirty(peer);
             return false;
         }
-        if self.evpn_recovery.finish_recovery(handle) != Ok(true) {
+        if self
+            .evpn_recovery
+            .finish_recovery_with_checkpoint(handle, &mut |force| {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+            })
+            != Ok(true)
+        {
             self.mark_outbound_dirty(peer);
             return false;
         }
@@ -1855,7 +1744,10 @@ impl RibManager {
 
     pub(in crate::manager) fn retire_evpn_recovery(&mut self, peer: PeerId) {
         if let Some(handle) = self.evpn_recovery_handle(peer) {
-            self.evpn_recovery.retire_member(handle);
+            self.evpn_recovery
+                .retire_member_with_checkpoint(handle, &mut |force| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+                });
         }
         if let Some(owner) = self.evpn_recovery_owner(peer)
             && let Some(outbound) = self.outbound_peers.get(&peer)
@@ -1879,12 +1771,14 @@ fn capture_admitted_keys(
     ledger: &mut super::update_groups::recovery_provenance::EvpnRecoveryProvenance,
     handle: ProvenanceHandle,
     keys: impl Iterator<Item = EvpnRouteKey>,
-    checkpoint: &mut impl FnMut(),
+    checkpoint: &mut impl FnMut(bool),
 ) -> bool {
-    for key in keys {
-        checkpoint();
+    for (n, key) in keys.enumerate() {
+        if n % 64 == 0 {
+            checkpoint(false);
+        }
         if ledger
-            .capture_key_with_checkpoint(handle, key, &mut |_| checkpoint())
+            .capture_key_with_checkpoint(handle, key, checkpoint)
             .is_err()
         {
             return false;

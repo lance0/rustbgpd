@@ -261,24 +261,21 @@ fn late_capture_uses_displaced_admitted_keys_instead_of_advanced_group_rows() {
 }
 
 #[test]
-fn late_capture_with_expired_universe_keeps_displaced_admitted_keys() {
+fn late_capture_after_released_slots_keeps_displaced_admitted_keys() {
     assert_late_capture_uses_displaced_keys(true);
 }
 
-fn assert_late_capture_uses_displaced_keys(expired_hint: bool) {
+fn assert_late_capture_uses_displaced_keys(released_slots: bool) {
     let (mut manager, peer, gid, _output) = fixture();
     let old = received(100);
     stage(&mut manager, gid, &old);
     let handle = manager.evpn_recovery_handle(peer).unwrap();
-    if expired_hint {
+    if released_slots {
         assert!(manager.capture_shared_evpn_admitted(peer));
-        let hint = manager.group_ribs[&gid].evpn_recovery_universe.unwrap();
-        assert!(manager.evpn_recovery.universe_is_live(hint));
+        assert_eq!(manager.evpn_recovery.slot_usage().live, 1);
         assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
-        assert!(!manager.evpn_recovery.universe_is_live(hint));
-        assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
-    } else {
-        assert!(manager.group_ribs[&gid].evpn_recovery_universe.is_none());
+        // The finished proof was the only holder; its slot is gone.
+        assert_eq!(manager.evpn_recovery.slot_usage().live, 0);
     }
     let resets = count_reset_attempts(&mut manager);
     let new = make_evpn_imet(Ipv4Addr::new(192, 0, 2, 11), 2);

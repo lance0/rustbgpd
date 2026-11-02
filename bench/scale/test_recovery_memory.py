@@ -1455,27 +1455,32 @@ class RecoveryScanTests(unittest.TestCase):
             for layout in ("dense", "older-sparse"):
                 sparse = records if layout == "older-sparse" else 0
                 for leg, arm in enumerate(("flat", "candidate", "candidate", "flat")):
-                    shared = arm == "candidate"
-                    comparisons = {"full-uc": keys, "evpn-soak": 2 * keys,
+                    single = profile in receipt.SINGLE_REPRESENTATION
+                    shared = single or arm == "candidate"
+                    comparisons = {"full-uc": keys, "evpn-soak": 0,
                                    "full-vpn": 2 * sparse}[profile] if shared else 0
                     additions = sparse if shared else 0
                     slots = keys + sparse // 2 if profile == "full-uc" else 0
+                    # Dense-slot capture only checkpoints index rebuilds.
+                    callbacks = (1 if single else
+                                 (slots if profile == "full-uc" else keys) + comparisons
+                                 + (additions if profile == "full-vpn" else 0))
                     rows.append(dict(
                         schema=receipt.SCAN_SCHEMA, profile=profile, old_order=old_order,
                         vpn_negotiated=profile == "full-vpn", keys=keys, records=records, layout=layout, arm=arm, leg=leg,
                         measured=True, old_keys=keys, additions=additions,
-                        shape_callbacks=(slots if profile == "full-uc" else keys) + comparisons
-                        + (additions if profile == "full-vpn" else 0),
-                        comparison_counter_scope="ordered-evpn-checkpoints-minus-old-visits" if profile == "evpn-soak" else "typed-full-old-shape",
+                        shape_callbacks=callbacks,
+                        comparison_counter_scope="none-dense-slot-capture" if profile == "evpn-soak" else "typed-full-old-shape",
                         comparisons=comparisons, mismatches=sparse if shared and profile == "full-uc" else 0,
                         source_slots=slots,
                         selected_strategy=receipt.SHARED_STRATEGY[profile] if shared else "exact-flat",
-                        selection_reason="explicit-flat-control" if arm == "flat" else "eligible",
+                        selection_reason=("single-representation" if single
+                                          else "explicit-flat-control" if arm == "flat" else "eligible"),
                         cold_anchor_strategy="not-measured" if profile == "evpn-soak" else receipt.SHARED_STRATEGY[profile],
                         cold_anchor_unavailable_reason="evpn-not-production-cold-path" if profile == "evpn-soak" else None,
                         proof_keys=keys, shared=shared, retained_bytes=8192, peak_bytes=9000,
                         empty_bytes=56, settled_bytes=56, refusal=None,
-                        phases={"shape": {"wall_ns": 1000, "cpu_ticks": 1},
+                        phases={**({} if single else {"shape": {"wall_ns": 1000, "cpu_ticks": 1}}),
                                 "capture": {"wall_ns": 2000, "cpu_ticks": 2},
                                 "cold_anchor_capture": None if profile == "evpn-soak" else {"wall_ns": 3000, "cpu_ticks": 3}},
                     ))
@@ -1602,9 +1607,11 @@ class RecoveryScanTests(unittest.TestCase):
             with self.subTest(profile=profile):
                 rows = self.rows(profile)
                 result = receipt.validate_scan_log(self.log(rows), profile)
+                single = profile in receipt.SINGLE_REPRESENTATION
                 for cell in result["comparisons"]:
-                    self.assertEqual(set(cell["candidate_over_flat"]), {"shape", "capture"})
-                self.assertTrue(all(row["shared"] == (row["arm"] == "candidate") for row in rows))
+                    self.assertEqual(set(cell["candidate_over_flat"]),
+                                     {"capture"} if single else {"shape", "capture"})
+                self.assertTrue(all(row["shared"] == (single or row["arm"] == "candidate") for row in rows))
                 for bad in ("cold-policy", "unavailable-zero", "unavailable-fabricated", "slab-lineage"):
                     if bad == "unavailable-fabricated" and profile != "evpn-soak":
                         continue
@@ -1638,6 +1645,31 @@ class RecoveryScanTests(unittest.TestCase):
                 with self.assertRaises(receipt.InvalidReceipt):
                     receipt.validate_scan_log(self.log(rows), "full-vpn")
 
+    def test_scan_v3_evpn_requires_the_single_dense_slot_representation(self):
+        keys = receipt.SCAN_PROFILES["evpn-soak"]
+        result = receipt.validate_scan_log(self.log(self.rows("evpn-soak")), "evpn-soak")
+        self.assertIn("run-to-run control", result["arm_scope"])
+        cases = {
+            # The universe design's receipts are no longer valid EVPN evidence.
+            "sorted-universe-strategy": (1, dict(selected_strategy="evpn-sort-shared")),
+            "flat-control-arm": (0, dict(selected_strategy="exact-flat", selection_reason="explicit-flat-control",
+                                         shared=False, additions=0)),
+            "ordered-comparisons": (1, dict(comparisons=2 * keys)),
+            "per-key-walk": (1, dict(shape_callbacks=keys)),
+            "old-counter-scope": (1, dict(comparison_counter_scope="ordered-evpn-checkpoints-minus-old-visits")),
+            "shape-phase": (1, dict(phases={"shape": {"wall_ns": 1, "cpu_ticks": 1},
+                                            "capture": {"wall_ns": 2, "cpu_ticks": 2},
+                                            "cold_anchor_capture": None})),
+            "flat-arm-without-additions": (7, dict(additions=0)),
+            "unshared-arm": (0, dict(shared=False)),
+        }
+        for name, (index, change) in cases.items():
+            with self.subTest(name=name):
+                rows = self.rows("evpn-soak")
+                rows[index].update(change)
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.validate_scan_log(self.log(rows), "evpn-soak")
+
     def test_scan_summary_rejects_incomplete_matrix_or_proof(self):
         for failure in ("missing-leg", "wrong-proof"):
             with self.subTest(failure=failure):
@@ -1659,7 +1691,8 @@ class RecoveryScanTests(unittest.TestCase):
             self.assertEqual(24, len(result["samples"]))
             self.assertEqual(6, len(result["comparisons"]))
             self.assertTrue(all(row["eligible"] for row in result["comparisons"]))
-            self.assertEqual(1.0, result["comparisons"][0]["candidate_over_flat"]["shape"]["wall_ns"])
+            phase = "capture" if profile in receipt.SINGLE_REPRESENTATION else "shape"
+            self.assertEqual(1.0, result["comparisons"][0]["candidate_over_flat"][phase]["wall_ns"])
 
     def test_scan_rejects_false_proof_work_and_measurement_claims(self):
         cases = [(1, "old_keys", 0), (1, "proof_keys", 1), (1, "comparisons", 0),
@@ -1667,12 +1700,13 @@ class RecoveryScanTests(unittest.TestCase):
                  (1, "shape_callbacks", 0), (1, "measured", False), (1, "settled_bytes", 57),
                  (5, "additions", 0), (0, "phases", {}), (1, "leg", 0),
                  (1, "refusal", "unrecognized")]
+        # A flat control against a shared candidate: full-uc keeps both arms.
         for index, field, value in cases:
             with self.subTest(field=field, value=value):
-                rows = self.rows()
+                rows = self.rows("full-uc")
                 rows[index][field] = value
                 with self.assertRaises(receipt.InvalidReceipt):
-                    receipt.validate_scan_log(self.log(rows), "evpn-soak")
+                    receipt.validate_scan_log(self.log(rows), "full-uc")
         with self.assertRaises(receipt.InvalidReceipt):
             receipt.validate_scan_log(self.log(self.rows()[:-1]), "evpn-soak")
 
@@ -1681,7 +1715,7 @@ class RecoveryScanTests(unittest.TestCase):
         rows = self.rows()
         rows[1]["comparisons"] = keys * keys.bit_length()
         rows[1]["shape_callbacks"] = keys + rows[1]["comparisons"]
-        with self.assertRaisesRegex(receipt.InvalidReceipt, "non-linear classification"):
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "ordered keys or walked a per-key shape"):
             receipt.validate_scan_log(self.log(rows), "evpn-soak")
         rows = self.rows()
         rows[1]["schema"] = "rustbgpd.recovery-scan.v2"
@@ -1694,12 +1728,11 @@ class RecoveryScanTests(unittest.TestCase):
             rows[1]["comparison_counter_scope"] = "callbacks-minus-keys"
             with self.assertRaisesRegex(receipt.InvalidReceipt, "counter scope differs"):
                 receipt.validate_scan_log(self.log(rows), profile)
-        # Losing the OLD-visit or the per-comparison checkpoint must not
-        # become an apparently cheaper measurement of the unchanged EVPN walk.
+        # A receipt from the sorted-universe walk is not dense-slot evidence.
         rows = self.rows()
         keys = receipt.SCAN_PROFILES["evpn-soak"]
         rows[1].update(comparisons=keys, shape_callbacks=2 * keys)
-        with self.assertRaisesRegex(receipt.InvalidReceipt, "missing sorted merge work"):
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "ordered keys or walked a per-key shape"):
             receipt.validate_scan_log(self.log(rows), "evpn-soak")
 
     def test_scan_refusal_is_retained_without_a_ratio(self):
@@ -1741,18 +1774,18 @@ class RecoveryScanTests(unittest.TestCase):
                     self.assertEqual((root / "harness.log").read_bytes(), raw)
 
     def test_scan_zero_tick_denominator_has_no_cpu_ratio(self):
-        rows = self.rows()
+        rows = self.rows("full-uc")
         for row in rows:
             row["phases"]["shape"]["cpu_ticks"] = 0
-        result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        result = receipt.validate_scan_log(self.log(rows), "full-uc")
         self.assertIsNone(result["comparisons"][0]["candidate_over_flat"]["shape"]["cpu_ticks"])
 
     def test_independent_shape_can_exceed_capture_without_fake_tick_minimum(self):
-        rows = self.rows()
+        rows = self.rows("full-uc")
         for row in rows:
             row["phases"]["shape"].update(wall_ns=3000, cpu_ticks=1)
             row["phases"]["capture"].update(wall_ns=2000, cpu_ticks=0)
-        result = receipt.validate_scan_log(self.log(rows), "evpn-soak")
+        result = receipt.validate_scan_log(self.log(rows), "full-uc")
         self.assertTrue(all(row["eligible"] for row in result["comparisons"]))
         self.assertIsNone(result["comparisons"][0]["candidate_over_flat"]["capture"]["cpu_ticks"])
 

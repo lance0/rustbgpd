@@ -125,7 +125,7 @@ fn sample(
         };
         let vpn_negotiated = profile == "full-vpn";
         let comparison_counter_scope = if profile == "evpn-soak" {
-            "ordered-evpn-checkpoints-minus-old-visits"
+            "none-dense-slot-capture"
         } else {
             "typed-full-old-shape"
         };
@@ -280,7 +280,7 @@ mod tests {
                         );
                         assert_eq!(receipt.refusal, None);
                         assert_eq!(receipt.proof_keys, 64);
-                        let expected_shared = shared;
+                        let expected_shared = shared || family == "evpn-soak";
                         assert_eq!(receipt.shared, expected_shared);
                         assert_eq!(
                             receipt.additions,
@@ -288,6 +288,17 @@ mod tests {
                         );
                         assert_eq!(receipt.settled_bytes, receipt.empty_bytes);
                         assert_eq!(counted.old_keys, 64);
+                        if family == "evpn-soak" {
+                            // One slot representation for both arms: no
+                            // ordering comparisons and no per-key shape walk.
+                            // New keys may grow the slot index, whose rebuild
+                            // checkpoints once per 1024 slots.
+                            assert!(receipt.shared);
+                            assert_eq!(receipt.additions, if sparse { 4 } else { 0 });
+                            assert_eq!(counted.comparisons, 0);
+                            assert!(counted.shape_callbacks <= usize::from(sparse));
+                            continue;
+                        }
                         if family == "full-uc" {
                             assert_eq!(receipt.source_slots, if sparse { 66 } else { 64 });
                             assert_eq!(receipt.mismatches, if shared && sparse { 4 } else { 0 });
@@ -303,9 +314,6 @@ mod tests {
                             }
                         } else if expected_shared {
                             assert!(counted.shape_callbacks > 64);
-                            if family == "evpn-soak" && !sparse {
-                                assert!(counted.comparisons >= 127 && counted.comparisons <= 137);
-                            }
                         } else {
                             assert_eq!(
                                 counted.shape_callbacks,

@@ -619,6 +619,10 @@ pub struct EvpnGroupBenchReceipt {
     pub retained_recovery_members: usize,
     pub retained_provenance_bytes: usize,
     pub peak_provenance_bytes: usize,
+    /// Keys held in the ledger's dense slots, each stored once.
+    pub live_provenance_slots: usize,
+    /// Slot capacity; daemon bytes include it at the per-slot cost.
+    pub provenance_slot_capacity: usize,
     pub max_peer_retained_provenance_bytes: usize,
     pub max_peer_peak_provenance_bytes: usize,
     pub peer_budget_bytes: usize,
@@ -679,6 +683,7 @@ impl RibManager {
             .collect::<Vec<_>>();
         peers.sort_unstable_by_key(|row| row.peer);
         let daemon = self.evpn_recovery.daemon_usage();
+        let slots = self.evpn_recovery.slot_usage();
         let (peer_budget_bytes, daemon_budget_bytes) = self.evpn_recovery.limits();
         EvpnGroupBenchReceipt {
             owned_groups: self
@@ -705,6 +710,8 @@ impl RibManager {
             retained_recovery_members: peers.iter().filter(|row| row.retained_recovery).count(),
             retained_provenance_bytes: daemon.retained,
             peak_provenance_bytes: daemon.peak,
+            live_provenance_slots: slots.live,
+            provenance_slot_capacity: slots.capacity,
             max_peer_retained_provenance_bytes: peers
                 .iter()
                 .map(|row| row.retained_provenance_bytes)
@@ -1026,17 +1033,6 @@ pub fn bench_recovery_capture_scan(
         run_recovery_scan(spec, &mut receipt, &mut phase, &mut |_| {})
     };
     receipt.shape_callbacks = callbacks;
-    if spec.family == "evpn-soak" && counted {
-        // The unchanged EVPN walker checkpoints once per OLD key and once
-        // per comparison. Common slab counters come directly from the shape.
-        receipt.comparisons = if result.is_ok() {
-            callbacks
-                .checked_sub(receipt.old_keys)
-                .expect("EVPN OLD visit checkpoints")
-        } else {
-            callbacks.saturating_sub(receipt.old_keys)
-        };
-    }
     receipt.refusal = result.err();
     receipt
 }
@@ -1235,10 +1231,9 @@ fn run_common_recovery_scan(
     captured
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the component fixture keeps untimed setup, measured capture and proof settlement in one ordered path"
-)]
+/// EVPN has one representation: every capture interns keys into the ledger's
+/// dense slots, so the shared and flat arms run the same path. The anchor
+/// populates the slots a later capture finds; sparse OLD adds new keys.
 fn run_evpn_recovery_scan(
     spec: RecoveryScanSpec,
     receipt: &mut RecoveryScanReceipt,
@@ -1248,16 +1243,9 @@ fn run_evpn_recovery_scan(
     use super::update_groups::recovery_provenance::{EvpnRecoveryProvenance, PeerSession};
     let mut ledger = EvpnRecoveryProvenance::new();
     receipt.cold_anchor_strategy = "not-measured";
-    receipt.selected_strategy = if spec.shared {
-        "evpn-sort-shared"
-    } else {
-        "exact-flat"
-    };
-    receipt.selection_reason = if spec.shared {
-        "eligible"
-    } else {
-        "explicit-flat-control"
-    };
+    receipt.selected_strategy = "evpn-dense-slots";
+    receipt.selection_reason = "single-representation";
+    receipt.shared = true;
     receipt.empty_bytes = ledger.daemon_usage().retained;
     let owner = |index| PeerSession {
         peer: scan_peer(index),
@@ -1270,20 +1258,9 @@ fn run_evpn_recovery_scan(
     }
     let anchor = ledger.primary_handle(owner(0)).unwrap();
     ledger
-        .finish_recovery(anchor)
+        .finish_recovery_with_checkpoint(anchor, &mut |_| {})
         .map_err(|e| e.cause.as_str())?;
     ledger.begin_capture(anchor).map_err(|e| e.cause.as_str())?;
-    let hint = ledger
-        .share_capture(
-            anchor,
-            None,
-            spec.keys,
-            (0..spec.keys).map(scan_evpn_key),
-            (spec.keys, 0),
-            &mut |_| {},
-        )
-        .map_err(|e| e.cause.as_str())?
-        .ok_or("anchor_not_shared")?;
     for n in 0..spec.keys {
         ledger
             .capture_key_with_checkpoint(anchor, scan_evpn_key(n), &mut |_| {})
@@ -1309,78 +1286,20 @@ fn run_evpn_recovery_scan(
     if spec.shuffled {
         shuffle_scan(&mut old);
     }
+    receipt.old_keys = old.len();
+    receipt.additions = scan_old(spec).filter(|n| *n >= spec.keys).count();
     phase("capture", true);
     let captured = (|| {
         ledger
-            .finish_recovery(target)
+            .finish_recovery_with_checkpoint(target, &mut |_| {})
             .map_err(|e| e.cause.as_str())?;
         ledger.begin_capture(target).map_err(|e| e.cause.as_str())?;
-        if spec.shared {
-            let count = old
-                .iter()
-                .inspect(|route| {
-                    std::hint::black_box(route.key());
-                })
-                .count();
-            receipt.shared = ledger
-                .with_ordered_capture(
-                    target,
-                    count,
-                    old.iter(),
-                    &mut |_| {},
-                    |ledger, ordered, checkpoint| {
-                        phase("shape", true);
-                        let shape = ledger.capture_shape(
-                            Some(hint),
-                            ordered.iter().map(|route| route.key()),
-                            shape_checkpoint,
-                        );
-                        phase("shape", false);
-                        let shape = shape?;
-                        (receipt.old_keys, receipt.additions) = shape;
-                        let shared = ledger.share_capture(
-                            target,
-                            Some(hint),
-                            spec.keys,
-                            (0..spec.keys).map(scan_evpn_key),
-                            shape,
-                            checkpoint,
-                        )?;
-                        if shared.is_some() {
-                            assert!(ledger.capture_batch_with_checkpoint(
-                                target,
-                                ordered.iter().map(|route| route.key()),
-                                checkpoint
-                            )?);
-                        }
-                        Ok(shared)
-                    },
-                )
-                .map_err(|error| error.cause.as_str())?
-                .is_some();
-            if !receipt.shared {
-                return Err("capture_unavailable");
-            }
-        } else {
-            phase("shape", true);
-            let shape = ledger.capture_shape(
-                None,
-                old.iter().map(crate::route::EvpnRibRoute::key),
-                shape_checkpoint,
+        for route in &old {
+            assert!(
+                ledger
+                    .capture_key_with_checkpoint(target, route.key(), shape_checkpoint)
+                    .map_err(|error| error.cause.as_str())?
             );
-            phase("shape", false);
-            let shape = shape.map_err(|error| error.cause.as_str())?;
-            (receipt.old_keys, receipt.additions) = shape;
-            ledger
-                .reserve_capture(target, shape.0, &mut |_| {})
-                .map_err(|error| error.cause.as_str())?;
-            for route in &old {
-                assert!(
-                    ledger
-                        .capture_key_with_checkpoint(target, route.key(), &mut |_| {})
-                        .map_err(|error| error.cause.as_str())?
-                );
-            }
         }
         assert!(
             ledger
@@ -1403,7 +1322,7 @@ fn run_evpn_recovery_scan(
     }
     for index in 0..spec.records {
         if let Some(handle) = ledger.primary_handle(owner(index)) {
-            assert!(ledger.retire(handle));
+            assert!(ledger.retire_with_checkpoint(handle, &mut |_| {}));
         }
     }
     receipt.settled_bytes = ledger.daemon_usage().retained;

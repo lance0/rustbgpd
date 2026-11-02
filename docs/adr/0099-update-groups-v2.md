@@ -1127,3 +1127,123 @@ These are preparation and correctness controls. They establish no memory,
 readiness, throughput or scale result. Full feeds still encode privately, so a
 large initial feed is not an encode-once qualification. Production activation
 still requires the separately accepted qualification and approval.
+
+## Amendment (2026-11-02): dense slot IDs for EVPN recovery provenance
+
+The EVPN recovery ledger replaces its shared key universes and per-member
+sparse key copies with ledger-wide slot IDs. A mass-dirty attribution at the
+150-receiver recovery shape found that 96.5% of the peak provenance charge was
+per-member copies of keys added after the group's shared universe was built:
+every member that captured against a stale universe stored its own 64-byte copy
+of each churned key. Admission-time copies were negligible. Rebasing the
+universe more often would bound only the capture term and keep a second
+representation; this amendment removes the per-member copy instead.
+
+**Representation.** The ledger owns one slot space. Each slot stores a key once,
+with a holder count, and a hash index maps a key to its slot. Each recovery
+record, primary or snapshot, holds its slots either as sorted slot IDs or as a
+bitset over slot IDs, whichever is smaller, plus the slots pinned by an
+outstanding admission reservation. Sorted IDs cost four bytes per key; a
+bitset costs one bit per slot up to the record's highest slot. A record changes
+back from a bitset only when sorted IDs would take at most half its size, so
+its size cannot flap. The slot space belongs to the ledger, not to a group: a
+retained proof survives regroup, group retirement, private capture and the
+private-to-owned handoff without rebinding, and groups that stage the same keys
+share their slots. Slot IDs never leave the ledger; proof views expose only key
+membership, the admitted count and key iteration.
+
+**Lifecycle.** Capture, admission and snapshot increment a slot's holder count
+for each entry they add, and each reservation pin increments it once. Removing
+an entry or dropping a pin decrements it. A slot whose count reaches zero leaves
+the index and becomes free; only then can a later key reuse it. The holder count
+covers every primary entry, snapshot entry and pin, so a key and its mapping
+remain until every record that can reference the slot has released it, and
+reuse cannot make an existing entry name a different route. A new key takes the
+lowest free slot.
+
+**Settlement.** When a record releases its holdings at finish or retirement,
+the ledger settles the space: it frees the whole space when no slot is held,
+trims free slots from the top, and, once at most a quarter of the remaining
+slots are held, renumbers held slots into a dense prefix, preserving their
+order, rewrites every record's entries, bitset and pins and the index, and
+shrinks the space. A drained peak therefore returns its capacity even while a
+slow member holds one of its highest slots. Settlement never runs inside
+admission, so final application stays free of allocation; a withdrawal that
+drains the space waits for the next finish or retirement. Renumbering and
+shrinking are optional maintenance: a daemon-cap or allocation refusal leaves
+the committed state unchanged. Renumbering costs one pass over the slots and the
+index plus one over every record's entries, bitset words and pins. It offers
+the readiness checkpoint at the ledger stride; a component probe at 1,500
+members with large bitsets measured about 0.3 s in total with gaps of about
+1 ms between checkpoints. It runs only after at least three quarters of the
+slots have drained.
+
+**Admission.** Reservation interns and pins each announced key the record has
+not already admitted, then sizes the record for those slots. Final application
+then only changes entries: it allocates nothing, and a release elsewhere cannot
+free a slot it still needs. Every withdrawal must name an admitted slot, and
+each newly admitted announcement must have been pinned. Application validates
+the whole batch before it mutates, so an unknown or repeated withdrawal is
+refused unchanged and still requests section E's reset. A key withdrawn and
+announced in one batch remains admitted. Announcements stay sorted and unique,
+so a repeated announcement is refused rather than sent twice. Withdrawals need
+only be distinct; the emitter sorts them, and the ledger does not depend on it.
+A proof's iteration order is slot order; callers that need key order sort their
+own output.
+
+**Hashing.** Keys are chosen by peers. An unkeyed hash is invertible, so a peer
+could build distinct keys that all reach one bucket and make each insert,
+lookup, rebuild and delete probe the same run. The route maps accept that
+exposure because hashbrown filters probes by tag and a prefix limit bounds a
+peer's keys; this index, with linear probing and backward-shift deletion, would
+turn it into quadratic work in a single non-yielding call. The slot index
+therefore hashes with a per-space random `SipHash` key, which keeps every probe
+chain expected constant length. Its own arrays remain exactly charged.
+
+**Cost.** Capture walks the member's existing old projection once. Each key
+costs one keyed hash, one lookup, an insert on first sight and an appended
+entry, with no ordering of keys and no search of a universe; sealing sorts only
+a result small enough to stay as sorted IDs. Membership tests, reservation and
+application cost one lookup per key. Ledger loops over keys and slots, release,
+renumbering and index rebuilds offer the readiness checkpoint at a fixed
+stride. The manager passes its checkpoint through capture, sealing,
+admission, finish and retirement, and snapshots take one too. No checkpoint
+runs inside a comparison.
+
+**Accounting.** The daemon cap is unchanged and still provisional. The daemon
+charge is exact for the ledger's own allocations: its header, record array,
+each record's entries or bitset and pin capacity, and the slot space's keys,
+holder counts, free bits and index. Growth, renumbering and shrinking charge new
+storage beside the old before allocating and reconcile to the actual capacities
+afterwards. A slot of capacity costs 76⅛ bytes: the key, its holder count, two
+index buckets and a free bit. Each peer is charged its records' own storage plus
+80 bytes, that cost rounded up, for every slot it holds through an entry or a
+pin, which is the cost it would impose as the slot's only holder. Capacity above the held slots is charged to the
+daemon, not to a peer; settlement returns it as slots drain. The
+peer cap is 22 MiB. At 80 bytes per held key that admits at least 262,144 held
+keys, including a capture's entry buffer, which the earlier 64-byte charge per
+universe key allowed under 16 MiB. A lower ceiling would refuse every recovery
+of a member holding between the two, and because an initial feed reserves
+through the same path, that session would reset and reconnect in a loop.
+Allocator overhead, route bodies and RSS remain separate qualification
+surfaces.
+
+**Evidence status.** Component tests pin retention across churn, finish and
+snapshot; adversarial reuse with a retained snapshot, a pin and a slow holder;
+exact accounting with bounded slot reuse under sustained churn; renumbering
+after a skewed peak; renumbering with pins, snapshots, an open capture and both
+representations live, in a fixed case and a seeded interleaving model; settlement
+after, never inside, application; the most work between readiness checkpoints;
+linear index work for keys built to collide under an unkeyed hash; and the cap
+boundary. While the ledger has at most 512 slots and 64 records, test builds
+recount it at the start of every public call and when it is dropped, so
+manager-level flows run the same check; larger tests recount explicitly. A
+deterministic differential drives owned and private managers through capture
+under backpressure, recovery, a refresh replay, admission into a retained
+proof, a renumbering settlement, churn and full withdrawal, and requires equal
+routes and no withdrawal of an unheld route; the existing update-group and
+selection-deferral oracles do not enable EVPN ownership. A synthetic probe at ten times the measured receiver
+count checks the ledger peak against the qualification bar. These are component
+results. They do not qualify the recovery memory envelope, readiness or replay
+cost, and production EVPN ownership remains disabled until the mass-dirty and
+replay qualifications pass on this representation.
