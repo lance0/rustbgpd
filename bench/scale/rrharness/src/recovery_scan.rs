@@ -289,11 +289,14 @@ mod tests {
                         assert_eq!(receipt.settled_bytes, receipt.empty_bytes);
                         assert_eq!(counted.old_keys, 64);
                         if family == "evpn-soak" {
-                            // One dense-slot representation for both arms:
-                            // no ordering comparisons and no shape walk.
+                            // One slot representation for both arms: no
+                            // ordering comparisons and no per-key shape walk.
+                            // New keys may grow the slot index, whose rebuild
+                            // checkpoints once per 1024 slots.
                             assert!(receipt.shared);
                             assert_eq!(receipt.additions, if sparse { 4 } else { 0 });
-                            assert_eq!((counted.comparisons, counted.shape_callbacks), (0, 0));
+                            assert_eq!(counted.comparisons, 0);
+                            assert!(counted.shape_callbacks <= usize::from(sparse));
                             continue;
                         }
                         if family == "full-uc" {
