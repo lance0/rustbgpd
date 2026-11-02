@@ -65,7 +65,7 @@ pub struct TestFailure {
 
 /// An owned route/peer fixture backing a borrowed [`RouteContext`].
 #[derive(Debug, Default)]
-struct Fixture {
+pub(super) struct Fixture {
     prefix: Option<Prefix>,
     next_hop: Option<IpAddr>,
     communities: Vec<u32>,
@@ -88,12 +88,12 @@ struct Fixture {
     peer_asn: Option<u32>,
     /// Backs `prepend as self` (LAN-296); stamped onto the chain under
     /// test, mirroring how the config resolver stamps `[global] asn`.
-    local_asn: Option<u32>,
+    pub(super) local_asn: Option<u32>,
     peer_group: Option<String>,
 }
 
 impl Fixture {
-    fn build(test: &TestDef) -> Self {
+    pub(super) fn build(test: &TestDef) -> Self {
         let mut fixture = Fixture::default();
         for field in &test.route {
             match field {
@@ -195,7 +195,7 @@ impl Fixture {
         fixture
     }
 
-    fn context(&self) -> RouteContext<'_> {
+    pub(super) fn context(&self) -> RouteContext<'_> {
         RouteContext {
             prefix: self.prefix,
             next_hop: self.next_hop,
@@ -507,7 +507,7 @@ pub(super) fn assemble_chain(
 /// Kind agreement between members and the declared kind is a
 /// typecheck guarantee; mismatched members are unreachable here and
 /// are skipped defensively.
-fn override_data(
+pub(super) fn override_data(
     kind: DatasetKind,
     entries: &[super::diag::Spanned<DatasetEntryAst>],
 ) -> DatasetData {
@@ -547,7 +547,7 @@ fn verdict(accept: bool) -> &'static str {
     if accept { "accept" } else { "reject" }
 }
 
-fn render_expect(expect: &ExpectDef) -> String {
+pub(super) fn render_expect(expect: &ExpectDef) -> String {
     let calls = expect
         .calls
         .iter()

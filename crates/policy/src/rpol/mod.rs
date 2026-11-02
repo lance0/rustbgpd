@@ -22,6 +22,8 @@
 
 mod ast;
 mod coverage;
+#[cfg(test)]
+mod decision_corpus;
 mod diag;
 mod fmt;
 mod lexer;

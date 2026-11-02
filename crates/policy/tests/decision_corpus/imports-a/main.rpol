@@ -1,0 +1,8 @@
+# Identical entrypoints importing different sets: the corpus keeps both,
+# because their decisions differ.
+import "lib/sets.rpol"
+
+policy tagged-only {
+    term t { if route.communities in tagged { accept } }
+    term rest { reject }
+}
