@@ -483,6 +483,14 @@ amends ADR-0103 Decision 6.3, which stays true for predicate `apply`.
 - `rbgp policy stats`, `rbgp policy test` term hits and the explain
   traces show these names. In-language test coverage credits a hit to
   the callee's source term.
+- **Exception: a call inside a `for` body.** The call is inlined into the
+  loop's body terms, which sit outside the policy's term and counter grid,
+  and the loop evaluator reports neither body-term coverage nor
+  per-body-term explain traces. A loop-contained call is therefore
+  attributed at the loop level, like any other loop-body term today:
+  counters, coverage and explain name the enclosing loop term, not the
+  inlined callee terms. Per-term attribution inside loops remains a
+  possible later extension, for loop bodies in general.
 
 ### Cost model
 
@@ -546,3 +554,5 @@ With the flag, a callee's cost is linear in its size at each call site.
   - The agreement probe over the call shapes.
   - Explain, stats and test term-hit names for inlined terms and the
     flag terms.
+  - A call inside a `for` body attributes its hits, coverage and explain
+    trace to the enclosing loop term.
