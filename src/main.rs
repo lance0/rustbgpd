@@ -7892,9 +7892,17 @@ mod tests {
 
     /// The forwarding loop sends each table update to the RIB as it arrives
     /// and, when the pass in flight ends, the deltas that waited for it as
-    /// one.
-    #[tokio::test]
+    /// one. Every wait is bounded under paused time, so a loop that never
+    /// sends something fails at once instead of hanging.
+    #[tokio::test(start_paused = true)]
     async fn validation_forwarder_sends_the_merged_delta_when_the_pass_ends() {
+        async fn next<T>(receiver: &mut mpsc::Receiver<T>) -> Option<T> {
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .ok()
+                .flatten()
+        }
+
         let (updates_tx, updates_rx) = mpsc::channel(8);
         let (rib_tx, mut rib_rx) = mpsc::channel(8);
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
@@ -7925,7 +7933,7 @@ mod tests {
                 .unwrap();
         }
         for index in 0..3 {
-            let Some(RibUpdate::PeerDown { peer: sent, .. }) = rib_rx.recv().await else {
+            let Some(RibUpdate::PeerDown { peer: sent, .. }) = next(&mut rib_rx).await else {
                 panic!("each table update reaches the RIB");
             };
             assert_eq!(sent, peer(index), "in arrival order");
@@ -7933,7 +7941,7 @@ mod tests {
         let Some(PeerManagerCommand::SoftResetImportValidationDependents {
             delta: rustbgpd_transport::ValidationDelta::Rpki(Some(first)),
             reply,
-        }) = peer_mgr_rx.recv().await
+        }) = next(&mut peer_mgr_rx).await
         else {
             panic!("the first delta reaches the peer manager");
         };
@@ -7944,7 +7952,7 @@ mod tests {
         let Some(PeerManagerCommand::SoftResetImportValidationDependents {
             delta: rustbgpd_transport::ValidationDelta::Rpki(Some(merged)),
             reply,
-        }) = peer_mgr_rx.recv().await
+        }) = next(&mut peer_mgr_rx).await
         else {
             panic!("the deltas that waited follow when the pass ends");
         };
@@ -7957,7 +7965,10 @@ mod tests {
         );
         reply.send(Ok(())).unwrap();
         drop(updates_tx);
-        forwarder.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), forwarder)
+            .await
+            .expect("the forwarder ends when its channel closes")
+            .unwrap();
     }
 
     #[test]
