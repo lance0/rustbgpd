@@ -386,6 +386,49 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// LAN-2803: every set kind shares one namespace, as datasets already
+    /// do. An `in` reference cannot tell an asn-set from a community-set of
+    /// the same name, so a name defined by two kinds is an error naming
+    /// both; a same-kind duplicate is reported by `duplicate_check`.
+    fn cross_kind_set_check(&mut self) {
+        let sets = self
+            .file
+            .prefix_sets
+            .iter()
+            .map(|s| ("prefix-set", &s.name))
+            .chain(
+                self.file
+                    .community_sets
+                    .iter()
+                    .map(|s| ("community-set", &s.name)),
+            )
+            .chain(self.file.asn_sets.iter().map(|s| ("asn-set", &s.name)));
+        let mut seen: HashMap<&str, (&'static str, Span)> = HashMap::new();
+        for (kind, name) in sets {
+            match seen.get(name.node.as_str()) {
+                Some(&(first_kind, first_span)) if first_kind != kind => {
+                    self.diags.push(
+                        Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            name.span,
+                            format!(
+                                "{kind} `{}` collides with the {first_kind} of the same name",
+                                name.node
+                            ),
+                            "sets of every kind share one namespace",
+                        )
+                        .with_label(first_span, format!("{first_kind} defined here"))
+                        .with_note("rename one of them — `in` could not tell which to probe"),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    seen.insert(&name.node, (kind, name.span));
+                }
+            }
+        }
+    }
+
     fn check_declarations(&mut self) {
         self.duplicate_check("prefix-set", self.file.prefix_sets.iter().map(|s| &s.name));
         self.duplicate_check(
@@ -393,6 +436,7 @@ impl<'a> Checker<'a> {
             self.file.community_sets.iter().map(|s| &s.name),
         );
         self.duplicate_check("asn-set", self.file.asn_sets.iter().map(|s| &s.name));
+        self.cross_kind_set_check();
         // Functions get their own namespace (LAN-304): duplicates are
         // errors; sharing a name with a set or policy is allowed —
         // every reference position is disjoint (calls in value

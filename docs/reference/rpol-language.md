@@ -147,6 +147,11 @@ community-set NAME { COMMUNITY-LITERAL, ... }
 asn-set NAME { ASN, ... }
 ```
 
+Set names share one namespace across kinds and with datasets: a
+prefix-set, community-set, asn-set or dataset with the same name as
+another is a compile error naming both, because an `in` reference could
+not tell which to probe.
+
 - `ge`/`le` bounds are per member, with the same semantics as the
   TOML frontend (and Cisco/Juniper prefix lists): the candidate is
   masked at the member's length and its length must fall in the

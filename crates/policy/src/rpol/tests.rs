@@ -10764,14 +10764,15 @@ mod typed_parameter_round_two {
         assert!(report.failures.is_empty(), "{:#?}", report.failures);
     }
 
-    /// A set argument keeps the kind of its parameter. With an asn-set and
-    /// a community-set of the same name, a `community-set` parameter
-    /// probes the community-set, for a binding and for a `u32` constant.
+    /// A set argument keeps the kind of its parameter: a `community-set`
+    /// parameter probes the community-set, for a binding and for a `u32`
+    /// constant, and an `asn-set` parameter the asn-set. (Sets of different
+    /// kinds can no longer share a name, LAN-2803.)
     #[test]
     fn set_arguments_keep_their_parameter_kind() {
         passes(
-            "asn-set shared { 65000 }
-             community-set shared { 65000:1 }
+            "asn-set origins { 65000 }
+             community-set tags { 65000:1 }
              policy binding(s: community-set) {
                  term t { for c in route.communities { if c in s { reject } } }
              }
@@ -10783,23 +10784,23 @@ mod typed_parameter_round_two {
              }
              test community-binding {
                  route { prefix 192.0.2.0/24; communities [65000:1] }
-                 expect binding(shared) == reject
+                 expect binding(tags) == reject
              }
              test asn-value-binding {
                  route { prefix 192.0.2.0/24; communities [0:65000] }
-                 expect binding(shared) == accept
+                 expect binding(tags) == accept
              }
              test community-constant {
                  route { prefix 192.0.2.0/24 }
-                 expect constant(shared, 4259840001) == reject
+                 expect constant(tags, 4259840001) == reject
              }
              test asn-value-constant {
                  route { prefix 192.0.2.0/24 }
-                 expect constant(shared, 65000) == accept
+                 expect constant(tags, 65000) == accept
              }
              test asn-kind {
                  route { prefix 192.0.2.0/24 }
-                 expect asn(shared, 65000) == reject
+                 expect asn(origins, 65000) == reject
              }",
             5,
         );
@@ -11029,4 +11030,42 @@ mod typed_parameter_round_three {
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// LAN-2803: one set namespace across kinds
+// ─────────────────────────────────────────────────────────────────────
+
+/// An asn-set and a community-set may not share a name: `c in shared`
+/// cannot tell which to probe, and lowering used to take the asn-set, so a
+/// route carrying `65000:1` passed and one carrying `0:65000` was rejected.
+/// The collision is a compile error naming both definitions, for a loop
+/// binding, a `let` binding of a constant and a prefix-set alike.
+#[test]
+fn sets_of_every_kind_share_one_namespace() {
+    for source in [
+        "asn-set shared { 65000 } community-set shared { 65000:1 } \
+         policy p { term t { for c in route.communities { if c in shared { reject } } accept } }",
+        "community-set shared { 65000:1 } asn-set shared { 65000 } \
+         policy p { term t { let x = 65000; if x in shared { reject } accept } }",
+        "prefix-set shared { 192.0.2.0/24 } asn-set shared { 65000 } \
+         policy p { term t { if route.origin-as in shared { reject } accept } }",
+    ] {
+        let (diags, rendered) = diagnostics_of(source);
+        assert!(
+            rendered.contains("collides with the"),
+            "{source}: {rendered}"
+        );
+        assert!(rendered.contains("of the same name"), "{rendered}");
+        assert!(rendered.contains("defined here"), "names both: {rendered}");
+        assert_eq!(diags.len(), 1, "{rendered}");
+    }
+    // Distinct names compile; a same-kind duplicate keeps its own error.
+    compile_ok(
+        "asn-set origins { 65000 } community-set tags { 65000:1 } \
+         policy p { term t { for c in route.communities { if c in tags { reject } } accept } }",
+    );
+    let (_, rendered) =
+        diagnostics_of("asn-set a { 1 } asn-set a { 2 } policy p { term t { accept } }");
+    assert!(rendered.contains("duplicate asn-set `a`"), "{rendered}");
 }
