@@ -2248,17 +2248,24 @@ fn policy_validation_dependency(
     }
 }
 
-/// One delta covering `older` then `newer`: their union, or a full
-/// re-evaluation when either is one.
+/// One delta covering `older` then `newer`: their set union, each VRP or
+/// ASN once however often it changed, or a full re-evaluation when either is
+/// one. Entry order carries no meaning to a session.
 fn merge_validation_deltas(
     older: rustbgpd_transport::ValidationDelta,
     newer: rustbgpd_transport::ValidationDelta,
 ) -> rustbgpd_transport::ValidationDelta {
     use rustbgpd_transport::ValidationDelta::{Aspa, Rpki};
     match (older, newer) {
-        (Rpki(Some(older)), Rpki(Some(newer))) => {
-            Rpki(Some(older.iter().chain(newer.iter()).cloned().collect()))
-        }
+        (Rpki(Some(older)), Rpki(Some(newer))) => Rpki(Some(
+            older
+                .iter()
+                .chain(newer.iter())
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect(),
+        )),
         (Aspa(Some(older)), Aspa(Some(newer))) => Aspa(Some(std::sync::Arc::new(
             older.union(&newer).copied().collect(),
         ))),
@@ -7851,6 +7858,36 @@ mod tests {
             merge_validation_deltas(Rpki(None), rpki_delta(&[vrp(24)])),
             Rpki(None)
         ));
+    }
+
+    /// A VRP that changes again and again while a pass is in flight is
+    /// carried once in the merged delta: every copy would cost each
+    /// dependent session another re-evaluation of the VRP's routes.
+    #[tokio::test]
+    async fn a_repeatedly_changed_vrp_is_merged_once() {
+        use futures::FutureExt as _;
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let mut queue = ValidationRefreshQueue::new(peer_mgr_tx);
+        for _ in 0..6 {
+            assert!(queue.push(rpki_delta(&[vrp(24)])).now_or_never().is_some());
+        }
+        let Ok(PeerManagerCommand::SoftResetImportValidationDependents { reply, .. }) =
+            peer_mgr_rx.try_recv()
+        else {
+            panic!("the first delta reaches the peer manager");
+        };
+        reply.send(Ok(())).unwrap();
+        let outcome = queue.finished().await;
+        assert!(queue.complete(outcome).now_or_never().is_some());
+        let Ok(PeerManagerCommand::SoftResetImportValidationDependents {
+            delta: rustbgpd_transport::ValidationDelta::Rpki(Some(merged)),
+            ..
+        }) = peer_mgr_rx.try_recv()
+        else {
+            panic!("the merged delta follows");
+        };
+        assert_eq!(merged.to_vec(), vec![vrp(24)], "one copy of the VRP");
     }
 
     /// The forwarding loop sends each table update to the RIB as it arrives
