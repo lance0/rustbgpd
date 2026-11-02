@@ -43,9 +43,9 @@ use std::sync::Arc;
 use super::ast::{
     ActionStmt, AsnSetDef, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunityLit,
     CommunitySetDef, DatasetDecl, DatasetEntryAst, ElseBody, ExpectCall, ExpectDef, ExpectVerdict,
-    Expr, FieldPath, FnDef, ForSource, ForStmt, IfBranch, IfStmt, NextHopArg, ParamType, PeerField,
-    PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt,
-    TermDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
+    Expr, FieldPath, FnDef, FnLet, ForSource, ForStmt, IfBranch, IfStmt, NextHopArg, ParamType,
+    PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, ScalarAttr,
+    SourceFile, Stmt, TermDef, TestDatasetDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
 use super::diag::Spanned;
 use super::testing::{Fixture, override_data, render_expect};
@@ -871,6 +871,8 @@ const CONSTRUCTS: &[&str] = &[
     "ast.prepend.path-first",
     "ast.prepend.literal",
     "ast.prepend.parameter",
+    "ast.prepend.count.literal",
+    "ast.prepend.count.parameter",
     "ast.param.u32",
     "ast.param.prefix-set",
     "ast.param.community-set",
@@ -933,7 +935,10 @@ const CONSTRUCTS: &[&str] = &[
     "ast.test.with.removes-all",
     "ast.test.with.not-removed",
     "ast.test.with.without-community",
-    "ast.test.with.without",
+    "ast.test.with.without.local-pref",
+    "ast.test.with.without.med",
+    "ast.test.with.without.next-hop",
+    "ast.test.with.without.prepend",
     "ir.guard.true",
     "ir.guard.prefix-in-set",
     "ir.guard.prefix-eq",
@@ -1114,7 +1119,15 @@ fn ast_action(action: &ActionStmt, seen: &mut Seen) {
                 CommunityArg::InSet { negate: true, .. } => "ast.action.community-not-in-set",
             }
         }
-        ActionStmt::Prepend { asn, .. } => {
+        ActionStmt::Prepend {
+            asn,
+            count,
+            span: _,
+        } => {
+            seen.insert(match count {
+                U32Arg::Lit(..) => "ast.prepend.count.literal",
+                U32Arg::Param(_) => "ast.prepend.count.parameter",
+            });
             // Every argument form, then the operand it denotes: `origin`
             // and `path-first` arrive as a bare identifier.
             let form = match (asn, asn.operand()) {
@@ -1416,7 +1429,7 @@ fn declared_constructs(file: &RpolFile) -> Seen {
     } in fns
     {
         seen.insert("ast.decl.fn");
-        if !lets.is_empty() {
+        for FnLet { name: _, init: _ } in lets {
             seen.insert("ast.decl.fn.let");
         }
     }
@@ -1437,9 +1450,9 @@ fn test_constructs(test: &TestDef, seen: &mut Seen) {
         expects,
     } = test;
     seen.insert("ast.decl.test");
-    for dataset in datasets {
+    for TestDatasetDef { name: _, entries } in datasets {
         seen.insert("ast.test.dataset-override");
-        for entry in &dataset.entries {
+        for entry in entries {
             match &entry.node {
                 DatasetEntryAst::Community(member) => community_member(member, seen),
                 // Prefix and ASN members are the set forms already named.
@@ -1507,7 +1520,12 @@ fn test_constructs(test: &TestDef, seen: &mut Seen) {
                 WithAssertion::RemovesAll(_) => "ast.test.with.removes-all",
                 WithAssertion::NotRemoved(_) => "ast.test.with.not-removed",
                 WithAssertion::WithoutCommunity(_) => "ast.test.with.without-community",
-                WithAssertion::Without(_) => "ast.test.with.without",
+                WithAssertion::Without(attr) => match attr {
+                    ScalarAttr::LocalPref => "ast.test.with.without.local-pref",
+                    ScalarAttr::Med => "ast.test.with.without.med",
+                    ScalarAttr::NextHop => "ast.test.with.without.next-hop",
+                    ScalarAttr::Prepend => "ast.test.with.without.prepend",
+                },
             });
         }
     }

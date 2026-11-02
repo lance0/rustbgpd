@@ -3328,6 +3328,8 @@ settles these cases:
 | `ast.prepend.path-first` | v1 | `prepend as path-first <count>` |
 | `ast.prepend.literal` | v1 | `prepend as <asn> <count>` with a literal ASN |
 | `ast.prepend.parameter` | v1 | `prepend as <parameter> <count>` |
+| `ast.prepend.count.literal` | v1 | `prepend as <asn> <count>` with a literal count |
+| `ast.prepend.count.parameter` | v1 | `prepend as <asn> <parameter>`, a parameter count |
 | `ast.param.u32` | v1 | `u32` parameter type |
 | `ast.param.prefix-set` | v1 | `prefix-set` parameter type |
 | `ast.param.community-set` | v1 | `community-set` parameter type |
@@ -3390,7 +3392,10 @@ settles these cases:
 | `ast.test.with.removes-all` | v1 | `with removes <kind> *` |
 | `ast.test.with.not-removed` | v1 | `with not removed <kind> <literal>` |
 | `ast.test.with.without-community` | v1 | `with without <kind> <literal>` |
-| `ast.test.with.without` | v1 | `with without local-pref\|med\|next-hop\|prepend` |
+| `ast.test.with.without.local-pref` | v1 | `with without local-pref` |
+| `ast.test.with.without.med` | v1 | `with without med` |
+| `ast.test.with.without.next-hop` | v1 | `with without next-hop` |
+| `ast.test.with.without.prepend` | v1 | `with without prepend` |
 | `ir.guard.true` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
 | `ir.guard.prefix-in-set` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |
 | `ir.guard.prefix-eq` | outside_v1 | internal compiled form; decisions that reach it are pinned through the source constructs that lower to it, and it may be split, merged or renamed |

@@ -291,5 +291,14 @@ policy forward {
 
 test forward-marks {
     route { prefix 192.0.2.0/24; next-hop 198.51.100.1; communities [65000:666] }
-    expect forward == accept with community 65000:7, next-hop 192.0.2.9, removes community 65000:666
+    expect forward == accept with community 65000:7, next-hop 192.0.2.9, removes community 65000:666, without prepend
+}
+
+policy pad-times(n: u32) {
+    term pad { prepend as 64500 n; accept }
+}
+
+test padded-times-parameter {
+    route { prefix 192.0.2.0/24; next-hop 198.51.100.1; as-path "64500" }
+    expect pad-times(2) == accept with prepend as 64500 2, without next-hop
 }
