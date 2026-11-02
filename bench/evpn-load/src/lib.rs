@@ -27,7 +27,7 @@ use rustbgpd_wire::open::OpenMessage;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep};
 
 /// Errors during peer session setup or I/O.
@@ -49,6 +49,8 @@ pub enum PeerError {
     SendChannelClosed,
     #[error("hold time must be 0 (disabled) or at least 3 seconds, got {0}")]
     InvalidHoldTime(u16),
+    #[error("synthetic peer I/O control closed before acknowledgement")]
+    IoControlClosed,
 }
 
 /// Peer session configuration.
@@ -115,6 +117,55 @@ pub struct PeerHandle {
     pub rx: mpsc::Receiver<Message>,
     /// Time the session reached Established.
     pub established_at: Instant,
+    /// Acknowledged socket-read pauses and completed outbound writes for
+    /// controlled recovery fixtures. Dropping it while paused closes the reader;
+    /// dropping it during ordinary receiving leaves reads enabled.
+    pub io_control: PeerIoControl,
+}
+
+#[derive(Clone, Copy)]
+struct ReadRequest {
+    generation: u64,
+    paused: bool,
+}
+
+/// Control the actual TCP reader, independently of the decoded-message queue.
+/// A write count includes messages sent through `PeerHandle::tx`, excluding
+/// the OPEN/initial KEEPALIVE and automatically scheduled KEEPALIVEs.
+pub struct PeerIoControl {
+    read_request: watch::Sender<ReadRequest>,
+    read_ack: watch::Receiver<u64>,
+    write_completed: watch::Receiver<u64>,
+}
+
+impl PeerIoControl {
+    /// Wait until the socket reader has applied this pause/resume generation.
+    ///
+    /// # Errors
+    /// Returns an error when the reader exits before acknowledging the request.
+    pub async fn set_reads_paused(&mut self, paused: bool) -> Result<(), PeerError> {
+        let generation = self.read_request.borrow().generation + 1;
+        self.read_request
+            .send_replace(ReadRequest { generation, paused });
+        self.read_ack
+            .wait_for(|ack| *ack == generation)
+            .await
+            .map_err(|_| PeerError::IoControlClosed)?;
+        Ok(())
+    }
+
+    /// Wait for the writer to finish exactly the submitted message count.
+    /// The caller counts its successful sends, never queue depth or elapsed time.
+    ///
+    /// # Errors
+    /// Returns an error when the writer exits before completing that count.
+    pub async fn drain_writes(&mut self, submitted: u64) -> Result<(), PeerError> {
+        self.write_completed
+            .wait_for(|completed| *completed >= submitted)
+            .await
+            .map_err(|_| PeerError::IoControlClosed)?;
+        Ok(())
+    }
 }
 
 /// Listen on `cfg.listen`, accept the first inbound TCP, exchange OPEN,
@@ -195,6 +246,12 @@ pub async fn establish_stream(
 
     let (tx_out, mut tx_rx) = mpsc::channel::<Message>(1024);
     let (rx_tx, rx_out) = mpsc::channel::<Message>(65536);
+    let (read_request, mut read_control) = watch::channel(ReadRequest {
+        generation: 0,
+        paused: false,
+    });
+    let (read_ack, read_acknowledged) = watch::channel(0);
+    let (write_completed, write_progress) = watch::channel(0_u64);
 
     let (mut reader, mut writer) = stream.into_split();
 
@@ -221,6 +278,7 @@ pub async fn establish_stream(
                                 if writer.write_all(&bytes).await.is_err() {
                                     return;
                                 }
+                                write_completed.send_modify(|count| *count += 1);
                             }
                             Err(e) => {
                                 tracing::error!(?e, "encode failed in writer task");
@@ -248,6 +306,7 @@ pub async fn establish_stream(
             if writer.write_all(&bytes).await.is_err() {
                 return;
             }
+            write_completed.send_modify(|count| *count += 1);
         }
     });
 
@@ -273,8 +332,21 @@ pub async fn establish_stream(
             // Far-future placeholder — never fires.
             tokio::time::Instant::now() + Duration::from_hours(24 * 365)
         };
+        let mut control_live = true;
         loop {
+            let request = *read_control.borrow_and_update();
+            read_ack.send_replace(request.generation);
+            if request.paused {
+                if read_control.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
             let n = tokio::select! {
+                changed = read_control.changed(), if control_live => {
+                    control_live = changed.is_ok();
+                    continue;
+                }
                 read_res = reader.read(&mut tmp) => match read_res {
                     Ok(0) | Err(_) => return,
                     Ok(n) => n,
@@ -330,6 +402,11 @@ pub async fn establish_stream(
         tx: tx_out,
         rx: rx_out,
         established_at,
+        io_control: PeerIoControl {
+            read_request,
+            read_ack: read_acknowledged,
+            write_completed: write_progress,
+        },
     })
 }
 
@@ -447,6 +524,61 @@ pub const fn v4_next_hop(id: Ipv4Addr) -> IpAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn io_control_waits_for_current_reader_generation_and_completed_writes() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let (read_request, requests) = watch::channel(ReadRequest {
+            generation: 0,
+            paused: false,
+        });
+        let (acknowledge, read_ack) = watch::channel(0);
+        let (completed, write_completed) = watch::channel(0);
+        let mut control = PeerIoControl {
+            read_request,
+            read_ack,
+            write_completed,
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        {
+            let mut pause = std::pin::pin!(control.set_reads_paused(true));
+            assert!(pause.as_mut().poll(&mut context).is_pending());
+            assert!(requests.borrow().paused);
+            assert_eq!(requests.borrow().generation, 1);
+            acknowledge.send_replace(1);
+            assert!(matches!(
+                pause.as_mut().poll(&mut context),
+                Poll::Ready(Ok(()))
+            ));
+        }
+        {
+            let mut resume = std::pin::pin!(control.set_reads_paused(false));
+            assert!(
+                resume.as_mut().poll(&mut context).is_pending(),
+                "old pause acknowledgement cannot resume reads"
+            );
+            assert!(!requests.borrow().paused);
+            acknowledge.send_replace(2);
+            assert!(matches!(
+                resume.as_mut().poll(&mut context),
+                Poll::Ready(Ok(()))
+            ));
+        }
+        let mut drain = std::pin::pin!(control.drain_writes(3));
+        assert!(drain.as_mut().poll(&mut context).is_pending());
+        completed.send_replace(2);
+        assert!(
+            drain.as_mut().poll(&mut context).is_pending(),
+            "partial writer progress cannot acknowledge full drain"
+        );
+        completed.send_replace(3);
+        assert!(matches!(
+            drain.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+    }
 
     #[test]
     fn synth_mac_is_deterministic_and_locally_administered() {
