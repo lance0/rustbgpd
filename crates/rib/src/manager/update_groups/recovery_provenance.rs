@@ -21,7 +21,13 @@ pub(in crate::manager) use crate::update::EvpnRecoveryExhaustionCause as Exhaust
 use rustbgpd_wire::EvpnRouteKey;
 use smallvec::SmallVec;
 
-pub(in crate::manager) const PEER_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+/// A peer pays [`SLOT_BYTES`] per held key. 22 MiB keeps at least 262,144
+/// held keys per peer, through a capture's own entry buffer, which the
+/// earlier 64-byte charge per universe key allowed under 16 MiB. A lower
+/// ceiling would refuse every recovery of a member between the two, and an
+/// initial feed reserves through the same path, so such a session would
+/// reset and reconnect in a loop.
+pub(in crate::manager) const PEER_LIMIT_BYTES: usize = 22 * 1024 * 1024;
 pub(in crate::manager) const DAEMON_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 
 type Keys = SmallVec<[EvpnRouteKey; 0]>;
@@ -3501,6 +3507,28 @@ mod tests {
         assert_running_charges(&ledger);
         assert!(ledger.retire_member(retired));
         assert_eq!(ledger.slot_usage().live, 0);
+        assert_running_charges(&ledger);
+    }
+
+    /// The default peer cap admits a member holding the 262,144 keys the
+    /// earlier charge allowed: capture, sealing and a later admission.
+    #[test]
+    fn default_peer_cap_admits_the_earlier_ceiling() {
+        const CEILING: u32 = 262_144;
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let handle = ledger.register(owner(1, 7)).unwrap();
+        assert!(ledger.finish_recovery(handle).unwrap());
+        assert!(ledger.begin_capture(handle).unwrap());
+        for n in 0..CEILING {
+            assert!(ledger.capture_key(handle, key(n)).unwrap(), "key {n}");
+        }
+        assert!(ledger.seal_capture(handle).unwrap());
+        assert_eq!(
+            ledger.proof(handle).unwrap().unwrap().len(),
+            CEILING as usize
+        );
+        admit(&mut ledger, handle, &[key(CEILING)], &[key(0)]);
+        assert!(ledger.peer_usage(handle.owner.peer).peak <= PEER_LIMIT_BYTES);
         assert_running_charges(&ledger);
     }
 
