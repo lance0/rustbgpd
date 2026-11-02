@@ -235,7 +235,7 @@ class RecoveryTests(unittest.TestCase):
             if target == "daemon":
                 row["peak"] = int(row["daemon_budget"] * .8) + 1
             else:
-                row["peers"][0][4] = int(row["peer_budget"] * .8) + 1
+                row["peers"][0][4] = int(Q.PEER_BAR_BUDGET * .8) + 1
             with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
                 R.roster(row, "candidate", 4)
 
@@ -640,7 +640,8 @@ class RecoveryTests(unittest.TestCase):
                 for fraction, failed in ((.8, False), (.9, True)):
                     with self.subTest(arm=arm, target=target, fraction=fraction):
                         row = witness(arm, 1, 10)
-                        set_provenance_peak(row, target, int(row[f"{target}_budget"] * fraction))
+                        budget = Q.PEER_BAR_BUDGET if target == "peer" else row["daemon_budget"]
+                        set_provenance_peak(row, target, int(budget * fraction))
                         if failed:
                             with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
                                 R.roster(row, arm, 4)
@@ -654,9 +655,9 @@ class RecoveryTests(unittest.TestCase):
                 with self.subTest(arm=arm, defect=defect):
                     row = witness(arm, 1, 10)
                     if defect == "partial-under-bar":
-                        set_provenance_peak(row, "peer", int(row["peer_budget"] * .8))
+                        set_provenance_peak(row, "peer", int(Q.PEER_BAR_BUDGET * .8))
                     else:
-                        set_provenance_peak(row, "peer", int(row["peer_budget"] * .9))
+                        set_provenance_peak(row, "peer", int(Q.PEER_BAR_BUDGET * .9))
                     if defect == "wrong-source-over-bar":
                         row["peers"][0][1] = None if arm == "candidate" else 1
                     controller = R.Controller.__new__(R.Controller)
@@ -692,7 +693,7 @@ class RecoveryTests(unittest.TestCase):
                         # Registration rows precede the full roster.
                         row = witness(arm, 1, 10_000)
                     fraction = .8 if defect == "partial-under-bar" else .9
-                    set_provenance_peak(row, "peer", int(row["peer_budget"] * fraction))
+                    set_provenance_peak(row, "peer", int(Q.PEER_BAR_BUDGET * fraction))
                     path.write_text("evpn_qualification " + json.dumps(row) + "\n" + path.read_text())
                     with patch.object(R, "check_wire", return_value=report):
                         if expected == "PASS":

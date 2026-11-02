@@ -178,28 +178,6 @@ def derived_high_water(rib, groups):
     return rib, groups
 
 
-PROVENANCE = "crates/rib/src/manager/update_groups/recovery_provenance.rs"
-SEALED_STATIC = ("static BENCH_SEALED_CAPACITY: std::sync::LazyLock<\n"
-                 "    std::sync::Mutex<std::collections::HashMap<u64, usize>>,\n"
-                 "> = std::sync::LazyLock::new(Default::default);\n")
-SEAL_NOTE = ("        BENCH_SEALED_CAPACITY.lock().expect(\"bench seal map\").insert(\n"
-             "            self.records[index].handle.id,\n"
-             "            self.records[index].keys.capacity(),\n"
-             "        );\n")
-
-
-def derived_provenance(provenance, gauges):
-    """Bench-only ledger shape: capture-origin vs admission-origin key bytes,
-    masks and live universes, read by the observer row in both arms."""
-    anchor = "type Universes = SmallVec<[Universe; 0]>;\n"
-    provenance = replace_once(provenance, anchor, anchor + SEALED_STATIC)
-    anchor = ("        Self::sort_keys(&mut self.records[index].keys, checkpoint);\n"
-              "        self.records[index].state = State::Ready;\n")
-    provenance = replace_once(provenance, anchor, SEAL_NOTE + anchor)
-    anchor = "impl EvpnRecoveryProvenance {\n"
-    return replace_once(provenance, anchor, anchor + gauges)
-
-
 def derive(source, arm):
     """Only exported sources are eligible; normal worktrees remain untouched."""
     source = Path(source)
@@ -210,15 +188,12 @@ def derive(source, arm):
     observer = source / "bench/scale/evpn-qualification/observer.rs"
     input_observer = source / "bench/scale/evpn-qualification/input_observer.rs"
     groups = source / "crates/rib/src/manager/update_groups.rs"
-    provenance = source / PROVENANCE
-    gauges = source / "bench/scale/evpn-qualification/provenance_gauges.rs"
     main_text, rib_text = derived_texts(main.read_text(), rib.read_text(), observer.read_text(), arm,
                                       input_observer.read_text())
     rib_text, groups_text = derived_high_water(rib_text, groups.read_text())
     main.write_text(main_text)
     rib.write_text(rib_text)
     groups.write_text(groups_text)
-    provenance.write_text(derived_provenance(provenance.read_text(), gauges.read_text()))
 
 
 def verify_export(output, arm):
@@ -231,9 +206,7 @@ def verify_export(output, arm):
         groups_name = "crates/rib/src/manager/update_groups.rs"
         main_text, rib_text = derived_texts(*texts, arm, input_observer)
         rib_text, groups_text = derived_high_water(rib_text, archive.extractfile(groups_name).read().decode())
-        gauges = archive.extractfile("bench/scale/evpn-qualification/provenance_gauges.rs").read().decode()
-        provenance_text = derived_provenance(archive.extractfile(PROVENANCE).read().decode(), gauges)
-        changed = {names[0]: main_text, names[1]: rib_text, groups_name: groups_text, PROVENANCE: provenance_text}
+        changed = {names[0]: main_text, names[1]: rib_text, groups_name: groups_text}
         tracked = set()
         for member in archive:
             if member.issym():
@@ -361,11 +334,18 @@ def receipt(text, clients, routes):
     return {"exact_receiver_keys": True, "initial_convergence_ms": int(convergence[0])}
 
 
+# The dense-ID candidate declares a 22 MiB per-peer cap (calibrated so its
+# ceiling is not below main's). The predeclared per-peer headroom bar stays
+# 0.8 x the original 16 MiB, independent of the product's declared cap.
+REPORTED_PEER_BUDGET = 22 * 1024 ** 2
+PEER_BAR_BUDGET = 16 * 1024 ** 2
+
+
 def validate_provenance(row, clients):
     """Validate charges and peer identity, including partial or dirty rosters."""
     counts = ("members", "retained", "peak", "peer_budget", "daemon_budget")
     require(all(type(row[name]) is int and row[name] >= 0 for name in counts), "invalid provenance count")
-    require(row["peer_budget"] == 16 * 1024 ** 2 and row["daemon_budget"] == 256 * 1024 ** 2,
+    require(row["peer_budget"] == REPORTED_PEER_BUDGET and row["daemon_budget"] == 256 * 1024 ** 2,
             "EVPN provenance budgets changed")
     require(row["retained"] <= row["peak"] <= row["daemon_budget"], "invalid daemon provenance charge")
     require(type(row["peers"]) is list and len(row["peers"]) == row["members"] <= clients,
@@ -386,7 +366,7 @@ def validate_provenance(row, clients):
 def accept_provenance_headroom(row):
     fraction = RECOVERY_BARS["max_budget_fraction"]
     accept(row["peak"] <= row["daemon_budget"] * fraction, "daemon provenance headroom breached")
-    accept(all(peer[4] <= row["peer_budget"] * fraction for peer in row["peers"]),
+    accept(all(peer[4] <= PEER_BAR_BUDGET * fraction for peer in row["peers"]),
            "peer provenance headroom breached")
 
 
