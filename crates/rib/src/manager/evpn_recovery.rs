@@ -838,58 +838,97 @@ impl RibManager {
         }
         for peer in peers {
             self.evpn_marker_cursor = Some(peer);
-            let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
-                continue;
-            };
-            let session_id = self.outbound_session_ids.get(&peer).copied();
-            let owed = if self.evpn_feed_is_current(peer) {
-                self.evpn_completion_record(peer)
-                    .and_then(|record| record.evpn_feed_completion.as_ref())
-                    .map_or(0, |completion| completion.owed_markers)
-            } else {
-                0
-            };
-            let mut end_of_rib = self
-                .pending_eor
+            self.try_send_evpn_feed_markers(peer, true);
+        }
+    }
+
+    /// One standalone attempt at `peer`'s ready terminal markers: the EVPN
+    /// EoR/EoRR its current complete feed owes, plus, with
+    /// `pending_families`, its other ready pending End-of-RIB families. A
+    /// refused send leaves them for the resync tick.
+    fn try_send_evpn_feed_markers(&mut self, peer: PeerId, pending_families: bool) {
+        let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
+            return;
+        };
+        let session_id = self.outbound_session_ids.get(&peer).copied();
+        let owed = if self.evpn_feed_is_current(peer) {
+            self.evpn_completion_record(peer)
+                .and_then(|record| record.evpn_feed_completion.as_ref())
+                .map_or(0, |completion| completion.owed_markers)
+        } else {
+            0
+        };
+        let mut end_of_rib = if pending_families {
+            self.pending_eor
                 .get(&peer)
                 .into_iter()
                 .flat_map(|families| families.iter().copied())
                 .filter(|&family| self.pending_marker_family_ready(peer, family))
-                .collect::<Vec<_>>();
-            let evpn_ready = self.pending_marker_family_ready(peer, EVPN_FAMILY);
-            if owed & EVPN_EOR != 0 && evpn_ready && !end_of_rib.contains(&EVPN_FAMILY) {
-                end_of_rib.push(EVPN_FAMILY);
-            }
-            let refresh_markers = if owed & EVPN_EORR != 0 && evpn_ready {
-                vec![(
-                    EVPN_FAMILY.0,
-                    EVPN_FAMILY.1,
-                    rustbgpd_wire::RouteRefreshSubtype::EoRR,
-                )]
-            } else {
-                vec![]
-            };
-            let bits = Self::evpn_admitted_marker_bits(&end_of_rib, &refresh_markers);
-            let update = OutboundRouteUpdate {
-                end_of_rib: end_of_rib.clone(),
-                refresh_markers,
-                ..OutboundRouteUpdate::default()
-            };
-            if sender.try_send(update).is_ok()
-                && self.outbound_session_ids.get(&peer).copied() == session_id
-                && self
-                    .outbound_peers
-                    .get(&peer)
-                    .is_some_and(|current| current.same_channel(&sender))
-            {
-                if let Some(pending) = self.pending_eor.get_mut(&peer) {
-                    pending.retain(|family| !end_of_rib.contains(family));
-                    if pending.is_empty() {
-                        self.pending_eor.remove(&peer);
-                    }
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let evpn_ready = self.pending_marker_family_ready(peer, EVPN_FAMILY);
+        if owed & EVPN_EOR != 0 && evpn_ready && !end_of_rib.contains(&EVPN_FAMILY) {
+            end_of_rib.push(EVPN_FAMILY);
+        }
+        let refresh_markers = if owed & EVPN_EORR != 0 && evpn_ready {
+            vec![(
+                EVPN_FAMILY.0,
+                EVPN_FAMILY.1,
+                rustbgpd_wire::RouteRefreshSubtype::EoRR,
+            )]
+        } else {
+            vec![]
+        };
+        if end_of_rib.is_empty() && refresh_markers.is_empty() {
+            return;
+        }
+        let bits = Self::evpn_admitted_marker_bits(&end_of_rib, &refresh_markers);
+        let update = OutboundRouteUpdate {
+            end_of_rib: end_of_rib.clone(),
+            refresh_markers,
+            ..OutboundRouteUpdate::default()
+        };
+        if sender.try_send(update).is_ok()
+            && self.outbound_session_ids.get(&peer).copied() == session_id
+            && self
+                .outbound_peers
+                .get(&peer)
+                .is_some_and(|current| current.same_channel(&sender))
+        {
+            if let Some(pending) = self.pending_eor.get_mut(&peer) {
+                pending.retain(|family| !end_of_rib.contains(family));
+                if pending.is_empty() {
+                    self.pending_eor.remove(&peer);
                 }
-                self.evpn_feed_markers_admitted(peer, &sender, bits);
             }
+            self.evpn_feed_markers_admitted(peer, &sender, bits);
+        }
+    }
+
+    /// A refresh replay strips the EVPN markers its complete feed owes from
+    /// the data; once that data is admitted, send them behind it instead of
+    /// leaving them to the resync tick, which retries a refused or held one.
+    /// Other families' pending End-of-RIB, and EVPN's own pending initial
+    /// one, stay with `flush_pending_eor` and its completion hooks.
+    pub(in crate::manager) fn send_evpn_refresh_markers(&mut self, peer: PeerId) {
+        let owed = self.evpn_feed_is_current(peer)
+            && self
+                .evpn_completion_record(peer)
+                .and_then(|record| record.evpn_feed_completion.as_ref())
+                .is_some_and(|completion| completion.owed_markers != 0);
+        if owed
+            && !self.dirty_peers.contains(&peer)
+            && !self.evpn_recovery_reset_pending(peer)
+            && !self.outbound_channel_gone(peer)
+            && self.pending_marker_family_ready(peer, EVPN_FAMILY)
+            && !self
+                .pending_eor
+                .get(&peer)
+                .is_some_and(|families| families.contains(&EVPN_FAMILY))
+        {
+            self.try_send_evpn_feed_markers(peer, false);
         }
     }
 

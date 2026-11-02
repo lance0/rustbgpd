@@ -1090,8 +1090,12 @@ fn owned_late_full_queue_captures_actual_displaced_old_before_delta_retirement()
     assert_eq!(resets.load(Ordering::SeqCst), 0);
 }
 
+/// An owned refresh replays the full inventory, and the terminal markers it
+/// stripped from the data follow right behind it once the admission has
+/// verified complete coverage, with no wait for the resync tick. A failed
+/// verification never releases them.
 #[test]
-fn owned_refresh_replays_announcements_but_terminal_waits_for_current_completion() {
+fn owned_refresh_sends_terminal_markers_right_after_verified_coverage() {
     for late_fault in [false, true] {
         let (mut manager, peer, gid, mut output) = fixture();
         let route = received(100);
@@ -1111,14 +1115,15 @@ fn owned_refresh_replays_announcements_but_terminal_waits_for_current_completion
             [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
         );
         assert!(!data.end_of_rib.contains(&EVPN));
-        assert!(output.try_recv().is_err());
         assert_eq!(manager.evpn_admitted_count(peer), 1);
         let builds = manager.adj_rib_out_commit_stats.resync_builds;
-        manager.retry_evpn_feed_markers_bounded();
         if late_fault {
+            assert!(output.try_recv().is_err());
+            manager.retry_evpn_feed_markers_bounded();
             assert!(output.try_recv().is_err());
             assert!(manager.evpn_recovery_reset_pending(peer));
         } else {
+            // No resync tick has run: the markers came with the refresh.
             let marker = output.try_recv().unwrap();
             assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
             assert_eq!(marker.end_of_rib, [EVPN]);
@@ -1127,6 +1132,7 @@ fn owned_refresh_replays_announcements_but_terminal_waits_for_current_completion
                 [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
             );
             assert!(!manager.has_evpn_feed_completion(peer));
+            assert!(output.try_recv().is_err());
         }
         assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
     }
@@ -2546,4 +2552,189 @@ fn sparse_renewal_respects_a_rejected_delta() {
     assert!(manager.evpn_feed_is_current(peer));
     assert_eq!(resets.load(Ordering::SeqCst), 0);
     assert_eq!(manager.evpn_admitted_count(peer), 1);
+}
+
+/// An owned refresh whose data takes the last free outbound slot cannot send
+/// its markers right behind it: the feed keeps owing them without going
+/// dirty, and the resync tick sends them once the queue drains.
+#[test]
+fn refused_refresh_marker_falls_back_to_the_resync_tick() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.capacity() > 1 {
+        sender.try_send(OutboundRouteUpdate::default()).unwrap();
+    }
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    assert_eq!(sender.capacity(), 0);
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.resync_tick_pending());
+    let mut updates = Vec::new();
+    while let Ok(update) = output.try_recv() {
+        updates.push(update);
+    }
+    let data = updates.pop().unwrap();
+    assert_eq!(data.evpn_announce.len(), 1);
+    assert_eq!(
+        data.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
+    );
+    manager.retry_evpn_feed_markers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(
+        marker.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+    );
+    assert!(!manager.has_evpn_feed_completion(peer));
+}
+
+/// A sparse renewal inherits the End-of-RIB-for-refresh its feed still owes
+/// (owed only through the completion): the churn's data goes out, the marker
+/// stays owed, and the resync tick sends it after that data.
+#[test]
+fn sparse_renewal_inherits_the_owed_marker_behind_its_data() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    output.try_recv().unwrap();
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+        .unwrap();
+    feed.seal.required_markers =
+        RibManager::evpn_admitted_marker_bits(&[], &[(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(!manager.pending_eor.contains_key(&peer));
+    while output.try_recv().is_ok() {}
+    let changed = imet_with_tag(5);
+    manager.process_evpn_announce_chunk(changed.peer, vec![changed.clone()]);
+    let data = output.try_recv().unwrap();
+    assert_eq!(data.evpn_announce.len(), 1);
+    assert_eq!(data.evpn_announce[0].key(), changed.key());
+    assert!(output.try_recv().is_err());
+    assert!(
+        manager.evpn_feed_is_current(peer),
+        "the renewal kept the owed marker"
+    );
+    manager.retry_evpn_feed_markers_bounded();
+    let marker = output.try_recv().unwrap();
+    assert_eq!(
+        marker.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+    );
+    assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert_eq!(manager.evpn_admitted_count(peer), 2);
+}
+
+/// Every update one dump produced, in order.
+fn drain_all(output: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<OutboundRouteUpdate> {
+    let mut updates = Vec::new();
+    while let Ok(update) = output.try_recv() {
+        updates.push(update);
+    }
+    updates
+}
+
+/// An owned initial dump sends its EVPN End-of-RIB exactly once, leaves
+/// nothing pending, and releases the group-admitted proof; a following
+/// refresh still carries its BoRR/EoRR demarcation.
+#[test]
+fn owned_initial_dump_settles_its_marker_once_and_refresh_keeps_demarcation() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    stage(&mut manager, gid, &route);
+    assert!(manager.capture_private_evpn_admitted(peer));
+    manager.send_initial_table(peer);
+    let updates = drain_all(&mut output);
+    let eors = updates
+        .iter()
+        .filter(|update| update.end_of_rib.contains(&EVPN))
+        .count();
+    assert_eq!(eors, 1, "exactly one EVPN End-of-RIB");
+    assert!(
+        !manager
+            .pending_eor
+            .get(&peer)
+            .is_some_and(|families| families.contains(&EVPN))
+    );
+    assert!(!manager.pending_group_admitted.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    manager.retry_evpn_feed_markers_bounded();
+    let refresh = drain_all(&mut output);
+    let has = |subtype| {
+        refresh
+            .iter()
+            .any(|update| update.refresh_markers.contains(&(EVPN.0, EVPN.1, subtype)))
+    };
+    assert!(has(RouteRefreshSubtype::BoRR) && has(RouteRefreshSubtype::EoRR));
+}
+
+/// A private-handoff initial dump sends its EVPN End-of-RIB once, and the
+/// resync tick does not send it again.
+#[test]
+fn private_handoff_initial_dump_sends_one_marker() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    stage(&mut manager, gid, &route);
+    assert!(manager.capture_private_evpn_admitted(peer));
+    assert!(manager.begin_private_evpn_handoff(peer));
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(false);
+    assert!(manager.has_private_evpn_handoff(peer));
+    manager.send_initial_table(peer);
+    let mut updates = drain_all(&mut output);
+    manager.retry_evpn_feed_markers_bounded();
+    updates.extend(drain_all(&mut output));
+    let eors = updates
+        .iter()
+        .filter(|update| update.end_of_rib.contains(&EVPN))
+        .count();
+    assert_eq!(eors, 1, "exactly one EVPN End-of-RIB");
+}
+
+/// The refresh tail sends EVPN's own owed markers only: another family's
+/// ready pending End-of-RIB stays pending for its own flush and hooks.
+#[test]
+fn evpn_refresh_markers_leave_other_families_pending_eor() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    admit_converged_owned(&mut manager, peer, gid, &mut output, &route);
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    manager.pending_eor.insert(peer, HashSet::from([unicast]));
+    manager.send_route_refresh_response(peer, EVPN.0, EVPN.1);
+    let updates = drain_all(&mut output);
+    let marker = updates.last().unwrap();
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert_eq!(
+        marker.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+    );
+    assert!(
+        updates
+            .iter()
+            .all(|update| !update.end_of_rib.contains(&unicast))
+    );
+    assert!(manager.pending_eor[&peer].contains(&unicast));
+    assert!(!manager.has_evpn_feed_completion(peer));
 }
