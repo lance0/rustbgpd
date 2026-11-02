@@ -1325,6 +1325,11 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 set_label(&tables.community_set_names, id.0, "community-set")
             )
         }
+        MatchExpr::CommunityKindInSet(id, kind) => format!(
+            "{} in {}",
+            kind.field(),
+            set_label(&tables.community_set_names, id.0, "community-set")
+        ),
         MatchExpr::AsPathMatches(id) => format!(
             "route.as-path matches {:?}",
             tables
@@ -1466,14 +1471,17 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 crate::ir::DatasetProbe::Prefix => format!("route.prefix in {name}"),
                 crate::ir::DatasetProbe::OriginAs => format!("route.origin-as in {name}"),
                 crate::ir::DatasetProbe::PeerAs => format!("peer.asn in {name}"),
-                crate::ir::DatasetProbe::Community => format!("route.communities in {name}"),
+                crate::ir::DatasetProbe::Community => format!("route.any-community in {name}"),
+                crate::ir::DatasetProbe::CommunityKind(kind) => {
+                    format!("{} in {name}", kind.field())
+                }
                 crate::ir::DatasetProbe::LocalAsn { name: binding, .. }
                 | crate::ir::DatasetProbe::LocalCommunity { name: binding, .. } => {
                     format!("{binding} in {name}")
                 }
-                crate::ir::DatasetProbe::ConstAsn(value)
-                | crate::ir::DatasetProbe::ConstCommunity(value) => {
-                    format!("{value} in {name}")
+                crate::ir::DatasetProbe::ConstAsn(value) => format!("{value} in {name}"),
+                crate::ir::DatasetProbe::ConstCommunity(value) => {
+                    format!("{}:{} in {name}", value >> 16, value & 0xffff)
                 }
             }
         }
@@ -1497,10 +1505,10 @@ fn render_cmp(field: &str, cmp: Cmp) -> String {
     }
 }
 
-/// The `.rpol` field a community criterion set reads: all-standard →
+/// The `.rpol` field a kind-agnostic community probe reads: all-standard →
 /// `route.communities`, all-large → `route.large-communities`,
-/// all-RT/RO → `route.ext-communities`, mixed → the generic
-/// `route.communities`.
+/// all-RT/RO → `route.ext-communities`, mixed → `route.any-community`
+/// (a per-kind field reads only its own kind).
 fn community_field(
     criteria: &[CommunityMatch],
     patterns: &[crate::sets::CommunityPattern],
@@ -1527,7 +1535,7 @@ fn community_field(
     if fields.all(|field| field == first) {
         first
     } else {
-        "route.communities"
+        "route.any-community"
     }
 }
 

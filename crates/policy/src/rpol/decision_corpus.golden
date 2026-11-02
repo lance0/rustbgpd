@@ -1,20 +1,20 @@
-# rpol decision corpus: 263 programs, 1622 cases. Regenerate with
+# rpol decision corpus: 264 programs, 1647 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 29
-ast.stmt.if 509
+ast.stmt.if 516
 ast.stmt.else-if 18
 ast.stmt.else 27
 ast.stmt.nested-if 13
 ast.stmt.for 75
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1110
+ast.action.accept 1127
 ast.action.reject 384
-ast.action.set-local-pref 116
-ast.action.set-med 173
+ast.action.set-local-pref 123
+ast.action.set-med 175
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.set-next-hop-parameter 1
@@ -22,36 +22,38 @@ ast.action.community-literal 510
 ast.action.large-community-admin-wildcard 11
 ast.action.community-all 45
 ast.action.community-binding 43
-ast.action.community-in-set 23
+ast.action.community-in-set 25
 ast.action.community-not-in-set 22
 ast.action.prepend 43
 ast.action.let 63
 ast.action.break 33
 ast.action.continue 22
-ast.expr.or 9
-ast.expr.and 20
+ast.expr.or 11
+ast.expr.and 31
 ast.expr.not 5
 ast.expr.cmp 220
-ast.expr.in 107
+ast.expr.in 112
 ast.expr.ident-in 42
 ast.expr.has 4
 ast.expr.has-parameter 1
 ast.expr.exists 4
 ast.expr.matches 37
 ast.expr.contains 5
-ast.expr.value-cmp 118
+ast.expr.value-cmp 120
 ast.expr.apply 1
-ast.value.literal 314
+ast.value.literal 299
+ast.value.community 22
 ast.value.identifier 106
-ast.value.field 137
-ast.value.arithmetic 105
-ast.value.call 48
-ir.guard.true 1154
+ast.value.field 139
+ast.value.arithmetic 96
+ast.value.call 50
+ir.guard.true 1164
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
 ir.guard.community-contains 26
-ir.guard.community-in-set 53
+ir.guard.community-in-set 25
+ir.guard.community-kind-in-set 53
 ir.guard.as-path-matches 148
 ir.guard.as-path-len 77
 ir.guard.origin-as-eq 21
@@ -79,17 +81,18 @@ ir.guard.exists 12
 ir.guard.local-in-asn-set 22
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 5
-ir.guard.and 127
+ir.guard.and 138
 ir.guard.or 15
 ir.guard.not 64
-ir.value.const 181
+ir.value.const 165
+ir.value.community 16
 ir.value.field 159
 ir.value.local 107
-ir.value.binary 148
-ir.value.min 38
-ir.value.max 9
-ir.value.clamp 9
-ir.action.permit 1087
+ir.value.binary 137
+ir.value.min 40
+ir.value.max 11
+ir.value.clamp 11
+ir.action.permit 1104
 ir.action.deny 347
 ir.action.continue 167
 ir.action.bind 84
@@ -99,11 +102,11 @@ ir.action.continue-loop 22
 ir.action.community-var 43
 ir.action.remove-large-community-admin 11
 ir.action.remove-all-communities 45
-ir.action.remove-communities-in-set 23
-ir.mod.set-local-pref 99
-ir.mod.set-local-pref-computed 17
+ir.action.remove-communities-in-set 25
+ir.mod.set-local-pref 104
+ir.mod.set-local-pref-computed 19
 ir.mod.set-med 68
-ir.mod.set-med-computed 85
+ir.mod.set-med-computed 87
 ir.mod.set-next-hop 13
 ir.mod.prepend 32
 ir.mod.prepend-computed 11
@@ -117,7 +120,6 @@ ir.mod.ext-community-remove 11
 ## programs and policies without cases
 crates/policy/fuzz/seeds/rpol_compile/lan-184-deep-nesting.rpol: does not compile (a deliberate error, or datasets bound by config)
 crates/policy/fuzz/seeds/rpol_compile/lan-299-arithmetic.rpol: policy arith takes parameters (in-language tests only)
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol: in-language tests fail: boundary
 crates/policy/fuzz/seeds/rpol_compile/lan-299-fold-errors.rpol: does not compile (a deliberate error, or datasets bound by config)
 crates/policy/fuzz/seeds/rpol_compile/lan-300-imports.rpol: does not compile (a deliberate error, or datasets bound by config)
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-shadowing.rpol: policy shadow takes parameters (in-language tests only)
@@ -355,11 +357,23 @@ bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m08-host-routes => permit with add community 65500:2000
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m09-evpn => permit with add community 65500:2000
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m10-v6-bogon => permit with add community 65500:2000
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | test boundary | edges => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | test standard-twin | twins => permit with set local-pref 50; remove community 0:65010
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | test large-twin | twins => permit with set local-pref 50; remove large-community 65000:0:65010
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m01-v4-transit => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m02-v4-invalid-long => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m03-v6-tagged => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m04-bare => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m05-internal => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m06-local-as-set => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m07-default => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m08-host-routes => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m09-evpn => permit
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol | twins | m10-v6-bogon => permit
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | test boundary | edges => permit with set local-pref 100; set med 400
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m01-v4-transit => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m02-v4-invalid-long => permit with set local-pref 100; set med 400
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m03-v6-tagged => permit with set local-pref 150; set med 50
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m04-bare => permit
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m04-bare => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m05-internal => permit with set local-pref 300; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m06-local-as-set => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m07-default => permit with set local-pref 100; set med 50
@@ -639,6 +653,9 @@ crates/policy/tests/decision_corpus/guards.rpol | test evpn-prefix | evpn-types 
 crates/policy/tests/decision_corpus/guards.rpol | test evpn-imet | evpn-types => permit
 crates/policy/tests/decision_corpus/guards.rpol | test family-v6 | not-v4 => deny
 crates/policy/tests/decision_corpus/guards.rpol | test family-v4 | not-v4 => permit
+crates/policy/tests/decision_corpus/guards.rpol | test any-kind-standard-twin | any-kind-twins => permit with set local-pref 50
+crates/policy/tests/decision_corpus/guards.rpol | test any-kind-large-twin | any-kind-twins => permit with set local-pref 50
+crates/policy/tests/decision_corpus/guards.rpol | test any-kind-neither | any-kind-twins => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-bogon | m01-v4-transit => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-bogon | m02-v4-invalid-long => deny
 crates/policy/tests/decision_corpus/guards.rpol | not-bogon | m03-v6-tagged => permit
@@ -739,6 +756,16 @@ crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m07-default => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m08-host-routes => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m09-evpn => deny
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m10-v6-bogon => deny
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m01-v4-transit => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m02-v4-invalid-long => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m03-v6-tagged => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m04-bare => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m05-internal => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m06-local-as-set => permit with set local-pref 50
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m07-default => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m08-host-routes => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m09-evpn => permit
+crates/policy/tests/decision_corpus/guards.rpol | any-kind-twins | m10-v6-bogon => permit
 crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m01-v4-transit => permit
 crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m02-v4-invalid-long => deny
 crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m03-v6-tagged => deny

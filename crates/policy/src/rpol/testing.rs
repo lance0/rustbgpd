@@ -748,6 +748,8 @@ fn discard_asserted(assertion: &WithAssertion, fixture: &Fixture, mods: &mut Rou
             CommunityKind::Large => mods
                 .large_communities_remove
                 .retain(|value| !fixture.large_communities.contains(value)),
+            // The parser gives `removes` assertions a single kind.
+            CommunityKind::Any => {}
         },
         WithAssertion::Community(lit) | WithAssertion::Removes(lit) => {
             let add = matches!(assertion, WithAssertion::Community(_));
@@ -864,6 +866,8 @@ fn check_removes_all(
             |value| *value,
             ToString::to_string,
         ),
+        // The parser gives `removes` assertions a single kind.
+        CommunityKind::Any => Ok(None),
     };
     let keyword = super::typeck::kind_keyword(kind);
     match missing {

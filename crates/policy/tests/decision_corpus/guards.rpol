@@ -155,3 +155,27 @@ test family-v4 {
     route { prefix 192.0.2.0/24; family ipv4-unicast }
     expect not-v4 == accept
 }
+
+# A route server publishes the standard and large twins of one action
+# community, so the set mixes kinds and is probed with `any-community`.
+community-set rs-blackhole { 0:65000, 65000:0:0 }
+
+policy any-kind-twins {
+    term actions { if route.any-community in rs-blackhole { set local-pref 50; accept } }
+    term rest { accept }
+}
+
+test any-kind-standard-twin {
+    route { prefix 192.0.2.0/24; communities [0:65000] }
+    expect any-kind-twins == accept with local-pref 50
+}
+
+test any-kind-large-twin {
+    route { prefix 192.0.2.0/24; large-communities [65000:0:0] }
+    expect any-kind-twins == accept with local-pref 50
+}
+
+test any-kind-neither {
+    route { prefix 192.0.2.0/24; communities [65000:0] }
+    expect any-kind-twins == accept with without local-pref
+}

@@ -185,7 +185,9 @@ term).
 
 - **`u32` remains the only arithmetic type.** Policy parameters are
   `u32` today, and every numeric attribute the language touches
-  (`local-pref`, `med`, ASN, path length) is `u32`-shaped. Arithmetic
+  (`local-pref`, `med`, ASN, path length) is `u32`-shaped. *(Amended
+  2026-11-02: ASNs and standard communities are values of their own
+  types; see "Amendment (2026-11-02): ASN and community values".)* Arithmetic
   (`+ - * / %`) is **checked**: overflow, underflow, and
   division/modulo by zero are *evaluation errors* (Decision 4), never
   traps — the SIGFPE class is unrepresentable. No floats, no signed
@@ -619,3 +621,26 @@ only value that cannot be computed is one built from a missing operand
 leaves a condition false and fails an action closed, as Decision 4
 describes. The `overflow`, `underflow` and `clamp-inverted` error kinds stay
 valid in `expect … == error KIND`, but evaluation no longer produces them.
+
+## Amendment (2026-11-02): ASN and community values
+
+Decision 2 treated every numeric value as a u32, so the typechecker could
+not tell an ASN from a standard community. An AS-path loop variable probed a
+community-set, where ASN 64500 matched the community `0:64500`, and
+`remove community a` removed that community. This amendment types a value
+by its source:
+
+- `route.origin-as`, `peer.asn` and a loop variable over `route.as-path` or
+  an asn-set are ASNs. An ASN probes asn-sets, compares with `==` and `!=`,
+  orders (`>=`, `<=`) against a constant u32 such as a literal or parameter,
+  and may be set as a whole value. It is not an arithmetic operand or a
+  function argument.
+- A loop variable over `route.communities` is a standard community. It
+  probes community-sets of standard members, compares with `==` and `!=`,
+  and can be added or removed. It is not an arithmetic operand.
+- A `let` takes its initializer's type. A u32 never probes a
+  community-set, and only a constant u32 stands for a community in
+  `add community` or `remove community`.
+
+`u32` stays the only arithmetic type, so the saturating amendment above is
+unchanged.

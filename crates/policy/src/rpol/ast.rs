@@ -187,6 +187,9 @@ pub enum CommunityKind {
     Large,
     /// Extended (RFC 4360 RT/RO).
     Ext,
+    /// Every kind: `remove any-community in S` only (LAN-2794), the
+    /// kind-agnostic removal for a set that mixes kinds.
+    Any,
 }
 
 impl CommunityLit {
@@ -378,6 +381,9 @@ impl IfStmt {
 pub enum ValueExprAst {
     /// Integer literal.
     Lit(u32, Span),
+    /// A standard community literal (`65000:1`), as its RFC 1997 value. It
+    /// is a community, never a u32 operand (LAN-2794).
+    Community(u32, Span),
     /// Parameter reference (bare identifier in a value position).
     Ident(Spanned<String>),
     /// A `route.`/`peer.` field read (u32-typed fields only, checked
@@ -414,6 +420,7 @@ impl ValueExprAst {
     pub fn span(&self) -> Span {
         match self {
             ValueExprAst::Lit(_, span)
+            | ValueExprAst::Community(_, span)
             | ValueExprAst::Binary { span, .. }
             | ValueExprAst::Call { span, .. } => *span,
             ValueExprAst::Ident(name) => name.span,

@@ -712,19 +712,41 @@ fn rpol_fallthrough_keeps_continue_mods_under_the_permit_default() {
     assert!(step.term_traces[2].ends_with("[not matched]"));
 }
 
-/// LAN-304 dual attribution: a call whose argument has no value renders
-/// with the calling term's name AND the function-qualified binding
-/// names — the trace names both — and the action that needs the result
-/// fails closed.
+/// LAN-304 dual attribution: a call's bindings render with the calling
+/// term's name AND the function-qualified binding names, and an error in a
+/// call's binding names both and fails the action closed. A call takes u32
+/// values, which are never missing (LAN-2794), so the test swaps the missing
+/// `route.origin-as` into the compiled call to reach the rail.
 #[test]
 fn rpol_fn_body_error_names_function_and_calling_term() {
+    use crate::ir::{TermAction, ValueExpr, ValueField};
+    fn origin_for_med(expr: &mut ValueExpr) {
+        match expr {
+            ValueExpr::Field(field) if *field == ValueField::Med => *field = ValueField::OriginAs,
+            ValueExpr::Binary { lhs, rhs, .. }
+            | ValueExpr::Min(lhs, rhs)
+            | ValueExpr::Max(lhs, rhs) => {
+                origin_for_med(lhs);
+                origin_for_med(rhs);
+            }
+            ValueExpr::Clamp(x, lo, hi) => {
+                origin_for_med(x);
+                origin_for_med(lo);
+                origin_for_med(hi);
+            }
+            ValueExpr::Const(_)
+            | ValueExpr::Community(_)
+            | ValueExpr::Field(_)
+            | ValueExpr::Local { .. } => {}
+        }
+    }
     const FN_RPOL: &str = r"
 fn share(total: u32, parts: u32) -> u32 {
     let each = total / max(parts, 1)
     each
 }
 policy divide {
-    term compute { set local-pref share(100, route.origin-as); accept }
+    term compute { set local-pref share(100, route.med); accept }
 }
 ";
     let file = crate::rpol::RpolFile::parse(FN_RPOL).expect("clean rpol");
@@ -732,40 +754,86 @@ policy divide {
     let compiled = file
         .compile_policy("divide", &[], &mut store)
         .expect("policy exists");
-    let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
-        "divide".to_string(),
-        std::sync::Arc::new(compiled),
-    )]);
-    // No origin AS: `share.each` has no value, and the action needs it.
-    let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
-    assert_eq!(trace.action, PolicyAction::Deny, "fail closed");
-    let step = &trace.steps[0];
-    let traces = step.term_traces.join(
-        "
-",
-    );
+    let chain_of = |compiled: crate::ir::CompiledChain| {
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "divide".to_string(),
+            std::sync::Arc::new(compiled),
+        )])
+    };
+    let mut ctx = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
+    ctx.med = Some(50);
+    let trace = explain_chain_statements(Some(&chain_of(compiled.clone())), &ctx);
+    assert_eq!(trace.action, PolicyAction::Permit, "100/50 = 2");
+    let traces = trace.steps[0].term_traces.join("\n");
     // The calling term (compute.<n> split names) attributes the walk...
     assert!(traces.contains("term compute."), "{traces}");
-    // ...the erroring bind names the function-qualified binding...
+    // ...and the bind names the function-qualified binding.
     assert!(traces.contains("let share.each"), "{traces}");
-    // ...and the error renders on the uniform rail.
+    let rendered = format!("{:?}", trace.steps[0]);
+    assert!(rendered.contains("share(100, route.med)"), "{rendered}");
+
+    // The call's operand has no value: the erroring bind names the
+    // function-qualified binding, and the action that needs it fails closed.
+    let mut missing = compiled;
+    for term in &mut missing.policies[0].terms {
+        if let TermAction::Bind { expr, .. } = &mut term.action {
+            origin_for_med(expr);
+        }
+    }
+    let trace = explain_chain_statements(
+        Some(&chain_of(missing)),
+        &plain_ctx(v4_prefix([10, 0, 0, 0], 24)),
+    );
+    assert_eq!(trace.action, PolicyAction::Deny, "fail closed");
+    let traces = trace.steps[0].term_traces.join("\n");
+    assert!(traces.contains("term compute."), "{traces}");
+    assert!(traces.contains("let share.each"), "{traces}");
     assert!(
         traces.contains("`route.origin-as` has no value"),
         "{traces}"
     );
     assert!(traces.contains("fail closed => reject"), "{traces}");
+}
 
-    // On a resolvable route the action renders the call source-level
-    // (the result slot's name) with its value.
-    let mut ok = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
-    ok.origin_asn = Some(50);
-    let trace = explain_chain_statements(Some(&chain), &ok);
-    assert_eq!(trace.action, PolicyAction::Permit, "100/50 = 2");
-    let rendered = format!("{:?}", trace.steps[0]);
-    assert!(
-        rendered.contains("share(100, route.origin-as)"),
-        "{rendered}"
-    );
+/// Community values keep their spelling through lowering: explain renders
+/// a community literal, a substituted `community` argument and a binding of
+/// either as `65000:1` in a comparison and in a `let`, never as the raw
+/// integer, which would not typecheck as source (LAN-2794).
+#[test]
+fn rpol_explain_spells_community_values() {
+    const RPOL: &str = r"
+policy tagged(tag: community) {
+    term t {
+        let mine = tag;
+        let other = 65000:2;
+        if mine == 65000:2 || other == mine { reject }
+        accept
+    }
+}
+";
+    let file = crate::rpol::RpolFile::parse(RPOL).expect("clean rpol");
+    let compiled = file
+        .compile_policy_args(
+            "tagged",
+            &[crate::rpol::PolicyArg::Community((65000 << 16) | 1)],
+            &mut crate::sets::SetStore::new(),
+            &crate::datasets::DatasetBindings::new(),
+            false,
+        )
+        .expect("policy exists")
+        .expect("within the prepend cap")
+        .expect("no datasets");
+    let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+        "tagged".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
+    assert_eq!(trace.action, PolicyAction::Permit);
+    let traces = trace.steps[0].term_traces.join("\n");
+    assert!(traces.contains("let mine = 65000:1"), "{traces}");
+    assert!(traces.contains("let other = 65000:2"), "{traces}");
+    assert!(traces.contains("mine == 65000:2"), "{traces}");
+    assert!(!traces.contains("42598400"), "{traces}");
 }
 
 /// The rpol agreement matrix: mixed TOML + rpol chains, contexts that

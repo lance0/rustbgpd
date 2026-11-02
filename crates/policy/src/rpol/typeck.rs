@@ -31,6 +31,9 @@ pub(super) enum Field {
     Communities,
     LargeCommunities,
     ExtCommunities,
+    /// `route.any-community`: the kind-agnostic community probe, valid
+    /// only on the left of `in` (LAN-2794).
+    AnyCommunity,
     AsPath,
     AsPathLen,
     CommunitiesLen,
@@ -55,6 +58,7 @@ const ROUTE_FIELDS: &[(&str, Field)] = &[
     ("communities", Field::Communities),
     ("large-communities", Field::LargeCommunities),
     ("ext-communities", Field::ExtCommunities),
+    ("any-community", Field::AnyCommunity),
     ("as-path", Field::AsPath),
     ("origin-as", Field::OriginAs),
     ("local-pref", Field::LocalPref),
@@ -169,7 +173,9 @@ struct Scope<'a> {
     /// The policy's parameters of a type other than `u32`, which resolve
     /// only in positions of their own type.
     typed: Vec<(&'a str, ParamType)>,
-    lets: Vec<String>,
+    /// `let` and loop bindings in scope, with the type each carries
+    /// (LAN-2794): a binding takes its initializer's or source's type.
+    lets: Vec<(String, ValueType, bool)>,
     /// False inside a function body (LAN-304): functions are closed
     /// over nothing — `route.`/`peer.` field reads are rejected there;
     /// every input arrives as a parameter, which keeps the
@@ -183,7 +189,31 @@ impl Scope<'_> {
     }
 
     fn is_local(&self, name: &str) -> bool {
-        self.lets.iter().any(|local| local == name)
+        self.lets.iter().any(|(local, ..)| local == name)
+    }
+
+    /// The type of the innermost binding `name`, if one is in scope.
+    fn local_type(&self, name: &str) -> Option<ValueType> {
+        self.lets
+            .iter()
+            .rev()
+            .find(|(local, ..)| local == name)
+            .map(|(_, ty, _)| *ty)
+    }
+
+    /// Whether the innermost binding `name` holds a compile-time constant
+    /// (a `let` of literals and parameters).
+    fn local_is_constant(&self, name: &str) -> bool {
+        self.lets
+            .iter()
+            .rev()
+            .find(|(local, ..)| local == name)
+            .is_some_and(|(_, _, constant)| *constant)
+    }
+
+    /// The names of every binding in scope, for suggestions.
+    fn local_names(&self) -> impl Iterator<Item = &str> {
+        self.lets.iter().map(|(local, ..)| local.as_str())
     }
 
     fn typed_param(&self, name: &str) -> Option<ParamType> {
@@ -524,6 +554,49 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// LAN-2803: every set kind shares one namespace, as datasets already
+    /// do. An `in` reference cannot tell an asn-set from a community-set of
+    /// the same name, so a name defined by two kinds is an error naming
+    /// both; a same-kind duplicate is reported by `duplicate_check`.
+    fn cross_kind_set_check(&mut self) {
+        let sets = self
+            .file
+            .prefix_sets
+            .iter()
+            .map(|s| ("prefix-set", &s.name))
+            .chain(
+                self.file
+                    .community_sets
+                    .iter()
+                    .map(|s| ("community-set", &s.name)),
+            )
+            .chain(self.file.asn_sets.iter().map(|s| ("asn-set", &s.name)));
+        let mut seen: HashMap<&str, (&'static str, Span)> = HashMap::new();
+        for (kind, name) in sets {
+            match seen.get(name.node.as_str()) {
+                Some(&(first_kind, first_span)) if first_kind != kind => {
+                    self.diags.push(
+                        Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            name.span,
+                            format!(
+                                "{kind} `{}` collides with the {first_kind} of the same name",
+                                name.node
+                            ),
+                            "sets of every kind share one namespace",
+                        )
+                        .with_label(first_span, format!("{first_kind} defined here"))
+                        .with_note("rename one of them — `in` could not tell which to probe"),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    seen.insert(&name.node, (kind, name.span));
+                }
+            }
+        }
+    }
+
     fn check_declarations(&mut self) {
         self.duplicate_check("prefix-set", self.file.prefix_sets.iter().map(|s| &s.name));
         self.duplicate_check(
@@ -531,6 +604,7 @@ impl<'a> Checker<'a> {
             self.file.community_sets.iter().map(|s| &s.name),
         );
         self.duplicate_check("asn-set", self.file.asn_sets.iter().map(|s| &s.name));
+        self.cross_kind_set_check();
         // Functions get their own namespace (LAN-304): duplicates are
         // errors; sharing a name with a set or policy is allowed —
         // every reference position is disjoint (calls in value
@@ -693,12 +767,18 @@ impl<'a> Checker<'a> {
                 // `let x = x + 1` reads a parameter/earlier `x`
                 // (shadowing, never self-reference) — the LAN-302 rule.
                 self.check_value_expr(&l.init, &scope);
+                // LAN-2794: a function computes u32 values only, so a
+                // community literal cannot leave it as a number.
+                self.require_u32_operand(&l.init, &scope, "a function body");
                 if def.params.len() + index == MAX_LOCALS {
                     self.locals_exceeded(l.name.span);
                 }
-                scope.lets.push(l.name.node.clone());
+                scope
+                    .lets
+                    .push((l.name.node.clone(), ValueType::U32, false));
             }
             self.check_value_expr(&def.result, &scope);
+            self.require_u32_operand(&def.result, &scope, "a function body");
         }
         self.check_fn_graph()
     }
@@ -982,7 +1062,8 @@ impl<'a> Checker<'a> {
                 // for everything after it.
                 Stmt::Action(ActionStmt::Let { name, init, .. }) => {
                     self.check_value_expr(init, scope);
-                    self.declare_binding(scope, name, &mut scope_locals);
+                    let ty = binding_type(init, scope);
+                    self.declare_binding(scope, name, ty, &mut scope_locals);
                 }
                 Stmt::Action(action) => {
                     self.check_action(action, scope, loop_depth);
@@ -1044,14 +1125,22 @@ impl<'a> Checker<'a> {
         let mark = scope.lets.len();
         let mut scope_locals = 0usize;
         // The loop variable is an immutable binding in the body scope,
-        // fresh per iteration (LAN-302 slot model).
-        self.declare_binding(scope, &for_stmt.var, &mut scope_locals);
+        // fresh per iteration (LAN-302 slot model), typed by its source
+        // (LAN-2794): an ASN from the AS path or an asn-set, a standard
+        // community from `route.communities`.
+        let ty = match &for_stmt.source {
+            ForSource::Field(path) if matches!(resolve_field(path), Ok(Field::Communities)) => {
+                ValueType::Community
+            }
+            ForSource::Field(_) | ForSource::Set(_) => ValueType::Asn,
+        };
+        self.declare_binding(scope, &for_stmt.var, (ty, false), &mut scope_locals);
         self.check_stmts(&for_stmt.body, scope, loop_depth + 1);
         scope.lets.truncate(mark);
     }
 
     /// The three iterable source forms (LAN-303): `route.communities`
-    /// (standard, u32), `route.as-path` (ASNs), a named `asn-set`.
+    /// (standard communities), `route.as-path` (ASNs), a named `asn-set`.
     /// Everything else gets a spanned diagnostic naming why — the
     /// finite-source grammar is what makes every loop bound provable
     /// or runtime-meterable.
@@ -1069,12 +1158,12 @@ impl<'a> Checker<'a> {
                         DiagnosticCode::Typecheck,
                         path.span,
                         format!("`{}` is not iterable", path.render()),
-                        "large/extended communities are not u32 values",
+                        "only standard communities iterate",
                     )
                     .with_note(
-                        "the loop variable is u32-typed (ADR-0103 Decision 2); only \
-                         route.communities (standard, RFC 1997) and route.as-path iterate \
-                         in this slice — probe large/ext communities with `has` or `in`",
+                        "a loop variable is an ASN or a standard community (RFC 1997): \
+                         only route.communities and route.as-path iterate — probe \
+                         large/ext communities with `has` or `in`",
                     ),
                 ),
                 Ok(_) => self.diags.push(
@@ -1253,7 +1342,8 @@ impl<'a> Checker<'a> {
             };
             if let ActionStmt::Let { name, init, .. } = action {
                 self.check_value_expr(init, scope);
-                self.declare_binding(scope, name, &mut body_locals);
+                let ty = binding_type(init, scope);
+                self.declare_binding(scope, name, ty, &mut body_locals);
                 continue;
             }
             self.check_action(action, scope, loop_depth);
@@ -1279,6 +1369,7 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &mut Scope,
         name: &Spanned<String>,
+        (ty, constant): (ValueType, bool),
         scope_locals: &mut usize,
     ) {
         if *scope_locals == MAX_LOCALS {
@@ -1299,7 +1390,7 @@ impl<'a> Checker<'a> {
                 .with_note("split the term or fold intermediate values"),
             );
         }
-        scope.lets.push(name.node.clone());
+        scope.lets.push((name.node.clone(), ty, constant));
     }
 
     /// The 65th `let` of one scope (LAN-302, `MAX_LOCALS`): fires once,
@@ -1337,6 +1428,27 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
+            // LAN-2794: `any-community` addresses every kind, so it only
+            // removes the members of a set; a value has one kind.
+            ActionStmt::Community {
+                kind: CommunityKind::Any,
+                arg,
+                span,
+                ..
+            } if !matches!(arg, CommunityArg::InSet { .. }) => {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        *span,
+                        "`any-community` removes only by set",
+                        "a single value has one kind",
+                    )
+                    .with_note(
+                        "write `remove any-community in SET`, or name the kind: \
+                         `community`, `large-community` or `ext-community`",
+                    ),
+                );
+            }
             ActionStmt::Accept(_)
             | ActionStmt::Reject(_)
             | ActionStmt::SetNextHop(..)
@@ -1367,6 +1479,19 @@ impl<'a> Checker<'a> {
             }
             ActionStmt::SetLocalPref(expr, _) | ActionStmt::SetMed(expr, _) => {
                 self.check_value_expr(expr, scope);
+                // LAN-2794: an ASN may be set as a whole value; a community
+                // is not a number.
+                if value_type(expr, scope) == ValueType::Community {
+                    self.diags.push(
+                        Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            expr.span(),
+                            "`set` takes a u32 value or an ASN, but this is a community",
+                            "communities are not numbers",
+                        )
+                        .with_note("add or remove a community instead: `add community c`"),
+                    );
+                }
             }
             ActionStmt::Community {
                 kind,
@@ -1418,9 +1543,10 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            // LAN-303: `add/remove community <binding>` — bindings are
-            // u32-valued, so the variable form is standard-kind only,
-            // and the name must resolve to a binding or parameter.
+            // LAN-303: `add/remove community <binding>` — a binding holds
+            // at most a standard community, so the variable form is
+            // standard-kind only, and the name must resolve to a binding
+            // or parameter.
             ActionStmt::Community {
                 kind,
                 arg: CommunityArg::Var(name),
@@ -1435,20 +1561,40 @@ impl<'a> Checker<'a> {
                                 "`{}` actions take a literal, not a binding",
                                 kind_keyword(*kind)
                             ),
-                            "bindings are u32-valued",
+                            "bindings hold standard communities only",
                         )
                         .with_note(
-                            "only standard (RFC 1997) communities are u32-shaped; \
+                            "a binding is a u32, an ASN or a standard (RFC 1997) community; \
                              large/extended community actions need a literal",
                         ),
                     );
                 }
                 // A `let` shadows an outer parameter here, as in value
                 // positions; lowering resolves the same way.
-                let local = scope.is_local(&name.node);
+                let local = scope.local_type(&name.node);
                 let community_param =
-                    !local && scope.typed_param(&name.node) == Some(ParamType::Community);
-                if local || community_param {
+                    local.is_none() && scope.typed_param(&name.node) == Some(ParamType::Community);
+                // LAN-2794: a community action takes a community, or a
+                // constant u32 standing for one (like a literal); never an
+                // ASN or a runtime u32.
+                let runtime_value = local.filter(|ty| {
+                    *ty == ValueType::Asn
+                        || (*ty == ValueType::U32 && !scope.local_is_constant(&name.node))
+                });
+                if let Some(ty) = runtime_value {
+                    self.diags.push(
+                        Diagnostic::coded(
+                            DiagnosticCode::Typecheck,
+                            name.span,
+                            format!("`{}` is {}, not a community", name.node, ty.describe()),
+                            "community actions take a community",
+                        )
+                        .with_note(
+                            "bind a community: a loop over `route.communities`, or a parameter \
+                             declared `community`",
+                        ),
+                    );
+                } else if local.is_some() || community_param {
                     // Resolved.
                 } else if self.typed_param_misused(name, scope, "a community") {
                     // Reported.
@@ -1461,11 +1607,7 @@ impl<'a> Checker<'a> {
                     );
                     if let Some(suggestion) = closest(
                         &name.node,
-                        scope
-                            .params
-                            .iter()
-                            .copied()
-                            .chain(scope.lets.iter().map(String::as_str)),
+                        scope.params.iter().copied().chain(scope.local_names()),
                     ) {
                         diag = diag.with_note(format!("did you mean `{suggestion}`?"));
                     }
@@ -1534,7 +1676,7 @@ impl<'a> Checker<'a> {
     )]
     fn check_value_expr(&mut self, expr: &ValueExprAst, scope: &Scope<'_>) {
         match expr {
-            ValueExprAst::Lit(..) => {}
+            ValueExprAst::Lit(..) | ValueExprAst::Community(..) => {}
             // A bare identifier in a value position resolves innermost
             // `let` first, then parameters (LAN-302 shadowing). A name
             // followed by `(` is a builtin call (the `Call` arm), the
@@ -1570,8 +1712,9 @@ impl<'a> Checker<'a> {
                                 "arithmetic operands are u32",
                             )
                             .with_note(
-                                "u32 fields: route.local-pref, route.med, route.as-path.len, \
-                                 route.origin-as, peer.asn",
+                                "value fields: route.local-pref, route.med, route.as-path.len \
+                                 and the community counts (u32); route.origin-as and peer.asn \
+                                 (ASNs, no arithmetic)",
                             ),
                         );
                     }
@@ -1580,6 +1723,8 @@ impl<'a> Checker<'a> {
             ValueExprAst::Binary { op, lhs, rhs, span } => {
                 self.check_value_expr(lhs, scope);
                 self.check_value_expr(rhs, scope);
+                self.require_u32_operand(lhs, scope, "arithmetic");
+                self.require_u32_operand(rhs, scope, "arithmetic");
                 // LAN-2791: arithmetic saturates, but literal-only
                 // arithmetic that leaves u32 can only be a typo. Reported
                 // at the smallest failing subexpression: both children
@@ -1613,6 +1758,7 @@ impl<'a> Checker<'a> {
             ValueExprAst::Call { name, args, span } => {
                 for arg in args {
                     self.check_value_expr(arg, scope);
+                    self.require_u32_operand(arg, scope, &format!("`{}`", name.node));
                 }
                 let Some(&(_, arity)) = VALUE_BUILTINS
                     .iter()
@@ -1718,11 +1864,143 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A bare identifier in a value position (LAN-302): innermost
-    /// `let` binding, else parameter, else a spanned unknown-name
-    /// diagnostic suggesting across both.
+    /// LAN-2794: arithmetic, builtins and function arguments take u32
+    /// values; an ASN or a community there is reported at the operand.
+    fn require_u32_operand(&mut self, operand: &ValueExprAst, scope: &Scope<'_>, position: &str) {
+        let ty = value_type(operand, scope);
+        let note = match ty {
+            ValueType::U32 => return,
+            ValueType::Asn => {
+                "compare an ASN with `==`, `!=`, `>=` or `<=` against an integer literal or \
+                 u32 parameter, or probe an asn-set; arithmetic on ASNs has no meaning"
+            }
+            ValueType::Community => {
+                "compare a community with `==` or `!=` against a community literal, probe a \
+                 community-set, or add or remove it"
+            }
+        };
+        self.diags.push(
+            Diagnostic::coded(
+                DiagnosticCode::Typecheck,
+                operand.span(),
+                format!("{position} takes u32 values, but this is {}", ty.describe()),
+                format!("{} take no arithmetic", ty.plural()),
+            )
+            .with_note(note),
+        );
+    }
+
+    /// LAN-2794: whether two compared values' types meet. Each side is its
+    /// type and whether it is a compile-time constant. An ASN compares with
+    /// an ASN (`==`/`!=`) or a constant u32 (any operator); a community with
+    /// a community (`==`/`!=`), a literal `65000:1` included; u32 with u32.
+    fn check_compare_types(
+        &mut self,
+        lhs: (ValueType, bool),
+        rhs: (ValueType, bool),
+        op: CmpOp,
+        span: Span,
+    ) {
+        let ordering = matches!(op, CmpOp::Ge | CmpOp::Le);
+        let problem = match (lhs, rhs) {
+            ((ValueType::Asn, _), (ValueType::Asn, _)) if ordering => {
+                Some("two ASNs compare with `==` and `!=` only")
+            }
+            ((ValueType::Community, _), (ValueType::Community, _)) if ordering => {
+                Some("communities compare with `==` and `!=` only")
+            }
+            ((ValueType::U32, _), (ValueType::U32, _))
+            | ((ValueType::Asn, _), (ValueType::Asn, _))
+            | ((ValueType::Community, _), (ValueType::Community, _)) => None,
+            ((ValueType::Asn, _), (ValueType::U32, constant))
+            | ((ValueType::U32, constant), (ValueType::Asn, _)) => (!constant).then_some(
+                "an ASN compares with an ASN, an integer literal or a u32 parameter, \
+                     not a runtime u32 value",
+            ),
+            ((ValueType::Community, _), (ValueType::U32, _))
+            | ((ValueType::U32, _), (ValueType::Community, _)) => Some(if ordering {
+                "communities compare with `==` and `!=` only"
+            } else {
+                "a community compares with a community: a literal such as `65000:1`, a \
+                 binding, or a parameter declared `community`"
+            }),
+            ((ValueType::Asn, _), (ValueType::Community, _))
+            | ((ValueType::Community, _), (ValueType::Asn, _)) => {
+                Some("an ASN and a community never compare equal; they are different kinds")
+            }
+        };
+        if let Some(problem) = problem {
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Typecheck,
+                span,
+                format!("{} compared with {}", lhs.0.describe(), rhs.0.describe()),
+                problem,
+            ));
+        }
+    }
+
+    /// LAN-2794: a binding or parameter probes a set of its own kind. An
+    /// ASN (or a u32 parameter, a constant ASN) probes an asn-set; a
+    /// community probes a community-set whose members are all standard. A
+    /// runtime u32 probes neither: that is how a community matched an ASN.
+    fn check_probe_kind(
+        &mut self,
+        ident: &Spanned<String>,
+        (ty, constant): (ValueType, bool),
+        set: &Spanned<String>,
+        kind: DatasetKind,
+    ) {
+        let problem = match (ty, kind) {
+            (ValueType::Asn, DatasetKind::Asn) => None,
+            (ValueType::U32, DatasetKind::Asn) if constant => None,
+            (ValueType::Community, DatasetKind::Community) => {
+                self.check_set_member_kinds(
+                    set,
+                    crate::ir::CommunityAttribute::Standard,
+                    &format!("{} in", ident.node),
+                    &format!("route.any-community in {}", set.node),
+                );
+                None
+            }
+            (ValueType::U32, DatasetKind::Asn) => Some(
+                "bind an ASN instead: a loop over `route.as-path` or an asn-set, or \
+                 `let x = route.origin-as`",
+            ),
+            (ValueType::U32, _) => Some(
+                "bind a community instead: a loop over `route.communities`, or a parameter \
+                 declared `community`",
+            ),
+            (ValueType::Asn, _) => Some("an ASN probes an asn-set"),
+            (ValueType::Community, _) => Some("a community probes a community-set"),
+        };
+        if let Some(note) = problem {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    ident.span.to(set.span),
+                    format!(
+                        "`{}` is {}, but `{}` is {} {kind}",
+                        ident.node,
+                        ty.describe(),
+                        set.node,
+                        article(&kind.to_string())
+                    ),
+                    "a value probes a set of its own kind",
+                )
+                .with_note(note),
+            );
+        }
+    }
+
+    /// A bare identifier in a value position (LAN-302): innermost `let`
+    /// binding, else parameter (a `community` parameter is a community
+    /// value, LAN-2794), else a spanned unknown-name diagnostic suggesting
+    /// across both.
     fn check_value_ident(&mut self, name: &Spanned<String>, scope: &Scope<'_>) {
-        if scope.is_local(&name.node) || scope.is_param(&name.node) {
+        if scope.is_local(&name.node)
+            || scope.is_param(&name.node)
+            || scope.typed_param(&name.node) == Some(ParamType::Community)
+        {
             return;
         }
         if self.typed_param_misused(name, scope, "a u32 value") {
@@ -1736,11 +2014,7 @@ impl<'a> Checker<'a> {
         );
         if let Some(suggestion) = closest(
             &name.node,
-            scope
-                .params
-                .iter()
-                .copied()
-                .chain(scope.lets.iter().map(String::as_str)),
+            scope.params.iter().copied().chain(scope.local_names()),
         ) {
             diag = diag.with_note(format!("did you mean `{suggestion}`?"));
         }
@@ -1899,16 +2173,26 @@ impl<'a> Checker<'a> {
             // LAN-299: both sides of a value comparison are u32 value
             // expressions; all four operators apply (the checked
             // evaluation model has no unordered u32 fields).
-            Expr::ValueCmp { lhs, rhs, .. } => {
+            Expr::ValueCmp { lhs, op, rhs, span } => {
                 self.check_value_expr(lhs, scope);
                 self.check_value_expr(rhs, scope);
+                // LAN-2794: both sides' types must meet.
+                self.check_compare_types(
+                    (value_type(lhs, scope), is_constant(lhs, scope)),
+                    (value_type(rhs, scope), is_constant(rhs, scope)),
+                    *op,
+                    *span,
+                );
             }
             Expr::In { field, set } => {
                 if let Some(ty) = scope.typed_param(&set.node) {
                     let wanted: &[ParamType] = match resolve_field(field) {
                         Ok(Field::Prefix) => &[ParamType::PrefixSet],
                         Ok(
-                            Field::Communities | Field::LargeCommunities | Field::ExtCommunities,
+                            Field::Communities
+                            | Field::LargeCommunities
+                            | Field::ExtCommunities
+                            | Field::AnyCommunity,
                         ) => &[ParamType::CommunitySet],
                         Ok(Field::OriginAs | Field::PeerAsn) => &[ParamType::AsnSet],
                         _ => &[],
@@ -1922,22 +2206,54 @@ impl<'a> Checker<'a> {
                     self.check_in(field, set);
                 }
             }
-            // LAN-303: `<binding> in <set>` — u32 value against an
-            // asn-set, or a community-set's standard members.
+            // LAN-303: `<binding> in <set>` — an ASN against an asn-set,
+            // or a community against a community-set's standard members.
             Expr::IdentIn { ident, set } => {
-                self.check_value_ident(ident, scope);
-                if let Some(ty) = scope.typed_param(&set.node) {
+                // LAN-2794: the probed value's type: a binding's own, a
+                // `community` parameter, or a u32 parameter (a constant).
+                let value = if let Some(ty) = scope.local_type(&ident.node) {
+                    Some((ty, scope.local_is_constant(&ident.node)))
+                } else if scope.typed_param(&ident.node) == Some(ParamType::Community) {
+                    Some((ValueType::Community, true))
+                } else if scope.is_param(&ident.node) {
+                    Some((ValueType::U32, true))
+                } else {
+                    self.check_value_ident(ident, scope);
+                    None
+                };
+                let set_kind = if let Some(ty) = scope.typed_param(&set.node) {
                     self.check_set_param(set, ty, &[ParamType::AsnSet, ParamType::CommunitySet]);
-                } else if self.file.asn_sets.iter().any(|s| s.name.node == set.node)
+                    match ty {
+                        ParamType::AsnSet => Some(DatasetKind::Asn),
+                        ParamType::CommunitySet => Some(DatasetKind::Community),
+                        _ => None,
+                    }
+                } else if self.file.asn_sets.iter().any(|s| s.name.node == set.node) {
+                    Some(DatasetKind::Asn)
+                } else if self
+                    .file
+                    .community_sets
+                    .iter()
+                    .any(|s| s.name.node == set.node)
+                {
+                    Some(DatasetKind::Community)
+                } else {
+                    self.dataset_of(&set.node)
+                        .map(|decl| decl.kind)
+                        .filter(|kind| *kind != DatasetKind::Prefix)
+                };
+                if let (Some(value), Some(kind)) = (value, set_kind) {
+                    self.check_probe_kind(ident, value, set, kind);
+                }
+                if scope.typed_param(&set.node).is_some()
+                    || self.file.asn_sets.iter().any(|s| s.name.node == set.node)
                     || self
                         .file
                         .community_sets
                         .iter()
                         .any(|s| s.name.node == set.node)
                 {
-                    // Community-set probes match standard members only
-                    // (the binding is a raw u32) — documented in the
-                    // language reference.
+                    // Resolved above.
                 } else if let Some(decl) = self.dataset_of(&set.node) {
                     // LAN-305: asn-set / community-set datasets probe
                     // exactly like their in-language kinds; prefix
@@ -2251,6 +2567,21 @@ impl<'a> Checker<'a> {
             }
         };
         if binding_value_cmp(rhs, resolved, scope) {
+            if let Rhs::Ident(name) = rhs {
+                // LAN-2794: the binding's type meets the field's.
+                let field_ty = if matches!(resolved, Field::OriginAs | Field::PeerAsn) {
+                    ValueType::Asn
+                } else {
+                    ValueType::U32
+                };
+                let binding_ty = scope.local_type(&name.node).unwrap_or(ValueType::U32);
+                self.check_compare_types(
+                    (field_ty, false),
+                    (binding_ty, scope.local_is_constant(&name.node)),
+                    op,
+                    field.span.to(rhs.span()),
+                );
+            }
             return;
         }
         let eq_only = |checker: &mut Self| {
@@ -2264,16 +2595,16 @@ impl<'a> Checker<'a> {
             }
         };
         match resolved {
+            // LAN-2794: an ASN orders against an integer literal or u32
+            // parameter, for private-range checks, like the u32 fields.
             Field::LocalPref
             | Field::Med
             | Field::AsPathLen
             | Field::CommunitiesLen
             | Field::LargeCommunitiesLen
-            | Field::ExtCommunitiesLen => {
-                self.expect_u32_rhs(field, rhs, scope);
-            }
-            Field::PeerAsn | Field::OriginAs => {
-                eq_only(self);
+            | Field::ExtCommunitiesLen
+            | Field::PeerAsn
+            | Field::OriginAs => {
                 self.expect_u32_rhs(field, rhs, scope);
             }
             Field::EvpnRouteType => {
@@ -2328,7 +2659,10 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => {
+            Field::Communities
+            | Field::LargeCommunities
+            | Field::ExtCommunities
+            | Field::AnyCommunity => {
                 self.diags.push(
                     Diagnostic::coded(
                         DiagnosticCode::Typecheck,
@@ -2503,6 +2837,21 @@ impl<'a> Checker<'a> {
             );
             return;
         }
+        if kind == CommunityKind::Any && negate {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    set.span,
+                    "`remove any-community not in` is not an action",
+                    "an allow-list is per kind",
+                )
+                .with_note(format!(
+                    "write one `remove <kind> not in {}` per kind you scrub",
+                    set.node
+                )),
+            );
+            return;
+        }
         // A set parameter stands for its argument here, as in every other
         // set position. Its members are known only at instantiation, so
         // the member-kind notes below apply to named sets.
@@ -2518,6 +2867,10 @@ impl<'a> Checker<'a> {
         {
             match removal_set_problem(def, kind, negate) {
                 None => {}
+                Some(RemovalSetProblem::OtherKind { member, span }) => {
+                    self.diags
+                        .push(other_kind_removal(set, member, span, kind, form));
+                }
                 Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
                     self.diags
                         .push(ext_not_in_without_rt_ro(set, def.name.span));
@@ -2608,6 +2961,55 @@ impl<'a> Checker<'a> {
         self.diags.push(diag);
     }
 
+    /// LAN-2794: a kind-specific probe or removal of a named community-set
+    /// reads only members of its own kind, so a member of another kind is
+    /// a compile error pointing at `instead` (the kind-agnostic form).
+    /// Returns whether it reported one. Set parameters and datasets are
+    /// known only at runtime and filter by kind there.
+    fn check_set_member_kinds(
+        &mut self,
+        set: &Spanned<String>,
+        attribute: crate::ir::CommunityAttribute,
+        form: &str,
+        instead: &str,
+    ) -> bool {
+        let Some(def) = self
+            .file
+            .community_sets
+            .iter()
+            .find(|s| s.name.node == set.node)
+        else {
+            return false;
+        };
+        let Some(member) = def
+            .entries
+            .iter()
+            .find(|member| member.node.attribute() != attribute)
+        else {
+            return false;
+        };
+        let other = attribute_describe(member.node.attribute());
+        self.diags.push(
+            Diagnostic::coded(
+                DiagnosticCode::Typecheck,
+                set.span,
+                format!(
+                    "community-set `{}` has {} {other} member, but `{form}` reads only {} \
+                     communities",
+                    set.node,
+                    article(other),
+                    attribute_describe(attribute)
+                ),
+                "a member of another kind",
+            )
+            .with_label(member.span, format!("{} {other} member", article(other)))
+            .with_note(format!(
+                "for a set that mixes kinds, write `{instead}`, or split the set by kind"
+            )),
+        );
+        true
+    }
+
     fn check_in(&mut self, field: &FieldPath, set: &Spanned<String>) {
         let resolved = match resolve_field(field) {
             Ok(resolved) => resolved,
@@ -2621,9 +3023,10 @@ impl<'a> Checker<'a> {
         // error as a wrong-kind set.
         let expected_kind = match resolved {
             Field::Prefix => Some(DatasetKind::Prefix),
-            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => {
-                Some(DatasetKind::Community)
-            }
+            Field::Communities
+            | Field::LargeCommunities
+            | Field::ExtCommunities
+            | Field::AnyCommunity => Some(DatasetKind::Community),
             Field::OriginAs | Field::PeerAsn => Some(DatasetKind::Asn),
             _ => None,
         };
@@ -2657,8 +3060,11 @@ impl<'a> Checker<'a> {
                     .map(|s| &s.name)
                     .chain(self.dataset_names(DatasetKind::Prefix)),
             ),
-            Field::Communities | Field::LargeCommunities | Field::ExtCommunities => self
-                .check_set_reference(
+            Field::Communities
+            | Field::LargeCommunities
+            | Field::ExtCommunities
+            | Field::AnyCommunity => {
+                self.check_set_reference(
                     set,
                     "community-set",
                     "community membership needs a community-set",
@@ -2667,7 +3073,16 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|s| &s.name)
                         .chain(self.dataset_names(DatasetKind::Community)),
-                ),
+                );
+                if let Some(attribute) = community_attribute_of(resolved) {
+                    self.check_set_member_kinds(
+                        set,
+                        attribute,
+                        &format!("{} in", field.render()),
+                        &format!("route.any-community in {}", set.node),
+                    );
+                }
+            }
             Field::OriginAs | Field::PeerAsn => self.check_set_reference(
                 set,
                 "asn-set",
@@ -3467,6 +3882,9 @@ pub(super) fn check_call_arg(
                     let action = format!("`remove {} {form} {param}`", kind_keyword(kind));
                     match removal_set_problem(def, kind, negate) {
                         None => {}
+                        Some(RemovalSetProblem::OtherKind { member, .. }) => {
+                            return Err(other_kind_message(name, member, kind, form));
+                        }
                         Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
                             return Err(format!(
                                 "community-set `{name}` has no route-target or route-origin \
@@ -3607,6 +4025,89 @@ fn for_costs(
     (nodes, bound.saturating_mul(body_steps).saturating_add(1))
 }
 
+/// The type a value carries (LAN-2794). Arithmetic is u32-only; an `asn`
+/// (`route.origin-as`, `peer.asn`, an AS-path or asn-set loop variable)
+/// compares and probes asn-sets; a `community` (a `route.communities` loop
+/// variable) compares with community literals, probes community-sets and
+/// is added or removed. A `let` takes its initializer's type, so a typed
+/// value cannot be laundered through a u32.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ValueType {
+    U32,
+    Asn,
+    Community,
+}
+
+impl ValueType {
+    fn plural(self) -> &'static str {
+        match self {
+            ValueType::U32 => "u32 values",
+            ValueType::Asn => "ASNs",
+            ValueType::Community => "communities",
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            ValueType::U32 => "a u32 value",
+            ValueType::Asn => "an ASN",
+            ValueType::Community => "a community",
+        }
+    }
+}
+
+/// The type of a value expression in `scope` (LAN-2794): a binding's own
+/// type, `community` for a community literal or `community` parameter,
+/// `asn` for the two ASN fields, otherwise u32 (arithmetic and builtins
+/// are u32-only, so a typed operand is reported where it occurs).
+fn value_type(expr: &ValueExprAst, scope: &Scope<'_>) -> ValueType {
+    match expr {
+        ValueExprAst::Ident(name) => scope.local_type(&name.node).unwrap_or_else(|| {
+            if scope.typed_param(&name.node) == Some(ParamType::Community) {
+                ValueType::Community
+            } else {
+                ValueType::U32
+            }
+        }),
+        ValueExprAst::Community(..) => ValueType::Community,
+        ValueExprAst::Field(path) => match resolve_field(path) {
+            Ok(Field::OriginAs | Field::PeerAsn) => ValueType::Asn,
+            _ => ValueType::U32,
+        },
+        ValueExprAst::Lit(..) | ValueExprAst::Binary { .. } | ValueExprAst::Call { .. } => {
+            ValueType::U32
+        }
+    }
+}
+
+/// A `let`'s type and whether it holds a compile-time constant (LAN-2794):
+/// it takes its initializer's type, so a typed value is never laundered
+/// through a u32, and a constant u32 stays usable where constants are.
+fn binding_type(init: &ValueExprAst, scope: &Scope<'_>) -> (ValueType, bool) {
+    let ty = value_type(init, scope);
+    (ty, ty == ValueType::U32 && is_constant(init, scope))
+}
+
+/// Whether a value is a compile-time constant (LAN-2794): literals,
+/// parameters and constant bindings, combined by arithmetic and calls. An
+/// ASN compares with a constant u32, never a runtime one.
+fn is_constant(expr: &ValueExprAst, scope: &Scope<'_>) -> bool {
+    match expr {
+        ValueExprAst::Lit(..) | ValueExprAst::Community(..) => true,
+        ValueExprAst::Ident(name) => {
+            if scope.is_local(&name.node) {
+                scope.local_is_constant(&name.node)
+            } else {
+                scope.is_param(&name.node)
+                    || scope.typed_param(&name.node) == Some(ParamType::Community)
+            }
+        }
+        ValueExprAst::Field(_) => false,
+        ValueExprAst::Binary { lhs, rhs, .. } => is_constant(lhs, scope) && is_constant(rhs, scope),
+        ValueExprAst::Call { args, .. } => args.iter().all(|arg| is_constant(arg, scope)),
+    }
+}
+
 /// LAN-302: a `let` binding on the right of a u32-field comparison
 /// makes it a value comparison (that is what it lowers to), so all
 /// four operators apply and both sides are u32 — nothing further to
@@ -3718,6 +4219,8 @@ fn if_terms<'a>(
 
 /// Conservative guarded-tail count: every source action plus every Bind term
 /// hoisted by an inline user call, with one arm retained for an empty branch.
+/// `remove any-community in S` counts one term per kind, the most S can
+/// lower to (LAN-2794).
 fn guarded_action_terms(actions: &[ActionStmt], fns: &HashMap<&str, FnCost>) -> u64 {
     actions
         .iter()
@@ -3726,6 +4229,11 @@ fn guarded_action_terms(actions: &[ActionStmt], fns: &HashMap<&str, FnCost>) -> 
                 ActionStmt::SetLocalPref(expr, _)
                 | ActionStmt::SetMed(expr, _)
                 | ActionStmt::Let { init: expr, .. } => call_slots(expr, fns),
+                ActionStmt::Community {
+                    kind,
+                    arg: CommunityArg::InSet { .. },
+                    ..
+                } => community_attributes(*kind).len() as u64 - 1,
                 _ => 0,
             }
         })
@@ -3753,7 +4261,10 @@ fn action_value_cost(action: &ActionStmt, fns: &HashMap<&str, FnCost>) -> u64 {
             kind,
             arg: CommunityArg::All(_) | CommunityArg::InSet { .. },
             ..
-        } => crate::eval::max_communities_per_route(community_attribute(*kind)),
+        } => community_attributes(*kind)
+            .iter()
+            .map(|&attribute| crate::eval::max_communities_per_route(attribute))
+            .fold(0, u64::saturating_add),
         _ => 0,
     }
 }
@@ -3794,7 +4305,10 @@ fn first_loop(def: &PolicyDef) -> Option<Span> {
 fn first_fn_call(def: &PolicyDef, file: &SourceFile) -> Option<Span> {
     fn in_value(expr: &ValueExprAst, file: &SourceFile) -> Option<Span> {
         match expr {
-            ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
+            ValueExprAst::Lit(..)
+            | ValueExprAst::Community(..)
+            | ValueExprAst::Ident(_)
+            | ValueExprAst::Field(_) => None,
             ValueExprAst::Binary { lhs, rhs, .. } => {
                 in_value(lhs, file).or_else(|| in_value(rhs, file))
             }
@@ -3845,7 +4359,10 @@ fn first_fn_call(def: &PolicyDef, file: &SourceFile) -> Option<Span> {
 /// arguments walked for nested calls.
 fn collect_fn_calls<'a>(expr: &'a ValueExprAst, file: &SourceFile, out: &mut Vec<(&'a str, Span)>) {
     match expr {
-        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => {}
+        ValueExprAst::Lit(..)
+        | ValueExprAst::Community(..)
+        | ValueExprAst::Ident(_)
+        | ValueExprAst::Field(_) => {}
         ValueExprAst::Binary { lhs, rhs, .. } => {
             collect_fn_calls(lhs, file, out);
             collect_fn_calls(rhs, file, out);
@@ -3867,7 +4384,10 @@ fn collect_fn_calls<'a>(expr: &'a ValueExprAst, file: &SourceFile, out: &mut Vec
 /// exactly the lowerer's monotonic allocation order.
 fn call_slots(expr: &ValueExprAst, fns: &HashMap<&str, FnCost>) -> u64 {
     match expr {
-        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => 0,
+        ValueExprAst::Lit(..)
+        | ValueExprAst::Community(..)
+        | ValueExprAst::Ident(_)
+        | ValueExprAst::Field(_) => 0,
         ValueExprAst::Binary { lhs, rhs, .. } => {
             call_slots(lhs, fns).saturating_add(call_slots(rhs, fns))
         }
@@ -3945,7 +4465,10 @@ fn stmts_slot_high_water(stmts: &[Stmt], base: u64, fns: &HashMap<&str, FnCost>)
 /// charges two — it is a min/max pair).
 fn value_cost(expr: &ValueExprAst, fns: &HashMap<&str, FnCost>) -> u64 {
     match expr {
-        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => 1,
+        ValueExprAst::Lit(..)
+        | ValueExprAst::Community(..)
+        | ValueExprAst::Ident(_)
+        | ValueExprAst::Field(_) => 1,
         ValueExprAst::Binary { lhs, rhs, .. } => 1u64
             .saturating_add(value_cost(lhs, fns))
             .saturating_add(value_cost(rhs, fns)),
@@ -3988,7 +4511,7 @@ fn nonzero_divisor(divisor: &ValueExprAst) -> bool {
 pub(super) fn fold_const(expr: &ValueExprAst) -> Option<u32> {
     match expr {
         ValueExprAst::Lit(value, _) => Some(*value),
-        ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
+        ValueExprAst::Community(..) | ValueExprAst::Ident(_) | ValueExprAst::Field(_) => None,
         ValueExprAst::Binary { op, lhs, rhs, .. } => {
             checked_arith(*op, fold_const(lhs)?, fold_const(rhs)?).ok()
         }
@@ -4121,6 +4644,7 @@ fn kind_describe(kind: CommunityKind) -> &'static str {
         CommunityKind::Standard => "standard-community",
         CommunityKind::Large => "large-community",
         CommunityKind::Ext => "extended-community",
+        CommunityKind::Any => "community",
     }
 }
 
@@ -4146,12 +4670,63 @@ fn ext_not_in_without_rt_ro(set: &Spanned<String>, def_span: Span) -> Diagnostic
 
 /// Why a community-set cannot be the set of `remove <kind> in` / `not in`.
 enum RemovalSetProblem {
+    /// LAN-2794: a member of another kind. A kind-specific removal reads
+    /// only its own kind, so the member could never match.
+    OtherKind { member: CommunityKind, span: Span },
     /// `ext-community not in` with extended members but no route target or
     /// route origin: it would remove every arrived RT and RO.
     NoRouteTargetOrOrigin,
     /// No member of the action's kind; `effect` says what the action
     /// would do instead.
     NoMembers { effect: String },
+}
+
+/// LAN-2794: the diagnostic for a named removal set with a member of
+/// another kind, at `member_span`. An `in` removal of every listed value
+/// can become `remove any-community in`; a `not in` allow-list is per kind,
+/// so it keeps its kind and operator over a set split by kind.
+fn other_kind_removal(
+    set: &Spanned<String>,
+    member: CommunityKind,
+    member_span: Span,
+    kind: CommunityKind,
+    form: &str,
+) -> Diagnostic {
+    let note = if form == "in" {
+        format!(
+            "for a set that mixes kinds, write `remove any-community in {}`, or split the set \
+             by kind",
+            set.node
+        )
+    } else {
+        format!(
+            "an allow-list is per kind: split `{set}` by kind and keep `remove {keyword} not in` \
+             over its {kind} members; `remove any-community in {set}` would remove the allowed \
+             members instead, of every kind",
+            set = set.node,
+            keyword = kind_keyword(kind),
+            kind = kind_describe(kind),
+        )
+    };
+    Diagnostic::coded(
+        DiagnosticCode::Typecheck,
+        set.span,
+        other_kind_message(&set.node, member, kind, form),
+        "a member of another kind",
+    )
+    .with_label(member_span, format!("{} member", kind_describe(member)))
+    .with_note(note)
+}
+
+/// LAN-2794: the message for a removal set with a member of another kind.
+fn other_kind_message(set: &str, member: CommunityKind, kind: CommunityKind, form: &str) -> String {
+    format!(
+        "community-set `{set}` has {} {} member, but `remove {} {form}` reads only {} values",
+        article(kind_describe(member)),
+        kind_describe(member),
+        kind_keyword(kind),
+        kind_describe(kind)
+    )
 }
 
 /// The member check for a removal set, shared by a named set and a set
@@ -4161,6 +4736,20 @@ fn removal_set_problem(
     kind: CommunityKind,
     negate: bool,
 ) -> Option<RemovalSetProblem> {
+    // `any-community` removes members of every kind.
+    if kind == CommunityKind::Any {
+        return None;
+    }
+    if let Some(other) = def
+        .entries
+        .iter()
+        .find(|entry| member_kind(&entry.node) != kind)
+    {
+        return Some(RemovalSetProblem::OtherKind {
+            member: member_kind(&other.node),
+            span: other.span,
+        });
+    }
     let has_kind = def
         .entries
         .iter()
@@ -4221,12 +4810,55 @@ fn member_kind(member: &crate::sets::CommunityMember) -> CommunityKind {
     }
 }
 
-/// The IR attribute a community action kind addresses.
+/// The IR attribute a single-kind community action addresses.
+/// `any-community` addresses every kind; see [`community_attributes`]
+/// (the typechecker admits it only in `remove any-community in S`).
 pub(super) fn community_attribute(kind: CommunityKind) -> crate::ir::CommunityAttribute {
     match kind {
         CommunityKind::Standard => crate::ir::CommunityAttribute::Standard,
         CommunityKind::Large => crate::ir::CommunityAttribute::Large,
         CommunityKind::Ext => crate::ir::CommunityAttribute::Extended,
+        CommunityKind::Any => unreachable!("typechecked: any-community addresses every kind"),
+    }
+}
+
+/// Every IR attribute a community action kind addresses: one, or all
+/// three for `any-community` (LAN-2794).
+pub(super) fn community_attributes(
+    kind: CommunityKind,
+) -> &'static [crate::ir::CommunityAttribute] {
+    use crate::ir::CommunityAttribute;
+    match kind {
+        CommunityKind::Standard => &[CommunityAttribute::Standard],
+        CommunityKind::Large => &[CommunityAttribute::Large],
+        CommunityKind::Ext => &[CommunityAttribute::Extended],
+        CommunityKind::Any => &[
+            CommunityAttribute::Standard,
+            CommunityAttribute::Extended,
+            CommunityAttribute::Large,
+        ],
+    }
+}
+
+/// The community attribute a kind-specific community field reads
+/// (LAN-2794); `None` for `route.any-community` and non-community fields.
+pub(super) fn community_attribute_of(field: Field) -> Option<crate::ir::CommunityAttribute> {
+    use crate::ir::CommunityAttribute;
+    match field {
+        Field::Communities => Some(CommunityAttribute::Standard),
+        Field::LargeCommunities => Some(CommunityAttribute::Large),
+        Field::ExtCommunities => Some(CommunityAttribute::Extended),
+        _ => None,
+    }
+}
+
+/// A community attribute in prose: `standard`, `large` or `extended`.
+fn attribute_describe(attribute: crate::ir::CommunityAttribute) -> &'static str {
+    use crate::ir::CommunityAttribute;
+    match attribute {
+        CommunityAttribute::Standard => "standard",
+        CommunityAttribute::Large => "large",
+        CommunityAttribute::Extended => "extended",
     }
 }
 
@@ -4235,6 +4867,7 @@ pub(super) fn kind_keyword(kind: CommunityKind) -> &'static str {
         CommunityKind::Standard => "community",
         CommunityKind::Large => "large-community",
         CommunityKind::Ext => "ext-community",
+        CommunityKind::Any => "any-community",
     }
 }
 
@@ -4243,6 +4876,7 @@ fn kind_field(kind: CommunityKind) -> &'static str {
         CommunityKind::Standard => "communities",
         CommunityKind::Large => "large-communities",
         CommunityKind::Ext => "ext-communities",
+        CommunityKind::Any => "any-community",
     }
 }
 

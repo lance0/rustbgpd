@@ -138,7 +138,9 @@ fn all_ids_resolve(expr: &MatchExpr, compiled: &rustbgpd_policy::ir::CompiledCha
     expr.any_node(&|node| {
         let resolved = match node {
             MatchExpr::PrefixInSet(id) => (id.0 as usize) < compiled.prefix_sets.len(),
-            MatchExpr::CommunityInSet(id) | MatchExpr::LocalInCommunitySet { set: id, .. } => {
+            MatchExpr::CommunityInSet(id)
+            | MatchExpr::CommunityKindInSet(id, _)
+            | MatchExpr::LocalInCommunitySet { set: id, .. } => {
                 (id.0 as usize) < compiled.community_sets.len()
             }
             MatchExpr::OriginAsInSet(id)
