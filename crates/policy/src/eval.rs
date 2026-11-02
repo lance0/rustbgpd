@@ -205,28 +205,6 @@ pub enum EvalErrorKind {
     DatasetUnpinned,
 }
 
-impl EvalErrorKind {
-    /// Whether this kind fails the route closed wherever it occurs,
-    /// conditions included: a compiler-bug rail or a resource limit.
-    /// Only the kinds listed here as a value that cannot be computed
-    /// make a condition false instead, with the deny left to an action
-    /// that needs the value (LAN-2790), so a kind added later fails
-    /// closed until it is listed.
-    #[must_use]
-    pub fn fails_closed(self) -> bool {
-        !matches!(
-            self,
-            EvalErrorKind::Overflow
-                | EvalErrorKind::Underflow
-                | EvalErrorKind::DivideByZero
-                | EvalErrorKind::RemainderByZero
-                | EvalErrorKind::ClampInverted
-                | EvalErrorKind::AbsentField(_)
-                | EvalErrorKind::AbsentPrependOperand(_)
-        )
-    }
-}
-
 /// Both operands of a value node, each evaluated, so a value that cannot
 /// be computed on one side never hides a fail-closed kind on the other;
 /// otherwise the left error wins.
@@ -270,6 +248,26 @@ impl fmt::Display for EvalError {
 }
 
 impl EvalErrorKind {
+    /// Whether this kind fails the route closed wherever it occurs,
+    /// conditions included: a compiler-bug rail or a resource limit.
+    /// Only the kinds listed here as a value that cannot be computed
+    /// make a condition false instead, with the deny left to an action
+    /// that needs the value (LAN-2790), so a kind added later fails
+    /// closed until it is listed.
+    #[must_use]
+    pub fn fails_closed(self) -> bool {
+        !matches!(
+            self,
+            EvalErrorKind::Overflow
+                | EvalErrorKind::Underflow
+                | EvalErrorKind::DivideByZero
+                | EvalErrorKind::RemainderByZero
+                | EvalErrorKind::ClampInverted
+                | EvalErrorKind::AbsentField(_)
+                | EvalErrorKind::AbsentPrependOperand(_)
+        )
+    }
+
     /// Stable short label (counter/log-friendly).
     #[must_use]
     pub fn label(self) -> &'static str {
