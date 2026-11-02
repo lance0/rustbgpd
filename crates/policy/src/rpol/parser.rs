@@ -1497,8 +1497,8 @@ impl Parser<'_> {
         }
     }
 
-    /// `value_expr := value_mul (("+"|"-") value_mul)*` — checked u32
-    /// arithmetic (LAN-299). `*`/`/`/`%` bind tighter than `+`/`-`;
+    /// `value_expr := value_mul (("+"|"-") value_mul)*` — saturating
+    /// u32 arithmetic (LAN-299, LAN-2791). `*`/`/`/`%` bind tighter than `+`/`-`;
     /// both bind tighter than comparisons. Chained operators count
     /// toward [`MAX_EXPR_DEPTH`] like `&&`/`||` chains do.
     fn value_expr(&mut self, mut depth: u32) -> PResult<ValueExprAst> {

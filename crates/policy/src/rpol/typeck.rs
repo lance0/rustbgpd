@@ -1225,10 +1225,10 @@ impl<'a> Checker<'a> {
     /// Typecheck a value expression (LAN-299): operands must be u32 —
     /// literals, declared parameters, `let` bindings (LAN-302),
     /// u32-typed fields — builtins must be `min`/`max`/`clamp` with
-    /// the right arity, and every statically-evaluable subexpression
-    /// must evaluate cleanly under checked arithmetic (`4294967295 +
-    /// 1` is a compile error at its span, not a per-route runtime
-    /// error).
+    /// the right arity, every literal-only subexpression must stay in
+    /// u32 (`4294967295 + 1` is a compile error at its span, a typo;
+    /// everything else saturates), and every divisor must be non-zero
+    /// (LAN-2791).
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per value-expression kind; splitting would scatter the operand rules"

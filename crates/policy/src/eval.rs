@@ -417,8 +417,9 @@ pub(crate) fn exec_bind(
 /// Evaluate a compiled value expression against a route context and
 /// the current `let`-binding frame (`&[]` when the caller has none —
 /// expressions without `Local` reads never index it). Pure and
-/// allocation-free; every arithmetic step is checked (ADR-0103
-/// Decision 2 — the SIGFPE class is unrepresentable). Recursion depth
+/// allocation-free; `+ - *` saturate and divisors are never zero
+/// (LAN-2791, amending ADR-0103 Decision 2), so the SIGFPE class stays
+/// unrepresentable. Recursion depth
 /// is bounded by the frontend (`MAX_EXPR_DEPTH`).
 pub(crate) fn eval_value(
     expr: &ValueExpr,
@@ -639,7 +640,8 @@ impl PolicyHitCounters {
     }
 
     /// Routes denied by an evaluation error (LAN-299, ADR-0103
-    /// Decision 4: checked-arithmetic failure or absent operand) since
+    /// Decision 4: an action that needs an absent operand, or a
+    /// fail-closed rail) since
     /// chain install. A nonzero value means some policy is erroring —
     /// the rate-limited WARN log and explain traces name where and
     /// why.
@@ -1962,8 +1964,8 @@ impl CompiledChain {
     /// - `Ok(Some(owned))` — a clone with every operand folded into
     ///   its literal field, so downstream consumers (merge, apply,
     ///   memoization, API surfaces) only ever see concrete values.
-    /// - `Err(kind)` — an operand is unresolvable (absent context
-    ///   value, checked-arithmetic failure): the caller fails the
+    /// - `Err(kind)` — an operand is unresolvable (an absent context
+    ///   value): the caller fails the
     ///   route **closed** on the eval-error rail (uniform Deny +
     ///   counter + rate-limited WARN + explain error trace, ADR-0103
     ///   Decision 4). ASN 0 is never prepended (RFC 7607).
@@ -2466,6 +2468,93 @@ mod tests {
         let (result, evaluation) = chain.evaluate_with_attribution(&ctx(None));
         assert_eq!(result.action, PolicyAction::Deny);
         assert_eq!(evaluation.eval_error, None);
+    }
+
+    /// The compiler never emits a zero divisor (divisors are non-zero
+    /// constants or `max(e, k)` with `k >= 1`), so one in hand-built IR is
+    /// a compiler bug: it fails the route closed in a guard, a `set` and a
+    /// `let`, and explain agrees.
+    #[test]
+    fn a_zero_divisor_fails_closed_in_every_position() {
+        use super::EvalErrorKind;
+        use crate::engine::PolicyChain;
+        use crate::engine::explain::explain_chain_statements;
+        use crate::ir::{ArithOp, ValueCmpNode, ValueCmpOp, ValueExpr, ValueField};
+
+        let chain_of = |terms: Vec<(MatchExpr, TermAction)>| CompiledChain {
+            policies: vec![CompiledPolicy {
+                name: None,
+                terms: terms
+                    .into_iter()
+                    .map(|(guard, action)| Term {
+                        name: None,
+                        guard,
+                        action,
+                    })
+                    .collect(),
+                default_action: PolicyAction::Permit,
+                source: PolicySource::Rpol,
+            }],
+            ..CompiledChain::empty()
+        };
+        for (op, kind) in [
+            (ArithOp::Div, EvalErrorKind::DivideByZero),
+            (ArithOp::Rem, EvalErrorKind::RemainderByZero),
+        ] {
+            let zero = || ValueExpr::Binary {
+                op,
+                lhs: Box::new(ValueExpr::Field(ValueField::Med)),
+                rhs: Box::new(ValueExpr::Const(0)),
+            };
+            let accept = || TermAction::Permit(RouteModifications::default());
+            let guard = MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+                op: ValueCmpOp::Ge,
+                lhs: zero(),
+                rhs: ValueExpr::Const(0),
+            }));
+            let set = TermAction::Permit(RouteModifications {
+                set_med_computed: Some(Arc::new(zero())),
+                ..RouteModifications::default()
+            });
+            let bind = TermAction::Bind {
+                slot: 0,
+                name: "x".into(),
+                expr: zero(),
+            };
+            for (position, chain) in [
+                ("guard", chain_of(vec![(guard, accept())])),
+                ("set", chain_of(vec![(MatchExpr::True, set)])),
+                (
+                    "let",
+                    chain_of(vec![(MatchExpr::True, bind), (MatchExpr::True, accept())]),
+                ),
+            ] {
+                let mut route = ctx(None);
+                route.med = Some(7);
+                let (result, evaluation) = chain.evaluate_with_attribution(&route);
+                assert_eq!(result.action, PolicyAction::Deny, "{kind:?} in {position}");
+                assert_eq!(
+                    evaluation.eval_error.map(|error| error.kind),
+                    Some(kind),
+                    "{position}"
+                );
+                let policy = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+                    "p".to_string(),
+                    Arc::new(chain),
+                )]);
+                let trace = explain_chain_statements(Some(&policy), &route);
+                assert_eq!(trace.action, PolicyAction::Deny, "explain, {position}");
+                assert!(
+                    trace
+                        .steps
+                        .iter()
+                        .flat_map(|step| &step.term_traces)
+                        .any(|line| line.contains(&format!("evaluation error: {kind}"))),
+                    "explain renders {kind} in {position}: {:?}",
+                    trace.steps
+                );
+            }
+        }
     }
 
     /// Only the listed value kinds make a condition false; everything else,

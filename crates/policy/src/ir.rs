@@ -246,14 +246,13 @@ impl ValueField {
     }
 }
 
-/// A compiled `u32` value expression (LAN-299): checked arithmetic over
-/// constants, context fields, and the bounded builtins. Evaluated per
-/// route by `eval_value` (`crate::eval`). A checked-arithmetic failure
-/// or absent operand makes a condition false; in an action it is an
-/// evaluation error that resolves the route as Deny (ADR-0103 Decision
-/// 4, as amended by LAN-2790). Constant subtrees are folded at compile
-/// time (with checked ops); a constant expression that cannot fold
-/// safely is left in place and fails per route the same way.
+/// A compiled `u32` value expression (LAN-299): saturating arithmetic
+/// (LAN-2791) over constants, context fields, and the bounded builtins.
+/// Evaluated per route by `eval_value` (`crate::eval`). An absent operand
+/// makes a condition false; in an action it is an evaluation error that
+/// resolves the route as Deny (ADR-0103 Decision 4, as amended by
+/// LAN-2790 and LAN-2791). Constant subtrees are folded at compile time
+/// with the same saturating operators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueExpr {
     /// A constant (literal, parameter, or folded subtree).
@@ -470,9 +469,9 @@ impl ValueCmpOp {
 /// A comparison between two value expressions (LAN-299) — the compiled
 /// form of any `.rpol` comparison containing arithmetic or a builtin.
 /// Boxed behind [`MatchExpr::ValueCmp`] so plain guard nodes keep their
-/// size. An operand that is missing or cannot be computed (absent
-/// origin/peer ASN, checked-arithmetic failure) makes the comparison
-/// false, like the plain scalar nodes (LAN-2790); only a fail-closed
+/// size. A missing operand (absent origin/peer ASN) makes the
+/// comparison false, like the plain scalar nodes (LAN-2790); arithmetic
+/// saturates (LAN-2791); only a fail-closed
 /// kind ([`EvalErrorKind::fails_closed`](crate::eval::EvalErrorKind::fails_closed))
 /// denies the route.
 #[derive(Debug, Clone, PartialEq, Eq)]

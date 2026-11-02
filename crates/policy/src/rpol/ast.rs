@@ -538,7 +538,7 @@ pub enum ActionStmt {
     Let {
         /// The binding name.
         name: Spanned<String>,
-        /// The initializer (a checked u32 value expression).
+        /// The initializer (a saturating u32 value expression).
         init: ValueExprAst,
         /// Whole-statement span.
         span: Span,

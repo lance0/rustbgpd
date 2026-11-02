@@ -3763,8 +3763,8 @@ fn absent_operand_is_a_non_match_in_every_form() {
     }
 }
 
-/// min/max/clamp evaluate per route with checked operand evaluation;
-/// a data-dependent inverted clamp is an eval error.
+/// min/max/clamp evaluate per route; a data-dependent inverted clamp is
+/// `min(max(x, lo), hi)` and never fails (LAN-2791).
 #[test]
 fn builtin_edges_evaluate_and_inverted_clamp_is_min_of_max() {
     let chain = compile_ok("policy p { term t { set med clamp(route.med, 10, 20); accept } }");
@@ -4080,6 +4080,33 @@ test set-ceiling {
     assert!(report.all_passed(), "failures: {:?}", report.failures);
 }
 
+/// Explain shows the saturated value of a computed `set` (LAN-2791).
+#[test]
+fn explain_renders_the_saturated_value() {
+    use crate::engine::PolicyChain;
+    use crate::engine::explain::explain_chain_statements;
+
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".to_string(),
+        std::sync::Arc::new(compile_ok(
+            "policy p { term t { set med route.med - 10; accept } }",
+        )),
+    )]);
+    let mut ctx = absent_ctx();
+    ctx.med = Some(4);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, chain.evaluate(&ctx).action);
+    assert_eq!(chain.evaluate(&ctx).modifications.set_med, Some(0));
+    assert!(
+        trace.steps[0]
+            .modifications
+            .iter()
+            .any(|line| line.contains("med 4 -> route.med - 10 = 0")),
+        "{:?}",
+        trace.steps[0].modifications
+    );
+}
+
 /// LAN-2791: a divisor must be a non-zero constant or `max(e, k)` with a
 /// constant `k >= 1`, so division never fails at runtime; literal-only
 /// overflow stays a compile error, while an expression with a parameter
@@ -4097,9 +4124,14 @@ fn divisors_cannot_be_zero_and_parameters_fold_saturating() {
         let (_, rendered) = diagnostics_of(&format!("policy p {{ term t {{ {bad}; accept }} }}"));
         assert!(rendered.contains("can be zero"), "{bad}: {rendered}");
     }
-    let (_, rendered) =
-        diagnostics_of("policy p(d: u32) { term t { set med route.med / d; accept } }");
-    assert!(rendered.contains("can be zero"), "{rendered}");
+    for source in [
+        "policy p(d: u32) { term t { set med route.med / d; accept } }",
+        "policy p { term t { let d = route.local-pref; set med route.med / d; accept } }",
+        "fn f(x: u32) -> u32 { x } policy p { term t { set med route.med % f(route.local-pref); accept } }",
+    ] {
+        let (_, rendered) = diagnostics_of(source);
+        assert!(rendered.contains("can be zero"), "{source}: {rendered}");
+    }
     for good in [
         "set med route.med / 3",
         "set med route.med % 2",

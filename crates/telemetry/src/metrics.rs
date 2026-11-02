@@ -2528,7 +2528,7 @@ impl BgpMetrics {
                 "bgp_policy_eval_errors_total",
                 "Policy evaluation errors (ADR-0103 Decision 4 fail-closed rail) \
                  by direction and error kind (the closed EvalErrorKind label set: \
-                 overflow, divide-by-zero, absent-operand, fuel-exhausted, ...). \
+                 absent-operand, absent-prepend-operand, fuel-exhausted, ...). \
                  Direction import or export counts a denied route; condition \
                  counts a conditional-advertisement condition_policy candidate \
                  (ADR-0137) that is neither a match nor a miss. Per-chain counts \

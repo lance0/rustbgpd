@@ -1523,7 +1523,7 @@ tests:
   - interval: 1m
     input_series:
       # Two eval errors at minute 5 — fires.
-      - series: 'bgp_policy_eval_errors_total{direction="import", kind="overflow", instance="edge1:9179"}'
+      - series: 'bgp_policy_eval_errors_total{direction="import", kind="absent-operand", instance="edge1:9179"}'
         values: "0 0 0 0 0 2 2 2 2 2 2 2 2 2 2 2"
       # Flat counter — must not fire.
       - series: 'bgp_policy_eval_errors_total{direction="export", kind="dataset-unpinned", instance="edge2:9179"}'
@@ -1538,13 +1538,13 @@ tests:
           - exp_labels:
               severity: warning
               direction: import
-              kind: overflow
+              kind: absent-operand
               instance: edge1:9179
             exp_annotations:
-              summary: "Policy evaluation errors (import, overflow)"
+              summary: "Policy evaluation errors (import, absent-operand)"
               description: >-
                 bgp_policy_eval_errors_total{direction="import",
-                kind="overflow"} on edge1:9179 increased by 2 in the
+                kind="absent-operand"} on edge1:9179 increased by 2 in the
                 last 15 minutes. For import or export, routes hitting
                 the failing statement are being denied; for condition,
                 the failing candidate counts as neither a match nor a
