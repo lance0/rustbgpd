@@ -12,11 +12,11 @@ import time
 
 import patches
 
-# Qualification a5da4df merged into the dense-ID provenance candidate (#3570,
-# stand-in head b12e101bd); the 2026-11-02 three-cell run used 8a501cba8 (a5da4df
+# Qualification a5da4df merged into the dense-ID provenance candidate (#3570
+# head 3e3a7e10e); the 2026-11-02 three-cell run used 8a501cba8 (a5da4df
 # into the owned-feed marker fix 3c7339027), earlier reruns 8de125af1 and the
 # 2026-10-27 receipt a5da4df26898b3658511babd3cb919e130b7fc40 itself.
-PINNED = "ab673cbde66d4c3e053549f21c3b7a75d23f6e01"
+PINNED = "469353834e4bcb38c08c3fa5e7e119667d1597d3"
 BASE = "110dd43f9be38901fc7826eb74673b7c6d2bc0d6"
 PREFIX = "bench/scale/evpn-terminal-debt/"
 HERE = Path(__file__).resolve().parent
