@@ -398,3 +398,79 @@ async fn rtr_delta_probes_wedged_dependents_in_one_window() {
     );
     assert!(mgr.peers.values().all(|managed| managed.pending_refresh));
 }
+
+/// A session that reads every command and answers none.
+fn draining_session() -> PeerHandle {
+    let (commands, mut receiver) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = receiver.recv().await {
+            if matches!(command, PeerCommand::Shutdown) {
+                break;
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
+/// 65 dynamic members of one range, in address order, wedged at positions 0
+/// and 64 and draining their commands everywhere else: more members than
+/// `PEER_SHUTDOWN_CONCURRENCY`, so a sweep that starts a member only when
+/// the one 64 places before it has finished takes two windows.
+fn dynamic_members_wedged_64_apart() -> (PeerManager, mpsc::Sender<PeerManagerReadinessQuery>) {
+    let (mut mgr, readiness_tx) = readiness_manager(dynamic_test_manager());
+    let range = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0));
+    for index in 0..=64_u8 {
+        let handle = if index % 64 == 0 {
+            wedged_session()
+        } else {
+            draining_session()
+        };
+        insert_test_dynamic_managed_peer(
+            &mut mgr,
+            IpAddr::V4(Ipv4Addr::new(127, 0, 1, index)),
+            u64::from(index) + 1,
+            handle,
+            true,
+            range,
+            8,
+            "ix-members",
+        );
+    }
+    (mgr, readiness_tx)
+}
+
+/// A single command per member: wedged members anywhere in a sweep larger
+/// than the concurrency cap still share one window.
+#[tokio::test(start_paused = true)]
+async fn bounce_beyond_the_concurrency_cap_still_takes_one_window() {
+    let (mut mgr, readiness_tx) = dynamic_members_wedged_64_apart();
+    let target = DynamicRangeTarget {
+        addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        prefix_len: 8,
+        peer_group: "ix-members".to_string(),
+    };
+    let outcome = one_readiness_serving_window(&readiness_tx, WINDOW, async move {
+        mgr.bounce_dynamic_peers_for_ranges(std::slice::from_ref(&target), &[])
+            .await
+    })
+    .await;
+    assert_eq!(outcome.signaled, 63);
+    assert_eq!(outcome.failures.len(), 2, "{:?}", outcome.failures);
+}
+
+/// Command chains beyond the concurrency cap: a wedged chain holds its slot
+/// while the others pass it, so two wedged members 64 places apart still
+/// share one window.
+#[tokio::test(start_paused = true)]
+async fn reap_beyond_the_concurrency_cap_still_takes_one_window() {
+    let (mut mgr, readiness_tx) = dynamic_members_wedged_64_apart();
+    mgr.dynamic_ranges.clear();
+    let (removed, mgr) = one_readiness_serving_window(&readiness_tx, WINDOW, async move {
+        let removed = mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await;
+        (removed, mgr)
+    })
+    .await;
+    assert_eq!(removed, 65);
+    assert!(mgr.peers.is_empty());
+}

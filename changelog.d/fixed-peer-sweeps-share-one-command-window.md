@@ -5,7 +5,8 @@
   waiting on a full RIB mailbox does. Dynamic-peer resets after a peer-group
   change, the rollback reap of dynamic peers, SIGHUP removal and replacement
   of neighbors, the all-peers graceful-shutdown toggle and RPKI/ASPA
-  revalidation now command every peer at once, up to 64 at a time, and keep
+  revalidation now send a single command to every peer at once, and run a
+  chain of commands, such as a delete, for up to 64 peers at a time, and keep
   answering readiness probes while they wait. The VRP and ASPA forwarders no
   longer hold the next cache delta until the previous delta's revalidation
   pass ends. The all-peers graceful-shutdown toggle's outbound refresh now

@@ -69,10 +69,10 @@ impl PeerManager {
             .collect();
 
         // Detach removed peers, and changed peers for delete-then-re-add,
-        // then stop all their sessions at once: a session that stopped
-        // draining commands costs one window for the whole reload, not one
-        // per peer. Each changed peer is re-added only after its old
-        // sessions are gone.
+        // then stop their sessions together (`bounded_fan_out`): sessions
+        // that stopped draining commands cost one delete window per 64 of
+        // them, not one per peer. Each changed peer is re-added only after
+        // its old sessions are gone.
         let mut detached = Vec::with_capacity(removed.len() + changed.len());
         for addr in &removed {
             match self

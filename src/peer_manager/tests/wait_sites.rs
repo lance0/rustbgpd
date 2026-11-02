@@ -603,9 +603,11 @@ const WAIT_SITES: &[WaitSite] = &[
         additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
-            reason: "state probes bounded by PEER_QUERY_TIMEOUT (100 ms) and the refreshes they \
-                     admit, bounded by PEER_POLICY_UPDATE_TIMEOUT, run at once, below the 2 s \
-                     reader deadline; the readiness lane is drained after them",
+            reason: "each dependent's state probe (PEER_QUERY_TIMEOUT, 100 ms) and the \
+                     refresh it admits (PEER_POLICY_UPDATE_TIMEOUT) run as one chain, 64 \
+                     chains at once: one 600 ms window per 64 wedged dependents, so a read \
+                     waits past the 2 s reader deadline only behind more than 192 of them; \
+                     the readiness lane is drained after them",
         },
         completion: Completion::Finished,
     },
@@ -789,7 +791,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "mod.rs::fan_out_session_commands",
+        site: "mod.rs::await_session_sweep",
         awaits: "per-peer session commands of a lifecycle sweep, all at once (here the \
                  graceful-shutdown toggles)",
         drive: Drive::GracefulShutdown,
@@ -798,10 +800,12 @@ const WAIT_SITES: &[WaitSite] = &[
         additional_entry: None,
         window: Duration::from_millis(250),
         contract: Contract::Fenced {
-            reason: "every command is bounded by its own deadline (500 ms) from when it starts, \
-                     at most PEER_SHUTDOWN_CONCURRENCY at once, below the 2 s reader deadline \
-                     for the sweep sizes it serves; until each settles, sessions and manager \
-                     bookkeeping can disagree",
+            reason: "until each command settles, sessions and manager bookkeeping can \
+                     disagree. A single command per peer is sent to every peer at once and \
+                     takes one 500 ms window; a chain per peer (a delete: up to 1.5 s) runs \
+                     PEER_SHUTDOWN_CONCURRENCY at once, one chain window per 64 wedged \
+                     sessions, so a read queued behind more than 64 wedged delete chains \
+                     misses the 2 s reader deadline",
         },
         completion: Completion::Finished,
     },

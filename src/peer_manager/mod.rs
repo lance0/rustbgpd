@@ -269,7 +269,7 @@ const PEER_POLICY_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 const PEER_LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Maximum number of independently owned peers drained at once during
-/// process shutdown, and of per-peer session commands in flight in one sweep
+/// process shutdown, and of per-peer command chains in flight in one sweep
 /// ([`bounded_fan_out`]). Each peer still drains a pending inbound candidate
 /// before its primary session, preserving the collision-owner ordering, while
 /// the fixed cross-peer cap prevents the daemon's shutdown time, or a sweep,
@@ -277,22 +277,31 @@ const PEER_LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 /// transport back-pressure.
 const PEER_SHUTDOWN_CONCURRENCY: usize = 64;
 
-/// Run independent per-peer `futures` with at most
+/// Run independent per-peer command chains with at most
 /// [`PEER_SHUTDOWN_CONCURRENCY`] in flight; outputs come back in input order.
 ///
-/// Each future bounds its own session commands by their usual deadline from
-/// when it starts. Sessions parked on a full RIB mailbox (ADR-0078) stop
-/// draining their command channels, so a sweep that awaited one peer at a
-/// time cost one deadline per such peer; here it costs one deadline per
-/// `PEER_SHUTDOWN_CONCURRENCY` of them. A future keeps any order its own peer
-/// needs, such as a pending session before the primary.
+/// For chains of steps that each keep their own deadline from when they
+/// start, such as a delete's pending shutdown, Cease and primary shutdown,
+/// and whose steps start real work, such as a session teardown or a Route
+/// Refresh. Sessions parked on a full RIB mailbox (ADR-0078) stop draining
+/// their command channels. A chain waiting on one holds a slot until its
+/// steps time out while every other chain passes it, so W such sessions cost
+/// `ceil(W / PEER_SHUTDOWN_CONCURRENCY)` chain windows however many peers the
+/// sweep covers. A single command per peer needs no cap: send them all at
+/// once with `join_all` and they share one window.
 fn bounded_fan_out<F: Future>(
-    futures: impl IntoIterator<Item = F>,
+    chains: impl IntoIterator<Item = F>,
 ) -> impl Future<Output = Vec<F::Output>> {
     use futures::StreamExt as _;
-    futures::stream::iter(futures)
-        .buffered(PEER_SHUTDOWN_CONCURRENCY)
-        .collect()
+    let chains = futures::stream::iter(chains.into_iter().enumerate())
+        .map(|(index, chain)| async move { (index, chain.await) })
+        .buffer_unordered(PEER_SHUTDOWN_CONCURRENCY)
+        .collect::<Vec<_>>();
+    async move {
+        let mut outputs = chains.await;
+        outputs.sort_unstable_by_key(|(index, _)| *index);
+        outputs.into_iter().map(|(_, output)| output).collect()
+    }
 }
 
 /// Readiness requests serviced after each bounded policy-transaction step.
@@ -1487,17 +1496,15 @@ impl PeerManager {
         }
     }
 
-    /// Send one sweep's independent per-peer session commands at once
-    /// ([`bounded_fan_out`]), serving readiness while they wait.
+    /// Await one lifecycle sweep's per-peer session commands, sent at once
+    /// with `join_all` or [`bounded_fan_out`], serving readiness while they
+    /// wait.
     ///
     /// Operator reads stay queued: until every command settles, the sessions
     /// and this actor's bookkeeping can disagree.
-    async fn fan_out_session_commands<F: Future>(
-        &mut self,
-        commands: impl IntoIterator<Item = F>,
-    ) -> Vec<F::Output> {
+    async fn await_session_sweep<T>(&mut self, sweep: impl Future<Output = T>) -> T {
         self.await_with_readiness(
-            bounded_fan_out(commands),
+            sweep,
             OperatorReadAdmission::Fenced {
                 reason: "a lifecycle sweep's session commands are in flight; until each \
                          settles, sessions and manager bookkeeping can disagree",

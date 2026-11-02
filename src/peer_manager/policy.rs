@@ -2844,9 +2844,9 @@ impl PeerManager {
         let mut skipped_state_unknown = 0usize;
         let mut failures = Vec::new();
 
-        // Every dependent is probed, and refreshed once Established, at
-        // once: a session that stopped draining commands costs one window
-        // for the whole pass, not one per dependent.
+        // Every dependent is probed, and refreshed once Established, 64 at a
+        // time (`bounded_fan_out`): sessions that stopped draining commands
+        // cost one window per 64 of them, not one per dependent.
         let mut peers = Vec::with_capacity(candidates.len());
         let mut passes = Vec::with_capacity(candidates.len());
         for peer_key in &candidates {
@@ -2989,10 +2989,11 @@ impl PeerManager {
         let mut skipped_state_unknown = 0usize;
         let mut failures = Vec::new();
 
-        // Every dependent is asked at once: a session that stopped draining
-        // commands costs one window for the whole pass, not one per
-        // dependent. Each session still sees this pass's command after the
-        // previous pass's, in its own command FIFO.
+        // Every dependent is asked, and refreshed if it needs it, 64 at a
+        // time (`bounded_fan_out`): sessions that stopped draining commands
+        // cost one window per 64 of them, not one per dependent. Each
+        // session still sees this pass's command after the previous pass's,
+        // in its own command FIFO.
         let mut peers = Vec::with_capacity(candidates.len());
         let mut passes = Vec::with_capacity(candidates.len());
         for peer_key in &candidates {

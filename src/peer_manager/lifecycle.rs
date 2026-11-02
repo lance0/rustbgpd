@@ -1892,7 +1892,9 @@ impl PeerManager {
                     .map_err(|error| format!("primary session: {error}"))
             });
         }
-        let signaled = self.fan_out_session_commands(signals).await;
+        let signaled = self
+            .await_session_sweep(futures::future::join_all(signals))
+            .await;
 
         for (peer_key, signaled) in matched.into_iter().zip(signaled) {
             match signaled {
@@ -2192,8 +2194,9 @@ impl PeerManager {
     /// sessions at once, then settle each delete in input order. Per peer the
     /// order is unchanged: the pending inbound candidate stops before the
     /// primary, and the primary is sent its Cease first when there is a stop
-    /// reason. A session that stopped draining commands therefore costs one
-    /// window for the whole batch, not one per peer.
+    /// reason. Up to `PEER_SHUTDOWN_CONCURRENCY` peers' chains run at once
+    /// ([`super::bounded_fan_out`]), so sessions that stopped draining
+    /// commands cost one delete window per 64 of them, not one per peer.
     pub(super) async fn delete_detached_peers(
         &mut self,
         detached: Vec<DetachedPeer>,
@@ -2231,7 +2234,9 @@ impl PeerManager {
             });
             settlements.push((settlement, pending_session_id, primary_session_id));
         }
-        let shutdowns = self.fan_out_session_commands(shutdowns).await;
+        let shutdowns = self
+            .await_session_sweep(super::bounded_fan_out(shutdowns))
+            .await;
 
         let mut removed = Vec::with_capacity(settlements.len());
         for ((settlement, pending_session_id, primary_session_id), shutdown) in
@@ -2732,7 +2737,9 @@ impl PeerManager {
         // (2) Tell every live session at once, best-effort. If a session
         // task is wedged or already restarting, the new session will pick
         // up the toggle from ManagedPeer at spawn time.
-        let acks = self.fan_out_session_commands(toggles).await;
+        let acks = self
+            .await_session_sweep(futures::future::join_all(toggles))
+            .await;
         let mut failures: Vec<String> = Vec::new();
         let mut acknowledged = Vec::with_capacity(targets.len());
         for (peer, ack) in targets.iter().zip(acks) {

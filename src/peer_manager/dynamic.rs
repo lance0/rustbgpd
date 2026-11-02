@@ -552,7 +552,8 @@ impl PeerManager {
         }
         // Every reaped peer's sessions stop at once; a peer's metric series
         // go only after its sessions' last emission.
-        self.fan_out_session_commands(shutdowns).await;
+        self.await_session_sweep(super::bounded_fan_out(shutdowns))
+            .await;
         for peer_key in &reaped {
             self.reap_deleted_peer_metric_series_for_key(peer_key);
             self.release_dynamic_bfd(peer_key.address);
