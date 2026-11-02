@@ -9,8 +9,12 @@
 //! `crates/policy/tests/decision_corpus/` holds small programs that give
 //! every construct at least one case. The golden also records the
 //! programs and policies that produce no case (and why), and a
-//! per-construct case count over the parser AST and the compiled IR; a
-//! construct with no case fails the test.
+//! per-construct count of the cases that executed it (a guard counts when
+//! its term is evaluated, an action when its term matches); a construct no
+//! case executes fails the test. Programs are identified by their
+//! entrypoint and resolved imports. An evaluation error is recorded with
+//! its outcome, which must be a deny with no modifications, and extended
+//! communities carry their exact wire value.
 //!
 //! A change to `decision_corpus.golden` is a behaviour change; justify it
 //! in the PR. After an intentional change, rewrite the golden with
@@ -153,17 +157,43 @@ fn content_id(text: &str) -> String {
 }
 
 impl Corpus {
-    /// Credit `weight` cases to every construct `chain` and `policies` use.
-    fn count(&mut self, chain: &CompiledChain, policies: &[&PolicyDef], weight: usize) {
+    /// Credit one case to every construct its evaluation of `ctx` reached:
+    /// the guards of the IR terms it evaluated, the actions of the terms
+    /// whose guard matched, and the AST statements of the source terms
+    /// with a matched IR term. Loop bodies are credited whole when their
+    /// loop term runs; the evaluator does not report body-term reachability.
+    fn count(
+        &mut self,
+        chain: &CompiledChain,
+        policies: &[&PolicyDef],
+        ctx: &crate::RouteContext<'_>,
+    ) {
+        let mut evaluated = chain.zero_term_hits();
+        let mut matched = chain.zero_term_hits();
+        let _ = chain.evaluate_recording_coverage(ctx, &mut evaluated, &mut matched);
         let mut seen = std::collections::BTreeSet::new();
-        for policy in &chain.policies {
-            for term in &policy.terms {
-                ir_term(term, &mut seen);
+        let mut matched_source_terms: Vec<std::collections::BTreeSet<&str>> = Vec::new();
+        for (index, policy) in chain.policies.iter().enumerate() {
+            let mut source_terms = std::collections::BTreeSet::new();
+            for (term_index, term) in policy.terms.iter().enumerate() {
+                if evaluated[index][term_index] > 0 {
+                    ir_guard(&term.guard, &mut seen);
+                }
+                if matched[index][term_index] > 0 {
+                    ir_action(term, &mut seen);
+                    if let Some(name) = &term.name {
+                        source_terms.insert(name.split(['.', '/']).next().unwrap_or(name));
+                    }
+                }
             }
+            matched_source_terms.push(source_terms);
         }
-        for def in policies {
+        for (index, def) in policies.iter().enumerate() {
+            let source_terms = &matched_source_terms[index.min(matched_source_terms.len() - 1)];
             for term in &def.terms {
-                ast_stmts(&term.stmts, &mut seen);
+                if source_terms.contains(term.name.node.as_str()) {
+                    ast_stmts(&term.stmts, &mut seen);
+                }
             }
             if def.default_action.is_some() {
                 seen.insert("ast.policy.default-action");
@@ -177,19 +207,25 @@ impl Corpus {
                 CONSTRUCTS.contains(&name),
                 "construct {name} is missing from CONSTRUCTS"
             );
-            *self.counts.entry(name).or_default() += weight;
+            *self.counts.entry(name).or_default() += 1;
         }
     }
 }
 
 fn verdict(result: &crate::PolicyResult, evaluation: &crate::PolicyEvaluation) -> String {
-    if let Some(error) = &evaluation.eval_error {
-        return format!("error {}", error.kind.label());
-    }
     let mut out = match result.action {
         PolicyAction::Permit => "permit".to_string(),
         PolicyAction::Deny => "deny".to_string(),
     };
+    if let Some(error) = &evaluation.eval_error {
+        // ADR-0103 Decision 4: an evaluation error denies and discards
+        // every staged modification.
+        assert!(
+            result.action == PolicyAction::Deny && result.modifications.is_empty(),
+            "an evaluation error must deny with no modifications"
+        );
+        out = format!("{out} (error {})", error.kind.label());
+    }
     let mods = render_mods(&result.modifications);
     if !mods.is_empty() {
         out.push_str(" with ");
@@ -243,7 +279,11 @@ fn render_mods(mods: &RouteModifications) -> String {
         ("add", &mods.extended_communities_add),
         ("remove", &mods.extended_communities_remove),
     ] {
-        parts.extend(values.iter().map(|v| format!("{verb} ext-community {v}")));
+        parts.extend(
+            values
+                .iter()
+                .map(|v| format!("{verb} ext-community {v} ({:#018x})", v.as_u64())),
+        );
     }
     parts.join("; ")
 }
@@ -253,18 +293,43 @@ fn evaluate(chain: &CompiledChain, fixture: &Fixture) -> String {
     verdict(&result, &evaluation)
 }
 
-fn run_source(corpus: &mut Corpus, program: &Program, matrix: &[(String, Fixture)]) {
-    let id = program.id.as_str();
-    let parsed = RpolFile::parse(&program.text).or_else(|_| match &program.path {
-        Some(path) => RpolFile::load(
+/// Compile a program standalone, or from its file with its imports.
+fn compile_program(program: &Program) -> Option<RpolFile> {
+    RpolFile::parse(&program.text).ok().or_else(|| {
+        let path = program.path.as_ref()?;
+        RpolFile::load(
             path,
             &[path.parent().unwrap().to_path_buf()],
             super::DEFAULT_MAX_GRAPH_BYTES,
         )
-        .map_err(|_| ()),
-        None => Err(()),
-    });
-    let Ok(file) = parsed else {
+        .ok()
+    })
+}
+
+/// The identity of a compiled program: the entrypoint and every module
+/// its imports resolved to, in resolution order.
+fn program_identity(program: &Program, file: Option<&RpolFile>) -> String {
+    match file {
+        Some(file) => content_id(
+            &file
+                .modules
+                .iter()
+                .map(|module| module.digest.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        None => content_id(&program.text),
+    }
+}
+
+fn run_source(
+    corpus: &mut Corpus,
+    program: &Program,
+    file: Option<&RpolFile>,
+    matrix: &[(String, Fixture)],
+) {
+    let id = program.id.as_str();
+    let Some(file) = file else {
         corpus.skipped.push(format!(
             "{id}: does not compile (a deliberate error, or datasets bound by config)"
         ));
@@ -315,7 +380,7 @@ fn run_source(corpus: &mut Corpus, program: &Program, matrix: &[(String, Fixture
                             .iter()
                             .filter_map(|call| policy_def(&call.policy.node))
                             .collect();
-                        corpus.count(&chain, &defs, 1);
+                        corpus.count(&chain, &defs, &fixture.context());
                         evaluate(&chain, &fixture)
                     }
                     Err(_) => "does not assemble".to_string(),
@@ -343,9 +408,9 @@ fn run_source(corpus: &mut Corpus, program: &Program, matrix: &[(String, Fixture
             ));
             continue;
         }
-        corpus.count(&chain, &[def], matrix.len());
         for (route, fixture) in matrix {
             chain.local_asn = fixture.local_asn;
+            corpus.count(&chain, &[def], &fixture.context());
             let line = evaluate(&chain, fixture);
             corpus
                 .cases
@@ -457,18 +522,21 @@ fn render(root: &Path) -> (String, Vec<&'static str>) {
         .collect();
     let mut corpus = Corpus::default();
     let programs = programs(root);
-    // A program whose text repeats an earlier one (the generated receipt
-    // configs repeat a handful of programs) decides identically; it is
-    // listed once against the first copy instead of repeating its cases.
+    // A program that repeats an earlier one, entrypoint and resolved
+    // imports alike (the generated receipt configs repeat a handful of
+    // programs), decides identically; it is listed once against the first
+    // copy instead of repeating its cases.
     let mut first_copy: BTreeMap<String, &str> = BTreeMap::new();
     let mut duplicates = Vec::new();
     for program in &programs {
-        if let Some(first) = first_copy.get(&content_id(&program.text)) {
+        let file = compile_program(program);
+        let identity = program_identity(program, file.as_ref());
+        if let Some(first) = first_copy.get(&identity) {
             duplicates.push(format!("{} = {first}", program.id));
             continue;
         }
-        first_copy.insert(content_id(&program.text), &program.id);
-        run_source(&mut corpus, program, &matrix);
+        first_copy.insert(identity, &program.id);
+        run_source(&mut corpus, program, file.as_ref(), &matrix);
     }
     let mut out = String::new();
     writeln!(
@@ -737,8 +805,8 @@ fn ast_value(value: &ValueExprAst, seen: &mut std::collections::BTreeSet<&'stati
     seen.insert(name);
 }
 
-fn ir_term(term: &Term, seen: &mut std::collections::BTreeSet<&'static str>) {
-    ir_guard(&term.guard, seen);
+/// The constructs an executed term's action uses.
+fn ir_action(term: &Term, seen: &mut std::collections::BTreeSet<&'static str>) {
     let mods = match &term.action {
         TermAction::Permit(mods) => {
             seen.insert("ir.action.permit");
@@ -760,7 +828,8 @@ fn ir_term(term: &Term, seen: &mut std::collections::BTreeSet<&'static str>) {
         TermAction::ForEach(node) => {
             seen.insert("ir.action.for-each");
             for body in &node.body {
-                ir_term(body, seen);
+                ir_guard(&body.guard, seen);
+                ir_action(body, seen);
             }
             None
         }

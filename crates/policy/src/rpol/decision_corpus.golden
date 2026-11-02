@@ -1,113 +1,113 @@
-# rpol decision corpus: 256 programs, 1573 cases. Regenerate with
+# rpol decision corpus: 261 programs, 1631 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 27
-ast.stmt.if 1079
-ast.stmt.else-if 13
-ast.stmt.else 13
+ast.stmt.if 506
+ast.stmt.else-if 18
+ast.stmt.else 27
 ast.stmt.nested-if 13
-ast.stmt.for 64
-ast.for.field 53
+ast.stmt.for 75
+ast.for.field 64
 ast.for.set 11
-ast.action.accept 1359
-ast.action.reject 903
-ast.action.set-local-pref 270
-ast.action.set-med 220
-ast.action.set-next-hop-self 12
-ast.action.set-next-hop-address 12
-ast.action.community-literal 544
+ast.action.accept 1122
+ast.action.reject 374
+ast.action.set-local-pref 114
+ast.action.set-med 170
+ast.action.set-next-hop-self 3
+ast.action.set-next-hop-address 9
+ast.action.community-literal 511
 ast.action.large-community-admin-wildcard 11
-ast.action.community-all 66
-ast.action.community-binding 32
+ast.action.community-all 46
+ast.action.community-binding 43
 ast.action.community-in-set 22
 ast.action.community-not-in-set 22
 ast.action.prepend 54
 ast.action.let 63
-ast.action.break 22
-ast.action.continue 11
-ast.expr.or 11
-ast.expr.and 104
-ast.expr.not 21
-ast.expr.cmp 655
-ast.expr.in 296
+ast.action.break 33
+ast.action.continue 22
+ast.expr.or 7
+ast.expr.and 20
+ast.expr.not 1
+ast.expr.cmp 217
+ast.expr.in 107
 ast.expr.ident-in 42
-ast.expr.has 24
-ast.expr.matches 137
-ast.expr.contains 12
-ast.expr.value-cmp 147
-ast.expr.apply 5
-ast.value.literal 505
-ast.value.identifier 112
-ast.value.field 160
-ast.value.arithmetic 140
-ast.value.call 75
-ir.guard.true 1288
-ir.guard.prefix-in-set 258
-ir.guard.prefix-eq 287
+ast.expr.has 4
+ast.expr.matches 37
+ast.expr.contains 5
+ast.expr.value-cmp 123
+ast.expr.apply 1
+ast.value.literal 330
+ast.value.identifier 106
+ast.value.field 141
+ast.value.arithmetic 121
+ast.value.call 69
+ir.guard.true 1162
+ir.guard.prefix-in-set 241
+ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
 ir.guard.community-contains 24
-ir.guard.community-in-set 39
-ir.guard.as-path-matches 149
-ir.guard.as-path-len 91
+ir.guard.community-in-set 53
+ir.guard.as-path-matches 148
+ir.guard.as-path-len 77
 ir.guard.origin-as-eq 13
-ir.guard.origin-as-ne 13
-ir.guard.origin-as-in-set 70
-ir.guard.peer-as-in-set 17
+ir.guard.origin-as-ne 9
+ir.guard.origin-as-in-set 61
+ir.guard.peer-as-in-set 8
 ir.guard.local-pref 25
-ir.guard.med 43
+ir.guard.med 70
 ir.guard.next-hop-eq 13
 ir.guard.next-hop-eq-peer 12
-ir.guard.next-hop-ne 13
-ir.guard.next-hop-ne-peer 13
-ir.guard.neighbor-in 4
+ir.guard.next-hop-ne 11
+ir.guard.next-hop-ne-peer 12
+ir.guard.neighbor-in 2
 ir.guard.neighbor-ne 12
 ir.guard.route-type-is 13
-ir.guard.route-type-ne 13
+ir.guard.route-type-ne 10
 ir.guard.evpn-route-type-is 13
-ir.guard.evpn-route-type-ne 13
-ir.guard.family-is 60
+ir.guard.evpn-route-type-ne 11
+ir.guard.family-is 50
 ir.guard.family-ne 12
-ir.guard.rpki-is 78
-ir.guard.aspa-is 84
-ir.guard.value-cmp 157
+ir.guard.rpki-is 52
+ir.guard.aspa-is 76
+ir.guard.value-cmp 160
 ir.guard.local-in-asn-set 31
 ir.guard.local-in-community-set 21
 ir.guard.in-dataset 5
-ir.guard.and 130
-ir.guard.or 16
-ir.guard.not 48
-ir.value.const 203
+ir.guard.and 128
+ir.guard.or 15
+ir.guard.not 52
+ir.value.const 208
 ir.value.field 170
-ir.value.local 106
-ir.value.binary 171
-ir.value.min 53
-ir.value.max 23
-ir.value.clamp 11
-ir.action.permit 1359
-ir.action.deny 903
-ir.action.continue 257
+ir.value.local 101
+ir.value.binary 165
+ir.value.min 47
+ir.value.max 19
+ir.value.clamp 7
+ir.action.permit 1090
+ir.action.deny 329
+ir.action.continue 167
 ir.action.bind 84
-ir.action.for-each 64
-ir.action.break 22
-ir.action.continue-loop 11
-ir.action.community-var 32
+ir.action.for-each 75
+ir.action.break 33
+ir.action.continue-loop 22
+ir.action.community-var 43
 ir.action.remove-large-community-admin 11
-ir.action.remove-all-communities 66
+ir.action.remove-all-communities 46
 ir.action.remove-communities-in-set 22
-ir.mod.set-local-pref 249
-ir.mod.set-local-pref-computed 21
-ir.mod.set-med 102
-ir.mod.set-med-computed 118
+ir.mod.set-local-pref 90
+ir.mod.set-local-pref-computed 15
+ir.mod.set-med 68
+ir.mod.set-med-computed 73
 ir.mod.set-next-hop 12
 ir.mod.prepend 43
 ir.mod.prepend-computed 11
-ir.mod.community-add 458
-ir.mod.community-remove 54
+ir.mod.community-add 437
+ir.mod.community-remove 33
 ir.mod.large-community-add 11
 ir.mod.large-community-remove 17
-ir.mod.ext-community-add 47
+ir.mod.ext-community-add 35
 ir.mod.ext-community-remove 11
 
 ## programs and policies without cases
@@ -350,19 +350,19 @@ bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m08-host-routes => permit with add community 65500:2000
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m09-evpn => permit with add community 65500:2000
 bench/scale/matrix/artifacts-rung1/rustbgpd/scenario/gen-b.rpol | member-out | m10-v6-bogon => permit with add community 65500:2000
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | test boundary | edges => error absent-operand
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | test boundary | edges => deny (error absent-operand)
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m01-v4-transit => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m02-v4-invalid-long => permit with set local-pref 100; set med 400
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m03-v6-tagged => permit with set local-pref 150; set med 50
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m04-bare => error absent-operand
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m05-internal => error absent-operand
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m04-bare => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m05-internal => deny (error absent-operand)
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m06-local-as-set => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m07-default => permit with set local-pref 100; set med 50
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m08-host-routes => permit with set local-pref 400; set med 400
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m09-evpn => error absent-operand
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m09-evpn => deny (error absent-operand)
 crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol | edges | m10-v6-bogon => permit with set local-pref 100; set med 50
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test any-error | overflowing => error overflow
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test kind-pinned | overflowing => error overflow
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test any-error | overflowing => deny (error overflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test kind-pinned | overflowing => deny (error overflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | test contextual-error-name | error => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m01-v4-transit => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m02-v4-invalid-long => permit
@@ -371,7 +371,7 @@ crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | 
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m05-internal => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m06-local-as-set => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m07-default => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m08-host-routes => error overflow
+crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m08-host-routes => deny (error overflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m09-evpn => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | overflowing | m10-v6-bogon => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m01-v4-transit => permit
@@ -387,25 +387,25 @@ crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol | error | m10-v6
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m01-v4-transit => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m02-v4-invalid-long => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m03-v6-tagged => deny
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m04-bare => error absent-operand
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m05-internal => error absent-operand
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m04-bare => deny (error absent-operand)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m05-internal => deny (error absent-operand)
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m06-local-as-set => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m07-default => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m08-host-routes => permit with set med 20
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m09-evpn => error absent-operand
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m09-evpn => deny (error absent-operand)
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-bindings.rpol | score | m10-v6-bogon => deny
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | test underflow-denies | eager => error underflow
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | test underflow-denies | eager => deny (error underflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | test ok-applies | eager => permit with set local-pref 500; set med 100
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m01-v4-transit => error underflow
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m01-v4-transit => deny (error underflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m02-v4-invalid-long => permit with set local-pref 500; set med 900
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m03-v6-tagged => error underflow
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m04-bare => error underflow
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m05-internal => error underflow
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m06-local-as-set => error underflow
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m07-default => error underflow
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m03-v6-tagged => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m04-bare => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m05-internal => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m06-local-as-set => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m07-default => deny (error underflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m08-host-routes => permit with set local-pref 500; set med 4294967195
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m09-evpn => error underflow
-crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m10-v6-bogon => error underflow
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m09-evpn => deny (error underflow)
+crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol | eager | m10-v6-bogon => deny (error underflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | test scrub-loop | strip-scrub => permit with remove community 65000:100
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | test bogon-loop | bogon-path-guard => deny
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol | strip-scrub | m01-v4-transit => permit with remove community 65000:100
@@ -446,7 +446,7 @@ crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m04-bare => pe
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m05-internal => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m06-local-as-set => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m07-default => permit
-crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m08-host-routes => error overflow
+crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m08-host-routes => deny (error overflow)
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m09-evpn => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol | p | m10-v6-bogon => permit
 crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol | test penalty-rejects-long-paths | p => deny
@@ -518,8 +518,8 @@ crates/policy/tests/decision_corpus/actions.rpol | test outer-else | branches =>
 crates/policy/tests/decision_corpus/actions.rpol | test next-hop-self | next-hop-rewrite => permit with set next-hop self
 crates/policy/tests/decision_corpus/actions.rpol | test next-hop-address | next-hop-rewrite => permit with set next-hop 198.51.100.254
 crates/policy/tests/decision_corpus/actions.rpol | test prepend-peer | computed-prepend => permit with prepend as 64500 2
-crates/policy/tests/decision_corpus/actions.rpol | test tag-and-scrub | tag-and-scrub => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | test scrub-by-set | scrub-by-set => permit with remove large-community 65000:1:1; remove ext-community RT:64496:1
+crates/policy/tests/decision_corpus/actions.rpol | test tag-and-scrub | tag-and-scrub => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | test scrub-by-set | scrub-by-set => permit with remove large-community 65000:1:1; remove ext-community RT:64496:1 (0x0002fbf000000001)
 crates/policy/tests/decision_corpus/actions.rpol | branches | m01-v4-transit => permit with set med 3
 crates/policy/tests/decision_corpus/actions.rpol | branches | m02-v4-invalid-long => permit with set med 2
 crates/policy/tests/decision_corpus/actions.rpol | branches | m03-v6-tagged => permit with set med 3
@@ -543,33 +543,71 @@ crates/policy/tests/decision_corpus/actions.rpol | next-hop-rewrite | m10-v6-bog
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m01-v4-transit => permit with prepend as 64500 2
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m02-v4-invalid-long => permit with prepend as 64496 2
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m03-v6-tagged => permit with prepend as 64510 2
-crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m04-bare => error absent-prepend-operand
+crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m04-bare => deny (error absent-prepend-operand)
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m05-internal => permit with prepend as 65000 2
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m06-local-as-set => permit with prepend as 4200000001 2
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m07-default => permit with prepend as 64500 2
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m08-host-routes => permit with prepend as 64501 2
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m09-evpn => permit with prepend as 65000 2
 crates/policy/tests/decision_corpus/actions.rpol | computed-prepend | m10-v6-bogon => permit with prepend as 64512 2
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m01-v4-transit => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m02-v4-invalid-long => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m03-v6-tagged => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m04-bare => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m05-internal => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m06-local-as-set => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m07-default => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m08-host-routes => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m09-evpn => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
-crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m10-v6-bogon => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m01-v4-transit => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m02-v4-invalid-long => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m03-v6-tagged => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m04-bare => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m05-internal => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m06-local-as-set => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m07-default => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m08-host-routes => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m09-evpn => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
+crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m10-v6-bogon => permit with add large-community 65000:1:2; remove ext-community RT:65000:1 (0x0002fde800000001)
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m01-v4-transit => permit
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m02-v4-invalid-long => permit
-crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m03-v6-tagged => permit with remove large-community 65000:1:2; remove ext-community RO:64510:5
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m03-v6-tagged => permit with remove large-community 65000:1:2; remove ext-community RO:64510:5 (0x0003fbfe00000005)
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m04-bare => permit
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m05-internal => permit
-crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m06-local-as-set => permit with remove large-community 65000:0:0; remove large-community 65000:1000:5; remove ext-community RT:192.0.2.1:7
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m06-local-as-set => permit with remove large-community 65000:0:0; remove large-community 65000:1000:5; remove ext-community RT:192.0.2.1:7 (0x0102c00002010007)
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m07-default => permit
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m08-host-routes => permit
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m09-evpn => permit
 crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m10-v6-bogon => permit
+crates/policy/tests/decision_corpus/control-flow.rpol | test loop-continue-and-break | scrub-loop => permit with remove community 65000:2; remove community 65000:3
+crates/policy/tests/decision_corpus/control-flow.rpol | test tiers-first | tiers => permit with set local-pref 300; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | test tiers-second | tiers => permit with set local-pref 200; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | test tiers-third | tiers => permit with set local-pref 100; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | test tiers-else | tiers => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | test early-reject | early-verdicts => deny
+crates/policy/tests/decision_corpus/control-flow.rpol | test early-accept | early-verdicts => permit with set local-pref 150
+crates/policy/tests/decision_corpus/control-flow.rpol | test fall-through | early-verdicts => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m01-v4-transit => permit with remove community 65000:100; remove community 64500:1
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m02-v4-invalid-long => permit with remove community 65000:666; remove community 65535:666; remove community 64512:7
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m03-v6-tagged => permit with remove community 65535:65281; remove community 65000:200; remove community 65001:999
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m04-bare => permit
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m05-internal => permit with remove community 65535:0
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m06-local-as-set => permit with remove community 65535:666; remove community 64512:1; remove community 65534:65535
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m07-default => permit
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m08-host-routes => permit with remove community 65000:100; remove community 65000:200; remove community 65000:300
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m09-evpn => permit
+crates/policy/tests/decision_corpus/control-flow.rpol | scrub-loop | m10-v6-bogon => permit with remove community 65000:666
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m01-v4-transit => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m02-v4-invalid-long => permit with set local-pref 300; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m03-v6-tagged => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m04-bare => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m05-internal => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m06-local-as-set => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m07-default => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m08-host-routes => permit with set local-pref 300; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m09-evpn => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | tiers | m10-v6-bogon => permit with set local-pref 50; add community 65000:7
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m01-v4-transit => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m02-v4-invalid-long => deny
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m03-v6-tagged => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m04-bare => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m05-internal => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m06-local-as-set => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m07-default => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m08-host-routes => deny
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m09-evpn => permit with add community 65000:8
+crates/policy/tests/decision_corpus/control-flow.rpol | early-verdicts | m10-v6-bogon => permit with add community 65000:8
 crates/policy/tests/decision_corpus/guards.rpol | test prefix-ne | not-bogon => permit
 crates/policy/tests/decision_corpus/guards.rpol | test prefix-ne-bogon | not-bogon => deny
 crates/policy/tests/decision_corpus/guards.rpol | test origin-eq | origin-lock => permit with set local-pref 200
@@ -694,6 +732,26 @@ crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m07-default => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m08-host-routes => permit
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m09-evpn => deny
 crates/policy/tests/decision_corpus/guards.rpol | not-v4 | m10-v6-bogon => deny
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m01-v4-transit => permit
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m02-v4-invalid-long => deny
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m03-v6-tagged => deny
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m04-bare => deny
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m05-internal => deny
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m06-local-as-set => deny
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m07-default => deny
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m08-host-routes => permit
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m09-evpn => deny
+crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | m10-v6-bogon => deny
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m01-v4-transit => deny
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m02-v4-invalid-long => deny
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m03-v6-tagged => permit
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m04-bare => deny
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m05-internal => deny
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m06-local-as-set => deny
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m07-default => deny
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m08-host-routes => permit
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m09-evpn => deny
+crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | m10-v6-bogon => deny
 docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in | m01-v4-transit => deny
 docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in | m02-v4-invalid-long => permit
 docs/artifacts/soak/soak-rs-flagship-20260816T062037Z/scenario/gen-a.rpol | member-in | m03-v6-tagged => permit
@@ -1188,18 +1246,18 @@ docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m04-bare => permit 
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m05-internal => permit with set local-pref 400; set med 50
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m06-local-as-set => permit with set local-pref 200; set med 50
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m07-default => permit with set local-pref 200; set med 50
-docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m08-host-routes => error overflow
+docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m08-host-routes => deny (error overflow)
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m09-evpn => permit with set local-pref 200; set med 50
 docs/reference/rpol-language.md#71e3fa7285e69678 | pad-med | m10-v6-bogon => permit with set local-pref 200; set med 50
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m01-v4-transit => permit
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m02-v4-invalid-long => permit
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m03-v6-tagged => deny
-docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m04-bare => error absent-operand
-docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m05-internal => error absent-operand
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m04-bare => deny (error absent-operand)
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m05-internal => deny (error absent-operand)
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m06-local-as-set => deny
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m07-default => deny
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m08-host-routes => permit with set med 20
-docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m09-evpn => error absent-operand
+docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m09-evpn => deny (error absent-operand)
 docs/reference/rpol-language.md#1a6b3759fd0e0f0f | dampen | m10-v6-bogon => deny
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m01-v4-transit => permit with set med 100
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m02-v4-invalid-long => deny
@@ -1208,7 +1266,7 @@ docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m04-bare => 
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m05-internal => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m06-local-as-set => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m07-default => permit with set med 50
-docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m08-host-routes => error overflow
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m08-host-routes => deny (error overflow)
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m09-evpn => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med-inline | m10-v6-bogon => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m01-v4-transit => permit with set med 100
@@ -1218,7 +1276,7 @@ docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m04-bare => permit 
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m05-internal => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m06-local-as-set => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m07-default => permit with set med 50
-docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m08-host-routes => error overflow
+docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m08-host-routes => deny (error overflow)
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m09-evpn => permit with set med 50
 docs/reference/rpol-language.md#25a50acd09dbb566 | pad-med | m10-v6-bogon => permit with set med 50
 docs/reference/rpol-language.md#01a0dec67ca64dc2 | route-server-in | m01-v4-transit => permit with remove community 65000:100
@@ -1424,20 +1482,20 @@ docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | m07-default => p
 docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | m08-host-routes => permit
 docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | m09-evpn => permit with set local-pref 200
 docs/reference/rpol-language.md#13f4e1e8ac78556c | no-default | m10-v6-bogon => permit
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test literal-underflow-denies | med-minus-literal => error underflow
+docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test literal-underflow-denies | med-minus-literal => deny (error underflow)
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test floor-at-zero | med-minus => permit with set med 0
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test ordinary-subtraction | med-minus => permit with set med 40
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | test ceiling-at-max | med-plus => permit with set med 4294967295
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m01-v4-transit => permit with set med 40
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m02-v4-invalid-long => permit with set med 990
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m03-v6-tagged => error underflow
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m04-bare => error underflow
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m05-internal => error underflow
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m06-local-as-set => error underflow
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m07-default => error underflow
+docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m03-v6-tagged => deny (error underflow)
+docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m04-bare => deny (error underflow)
+docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m05-internal => deny (error underflow)
+docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m06-local-as-set => deny (error underflow)
+docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m07-default => deny (error underflow)
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m08-host-routes => permit with set med 4294967285
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m09-evpn => error underflow
-docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m10-v6-bogon => error underflow
+docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m09-evpn => deny (error underflow)
+docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus-literal | m10-v6-bogon => deny (error underflow)
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m01-v4-transit => permit with set med 40
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m02-v4-invalid-long => permit with set med 990
 docs/reference/rpol-language.md#4b5d03eaaf5f73b8 | med-minus | m03-v6-tagged => permit with set med 0
@@ -1678,41 +1736,41 @@ examples/route-server/hygiene.rpol | ixp-hygiene | m09-evpn => permit
 examples/route-server/hygiene.rpol | ixp-hygiene | m10-v6-bogon => permit
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test as-set-is-rejected | ixp-hygiene => deny
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test aspa-invalid-is-rejected | ixp-hygiene => deny
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test clean-route-falls-through | ixp-hygiene => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test rpki-valid-is-tagged-ov-valid | ixp-hygiene => permit with add ext-community OV_VALID
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test rpki-not-found-is-tagged-ov-not-found | ixp-hygiene => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m01-v4-transit => permit with add ext-community OV_VALID
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test clean-route-falls-through | ixp-hygiene => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test rpki-valid-is-tagged-ov-valid | ixp-hygiene => permit with add ext-community OV_VALID (0x4300000000000000)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | test rpki-not-found-is-tagged-ov-not-found | ixp-hygiene => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m01-v4-transit => permit with add ext-community OV_VALID (0x4300000000000000)
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m02-v4-invalid-long => deny
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m03-v6-tagged => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m04-bare => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m05-internal => permit with add ext-community OV_VALID
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m03-v6-tagged => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m04-bare => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m05-internal => permit with add ext-community OV_VALID (0x4300000000000000)
 tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m06-local-as-set => deny
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m07-default => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m08-host-routes => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m09-evpn => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m10-v6-bogon => permit with add ext-community OV_INVALID
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m07-default => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m08-host-routes => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m09-evpn => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.50.0/route-server/hygiene.rpol | ixp-hygiene | m10-v6-bogon => permit with add ext-community OV_INVALID (0x4300000000000002)
 tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test as-set-is-rejected | ixp-hygiene => deny
 tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test aspa-invalid-is-rejected | ixp-hygiene => deny
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test clean-route-falls-through | ixp-hygiene => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test rpki-valid-is-tagged-ov-valid | ixp-hygiene => permit with add ext-community OV_VALID
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test rpki-not-found-is-tagged-ov-not-found | ixp-hygiene => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test rpki-invalid-is-tagged-ov-invalid | ixp-hygiene => permit with add ext-community OV_INVALID
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m01-v4-transit => permit with add ext-community OV_VALID
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test clean-route-falls-through | ixp-hygiene => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test rpki-valid-is-tagged-ov-valid | ixp-hygiene => permit with add ext-community OV_VALID (0x4300000000000000)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test rpki-not-found-is-tagged-ov-not-found | ixp-hygiene => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | test rpki-invalid-is-tagged-ov-invalid | ixp-hygiene => permit with add ext-community OV_INVALID (0x4300000000000002)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m01-v4-transit => permit with add ext-community OV_VALID (0x4300000000000000)
 tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m02-v4-invalid-long => deny
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m03-v6-tagged => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m04-bare => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m05-internal => permit with add ext-community OV_VALID
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m03-v6-tagged => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m04-bare => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m05-internal => permit with add ext-community OV_VALID (0x4300000000000000)
 tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m06-local-as-set => deny
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m07-default => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m08-host-routes => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m09-evpn => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m10-v6-bogon => permit with add ext-community OV_INVALID
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m07-default => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m08-host-routes => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m09-evpn => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.51.0/route-server/hygiene.rpol | ixp-hygiene | m10-v6-bogon => permit with add ext-community OV_INVALID (0x4300000000000002)
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test as-set-is-rejected | ixp-hygiene => deny
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test aspa-invalid-is-rejected | ixp-hygiene => deny
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test clean-route-falls-through | ixp-hygiene => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test rpki-valid-is-tagged-ov-valid | ixp-hygiene => permit with add ext-community OV_VALID
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test rpki-not-found-is-tagged-ov-not-found | ixp-hygiene => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test rpki-invalid-is-tagged-ov-invalid | ixp-hygiene => permit with add ext-community OV_INVALID
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test clean-route-falls-through | ixp-hygiene => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test rpki-valid-is-tagged-ov-valid | ixp-hygiene => permit with add ext-community OV_VALID (0x4300000000000000)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test rpki-not-found-is-tagged-ov-not-found | ixp-hygiene => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test rpki-invalid-is-tagged-ov-invalid | ixp-hygiene => permit with add ext-community OV_INVALID (0x4300000000000002)
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test ipv4-default-is-rejected | reject-special-purpose => deny
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test ipv6-default-is-rejected | reject-special-purpose => deny
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | test shared-address-more-specific-is-rejected | reject-special-purpose => deny
@@ -1733,16 +1791,16 @@ tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | reject-special-purp
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | reject-special-purpose | m08-host-routes => deny
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | reject-special-purpose | m09-evpn => deny
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | reject-special-purpose | m10-v6-bogon => deny
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m01-v4-transit => permit with add ext-community OV_VALID
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m01-v4-transit => permit with add ext-community OV_VALID (0x4300000000000000)
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m02-v4-invalid-long => deny
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m03-v6-tagged => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m04-bare => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m05-internal => permit with add ext-community OV_VALID
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m03-v6-tagged => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m04-bare => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m05-internal => permit with add ext-community OV_VALID (0x4300000000000000)
 tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m06-local-as-set => deny
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m07-default => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m08-host-routes => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m09-evpn => permit with add ext-community OV_NOT_FOUND
-tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m10-v6-bogon => permit with add ext-community OV_INVALID
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m07-default => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m08-host-routes => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m09-evpn => permit with add ext-community OV_NOT_FOUND (0x4300000000000001)
+tests/fixtures/v1-stable/v0.60.0/route-server/hygiene.rpol | ixp-hygiene | m10-v6-bogon => permit with add ext-community OV_INVALID (0x4300000000000002)
 tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | test as-set-is-rejected | ixp-hygiene => deny
 tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | test aspa-invalid-is-rejected | ixp-hygiene => deny
 tests/fixtures/v1-stable/v0.72.0/route-server/hygiene.rpol | test clean-route-falls-through | ixp-hygiene => permit
