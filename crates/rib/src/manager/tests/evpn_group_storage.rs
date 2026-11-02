@@ -902,7 +902,7 @@ fn gr_llgr_transitions_refresh_flags_and_link_local_metadata_without_ordinary_ev
 }
 
 #[test]
-fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exact() {
+fn shared_captures_share_slots_and_keep_each_old_projection_exact_across_churn() {
     let (mut manager, first, gid, _first_output) = fixture();
     let second = PeerId::from_addr("192.0.2.31".parse().unwrap());
     let third = PeerId::from_addr("192.0.2.32".parse().unwrap());
@@ -936,7 +936,6 @@ fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exa
         })
         .collect::<Vec<_>>();
     assert!(manager.capture_shared_evpn_admitted(first));
-    let hint = manager.group_ribs[&gid].evpn_recovery_universe.unwrap();
     let first_handle = manager.evpn_recovery_handle(first).unwrap();
     let first_proof = manager.evpn_recovery.proof_keys(first_handle).unwrap();
     manager
@@ -951,7 +950,6 @@ fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exa
         .or_default()
         .insert(ExactExportKey::Evpn(routes[1].key()));
     assert!(manager.capture_shared_evpn_admitted(second));
-    assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
     let second_handle = manager.evpn_recovery_handle(second).unwrap();
     let second_proof = manager
         .evpn_recovery
@@ -968,13 +966,13 @@ fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exa
     );
     let extra2 = make_evpn_imet("192.0.2.10".parse().unwrap(), 18);
     stage(&mut manager, gid, &extra2);
-    // One mask allocation and one exact sparse reservation must suffice.
-    // Removing the caller reservation makes geometric sparse growth fail.
+    // Every key but one already has a slot and the slot space has room:
+    // the only allocation is this member's bitset, with no key copies.
     manager
         .evpn_recovery
-        .fail_allocation_after_for_test(Some(2));
+        .fail_allocation_after_for_test(Some(1));
     assert!(manager.capture_shared_evpn_admitted(third));
-    assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
+    assert_eq!(manager.evpn_recovery.slot_usage().live, 18);
     let third_handle = manager.evpn_recovery_handle(third).unwrap();
     let third_proof = manager
         .evpn_recovery
@@ -997,15 +995,14 @@ fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exa
         manager.evpn_recovery.daemon_usage().retained,
         std::mem::size_of_val(&manager.evpn_recovery)
     );
-    assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
+    assert_eq!(manager.evpn_recovery.slot_usage().capacity, 0);
     // The allocation hook has served its population boundary assertion.
     manager.evpn_recovery.fail_allocation_after_for_test(None);
     assert!(manager.capture_shared_evpn_admitted(first));
-    assert_ne!(manager.group_ribs[&gid].evpn_recovery_universe, Some(hint));
 }
 
 #[test]
-fn shared_capture_caller_optional_refusal_uses_smaller_truthful_flat_projection() {
+fn capture_charges_the_member_projection_not_the_group_table() {
     use crate::manager::update_groups::recovery_provenance::EvpnRecoveryProvenance;
     let (mut manager, member, gid, _output) = fixture();
     manager.evpn_recovery = EvpnRecoveryProvenance::with_test_limits(8 * 1024, 256 * 1024 * 1024);
@@ -1026,7 +1023,7 @@ fn shared_capture_caller_optional_refusal_uses_smaller_truthful_flat_projection(
         assert_eq!(proof.contains(&key), tag < 16);
     }
     assert_eq!(manager.evpn_recovery.exhaustion(handle), None);
-    assert!(manager.group_ribs[&gid].evpn_recovery_universe.is_none());
+    assert_eq!(manager.evpn_recovery.slot_usage().live, 16);
 }
 
 const DISJOINT_ROUTES: u32 = 64;
@@ -1061,7 +1058,7 @@ fn assert_owned_test_evpn_bodies(manager: &RibManager, peer: PeerId, routes: &[E
     }
 }
 
-fn older_universe_fixture() -> (
+fn churned_owned_fixture() -> (
     RibManager,
     PeerId,
     PeerId,
@@ -1140,7 +1137,7 @@ fn older_universe_fixture() -> (
     (manager, first, second, gid, first_output, second_output)
 }
 
-fn assert_disjoint_flat_fits(routes: &[EvpnRibRoute]) {
+fn assert_disjoint_proof_fits(routes: &[EvpnRibRoute]) {
     use crate::manager::update_groups::recovery_provenance::{EvpnRecoveryProvenance, PeerSession};
     let mut flat = EvpnRecoveryProvenance::with_test_limits(
         disjoint_peer_budget(),
@@ -1166,6 +1163,25 @@ fn assert_disjoint_flat_fits(routes: &[EvpnRibRoute]) {
     );
 }
 
+/// A member's new proof charges its peer one slot per admitted key plus its
+/// own bitset and pins, never a key copy. Returns the daemon growth and the
+/// member's own storage.
+fn assert_dense_charge(
+    manager: &RibManager,
+    peer: PeerId,
+    (daemon_before, peer_before): (usize, usize),
+    keys: usize,
+) -> (usize, usize) {
+    use crate::manager::update_groups::recovery_provenance::SLOT_BYTES;
+    let daemon = manager.evpn_recovery.daemon_usage().retained - daemon_before;
+    let own = manager.evpn_recovery.peer_usage(peer).retained - peer_before - keys * SLOT_BYTES;
+    assert!(
+        own < keys * std::mem::size_of::<rustbgpd_wire::EvpnRouteKey>(),
+        "member storage {own} would be a per-member key copy"
+    );
+    (daemon, own)
+}
+
 fn no_reset_counter(manager: &mut RibManager) -> Arc<AtomicUsize> {
     let calls = Arc::new(AtomicUsize::new(0));
     let captured = calls.clone();
@@ -1177,10 +1193,10 @@ fn no_reset_counter(manager: &mut RibManager) -> Arc<AtomicUsize> {
 }
 
 #[test]
-fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
-    let (mut manager, first, second, gid, _first_output, mut output) = older_universe_fixture();
+fn disjoint_capture_after_churn_reuses_freed_slots_without_key_copies() {
+    let (mut manager, first, second, _gid, _first_output, mut output) = churned_owned_fixture();
     let fresh = disjoint_routes(1000);
-    assert_disjoint_flat_fits(&fresh);
+    assert_disjoint_proof_fits(&fresh);
     let handle = manager.evpn_recovery_handle(second).unwrap();
     assert!(
         manager
@@ -1207,13 +1223,13 @@ fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
     assert!(manager.evpn_recovery.finish_recovery(handle).unwrap());
     let first_handle = manager.evpn_recovery_handle(first).unwrap();
     let old = manager.evpn_recovery.proof_keys(first_handle).unwrap();
-    let hint = manager.group_ribs[&gid].evpn_recovery_universe;
+    let slots = manager.evpn_recovery.slot_usage();
     let retained = manager.evpn_recovery.daemon_usage().retained;
     let header = manager.evpn_recovery.peer_usage(second).retained;
     let resets = no_reset_counter(&mut manager);
     assert!(
         manager.capture_shared_evpn_admitted(second),
-        "a complete flat OLD proof fits the same cap"
+        "a complete OLD proof fits the same cap"
     );
     assert_eq!(
         manager.evpn_recovery.proof_keys(handle).unwrap().unwrap(),
@@ -1222,16 +1238,11 @@ fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
     assert_eq!(manager.evpn_recovery.exhaustion(handle), None);
     assert!(!manager.dirty_peers.contains(&second));
     assert_eq!(resets.load(Ordering::SeqCst), 0);
-    let key_bytes = fresh.len() * std::mem::size_of::<rustbgpd_wire::EvpnRouteKey>();
-    assert_eq!(
-        manager.evpn_recovery.daemon_usage().retained,
-        retained + key_bytes
-    );
-    assert_eq!(
-        manager.evpn_recovery.peer_usage(second).retained,
-        header + key_bytes
-    );
-    assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, hint);
+    let (daemon, own) = assert_dense_charge(&manager, second, (retained, header), fresh.len());
+    // The settled admission freed its slots; this capture reused them and
+    // grew nothing shared.
+    assert_eq!(daemon, own);
+    assert_eq!(manager.evpn_recovery.slot_usage().capacity, slots.capacity);
     manager.retire_evpn_recovery(second);
     assert_eq!(manager.evpn_recovery.proof_keys(first_handle).unwrap(), old);
     manager.retire_evpn_recovery(first);
@@ -1242,11 +1253,11 @@ fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
 }
 
 #[test]
-fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_universe() {
+fn empty_ready_disjoint_admission_pins_its_own_slots_with_or_without_earlier_keys() {
     for existing in [false, true] {
-        let (mut manager, first, second, gid, _first_output, mut output) = older_universe_fixture();
+        let (mut manager, first, second, _gid, _first_output, mut output) = churned_owned_fixture();
         let fresh = disjoint_routes(1000);
-        assert_disjoint_flat_fits(&fresh);
+        assert_disjoint_proof_fits(&fresh);
         let handle = manager.evpn_recovery_handle(second).unwrap();
         let retained = manager.evpn_recovery.daemon_usage().retained;
         let header = manager.evpn_recovery.peer_usage(second).retained;
@@ -1286,7 +1297,6 @@ fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_univers
         );
         let first_handle = manager.evpn_recovery_handle(first).unwrap();
         let old = manager.evpn_recovery.proof_keys(first_handle).unwrap();
-        let hint = manager.group_ribs[&gid].evpn_recovery_universe;
         let resets = no_reset_counter(&mut manager);
         assert!(
             manager
@@ -1298,7 +1308,7 @@ fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_univers
                     }
                 )
                 .is_ok(),
-            "flat candidate union fits; existing empty universe: {existing}"
+            "the candidate admission fits; earlier key: {existing}"
         );
         assert_eq!(output.try_recv().unwrap().evpn_announce.len(), fresh.len());
         assert_eq!(
@@ -1308,16 +1318,7 @@ fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_univers
         assert_eq!(manager.evpn_recovery.exhaustion(handle), None);
         assert!(!manager.dirty_peers.contains(&second));
         assert_eq!(resets.load(Ordering::SeqCst), 0);
-        let key_bytes = fresh.len() * std::mem::size_of::<rustbgpd_wire::EvpnRouteKey>();
-        assert_eq!(
-            manager.evpn_recovery.daemon_usage().retained,
-            retained + key_bytes
-        );
-        assert_eq!(
-            manager.evpn_recovery.peer_usage(second).retained,
-            header + key_bytes
-        );
-        assert_eq!(manager.group_ribs[&gid].evpn_recovery_universe, hint);
+        assert_dense_charge(&manager, second, (retained, header), fresh.len());
         manager.retire_evpn_recovery(second);
         assert_eq!(manager.evpn_recovery.proof_keys(first_handle).unwrap(), old);
         manager.retire_evpn_recovery(first);

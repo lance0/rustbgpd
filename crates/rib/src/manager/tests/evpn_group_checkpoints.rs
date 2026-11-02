@@ -95,8 +95,8 @@ fn evpn_shared_empty_capture_checkpoints_completeness_count_and_population() {
     );
     assert_eq!(
         visits.load(Ordering::SeqCst),
-        routes.len() * 4,
-        "completeness, cardinality, ordered reference collection and flat fallback each visit every excluded row"
+        routes.len() * 2,
+        "completeness and the single OLD projection walk each visit every excluded row"
     );
     let handle = manager.evpn_recovery_handle(member).unwrap();
     assert_eq!(
@@ -132,8 +132,8 @@ fn evpn_private_capture_preserves_keys_and_checkpoints_projection_and_insertion(
     );
     assert_eq!(
         visits.load(Ordering::SeqCst),
-        routes.len() * 2,
-        "both the actual-key producer and ledger insertion visit every row"
+        routes.len().div_ceil(64) + 4,
+        "one checkpoint per 64 captured keys plus the slot-space and bitset allocation brackets"
     );
     let handle = manager.evpn_recovery_handle(member).unwrap();
     let proof: HashSet<_> = manager
@@ -184,7 +184,7 @@ fn evpn_denial_replacement_checkpoints_staged_and_inserted_rows() {
 }
 
 #[test]
-fn shared_capture_proof_iteration_checkpoints_masked_and_trailing_rows() {
+fn shared_capture_proof_iteration_checkpoints_once_per_slot_word() {
     let (mut manager, member, gid, _output) = fixture();
     let routes = install_routes(&mut manager, gid, 32);
     manager.peer_unexportable.insert(
@@ -205,10 +205,6 @@ fn shared_capture_proof_iteration_checkpoints_masked_and_trailing_rows() {
         })
         .collect::<Vec<_>>();
     assert_eq!(keys, [routes[0].key()]);
-    assert!(manager.group_ribs[&gid].evpn_recovery_universe.is_some());
-    assert_eq!(
-        visits,
-        routes.len(),
-        "all unmarked and trailing universe rows need checkpoints"
-    );
+    // One admitted key needs one 64-slot word step, not a walk of the table.
+    assert!((1..=16).contains(&visits), "visits {visits}");
 }

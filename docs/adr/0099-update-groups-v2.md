@@ -1127,3 +1127,73 @@ These are preparation and correctness controls. They establish no memory,
 readiness, throughput or scale result. Full feeds still encode privately, so a
 large initial feed is not an encode-once qualification. Production activation
 still requires the separately accepted qualification and approval.
+
+## Amendment (2026-11-02): dense slot IDs for EVPN recovery provenance
+
+The EVPN recovery ledger replaces its shared key universes and per-member
+sparse key copies with dense slot IDs. A mass-dirty attribution at the
+150-receiver recovery shape found that 96.5% of the peak provenance charge was
+per-member copies of keys added after the group's shared universe was built:
+every member that captured against a stale universe stored its own 64-byte copy
+of each churned key. Admission-time copies were negligible. Rebasing the
+universe more often would bound only the capture term and keep a second
+representation; this amendment removes the per-member copy instead.
+
+**Representation.** The ledger owns one slot space. Each slot stores a key once,
+with a holder count, and a hash index maps a key to its slot. Each recovery
+record, primary or snapshot, keeps a bitset over slot IDs, a set-bit count and
+the slots pinned by an outstanding admission reservation. The slot space belongs
+to the ledger, not to a group: a retained proof survives regroup, group
+retirement, private capture and the private-to-owned handoff without rebinding,
+and groups that stage the same keys share their slots. Slot IDs never leave the
+ledger; proof views expose only key membership, the admitted count and key
+iteration.
+
+**Lifecycle.** Capture, admission and snapshot increment a slot's holder count
+when they set a bit, and each reservation pin increments it once. Clearing a bit
+or dropping a pin decrements it. A slot whose count reaches zero leaves the index
+and joins a free list; only then can a later key reuse it. The holder count
+covers every primary bit, snapshot bit and pin, so a key and its mapping remain
+until every record that can reference the slot has released it, and reuse
+cannot make an existing bit name a different route. When no slot is held, the
+ledger frees the whole slot space.
+
+**Admission.** Reservation interns and pins each announced key that the record
+has not already admitted, and sizes the record's bitset for those slots. Final
+application then only sets and clears bits: it allocates nothing, and a release
+elsewhere cannot free a slot it still needs. Every withdrawal must name a set
+bit. Application validates the whole batch before it mutates, so an unknown or
+duplicated withdrawal is refused unchanged and still requests section E's reset.
+A key withdrawn and announced in one batch remains admitted. Announcements stay
+sorted and unique, so a repeated announcement is refused rather than sent twice.
+A proof's iteration order is slot order; callers that need key order sort their
+own output.
+
+**Cost.** Capture walks the member's existing old projection once. Each key
+costs one index probe, an insert on first sight and a bit set, with no ordering
+of keys and no search of a universe. Membership tests, reservation and
+application cost one probe per key. Proof iteration, release and snapshot walk
+the bitset in slot order. Readiness checkpoints run at a fixed stride inside
+ledger loops, never inside a comparison.
+
+**Accounting.** The section E caps are unchanged and still provisional. The
+daemon charge is exact for the ledger's own allocations: its header, record
+array, each record's bitset and pin capacity, and slot-space capacity at 80 bytes
+per slot (the key, holder count, free-list entry and two index buckets). Growth
+charges old and new storage together before allocating and reconciles to the
+actual capacities afterwards. Each peer is charged its records' own storage plus
+80 bytes for every slot it holds through a bit or a pin, which is the cost it
+would impose as the slot's only holder. A slow peer therefore pays for the
+retention it causes, and exhaustion of the daemon cap cannot be shifted onto
+healthy peers. At 16 MiB this allows about 209,000 held keys per peer, fewer
+than the earlier 64-byte charge per universe key allowed. Allocator overhead, route
+bodies and RSS remain separate qualification surfaces.
+
+**Evidence status.** Component tests pin retention across churn, finish and
+snapshot; adversarial reuse with a retained snapshot and a slow holder; and
+exact accounting with bounded slot reuse under sustained churn. A synthetic
+probe at ten times the measured receiver count checks the ledger peak against
+the qualification bar. These are component results. They do not qualify the
+recovery memory envelope, readiness or replay cost, and production EVPN
+ownership remains disabled until the mass-dirty and replay qualifications pass
+on this representation.
