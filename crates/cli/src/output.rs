@@ -753,7 +753,9 @@ pub struct JsonExplainModifications {
     pub extended_communities_remove: Vec<u64>,
     pub large_communities_add: Vec<String>,
     pub large_communities_remove: Vec<String>,
-    /// Prepended ASNs, leftmost first.
+    /// Prepended ASNs, leftmost first; omitted when nothing is prepended,
+    /// as the single-ASN fields it replaces were.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub as_path_prepend: Vec<u32>,
 }
 

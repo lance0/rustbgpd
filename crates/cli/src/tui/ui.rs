@@ -2268,7 +2268,7 @@ mod tests {
             "Modifications",
             "local-pref=200",
             "MED=0",
-            "prepend=64512x2",
+            "prepend=64512,64512",
             "communities+=65000:1",
             "extended-communities+=4294967297,4294967298",
             "extended-communities-=8589934593",
