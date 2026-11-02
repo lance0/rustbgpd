@@ -30,7 +30,7 @@ def witness(arm, clients=3, routes=10):
             "owned_groups": int(candidate), "owned_members": clients if candidate else 0,
             "owned_routes": clients * routes if candidate else 0,
             "private_routes": 0 if candidate else clients * (clients - 1) * routes,
-            "dirty": 0, "retained": clients * 64 if candidate else 0,
+            "dirty": 0, "dirty_high_water": 0, "retained": clients * 64 if candidate else 0,
             "peak": clients * 128 if candidate else 0, "peer_budget": 16 * 1024 ** 2,
             "daemon_budget": 256 * 1024 ** 2, "pending_resets": 0, "completion_receipts": 0,
             "marker_debt": 0, "retained_recovery": 0,
@@ -382,7 +382,10 @@ class TestQualification(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             files = {"src/main.rs": "RibManager::new().with_readiness_queries(rib_readiness_rx);",
-                     "crates/rib/src/manager/mod.rs": "    fn sample_outbound_dirty_gauges(&self) {\n}\n                    self.handle_end_of_rib(peer, afi, safi);\n",
+                     "crates/rib/src/manager/mod.rs": "use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};\n"
+                         "    fn sample_outbound_dirty_gauges(&self) {\n}\n                    self.handle_end_of_rib(peer, afi, safi);\n"
+                         "            self.dirty_peers.extend(withheld);\n",
+                     "crates/rib/src/manager/update_groups.rs": "        if self.dirty_peers.insert(peer) {\n        }\n",
                      "bench/scale/evpn-qualification/observer.rs": "        self.bench_evpn_group_receipt();\n",
                      "bench/scale/evpn-qualification/input_observer.rs": "// input applied observer\n",
                      "crates/wire/src/lib.rs": "// actual runtime input\n"}

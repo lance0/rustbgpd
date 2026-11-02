@@ -12,6 +12,12 @@
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("qualification clock precedes epoch").as_micros();
             let receipt = self.bench_evpn_group_receipt();
+            // The most members dirty at once since the previous row: every
+            // writer that grows the dirty set records its size.
+            let dirty = receipt.peers.iter().filter(|peer| peer.dirty).count();
+            let dirty_high_water = crate::manager::BENCH_DIRTY_HIGH_WATER
+                .swap(dirty, std::sync::atomic::Ordering::Relaxed)
+                .max(dirty);
             let (mut refresh_pending, mut eor_pending, mut protocol_obligations) = (0, 0, 0);
             let peers = receipt.peers.iter().map(|peer| {
                 let refresh = self.pending_refresh.get(&peer.peer)
@@ -36,7 +42,7 @@
                 )
             }).collect::<Vec<_>>().join(",");
             eprintln!(
-                "evpn_qualification {{\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"peers\":[{}]}}",
+                "evpn_qualification {{\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"dirty_high_water\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"peers\":[{}]}}",
                 elapsed_us,
                 sample_slot,
                 wall_us,
@@ -45,7 +51,8 @@
                 receipt.owned_members,
                 receipt.owned_routes,
                 receipt.private_routes,
-                receipt.peers.iter().filter(|peer| peer.dirty).count(),
+                dirty,
+                dirty_high_water,
                 receipt.retained_provenance_bytes,
                 receipt.peak_provenance_bytes,
                 receipt.peer_budget_bytes,

@@ -125,13 +125,17 @@ frozen-source campaign in an explicitly recorded timing window.
 
 The controller pauses actual socket readers with acknowledged generation fences,
 then issues 32 fixed full-window churn rounds. Both arms must show all members
-dirty together in two consecutive actual observations at 20 Hz: 150/150 in each
-measured observation. Two isolated 150/150 observations separated by 149/150 do
-not pass. The observer captures timestamps before building each receipt and
+dirty at the same time: an observer row whose `dirty_high_water` is 150/150.
+That field is the most members dirty at once since the previous row; the
+derived daemon records the dirty-set size at both writers that can grow it
+(the dirty mark and the resync pass's re-admission of withheld peers), so a
+peak between two 20 Hz rows cannot be missed. The observer captures timestamps before building each receipt and
 emits at most once per anchored 50,000 µs slot, skipping missed slots without
-catch-up or interpolation. Both online and final checks require adjacent raw
-records in adjacent slots with an actual timestamp gap greater than zero and
-at most 50,000 µs; there is no extra tolerance. Queue occupancy and a pause
+catch-up or interpolation. Both online and final checks require the witness row
+and its predecessor to be adjacent raw records in adjacent slots, with an actual
+timestamp gap greater than zero and at most 50,000 µs, and that one-slot window
+to lie wholly between the pause acknowledgement and the resume command; there is
+no extra tolerance. A peak of 149/150 fails. Queue occupancy and a pause
 acknowledgement do not establish that condition. A real Route Refresh
 must leave an outstanding refresh/EoR obligation, observed before, during and
 after another paced source-update sequence. The private observer retains three

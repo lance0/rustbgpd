@@ -222,7 +222,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_aggregate_dirty_cannot_fake_actual_roster(self):
         row = two_groups()
-        row["dirty"] = 4
+        row["dirty"] = row["dirty_high_water"] = 4
         with self.assertRaisesRegex(ValueError, "aggregate observer"):
             R.roster(row, "candidate", 4)
         for peer in row["peers"]:
@@ -275,35 +275,43 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing required wire phase"):
                 R.check_wire(root, 3, 10)
 
-    def test_repeated_or_interrupted_dirty_snapshot_is_not_overlap(self):
-        first = two_groups()
-        first["dirty"] = 4
-        second = copy.deepcopy(first)
-        self.assertIsNone(R.dirty_pair([first, second], 4))
-        second["elapsed_us"] += 50_000
-        second["sample_slot"] += 1
-        self.assertEqual(R.dirty_pair([first, second], 4), (first, second))
-        middle = copy.deepcopy(first)
-        middle["dirty"] = 3
-        self.assertIsNone(R.dirty_pair([first, middle, second], 4))
-
-    def test_dirty_pair_requires_adjacent_slots_and_actual_twenty_hz_gap(self):
-        first = two_groups()
-        first["dirty"] = 4
+    def test_high_water_witness_needs_every_member_inside_one_paused_slot(self):
+        first, second = two_groups(), two_groups()
+        first["wall_us"], second["wall_us"] = 100, 200
+        second.update(elapsed_us=100_000, sample_slot=2, dirty_high_water=4)
+        self.assertEqual(R.dirty_pair([first, second], 4, 100, 200), (first, second))
+        for paused, resumed in ((101, 200), (100, 199)):
+            with self.subTest(paused=paused, resumed=resumed):
+                self.assertIsNone(R.dirty_pair([first, second], 4, paused, resumed))
+        short = copy.deepcopy(second)
+        short["dirty_high_water"] = 3
+        self.assertIsNone(R.dirty_pair([first, short], 4, 100, 200), "one member short is not mass-dirty")
         for gap in (1_000_000, 50_001):
             with self.subTest(gap=gap):
-                second = copy.deepcopy(first)
-                second["elapsed_us"] += gap
-                second["sample_slot"] = second["elapsed_us"] // 50_000
-                self.assertIsNone(R.dirty_pair([first, second], 4))
-        second = copy.deepcopy(first)
-        second.update(elapsed_us=100_000, sample_slot=2)
-        self.assertEqual(R.dirty_pair([first, second], 4), (first, second))
+                late = copy.deepcopy(second)
+                late["elapsed_us"] = first["elapsed_us"] + gap
+                late["sample_slot"] = late["elapsed_us"] // 50_000
+                self.assertIsNone(R.dirty_pair([first, late], 4, 100, 200))
         for elapsed, slot in ((50_001, 1), (150_000, 3), (100_000, 3)):
             with self.subTest(elapsed=elapsed, slot=slot):
-                second = copy.deepcopy(first)
-                second.update(elapsed_us=elapsed, sample_slot=slot)
-                self.assertIsNone(R.dirty_pair([first, second], 4))
+                skewed = copy.deepcopy(second)
+                skewed.update(elapsed_us=elapsed, sample_slot=slot)
+                self.assertIsNone(R.dirty_pair([first, skewed], 4, 100, 200))
+
+    def test_high_water_records_a_peak_the_sampled_gauge_misses(self):
+        rows = []
+        for slot in range(1, 6):
+            row = two_groups()
+            row.update(elapsed_us=slot * 50_000, sample_slot=slot, wall_us=slot * 100,
+                       dirty=3, dirty_high_water=4 if slot == 3 else 3)
+            rows.append(row)
+        # The old witness needed two consecutive samples with every member
+        # dirty; no 20 Hz sample here reads more than 3 of 4.
+        self.assertFalse(any(left["dirty"] == right["dirty"] == 4 for left, right in zip(rows, rows[1:])))
+        self.assertEqual(R.dirty_pair(rows, 4, 0, 1_000), (rows[1], rows[2]))
+        for row in rows:
+            row["dirty_high_water"] = 3
+        self.assertIsNone(R.dirty_pair(rows, 4, 0, 1_000), "a peak one member short fails")
 
     def test_timings_use_reload_trigger_and_all_resume_ack(self):
         events = [{"event": "reload", "generation": "a", "at": 1},
@@ -396,7 +404,7 @@ class RecoveryTests(unittest.TestCase):
                         data[1] = 2 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1
                 observation.update(elapsed_us=sequence * 50_000, sample_slot=sequence, wall_us=sequence * 100)
                 if name.startswith("mass_dirty"):
-                    observation["dirty"] = 3
+                    observation["dirty"] = observation["dirty_high_water"] = 3
                     for data in observation["peers"]: data[2] = True
                 if name.startswith("protocol_obligation"):
                     observation["refresh_pending"] = observation["protocol_obligations"] = 3
@@ -417,12 +425,13 @@ class RecoveryTests(unittest.TestCase):
                       {"event": "complete", "command": "policy b", "at": 3},
                       {"event": "reload", "generation": "a", "at": 4, "wall_us": 4_000_000},
                       {"event": "complete", "command": "policy a", "at": 6},
+                      {"event": "complete", "command": "pause", "at": 6.5, "wall_us": 350},
                       *[{"event": "complete", "command": "churn", "at": 7 + n} for n in range(32)],
                       {"event": "command", "command": "churn-overlap", "at": 40, "wall_us": 2000},
                       {"event": "complete", "command": "churn-overlap", "at": 41, "wall_us": 4000},
                       *[{"event": "input-applied", "generation": n, "receipts": n * 3,
                          "at": n * 15, "wall_us": 5000 if n == 3 else n * 100} for n in range(1, 4)],
-                      {"event": "command", "command": "resume", "at": 51},
+                      {"event": "command", "command": "resume", "at": 51, "wall_us": 7000},
                       {"event": "complete", "command": "resume", "at": 52},
                       {"event": "complete", "command": "settle", "at": 56}]
             reload_controls(leg, row, events)
@@ -515,6 +524,71 @@ class RecoveryTests(unittest.TestCase):
                     with patch.object(R, "check_wire", return_value=report), \
                          self.assertRaises(Q.AcceptanceFailure):
                         R.analyze(root)
+
+    def test_analyze_fails_a_short_or_unpaused_high_water_in_either_arm(self):
+        for arm in ("candidate", "private"):
+            for defect in ("short", "before-pause", "after-resume"):
+                with self.subTest(arm=arm, defect=defect), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    report = self.analysis_fixture(root)
+                    leg = next(root.glob(f"recovery-*-{arm}"))
+                    row = json.loads((leg / "result.json").read_text())
+                    events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
+                    lines = (leg / "observer.log").read_text().splitlines()
+                    if defect == "short":
+                        target = row["mass_dirty"]
+                        row["mass_dirty"] = copy.deepcopy(target)
+                        row["mass_dirty"]["dirty"] = row["mass_dirty"]["dirty_high_water"] = 2
+                        row["mass_dirty"]["peers"][2][2] = False
+                        lines = [("evpn_qualification " + json.dumps(row["mass_dirty"]))
+                                 if line.startswith("evpn_qualification ")
+                                 and json.loads(line.removeprefix("evpn_qualification ")) == target
+                                 else line for line in lines]
+                    else:
+                        # Moves the pause after, or the resume before, the witness window.
+                        command, kind = ("pause", "complete") if defect == "before-pause" else ("resume", "command")
+                        for event in events:
+                            if event.get("command") == command and event["event"] == kind:
+                                event["wall_us"] = 450
+                    (leg / "observer.log").write_text("".join(line + "\n" for line in lines))
+                    (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+                    Q.write_json(leg / "result.json", row)
+                    with patch.object(R, "check_wire", return_value=report), \
+                         self.assertRaises(Q.AcceptanceFailure):
+                        R.analyze(root)
+
+    def test_analyze_needs_the_pause_and_resume_clocks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = self.analysis_fixture(root)
+            leg = next(root.glob("recovery-*-candidate"))
+            events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
+            events = [event for event in events if event.get("command") != "pause"]
+            (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+            with patch.object(R, "check_wire", return_value=report), \
+                 self.assertRaisesRegex(ValueError, "pause/resume events missing") as caught:
+                R.analyze(root)
+            self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+
+    def test_roster_requires_a_consistent_high_water(self):
+        row = two_groups()
+        R.roster(row, "candidate", 4)
+        for value in (None, True, -1, 5, "4"):
+            with self.subTest(value=value):
+                bad = copy.deepcopy(row)
+                if value is None:
+                    del bad["dirty_high_water"]
+                else:
+                    bad["dirty_high_water"] = value
+                with self.assertRaisesRegex(ValueError, "dirty high-water") as caught:
+                    R.roster(bad, "candidate", 4)
+                self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+        below = copy.deepcopy(row)
+        for peer in below["peers"]:
+            peer[2] = True
+        below["dirty"], below["dirty_high_water"] = 4, 3
+        with self.assertRaisesRegex(ValueError, "dirty high-water"):
+            R.roster(below, "candidate", 4)
 
     def test_analyze_consumes_raw_receipts_and_rejects_hidden_middle_peak(self):
         with tempfile.TemporaryDirectory() as temporary:

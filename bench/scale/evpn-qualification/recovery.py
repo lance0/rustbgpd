@@ -91,6 +91,9 @@ def roster(row, arm, clients):
               and row["eor_pending"] == sum(p[9] for p in row["peers"])
               and row["protocol_obligations"] == sum(p[5] != 0 or p[8] or p[9] for p in row["peers"]),
               "aggregate observer differs from peer witnesses")
+    high_water = row.get("dirty_high_water")
+    Q.require(type(high_water) is int and row["dirty"] <= high_water <= row["members"],
+              "missing or inconsistent dirty high-water mark")
     if arm == "candidate":
         full = row["members"] == clients
         Q.require(row["private_routes"] == 0 and all(type(p[1]) is int for p in row["peers"])
@@ -197,9 +200,13 @@ def check_reload_receipts(leg, row, events, seconds):
               "unknown reload control generation")
 
 
-def dirty_pair(observed, clients):
+def dirty_pair(observed, clients, paused_wall_us, resumed_wall_us):
+    """The first row whose high-water mark shows every member dirty at once,
+    with its one-slot window (from the previous row) wholly inside the paused
+    interval: the observer cannot miss a peak between its 20 Hz rows."""
     return next(((left, right) for left, right in zip(observed, observed[1:])
-                 if left["dirty"] == right["dirty"] == clients
+                 if right["dirty_high_water"] == clients
+                 and paused_wall_us <= left["wall_us"] and right["wall_us"] <= resumed_wall_us
                  and left["sample_slot"] == left["elapsed_us"] // SAMPLE_PERIOD_US
                  and right["sample_slot"] == right["elapsed_us"] // SAMPLE_PERIOD_US
                  and right["sample_slot"] == left["sample_slot"] + 1
@@ -589,6 +596,7 @@ def run_cell(output, manifest, arm, index, correctness):
             controller.command("refresh-settle", bars["convergence_seconds"])
             controller.witness(settled)
             controller.command("pause")
+            paused = controller.last_command_complete["wall_us"]
             dirty = None
             for _ in range(bars["max_churn_rounds"]):
                 start = len(controller.observations)
@@ -597,14 +605,10 @@ def run_cell(output, manifest, arm, index, correctness):
                     continue
                 # The socket read acknowledgement alone is never the witness.
                 try:
-                    controller.witness(lambda row: row["dirty"] == clients, timeout=2, after=start)
-                    pair = dirty_pair(controller.observations[start:], clients)
-                    if pair is None:
-                        controller.witness(lambda row: row["dirty"] == clients, timeout=2)
-                        pair = dirty_pair(controller.observations[start:], clients)
-                    if pair is None:
-                        raise MissingWitness("two consecutive actual dirty snapshots missing")
-                    dirty = pair
+                    controller.witness(lambda row: row["dirty_high_water"] == clients, timeout=2, after=start)
+                    dirty = dirty_pair(controller.observations[max(start - 1, 0):], clients, paused, float("inf"))
+                    if dirty is None:
+                        raise MissingWitness("high-water window not inside the paused interval")
                 except MissingWitness:
                     continue
             Q.accept(dirty is not None, "simultaneous all-peer mass-dirty witness missing")
@@ -709,7 +713,13 @@ def analyze_results(output):
             Q.require(row[key] in observed and row[key]["members"] == clients,
                       f"{key} absent from raw observer or not a full roster")
             roster(row[key], row["arm"], clients)
-        Q.accept(dirty_pair([row["mass_dirty_previous"], row["mass_dirty"]], clients) is not None
+        paused = next((event["wall_us"] for event in events
+                       if event["event"] == "complete" and event.get("command") == "pause"), None)
+        resumed = next((event["wall_us"] for event in events
+                        if event["event"] == "command" and event.get("command") == "resume"), None)
+        Q.require(type(paused) is int and type(resumed) is int and paused < resumed,
+                  "pause/resume events missing for the mass-dirty window")
+        Q.accept(dirty_pair([row["mass_dirty_previous"], row["mass_dirty"]], clients, paused, resumed) is not None
                  and row["protocol_obligation_before_churn"]["protocol_obligations"] > 0
                  and row["protocol_obligation_during_churn"]["protocol_obligations"] > 0
                  and row["protocol_obligation_after_churn"]["protocol_obligations"] > 0,

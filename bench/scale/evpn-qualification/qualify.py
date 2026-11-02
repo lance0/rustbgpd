@@ -38,7 +38,7 @@ SHAPES = ((75, 500), (150, 250), (100, 1000), (200, 500))
 SCHEDULE = ("candidate", "private") * 3
 MAX_SLOPE_BYTES = 10
 RECOVERY_BARS = {"clients": 150, "routes_per_client": 250, "dirty_members": 150,
-                 "consecutive_dirty_samples": 2, "sample_hz": 20,
+                 "dirty_witness": "high-water", "sample_hz": 20,
                  "readiness_seconds": .2, "convergence_seconds": 60,
                  "candidate_median_ratio": 1.03, "max_budget_fraction": .8,
                  "max_churn_rounds": 32, "overlap_source_spacing_ms": 50}
@@ -157,6 +157,27 @@ def derived_texts(main, rib, observer, arm, input_observer=None):
     return main, rib
 
 
+HIGH_WATER_STATIC = ("pub(crate) static BENCH_DIRTY_HIGH_WATER: std::sync::atomic::AtomicUsize =\n"
+                     "    std::sync::atomic::AtomicUsize::new(0);\n")
+
+
+def high_water_note(indent):
+    return (f"{indent}crate::manager::BENCH_DIRTY_HIGH_WATER\n"
+            f"{indent}    .fetch_max(self.dirty_peers.len(), std::sync::atomic::Ordering::Relaxed);\n")
+
+
+def derived_high_water(rib, groups):
+    """Record the dirty-set size at both writers that can grow it, so the
+    observer reports the most members dirty at once since its previous row."""
+    anchor = "use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};\n"
+    rib = replace_once(rib, anchor, anchor + HIGH_WATER_STATIC)
+    anchor = "            self.dirty_peers.extend(withheld);\n"
+    rib = replace_once(rib, anchor, anchor + high_water_note("            "))
+    anchor = "        if self.dirty_peers.insert(peer) {\n"
+    groups = replace_once(groups, anchor, anchor + high_water_note("            "))
+    return rib, groups
+
+
 def derive(source, arm):
     """Only exported sources are eligible; normal worktrees remain untouched."""
     source = Path(source)
@@ -166,10 +187,13 @@ def derive(source, arm):
     rib = source / "crates/rib/src/manager/mod.rs"
     observer = source / "bench/scale/evpn-qualification/observer.rs"
     input_observer = source / "bench/scale/evpn-qualification/input_observer.rs"
+    groups = source / "crates/rib/src/manager/update_groups.rs"
     main_text, rib_text = derived_texts(main.read_text(), rib.read_text(), observer.read_text(), arm,
                                       input_observer.read_text())
+    rib_text, groups_text = derived_high_water(rib_text, groups.read_text())
     main.write_text(main_text)
     rib.write_text(rib_text)
+    groups.write_text(groups_text)
 
 
 def verify_export(output, arm):
@@ -179,7 +203,10 @@ def verify_export(output, arm):
         names = ("src/main.rs", "crates/rib/src/manager/mod.rs", "bench/scale/evpn-qualification/observer.rs")
         texts = [archive.extractfile(name).read().decode() for name in names]
         input_observer = archive.extractfile("bench/scale/evpn-qualification/input_observer.rs").read().decode()
-        changed = dict(zip(names[:2], derived_texts(*texts, arm, input_observer), strict=True))
+        groups_name = "crates/rib/src/manager/update_groups.rs"
+        main_text, rib_text = derived_texts(*texts, arm, input_observer)
+        rib_text, groups_text = derived_high_water(rib_text, archive.extractfile(groups_name).read().decode())
+        changed = {names[0]: main_text, names[1]: rib_text, groups_name: groups_text}
         tracked = set()
         for member in archive:
             if member.issym():
