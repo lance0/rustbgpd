@@ -30,8 +30,9 @@ use crate::engine::{
 };
 use crate::ir::{
     ArithOp, Cmp, CommunityAttribute, CommunityAttributes, CompiledChain, CompiledPolicy,
-    DatasetProbe, ForEachNode, LoopSource, MatchExpr, Term, TermAction, TermActionView,
-    ValidationDimension, ValueCmpOp, ValueExpr, ValueField, is_well_known_community,
+    DatasetProbe, ForEachNode, LoopSource, MatchExpr, OptionalField, Term, TermAction,
+    TermActionView, ValidationDimension, ValueCmpOp, ValueExpr, ValueField,
+    is_well_known_community,
 };
 use crate::sets::{CommunitySet, prefix_entry_matches};
 
@@ -194,6 +195,22 @@ pub enum EvalErrorKind {
     DatasetUnpinned,
 }
 
+impl EvalErrorKind {
+    /// Whether this kind is a compiler-bug rail, which fails the route
+    /// closed wherever it occurs. Every other kind is a value that
+    /// cannot be computed: a condition reading it is false, and only
+    /// an action that needs it denies the route (LAN-2790).
+    #[must_use]
+    pub fn is_compiler_rail(self) -> bool {
+        matches!(
+            self,
+            EvalErrorKind::UnboundLocal
+                | EvalErrorKind::DatasetUnpinned
+                | EvalErrorKind::StrayLoopControl
+        )
+    }
+}
+
 /// One evaluation error with its blame context (LAN-301): the kind
 /// plus the failing policy/term names, as the live walk resolved them.
 /// Carried on [`PolicyEvaluation`]
@@ -324,18 +341,47 @@ impl fmt::Display for EvalErrorKind {
 /// reset per source term and sibling scopes reuse.
 pub(crate) const LOCAL_FRAME_SLOTS: usize = 256;
 
+/// One `let` or loop slot: the bound value, or why a `let`
+/// initializer could not be computed (LAN-2790). A condition that reads
+/// an `Err` slot is false; an action that needs it denies the route with
+/// the stored kind.
+pub(crate) type LocalSlot = Result<u32, EvalErrorKind>;
+
 /// The fixed-size evaluation frame `let` bindings live in: a stack
 /// array, allocated (and zeroed) lazily only when a policy's walk
 /// reaches its first [`TermAction::Bind`] — policies without bindings
 /// never touch it, preserving the V1 hot-path cost exactly.
-pub(crate) type LocalFrame = [u32; LOCAL_FRAME_SLOTS];
+pub(crate) type LocalFrame = [LocalSlot; LOCAL_FRAME_SLOTS];
+
+/// A frame before any binding is written.
+pub(crate) const EMPTY_LOCAL_FRAME: LocalFrame = [Ok(0); LOCAL_FRAME_SLOTS];
 
 /// The frame as a read slice: empty when no binding has executed yet
 /// (a `Local` read against it is the fail-closed
 /// [`EvalErrorKind::UnboundLocal`] compiler-bug rail).
 #[inline]
-pub(crate) fn locals_slice(locals: Option<&LocalFrame>) -> &[u32] {
+pub(crate) fn locals_slice(locals: Option<&LocalFrame>) -> &[LocalSlot] {
     locals.map_or(&[], |frame| &frame[..])
+}
+
+/// Evaluate a `let` initializer into its slot (LAN-2790). A value that
+/// cannot be computed is stored as its error kind, so the binding
+/// carries the state instead of denying here; only a compiler-bug rail
+/// is terminal. Shared by every walk and by explain.
+pub(crate) fn exec_bind(
+    slot: u8,
+    expr: &ValueExpr,
+    ctx: &RouteContext<'_>,
+    locals: &mut Option<LocalFrame>,
+) -> Result<(), EvalErrorKind> {
+    let value = eval_value(expr, ctx, locals_slice(locals.as_ref()));
+    if let Err(kind) = value
+        && kind.is_compiler_rail()
+    {
+        return Err(kind);
+    }
+    locals.get_or_insert(EMPTY_LOCAL_FRAME)[usize::from(slot)] = value;
+    Ok(())
 }
 
 /// Evaluate a compiled value expression against a route context and
@@ -347,17 +393,18 @@ pub(crate) fn locals_slice(locals: Option<&LocalFrame>) -> &[u32] {
 pub(crate) fn eval_value(
     expr: &ValueExpr,
     ctx: &RouteContext<'_>,
-    locals: &[u32],
+    locals: &[LocalSlot],
 ) -> Result<u32, EvalErrorKind> {
     match expr {
         ValueExpr::Const(value) => Ok(*value),
         // One indexed load; the slot was written by this walk's Bind
-        // term (definite assignment). `get` degrades a compiler bug to
-        // a fail-closed eval error instead of a panic.
+        // term (definite assignment) and may hold the kind its
+        // initializer failed with (LAN-2790). `get` degrades a compiler
+        // bug to a fail-closed eval error instead of a panic.
         ValueExpr::Local { slot, .. } => locals
             .get(*slot as usize)
             .copied()
-            .ok_or(EvalErrorKind::UnboundLocal),
+            .unwrap_or(Err(EvalErrorKind::UnboundLocal)),
         ValueExpr::Field(field) => match field {
             ValueField::LocalPref => Ok(ctx.local_pref.unwrap_or(IMPLICIT_LOCAL_PREF)),
             ValueField::Med => Ok(ctx.med.unwrap_or(IMPLICIT_MED)),
@@ -687,7 +734,7 @@ pub(crate) fn exec_community_var(
     let value = locals_slice(locals)
         .get(usize::from(slot))
         .copied()
-        .ok_or(EvalErrorKind::UnboundLocal)?;
+        .unwrap_or(Err(EvalErrorKind::UnboundLocal))?;
     let mut mods = RouteModifications::default();
     if add {
         mods.communities_add.push(value);
@@ -1310,7 +1357,7 @@ impl CompiledChain {
                     &mut err,
                 );
                 if err.is_some() {
-                    // Guard evaluation error: fail closed (LAN-299).
+                    // Compiler-bug rail in a guard: fail closed.
                     denied = true;
                     break;
                 }
@@ -1356,18 +1403,18 @@ impl CompiledChain {
                             }
                         }
                         // LAN-302: eager `let`, identical to the live
-                        // walk — initializer error fails closed.
+                        // walk — an uncomputable value is bound as its
+                        // state (LAN-2790); a compiler-bug rail fails
+                        // closed.
                         TermActionView::Bind {
                             slot,
                             name: _name,
                             expr,
                         } => {
-                            let Ok(value) = eval_value(expr, ctx, locals_slice(locals.as_ref()))
-                            else {
+                            if exec_bind(slot, expr, ctx, &mut locals).is_err() {
                                 denied = true;
                                 break;
-                            };
-                            locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(slot)] = value;
+                            }
                         }
                         // LAN-303: loops run identically to the live
                         // walk (same eval_for_each), errors fail
@@ -1498,8 +1545,8 @@ impl CompiledChain {
                 &mut err,
             );
             if let Some(kind) = err {
-                // Guard evaluation error (LAN-299): terminal for the
-                // route regardless of the guard's boolean outcome.
+                // Compiler-bug rail in a guard: terminal for the route
+                // regardless of the guard's boolean outcome.
                 return PolicyDecision::Error { kind, term_index };
             }
             if matched {
@@ -1553,18 +1600,19 @@ impl CompiledChain {
                     // LAN-302: eager `let` — evaluate the initializer
                     // (against the frame as written so far; earlier
                     // bindings are readable), write the slot, keep
-                    // walking. An initializer error is terminal on the
-                    // uniform eval-error rail, used or not.
+                    // walking. A value that cannot be computed is bound
+                    // as its state (LAN-2790): a condition reading it is
+                    // false and an action needing it denies. Only a
+                    // compiler-bug rail is terminal here.
                     TermActionView::Bind {
                         slot,
                         name: _name,
                         expr,
-                    } => match eval_value(expr, ctx, locals_slice(locals.as_ref())) {
-                        Ok(value) => {
-                            locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(slot)] = value;
+                    } => {
+                        if let Err(kind) = exec_bind(slot, expr, ctx, &mut locals) {
+                            return PolicyDecision::Error { kind, term_index };
                         }
-                        Err(kind) => return PolicyDecision::Error { kind, term_index },
-                    },
+                    }
                     // LAN-303: a bounded loop. A body verdict decides
                     // the policy; otherwise the walk continues after
                     // it. Any error (fuel, iteration cap, body
@@ -1722,7 +1770,7 @@ impl CompiledChain {
             iterations += 1;
             // The loop variable is a fresh immutable binding per
             // iteration (the LAN-302 slot model).
-            locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(node.slot)] = element;
+            locals.get_or_insert(EMPTY_LOCAL_FRAME)[usize::from(node.slot)] = Ok(element);
             let mut continue_iter = false;
             for term in &node.body {
                 let mut err = None;
@@ -1766,9 +1814,8 @@ impl CompiledChain {
                             .merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
                     }
                     TermAction::Bind { slot, expr, .. } => {
-                        let value = eval_value(expr, ctx, locals_slice(locals.as_ref()))
+                        exec_bind(*slot, expr, ctx, locals)
                             .map_err(|kind| (kind, iterations - 1))?;
-                        locals.get_or_insert([0; LOCAL_FRAME_SLOTS])[usize::from(*slot)] = value;
                     }
                     TermAction::CommunityVar { add, slot, .. } => {
                         exec_community_var(*add, *slot, locals.as_ref(), continued)
@@ -1872,7 +1919,7 @@ impl CompiledChain {
         &self,
         mods: &RouteModifications,
         ctx: &RouteContext<'_>,
-        locals: &[u32],
+        locals: &[LocalSlot],
     ) -> Result<Option<RouteModifications>, EvalErrorKind> {
         if mods.as_path_prepend_computed.is_none()
             && mods.set_local_pref_computed.is_none()
@@ -1903,9 +1950,10 @@ impl CompiledChain {
     /// explain walk's window into the live matcher, so explain and
     /// evaluation cannot disagree about whether a guard fires (the
     /// same discipline as the legacy walk sharing
-    /// `PolicyStatement::matches`). `Err` when the guard contains a
-    /// value expression that failed to evaluate — the live walk denies
-    /// the route there (LAN-299), and explain must render the same.
+    /// `PolicyStatement::matches`). `Err` only for a compiler-bug rail —
+    /// a condition never fails (LAN-2790): a value that cannot be
+    /// computed makes its comparison false — and explain renders the
+    /// same.
     /// `locals` is the caller's `let` frame (LAN-302): the explain
     /// trace walk re-derives bindings term by term and passes its own
     /// frame here, so guard evaluation stays shared. `pinned` is the
@@ -1916,7 +1964,7 @@ impl CompiledChain {
         &self,
         expr: &MatchExpr,
         ctx: &RouteContext<'_>,
-        locals: &[u32],
+        locals: &[LocalSlot],
         pinned: &PinnedDatasets,
     ) -> Result<bool, EvalErrorKind> {
         let mut err = None;
@@ -1938,13 +1986,12 @@ impl CompiledChain {
     /// joins its conditions in one flat `And` per term, so an `else if`
     /// chain adds no depth and each nested `if` at most its own guard's.
     ///
-    /// `err` is the LAN-299 eval-error slot: a [`MatchExpr::ValueCmp`]
-    /// whose value expression fails sets it (first error wins) and
-    /// yields `false`; callers must treat a set slot as terminal for
-    /// the route (uniform Deny) — the boolean is then meaningless.
-    /// Short-circuited subtrees are never evaluated, so an error on a
-    /// path the walk never reaches does not fire (lazy, like the
-    /// arithmetic itself).
+    /// `err` is the eval-error slot for compiler-bug rails only (an
+    /// unbound frame, an unpinned dataset): it is set (first error wins)
+    /// and the node yields `false`; callers treat a set slot as terminal
+    /// for the route. A value that cannot be computed is not an error
+    /// here — its comparison is false (LAN-2790) — so `&&`, `||` and `!`
+    /// combine plain booleans and evaluation order never decides.
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per MatchExpr node; splitting would scatter the evaluation table"
@@ -1953,7 +2000,7 @@ impl CompiledChain {
         &self,
         expr: &MatchExpr,
         ctx: &RouteContext<'_>,
-        locals: &[u32],
+        locals: &[LocalSlot],
         pinned: &PinnedDatasets,
         err: &mut Option<EvalErrorKind>,
     ) -> bool {
@@ -1987,20 +2034,10 @@ impl CompiledChain {
                     }
                     (DatasetProbe::Community, DatasetData::Community(set)) => set.matches(ctx),
                     (DatasetProbe::LocalAsn { slot, .. }, DatasetData::Asn(set)) => {
-                        if let Some(value) = locals.get(usize::from(*slot)) {
-                            set.contains(*value)
-                        } else {
-                            err.get_or_insert(EvalErrorKind::UnboundLocal);
-                            false
-                        }
+                        local_probe(locals, *slot, err, |value| set.contains(value))
                     }
                     (DatasetProbe::LocalCommunity { slot, .. }, DatasetData::Community(set)) => {
-                        if let Some(value) = locals.get(usize::from(*slot)) {
-                            set.contains_standard(*value)
-                        } else {
-                            err.get_or_insert(EvalErrorKind::UnboundLocal);
-                            false
-                        }
+                        local_probe(locals, *slot, err, |value| set.contains_standard(value))
                     }
                     (DatasetProbe::ConstAsn(value), DatasetData::Asn(set)) => set.contains(*value),
                     (DatasetProbe::ConstCommunity(value), DatasetData::Community(set)) => {
@@ -2015,6 +2052,11 @@ impl CompiledChain {
                     }
                 }
             }
+            // LAN-2790: a condition never fails. An operand that is
+            // missing or cannot be computed makes the comparison false,
+            // exactly like the plain scalar nodes, so `&&`, `||` and `!`
+            // combine plain values in any order. Only a compiler-bug
+            // rail sets the error slot.
             MatchExpr::ValueCmp(node) => {
                 match (
                     eval_value(&node.lhs, ctx, locals),
@@ -2027,7 +2069,9 @@ impl CompiledChain {
                         ValueCmpOp::Le => lhs <= rhs,
                     },
                     (Err(kind), _) | (_, Err(kind)) => {
-                        err.get_or_insert(kind);
+                        if kind.is_compiler_rail() {
+                            err.get_or_insert(kind);
+                        }
                         false
                     }
                 }
@@ -2036,23 +2080,17 @@ impl CompiledChain {
             // frame is the fail-closed compiler-bug rail, like every
             // `Local` read.
             MatchExpr::LocalInAsnSet { slot, set, .. } => {
-                if let Some(value) = locals.get(usize::from(*slot)) {
-                    self.asn_sets[set.0 as usize].contains(*value)
-                } else {
-                    err.get_or_insert(EvalErrorKind::UnboundLocal);
-                    false
-                }
+                local_probe(locals, *slot, err, |value| {
+                    self.asn_sets[set.0 as usize].contains(value)
+                })
             }
             // LAN-303: probe the community set's standard partition by
             // raw u32 value (large/ext members are not u32-comparable
             // and never match a binding).
             MatchExpr::LocalInCommunitySet { slot, set, .. } => {
-                if let Some(value) = locals.get(usize::from(*slot)) {
-                    self.community_sets[set.0 as usize].contains_standard(*value)
-                } else {
-                    err.get_or_insert(EvalErrorKind::UnboundLocal);
-                    false
-                }
+                local_probe(locals, *slot, err, |value| {
+                    self.community_sets[set.0 as usize].contains_standard(value)
+                })
             }
             MatchExpr::PrefixEq { prefix, ge, le } => ctx
                 .prefix
@@ -2124,6 +2162,33 @@ impl CompiledChain {
             MatchExpr::FamilyNe(family) => ctx.family.is_some_and(|f| f != *family),
             MatchExpr::RpkiIs(state) => ctx.validation_state == *state,
             MatchExpr::AspaIs(state) => ctx.aspa_state == *state,
+            MatchExpr::Exists(field) => match field {
+                OptionalField::OriginAs => ctx.origin_asn.is_some(),
+                OptionalField::PeerAsn => ctx.peer_asn.is_some(),
+                OptionalField::Med => ctx.med.is_some(),
+                OptionalField::LocalPref => ctx.local_pref.is_some(),
+                OptionalField::NextHop => ctx.next_hop.is_some(),
+            },
+        }
+    }
+}
+
+/// A binding probe's slot read (LAN-303, LAN-2790): a bound value runs
+/// `probe`, a binding whose value could not be computed is false, and a
+/// missing frame is the fail-closed compiler-bug rail.
+#[inline]
+fn local_probe(
+    locals: &[LocalSlot],
+    slot: u8,
+    err: &mut Option<EvalErrorKind>,
+    probe: impl FnOnce(u32) -> bool,
+) -> bool {
+    match locals.get(usize::from(slot)) {
+        Some(Ok(value)) => probe(*value),
+        Some(Err(_)) => false,
+        None => {
+            err.get_or_insert(EvalErrorKind::UnboundLocal);
+            false
         }
     }
 }

@@ -411,6 +411,63 @@ fn belongs(ir: &str, src: &str) -> bool {
     ir == src || (ir.len() > src.len() && ir.starts_with(src) && ir.as_bytes()[src.len()] == b'.')
 }
 
+/// The optional field an equality under `!` compares, when the negation
+/// matches routes that lack it. Since LAN-2790 a comparison on a missing
+/// value is false in every form, so computed comparisons over
+/// `route.origin-as` or `peer.asn` qualify as well as the plain ones.
+fn negated_optional_equality(inner: &Expr) -> Option<String> {
+    match inner {
+        Expr::Cmp {
+            field,
+            op: CmpOp::Eq,
+            rhs,
+            ..
+        } => {
+            let optional = matches!(
+                (resolve_field(field), rhs),
+                (
+                    Ok(Field::Prefix
+                        | Field::OriginAs
+                        | Field::NextHop
+                        | Field::RouteType
+                        | Field::EvpnRouteType
+                        | Field::Family
+                        | Field::PeerAddress
+                        | Field::PeerAsn
+                        | Field::PeerGroup),
+                    Rhs::Int(..) | Rhs::Ip(..) | Rhs::Prefix(..) | Rhs::Str(_)
+                ) | (
+                    Ok(Field::RouteType | Field::Family | Field::OriginAs | Field::PeerAsn),
+                    Rhs::Ident(_)
+                )
+            );
+            optional.then(|| field.render())
+        }
+        Expr::ValueCmp {
+            lhs,
+            op: CmpOp::Eq,
+            rhs,
+            ..
+        } => optional_value_field(lhs).or_else(|| optional_value_field(rhs)),
+        _ => None,
+    }
+}
+
+/// The first `route.origin-as` / `peer.asn` read in a value expression.
+fn optional_value_field(value: &ValueExprAst) -> Option<String> {
+    match value {
+        ValueExprAst::Field(field) => {
+            matches!(resolve_field(field), Ok(Field::OriginAs | Field::PeerAsn))
+                .then(|| field.render())
+        }
+        ValueExprAst::Binary { lhs, rhs, .. } => {
+            optional_value_field(lhs).or_else(|| optional_value_field(rhs))
+        }
+        ValueExprAst::Call { args, .. } => args.iter().find_map(optional_value_field),
+        ValueExprAst::Lit(..) | ValueExprAst::Ident(_) => None,
+    }
+}
+
 /// The static lints (see module docs for scope).
 pub(super) fn lints(file: &SourceFile) -> Vec<Lint> {
     let refs = Refs::collect(file);
@@ -703,34 +760,12 @@ impl<'a> Refs<'a> {
                 self.expr(rhs);
             }
             Expr::Not(inner, span) => {
-                if let Expr::Cmp {
-                    field,
-                    op: CmpOp::Eq,
-                    rhs,
-                    ..
-                } = inner.as_ref()
-                    && matches!(
-                        (resolve_field(field), rhs),
-                        (
-                            Ok(Field::Prefix
-                                | Field::OriginAs
-                                | Field::NextHop
-                                | Field::RouteType
-                                | Field::EvpnRouteType
-                                | Field::Family
-                                | Field::PeerAddress
-                                | Field::PeerAsn
-                                | Field::PeerGroup),
-                            Rhs::Int(..) | Rhs::Ip(..) | Rhs::Prefix(..) | Rhs::Str(_)
-                        ) | (Ok(Field::RouteType | Field::Family), Rhs::Ident(_))
-                    )
-                {
+                if let Some(field) = negated_optional_equality(inner) {
                     self.optional_negations.push(Lint {
                         kind: LintKind::OptionalFieldNegation,
                         span: *span,
                         message: format!(
-                            "negated equality matches when {} is absent; use != to require its presence, or test the absent case explicitly",
-                            field.render()
+                            "negated equality matches when {field} is absent; use != to require its presence, or test `exists {field}` explicitly",
                         ),
                     });
                 }
@@ -746,7 +781,11 @@ impl<'a> Refs<'a> {
             Expr::Apply { policy, .. } => {
                 self.policies.insert(&policy.node);
             }
-            Expr::Cmp { .. } | Expr::Has { .. } | Expr::Matches { .. } | Expr::Contains { .. } => {}
+            Expr::Cmp { .. }
+            | Expr::Has { .. }
+            | Expr::Exists { .. }
+            | Expr::Matches { .. }
+            | Expr::Contains { .. } => {}
         }
     }
 

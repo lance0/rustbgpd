@@ -70,10 +70,11 @@ fn tagged_predicate() -> PolicyChain {
     )
 }
 
-/// Selects MED 0, rejects any other MED, and errors on MED `u32::MAX`.
+/// Selects MED 0, rejects any other MED, and errors on MED `u32::MAX` in the
+/// fall-through `set med` action (a condition never fails; only an action can).
 fn med_predicate() -> PolicyChain {
     rpol(
-        "policy guard { term t3 { if route.med + 1 == 1 { accept } } term rest { reject } }",
+        "policy guard { term t { if route.med == 0 { accept } } term t3 { set med route.med + 1 } term rest { reject } }",
         "guard",
     )
 }

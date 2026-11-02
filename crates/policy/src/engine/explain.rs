@@ -341,7 +341,7 @@ fn render_modifications(
     mods: &RouteModifications,
     ctx: &RouteContext<'_>,
     tables: Option<&CompiledChain>,
-    locals: &[u32],
+    locals: &[crate::eval::LocalSlot],
 ) -> Vec<String> {
     let mut out = Vec::new();
 
@@ -460,9 +460,9 @@ fn trace_rpol_policy(
     // LAN-302: the trace walk re-derives `let` bindings term by term
     // (explain may allocate/zero eagerly; the hot path never records)
     // and feeds the frame into the shared guard evaluation.
-    let mut locals: Option<crate::eval::LocalFrame> = Some([0u32; crate::eval::LOCAL_FRAME_SLOTS]);
+    let mut locals: Option<crate::eval::LocalFrame> = Some(crate::eval::EMPTY_LOCAL_FRAME);
     // LAN-296/LAN-299: set when a term errors — an unresolvable
-    // computed operand or a failed guard value expression. The live
+    // computed operand, or a compiler-bug rail in a guard. The live
     // evaluator fails the route closed at that term (the eval-error
     // rail), and the trace must agree (pinned by the agreement matrix
     // in `statement_trace.rs`).
@@ -480,10 +480,10 @@ fn trace_rpol_policy(
             pinned,
         ) {
             Ok(matched) => matched,
-            // Guard evaluation error (LAN-299): render the error in
-            // place of a verdict (ADR-0103 Decision 6.4) and decide
-            // the route as a fail-closed reject, mirroring the live
-            // walk.
+            // A compiler-bug rail in the guard (a condition never fails
+            // otherwise, LAN-2790): render the error in place of a
+            // verdict (ADR-0103 Decision 6.4) and decide the route as a
+            // fail-closed reject, mirroring the live walk.
             Err(kind) => {
                 term_traces.push(format!(
                     "term {}: {}{} => evaluation error: {kind} — fail closed => reject",
@@ -509,17 +509,20 @@ fn trace_rpol_policy(
         }
         match term.action.view() {
             // LAN-302: eager binding initialization, identical to the
-            // live walk. An error is terminal on the uniform rail.
-            TermActionView::Bind {
-                slot,
-                name: _name,
-                expr,
-            } => {
-                match crate::eval::eval_value(expr, ctx, crate::eval::locals_slice(locals.as_ref()))
-                {
-                    Ok(value) => {
-                        locals.get_or_insert([0; crate::eval::LOCAL_FRAME_SLOTS])
-                            [usize::from(slot)] = value;
+            // live walk (the shared `exec_bind`). A value that cannot be
+            // computed is bound as its state (LAN-2790) and noted; only
+            // a compiler-bug rail is terminal.
+            TermActionView::Bind { slot, name, expr } => {
+                match crate::eval::exec_bind(slot, expr, ctx, &mut locals) {
+                    Ok(()) => {
+                        if let Some(Err(kind)) =
+                            crate::eval::locals_slice(locals.as_ref()).get(usize::from(slot))
+                        {
+                            term_traces.push(format!(
+                                "term {}: `{name}` has no value ({kind}): conditions on it are false",
+                                term.name.as_deref().unwrap_or("<unnamed>"),
+                            ));
+                        }
                     }
                     Err(kind) => {
                         term_traces.push(format!(
@@ -1049,6 +1052,7 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 rustbgpd_wire::RpkiValidation::NotFound => "not-found",
             }
         ),
+        MatchExpr::Exists(field) => format!("exists {}", field.as_str()),
         MatchExpr::AspaIs(state) => format!(
             "route.aspa == {}",
             match state {

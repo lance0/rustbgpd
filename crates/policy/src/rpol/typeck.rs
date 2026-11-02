@@ -205,6 +205,20 @@ pub(super) const FAMILY_MEMBERS: &[&str] = &[
     "bgp-ls-vpn",
 ];
 
+/// The optional value `exists <field>` tests, or `None` for a field
+/// that is always present (LAN-2790).
+pub(super) fn optional_field(field: Field) -> Option<crate::ir::OptionalField> {
+    use crate::ir::OptionalField;
+    match field {
+        Field::OriginAs => Some(OptionalField::OriginAs),
+        Field::PeerAsn => Some(OptionalField::PeerAsn),
+        Field::Med => Some(OptionalField::Med),
+        Field::LocalPref => Some(OptionalField::LocalPref),
+        Field::NextHop => Some(OptionalField::NextHop),
+        _ => None,
+    }
+}
+
 /// Resolve a dotted field path to a [`Field`], or a diagnostic with a
 /// suggestion.
 pub(super) fn resolve_field(path: &FieldPath) -> Result<Field, Diagnostic> {
@@ -1543,6 +1557,27 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                 }
             }
+            // LAN-2790: a presence test for the optional values a
+            // condition can see as missing (or as their default).
+            Expr::Exists { field, span } => match resolve_field(field) {
+                Err(diag) => self.diags.push(diag),
+                Ok(resolved) => {
+                    if optional_field(resolved).is_none() {
+                        self.diags.push(
+                            Diagnostic::coded(
+                                DiagnosticCode::Typecheck,
+                                *span,
+                                format!("`{}` has no presence test", field.render()),
+                                "`exists` takes an optional value",
+                            )
+                            .with_note(
+                                "`exists` takes route.origin-as, peer.asn, route.med, \
+                                 route.local-pref or route.next-hop",
+                            ),
+                        );
+                    }
+                }
+            },
             Expr::Has { field, lit } => match resolve_field(field) {
                 Err(diag) => self.diags.push(diag),
                 Ok(resolved) => {

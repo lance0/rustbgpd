@@ -1128,6 +1128,12 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Expr::Has { lit, .. } => MatchExpr::CommunityContains(lit.node.to_match()),
+            Expr::Exists { field, .. } => MatchExpr::Exists(
+                resolve_field(field)
+                    .ok()
+                    .and_then(super::typeck::optional_field)
+                    .expect("typechecked: `exists` takes an optional field"),
+            ),
             Expr::Matches { pattern, .. } => {
                 MatchExpr::AsPathMatches(self.intern_regex(&pattern.node, store))
             }

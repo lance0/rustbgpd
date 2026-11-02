@@ -59,10 +59,12 @@ fn rpol_chain(source: &str, name: &str) -> PolicyChain {
 }
 
 /// Matches MED 0, misses any other MED, and errors on MED `u32::MAX`
-/// (checked-arithmetic overflow).
+/// (checked-arithmetic overflow). The error comes from the fall-through
+/// `set med` action: a condition never fails, so an overflowing comparison
+/// would only miss, and a `set` before `reject` is never evaluated.
 fn med_guard() -> PolicyChain {
     rpol_chain(
-        "policy guard { term t { if route.med + 1 == 1 { accept } } term rest { reject } }",
+        "policy guard { term t { if route.med == 0 { accept } set med route.med + 1 } term rest { reject } }",
         "guard",
     )
 }

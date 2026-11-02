@@ -3656,8 +3656,10 @@ peer's Adj-RIB-In, including stale and losing Add-Path paths, plus locally
 injected routes; the candidate need not be the best path.
 `condition_policy` sees the candidate's source peer address, ASN, and peer
 group; an injected route has none of them, so match route type `local` to
-select it. A `condition_policy` evaluation error makes the condition
-`unknown`, which holds the applied state.
+select it. A `condition_policy` evaluation error (an action that needs a
+value it cannot compute; a condition on a missing value is simply false, see
+[Conditions never fail](rpol-language.md#conditions-never-fail)) makes the
+condition `unknown`, which holds the applied state.
 
 **Timing.** A changed condition applies once it has stayed unchanged for
 `settle_time`; a shorter blip changes nothing. At startup every definition
