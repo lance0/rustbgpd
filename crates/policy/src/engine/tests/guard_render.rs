@@ -186,6 +186,27 @@ fn every_node_type_renders_its_golden_form() {
     }
 }
 
+/// A kind-agnostic probe of a set that mixes kinds renders as the
+/// `.rpol` form that reads every kind; a per-kind field would misstate it.
+#[test]
+fn a_mixed_kind_set_renders_as_any_community() {
+    let mut tables = tables();
+    tables.community_sets = vec![Arc::new(CommunitySet::new([
+        CommunityMatch::Standard {
+            value: (65000 << 16) | 0x0064,
+        },
+        CommunityMatch::LargeCommunity {
+            global_admin: 65000,
+            local_data1: 100,
+            local_data2: 0,
+        },
+    ]))];
+    assert_eq!(
+        render_expr(&MatchExpr::CommunityInSet(SetId(0)), &tables),
+        "route.any-community in cust-tags"
+    );
+}
+
 #[test]
 fn unnamed_sets_fall_back_to_indexed_placeholders() {
     let mut tables = tables();

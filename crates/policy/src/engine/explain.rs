@@ -1136,10 +1136,10 @@ fn render_cmp(field: &str, cmp: Cmp) -> String {
     }
 }
 
-/// The `.rpol` field a community criterion set reads: all-standard →
+/// The `.rpol` field a kind-agnostic community probe reads: all-standard →
 /// `route.communities`, all-large → `route.large-communities`,
-/// all-RT/RO → `route.ext-communities`, mixed → the generic
-/// `route.communities`.
+/// all-RT/RO → `route.ext-communities`, mixed → `route.any-community`
+/// (a per-kind field reads only its own kind).
 fn community_field(
     criteria: &[CommunityMatch],
     patterns: &[crate::sets::CommunityPattern],
@@ -1166,7 +1166,7 @@ fn community_field(
     if fields.all(|field| field == first) {
         first
     } else {
-        "route.communities"
+        "route.any-community"
     }
 }
 
