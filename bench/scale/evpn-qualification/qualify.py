@@ -178,6 +178,28 @@ def derived_high_water(rib, groups):
     return rib, groups
 
 
+PROVENANCE = "crates/rib/src/manager/update_groups/recovery_provenance.rs"
+SEALED_STATIC = ("static BENCH_SEALED_CAPACITY: std::sync::LazyLock<\n"
+                 "    std::sync::Mutex<std::collections::HashMap<u64, usize>>,\n"
+                 "> = std::sync::LazyLock::new(Default::default);\n")
+SEAL_NOTE = ("        BENCH_SEALED_CAPACITY.lock().expect(\"bench seal map\").insert(\n"
+             "            self.records[index].handle.id,\n"
+             "            self.records[index].keys.capacity(),\n"
+             "        );\n")
+
+
+def derived_provenance(provenance, gauges):
+    """Bench-only ledger shape: capture-origin vs admission-origin key bytes,
+    masks and live universes, read by the observer row in both arms."""
+    anchor = "type Universes = SmallVec<[Universe; 0]>;\n"
+    provenance = replace_once(provenance, anchor, anchor + SEALED_STATIC)
+    anchor = ("        Self::sort_keys(&mut self.records[index].keys, checkpoint);\n"
+              "        self.records[index].state = State::Ready;\n")
+    provenance = replace_once(provenance, anchor, SEAL_NOTE + anchor)
+    anchor = "impl EvpnRecoveryProvenance {\n"
+    return replace_once(provenance, anchor, anchor + gauges)
+
+
 def derive(source, arm):
     """Only exported sources are eligible; normal worktrees remain untouched."""
     source = Path(source)
@@ -188,12 +210,15 @@ def derive(source, arm):
     observer = source / "bench/scale/evpn-qualification/observer.rs"
     input_observer = source / "bench/scale/evpn-qualification/input_observer.rs"
     groups = source / "crates/rib/src/manager/update_groups.rs"
+    provenance = source / PROVENANCE
+    gauges = source / "bench/scale/evpn-qualification/provenance_gauges.rs"
     main_text, rib_text = derived_texts(main.read_text(), rib.read_text(), observer.read_text(), arm,
                                       input_observer.read_text())
     rib_text, groups_text = derived_high_water(rib_text, groups.read_text())
     main.write_text(main_text)
     rib.write_text(rib_text)
     groups.write_text(groups_text)
+    provenance.write_text(derived_provenance(provenance.read_text(), gauges.read_text()))
 
 
 def verify_export(output, arm):
@@ -206,7 +231,9 @@ def verify_export(output, arm):
         groups_name = "crates/rib/src/manager/update_groups.rs"
         main_text, rib_text = derived_texts(*texts, arm, input_observer)
         rib_text, groups_text = derived_high_water(rib_text, archive.extractfile(groups_name).read().decode())
-        changed = {names[0]: main_text, names[1]: rib_text, groups_name: groups_text}
+        gauges = archive.extractfile("bench/scale/evpn-qualification/provenance_gauges.rs").read().decode()
+        provenance_text = derived_provenance(archive.extractfile(PROVENANCE).read().decode(), gauges)
+        changed = {names[0]: main_text, names[1]: rib_text, groups_name: groups_text, PROVENANCE: provenance_text}
         tracked = set()
         for member in archive:
             if member.issym():

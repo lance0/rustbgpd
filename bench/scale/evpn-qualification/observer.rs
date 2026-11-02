@@ -41,8 +41,17 @@
                     eor,
                 )
             }).collect::<Vec<_>>().join(",");
+            // Bench-only ledger shape and each owned group's live universe hint.
+            let provenance = self.evpn_recovery.bench_provenance_shape();
+            let hints = self.group_ribs.iter()
+                .filter(|(_, group)| group.owns_evpn_routes())
+                .map(|(gid, group)| format!("[{},{}]", gid,
+                                            self.evpn_recovery.bench_universe_id(group.evpn_recovery_universe)))
+                .collect::<Vec<_>>().join(",");
             eprintln!(
-                "evpn_qualification {{\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"dirty_high_water\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"peers\":[{}]}}",
+                "evpn_qualification {{\"provenance\":{},\"universe_hints\":[{}],\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"dirty_high_water\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"peers\":[{}]}}",
+                provenance,
+                hints,
                 elapsed_us,
                 sample_slot,
                 wall_us,

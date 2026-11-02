@@ -388,6 +388,11 @@ class TestQualification(unittest.TestCase):
                      "crates/rib/src/manager/update_groups.rs": "        if self.dirty_peers.insert(peer) {\n        }\n",
                      "bench/scale/evpn-qualification/observer.rs": "        self.bench_evpn_group_receipt();\n",
                      "bench/scale/evpn-qualification/input_observer.rs": "// input applied observer\n",
+                     "bench/scale/evpn-qualification/provenance_gauges.rs": "    // bench gauges\n",
+                     "crates/rib/src/manager/update_groups/recovery_provenance.rs":
+                         "type Universes = SmallVec<[Universe; 0]>;\nimpl EvpnRecoveryProvenance {\n"
+                         "        Self::sort_keys(&mut self.records[index].keys, checkpoint);\n"
+                         "        self.records[index].state = State::Ready;\n}\n",
                      "crates/wire/src/lib.rs": "// actual runtime input\n"}
             with tarfile.open(root / "source.tar", "w") as archive:
                 for name, text in files.items():
