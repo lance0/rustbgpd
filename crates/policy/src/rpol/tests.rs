@@ -8960,3 +8960,481 @@ test range-edge { route { prefix 192.0.2.0/24; communities [64497:200] } expect 
         compile_ok(&chain("pat", longest));
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// `remove <kind> in SET` / `remove <kind> not in SET`
+// ─────────────────────────────────────────────────────────────────────
+
+mod remove_in_set {
+    use std::sync::Arc;
+
+    use rustbgpd_wire::{LargeCommunity, RpkiValidation};
+
+    use super::super::{format_rpol, run_rpol_tests};
+    use super::{compile_ok, diagnostics_of, route_ctx, v4};
+    use crate::engine::PolicyAction;
+
+    fn assert_passes(source: &str, tests: usize) {
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, tests);
+        assert!(report.all_passed(), "{:#?}", report.failures);
+    }
+
+    #[test]
+    fn standard_in_and_not_in_remove_members_and_non_members() {
+        assert_passes(
+            r"
+community-set scrub { 64496:*, 65000:1, 64497:100..199 }
+community-set allow { 65000:*, 64497:100..199 }
+policy scrub-in { term t { remove community in scrub; accept } }
+policy allow-only { term t { remove community not in allow; accept } }
+test in-removes-exact-and-pattern-members {
+    route { prefix 192.0.2.0/24; communities [64496:5, 65000:1, 65000:2, 64497:150, 64497:200] }
+    expect scrub-in == accept with only removes community 64496:5,
+        removes community 65000:1, removes community 64497:150,
+        not removed community 65000:2, not removed community 64497:200
+}
+test not-in-removes-the-rest {
+    route { prefix 192.0.2.0/24; communities [65000:7, 64497:100, 64497:99, 64496:5] }
+    expect allow-only == accept with only removes community 64497:99,
+        removes community 64496:5, not removed community 65000:7,
+        not removed community 64497:100
+}
+test nothing-to-remove {
+    route { prefix 192.0.2.0/24; communities [65001:1] }
+    expect scrub-in == accept with only not removed community 65001:1
+}
+",
+            3,
+        );
+    }
+
+    /// RFC 1997 well-known communities: `in` removes one only when the set
+    /// names it as an exact member — a pattern never names one — and
+    /// `not in` never removes one, so an allow-list scrub keeps `NO_EXPORT`.
+    #[test]
+    fn well_known_communities_need_an_exact_member() {
+        assert_passes(
+            r"
+community-set any { *:* }
+community-set well-known-half { 65535:* }
+community-set named { NO_EXPORT, 65535:65283 }
+community-set allow { 65000:* }
+community-set allow-named { 65000:*, NO_EXPORT }
+policy any-in { term t { remove community in any; accept } }
+policy half-in { term t { remove community in well-known-half; accept } }
+policy named-in { term t { remove community in named; accept } }
+policy allow-only { term t { remove community not in allow; accept } }
+policy allow-named-only { term t { remove community not in allow-named; accept } }
+test star-pattern-keeps-well-known {
+    route { prefix 192.0.2.0/24; communities [65000:1, NO_EXPORT, BLACKHOLE] }
+    expect any-in == accept with only removes community 65000:1,
+        not removed community NO_EXPORT, not removed community BLACKHOLE
+}
+test well-known-pattern-names-none {
+    route { prefix 192.0.2.0/24; communities [NO_EXPORT, 65535:1] }
+    expect half-in == accept with only not removed community NO_EXPORT,
+        not removed community 65535:1
+}
+test exact-members-name-them {
+    route { prefix 192.0.2.0/24; communities [NO_EXPORT, NO_ADVERTISE, NO_EXPORT_SUBCONFED] }
+    expect named-in == accept with only removes community NO_EXPORT,
+        removes community NO_EXPORT_SUBCONFED, not removed community NO_ADVERTISE
+}
+test not-in-never-strips-well-known {
+    route { prefix 192.0.2.0/24; communities [64496:1, NO_EXPORT, GRACEFUL_SHUTDOWN, 65000:1] }
+    expect allow-only == accept with only removes community 64496:1,
+        not removed community NO_EXPORT, not removed community GRACEFUL_SHUTDOWN,
+        not removed community 65000:1
+}
+test not-in-with-a-named-well-known {
+    route { prefix 192.0.2.0/24; communities [NO_EXPORT, BLACKHOLE, 64496:1] }
+    expect allow-named-only == accept with only removes community 64496:1,
+        not removed community NO_EXPORT, not removed community BLACKHOLE
+}
+",
+            5,
+        );
+    }
+
+    #[test]
+    fn large_in_and_not_in() {
+        assert_passes(
+            r"
+community-set lc { 64496:1:*, 64497:*:*, 65000:1:1 }
+policy lc-in { term t { remove large-community in lc; accept } }
+policy lc-not-in { term t { remove large-community not in lc; accept } }
+test scan-in {
+    route { prefix 192.0.2.0/24; large-communities [64496:1:9, 64496:2:9, 64497:5:5, 65000:1:1, 65000:1:2] }
+    expect lc-in == accept with only removes large-community 64496:1:9,
+        removes large-community 64497:5:5, removes large-community 65000:1:1,
+        not removed large-community 64496:2:9, not removed large-community 65000:1:2
+}
+test scan-not-in {
+    route { prefix 192.0.2.0/24; large-communities [64496:1:9, 64496:2:9, 64497:5:5, 4294967295:0:0] }
+    expect lc-not-in == accept with only removes large-community 64496:2:9,
+        removes large-community 4294967295:0:0, not removed large-community 64496:1:9,
+        not removed large-community 64497:5:5
+}
+",
+            2,
+        );
+    }
+
+    #[test]
+    fn extended_in_and_not_in() {
+        assert_passes(
+            r"
+community-set ext { RT:64496:*, RO:64497:5, OV_INVALID }
+policy ext-in { term t { remove ext-community in ext; accept } }
+policy ext-not-in { term t { remove ext-community not in ext; accept } }
+test scan-in {
+    route { prefix 192.0.2.0/24; ext-communities [RT:64496:9, RT:64497:5, RO:64497:5, OV_INVALID, OV_VALID] }
+    expect ext-in == accept with only removes ext-community RT:64496:9,
+        removes ext-community RO:64497:5, removes ext-community OV_INVALID,
+        not removed ext-community RT:64497:5, not removed ext-community OV_VALID
+}
+test scan-not-in {
+    route {
+        prefix 192.0.2.0/24
+        ext-communities [RT:64496:9, RT:64497:5, RT:200000:7, RO:192.0.2.1:3, OV_INVALID, OV_VALID]
+    }
+    expect ext-not-in == accept with only removes ext-community RT:64497:5,
+        removes ext-community RT:200000:7, removes ext-community RO:192.0.2.1:3,
+        not removed ext-community RT:64496:9, not removed ext-community OV_INVALID,
+        not removed ext-community OV_VALID
+}
+",
+            2,
+        );
+    }
+
+    /// Guarded and composed: the scan runs in an `if` body, after a literal
+    /// removal of the same value (deduplicated), and in a chain.
+    #[test]
+    fn composes_with_guards_literals_and_chains() {
+        assert_passes(
+            r"
+community-set scrub { 64496:* }
+policy guarded {
+    term t {
+        if route.communities has 65000:1 { remove community 64496:1; remove community in scrub }
+    }
+    term rest { accept }
+}
+policy tail { term t { remove large-community not in lc; accept } }
+community-set lc { 65000:*:* }
+test guard-holds {
+    route { prefix 192.0.2.0/24; communities [65000:1, 64496:1, 64496:2] }
+    expect guarded == accept with only removes community 64496:1, removes community 64496:2
+}
+test guard-fails {
+    route { prefix 192.0.2.0/24; communities [64496:1] }
+    expect guarded == accept with only not removed community 64496:1
+}
+test chained {
+    route { prefix 192.0.2.0/24; communities [65000:1, 64496:1, 64496:2]; large-communities [65000:1:1, 64496:1:1] }
+    expect chain [guarded, tail] == accept with only removes community 64496:1, removes community 64496:2,
+        removes large-community 64496:1:1, not removed large-community 65000:1:1
+}
+",
+            3,
+        );
+    }
+
+    /// Each arrived value is staged once, duplicates and prior staging
+    /// included, and a route over the wire bound fails closed — the same
+    /// in live evaluation and explain.
+    #[test]
+    fn stages_each_value_once_and_fails_closed_over_the_bound() {
+        use crate::engine::{PolicyChain, explain::explain_chain_statements};
+
+        let compiled = compile_ok(
+            "community-set scrub { 64496:* } community-set lc { 64496:*:* } \
+             policy p { term t { remove community 64496:1; remove community in scrub; \
+             remove large-community not in lc; accept } }",
+        );
+        let communities = [(64_496 << 16) + 1, (64_496 << 16) + 2, (64_496 << 16) + 2];
+        let large = [LargeCommunity::new(1, 1, 1), LargeCommunity::new(1, 1, 1)];
+        let ctx = crate::RouteContext {
+            large_communities: &large,
+            ..route_ctx(v4(192, 0, 2, 0, 24), &communities, RpkiValidation::NotFound)
+        };
+        let result = compiled.evaluate(&ctx);
+        assert_eq!(result.action, PolicyAction::Permit);
+        assert_eq!(
+            result.modifications.communities_remove,
+            [(64_496 << 16) + 1, (64_496 << 16) + 2]
+        );
+        assert_eq!(
+            result.modifications.large_communities_remove,
+            [LargeCommunity::new(1, 1, 1)]
+        );
+
+        let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+            "p".into(),
+            Arc::new(compiled.clone()),
+        )]);
+        let trace = explain_chain_statements(Some(&chain), &ctx);
+        assert_eq!(trace.action, PolicyAction::Permit);
+        assert!(
+            trace.steps[0]
+                .term_traces
+                .iter()
+                .any(|line| line.contains("=> remove community in scrub [matched]"))
+                && trace.steps[0]
+                    .term_traces
+                    .iter()
+                    .any(|line| line.contains("=> remove large-community not in lc [matched]")),
+            "{:?}",
+            trace.steps[0].term_traces
+        );
+
+        let bound = usize::try_from(crate::eval::MAX_COMMUNITIES_PER_ROUTE).unwrap();
+        let at_bound = vec![65_000 << 16; bound];
+        let ok = route_ctx(v4(192, 0, 2, 0, 24), &at_bound, RpkiValidation::NotFound);
+        assert_eq!(compiled.evaluate(&ok).action, PolicyAction::Permit);
+        let over = vec![65_000 << 16; bound + 1];
+        let over_ctx = route_ctx(v4(192, 0, 2, 0, 24), &over, RpkiValidation::NotFound);
+        assert_eq!(compiled.evaluate(&over_ctx), crate::PolicyResult::deny());
+        let trace = explain_chain_statements(Some(&chain), &over_ctx);
+        assert_eq!(trace.action, PolicyAction::Deny);
+        assert!(
+            trace.steps[0]
+                .term_traces
+                .iter()
+                .any(|line| line.contains("exceeds the `remove community in scrub` bound")),
+            "{:?}",
+            trace.steps[0].term_traces
+        );
+    }
+
+    /// The scan pre-pays one step per arrived value of the kind, like the
+    /// strip-all form: the per-route budget admits as many scans as it
+    /// admits `remove community *`.
+    #[test]
+    fn prepays_the_wire_bound_like_strip_all() {
+        let count = |body: &str| {
+            (1..100)
+                .find(|&n| {
+                    let source = format!(
+                        "community-set s {{ 64496:* }} policy p {{ term t {{ {} accept }} }}",
+                        body.repeat(n)
+                    );
+                    super::super::compile_rpol(&source, &mut crate::sets::SetStore::new()).is_err()
+                })
+                .unwrap()
+        };
+        let scans = count("remove community in s;");
+        assert_eq!(scans, count("remove community *;"));
+        assert_eq!(scans, count("remove community not in s;"));
+        assert!(scans < 100);
+        let (_, rendered) = diagnostics_of(&format!(
+            "community-set s {{ 64496:* }} policy p {{ term t {{ {} accept }} }}",
+            "remove community in s;".repeat(scans)
+        ));
+        assert!(rendered.contains("exceeds the worst-case evaluation budget"));
+    }
+
+    #[test]
+    fn invalid_forms_are_rejected() {
+        for (source, reason) in [
+            (
+                "community-set s { 64496:* } policy p { term t { add community in s } }",
+                "`add community in` is not an action",
+            ),
+            (
+                "community-set s { 64496:* } policy p { term t { add large-community not in s } }",
+                "`add large-community not in` is not an action",
+            ),
+            (
+                "community-set scrub { 64496:* } policy p { term t { remove community in scrubb } }",
+                "unknown community-set `scrubb`",
+            ),
+            (
+                "prefix-set s { 10.0.0.0/8 } policy p { term t { remove community in s } }",
+                "unknown community-set `s`",
+            ),
+            (
+                "dataset community-set tags policy p { term t { remove community in tags } }",
+                "takes a community-set; `tags` is a dataset",
+            ),
+            (
+                "community-set s { 64496:* } policy p { term t { remove large-community in s } }",
+                "has no large-community members, so `remove large-community in s` never removes anything",
+            ),
+            (
+                "community-set s { 64496:1:1 } policy p { term t { remove ext-community not in s } }",
+                "removes every arrived route target and route origin",
+            ),
+            (
+                "community-set s { OV_INVALID } policy p { term t { remove ext-community not in s } }",
+                "has no route-target or route-origin members",
+            ),
+            (
+                "community-set s { 64496:* } policy p { term t { remove community in } }",
+                "a community-set name",
+            ),
+        ] {
+            let (_, rendered) = diagnostics_of(source);
+            assert!(rendered.contains(reason), "{source}:\n{rendered}");
+        }
+        // `not` stays a usable binding name.
+        compile_ok(
+            "policy p { term t { for not in route.communities { remove community not } accept } }",
+        );
+    }
+
+    /// The set is a reference for the unused-set lint, fmt keeps the form,
+    /// and the formatted source compiles to the same IR.
+    #[test]
+    fn lints_and_fmt_see_the_reference() {
+        let source = "community-set allow {65000:*}\n\
+                      policy p{term t{remove community not in allow;remove large-community in lc;accept}}\n\
+                      community-set lc {64496:*:*}\n";
+        let report = super::super::check_rpol(source);
+        assert!(report.is_ok(), "{:?}", report.diagnostics);
+        let lints = super::super::RpolFile::parse(source).unwrap().lints();
+        assert!(
+            !lints
+                .iter()
+                .any(|lint| lint.message.contains("never referenced")),
+            "{lints:?}"
+        );
+        let formatted = format_rpol(source).expect("formats");
+        assert!(
+            formatted
+                .contains("remove community not in allow;\n        remove large-community in lc;"),
+            "{formatted}"
+        );
+        assert_eq!(format_rpol(&formatted).unwrap(), formatted);
+        assert_eq!(compile_ok(source), compile_ok(&formatted));
+    }
+
+    /// Splicing policies from separately compiled files into one chain
+    /// remaps the action's set id into the merged table.
+    #[test]
+    fn splicing_remaps_the_set() {
+        let first = compile_ok(
+            "community-set a { 64496:* } community-set b { 64497:* } \
+             policy p { term t { if route.communities in b { accept } } term r { accept } }",
+        );
+        let second = compile_ok(
+            "community-set c { 64498:* } policy q { term t { remove community in c; accept } }",
+        );
+        let spliced = crate::compile::splice_compiled(&[(None, &first, 0), (None, &second, 0)]);
+        let communities = [(64_496 << 16) + 1, (64_498 << 16) + 1];
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &communities, RpkiValidation::NotFound);
+        assert_eq!(
+            spliced.evaluate(&ctx).modifications.communities_remove,
+            [(64_498 << 16) + 1]
+        );
+    }
+
+    /// `remove ext-community not in` considers only route targets and route
+    /// origins, in every encoding; encapsulation, color, EVPN, link
+    /// bandwidth and origin-validation values survive an allow-list scrub.
+    /// `in` removes whatever the set names, the OV state included.
+    #[test]
+    fn ext_not_in_scrubs_only_route_targets_and_origins() {
+        use rustbgpd_wire::ExtendedCommunity;
+
+        let rt_member = (0x02u64 << 48) | (65_000 << 32) | 1; // RT:65000:1
+        let rt_other = (0x02u64 << 48) | (64_496 << 32) | 1; // RT:64496:1
+        let rt_ipv4 = (0x0102u64 << 48) | (0xC000_0201 << 16) | 7; // RT:192.0.2.1:7
+        let ro_four_octet = (0x0203u64 << 48) | (200_000 << 16) | 9; // RO:200000:9
+        let rt_non_transitive = (0x4002u64 << 48) | (64_497 << 32) | 2; // RT, type 0x40
+        let encap_vxlan = (0x03u64 << 56) | (0x0c << 48) | 8; // RFC 9012 tunnel type 8
+        let color = (0x03u64 << 56) | (0x0b << 48) | 0x64; // color 100
+        let router_mac = (0x06u64 << 56) | (0x03 << 48) | 0x0000_0102_0304_0506;
+        let es_import = (0x06u64 << 56) | (0x02 << 48) | 0x0000_0a0b_0c0d_0e0f;
+        let link_bw = (0x40u64 << 56) | (0x04 << 48) | (65_000 << 32) | 0x4b98_9680;
+        let opaque = (0x83u64 << 56) | (0x01 << 48) | 0xdead;
+        let ov_valid = ExtendedCommunity::ORIGIN_VALIDATION_VALID.as_u64();
+        let route: Vec<ExtendedCommunity> = [
+            rt_member,
+            rt_other,
+            rt_ipv4,
+            ro_four_octet,
+            rt_non_transitive,
+            encap_vxlan,
+            color,
+            router_mac,
+            es_import,
+            link_bw,
+            opaque,
+            ov_valid,
+        ]
+        .into_iter()
+        .map(ExtendedCommunity::new)
+        .collect();
+        let removed = |source: &str| -> Vec<u64> {
+            let ctx = crate::RouteContext {
+                extended_communities: &route,
+                ..route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound)
+            };
+            let result = compile_ok(source).evaluate(&ctx);
+            assert_eq!(result.action, PolicyAction::Permit);
+            result
+                .modifications
+                .extended_communities_remove
+                .iter()
+                .map(|ec| ec.as_u64())
+                .collect()
+        };
+        assert_eq!(
+            removed(
+                "community-set rts { RT:65000:* } \
+                 policy p { term t { remove ext-community not in rts; accept } }"
+            ),
+            [rt_other, rt_ipv4, ro_four_octet, rt_non_transitive]
+        );
+        assert_eq!(
+            removed(
+                "community-set kill { RT:64496:*, OV_VALID } \
+                 policy p { term t { remove ext-community in kill; accept } }"
+            ),
+            [rt_other, ov_valid]
+        );
+    }
+
+    /// A scan inside an `else if` branch runs only when that branch is
+    /// taken.
+    #[test]
+    fn scans_run_inside_else_if_branches() {
+        assert_passes(
+            r"
+community-set scrub { 64496:* }
+community-set lc { 65000:*:* }
+policy p {
+    term t {
+        if route.communities has 65000:1 { reject }
+        else if route.communities has 65000:2 { remove community in scrub }
+        else { remove large-community not in lc }
+    }
+    term rest { accept }
+}
+test else-if-branch {
+    route { prefix 192.0.2.0/24; communities [65000:2, 64496:7]; large-communities [64496:1:1] }
+    expect p == accept with only removes community 64496:7,
+        not removed large-community 64496:1:1
+}
+test else-branch {
+    route { prefix 192.0.2.0/24; communities [64496:7]; large-communities [64496:1:1, 65000:1:1] }
+    expect p == accept with only removes large-community 64496:1:1,
+        not removed community 64496:7, not removed large-community 65000:1:1
+}
+",
+            2,
+        );
+    }
+
+    /// The new action stays inside the existing IR layout.
+    #[test]
+    fn ir_layout_is_unchanged() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<crate::ir::TermAction>(), 216);
+        assert_eq!(size_of::<crate::ir::Term>(), 272);
+        assert_eq!(size_of::<crate::ir::MatchExpr>(), 32);
+    }
+}

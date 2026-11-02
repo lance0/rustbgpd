@@ -1841,6 +1841,9 @@ impl PolicyChain {
             TermAction::RemoveAllCommunities { attributes } => {
                 attributes.standard || attributes.large
             }
+            TermAction::RemoveCommunitiesInSet { attribute, .. } => {
+                *attribute != crate::ir::CommunityAttribute::Extended
+            }
             TermAction::Deny
             | TermAction::Bind { .. }
             | TermAction::ForEach(_)
