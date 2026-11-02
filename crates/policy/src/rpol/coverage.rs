@@ -427,18 +427,26 @@ fn negated_optional(
     match inner {
         Expr::Cmp { field, op, rhs, .. } => {
             let resolved = resolve_field(field).ok()?;
-            // A binding on the right of a u32 field lowers to a value
-            // comparison, false when the binding has no value.
+            let noun = if *op == CmpOp::Eq {
+                "equality"
+            } else {
+                "comparison"
+            };
             if let Rhs::Ident(name) = rhs
                 && value_field_of(resolved).is_some()
-                && let Some((from, written)) = missing.get(name.node.as_str())
             {
-                let noun = if *op == CmpOp::Eq {
-                    "equality"
-                } else {
-                    "comparison"
-                };
-                return Some((noun, *from, written.clone()));
+                // A binding on the right of a u32 field lowers to a value
+                // comparison, false when the binding has no value.
+                if let Some((from, written)) = missing.get(name.node.as_str()) {
+                    return Some((noun, *from, written.clone()));
+                }
+                // An origin AS or peer ASN against a binding or parameter
+                // is false when the field is absent, whatever the
+                // operator. `route.med` and `route.local-pref` read their
+                // defaults instead.
+                if matches!(resolved, Field::OriginAs | Field::PeerAsn) {
+                    return Some((noun, resolved, field.render()));
+                }
             }
             let optional = *op == CmpOp::Eq
                 && matches!(
@@ -454,10 +462,7 @@ fn negated_optional(
                             | Field::PeerAsn
                             | Field::PeerGroup,
                         Rhs::Int(..) | Rhs::Ip(..) | Rhs::Prefix(..) | Rhs::Str(_)
-                    ) | (
-                        Field::RouteType | Field::Family | Field::OriginAs | Field::PeerAsn,
-                        Rhs::Ident(_)
-                    )
+                    ) | (Field::RouteType | Field::Family, Rhs::Ident(_))
                 );
             optional.then(|| ("equality", resolved, field.render()))
         }

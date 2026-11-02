@@ -6619,6 +6619,18 @@ mod coverage {
             assert_eq!(lints.len(), 1, "{condition}: {:?}", cov.lints);
             // Parentheses have no AST node; the range ends at the comparison.
             assert_eq!(&source[lints[0].span.range()], format!("!({condition}"));
+            // `exists` is suggested only for a field it can test.
+            let field = condition.split_whitespace().next().unwrap();
+            let advice = if matches!(field, "route.origin-as" | "route.next-hop" | "peer.asn") {
+                format!("test `exists {field}` explicitly")
+            } else {
+                "test the absent case explicitly".to_string()
+            };
+            assert!(
+                lints[0].message.ends_with(&advice),
+                "{condition}: {}",
+                lints[0].message
+            );
         }
     }
 
@@ -6714,6 +6726,51 @@ mod coverage {
                 "negated equality matches when route.prefix is absent; use != to require its presence, or test the absent case explicitly"
             ],
         );
+    }
+
+    /// An origin AS or peer ASN compared against a binding, with any
+    /// operator, or against a parameter is false when the field is absent,
+    /// so its negation is flagged. `route.med` and `route.local-pref` read
+    /// their defaults and are not.
+    #[test]
+    fn optional_field_negation_flags_every_operator_against_an_identifier() {
+        for field in ["route.origin-as", "peer.asn"] {
+            let exists = format!("test `exists {field}` explicitly");
+            for op in ["==", "!=", ">=", "<="] {
+                let message = if op == "==" {
+                    format!(
+                        "negated equality matches when {field} is absent; use != to require its presence, or {exists}"
+                    )
+                } else {
+                    format!("negated comparison matches when {field} is absent; {exists}")
+                };
+                let body = format!("let target = 64500; if !({field} {op} target) {{ accept }}");
+                assert_eq!(
+                    negation_messages(&body),
+                    std::slice::from_ref(&message),
+                    "{body}"
+                );
+                if matches!(op, "==" | "!=") {
+                    let source = format!(
+                        "policy p(target: u32) {{ term t {{ if !({field} {op} target) {{ accept }} accept }} }}\n\
+                         test absent {{ route {{ med 0 }} expect p(64500) == accept }}"
+                    );
+                    let messages: Vec<String> = coverage_of(&source)
+                        .lints
+                        .into_iter()
+                        .filter(|lint| lint.kind == LintKind::OptionalFieldNegation)
+                        .map(|lint| lint.message)
+                        .collect();
+                    assert_eq!(messages, [message], "parameter: {field} {op}");
+                }
+            }
+        }
+        for body in [
+            "let floor = 100; if !(route.local-pref >= floor) { accept }",
+            "let cap = 50; if !(route.med <= cap) { accept }",
+        ] {
+            assert_eq!(negation_messages(body), Vec::<String>::new(), "{body}");
+        }
     }
 
     /// A binding stops counting as missing once a later `let` shadows it

@@ -610,8 +610,9 @@ absent-field behavior in the last row.
 `rbgp policy check` reports `optional-field-negation` for a negated test
 that is false on a route without the value, so the negation matches that
 route: `!(optional-field == literal)`, and for `route.origin-as` and
-`peer.asn` also a binding or parameter on the right, any computed
-comparison such as `!(route.origin-as + 0 >= 64512)`, and a `let` binding
+`peer.asn` also a comparison against a binding or parameter with any
+operator, any computed comparison such as
+`!(route.origin-as + 0 >= 64512)`, and a `let` binding
 of such a value compared or probed (`let o = route.origin-as;` then
 `!(o == 64500)` or `!(o in bogons)`). It points at the negated expression,
 including inside compound guards and loops. Use `!=` for an equality when
