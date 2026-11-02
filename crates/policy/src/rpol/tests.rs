@@ -9794,6 +9794,36 @@ test large-strip-all-cancels {
         );
     }
 
+    /// Fifty members carry 204,800 additions into a loop that removes a
+    /// value none of them added: each iteration's merge still traverses the
+    /// carried additions to look for one to cancel, so the loop exhausts the
+    /// fuel instead of doing about 839 million unmetered comparisons.
+    #[test]
+    fn merges_pay_fuel_for_carried_additions_a_loop_traverses() {
+        use crate::eval::PolicyHitCounters;
+        use std::fmt::Write as _;
+        let route: Vec<u32> = (0..4096u32).collect();
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &route, RpkiValidation::NotFound);
+        let mut source = String::new();
+        for i in 0..50 {
+            let _ = write!(
+                source,
+                " policy stage{i} {{ term t {{ for c in route.communities {{ add community c }} }} }}"
+            );
+        }
+        source.push_str(
+            " policy absent { term t { for c in route.communities { remove community 65000:9 } } }",
+        );
+        let carried = compile_ok(&source);
+        let counters = PolicyHitCounters::for_chain(&carried);
+        assert_eq!(
+            carried.evaluate_counting(&ctx, &counters).action,
+            crate::PolicyAction::Deny,
+            "merge fuel exhaustion fails closed"
+        );
+        assert_eq!(counters.eval_errors(), 1);
+    }
+
     /// Conditions read the route as received: a later term's guard does not
     /// see an earlier term's addition.
     #[test]
