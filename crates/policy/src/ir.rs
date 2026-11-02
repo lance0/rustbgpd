@@ -261,6 +261,11 @@ impl ValueField {
 pub enum ValueExpr {
     /// A constant (literal, parameter, or folded subtree).
     Const(u32),
+    /// A standard community constant (a literal or a `community`
+    /// argument): it evaluates like [`Const`](Self::Const) and renders
+    /// as `ASN:value`, so explain shows the value a policy compares or
+    /// binds as it was written (LAN-2794).
+    Community(u32),
     /// A `u32` context field read.
     Field(ValueField),
     /// A `let`-binding read (LAN-302): one indexed load from the
@@ -301,7 +306,10 @@ impl ValueExpr {
             return true;
         }
         match self {
-            ValueExpr::Const(_) | ValueExpr::Field(_) | ValueExpr::Local { .. } => false,
+            ValueExpr::Const(_)
+            | ValueExpr::Community(_)
+            | ValueExpr::Field(_)
+            | ValueExpr::Local { .. } => false,
             ValueExpr::Binary { lhs, rhs, .. }
             | ValueExpr::Min(lhs, rhs)
             | ValueExpr::Max(lhs, rhs) => lhs.any_node(pred) || rhs.any_node(pred),
@@ -341,6 +349,7 @@ impl fmt::Display for ValueExpr {
             }
             match expr {
                 ValueExpr::Const(value) => write!(f, "{value}")?,
+                ValueExpr::Community(value) => write!(f, "{}:{}", value >> 16, value & 0xffff)?,
                 ValueExpr::Field(field) => write!(f, "{}", field.as_str())?,
                 ValueExpr::Local { name, .. } => write!(f, "{name}")?,
                 ValueExpr::Binary { op, lhs, rhs } => {

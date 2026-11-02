@@ -427,7 +427,7 @@ pub(crate) fn eval_value(
     locals: &[LocalSlot],
 ) -> Result<u32, EvalErrorKind> {
     match expr {
-        ValueExpr::Const(value) => Ok(*value),
+        ValueExpr::Const(value) | ValueExpr::Community(value) => Ok(*value),
         // One indexed load; the slot was written by this walk's Bind
         // term (definite assignment) and may hold the kind its
         // initializer failed with (LAN-2790). `get` degrades a compiler

@@ -13,7 +13,9 @@
   runtime. Each probe still makes one pass over the route's communities of
   its kind. Policy explain output renders a kind-agnostic probe of a set that
   mixes kinds, including a TOML community list that mixes kinds, as
-  `route.any-community in S` instead of `route.communities in S`.
+  `route.any-community in S` instead of `route.communities in S`, and a
+  community compared or bound in a value position as `65000:1` instead of
+  its integer value.
 - **Breaking:** `.rpol` values carry a type. `route.origin-as`, `peer.asn`
   and loop variables over `route.as-path` or an asn-set are ASNs: they
   compare with `==`, `!=`, `>=` and `<=` against an integer literal or u32

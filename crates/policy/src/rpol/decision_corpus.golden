@@ -84,7 +84,8 @@ ir.guard.in-dataset 5
 ir.guard.and 138
 ir.guard.or 15
 ir.guard.not 64
-ir.value.const 181
+ir.value.const 165
+ir.value.community 16
 ir.value.field 159
 ir.value.local 107
 ir.value.binary 137

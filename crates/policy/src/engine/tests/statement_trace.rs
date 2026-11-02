@@ -734,7 +734,10 @@ fn rpol_fn_body_error_names_function_and_calling_term() {
                 origin_for_med(lo);
                 origin_for_med(hi);
             }
-            ValueExpr::Const(_) | ValueExpr::Field(_) | ValueExpr::Local { .. } => {}
+            ValueExpr::Const(_)
+            | ValueExpr::Community(_)
+            | ValueExpr::Field(_)
+            | ValueExpr::Local { .. } => {}
         }
     }
     const FN_RPOL: &str = r"
@@ -790,6 +793,46 @@ policy divide {
         "{traces}"
     );
     assert!(traces.contains("fail closed => reject"), "{traces}");
+}
+
+/// Community values keep their spelling through lowering: explain renders
+/// a community literal, a substituted `community` argument and a binding of
+/// either as `65000:1` in a comparison and in a `let`, never as the raw
+/// integer, which would not typecheck as source (LAN-2794).
+#[test]
+fn rpol_explain_spells_community_values() {
+    const RPOL: &str = r"
+policy tagged(tag: community) {
+    term t {
+        let mine = tag;
+        let other = 65000:2;
+        if mine == 65000:2 || other == mine { reject }
+        accept
+    }
+}
+";
+    let file = crate::rpol::RpolFile::parse(RPOL).expect("clean rpol");
+    let compiled = file
+        .compile_policy_args(
+            "tagged",
+            &[crate::rpol::PolicyArg::Community((65000 << 16) | 1)],
+            &mut crate::sets::SetStore::new(),
+            &crate::datasets::DatasetBindings::new(),
+            false,
+        )
+        .expect("policy exists")
+        .expect("no datasets");
+    let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+        "tagged".to_string(),
+        std::sync::Arc::new(compiled),
+    )]);
+    let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
+    assert_eq!(trace.action, PolicyAction::Permit);
+    let traces = trace.steps[0].term_traces.join("\n");
+    assert!(traces.contains("let mine = 65000:1"), "{traces}");
+    assert!(traces.contains("let other = 65000:2"), "{traces}");
+    assert!(traces.contains("mine == 65000:2"), "{traces}");
+    assert!(!traces.contains("42598400"), "{traces}");
 }
 
 /// The rpol agreement matrix: mixed TOML + rpol chains, contexts that

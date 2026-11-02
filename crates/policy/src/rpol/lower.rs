@@ -1937,9 +1937,8 @@ impl<'a> Lowerer<'a> {
         binds: &mut Vec<TermAction>,
     ) -> ValueExpr {
         match expr {
-            ValueExprAst::Lit(value, _) | ValueExprAst::Community(value, _) => {
-                ValueExpr::Const(*value)
-            }
+            ValueExprAst::Lit(value, _) => ValueExpr::Const(*value),
+            ValueExprAst::Community(value, _) => ValueExpr::Community(*value),
             ValueExprAst::Ident(name) => match names {
                 // Innermost binding shadows parameters (and outer
                 // bindings) in value positions — the typechecker
@@ -1952,8 +1951,11 @@ impl<'a> Lowerer<'a> {
                         };
                     }
                     // A `u32` parameter's value, or a `community`
-                    // argument's (LAN-2794).
-                    ValueExpr::Const(self.community(name, env))
+                    // argument, which keeps its spelling (LAN-2794).
+                    match env.get(name.node.as_str()) {
+                        Some(value) => ValueExpr::Const(*value),
+                        None => ValueExpr::Community(self.community(name, env)),
+                    }
                 }
                 // Function bodies see their parameters and earlier
                 // body lets, nothing else (closed over nothing). The

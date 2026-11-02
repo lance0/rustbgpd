@@ -664,6 +664,7 @@ const CONSTRUCTS: &[&str] = &[
     "ir.guard.or",
     "ir.guard.not",
     "ir.value.const",
+    "ir.value.community",
     "ir.value.field",
     "ir.value.local",
     "ir.value.binary",
@@ -1020,6 +1021,7 @@ fn ir_guard(expr: &MatchExpr, seen: &mut std::collections::BTreeSet<&'static str
 fn ir_value(expr: &ValueExpr, seen: &mut std::collections::BTreeSet<&'static str>) {
     let name = match expr {
         ValueExpr::Const(_) => "ir.value.const",
+        ValueExpr::Community(_) => "ir.value.community",
         ValueExpr::Field(_) => "ir.value.field",
         ValueExpr::Local { .. } => "ir.value.local",
         ValueExpr::Binary { lhs, rhs, .. } => {
