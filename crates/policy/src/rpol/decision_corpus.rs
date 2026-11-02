@@ -22,8 +22,11 @@
 //! decision change, and two rows with one name fail outright.
 //!
 //! [`CONSTRUCTS`] is the exhaustive construct list: the name functions
-//! below match every AST, IR and declaration enum without a wildcard, so a
-//! new variant does not compile until it is named. The v1 construct
+//! below match every AST and IR enum they meet without a wildcard, and
+//! destructure the AST structs and `RouteModifications` without a rest
+//! pattern, so a new variant or field does not compile until it is named.
+//! Parser sugar that desugars into an existing variant, or a new variant
+//! mapped to an existing name, needs review to catch. The v1 construct
 //! inventory in `docs/reference/v1-stable-surface.json` classifies every
 //! name, and `scripts/check-v1-stable-surface.py` checks the two agree.
 //!
@@ -38,10 +41,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::ast::{
-    ActionStmt, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunityLit,
-    DatasetEntryAst, ExpectCall, ExpectDef, ExpectVerdict, Expr, FieldPath, ForSource, NextHopArg,
-    ParamType, PeerField, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, TermDef,
-    TestDef, U32Arg, ValueExprAst, WithAssertion,
+    ActionStmt, AsnSetDef, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunityLit,
+    CommunitySetDef, DatasetDecl, DatasetEntryAst, ElseBody, ExpectCall, ExpectDef, ExpectVerdict,
+    Expr, FieldPath, FnDef, ForSource, ForStmt, IfBranch, IfStmt, NextHopArg, ParamType, PeerField,
+    PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt,
+    TermDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
 use super::diag::Spanned;
 use super::testing::{Fixture, override_data, render_expect};
@@ -366,30 +370,46 @@ pub(super) fn row_contents(action: &TermAction, chain: &CompiledChain) -> String
 /// Staged modifications in `.rpol` action spelling, in a fixed field
 /// order and staged value order.
 fn render_mods(mods: &RouteModifications) -> String {
+    // Destructured without `..`: a new modification does not compile until
+    // it is named here.
+    let RouteModifications {
+        set_local_pref,
+        set_med,
+        set_next_hop,
+        communities_add,
+        communities_remove,
+        extended_communities_add,
+        extended_communities_remove,
+        large_communities_add,
+        large_communities_remove,
+        as_path_prepend,
+        set_local_pref_computed,
+        set_med_computed,
+    } = mods;
     let std = |value: &u32| format!("{}:{}", value >> 16, value & 0xFFFF);
     let mut parts = Vec::new();
     // A lowered row stages computed values; an evaluated result never holds
     // one, so these render only in the term-name rows.
-    if let Some(value) = mods.set_local_pref {
+    if let Some(value) = set_local_pref {
         parts.push(format!("set local-pref {value}"));
     }
-    if let Some(expr) = &mods.set_local_pref_computed {
+    if let Some(expr) = &set_local_pref_computed {
         parts.push(format!("set local-pref {expr}"));
     }
-    if let Some(value) = mods.set_med {
+    if let Some(value) = set_med {
         parts.push(format!("set med {value}"));
     }
-    if let Some(expr) = &mods.set_med_computed {
+    if let Some(expr) = &set_med_computed {
         parts.push(format!("set med {expr}"));
     }
-    match &mods.set_next_hop {
+    match &set_next_hop {
         Some(NextHopAction::Self_) => parts.push("set next-hop self".to_string()),
         Some(NextHopAction::Specific(addr)) => parts.push(format!("set next-hop {addr}")),
         None => {}
     }
     // One part per prepend, in the order they run (each later one lands
     // to the left).
-    for prepend in &mods.as_path_prepend {
+    for prepend in as_path_prepend {
         let asn = match prepend.asn {
             crate::engine::PrependAsn::Asn(asn) => asn.to_string(),
             crate::engine::PrependAsn::Computed(operand) => match operand {
@@ -402,10 +422,7 @@ fn render_mods(mods: &RouteModifications) -> String {
         };
         parts.push(format!("prepend as {asn} {}", prepend.count));
     }
-    for (verb, values) in [
-        ("add", &mods.communities_add),
-        ("remove", &mods.communities_remove),
-    ] {
+    for (verb, values) in [("add", &communities_add), ("remove", &communities_remove)] {
         parts.extend(
             values
                 .iter()
@@ -413,14 +430,14 @@ fn render_mods(mods: &RouteModifications) -> String {
         );
     }
     for (verb, values) in [
-        ("add", &mods.large_communities_add),
-        ("remove", &mods.large_communities_remove),
+        ("add", &large_communities_add),
+        ("remove", &large_communities_remove),
     ] {
         parts.extend(values.iter().map(|v| format!("{verb} large-community {v}")));
     }
     for (verb, values) in [
-        ("add", &mods.extended_communities_add),
-        ("remove", &mods.extended_communities_remove),
+        ("add", &extended_communities_add),
+        ("remove", &extended_communities_remove),
     ] {
         parts.extend(
             values
@@ -993,26 +1010,34 @@ type Seen = std::collections::BTreeSet<&'static str>;
 fn ast_stmts(stmts: &[Stmt], seen: &mut Seen) {
     for stmt in stmts {
         match stmt {
-            Stmt::If(if_stmt) => {
+            Stmt::If(IfStmt {
+                branches,
+                else_body,
+            }) => {
                 seen.insert("ast.stmt.if");
-                if if_stmt.branches.len() > 1 {
+                if branches.len() > 1 {
                     seen.insert("ast.stmt.else-if");
                 }
-                if if_stmt.else_body.is_some() {
+                if else_body.is_some() {
                     seen.insert("ast.stmt.else");
                 }
-                for branch in &if_stmt.branches {
-                    ast_expr(&branch.cond, seen);
-                    if branch.body.iter().any(|s| matches!(s, Stmt::If(_))) {
+                for IfBranch {
+                    cond,
+                    body,
+                    span: _,
+                } in branches
+                {
+                    ast_expr(cond, seen);
+                    if body.iter().any(|s| matches!(s, Stmt::If(_))) {
                         seen.insert("ast.stmt.nested-if");
                     }
-                    ast_stmts(&branch.body, seen);
+                    ast_stmts(body, seen);
                 }
-                if let Some(else_body) = &if_stmt.else_body {
-                    if else_body.body.iter().any(|s| matches!(s, Stmt::If(_))) {
+                if let Some(ElseBody { body, span: _ }) = else_body {
+                    if body.iter().any(|s| matches!(s, Stmt::If(_))) {
                         seen.insert("ast.stmt.nested-if");
                     }
-                    ast_stmts(&else_body.body, seen);
+                    ast_stmts(body, seen);
                 }
             }
             Stmt::Action(action) => ast_action(action, seen),
@@ -1024,9 +1049,14 @@ fn ast_stmts(stmts: &[Stmt], seen: &mut Seen) {
                 ast_call_args(args, seen);
                 seen.insert("ast.stmt.call");
             }
-            Stmt::For(for_stmt) => {
+            Stmt::For(ForStmt {
+                var: _,
+                source,
+                body,
+                span: _,
+            }) => {
                 seen.insert("ast.stmt.for");
-                let source = match &for_stmt.source {
+                let source = match source {
                     ForSource::Field(path) => {
                         ast_field(path, seen);
                         "ast.for.field"
@@ -1034,7 +1064,7 @@ fn ast_stmts(stmts: &[Stmt], seen: &mut Seen) {
                     ForSource::Set(_) => "ast.for.set",
                 };
                 seen.insert(source);
-                ast_stmts(&for_stmt.body, seen);
+                ast_stmts(body, seen);
             }
         }
     }
@@ -1345,31 +1375,48 @@ fn declared_constructs(file: &RpolFile) -> Seen {
     if file.modules.len() > 1 {
         seen.insert("ast.decl.import");
     }
-    for set in prefix_sets {
+    for PrefixSetDef { name: _, entries } in prefix_sets {
         seen.insert("ast.decl.prefix-set");
-        if set.entries.iter().any(|e| e.ge.is_some() || e.le.is_some()) {
-            seen.insert("ast.decl.prefix-set.ge-le");
+        for PrefixEntryAst { prefix: _, ge, le } in entries {
+            if ge.is_some() || le.is_some() {
+                seen.insert("ast.decl.prefix-set.ge-le");
+            }
         }
     }
-    for set in community_sets {
+    for CommunitySetDef { name: _, entries } in community_sets {
         seen.insert("ast.decl.community-set");
-        for member in &set.entries {
+        for member in entries {
             community_member(&member.node, &mut seen);
         }
     }
-    if !asn_sets.is_empty() {
+    for AsnSetDef {
+        name: _,
+        entries: _,
+    } in asn_sets
+    {
         seen.insert("ast.decl.asn-set");
     }
-    for dataset in datasets {
-        seen.insert(match dataset.kind {
+    for DatasetDecl {
+        name: _,
+        kind,
+        kind_span: _,
+    } in datasets
+    {
+        seen.insert(match kind {
             DatasetKind::Prefix => "ast.decl.dataset.prefix-set",
             DatasetKind::Asn => "ast.decl.dataset.asn-set",
             DatasetKind::Community => "ast.decl.dataset.community-set",
         });
     }
-    for function in fns {
+    for FnDef {
+        name: _,
+        params: _,
+        lets,
+        result: _,
+    } in fns
+    {
         seen.insert("ast.decl.fn");
-        if !function.lets.is_empty() {
+        if !lets.is_empty() {
             seen.insert("ast.decl.fn.let");
         }
     }
@@ -1544,8 +1591,8 @@ fn visited_guards(
 /// The constructs an executed term's action uses; loop bodies are walked
 /// with their visited guards.
 /// Whether `mods` stages a computed (or, with `false`, a literal) prepend.
-fn prepend_kind(mods: &crate::engine::RouteModifications, computed: bool) -> bool {
-    mods.as_path_prepend
+fn prepend_kind(prepends: &[crate::engine::AsPathPrepend], computed: bool) -> bool {
+    prepends
         .iter()
         .any(|p| matches!(p.asn, crate::engine::PrependAsn::Computed(_)) == computed)
 }
@@ -1606,38 +1653,57 @@ fn ir_action(
             None
         }
     };
-    let Some(mods) = mods else { return };
-    let prepends = |computed: bool| prepend_kind(mods, computed);
+    if let Some(mods) = mods {
+        ir_mods(mods, seen);
+    }
+}
+
+/// The modification kinds a row stages, and the values it computes.
+fn ir_mods(mods: &RouteModifications, seen: &mut Seen) {
+    // Destructured without `..`: a new modification does not compile until
+    // it is named here.
+    let RouteModifications {
+        set_local_pref,
+        set_med,
+        set_next_hop,
+        communities_add,
+        communities_remove,
+        extended_communities_add,
+        extended_communities_remove,
+        large_communities_add,
+        large_communities_remove,
+        as_path_prepend,
+        set_local_pref_computed,
+        set_med_computed,
+    } = mods;
+    let prepends = |computed: bool| prepend_kind(as_path_prepend, computed);
     for (present, name) in [
-        (mods.set_local_pref.is_some(), "ir.mod.set-local-pref"),
+        (set_local_pref.is_some(), "ir.mod.set-local-pref"),
         (
-            mods.set_local_pref_computed.is_some(),
+            set_local_pref_computed.is_some(),
             "ir.mod.set-local-pref-computed",
         ),
-        (mods.set_med.is_some(), "ir.mod.set-med"),
-        (mods.set_med_computed.is_some(), "ir.mod.set-med-computed"),
-        (mods.set_next_hop.is_some(), "ir.mod.set-next-hop"),
+        (set_med.is_some(), "ir.mod.set-med"),
+        (set_med_computed.is_some(), "ir.mod.set-med-computed"),
+        (set_next_hop.is_some(), "ir.mod.set-next-hop"),
         (prepends(false), "ir.mod.prepend"),
         (prepends(true), "ir.mod.prepend-computed"),
-        (!mods.communities_add.is_empty(), "ir.mod.community-add"),
+        (!communities_add.is_empty(), "ir.mod.community-add"),
+        (!communities_remove.is_empty(), "ir.mod.community-remove"),
         (
-            !mods.communities_remove.is_empty(),
-            "ir.mod.community-remove",
-        ),
-        (
-            !mods.large_communities_add.is_empty(),
+            !large_communities_add.is_empty(),
             "ir.mod.large-community-add",
         ),
         (
-            !mods.large_communities_remove.is_empty(),
+            !large_communities_remove.is_empty(),
             "ir.mod.large-community-remove",
         ),
         (
-            !mods.extended_communities_add.is_empty(),
+            !extended_communities_add.is_empty(),
             "ir.mod.ext-community-add",
         ),
         (
-            !mods.extended_communities_remove.is_empty(),
+            !extended_communities_remove.is_empty(),
             "ir.mod.ext-community-remove",
         ),
     ] {
@@ -1648,7 +1714,7 @@ fn ir_action(
     for expr in mods
         .set_local_pref_computed
         .iter()
-        .chain(mods.set_med_computed.iter())
+        .chain(set_med_computed.iter())
     {
         ir_value(expr, seen);
     }
