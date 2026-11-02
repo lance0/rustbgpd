@@ -76,12 +76,12 @@ def roster(row, arm, clients):
     Q.require(row["members"] == clients and len(row["peers"]) == clients
               and {p[0] for p in row["peers"]} == {Q.COMMON.peer(i) for i in range(clients)},
               "observer peer roster differs")
-    Q.require(row["peer_budget"] == 16 * 1024 ** 2 and row["daemon_budget"] == 256 * 1024 ** 2,
+    Q.require(row["peer_budget"] == Q.REPORTED_PEER_BUDGET and row["daemon_budget"] == 256 * 1024 ** 2,
               "observer budgets differ")
     Q.accept(0 <= row["retained"] <= row["peak"] <= row["daemon_budget"] * .8, "daemon provenance headroom breached")
     for p in row["peers"]:
         Q.require(len(p) == 10 and all(type(p[i]) is bool for i in (2, 6, 7, 8, 9)), "invalid peer witness")
-        Q.accept(0 <= p[3] <= p[4] <= row["peer_budget"] * .8 and not p[6], "peer headroom or reset failure")
+        Q.accept(0 <= p[3] <= p[4] <= Q.PEER_BAR_BUDGET * .8 and not p[6], "peer headroom or reset failure")
     Q.accept(row["pending_resets"] == 0, "pending provenance reset")
     Q.require(row["dirty"] == sum(p[2] for p in row["peers"])
               and row["marker_debt"] == sum(p[5] != 0 for p in row["peers"])

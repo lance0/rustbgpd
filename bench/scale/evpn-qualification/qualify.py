@@ -305,11 +305,18 @@ def receipt(text, clients, routes):
     return {"exact_receiver_keys": True, "initial_convergence_ms": int(convergence[0])}
 
 
+# The dense-ID candidate declares a 22 MiB per-peer cap (calibrated so its
+# ceiling is not below main's). The predeclared per-peer headroom bar stays
+# 0.8 x the original 16 MiB, independent of the product's declared cap.
+REPORTED_PEER_BUDGET = 22 * 1024 ** 2
+PEER_BAR_BUDGET = 16 * 1024 ** 2
+
+
 def validate_provenance(row, clients):
     """Validate charges and peer identity, including partial or dirty rosters."""
     counts = ("members", "retained", "peak", "peer_budget", "daemon_budget")
     require(all(type(row[name]) is int and row[name] >= 0 for name in counts), "invalid provenance count")
-    require(row["peer_budget"] == 16 * 1024 ** 2 and row["daemon_budget"] == 256 * 1024 ** 2,
+    require(row["peer_budget"] == REPORTED_PEER_BUDGET and row["daemon_budget"] == 256 * 1024 ** 2,
             "EVPN provenance budgets changed")
     require(row["retained"] <= row["peak"] <= row["daemon_budget"], "invalid daemon provenance charge")
     require(type(row["peers"]) is list and len(row["peers"]) == row["members"] <= clients,
@@ -330,7 +337,7 @@ def validate_provenance(row, clients):
 def accept_provenance_headroom(row):
     fraction = RECOVERY_BARS["max_budget_fraction"]
     accept(row["peak"] <= row["daemon_budget"] * fraction, "daemon provenance headroom breached")
-    accept(all(peer[4] <= row["peer_budget"] * fraction for peer in row["peers"]),
+    accept(all(peer[4] <= PEER_BAR_BUDGET * fraction for peer in row["peers"]),
            "peer provenance headroom breached")
 
 

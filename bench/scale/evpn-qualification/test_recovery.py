@@ -106,7 +106,7 @@ class RecoveryTests(unittest.TestCase):
             if target == "daemon":
                 row["peak"] = int(row["daemon_budget"] * .8) + 1
             else:
-                row["peers"][0][4] = int(row["peer_budget"] * .8) + 1
+                row["peers"][0][4] = int(Q.PEER_BAR_BUDGET * .8) + 1
             with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
                 R.roster(row, "candidate", 4)
 

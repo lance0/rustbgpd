@@ -31,7 +31,7 @@ def witness(arm, clients=3, routes=10):
             "owned_routes": clients * routes if candidate else 0,
             "private_routes": 0 if candidate else clients * (clients - 1) * routes,
             "dirty": 0, "retained": clients * 64 if candidate else 0,
-            "peak": clients * 128 if candidate else 0, "peer_budget": 16 * 1024 ** 2,
+            "peak": clients * 128 if candidate else 0, "peer_budget": Q.REPORTED_PEER_BUDGET,
             "daemon_budget": 256 * 1024 ** 2, "pending_resets": 0, "completion_receipts": 0,
             "marker_debt": 0, "retained_recovery": 0,
             "refresh_pending": 0, "eor_pending": 0, "protocol_obligations": 0,
@@ -202,7 +202,8 @@ class TestQualification(unittest.TestCase):
     def test_memory_provenance_headroom_is_an_acceptance_bar_in_both_arms(self):
         for arm in ("candidate", "private"):
             for target in ("peer", "daemon"):
-                budget = witness(arm)[f"{target}_budget"]
+                # The per-peer bar stays 0.8 x 16 MiB, whatever cap the daemon reports.
+                budget = Q.PEER_BAR_BUDGET if target == "peer" else witness(arm)["daemon_budget"]
                 for peak in (int(budget * .8), int(budget * .8) + 1, int(budget * .9)):
                     with self.subTest(arm=arm, target=target, peak=peak):
                         row = witness(arm)
@@ -290,7 +291,8 @@ class TestQualification(unittest.TestCase):
     def test_raw_memory_consumer_enforces_peer_and_daemon_headroom(self):
         for arm in ("candidate", "private"):
             for target in ("peer", "daemon"):
-                budget = witness(arm)[f"{target}_budget"]
+                # The per-peer bar stays 0.8 x 16 MiB, whatever cap the daemon reports.
+                budget = Q.PEER_BAR_BUDGET if target == "peer" else witness(arm)["daemon_budget"]
                 for peak in (int(budget * .8), int(budget * .8) + 1, int(budget * .9)):
                     with self.subTest(arm=arm, target=target, peak=peak), tempfile.TemporaryDirectory() as temporary:
                         root = Path(temporary)
