@@ -1363,8 +1363,9 @@ Deny attribution. The sentinel interpretation applies only when
 
 **Policy evaluation errors — Prometheus.** `bgp_policy_eval_errors_total
 {direction, kind}` counts routes denied by the fail-closed evaluation-
-error rail (ADR-0103 Decision 4: checked-arithmetic failure, absent
-operand, fuel/loop-cap exhaustion, ...). These denies also appear in
+error rail (ADR-0103 Decision 4: an action that needs an absent
+operand, fuel/loop-cap exhaustion, ...; arithmetic saturates and cannot
+fail). These denies also appear in
 `bgp_policy_routes_total` as `action="deny"`; this counter separates
 "the policy said no" from "the policy is broken". The exception is
 `direction="condition"`: a conditional advertisement's `condition_policy`
