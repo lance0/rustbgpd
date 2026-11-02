@@ -509,7 +509,11 @@ fn trace_rpol_policy(
     // the result never needs to inspect the original action again.
     // Loop permits are already resolved by the shared evaluator;
     // direct permits retain their source expressions for explain.
-    let mut deciding_permit: Option<RouteModifications> = None;
+    // The deciding permit's running total, with computed operands resolved
+    // as the live walk resolves them (the next member is seeded from it),
+    // plus the deciding term's own source modifications when they carry
+    // computed operands, so its line renders the source expression.
+    let mut deciding_permit: Option<(RouteModifications, Option<RouteModifications>)> = None;
     // LAN-302: the trace walk re-derives `let` bindings term by term
     // (explain may allocate/zero eagerly; the hot path never records)
     // and feeds the frame into the shared guard evaluation.
@@ -625,7 +629,7 @@ fn trace_rpol_policy(
                                     break;
                                 }
                                 merged.merge_applicable(mods, ctx);
-                                deciding_permit = Some(merged);
+                                deciding_permit = Some((merged, None));
                                 decided = Some((index, term));
                                 break;
                             }
@@ -743,17 +747,22 @@ fn trace_rpol_policy(
                 break;
             }
             TermActionView::Permit(mods) => {
-                if let Err(kind) =
-                    tables.resolve_computed(mods, ctx, crate::eval::locals_slice(locals.as_ref()))
-                {
-                    term_traces.push(format!(
-                        "term {}: evaluation error: {kind} — fail closed => reject",
-                        term.name.as_deref().unwrap_or("<unnamed>"),
-                    ));
-                    eval_failed = true;
-                    decided = Some((index, term));
-                    break;
-                }
+                let resolved = match tables.resolve_computed(
+                    mods,
+                    ctx,
+                    crate::eval::locals_slice(locals.as_ref()),
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(kind) => {
+                        term_traces.push(format!(
+                            "term {}: evaluation error: {kind} — fail closed => reject",
+                            term.name.as_deref().unwrap_or("<unnamed>"),
+                        ));
+                        eval_failed = true;
+                        decided = Some((index, term));
+                        break;
+                    }
+                };
                 let mut merged = continued.take().unwrap_or_default();
                 if let Err(kind) = crate::eval::charge_merge(fuel, Some(&merged), mods) {
                     term_traces.push(merge_failure_trace(term, kind));
@@ -761,8 +770,11 @@ fn trace_rpol_policy(
                     decided = Some((index, term));
                     break;
                 }
-                merged.merge_applicable(mods.clone(), ctx);
-                deciding_permit = Some(merged);
+                // Seed the next member with resolved values, as the live
+                // walk does; render this member's source expressions.
+                let source = resolved.is_some().then(|| mods.clone());
+                merged.merge_applicable(resolved.unwrap_or_else(|| mods.clone()), ctx);
+                deciding_permit = Some((merged, source));
                 decided = Some((index, term));
                 break;
             }
@@ -808,11 +820,11 @@ fn trace_rpol_policy(
         // evaluation error denies regardless of the term's own action.
         let locals_view = crate::eval::locals_slice(locals.as_ref());
         let (action, modifications, total) = match deciding_permit {
-            Some(merged) if !eval_failed => {
+            Some((merged, source)) if !eval_failed => {
                 let total = crate::eval::applicable(merged, ctx);
                 (
                     PolicyAction::Permit,
-                    render_member_delta(before, &total, ctx, tables, locals_view),
+                    render_member_delta(before, &total, source.as_ref(), ctx, tables, locals_view),
                     total,
                 )
             }
@@ -843,6 +855,7 @@ fn trace_rpol_policy(
                     render_member_delta(
                         before,
                         &total,
+                        None,
                         ctx,
                         tables,
                         crate::eval::locals_slice(locals.as_ref()),
@@ -866,16 +879,23 @@ fn trace_rpol_policy(
     }
 }
 
-/// Render what one `.rpol` member changed: the difference between the
-/// running total `before` it and the total `after` it. Scalars render when
-/// the member changed them; list entries the member appended render as
-/// usual. An earlier entry the member dropped is a cancellation, rendered
-/// as the opposite operation with a note, in place of the member's own line
-/// for that value: a later scan or removal that cancels an earlier addition
-/// renders `community - V (cancels an earlier addition)`.
+/// Render what one `.rpol` member changed: the running total `before` it
+/// against the total `after` it.
+///
+/// Scalars compare resolved values and render when the member changed them,
+/// from the deciding term's own `source` expression when it computed one.
+/// Communities compare by logical presence per kind: a value newly added or
+/// newly removed renders as usual; an earlier addition (removal) no longer
+/// present renders `- V (cancels an earlier addition)` (`+ V (cancels an
+/// earlier removal)`) in place of the member's own line for it; a value
+/// whose presence did not change renders nothing, so removing and re-adding
+/// an earlier addition is no change. Cancellations render first, then the
+/// member's surviving operations. Hash sets keep this linear in the staged
+/// entries.
 fn render_member_delta(
     before: &RouteModifications,
     after: &RouteModifications,
+    source: Option<&RouteModifications>,
     ctx: &RouteContext<'_>,
     tables: &CompiledChain,
     locals: &[u32],
@@ -884,13 +904,23 @@ fn render_member_delta(
     if (after.set_local_pref, &after.set_local_pref_computed)
         != (before.set_local_pref, &before.set_local_pref_computed)
     {
-        own.set_local_pref = after.set_local_pref;
-        own.set_local_pref_computed
-            .clone_from(&after.set_local_pref_computed);
+        if let Some(expr) =
+            source.and_then(|own_source| own_source.set_local_pref_computed.as_ref())
+        {
+            own.set_local_pref_computed = Some(expr.clone());
+        } else {
+            own.set_local_pref = after.set_local_pref;
+            own.set_local_pref_computed
+                .clone_from(&after.set_local_pref_computed);
+        }
     }
     if (after.set_med, &after.set_med_computed) != (before.set_med, &before.set_med_computed) {
-        own.set_med = after.set_med;
-        own.set_med_computed.clone_from(&after.set_med_computed);
+        if let Some(expr) = source.and_then(|own_source| own_source.set_med_computed.as_ref()) {
+            own.set_med_computed = Some(expr.clone());
+        } else {
+            own.set_med = after.set_med;
+            own.set_med_computed.clone_from(&after.set_med_computed);
+        }
     }
     if after.set_next_hop != before.set_next_hop {
         own.set_next_hop.clone_from(&after.set_next_hop);
@@ -898,97 +928,151 @@ fn render_member_delta(
     if (after.as_path_prepend, after.as_path_prepend_computed)
         != (before.as_path_prepend, before.as_path_prepend_computed)
     {
-        own.as_path_prepend = after.as_path_prepend;
-        own.as_path_prepend_computed = after.as_path_prepend_computed;
+        if let Some(computed) = source.and_then(|own_source| own_source.as_path_prepend_computed) {
+            own.as_path_prepend_computed = Some(computed);
+        } else {
+            own.as_path_prepend = after.as_path_prepend;
+            own.as_path_prepend_computed = after.as_path_prepend_computed;
+        }
     }
-    let mut cancellations = Vec::new();
-    let (added, dropped_adds) = list_delta(&before.communities_add, &after.communities_add);
-    let (removed, dropped_removes) =
-        list_delta(&before.communities_remove, &after.communities_remove);
-    own.communities_add = without(added, &dropped_removes);
-    own.communities_remove = without(removed, &dropped_adds);
-    for value in dropped_adds {
-        cancellations.push(format!(
-            "community - {} (cancels an earlier addition)",
-            fmt_standard_community(value)
-        ));
-    }
-    for value in dropped_removes {
-        cancellations.push(format!(
-            "community + {} (cancels an earlier removal)",
-            fmt_standard_community(value)
-        ));
-    }
-    let (added, dropped_adds) = list_delta(
-        &before.extended_communities_add,
-        &after.extended_communities_add,
+    let mut out = Vec::new();
+    let standard = presence_delta(
+        (&before.communities_add, &before.communities_remove),
+        (&after.communities_add, &after.communities_remove),
     );
-    let (removed, dropped_removes) = list_delta(
-        &before.extended_communities_remove,
-        &after.extended_communities_remove,
+    let extended = presence_delta(
+        (
+            &before.extended_communities_add,
+            &before.extended_communities_remove,
+        ),
+        (
+            &after.extended_communities_add,
+            &after.extended_communities_remove,
+        ),
     );
-    own.extended_communities_add = without(added, &dropped_removes);
-    own.extended_communities_remove = without(removed, &dropped_adds);
-    for value in dropped_adds {
-        cancellations.push(format!(
-            "extended_community - {value} (cancels an earlier addition)"
-        ));
-    }
-    for value in dropped_removes {
-        cancellations.push(format!(
-            "extended_community + {value} (cancels an earlier removal)"
-        ));
-    }
-    let (added, dropped_adds) =
-        list_delta(&before.large_communities_add, &after.large_communities_add);
-    let (removed, dropped_removes) = list_delta(
-        &before.large_communities_remove,
-        &after.large_communities_remove,
+    let large = presence_delta(
+        (
+            &before.large_communities_add,
+            &before.large_communities_remove,
+        ),
+        (
+            &after.large_communities_add,
+            &after.large_communities_remove,
+        ),
     );
-    own.large_communities_add = without(added, &dropped_removes);
-    own.large_communities_remove = without(removed, &dropped_adds);
-    for value in dropped_adds {
-        cancellations.push(format!(
-            "large_community - {value} (cancels an earlier addition)"
-        ));
-    }
-    for value in dropped_removes {
-        cancellations.push(format!(
-            "large_community + {value} (cancels an earlier removal)"
-        ));
-    }
-    let mut out = render_modifications(&own, ctx, Some(tables), locals);
-    out.extend(cancellations);
+    standard.render_cancellations(
+        "community",
+        |value| fmt_standard_community(*value),
+        &mut out,
+    );
+    extended.render_cancellations("extended_community", ToString::to_string, &mut out);
+    large.render_cancellations("large_community", ToString::to_string, &mut out);
+    own.communities_add = standard.added;
+    own.communities_remove = standard.removed;
+    own.extended_communities_add = extended.added;
+    own.extended_communities_remove = extended.removed;
+    own.large_communities_add = large.added;
+    own.large_communities_remove = large.removed;
+    out.extend(render_modifications(&own, ctx, Some(tables), locals));
     out
 }
 
-/// Split `after` against `before` for one staged list. Merges and scans
-/// only drop entries (keeping order) and append new ones, so `after` is a
-/// subsequence of `before` followed by the appended tail: returns the
-/// appended entries and the dropped earlier ones.
-fn list_delta<T: Copy + PartialEq>(before: &[T], after: &[T]) -> (Vec<T>, Vec<T>) {
-    let mut kept = 0;
-    let mut dropped = Vec::new();
-    for &earlier in before {
-        if after.get(kept) == Some(&earlier) {
-            kept += 1;
-        } else {
-            dropped.push(earlier);
-        }
-    }
-    (after[kept..].to_vec(), dropped)
+/// One community kind's change in logical presence across a member.
+pub(super) struct PresenceDelta<T> {
+    /// Earlier additions no longer present.
+    pub(super) cancelled_adds: Vec<T>,
+    /// Earlier removals no longer present.
+    pub(super) cancelled_removes: Vec<T>,
+    /// Values newly added, other than those that cancel an earlier removal.
+    pub(super) added: Vec<T>,
+    /// Values newly removed, other than those that cancel an earlier addition.
+    pub(super) removed: Vec<T>,
 }
 
-/// `values` without the entries `drop` renders as a cancellation instead.
-fn without<T: Copy + Eq + std::hash::Hash>(values: Vec<T>, drop: &[T]) -> Vec<T> {
-    if drop.is_empty() {
-        return values;
+impl<T> PresenceDelta<T> {
+    fn render_cancellations(
+        &self,
+        label: &str,
+        render: impl Fn(&T) -> String,
+        out: &mut Vec<String>,
+    ) {
+        for value in &self.cancelled_adds {
+            out.push(format!(
+                "{label} - {} (cancels an earlier addition)",
+                render(value)
+            ));
+        }
+        for value in &self.cancelled_removes {
+            out.push(format!(
+                "{label} + {} (cancels an earlier removal)",
+                render(value)
+            ));
+        }
     }
-    let drop: std::collections::HashSet<T> = drop.iter().copied().collect();
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Membership probes and entries visited by [`presence_delta`], for the
+    /// linear-bound test.
+    pub(super) static DELTA_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `steps` of delta work (tests only).
+fn delta_steps(steps: usize) {
+    #[cfg(test)]
+    DELTA_STEPS.with(|total| total.set(total.get() + steps as u64));
+    #[cfg(not(test))]
+    let _ = steps;
+}
+
+/// Whether `value` is in `set`: one hash probe.
+fn present<T: Eq + std::hash::Hash>(set: &std::collections::HashSet<T>, value: &T) -> bool {
+    delta_steps(1);
+    set.contains(value)
+}
+
+/// Each distinct value of `values` passing `keep`, in first-seen order: one
+/// hash probe per entry.
+fn distinct<T: Copy + Eq + std::hash::Hash>(values: &[T], keep: impl Fn(&T) -> bool) -> Vec<T> {
+    let mut seen = std::collections::HashSet::new();
     values
-        .into_iter()
-        .filter(|value| !drop.contains(value))
+        .iter()
+        .copied()
+        .filter(|value| keep(value) && seen.insert(*value))
         .collect()
+}
+
+/// The presence delta of one kind's staged `(adds, removes)`, linear in the
+/// entries.
+pub(super) fn presence_delta<T: Copy + Eq + std::hash::Hash>(
+    before: (&[T], &[T]),
+    after: (&[T], &[T]),
+) -> PresenceDelta<T> {
+    let set = |values: &[T]| -> std::collections::HashSet<T> {
+        delta_steps(values.len());
+        values.iter().copied().collect()
+    };
+    let (before_adds, before_removes) = (set(before.0), set(before.1));
+    let (after_adds, after_removes) = (set(after.0), set(after.1));
+    let cancelled_adds = distinct(before.0, |value| !present(&after_adds, value));
+    let cancelled_removes = distinct(before.1, |value| !present(&after_removes, value));
+    let added = distinct(after.0, |value| {
+        // Not already added, and not the cancellation of an earlier removal.
+        !present(&before_adds, value)
+            && (!present(&before_removes, value) || present(&after_removes, value))
+    });
+    let removed = distinct(after.1, |value| {
+        // Not already removed, and not the cancellation of an earlier addition.
+        !present(&before_removes, value)
+            && (!present(&before_adds, value) || present(&after_adds, value))
+    });
+    PresenceDelta {
+        cancelled_adds,
+        cancelled_removes,
+        added,
+        removed,
+    }
 }
 
 /// Render a compiled term's action in `.rpol` surface syntax, e.g.

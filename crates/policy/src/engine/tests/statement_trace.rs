@@ -803,6 +803,15 @@ policy unstage { term t { for c in route.communities { remove community c } } }
 policy readd { term t { for c in route.communities { add community c } } }
 policy tag-continue { term t { add community 65000:1 } }
 policy tag-accept { term t { add community 65000:2; accept } }
+policy tag-ab { term t { add community 65000:1; add community 65000:2 } }
+policy readd-a {
+    term r { remove community 65000:1 }
+    term a { add community 65000:1; accept }
+}
+policy tag-x { term t { add community 65000:3 } }
+policy strip-readd-x { term t { remove community *; add community 65000:3; accept } }
+policy med-a { term t { let x = route.med + 1; set med x; accept } }
+policy med-b { term t { let x = route.med + 2; set med x; accept } }
 ";
 
 fn seeded_member(name: &str) -> NamedPolicy {
@@ -830,6 +839,107 @@ fn explain_shows_a_later_scan_cancelling_an_earlier_addition() {
     assert_eq!(
         trace.steps[1].modifications,
         ["community - 65000:7 (cancels an earlier addition)"]
+    );
+}
+
+/// Explain renders logical presence: removing and re-adding an earlier
+/// addition is no change, so the member renders nothing for it, in neither
+/// order.
+#[test]
+fn explain_renders_no_change_for_a_removed_and_re_added_value() {
+    let chain = PolicyChain::from_named(vec![seeded_member("tag-ab"), seeded_member("readd-a")]);
+    let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    let live = chain.compiled().evaluate(&ctx);
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(
+        trace.steps[0].modifications,
+        ["community + 65000:1", "community + 65000:2"]
+    );
+    assert_eq!(trace.steps[1].modifications, Vec::<String>::new());
+}
+
+/// A strip that cancels repeated earlier additions of a value the member
+/// then adds back leaves the value present: no cancellation line.
+#[test]
+fn explain_keeps_a_value_present_when_a_strip_re_adds_it() {
+    let chain = PolicyChain::from_named(vec![
+        seeded_member("tag-x"),
+        seeded_member("tag-x"),
+        seeded_member("strip-readd-x"),
+    ]);
+    let ctx = plain_ctx(v4_prefix([192, 0, 2, 0], 24));
+    let live = chain.compiled().evaluate(&ctx);
+    assert!(
+        live.modifications
+            .communities_add
+            .contains(&((65_000 << 16) + 3)),
+        "{:?}",
+        live.modifications
+    );
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(trace.steps[2].modifications, Vec::<String>::new());
+}
+
+/// The delta is linear in the staged entries: 204,800 carried additions of
+/// one value cancelled beside 4,096 new removals cost a bounded number of
+/// probes and visits, not their product.
+#[test]
+fn explain_delta_is_linear_in_the_staged_entries() {
+    let carried = vec![(65_000_u32 << 16) + 9; 204_800];
+    let removals: Vec<u32> = (0..4096).collect();
+    super::super::explain::DELTA_STEPS.with(|steps| steps.set(0));
+    let delta =
+        super::super::explain::presence_delta((&carried[..], &[][..]), (&[][..], &removals[..]));
+    let steps = super::super::explain::DELTA_STEPS.with(std::cell::Cell::get);
+    assert_eq!(delta.cancelled_adds, [(65_000 << 16) + 9]);
+    assert_eq!(delta.removed, removals);
+    assert!(delta.added.is_empty() && delta.cancelled_removes.is_empty());
+    let entries = u64::try_from(carried.len() + removals.len()).expect("fits");
+    assert!(steps <= 4 * entries, "{steps} steps for {entries} entries");
+
+    // Distinct values on every side: each probe hits a large set, so a
+    // probe that is not constant-time breaks the bound.
+    let earlier: Vec<u32> = (0..8192).collect();
+    let later: Vec<u32> = (4096..12_288).collect();
+    super::super::explain::DELTA_STEPS.with(|steps| steps.set(0));
+    let delta = super::super::explain::presence_delta(
+        (&earlier[..], &later[..]),
+        (&later[..], &earlier[..]),
+    );
+    let steps = super::super::explain::DELTA_STEPS.with(std::cell::Cell::get);
+    assert_eq!(delta.cancelled_adds.len(), 4096);
+    assert_eq!(delta.cancelled_removes.len(), 4096);
+    let entries = 4 * 8192;
+    assert!(steps <= 4 * entries, "{steps} steps for {entries} entries");
+}
+
+/// Explain seeds the next member with resolved scalar values: two members
+/// that each `set med x` with a different `x` render their own updates, and
+/// the last one is the live result.
+#[test]
+fn explain_resolves_scalars_before_seeding_the_next_member() {
+    let chain = PolicyChain::from_named(vec![seeded_member("med-a"), seeded_member("med-b")]);
+    let ctx = RouteContext {
+        med: Some(10),
+        ..plain_ctx(v4_prefix([192, 0, 2, 0], 24))
+    };
+    let live = chain.compiled().evaluate(&ctx);
+    assert_eq!(live.modifications.set_med, Some(12));
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, live.action);
+    assert_eq!(trace.steps[0].modifications.len(), 1);
+    assert!(
+        trace.steps[0].modifications[0].ends_with("= 11"),
+        "{:?}",
+        trace.steps[0].modifications
+    );
+    assert_eq!(trace.steps[1].modifications.len(), 1);
+    assert!(
+        trace.steps[1].modifications[0].ends_with("= 12"),
+        "{:?}",
+        trace.steps[1].modifications
     );
 }
 
