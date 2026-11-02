@@ -332,6 +332,7 @@ def load_helper(filename: str, module_name: str) -> ModuleType:
 
 DASHBOARD_CHECK = load_helper("check-grafana-dashboard.py", "dashboard_contract")
 PUBLIC_DOCS_CHECK = load_helper("check_public_tracker_ids.py", "public_docs_contract")
+STABLE_SURFACE_CHECK = load_helper("check-v1-stable-surface.py", "stable_surface_contract")
 
 
 def production_source(source: str) -> str:
@@ -1090,7 +1091,7 @@ def policy_eval_error_labels(source: str) -> set[str]:
     """Require each label to have an error construction in the runtime evaluator.
 
     Only the runtime functions below count: Display, compiler-only helpers
-    and test functions cannot stand in for emitters.
+    and test-gated code cannot stand in for emitters.
     Defensive compiler-bug rails remain runtime emitters even though valid
     compiled policies cannot reach them.
     """
@@ -1118,6 +1119,7 @@ def policy_eval_error_labels(source: str) -> set[str]:
         for owner, functions in runtime_functions
         for function in functions
     )
+    syntax = STABLE_SURFACE_CHECK.strip_cfg_test_items(syntax)
     emitted = set(re.findall(
         r"(?:\b(?:Err|ok_or|get_or_insert)\s*\(\s*\(?\s*"
         r"|\blet\s+\w+\s*=\s*|\bkind\s*:\s*)EvalErrorKind::(\w+)",

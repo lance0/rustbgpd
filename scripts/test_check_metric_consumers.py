@@ -731,6 +731,43 @@ fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> 
             ):
                 CHECK.policy_eval_error_labels(mutant)
 
+    def test_policy_eval_error_labels_ignore_inline_test_constructors(self):
+        source = self.rust[CHECK.POLICY_EVAL].replace(
+            'EvalErrorKind::DivideByZero => "divide-by-zero",',
+            'EvalErrorKind::Overflow => "overflow",\n'
+            '            EvalErrorKind::DivideByZero => "divide-by-zero",',
+            1,
+        )
+        inline_test = (
+            "        #[cfg(test)]\n"
+            "        VISITED_GUARDS.with(|visited| {\n"
+        )
+        self.assertEqual(source.count(inline_test), 1)
+        fake = "            let _unused = EvalErrorKind::Overflow;\n"
+        for scope, mutant in {
+            "existing inline test closure": source.replace(inline_test, inline_test + fake),
+            "nested test function": source.replace(
+                inline_test,
+                "        #[cfg(test)]\n        fn synthetic_error() {\n" + fake + "        }\n"
+                + inline_test,
+            ),
+            "compound test block": source.replace(
+                inline_test,
+                '        #[cfg(all(test, target_os = "linux"))]\n        {\n'
+                + fake + "        }\n" + inline_test,
+            ),
+        }.items():
+            with self.subTest(scope=scope), self.assertRaisesRegex(
+                ValueError, "labels without emitters.*Overflow"
+            ):
+                CHECK.policy_eval_error_labels(mutant)
+        # Production-only constructions remain eligible evidence.
+        production = source.replace(
+            inline_test,
+            "        #[cfg(not(test))]\n        {\n" + fake + "        }\n" + inline_test,
+        )
+        self.assertIn("overflow", CHECK.policy_eval_error_labels(production))
+
     def test_daemon_renaming_a_selected_label_value_is_rejected(self):
         rust = dict(self.rust)
         self.assertEqual(rust[CHECK.TELEMETRY].count('"known_partial"'), 1)
