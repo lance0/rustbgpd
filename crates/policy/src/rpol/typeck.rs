@@ -2051,7 +2051,10 @@ impl<'a> Checker<'a> {
                     let wanted: &[ParamType] = match resolve_field(field) {
                         Ok(Field::Prefix) => &[ParamType::PrefixSet],
                         Ok(
-                            Field::Communities | Field::LargeCommunities | Field::ExtCommunities,
+                            Field::Communities
+                            | Field::LargeCommunities
+                            | Field::ExtCommunities
+                            | Field::AnyCommunity,
                         ) => &[ParamType::CommunitySet],
                         Ok(Field::OriginAs | Field::PeerAsn) => &[ParamType::AsnSet],
                         _ => &[],
@@ -4078,6 +4081,8 @@ fn if_terms<'a>(
 
 /// Conservative guarded-tail count: every source action plus every Bind term
 /// hoisted by an inline user call, with one arm retained for an empty branch.
+/// `remove any-community in S` counts one term per kind, the most S can
+/// lower to (LAN-2794).
 fn guarded_action_terms(actions: &[ActionStmt], fns: &HashMap<&str, FnCost>) -> u64 {
     actions
         .iter()
@@ -4086,6 +4091,11 @@ fn guarded_action_terms(actions: &[ActionStmt], fns: &HashMap<&str, FnCost>) -> 
                 ActionStmt::SetLocalPref(expr, _)
                 | ActionStmt::SetMed(expr, _)
                 | ActionStmt::Let { init: expr, .. } => call_slots(expr, fns),
+                ActionStmt::Community {
+                    kind,
+                    arg: CommunityArg::InSet { .. },
+                    ..
+                } => community_attributes(*kind).len() as u64 - 1,
                 _ => 0,
             }
         })

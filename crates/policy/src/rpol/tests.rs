@@ -11637,6 +11637,62 @@ test other-tag {
             assert!(rendered.contains(message), "{body}: {rendered}");
         }
     }
+
+    /// `route.any-community in s` and `remove any-community in s` take a
+    /// `community-set` parameter, like the per-kind forms.
+    #[test]
+    fn any_community_takes_a_set_parameter() {
+        passes(
+            r"
+community-set twins { 65000:666, 65000:666:0 }
+policy p(s: community-set) {
+    term t { if route.any-community in s { reject } }
+    term rest { accept }
+}
+policy scrub(s: community-set) { term t { remove any-community in s; accept } }
+test large-twin {
+    route { prefix 192.0.2.0/24; large-communities [65000:666:0] }
+    expect p(twins) == reject
+}
+test neither {
+    route { prefix 192.0.2.0/24; communities [65000:1] }
+    expect p(twins) == accept
+}
+test scrub-both {
+    route { prefix 192.0.2.0/24; communities [65000:666]; large-communities [65000:666:0] }
+    expect scrub(twins) == accept with removes community 65000:666,
+        removes large-community 65000:666:0
+}
+",
+            3,
+        );
+    }
+
+    /// `remove any-community in S` lowers to one guarded term per kind, each
+    /// re-evaluating the guard, and the compiled-size budget counts all
+    /// three. Under the same inlined guard, a single-kind removal fits the
+    /// 100,000-node budget and the three-kind removal does not (the guard
+    /// alone reaches the budget at about 195 terms; three copies at about
+    /// 115). Red proof: counting it as one term admits both.
+    #[test]
+    fn guarded_any_community_removal_counts_every_kind() {
+        let policy = |removal: &str| {
+            use std::fmt::Write as _;
+            let mut terms = String::new();
+            for i in 0..150 {
+                writeln!(terms, "term t{i} {{ if route.med >= {i} {{ accept }} }}").unwrap();
+            }
+            format!(
+                "community-set stds {{ 65000:666 }}\n\
+                 community-set twins {{ 65000:666, 65000:666:0, RT:65000:666 }}\n\
+                 policy big {{\n{terms}}}\n\
+                 policy p {{ term t {{ if apply(big) {{ {removal} }} }} }}"
+            )
+        };
+        compile_ok(&policy("remove community in stds"));
+        let (_, rendered) = diagnostics_of(&policy("remove any-community in twins"));
+        assert!(rendered.contains("IR nodes"), "{rendered}");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
