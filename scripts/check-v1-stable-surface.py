@@ -2717,6 +2717,7 @@ RPOL_NAME_RE = re.compile(r'"((?:ast|ir)\.[a-z0-9.-]+)"')
 RPOL_CLASSIFICATIONS = {"v1", "outside_v1"}
 RPOL_TABLE_START = "<!-- rpol-construct-inventory:start -->"
 RPOL_TABLE_END = "<!-- rpol-construct-inventory:end -->"
+RPOL_TABLE_HEADER = ("| Construct | Class | Source form or reason |", "|---|---|---|")
 
 
 def rpol_corpus_constructs(source: str) -> list[str]:
@@ -2799,7 +2800,14 @@ def check_rpol_inventory(inventory: dict, source: str, golden: str, docs: str) -
     if docs.count(RPOL_TABLE_START) != 1 or docs.count(RPOL_TABLE_END) != 1:
         fail(f"{RPOL_DOCS_PATH.relative_to(ROOT)} needs one rpol construct inventory table")
     table = docs.split(RPOL_TABLE_START, 1)[1].split(RPOL_TABLE_END, 1)[0]
-    rows = [line for line in table.splitlines() if line.startswith("| `")]
+    lines = [line for line in table.splitlines() if line.strip()]
+    if lines[:2] != list(RPOL_TABLE_HEADER):
+        fail(
+            f"rpol construct table in {RPOL_DOCS_PATH.relative_to(ROOT)} must start with "
+            f"the header {list(RPOL_TABLE_HEADER)}"
+        )
+    # Every other line between the markers is a row, written or not as one.
+    rows = lines[2:]
     expected = [rpol_table_row(entry) for entry in entries]
     if rows != expected:
         position = next(
