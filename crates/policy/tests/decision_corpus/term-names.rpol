@@ -1,0 +1,81 @@
+# Decision-corpus programs that pin the lowered term-name rule: which row of
+# the final statement owns the bare name, and how merged and inlined rows
+# are named. `decision_corpus.golden` records every row's name and contents.
+
+# A final `if`/`else` with an `accept` and a `reject`: the `reject`, the last
+# own verdict, is bare (`if-else`), the `accept` is `if-else.1`.
+policy if-else {
+    term if-else { if route.med >= 100 { set med 3; accept } else { reject } }
+}
+
+# Earlier rows and a final two-verdict statement: `staged.1`, `staged.2.1`
+# (the accept) and `staged` (the reject).
+policy staged {
+    term staged { set med 4; if route.med >= 100 { accept } else { reject } }
+}
+
+# The final statement's verdict row is not its last row: `verdict-first`
+# is the reject, `verdict-first.2.2` the trailing modification.
+policy verdict-first {
+    term verdict-first { set med 7; if route.med >= 100 { reject } else { set med 8 } }
+    term rest { accept }
+}
+
+# Two own verdicts and a trailing modification in one chain: the reject,
+# the last verdict, is bare.
+policy chain-verdicts {
+    term chain-verdicts {
+        if route.med >= 1000 { accept }
+        else if route.med >= 100 { reject }
+        else { set med 1 }
+    }
+    term rest { accept }
+}
+
+# Two strip-all removals merge into one row named after the later
+# statement: `merged.2`, then the bare accept.
+policy merged {
+    term merged { remove community *; remove large-community *:*:*; accept }
+}
+
+# A merged strip-all as the final statement is the bare row.
+policy merged-final {
+    term merged-final { remove community *; remove large-community *:*:* }
+    term rest { accept }
+}
+
+# A final call: rows inlined from the called policy hold no verdict of the
+# calling statement, so its last row, `call/lib:tag`, is bare.
+policy lib {
+    term bad { if route.med >= 1000 { reject } }
+    term tag { add community 65000:9 }
+}
+
+policy call {
+    term call { apply lib }
+    term rest { accept }
+}
+
+test high-med {
+    route { prefix 192.0.2.0/24; med 500; communities [65000:1]; large-communities [65000:1:1] }
+    expect if-else == accept with med 3
+    expect staged == accept with med 4
+    expect verdict-first == reject
+    expect chain-verdicts == reject
+    expect merged == accept with removes community *, removes large-community *:*:*
+    expect call == accept with community 65000:9
+}
+
+test low-med {
+    route { prefix 192.0.2.0/24; med 5 }
+    expect if-else == reject
+    expect staged == reject
+    expect verdict-first == accept with med 8
+    expect chain-verdicts == accept with med 1
+}
+
+test very-high-med {
+    route { prefix 192.0.2.0/24; med 5000 }
+    expect chain-verdicts == accept
+    expect call == reject
+}

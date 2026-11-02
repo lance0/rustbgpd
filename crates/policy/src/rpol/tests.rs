@@ -612,7 +612,12 @@ fn term_fallthrough_encoding() {
 /// (`z`, and `y`, a staged run that reaches the end). A staged run is named
 /// after its last statement, so a modify-then-accept term stays `u` and a
 /// split-off staged run could only add `u.2`. A final statement with no row
-/// leaves no bare row (`x.1`).
+/// leaves no bare row (`x.1`). Merged strip-all removals form one row named
+/// after the later statement (`f.2`, and the bare `e`), a chain's last own
+/// verdict beats an earlier one and a trailing modification (`cv`), and a
+/// called policy's rows are not the calling statement's verdict (`c/lib:tag`).
+/// `crates/policy/tests/decision_corpus/term-names.rpol` pins the same shapes
+/// in the decision corpus.
 #[test]
 fn term_names_are_anchored_to_source_statements() {
     let rows = |members: &str, remove: &str| -> Vec<String> {
@@ -627,6 +632,18 @@ fn term_names_are_anchored_to_source_statements() {
                  term z {{ if route.med >= 9 {{ set med 1 }} else {{ set med 2 }} }}
                  term x {{ set med 5; if route.med >= 9 {{ }} }}
                  term y {{ set med 6; add community 65000:6 }}
+                 term f {{ remove community *; remove large-community *:*:*; accept }}
+                 term e {{ remove community *; remove large-community *:*:* }}
+                 term cv {{
+                     if route.med >= 1000 {{ accept }}
+                     else if route.med >= 100 {{ reject }}
+                     else {{ set med 1 }}
+                 }}
+                 term c {{ apply lib }}
+             }}
+             policy lib {{
+                 term bad {{ if route.med >= 1000 {{ reject }} }}
+                 term tag {{ add community 65000:9 }}
              }}"
         ));
         chain.policies[0]
@@ -652,6 +669,15 @@ fn term_names_are_anchored_to_source_statements() {
         "z = continue with set med 2",
         "x.1 = continue with set med 5",
         "y = continue with set med 6; add community 65000:6",
+        "f.2 = remove community *; remove large-community *:*:*",
+        "f = accept",
+        "e = remove community *; remove large-community *:*:*",
+        "cv.1 = accept",
+        "cv = reject",
+        "cv.3 = continue with set med 1",
+        "c.1/lib:#enter = let #return",
+        "c.2/lib:bad = reject",
+        "c/lib:tag = continue with add community 65000:9",
     ];
     let head = [
         "t.1 = continue with set med 1",
