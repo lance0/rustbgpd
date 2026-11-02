@@ -128,7 +128,9 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — `+ - *` **saturate** at 0 and 4294967295, never wrap or trap, and a divisor can never be zero (see "Saturating u32 value expressions") |
+| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, arguments; the only arithmetic type — `+ - *` **saturate** at 0 and 4294967295, never wrap or trap, and a divisor can never be zero (see "Saturating u32 value expressions") |
+| asn | `route.origin-as`, `peer.asn`, `for` loops over `route.as-path` or an asn-set, `let` bindings of these | compared with `==`, `!=`, `>=`, `<=` against an integer literal or u32 parameter (private ranges: `route.origin-as >= 64512 && route.origin-as <= 65534`), with `==`/`!=` against another ASN, probed against asn-sets, and set as a whole value (`set med route.origin-as`); **no arithmetic** |
+| community value | standard community literals (`65000:1`), `for c in route.communities`, `community` parameters, `let` bindings of these | compared with `==`/`!=` against another community value, probed against community-sets (standard members only), added or removed; no arithmetic, no asn-set probe, and never equal to an ASN or an integer |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -147,6 +149,11 @@ community-set NAME { COMMUNITY-LITERAL, ... }
 asn-set NAME { ASN, ... }
 ```
 
+Set names share one namespace across kinds and with datasets: a
+prefix-set, community-set, asn-set or dataset with the same name as
+another is a compile error naming both, because an `in` reference could
+not tell which to probe.
+
 - `ge`/`le` bounds are per member, with the same semantics as the
   TOML frontend (and Cisco/Juniper prefix lists): the candidate is
   masked at the member's length and its length must fall in the
@@ -157,11 +164,16 @@ asn-set NAME { ASN, ... }
   `10.0.0.0/24 le 16` or `10.0.0.0/24 ge 28 le 26`, is a compile
   error. Dataset snapshot files use the same grammar and the same
   rule.
-- Community sets may mix standard, large, and extended members.
-  Membership (`in`) matches when **any route community of any kind
-  matches any member** — the set is kind-partitioned internally, and
-  the field you write it against (`route.communities in tagged`)
-  reads as documentation, not a kind filter.
+- Community sets may mix standard, large, and extended members, but a
+  probe reads one kind: `route.communities in S` matches the route's
+  standard communities against the set's standard members only, and
+  `route.large-communities` / `route.ext-communities` likewise. A
+  member of another kind in a named set is a compile error for that
+  probe, because it could never match there. A set that mixes kinds, such
+  as the standard and large twins of a route-server action community, is
+  probed with `route.any-community in S`, which matches a route community
+  of any kind against the members of its kind. Datasets and set
+  parameters filter by kind at runtime.
 - Community-set members may be **patterns** that match a range of
   values (see "Community patterns" below).
 - ASN sets hold plain ASN literals (u32; 4-byte ASNs are first-class,
@@ -558,9 +570,9 @@ policy customer-in(lp: u32, pfx: prefix-set, tag: community, nh: ip) {
 |---|---|---|
 | `u32` | an integer | anywhere a u32 is expected: `set local-pref lp`, `route.local-pref >= lp`, `route.as-path contains asn`, a `prepend` operand or count |
 | `prefix-set` | a prefix-set or prefix dataset name | `route.prefix in pfx` |
-| `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists), `<binding> in tags`, and, for a community-set argument, `remove community in tags` / `not in tags` (the argument gets the member checks a named set gets) |
+| `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists, and `route.any-community in tags`), `<binding> in tags`, and, for a community-set argument, `remove community in tags` / `not in tags` and `remove any-community in tags` (the argument gets the member checks a named set gets) |
 | `asn-set` | an asn-set or ASN dataset name | `route.origin-as in origins`, `peer.asn in origins`, `<binding> in origins` |
-| `community` | a standard community, `65000:100` or a well-known name such as `NO_EXPORT` | `route.communities has tag`, `add community tag`, `remove community tag` |
+| `community` | a standard community, `65000:100` or a well-known name such as `NO_EXPORT` | `route.communities has tag`, `add community tag`, `remove community tag`, `tag in tags`, and as a community value (`let t = tag`, `c == tag`) |
 | `ip` | an IPv4 or IPv6 address | `set next-hop nh`, `route.next-hop == nh`, `peer.address == nh` |
 
 Arguments are written the same way everywhere a policy is instantiated:
@@ -604,7 +616,8 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.prefix == 10.0.0.0/24` | exact prefix (same network *and* length) |
 | `route.prefix in customers` | prefix-set membership (mask + ge/le ranges) |
 | `route.communities has 65000:100` | route carries this community (kind-checked against the field) |
-| `route.communities in tagged` | any route community matches any set member |
+| `route.communities in tagged` | a standard route community matches a standard set member (`route.large-communities` and `route.ext-communities` likewise; a set member of another kind is a compile error) |
+| `route.any-community in tagged` | a route community of any kind matches a set member of its kind; for sets that mix kinds |
 | `route.as-path.len >= 3` | AS-path ASN count (RFC 4271 counting) |
 | `route.communities.len >= 100` | number of standard communities on the route (`route.large-communities.len` and `route.ext-communities.len` likewise; 0 when the attribute is absent); route-context-only, so it never disqualifies update-group sharing |
 | `route.as-path contains 65001` | boundary-anchored ASN presence (sugar for `matches "_65001_"`) |
@@ -657,7 +670,7 @@ that is false on a route without the value, so the negation matches that
 route: `!(optional-field == literal)`, and for `route.origin-as` and
 `peer.asn` also a comparison against a binding or parameter with any
 operator, any computed comparison such as
-`!(route.origin-as + 0 >= 64512)`, and a `let` binding
+`!(route.origin-as >= 64512)`, and a `let` binding
 of such a value compared or probed (`let o = route.origin-as;` then
 `!(o == 64500)` or `!(o in bogons)`). It points at the negated expression,
 including inside compound guards and loops. Use `!=` for an equality when
@@ -673,8 +686,11 @@ u32 value positions — either side of a u32 comparison, and the
 (ADR-0103): arithmetic over integer literals, parameters,
 `let` bindings (below), u32-typed fields (`route.local-pref`,
 `route.med`, `route.as-path.len`, the three community counts such as
-`route.communities.len`, `route.origin-as`, `peer.asn`), and
-three bounded builtins. A comparison's left side may also carry
+`route.communities.len`), and three bounded builtins. An ASN
+(`route.origin-as`, `peer.asn`) is no arithmetic operand: it compares,
+orders against an integer, probes an asn-set, and may be set as a whole
+value; an ASN or a community in arithmetic, a builtin or a function
+argument is a compile error. A comparison's left side may also carry
 arithmetic when it starts with a field or a binding.
 
 ```rpol
@@ -727,12 +743,12 @@ cannot be computed is one built from a missing operand.
 `route.local-pref` and `route.med` read their implicit defaults (100 / 0)
 when absent, consistent with comparisons. Every form of a comparison
 agrees: `route.origin-as == 64500`, `route.origin-as == (64500)`,
-`route.origin-as + 0 == 64500` and `route.origin-as == x` with a `let`
+`route.origin-as >= 64500` and `route.origin-as == x` with a `let`
 binding are all false on an origin-less route, and match neither `==` nor
 `!=` there. `&&`, `||` and `!` therefore combine plain true and false
 values: an operand's evaluation order never changes a verdict, and `!`
-follows the truth table above (`!(route.origin-as + 0 == 64500)` is true
-on an origin-less route).
+follows the truth table above (`!(route.origin-as >= 64512)` is true on
+an origin-less route).
 
 **Rejecting when a value is missing.** Say so with `exists`, which tests
 whether the route carries the value (`route.origin-as`, `peer.asn`,
@@ -809,8 +825,11 @@ cap keeps the local-pref doubling at 400.
 
 ### Bindings — `let`
 
-`let <name> = <value expression>` names a computed `u32` in statement
-position — a term body, or an `if`/`else` body (ADR-0103):
+`let <name> = <value expression>` names a value in statement position
+— a term body, or an `if`/`else` body (ADR-0103). The binding takes its
+initializer's type: `let origin = route.origin-as` is an ASN, `let x = c`
+in a `route.communities` loop is a community, and anything else is a u32,
+so a typed value is never laundered through a u32:
 
 ```rpol
 policy dampen {
@@ -828,14 +847,17 @@ policy dampen {
 position admits no other bare identifier, so sets, policies, and
 parameters named `let` keep working.
 
-**Immutable, u32-only.** There is no assignment, no `var`, and no
+**Immutable and typed.** There is no assignment, no `var`, and no
 mutation: a binding's value is fixed by its initializer for the rest
-of its scope. Bindings hold `u32` values only this slice — the
-initializer is a value expression, so the bindable inputs are integer
-literals, parameters, other bindings, and the u32 fields
-(`route.local-pref`, `route.med`, `route.as-path.len`,
-`route.origin-as`, `peer.asn`); binding a non-u32 field is a compile
-error naming the u32 field set.
+of its scope. The initializer is a value expression, and the binding
+takes its type: a u32 (integer literals, u32 parameters, arithmetic,
+and the u32 fields `route.local-pref`, `route.med`,
+`route.as-path.len` and the community counts), an ASN
+(`route.origin-as`, `peer.asn`, or another ASN binding), or a standard
+community (a literal such as `65000:1`, a `community` parameter, or a
+communities-loop variable). A typed value keeps its type through any
+number of bindings. Binding a field that is none of these is a compile
+error naming the value fields.
 
 **Scope and shadowing (normative).**
 
@@ -933,8 +955,10 @@ fields alone never disqualify grouping.
 ### Loops — `for`
 
 `for <var> in <source> { ... }` walks a finite collection, binding
-each element to an immutable `u32` loop variable — a fresh binding per
-iteration, scoped to the body (ADR-0103 Decision 3):
+each element to an immutable loop variable — a fresh binding per
+iteration, scoped to the body (ADR-0103 Decision 3). The source types
+the variable: an ASN from `route.as-path` or an asn-set, a standard
+community from `route.communities`:
 
 ```rpol
 community-set scrub { 65000:100, 65000:200 }
@@ -964,14 +988,11 @@ runtime-meterable.
 **Iteration sources — exactly three forms.**
 
 - `route.communities` — the route's **standard** (RFC 1997)
-  communities as raw `u32` values (`ASN << 16 | value`), in attribute
-  order. This is the community-iteration decision for this slice: a
-  standard community *is* a `u32`, so it rides the u32-only value
-  model without a new type. `route.large-communities` and
-  `route.ext-communities` do not iterate (their members are 96/64-bit
-  — probe them with `has`/`in`); community-sets do not iterate either
-  (mixed-kind members). A standard community literal doubles as a u32
-  in value positions, so `if c == 65000:100 { ... }` reads naturally.
+  communities, in attribute order, as community values: compare one
+  with a community literal (`if c == 65000:100 { ... }`), probe a
+  community-set, or add or remove it. `route.large-communities` and
+  `route.ext-communities` do not iterate (probe them with `has`/`in`);
+  community-sets do not iterate either (mixed-kind members).
 - `route.as-path` — every ASN in wire order: segments in order, ASNs
   within each segment in stored order, **prepend duplicates included**.
   `AS_SET` members are yielded individually in received order (note
@@ -984,12 +1005,16 @@ runtime-meterable.
   per-loop bound are rejected at compile time (probe those with `in`).
 
 **The loop variable in guards and actions.** It resolves like any
-`let` binding: value comparisons and arithmetic, `in` membership —
-against an `asn-set`, or against a `community-set`'s standard members
-(`c in scrub` above; large/ext members of the set never match a u32)
-— and the binding-valued community actions `add community <var>` /
-`remove community <var>` (standard kind only), which stage the
-element's value per execution: the scrub-loop idiom. A loop removal is
+`let` binding, by type. An ASN compares and orders against integers and
+probes an asn-set (`asn in bogon-asns` above). A community compares with
+another community (`c == 65000:1`, never `c == 4259840001`), probes a
+community-set whose members are all standard (`c in scrub` above; a member of another kind is a compile
+error), and is staged per execution by `add community <var>` /
+`remove community <var>`: the scrub-loop idiom. An ASN never probes a
+community-set and a community never probes an asn-set: that is how
+`0:64500` used to match ASN 64500. A u32 probes only an asn-set, and only
+as a constant (a literal `let` or a u32 parameter). A community action
+also takes a constant u32 standing for the community with that value. A loop removal is
 explicit, so it removes well-known values such as `NO_EXPORT` too, unlike
 `remove community *`. Shadowing follows
 the `let` rules — the loop variable shadows outer bindings, a body
@@ -1289,6 +1314,7 @@ Two consequences worth internalizing:
 | `remove large-community 65000:*:*` | every arrived large community with global administrator 65000 |
 | `remove community *` / `remove large-community *:*:*` / `remove ext-community *` | every arrived community of that kind, except that `remove community *` keeps well-known communities (see below) |
 | `remove community in scrub` / `remove community not in allow` | every arrived community of that kind that is (or, with `not in`, is not) a member of the community-set; `large-community` and `ext-community` likewise (see below) |
+| `remove any-community in twins` | every arrived community, of any kind, that is a member of a set that mixes kinds (`in` only) |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (ASN: 1–4294967295; count: literal 1–255) |
 | `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
@@ -1415,9 +1441,13 @@ test scrubbed {
   targets would strip the encapsulation, color and EVPN communities that EVPN
   reflection and SR-TE steering depend on. `remove ext-community in SET`
   removes whatever the set names, the origin-validation state included.
-- **The set** must be a `community-set` with at least one member of the
-  action's kind: otherwise `in` would remove nothing and `not in` would remove
-  every value, and both are compile errors. For `ext-community not in` the
+- **The set** must be a `community-set` whose members are all of the
+  action's kind, with at least one: a member of another kind could never be
+  removed, `in` with none would remove nothing and `not in` every value, and
+  all three are compile errors. `remove any-community in SET` takes a set that
+  mixes kinds and removes the members of every kind; it has no `not in` form,
+  because an allow-list is per kind: split a mixed allow-list by kind and
+  keep one `remove <kind> not in` per kind. For `ext-community not in` the
   set needs a route-target or route-origin member. Datasets are not accepted
   here yet; probe a dataset in a guard instead.
 - **Removal only, in statement order.** `add <kind> in` is a compile error.
@@ -1748,7 +1778,7 @@ Static lints ride the same pass and need no fixtures:
 - `unreferenced-policy` — no test and no `apply` names it in the
   compilation unit (with the config-chain caveat above).
 - `optional-field-negation` — a negated test on an optional value, such as
-  `!(optional-field == literal)` or `!(route.origin-as + 0 >= 64512)`, also
+  `!(optional-field == literal)` or `!(route.origin-as >= 64512)`, also
   matches a route without the value; see
   [optional comparison semantics](#expressions).
 

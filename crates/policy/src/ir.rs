@@ -56,9 +56,13 @@ pub enum DatasetProbe {
     /// `peer.asn in <dataset>` (asn-set kind). Reads peer identity, so
     /// it counts toward [`CompiledChain::requires_peer_context`].
     PeerAs,
-    /// A community-list `in <dataset>` (community-set kind) — the
-    /// OR-any criteria semantics of [`MatchExpr::CommunityInSet`].
+    /// `route.any-community in <dataset>` (community-set kind) — the
+    /// kind-agnostic OR-any semantics of [`MatchExpr::CommunityInSet`].
     Community,
+    /// `route.<kind>-communities in <dataset>` (community-set kind) —
+    /// one kind against that kind's members, like
+    /// [`MatchExpr::CommunityKindInSet`] (LAN-2794).
+    CommunityKind(CommunityAttribute),
     /// `<binding> in <dataset>` (asn-set kind): one frame load plus
     /// one hash probe, mirroring [`MatchExpr::LocalInAsnSet`].
     LocalAsn {
@@ -257,6 +261,11 @@ impl ValueField {
 pub enum ValueExpr {
     /// A constant (literal, parameter, or folded subtree).
     Const(u32),
+    /// A standard community constant (a literal or a `community`
+    /// argument): it evaluates like [`Const`](Self::Const) and renders
+    /// as `ASN:value`, so explain shows the value a policy compares or
+    /// binds as it was written (LAN-2794).
+    Community(u32),
     /// A `u32` context field read.
     Field(ValueField),
     /// A `let`-binding read (LAN-302): one indexed load from the
@@ -297,7 +306,10 @@ impl ValueExpr {
             return true;
         }
         match self {
-            ValueExpr::Const(_) | ValueExpr::Field(_) | ValueExpr::Local { .. } => false,
+            ValueExpr::Const(_)
+            | ValueExpr::Community(_)
+            | ValueExpr::Field(_)
+            | ValueExpr::Local { .. } => false,
             ValueExpr::Binary { lhs, rhs, .. }
             | ValueExpr::Min(lhs, rhs)
             | ValueExpr::Max(lhs, rhs) => lhs.any_node(pred) || rhs.any_node(pred),
@@ -337,6 +349,7 @@ impl fmt::Display for ValueExpr {
             }
             match expr {
                 ValueExpr::Const(value) => write!(f, "{value}")?,
+                ValueExpr::Community(value) => write!(f, "{}:{}", value >> 16, value & 0xffff)?,
                 ValueExpr::Field(field) => write!(f, "{}", field.as_str())?,
                 ValueExpr::Local { name, .. } => write!(f, "{name}")?,
                 ValueExpr::Binary { op, lhs, rhs } => {
@@ -532,8 +545,15 @@ pub enum MatchExpr {
     },
     /// Any route community satisfies this single criterion.
     CommunityContains(CommunityMatch),
-    /// Any route community satisfies any criterion in an indexed set.
+    /// Any route community satisfies any criterion in an indexed set —
+    /// the kind-agnostic probe (`route.any-community in S`, TOML
+    /// `match_community`).
     CommunityInSet(SetId),
+    /// A route community **of one kind** satisfies a criterion of that
+    /// kind in an indexed set (LAN-2794): `route.communities in S` reads
+    /// only the standard communities, and likewise for large and extended,
+    /// in one pass over that attribute.
+    CommunityKindInSet(SetId, CommunityAttribute),
     /// The rendered `AS_PATH` string matches a compiled regex.
     AsPathMatches(RegexId),
     /// Comparison against the `AS_PATH` ASN count.
@@ -730,11 +750,13 @@ impl MatchExpr {
             // (same structures); the community form scans the route's
             // lists (tier 3), everything else is a hash probe (tier 1).
             MatchExpr::InDataset { probe, .. } => match probe {
-                DatasetProbe::Community => 3,
+                DatasetProbe::Community | DatasetProbe::CommunityKind(_) => 3,
                 _ => 1,
             },
             MatchExpr::NeighborIn(_) | MatchExpr::NeighborNe(_) => 2,
-            MatchExpr::CommunityContains(_) | MatchExpr::CommunityInSet(_) => 3,
+            MatchExpr::CommunityContains(_)
+            | MatchExpr::CommunityInSet(_)
+            | MatchExpr::CommunityKindInSet(..) => 3,
             MatchExpr::AsPathMatches(_) => 4,
             MatchExpr::Not(inner) => inner.cost_class(),
             MatchExpr::And(children) | MatchExpr::Or(children) => {
@@ -902,6 +924,16 @@ pub enum CommunityAttribute {
 }
 
 impl CommunityAttribute {
+    /// The route field that reads this attribute, as written in a probe.
+    #[must_use]
+    pub fn field(self) -> &'static str {
+        match self {
+            CommunityAttribute::Standard => "route.communities",
+            CommunityAttribute::Extended => "route.ext-communities",
+            CommunityAttribute::Large => "route.large-communities",
+        }
+    }
+
     /// The `.rpol` action keyword: `community`, `ext-community` or
     /// `large-community`.
     #[must_use]

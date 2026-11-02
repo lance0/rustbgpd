@@ -358,6 +358,30 @@ pub enum CommunityMember {
     Pattern(Box<CommunityPattern>),
 }
 
+impl CommunityMember {
+    /// The community attribute this member matches (LAN-2794).
+    #[must_use]
+    pub fn attribute(&self) -> crate::ir::CommunityAttribute {
+        use crate::ir::CommunityAttribute;
+        match self {
+            CommunityMember::Exact(exact) => match exact {
+                CommunityMatch::Standard { .. } => CommunityAttribute::Standard,
+                CommunityMatch::LargeCommunity { .. } => CommunityAttribute::Large,
+                CommunityMatch::RouteTarget { .. }
+                | CommunityMatch::RouteOrigin { .. }
+                | CommunityMatch::ExactExt(_) => CommunityAttribute::Extended,
+            },
+            CommunityMember::Pattern(pattern) => match **pattern {
+                CommunityPattern::Standard { .. } => CommunityAttribute::Standard,
+                CommunityPattern::Large { .. } => CommunityAttribute::Large,
+                CommunityPattern::RouteTarget { .. } | CommunityPattern::RouteOrigin { .. } => {
+                    CommunityAttribute::Extended
+                }
+            },
+        }
+    }
+}
+
 /// Split members into exact criteria and patterns.
 #[must_use]
 pub fn split_community_members<'a>(
@@ -588,6 +612,37 @@ impl CommunityPatterns {
             || self.standard_by_value.matches(low, [asn, low])
     }
 
+    /// The patterns of one kind against that kind's route attribute only
+    /// (LAN-2794): one pass over that list.
+    #[inline(never)]
+    fn matches_kind(&self, ctx: &RouteContext<'_>, kind: crate::ir::CommunityAttribute) -> bool {
+        use crate::ir::CommunityAttribute;
+        match kind {
+            CommunityAttribute::Standard => {
+                self.has_standard() && ctx.communities.iter().any(|&c| self.matches_standard(c))
+            }
+            CommunityAttribute::Extended => {
+                (!self.route_targets.is_empty() || !self.route_origins.is_empty())
+                    && ctx.extended_communities.iter().any(|ec| {
+                        ec.route_target().is_some_and(|(global, local)| {
+                            self.route_targets.matches(global, [global, local])
+                        }) || ec.route_origin().is_some_and(|(global, local)| {
+                            self.route_origins.matches(global, [global, local])
+                        })
+                    })
+            }
+            CommunityAttribute::Large => {
+                !self.large.is_empty()
+                    && ctx.large_communities.iter().any(|lc| {
+                        self.large.matches(
+                            lc.global_admin,
+                            [lc.global_admin, lc.local_data1, lc.local_data2],
+                        )
+                    })
+            }
+        }
+    }
+
     /// Out of line, so the exact-only probe loops compile as they did
     /// before patterns existed.
     #[inline(never)]
@@ -750,6 +805,74 @@ impl CommunitySet {
                 .patterns
                 .as_deref()
                 .is_some_and(|patterns| patterns.matches(ctx))
+    }
+
+    /// Whether the set has a member, exact or pattern, of `kind`.
+    #[must_use]
+    pub fn has_kind(&self, kind: crate::ir::CommunityAttribute) -> bool {
+        use crate::ir::CommunityAttribute;
+        let patterns = self.patterns.as_deref();
+        match kind {
+            CommunityAttribute::Standard => {
+                !self.standard.is_empty() || patterns.is_some_and(CommunityPatterns::has_standard)
+            }
+            CommunityAttribute::Large => {
+                !self.large.is_empty() || patterns.is_some_and(|p| !p.large.is_empty())
+            }
+            CommunityAttribute::Extended => {
+                !self.route_targets.is_empty()
+                    || !self.route_origins.is_empty()
+                    || !self.exact_ext.is_empty()
+                    || patterns
+                        .is_some_and(|p| !p.route_targets.is_empty() || !p.route_origins.is_empty())
+            }
+        }
+    }
+
+    /// Whether a route community **of `kind`** matches a member of that
+    /// kind (LAN-2794): `route.communities in S` reads only the standard
+    /// communities against the standard members, and likewise for large
+    /// and extended, in one pass over that list. [`matches`](Self::matches)
+    /// stays the kind-agnostic probe (`route.any-community in S`, TOML).
+    #[must_use]
+    #[inline]
+    pub fn matches_kind(
+        &self,
+        ctx: &RouteContext<'_>,
+        kind: crate::ir::CommunityAttribute,
+    ) -> bool {
+        use crate::ir::CommunityAttribute;
+        let exact = match kind {
+            CommunityAttribute::Standard => {
+                !self.standard.is_empty()
+                    && ctx.communities.iter().any(|c| self.standard.contains(c))
+            }
+            CommunityAttribute::Extended => {
+                (!self.route_targets.is_empty()
+                    || !self.route_origins.is_empty()
+                    || !self.exact_ext.is_empty())
+                    && ctx.extended_communities.iter().any(|ec| {
+                        ec.route_target()
+                            .is_some_and(|key| self.route_targets.contains(&key))
+                            || ec
+                                .route_origin()
+                                .is_some_and(|key| self.route_origins.contains(&key))
+                            || self.exact_ext.contains(&ec.as_u64())
+                    })
+            }
+            CommunityAttribute::Large => {
+                !self.large.is_empty()
+                    && ctx.large_communities.iter().any(|lc| {
+                        self.large
+                            .contains(&(lc.global_admin, lc.local_data1, lc.local_data2))
+                    })
+            }
+        };
+        exact
+            || self
+                .patterns
+                .as_deref()
+                .is_some_and(|patterns| patterns.matches_kind(ctx, kind))
     }
 
     /// Whether `value` is a **standard** (RFC 1997) member of this set

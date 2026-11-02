@@ -363,7 +363,7 @@ async fn a_missing_operand_in_the_condition_policy_is_a_miss() {
     let _ = manager.install_conditional_advertisements(vec![definition(
         ConditionalAdvertiseIf::Absent,
         Some(rpol_chain(
-            "policy asn { term t { if peer.asn + 0 == 65001 { accept } } term rest { reject } }",
+            "policy asn { term t { if peer.asn >= 65001 && peer.asn <= 65001 { accept } } term rest { reject } }",
             "asn",
         )),
         SETTLE,

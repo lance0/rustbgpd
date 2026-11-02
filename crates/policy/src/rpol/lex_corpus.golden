@@ -7,9 +7,10 @@ bench/scale/matrix/artifacts-rung2/rustbgpd/scenario/ixp-rustbgpd/gen-a.rpol 35 
 bench/scale/matrix/artifacts-rung2/rustbgpd/scenario/ixp-rustbgpd/gen-b.rpol 35 a9634366557caa6e
 bench/scale/matrix/artifacts-rung2/rustbgpd/scenario/ixp-rustbgpd/member.rpol 35 b1f042fa185e709e
 bench/scale/matrix/artifacts-rung2/rustbgpd/scenario/member.rpol 35 b1f042fa185e709e
+crates/policy/fuzz/seeds/rpol_compile/any-community-twins.rpol 83 253d19f58189221c
 crates/policy/fuzz/seeds/rpol_compile/lan-184-deep-nesting.rpol 200017 83e8c607f4c24362
 crates/policy/fuzz/seeds/rpol_compile/lan-299-arithmetic.rpol 62 38c30b6daf7a4b93
-crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol 75 61ff95cd068e2aa3
+crates/policy/fuzz/seeds/rpol_compile/lan-299-builtins.rpol 81 3c0194b9efdc7b4a
 crates/policy/fuzz/seeds/rpol_compile/lan-299-fold-errors.rpol 57 bd747b07f8eb5fc4
 crates/policy/fuzz/seeds/rpol_compile/lan-300-imports.rpol 28 79eb24dc0c86604d
 crates/policy/fuzz/seeds/rpol_compile/lan-301-error-expect.rpol 58 4850e4b64902a975
@@ -18,7 +19,7 @@ crates/policy/fuzz/seeds/rpol_compile/lan-302-let-errors.rpol 61 618fe69e68aa8b8
 crates/policy/fuzz/seeds/rpol_compile/lan-302-let-shadowing.rpol 67 ea5d2cd10bd1597b
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loop-errors.rpol 84 ba642c88366efe5d
 crates/policy/fuzz/seeds/rpol_compile/lan-303-loops.rpol 110 419fa4e419fed9b9
-crates/policy/fuzz/seeds/rpol_compile/lan-303-nested-loops.rpol 71 f366549f8892c3fa
+crates/policy/fuzz/seeds/rpol_compile/lan-303-nested-loops.rpol 73 c1c340439b5b0ba0
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-depth.rpol 90 f9b81fce97322f56
 crates/policy/fuzz/seeds/rpol_compile/lan-304-fn-errors.rpol 101 12a6ab0c6a84d5fb
 crates/policy/fuzz/seeds/rpol_compile/lan-304-functions.rpol 107 7ac8fed44a40c1a0

@@ -93,6 +93,10 @@ fn every_node_type_renders_its_golden_form() {
             "route.communities in cust-tags",
         ),
         (
+            MatchExpr::CommunityKindInSet(SetId(0), crate::ir::CommunityAttribute::Large),
+            "route.large-communities in cust-tags",
+        ),
+        (
             MatchExpr::AsPathMatches(crate::ir::RegexId(0)),
             "route.as-path matches \"_65010_\"",
         ),
@@ -183,6 +187,67 @@ fn every_node_type_renders_its_golden_form() {
     ];
     for (expr, expected) in cases {
         assert_eq!(render_expr(&expr, &tables), expected, "node {expr:?}");
+    }
+}
+
+/// A kind-agnostic probe of a set that mixes kinds renders as the
+/// `.rpol` form that reads every kind; a per-kind field would misstate it.
+#[test]
+fn a_mixed_kind_set_renders_as_any_community() {
+    let mut tables = tables();
+    tables.community_sets = vec![Arc::new(CommunitySet::new([
+        CommunityMatch::Standard {
+            value: (65000 << 16) | 0x0064,
+        },
+        CommunityMatch::LargeCommunity {
+            global_admin: 65000,
+            local_data1: 100,
+            local_data2: 0,
+        },
+    ]))];
+    assert_eq!(
+        render_expr(&MatchExpr::CommunityInSet(SetId(0)), &tables),
+        "route.any-community in cust-tags"
+    );
+}
+
+/// Dataset community probes render by field, like their set siblings: the
+/// kind-agnostic probe as `route.any-community`, a kind-filtered one by its
+/// list, and a constant as a community.
+#[test]
+fn dataset_community_probes_render_by_field() {
+    use crate::datasets::{DatasetData, DatasetHandle, DatasetKind};
+    use crate::ir::{CommunityAttribute, DatasetId, DatasetProbe, DatasetSlot};
+    let mut tables = tables();
+    tables.datasets = vec![DatasetSlot {
+        name: "ds".into(),
+        kind: DatasetKind::Community,
+        handle: Arc::new(DatasetHandle::new(
+            "ds",
+            DatasetKind::Community,
+            DatasetData::Community(CommunitySet::new(Vec::new())),
+        )),
+    }];
+    for (probe, expected) in [
+        (DatasetProbe::Community, "route.any-community in ds"),
+        (
+            DatasetProbe::CommunityKind(CommunityAttribute::Large),
+            "route.large-communities in ds",
+        ),
+        (
+            DatasetProbe::CommunityKind(CommunityAttribute::Standard),
+            "route.communities in ds",
+        ),
+        (
+            DatasetProbe::ConstCommunity((65000 << 16) | 1),
+            "65000:1 in ds",
+        ),
+    ] {
+        let expr = MatchExpr::InDataset {
+            probe,
+            id: DatasetId(0),
+        };
+        assert_eq!(render_expr(&expr, &tables), expected);
     }
 }
 
