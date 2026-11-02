@@ -457,7 +457,7 @@ async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
     assert!(peer_metric_series_count(&metrics_view, peer_label) > 0);
 
     // Reconcile with replacement missing scope_id on nonexistent interface,
-    // so delete_peer_for_reconfigure succeeds, but add_peer_with_admin_state
+    // so the reconcile's delete succeeds, but add_peer_with_admin_state
     // fails on nix::net::if_::if_nametoindex.
     let mut replacement = make_config(addr.addr(), 65002);
     replacement.interface = Some(interface.to_string());

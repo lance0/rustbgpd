@@ -213,6 +213,13 @@ fn stall_then_hold_state(command: &PeerCommand, index: usize) -> SessionAction {
     }
 }
 
+fn hold_first_gshut(command: &PeerCommand, index: usize) -> SessionAction {
+    match command {
+        PeerCommand::UpdateGracefulShutdown { .. } if index == 0 => SessionAction::Hold,
+        _ => SessionAction::Answer,
+    }
+}
+
 fn hold_first_revalidate(command: &PeerCommand, index: usize) -> SessionAction {
     match command {
         PeerCommand::RevalidateImport { .. } if index == 0 => SessionAction::Hold,
@@ -243,7 +250,10 @@ fn hold_first_replay(command: &PeerCommand, index: usize) -> SessionAction {
 }
 
 fn is_outbound_refresh(update: &RibUpdate) -> bool {
-    matches!(update, RibUpdate::RefreshPeerOutbound { .. })
+    matches!(
+        update,
+        RibUpdate::RefreshPeerOutbound { .. } | RibUpdate::RefreshPeersOutbound { .. }
+    )
 }
 
 fn is_prestage(update: &RibUpdate) -> bool {
@@ -304,9 +314,6 @@ const FORWARD_COHORT: Drive = Drive::ForwardCohort {
     import_delta: false,
     cohort_reply: CohortReply::Committed,
 };
-
-const QUERY_PROBE_REASON: &str = "one session state probe bounded by PEER_QUERY_TIMEOUT (100 ms), \
-     below the 2 s reader deadline; the readiness lane is drained after it";
 
 /// One row per actor wait-helper call site, in source order.
 const WAIT_SITES: &[WaitSite] = &[
@@ -579,7 +586,8 @@ const WAIT_SITES: &[WaitSite] = &[
     },
     WaitSite {
         site: "policy.rs::revalidate_import_validation_dependents",
-        awaits: "PeerCommand::RevalidateImport answer of each validation-dependent peer",
+        awaits: "PeerCommand::RevalidateImport answers of every validation-dependent peer at \
+                 once, and the Route Refresh any of them needs",
         drive: Drive::LocalRevalidation,
         rib: RibHold::None,
         session: hold_first_revalidate,
@@ -590,14 +598,17 @@ const WAIT_SITES: &[WaitSite] = &[
     },
     WaitSite {
         site: "policy.rs::soft_reset_import_validation_dependents",
-        awaits: "PeerCommand::QueryState of each validation-dependent peer",
+        awaits: "PeerCommand::QueryState of every validation-dependent peer at once, then \
+                 SendRouteRefresh of each Established one",
         drive: Drive::ValidationRefresh,
         rib: RibHold::None,
         session: hold_first_state,
         additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
-            reason: QUERY_PROBE_REASON,
+            reason: "state probes bounded by PEER_QUERY_TIMEOUT (100 ms) and the refreshes they \
+                     admit, bounded by PEER_POLICY_UPDATE_TIMEOUT, run at once, below the 2 s \
+                     reader deadline; the readiness lane is drained after them",
         },
         completion: Completion::Finished,
     },
@@ -745,7 +756,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
+        site: "lifecycle.rs::outbound_refresh_round_trip",
         awaits: "RibUpdate::RefreshPeerOutbound acknowledgement",
         drive: Drive::OutboundRefresh,
         rib: RibHold::Reply(is_outbound_refresh),
@@ -756,7 +767,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
+        site: "lifecycle.rs::outbound_refresh_round_trip",
         awaits: "RibUpdate::RefreshPeerOutbound after acknowledged export-knob update",
         drive: Drive::HotExportKnobs,
         rib: RibHold::Reply(is_outbound_refresh),
@@ -770,14 +781,31 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
-        awaits: "RibUpdate::RefreshPeerOutbound after acknowledged GSHUT toggle",
+        site: "lifecycle.rs::outbound_refresh_round_trip",
+        awaits: "RibUpdate::RefreshPeersOutbound after acknowledged GSHUT toggles",
         drive: Drive::GracefulShutdown,
         rib: RibHold::Reply(is_outbound_refresh),
         session: answer_all,
         additional_entry: Some("set_graceful_shutdown"),
         window: HELD_FOREVER,
         contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "mod.rs::fan_out_session_commands",
+        awaits: "per-peer session commands of a lifecycle sweep, all at once (here the \
+                 graceful-shutdown toggles)",
+        drive: Drive::GracefulShutdown,
+        rib: RibHold::None,
+        session: hold_first_gshut,
+        additional_entry: None,
+        window: Duration::from_millis(250),
+        contract: Contract::Fenced {
+            reason: "every command is bounded by its own deadline (500 ms) from when it starts, \
+                     at most PEER_SHUTDOWN_CONCURRENCY at once, below the 2 s reader deadline \
+                     for the sweep sizes it serves; until each settles, sessions and manager \
+                     bookkeeping can disagree",
+        },
         completion: Completion::Finished,
     },
     WaitSite {
@@ -1001,6 +1029,7 @@ fn answer_rib(
         RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
         | RibUpdate::ReplacePeerExportPolicy { reply, .. }
         | RibUpdate::RefreshPeerOutbound { reply, .. }
+        | RibUpdate::RefreshPeersOutbound { reply, .. }
         | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
             let _ = reply.send(Ok(()));
         }
@@ -1143,6 +1172,7 @@ fn command_kind(command: &PeerCommand) -> &'static str {
         PeerCommand::QueryImportPolicyTermHits { .. } => "QueryImportPolicyTermHits",
         PeerCommand::ReplayOutbound { .. } => "ReplayOutbound",
         PeerCommand::RevalidateImport { .. } => "RevalidateImport",
+        PeerCommand::UpdateGracefulShutdown { .. } => "UpdateGracefulShutdown",
         _ => "other",
     }
 }

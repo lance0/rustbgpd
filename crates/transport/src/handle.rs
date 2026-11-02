@@ -2428,7 +2428,21 @@ impl PeerHandle {
         safi: Safi,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        let commands = self.commands.clone();
+        Self::send_route_refresh_with(self.commands.clone(), afi, safi, deadline).await
+    }
+
+    /// Driver-side variant of [`Self::send_route_refresh_timeout`] that takes
+    /// an owned command sender, so several sessions' requests can run at once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::send_route_refresh_timeout`].
+    pub async fn send_route_refresh_with(
+        commands: mpsc::Sender<PeerCommand>,
+        afi: Afi,
+        safi: Safi,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
         match tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
             commands
@@ -2976,7 +2990,21 @@ impl PeerHandle {
         enabled: bool,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        let commands = self.commands.clone();
+        Self::update_graceful_shutdown_with(self.commands.clone(), enabled, deadline).await
+    }
+
+    /// Driver-side variant of [`Self::update_graceful_shutdown_timeout`] that
+    /// takes an owned command sender, so several sessions' toggles can run at
+    /// once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::update_graceful_shutdown_timeout`].
+    pub async fn update_graceful_shutdown_with(
+        commands: mpsc::Sender<PeerCommand>,
+        enabled: bool,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
         match tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
             commands

@@ -1857,6 +1857,7 @@ mod bmp_periodic;
 mod cohort_budgets;
 mod cohort_handoff;
 mod collision;
+mod command_fan_out;
 mod config_mutation;
 mod config_transaction;
 mod configured_owners;

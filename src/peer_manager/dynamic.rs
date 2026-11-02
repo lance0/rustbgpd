@@ -512,7 +512,8 @@ impl PeerManager {
             .collect();
         stale.sort();
 
-        let mut removed = 0;
+        let mut reaped = Vec::with_capacity(stale.len());
+        let mut shutdowns = Vec::with_capacity(stale.len());
         for peer_key in stale {
             let Some(managed) = self.peers.remove(&peer_key) else {
                 continue;
@@ -526,30 +527,43 @@ impl PeerManager {
             );
             self.remove_max_prefix_latch(&peer_key);
             self.unregister_session(session_id);
-            if let Some(pending) = managed.pending_inbound.take() {
+            let pending = managed.pending_inbound.take().map(|pending| {
                 self.unregister_session(pending.session_id);
-                let _ = self
-                    .shutdown_handle_bounded(
-                        peer_key.address,
+                pending.handle
+            });
+            let address = peer_key.address;
+            shutdowns.push(async move {
+                if let Some(pending) = pending {
+                    let _ = Self::shutdown_handle_bounded_owned(
+                        address,
                         "dynamic rollback pending inbound",
-                        pending.handle,
+                        pending,
                     )
                     .await;
-            }
-            let _ = self
-                .shutdown_handle_bounded(peer_key.address, "dynamic rollback primary", handle)
+                }
+                let _ = Self::shutdown_handle_bounded_owned(
+                    address,
+                    "dynamic rollback primary",
+                    handle,
+                )
                 .await;
-            self.reap_deleted_peer_metric_series_for_key(&peer_key);
+            });
+            reaped.push(peer_key);
+        }
+        // Every reaped peer's sessions stop at once; a peer's metric series
+        // go only after its sessions' last emission.
+        self.fan_out_session_commands(shutdowns).await;
+        for peer_key in &reaped {
+            self.reap_deleted_peer_metric_series_for_key(peer_key);
             self.release_dynamic_bfd(peer_key.address);
             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
             self.refresh_dynamic_neighbor_capacity_metrics();
-            removed += 1;
             info!(
                 peer = %peer_key,
                 "config rollback: removed dynamic peer whose accepting range is no longer present"
             );
         }
-        removed + self.release_unadmitted_retained_dynamic()
+        reaped.len() + self.release_unadmitted_retained_dynamic()
     }
 
     /// Snapshot any unfired hot-apply / Route Refresh intent for a peer

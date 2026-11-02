@@ -2151,6 +2151,9 @@ fn invalid_invocation(message: impl std::fmt::Display) -> ! {
     process::exit(2);
 }
 
+/// Hand a validation-cache delta to the peer manager without waiting for its
+/// per-peer pass: the forwarder's next RIB update must not queue behind it.
+/// Deltas still reach the peer manager, and so each session, in order.
 async fn trigger_import_validation_refresh(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     delta: rustbgpd_transport::ValidationDelta,
@@ -2175,19 +2178,21 @@ async fn trigger_import_validation_refresh(
         return;
     }
 
-    match reply_rx.await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => warn!(
-            ?dependency,
-            error = %error,
-            "validation-cache import refresh reported failures"
-        ),
-        Err(error) => warn!(
-            ?dependency,
-            error = %error,
-            "validation-cache import refresh reply dropped"
-        ),
-    }
+    tokio::spawn(async move {
+        match reply_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(
+                ?dependency,
+                error = %error,
+                "validation-cache import refresh reported failures"
+            ),
+            Err(error) => warn!(
+                ?dependency,
+                error = %error,
+                "validation-cache import refresh reply dropped"
+            ),
+        }
+    });
 }
 
 fn zero_static_peer_summary(dynamic_range_count: usize) -> String {
@@ -7642,6 +7647,36 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    /// The VRP and ASPA forwarders hand each delta to the peer manager and
+    /// move on: the next delta's RIB update never waits for the previous
+    /// delta's per-peer pass, which can take a command window per wedged
+    /// dependent.
+    #[tokio::test]
+    async fn validation_refresh_forwarding_does_not_wait_for_the_peer_pass() {
+        use futures::FutureExt as _;
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(4);
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            assert!(
+                trigger_import_validation_refresh(
+                    &peer_mgr_tx,
+                    rustbgpd_transport::ValidationDelta::Rpki(None),
+                )
+                .now_or_never()
+                .is_some(),
+                "forwarding returns once the peer manager admits the delta"
+            );
+            let Ok(PeerManagerCommand::SoftResetImportValidationDependents { reply, .. }) =
+                peer_mgr_rx.try_recv()
+            else {
+                panic!("the delta reaches the peer manager");
+            };
+            // The pass has not finished: its reply is held.
+            held.push(reply);
+        }
+    }
 
     #[test]
     fn current_apply_failure_metrics_clear_empty_and_retired_vni_snapshots() {

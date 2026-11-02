@@ -68,39 +68,62 @@ impl PeerManager {
             })
             .collect();
 
-        // Remove peers
+        // Detach removed peers, and changed peers for delete-then-re-add,
+        // then stop all their sessions at once: a session that stopped
+        // draining commands costs one window for the whole reload, not one
+        // per peer. Each changed peer is re-added only after its old
+        // sessions are gone.
+        let mut detached = Vec::with_capacity(removed.len() + changed.len());
         for addr in &removed {
-            if let Err(e) = self.delete_peer(addr.clone(), false).await {
-                warn!(peer = %addr, error = %e, "reconcile: failed to remove peer");
-                failures.push(ReconcileFailure {
-                    kind: ReconcileFailureKind::Remove,
-                    peer: addr.clone(),
-                    error: e.to_string(),
-                });
-            } else {
-                effects.push(PeerReconcileEffect::Removed(addr.clone()));
+            match self
+                .detach_peer_for_delete(addr.clone(), false, None, true, None, None)
+                .await
+            {
+                Ok(peer) => detached.push(peer),
+                Err(e) => {
+                    warn!(peer = %addr, error = %e, "reconcile: failed to remove peer");
+                    failures.push(ReconcileFailure {
+                        kind: ReconcileFailureKind::Remove,
+                        peer: addr.clone(),
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
             }
+            effects.push(PeerReconcileEffect::Removed(addr.clone()));
         }
-        // Changed peers: delete then re-add
+        let mut replaced = Vec::with_capacity(changed.len());
         for cfg in &changed {
             let addr = PeerKey::new(cfg.address, cfg.interface.clone());
-            if let Err(e) = self
-                .delete_peer_for_reconfigure(
+            match self
+                .detach_peer_for_delete(
                     addr.clone(),
+                    false,
                     cfg.tcp_ao.as_ref(),
-                    &cfg.discard_path_attributes,
+                    false,
+                    Some(&cfg.discard_path_attributes),
                     stop_reasons.remove(&addr),
                 )
                 .await
             {
-                warn!(peer = %addr, error = %e, "reconcile: failed to remove changed peer");
-                failures.push(ReconcileFailure {
-                    kind: ReconcileFailureKind::ChangeRemove,
-                    peer: addr.clone(),
-                    error: e.to_string(),
-                });
-                continue;
+                Ok(peer) => {
+                    detached.push(peer);
+                    replaced.push(cfg);
+                }
+                Err(e) => {
+                    warn!(peer = %addr, error = %e, "reconcile: failed to remove changed peer");
+                    failures.push(ReconcileFailure {
+                        kind: ReconcileFailureKind::ChangeRemove,
+                        peer: addr,
+                        error: e.to_string(),
+                    });
+                }
             }
+        }
+        self.delete_detached_peers(detached).await;
+        // Changed peers: re-add
+        for cfg in replaced {
+            let addr = PeerKey::new(cfg.address, cfg.interface.clone());
             let was_enabled = preserved_runtime_state
                 .get(&addr)
                 .is_none_or(|(enabled, _)| *enabled);
