@@ -1781,6 +1781,13 @@ impl EvpnRecoveryProvenance {
         })
     }
 
+    /// Whether a record keeps its slots as a bitset rather than sorted entries.
+    #[cfg(test)]
+    pub(in crate::manager) fn dense_for_test(&self, handle: ProvenanceHandle) -> Option<bool> {
+        self.index(handle)
+            .map(|index| matches!(self.records[index].held, Held::Dense(_)))
+    }
+
     /// Inspect retained storage without granting an exhausted proof authority.
     #[cfg(test)]
     pub(in crate::manager) fn retained_keys_for_test(
