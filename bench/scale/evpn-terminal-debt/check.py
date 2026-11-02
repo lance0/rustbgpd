@@ -331,8 +331,51 @@ def fallback_within_bar(result):
     return result["sent_event"] == "retry_sent" and result["tick_us"] <= MARKER_RETRY_US + result["drain_us"]
 
 
+def mono(row, what):
+    """A CLOCK_MONOTONIC stamp in µs; absent or zero is INVALID, never 0."""
+    value = row.get("mono_us")
+    require(type(value) is int and value > 0, f"missing CLOCK_MONOTONIC stamp on {what}")
+    return value
+
+
+def churn_applied(barriers, peers, dispatch_us):
+    """Timed overlap cells: controller churn dispatch to the last required
+    actor-applied receipt (each client's generation-2 input barrier), both on
+    CLOCK_MONOTONIC. Source write and queueing are inside the interval."""
+    last = 0
+    for peer in peers:
+        rows = [row for row in barriers if row["peer"] == peer]
+        require(len(rows) == 2, "missing or duplicate actor input receipt")
+        applied = mono(rows[1], "the actor input receipt")
+        require(mono(rows[0], "the actor input receipt") < dispatch_us < applied,
+                "actor input receipts do not bracket the churn dispatch")
+        last = max(last, applied)
+    return (last - dispatch_us) / 1e6
+
+
+def overlap_phase(feed, peers, replay_rows, refresh_us, dispatch_us, phase_us, window_us):
+    """The predeclared churn phase, realised, and the replay overlap it must
+    hit in either arm: each client's refresh replay completes once after the
+    refresh dispatch, and at least one completes after the churn dispatch."""
+    phase = dispatch_us - refresh_us
+    require(phase_us <= phase <= phase_us + window_us,
+            f"churn dispatch outside the predeclared phase window: {phase} us after refresh")
+    done = {}
+    for row in feed:
+        if row["event"] == "data_admitted" and row["root"] == 0 and row["rows"] == replay_rows:
+            at = mono(row, "a refresh replay completion")
+            if at > refresh_us:
+                require(row["peer"] not in done, "duplicate refresh replay completion")
+                done[row["peer"]] = at
+    require(set(done) == set(peers), "missing refresh replay completion")
+    last = max(done.values())
+    require(last > dispatch_us, "churn dispatched after the refresh replays drained")
+    return {"phase_us": phase, "replays_before_dispatch": sum(at < dispatch_us for at in done.values()),
+            "replay_residue_us": last - dispatch_us}
+
+
 def timing_medians(rows, ratio):
-    """No-refusal cells only; each field is compared separately, never pooled."""
+    """Timed overlap cells only; each field is compared separately, never pooled."""
     result = {}
     for field in ("churn-applied-seconds", "convergence-seconds"):
         medians = {arm: statistics.median(row[field] for row in rows if row["arm"] == arm)

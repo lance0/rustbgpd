@@ -18,6 +18,29 @@ def instrument(files, here):
         files[path] = once(files[path].decode(), old, new).encode()
 
     manager = "crates/rib/src/manager/"
+    # One CLOCK_MONOTONIC for the controller and the daemon: rib has no clock
+    # dependency, so the binary's `main` installs a nix clock_gettime reader
+    # that the receipts below call. Same patch in both arms.
+    files["crates/rib/src/lib.rs"] = files["crates/rib/src/lib.rs"] + (
+        b"\n#[doc(hidden)]\n"
+        b"pub static BENCH_MONO_CLOCK: std::sync::OnceLock<fn() -> u64> = std::sync::OnceLock::new();\n")
+    edit("src/main.rs", "fn main() -> ExitCode {\n",
+         "fn main() -> ExitCode {\n"
+         "    fn bench_mono_us() -> u64 {\n"
+         "        let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)\n"
+         "            .expect(\"bench CLOCK_MONOTONIC\");\n"
+         "        u64::try_from(now.tv_sec()).expect(\"bench monotonic seconds\") * 1_000_000\n"
+         "            + u64::try_from(now.tv_nsec()).expect(\"bench monotonic nanoseconds\") / 1_000\n"
+         "    }\n"
+         "    let _ = rustbgpd_rib::BENCH_MONO_CLOCK.set(bench_mono_us);\n")
+    # The pinned actor input receipt gains the same clock beside its wall time.
+    edit(manager + "mod.rs", '\\"wall_us\\":{},\\"pending_batches\\":{}',
+         '\\"wall_us\\":{},\\"mono_us\\":{},\\"pending_batches\\":{}')
+    edit(manager + "mod.rs", ".expect(\"qualification clock precedes epoch\").as_micros(),\n"
+         "                            self.pending_route_batches.len(),",
+         ".expect(\"qualification clock precedes epoch\").as_micros(),\n"
+         "                            crate::BENCH_MONO_CLOCK.get().map_or(0, |clock| clock()),\n"
+         "                            self.pending_route_batches.len(),")
     edit(manager + "mod.rs", "mod evpn_recovery;", "mod evpn_recovery;\nmod terminal_debt;")
     files[manager + "terminal_debt.rs"] = (Path(here) / "work.rs").read_bytes()
     edit(manager + "evpn_recovery.rs", "impl RibManager {", "impl RibManager {\n" +

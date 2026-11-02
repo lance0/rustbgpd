@@ -19,20 +19,36 @@ the one-second resync tick. The merge changes no product file of the fix.
 
 ## Cell types
 
-Each campaign runs two cell types with the same N, alternation, no-retry and
-INVALID rules: private/candidate three times for no-refusal cells, then three
-times for forced-refusal cells. A correctness-only campaign runs one pair of each.
-All feed clocks are the daemon's wall clock (`SystemTime`, microseconds) in its
-`evpn_terminal_feed` rows; controller dispatches use the controller's wall clock on
-the same host. Timing medians use the controller's monotonic clock as before.
+Each campaign runs three required cell types with the same alternation, no-retry
+and INVALID rules: five private/candidate pairs of timed overlap cells, then three
+pairs of pressure cells, then three pairs of forced-refusal cells. A
+correctness-only campaign runs one pair of each. Both timing and pressure
+qualification must pass. Feed and receipt rows carry the daemon's wall clock and,
+from the derived `main`, the same `CLOCK_MONOTONIC` the controller stamps on its
+dispatches (`mono_us`, microseconds).
 
-- **No-refusal** keeps the workload below. The candidate's refresh tail must
-  send each non-source debtor's markers at once: a `refresh_sent` row after the
-  refresh dispatch and zero `refresh_refused`. Its EoR therefore precedes the
-  churn on the wire. Every root called for the churn must report its work counters
-  and visit zero repeated inventory rows; a root with no debtor owing markers owes
-  no renewal. Candidate medians must be at most private × 1.03, separately for
-  churn application and resume-to-wire convergence.
+- **Timed overlap** cells dispatch the churn at refresh dispatch + 100 ms on the
+  controller's `CLOCK_MONOTONIC`, sleeping then spinning; nothing observed from the
+  daemon gates it, and no pressure witness is taken or required. The realised phase
+  must lie in [100, 102] ms, and at least one client's refresh replay (a
+  `data_admitted` row of 20,000 rows) must complete after the dispatch, in either
+  arm; otherwise the cell is INVALID. Churn-applied is the dispatch to the last
+  client's generation-2 actor input receipt, both on `CLOCK_MONOTONIC`, so source
+  write and queueing behind the replays are inside it. Candidate medians must be at
+  most private × 1.03, separately for churn-applied and resume-to-wire convergence.
+  The phase, replays completed before dispatch and the replay residue are recorded
+  per cell as diagnostics.
+- **Pressure** cells keep the original no-refusal workload: churn waits for a live
+  Pending write plus a kernel sample, and the same write's kernel limiting must
+  span applied churn. Missing pressure evidence is INVALID. Their timings are
+  diagnostic only and never enter the medians. This shows correctness under
+  witnessed pressure, not a ≤1.03× result under it.
+- In both no-refusal cell types the candidate's refresh tail must send each
+  non-source debtor's markers at once: a `refresh_sent` row after the refresh
+  dispatch and zero `refresh_refused`. Its EoR therefore precedes the churn on the
+  wire. Every root called for the churn must report its work counters and visit
+  zero repeated inventory rows; a root with no debtor owing markers owes no
+  renewal.
 - **Forced refusal** keeps the queue sizes, timer and actor state. After the
   readers pause, source zero announces real single-route UPDATEs from its unused
   pool indices (Type 2 `8000..15999`, then Type 5 `2000..3999`; at most 10,000).
@@ -163,13 +179,11 @@ dispatch. Forced-refusal cells replace the churn with the fill described above:
   coverage before EoR, terminal ordering, final route set and complete settlement.
   Raw BGP type 5 is rejected because this leg does not negotiate ERR. An ERR leg
   would require capability, capture, BoRR/EoRR parser and ordering extensions.
-- Measured order is private/candidate, three pairs per cell type. For no-refusal
-  cells only, candidate medians for
-  controller dispatch of the source-UPDATE command through actor application
-  (including actual source write/drain), and resume-to-wire-convergence must each be at
-  most private × 1.03. Private bar misses remain baseline evidence; technical
-  invalidity or a candidate miss stops later cells. No medians qualify an incomplete
-  matrix. Correctness cells publish no comparative performance measurements.
+- Measured order is private/candidate, five timed overlap pairs, then three
+  pressure and three forced-refusal pairs. Only timed overlap cells carry medians.
+  Private bar misses remain baseline evidence; technical invalidity or a candidate
+  miss stops later cells. No medians qualify an incomplete matrix. Correctness cells
+  publish no comparative performance measurements.
 
 The raw consumer runs online and again during `analyze`. `FAIL` means an observed
 bar miss or absent required witness; malformed or inconsistent evidence is

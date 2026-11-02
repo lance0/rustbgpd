@@ -56,6 +56,12 @@ pub(super) fn wall_us() -> u128 {
         .as_micros()
 }
 
+/// CLOCK_MONOTONIC in µs, from the clock the derived `main` installs; 0
+/// (rejected by the consumer) if it was never installed.
+pub(super) fn mono_us() -> u64 {
+    crate::BENCH_MONO_CLOCK.get().map_or(0, |clock| clock())
+}
+
 pub(super) struct Scope(std::time::Instant);
 impl Scope {
     pub(super) fn new(group: usize, keys: usize, debtors: usize) -> Self {

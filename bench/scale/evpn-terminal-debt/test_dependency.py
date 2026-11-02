@@ -99,7 +99,7 @@ class DependencyChecks(unittest.TestCase):
                  mock.patch.object(terminal.subprocess, "run"), mock.patch.object(terminal.subprocess, "Popen", side_effect=spawn), \
                  mock.patch.object(terminal, "controller_type", return_value=lambda *_: controller), \
                  mock.patch.object(self.q, "cleanup_cell", side_effect=cleanup):
-                record = terminal.run_cell(output, manifest, self.q, self.r, self.wire, "no-refusal", "private", 0, True)
+                record = terminal.run_cell(output, manifest, self.q, self.r, self.wire, "pressure", "private", 0, True)
             self.assertEqual(seen, [False], "runner precreated the driver's exclusive capture directory")
             self.assertEqual(record["driver_exit_before_cleanup"], 17)
 
@@ -272,7 +272,7 @@ class DependencyChecks(unittest.TestCase):
                       {"event": "complete", "command": "resume", "wall_us": 550, "at": 5.5},
                       {"event": "complete", "command": "settle", "wall_us": 600, "at": 6.0}]
             churn = next(value["result"] for value in controls if value["command"] == "terminal-churn")
-            record = {"shape": "no-refusal", "arm": "candidate", "settled": row, "applied": applied, "churn": churn,
+            record = {"shape": "pressure", "arm": "candidate", "settled": row, "applied": applied, "churn": churn,
                       "correctness_only": True, "churn-applied-seconds": None, "convergence-seconds": None,
                       "cell_started_monotonic_ns": 0, "cell_finished_monotonic_ns": 7_000_000_000}
             # 20 Hz readiness from load dispatch through finish completion.
@@ -428,6 +428,110 @@ class DependencyChecks(unittest.TestCase):
                         self.assertNotIsInstance(failure.exception, self.q.AcceptanceFailure)
                     barriers[:] = copy.deepcopy(original_barriers)
                     (leg / "driver.log").write_text(original_driver)
+
+            # Pressure cell: missing required pressure evidence is INVALID.
+            (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in original_events))
+            observer([row])
+            kept_ss = (leg / "ss.jsonl").read_text()
+            (leg / "ss.jsonl").write_text(kept_ss.splitlines()[0] + "\n")
+            with self.assertRaisesRegex(ValueError, "no real kernel backpressure across churn") as failure:
+                terminal.evidence(leg, record, self.q, self.r, self.wire)
+            self.assertNotIsInstance(failure.exception, self.q.AcceptanceFailure)
+            (leg / "ss.jsonl").write_text(kept_ss)
+
+            # Timed overlap cell on the same raw files: no pressure handshake,
+            # churn timed on CLOCK_MONOTONIC from dispatch to the last receipt.
+            refresh_us, dispatch_us = 9_000_000, 9_100_500
+            overlap_events = [dict(event) for event in original_events
+                              if event["event"] not in ("pressure-before", "pressure-after")]
+            for event in overlap_events:
+                if event["event"] == "command" and event.get("command") == "refresh":
+                    event["mono_us"] = refresh_us
+                if event["event"] == "command" and event.get("command") == "terminal-churn":
+                    event["mono_us"] = dispatch_us
+            for index, value in enumerate(barriers):
+                value["mono_us"] = 8_000_000 if index % 2 == 0 else dispatch_us + 50_000 + index
+            replay_rows = (terminal.BARS["clients"] - 1) * terminal.BARS["routes_per_source"]
+            replays = [feed_fixture("data_admitted", 80, rows=replay_rows, peer=self.q.COMMON.peer(peer), mono_us=mono)
+                       for peer, mono in enumerate((9_040_000, 9_120_000, 9_210_000))]
+            feed[:0] = replays
+            overlap = {key: value for key, value in copy.deepcopy(record).items()
+                       if key not in ("pressure_before", "pressure_after")}
+            overlap.update(shape="overlap", correctness_only=False,
+                           **{"churn-applied-seconds": (dispatch_us + 50_000 + 5 - dispatch_us) / 1e6,
+                              "convergence-seconds": .5})
+
+            def write_overlap(events_now):
+                observer([row])
+                (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events_now))
+
+            write_overlap(overlap_events)
+            good = terminal.evidence(leg, overlap, self.q, self.r, self.wire)
+            self.assertEqual(good["phase"], {"phase_us": 100_500, "replays_before_dispatch": 1,
+                                             "replay_residue_us": 9_210_000 - dispatch_us})
+            self.assertEqual(good["churn_applied_seconds"], overlap["churn-applied-seconds"])
+            self.assertNotIn("kernel", good)
+            for defect, message in (("late-dispatch", "outside the predeclared phase window"),
+                                    ("drained", "after the refresh replays drained"),
+                                    ("unstamped-receipt", "missing CLOCK_MONOTONIC stamp"),
+                                    ("unstamped-dispatch", "missing CLOCK_MONOTONIC stamp"),
+                                    ("wall-metric", "churn duration differs")):
+                with self.subTest(overlap=defect):
+                    events_now, current = copy.deepcopy(overlap_events), copy.deepcopy(overlap)
+                    kept_barriers, kept_feed = copy.deepcopy(barriers), copy.deepcopy(feed)
+                    churn_event = next(event for event in events_now if event.get("command") == "terminal-churn"
+                                       and event["event"] == "command")
+                    if defect == "late-dispatch":
+                        churn_event["mono_us"] = refresh_us + 102_001
+                        for index, value in enumerate(barriers):
+                            if index % 2:
+                                value["mono_us"] = refresh_us + 200_000 + index
+                        current["churn-applied-seconds"] = (200_005 - 102_001) / 1e6
+                    elif defect == "drained":
+                        for value in feed[:3]:
+                            value["mono_us"] = dispatch_us - 1_000
+                    elif defect == "unstamped-receipt":
+                        barriers[3].pop("mono_us")
+                    elif defect == "unstamped-dispatch":
+                        churn_event.pop("mono_us")
+                    else:
+                        # The poll-observed duration is no longer the metric.
+                        current["churn-applied-seconds"] = 4.0 - 1.7
+                    write_overlap(events_now)
+                    with self.assertRaisesRegex(ValueError, message) as failure:
+                        terminal.evidence(leg, current, self.q, self.r, self.wire)
+                    self.assertNotIsInstance(failure.exception, self.q.AcceptanceFailure)
+                    barriers[:], feed[:] = kept_barriers, kept_feed
+
+    def test_pressure_witness_waits_are_invalid_not_acceptance_misses(self):
+        controller = object.__new__(terminal.controller_type(self.r))
+        controller.sockets, controller.writes, controller.feed = [], [], []
+        controller.kernel = SimpleNamespace(rows=[])
+        controller.poll = lambda: None
+        with mock.patch.dict(terminal.BARS, debt_witness_seconds=.01):
+            with self.assertRaisesRegex(ValueError, "did not establish a live Pending/kernel baseline") as failure:
+                controller.before_churn(0)
+            self.assertNotIsInstance(failure.exception, self.q.AcceptanceFailure)
+            before = {"peer": self.q.COMMON.peer(1), "pending": {"wall_us": 1}, "wall_us": 2, "write_id": 9}
+            controller.sockets = [{"peer": before["peer"], "cookie": 17, "send_buffer": 8192, "notsent_lowat": 4096}]
+            with self.assertRaisesRegex(ValueError, "did not span actually applied churn") as failure:
+                controller.after_applied({"wall_us": 3}, before)
+            self.assertNotIsInstance(failure.exception, self.q.AcceptanceFailure)
+
+    def test_derived_receipts_and_feed_carry_the_same_monotonic_clock_in_both_arms(self):
+        for arm in ("candidate", "private"):
+            with self.subTest(arm=arm):
+                files = self.derived(arm)
+                main = files["src/main.rs"].decode()
+                self.assertIn("rustbgpd_rib::BENCH_MONO_CLOCK.set(bench_mono_us)", main)
+                self.assertIn("nix::time::ClockId::CLOCK_MONOTONIC", main)
+                self.assertIn("pub static BENCH_MONO_CLOCK", files["crates/rib/src/lib.rs"].decode())
+                rib = files["crates/rib/src/manager/mod.rs"].decode()
+                self.assertIn('\\"wall_us\\":{},\\"mono_us\\":{},\\"pending_batches\\"', rib)
+                self.assertIn("crate::BENCH_MONO_CLOCK.get().map_or(0, |clock| clock()),\n"
+                              "                            self.pending_route_batches.len(),", rib)
+                self.assertIn("super::terminal_debt::mono_us(),", files["crates/rib/src/manager/evpn_recovery.rs"].decode())
+                self.assertIn("pub(super) fn mono_us() -> u64", files["crates/rib/src/manager/terminal_debt.rs"].decode())
 
     def test_forced_refusal_consumer_measures_refusal_drain_and_tick(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(terminal.BARS, routes_per_source=10):
@@ -612,13 +716,13 @@ class DependencyChecks(unittest.TestCase):
                 self.q.write_json(leg / "result.json", row)
                 (leg / "events.jsonl").write_text(json.dumps({"at": index * 10 + 2}) + "\n")
                 rows.append(row)
-            outcomes = [self.q.AcceptanceFailure("private headroom"), ValueError("candidate truncated wire"), {}, {}]
+            outcomes = [self.q.AcceptanceFailure("private headroom"), ValueError("candidate truncated wire"), {}, {}, {}, {}]
             with mock.patch.object(source, "verify_build", return_value={"rustbgpd-private": "private", "rustbgpd-candidate": "candidate"}), \
                  mock.patch.object(terminal, "evidence", side_effect=outcomes) as consumer, \
                  mock.patch.object(terminal, "accept_report"):
                 terminal.summarize(output, manifest, rows, self.q, self.r, self.wire, True)
             summary = json.loads((output / "summary.json").read_text())
-            self.assertEqual(consumer.call_count, 4)
+            self.assertEqual(consumer.call_count, len(terminal.BARS["correctness_schedule"]))
             self.assertEqual(summary["status"], "INVALID")
             self.assertEqual(len(summary["failures"]), 1)
             self.assertIn("truncated wire", summary["invalid_cells"][0]["error"])
@@ -656,6 +760,35 @@ class DependencyChecks(unittest.TestCase):
                      mock.patch.object(terminal, "evidence", side_effect=lambda _leg, row, *_: row["evidence"]):
                     terminal.summarize(output, manifest, rows, self.q, self.r, self.wire, False)
                 self.assertEqual(json.loads((output / "summary.json").read_text())["status"], "INVALID")
+
+    def test_only_timed_overlap_cells_carry_the_medians(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, rows = Path(directory), []
+            manifest = {"head": "a" * 40, "bars": terminal.BARS}
+            for index, (shape, arm) in enumerate(terminal.BARS["schedule"]):
+                timed = shape == "overlap"
+                row = {"status": "PASS", "shape": shape, "arm": arm, "correctness_only": False, "head": manifest["head"],
+                       "qualification_head": source.PINNED, "scope": terminal.SCOPE, "production_activation": False,
+                       "driver_exit": 0, "settled": {}, "evidence": {"work": {"inventory_visits": 0}},
+                       # Pressure and forced timings are diagnostic: never a median input.
+                       "churn-applied-seconds": (1.0 if arm == "private" else 1.02) if timed else None,
+                       "convergence-seconds": 1.0 if timed else None,
+                       "boot_id": "00000000-0000-0000-0000-000000000001",
+                       "daemon_owner": {"pid": 100 + index, "starttime": 1000 + index, "binary_sha256": arm},
+                       "cell_started_monotonic_ns": (index * 10 + 1) * 1000000000,
+                       "cell_finished_monotonic_ns": (index * 10 + 9) * 1000000000}
+                leg = output / f"terminal-{index:02}-{shape}-{arm}"
+                leg.mkdir()
+                (leg / "events.jsonl").write_text(json.dumps({"at": index * 10 + 2}) + "\n")
+                self.q.write_json(leg / "result.json", row)
+                rows.append(row)
+            self.assertEqual(sum(row["shape"] == "overlap" for row in rows), 10)
+            with mock.patch.object(source, "verify_build", return_value={"rustbgpd-private": "private", "rustbgpd-candidate": "candidate"}), \
+                 mock.patch.object(terminal, "evidence", side_effect=lambda _leg, row, *_: row["evidence"]):
+                self.assertEqual(terminal.summarize(output, manifest, rows, self.q, self.r, self.wire, False), 0)
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertEqual(summary["medians"]["churn-applied-seconds"],
+                             {"candidate": 1.02, "private": 1.0, "pass": True})
 
     def test_build_verifier_rejects_missing_changed_identical_or_unproven_binaries(self):
         for defect in ("none", "missing-receipt", "changed-binary", "identical-arms", "wrong-toolchain", "failed-build", "wrong-source"):

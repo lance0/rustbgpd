@@ -509,3 +509,141 @@ class ForcedResumeOrder(unittest.TestCase):
         self.assertEqual(failures, ["fallback marker send exceeded the convergence bar"])
         calls, _, failures = self.run_order("private")
         self.assertEqual((calls, failures), (["resume", "terminal-unfill"], []))
+
+
+PEERS = ("127.1.0.1", "127.1.0.2", "127.1.0.3")
+REFRESH, DISPATCH = 5_000_000, 5_100_500  # CLOCK_MONOTONIC µs
+
+
+def receipts(applied=(5_150_000, 5_170_000, 5_160_000), wall_shift=0):
+    """Two input receipts per client; the wall clock may step independently."""
+    rows = []
+    for peer, mono in zip(PEERS, applied):
+        rows.append({"peer": peer, "wall_us": 900 + wall_shift, "mono_us": 4_000_000})
+        rows.append({"peer": peer, "wall_us": mono - 4_000_000 + wall_shift, "mono_us": mono})
+    return rows
+
+
+def replays(monos=(5_040_000, 5_120_000, 5_210_000), rows=20000):
+    return [feed("data_admitted", 1, rows=rows, peer=peer, mono_us=mono) for peer, mono in zip(PEERS, monos)]
+
+
+class OverlapTimingChecks(unittest.TestCase):
+    def test_churn_applied_is_dispatch_to_the_last_monotonic_receipt(self):
+        # A wall-clock step between dispatch and the receipts must not move
+        # the metric: it is read on CLOCK_MONOTONIC only.
+        value = check.churn_applied(receipts(wall_shift=-3_000_000), PEERS, DISPATCH)
+        self.assertEqual(value, (5_170_000 - DISPATCH) / 1e6)
+
+    def test_missing_or_zero_receipt_clock_is_invalid(self):
+        for stamp in (None, 0, 1.5):
+            with self.subTest(stamp=stamp):
+                rows = receipts()
+                if stamp is None:
+                    rows[3].pop("mono_us")
+                else:
+                    rows[3]["mono_us"] = stamp
+                with self.assertRaisesRegex(ValueError, "missing CLOCK_MONOTONIC stamp"):
+                    check.churn_applied(rows, PEERS, DISPATCH)
+
+    def test_receipts_must_bracket_the_dispatch(self):
+        for applied in ((DISPATCH, 5_170_000, 5_160_000), (DISPATCH - 1, 5_170_000, 5_160_000)):
+            with self.subTest(applied=applied):
+                with self.assertRaisesRegex(ValueError, "do not bracket"):
+                    check.churn_applied(receipts(applied), PEERS, DISPATCH)
+        with self.assertRaisesRegex(ValueError, "missing or duplicate"):
+            check.churn_applied(receipts()[1:], PEERS, DISPATCH)
+
+    def test_dispatch_outside_the_predeclared_window_is_invalid(self):
+        for phase, ok in ((99_999, False), (100_000, True), (102_000, True), (102_001, False)):
+            with self.subTest(phase=phase):
+                call = lambda phase=phase: check.overlap_phase(  # noqa: E731
+                    replays(), PEERS, 20000, REFRESH, REFRESH + phase, 100_000, 2_000)
+                if ok:
+                    self.assertEqual(call()["phase_us"], phase)
+                else:
+                    with self.assertRaisesRegex(ValueError, "outside the predeclared phase window"):
+                        call()
+
+    def test_replays_drained_before_dispatch_are_invalid(self):
+        result = check.overlap_phase(replays(), PEERS, 20000, REFRESH, DISPATCH, 100_000, 2_000)
+        self.assertEqual(result, {"phase_us": 100_500, "replays_before_dispatch": 1,
+                                  "replay_residue_us": 5_210_000 - DISPATCH})
+        with self.assertRaisesRegex(ValueError, "after the refresh replays drained"):
+            check.overlap_phase(replays((5_040_000, 5_080_000, DISPATCH)), PEERS, 20000, REFRESH, DISPATCH,
+                                100_000, 2_000)
+
+    def test_replay_completions_must_be_complete_unique_and_stamped(self):
+        for defect in ("missing", "duplicate", "unstamped", "short"):
+            with self.subTest(defect=defect):
+                rows = replays()
+                if defect == "missing":
+                    rows.pop(0)
+                    message = "missing refresh replay completion"
+                elif defect == "duplicate":
+                    rows.append(dict(rows[2]))
+                    message = "duplicate refresh replay completion"
+                elif defect == "unstamped":
+                    rows[1].pop("mono_us")
+                    message = "missing CLOCK_MONOTONIC stamp"
+                else:
+                    rows[1]["rows"] = 19999
+                    message = "missing refresh replay completion"
+                with self.assertRaisesRegex(ValueError, message):
+                    check.overlap_phase(rows, PEERS, 20000, REFRESH, DISPATCH, 100_000, 2_000)
+
+
+class OverlapDispatch(unittest.TestCase):
+    def test_churn_leaves_at_refresh_plus_the_phase_without_observation(self):
+        import terminal
+
+        calls = []
+
+        class Controller:
+            last_command_start = None
+
+            def command(self, name, *args):
+                calls.append(name)
+                self.last_command_start = {"command": name, "mono_us": 7_000_000}
+                return {"command": name}
+
+            def dispatch_at(self, mono_us):
+                calls.append(("dispatch_at", mono_us))
+
+            def poll(self):
+                calls.append("poll")
+
+            def before_churn(self, *args):
+                calls.append("before_churn")
+
+        self.assertEqual(terminal.dispatch_overlap_churn(Controller()), {"command": "terminal-churn"})
+        self.assertEqual(calls, ["refresh", ("dispatch_at", 7_000_000 + terminal.BARS["churn_phase_us"]),
+                                 "terminal-churn"])
+
+    def test_dispatch_at_returns_on_the_target_monotonic_microsecond(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import terminal
+
+        clock = {"ns": 1_000_000_000}
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["ns"] += int(seconds * 1e9)
+
+        def monotonic_ns():
+            clock["ns"] += 1_000  # each read costs 1 µs of spin
+            return clock["ns"]
+
+        controller = object.__new__(terminal.controller_type(SimpleNamespace(
+            Readiness=type("Readiness", (), {"issues_slot_due_before_stop": True}),
+            Controller=object)))
+        with mock.patch.object(terminal.time, "monotonic_ns", monotonic_ns), \
+             mock.patch.object(terminal.time, "sleep", sleep):
+            controller.dispatch_at(1_000_000 + 100_000)
+        self.assertGreaterEqual(clock["ns"] // 1000, 1_100_000)
+        self.assertLess(clock["ns"] // 1000, 1_100_000 + 10)
+        self.assertEqual(len(sleeps), 1)
+        self.assertLessEqual(sleeps[0], .1)

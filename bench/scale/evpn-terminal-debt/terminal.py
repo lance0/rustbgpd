@@ -28,11 +28,18 @@ BARS = {"clients": 3, "routes_per_source": 10000, "type2_fraction": .8,
         "convergence_seconds": 60, "initial_seconds": 900, "debt_witness_seconds": 2,
         "kernel_sample_hz": 20, "max_repeated_inventory_visits": 0,
         "candidate_median_ratio": 1.03,
-        # Same N=3 private/candidate alternation for each cell type; timing
-        # medians compare no-refusal cells only.
-        "schedule": [["no-refusal", "private"], ["no-refusal", "candidate"]] * 3
+        # Timed overlap cells: churn dispatched on the controller's
+        # CLOCK_MONOTONIC at refresh dispatch + 100 ms, inside [100, 102] ms,
+        # while refresh replays still run in both arms. churn-applied is that
+        # dispatch to the last actor-applied receipt, on the same clock.
+        "churn_phase_us": 100_000, "churn_phase_window_us": 2_000,
+        # Five timed overlap pairs carry the medians. Pressure cells keep the
+        # Pending/kernel witness around churn; their timings are diagnostic.
+        "schedule": [["overlap", "private"], ["overlap", "candidate"]] * 5
+        + [["pressure", "private"], ["pressure", "candidate"]] * 3
         + [["forced-refusal", "private"], ["forced-refusal", "candidate"]] * 3,
-        "correctness_schedule": [["no-refusal", "private"], ["no-refusal", "candidate"],
+        "correctness_schedule": [["overlap", "private"], ["overlap", "candidate"],
+                                 ["pressure", "private"], ["pressure", "candidate"],
                                  ["forced-refusal", "private"], ["forced-refusal", "candidate"]],
         # Forced refusal fills the unchanged 4,096-entry outbound channel with
         # single-route announcements from source zero's unused pool indices,
@@ -40,7 +47,9 @@ BARS = {"clients": 3, "routes_per_source": 10000, "type2_fraction": .8,
         "fill_target_capacity": 1, "fill_spare_routes": 10000, "fill_seconds": 60,
         "marker_retry_seconds": 1}
 SCOPE = ("non-RTC Type 2/5, three real TCP peers, ordinary route refresh; "
-         "no-refusal cells: immediate refresh-tail EVPN marker send concurrent with kernel backpressure; "
+         "timed overlap cells: churn-applied during refresh replay overlap (performance, <=1.03x medians); "
+         "pressure cells: immediate refresh-tail EVPN marker send and churn correctness under witnessed kernel "
+         "backpressure (timings diagnostic; no <=1.03x claim under witnessed pressure); "
          "forced-refusal cells: refresh-site marker refused by a full 4,096-entry outbound channel and "
          "sent by the 1 s resync tick; complete actual-caller producer work and raw receiver UPDATE/EoR order; "
          "not ERR, RTC, full-fleet recovery, soak or production activation")
@@ -126,6 +135,14 @@ def resume_after_fallback(controller, q, arm, debtor):
     return started
 
 
+def dispatch_overlap_churn(controller):
+    """Timed overlap cells: churn leaves at refresh dispatch + the predeclared
+    phase on CLOCK_MONOTONIC. No pressure or daemon observation gates it."""
+    controller.command("refresh", BARS["convergence_seconds"])
+    controller.dispatch_at(controller.last_command_start["mono_us"] + BARS["churn_phase_us"])
+    return controller.command("terminal-churn", BARS["convergence_seconds"])
+
+
 def controller_type(r):
     # The pinned input's Controller builds its sampler from this module name.
     if not getattr(r.Readiness, "issues_slot_due_before_stop", False):
@@ -153,6 +170,24 @@ def controller_type(r):
                                  ("evpn_terminal_socket ", self.sockets), ("evpn_terminal_write ", self.writes)):
                 rows.extend(json.loads(line[len(prefix):]) for line in lines if line.startswith(prefix))
 
+        def event(self, event, **fields):
+            # The pinned event, plus the same CLOCK_MONOTONIC reading in µs
+            # that the derived daemon stamps on its receipts.
+            now = time.monotonic_ns()
+            self.last_event = {"event": event, "at": now / 1e9, "wall_us": time.time_ns() // 1000,
+                               "mono_us": now // 1000, **fields}
+            with (self.leg / "events.jsonl").open("a") as stream:
+                stream.write(json.dumps(self.last_event) + "\n")
+            return self.last_event["at"]
+
+        def dispatch_at(self, mono_us):
+            """Return at `mono_us` on CLOCK_MONOTONIC: sleep, then spin the
+            last 2 ms. Nothing here waits on, or reads, daemon observation."""
+            while (remaining := mono_us - time.monotonic_ns() // 1000) > 2_000:
+                time.sleep((remaining - 2_000) / 1e6)
+            while time.monotonic_ns() // 1000 < mono_us:
+                pass
+
         def before_churn(self, after):
             end = time.monotonic() + BARS["debt_witness_seconds"]
             while time.monotonic() < end:
@@ -173,7 +208,8 @@ def controller_type(r):
                         self.event("pressure-before", peer=socket["peer"], write_id=pending["id"], cookie=socket["cookie"],
                                    pending=pending, sample=pre[-1])
                         return self.last_event.copy()
-            raise r.MissingWitness("refresh did not establish a live Pending/kernel baseline before churn")
+            # Missing required pressure evidence makes a pressure cell INVALID.
+            raise ValueError("refresh did not establish a live Pending/kernel baseline before churn")
 
         def after_applied(self, applied, before):
             end = time.monotonic() + BARS["debt_witness_seconds"]
@@ -185,7 +221,7 @@ def controller_type(r):
                 if kernel and kernel["pending"]["id"] == before["write_id"]:
                     self.event("pressure-after", peer=before["peer"], kernel=kernel)
                     return self.last_event.copy()
-            raise r.MissingWitness("same live write/kernel limiting did not span actually applied churn")
+            raise ValueError("same live write/kernel limiting did not span actually applied churn")
 
         def fill(self):
             """Raise route volume until a debtor's outbound channel has one slot.
@@ -401,11 +437,17 @@ def evidence(leg, record, q, r, wire):
             check.require(barrier_starts[generation]["wall_us"] <= row["wall_us"] <= applied_events[generation]["wall_us"],
                           "actor input receipt does not follow its actual source-barrier dispatch")
         check.require(actual[1]["wall_us"] > bursts[0]["writers_drained_us"], "old input receipt was substituted for applied source work")
-    timed = not record["correctness_only"] and not forced
+    overlap = record["shape"] == "overlap"
+    timed = not record["correctness_only"] and overlap
     churn_seconds = applied[0]["at"] - starts[0]["at"]
     q.accept(0 <= churn_seconds <= BARS["convergence_seconds"], "source work application exceeded convergence bar")
+    if overlap:
+        churn_seconds = check.churn_applied(barriers, [q.COMMON.peer(peer) for peer in range(clients)],
+                                            check.mono(starts[0], "the churn dispatch"))
+        q.accept(churn_seconds <= BARS["convergence_seconds"], "churn application exceeded convergence bar")
     check.require(record["churn-applied-seconds"] == (churn_seconds if timed else None),
-                  "churn duration differs from raw monotonic controller clocks")
+                  "churn duration differs from raw monotonic controller and receipt clocks")
+    report["churn_applied_seconds"] = churn_seconds
     phases = [("load", BARS["initial_seconds"]), ("terminal-baseline", BARS["convergence_seconds"]),
               ("refresh", BARS["convergence_seconds"])] + ([(burst, BARS["convergence_seconds"])] if forced else [])
     for command, cap in phases:
@@ -427,7 +469,14 @@ def evidence(leg, record, q, r, wire):
     check.validate_feed(feed, {q.COMMON.peer(index) for index in range(clients)})
     work = check.lines(leg / "observer.log", "evpn_terminal_work ")
     debtors = [q.COMMON.peer(index) for index in range(1, clients)]
-    if not forced:
+    report["convergence_seconds"] = convergence
+    if overlap:
+        # Pressure observation neither delays this dispatch nor decides validity.
+        report["phase"] = check.overlap_phase(
+            feed, [q.COMMON.peer(index) for index in range(clients)], (clients - 1) * BARS["routes_per_source"],
+            check.mono(refresh_start[0], "the refresh dispatch"), check.mono(starts[0], "the churn dispatch"),
+            BARS["churn_phase_us"], BARS["churn_phase_window_us"])
+    elif not forced:
         before_events = [row for row in events if row["event"] == "pressure-before"]
         after_events = [row for row in events if row["event"] == "pressure-after"]
         check.require(len(before_events) == len(after_events) == 1
@@ -443,10 +492,11 @@ def evidence(leg, record, q, r, wire):
         kernel = check.kernel_pressure(socket_rows, check.lines(leg / "observer.log", "evpn_terminal_write "), ss,
                                        before["peer"], before["pending"]["wall_us"], after["wall_us"],
                                        before["wall_us"], applied[0]["wall_us"])
-        q.accept(kernel is not None, "no real kernel backpressure across churn")
+        check.require(kernel is not None, "no real kernel backpressure across churn")
         check.require(kernel == after["kernel"] and kernel["pending"] == before["pending"],
                       "live-write/kernel handshake differs from raw evidence")
         report["kernel"] = kernel
+    if not forced:
         if record["arm"] == "candidate":
             # The no-refusal shape: every debtor's refresh-tail send succeeded.
             for peer in debtors:
@@ -549,17 +599,28 @@ def run_cell(output, manifest, q, r, wire, shape, arm, index, correctness):
             record["baseline"] = controller.witness(r.settled)
             controller.command("mark refresh-start")
             controller.command("pause")
-            timed = not correctness and shape == "no-refusal"
-            if shape == "no-refusal":
+            timed = not correctness and shape == "overlap"
+            if shape == "overlap":
+                record["churn"] = dispatch_overlap_churn(controller)
+                churn_started = controller.last_command_start.copy()
+                record["applied"] = controller.source_barrier()
+                churn_seconds = check.churn_applied(controller.input_barriers,
+                                                    [r.Q.COMMON.peer(peer) for peer in range(BARS["clients"])],
+                                                    churn_started["mono_us"])
+                q.accept(churn_seconds <= BARS["convergence_seconds"], "churn application exceeded convergence bar")
+                record["churn-applied-seconds"] = churn_seconds if timed else None
+                controller.command("resume")
+                started = controller.last_completion
+            elif shape == "pressure":
                 controller.command("refresh", BARS["convergence_seconds"])
                 refresh_started = controller.last_command_start["wall_us"]
                 record["pressure_before"] = controller.before_churn(refresh_started)
                 record["churn"] = controller.command("terminal-churn", BARS["convergence_seconds"])
                 churn_started = controller.last_command_start.copy()
                 record["applied"] = controller.source_barrier()
-                churn_seconds = record["applied"]["at"] - churn_started["at"]
-                q.accept(churn_seconds <= BARS["convergence_seconds"], "churn application exceeded convergence bar")
-                record["churn-applied-seconds"] = churn_seconds if timed else None
+                q.accept(record["applied"]["at"] - churn_started["at"] <= BARS["convergence_seconds"],
+                         "churn application exceeded convergence bar")
+                record["churn-applied-seconds"] = None
                 record["pressure_after"] = controller.after_applied(record["applied"], record["pressure_before"])
                 controller.command("resume")
                 started = controller.last_completion
@@ -696,9 +757,10 @@ def summarize(output, manifest, rows, q, r, wire, correctness):
         else:
             check.require(cells == expected, "incomplete/reordered campaign")
             if not correctness:
-                # Forced-refusal cells carry debt the private arm cannot; they
-                # are never compared on time.
-                summary["medians"] = check.timing_medians([row for row in rows if row["shape"] == "no-refusal"],
+                # Only timed overlap cells are compared on time. Pressure
+                # timings are diagnostic; forced-refusal cells carry debt the
+                # private arm cannot.
+                summary["medians"] = check.timing_medians([row for row in rows if row["shape"] == "overlap"],
                                                           BARS["candidate_median_ratio"])
                 for field, medians in summary["medians"].items():
                     q.accept(medians["pass"], f"{field} exceeded 1.03 bar")

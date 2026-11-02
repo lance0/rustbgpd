@@ -28,12 +28,13 @@ pub(in crate::manager) fn bench_terminal_event(&self, peer: PeerId, event: &str,
         });
     eprintln!(
         concat!(
-            "evpn_terminal_feed {{\"wall_us\":{},\"root\":{},\"peer\":\"{}\",",
+            "evpn_terminal_feed {{\"wall_us\":{},\"mono_us\":{},\"root\":{},\"peer\":\"{}\",",
             "\"event\":\"{}\",\"rows\":{},\"session\":{},\"record_session\":{},\"channel\":{},",
             "\"channel_match\":{},\"complete\":{},\"current\":{},\"revision\":{},\"target_group\":{},\"table_stamp\":{},",
             "\"owed\":{},\"dirty\":{},\"capacity\":{},\"max_capacity\":{},\"markers\":{}}}"
         ),
         super::terminal_debt::wall_us(),
+        super::terminal_debt::mono_us(),
         super::terminal_debt::id(),
         peer,
         event,
