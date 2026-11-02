@@ -11215,6 +11215,7 @@ fn sets_of_every_kind_share_one_namespace() {
 mod community_kinds {
     use super::super::{format_rpol, run_rpol_tests};
     use super::{compile_ok, diagnostics_of};
+    use crate::ir::{CommunityAttribute, DatasetId, DatasetProbe, MatchExpr};
 
     fn passes(source: &str, total: usize) {
         let report = run_rpol_tests(source).expect("compiles");
@@ -11302,6 +11303,15 @@ test parameter-hits-its-kind {
 ",
             5,
         );
+        // A kind-filtered dataset probe scans the route's list of its kind:
+        // the community tier, like the named-set and any-kind probes.
+        for probe in [
+            DatasetProbe::Community,
+            DatasetProbe::CommunityKind(CommunityAttribute::Large),
+        ] {
+            let id = DatasetId(0);
+            assert_eq!(MatchExpr::InDataset { probe, id }.cost_class(), 3);
+        }
     }
 
     /// The ticket's repros: an AS-path loop variable is an ASN and a

@@ -467,7 +467,7 @@ fn bench_set_heavy(c: &mut Criterion) {
     group.finish();
 }
 
-/// A `.rpol` community-set probe (`route.communities in tags`) against a
+/// A `.rpol` community-set probe (`route.any-community in tags`) against a
 /// route carrying 30 standard, 5 large and 5 route-target communities.
 /// The exact set holds 200 standard, 20 large and 20 RT members. `miss`
 /// probes every route community of every kind; `hit` matches on the last
@@ -483,15 +483,24 @@ fn bench_community_set(c: &mut Criterion) {
         .chain((0..20).map(|i| format!("64500:{i}:1")))
         .chain((0..20).map(|i| format!("RT:64500:{i}")))
         .collect();
+    // The set mixes kinds, so the probe is `route.any-community`. Builds
+    // that predate it read every kind through `route.communities`, the
+    // same IR node, so one file still runs on both sides of an A/B.
     let compile = |members: &[String]| {
-        rustbgpd_policy::rpol::compile_rpol(
-            &format!(
+        let source = |probe: &str| {
+            format!(
                 "community-set tags {{ {} }}
-                 policy p {{ term t {{ if route.communities in tags {{ reject }} }} term r {{ accept }} }}",
+                 policy p {{ term t {{ if {probe} in tags {{ reject }} }} term r {{ accept }} }}",
                 members.join(", ")
-            ),
-            &mut SetStore::new(),
-        )
+            )
+        };
+        rustbgpd_policy::rpol::compile_rpol(&source("route.any-community"), &mut SetStore::new())
+            .or_else(|_| {
+                rustbgpd_policy::rpol::compile_rpol(
+                    &source("route.communities"),
+                    &mut SetStore::new(),
+                )
+            })
     };
     let exact_chain = compile(&exact).expect("compiles");
     let mut patterned = exact.clone();

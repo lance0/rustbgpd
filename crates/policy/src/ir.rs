@@ -741,7 +741,7 @@ impl MatchExpr {
             // (same structures); the community form scans the route's
             // lists (tier 3), everything else is a hash probe (tier 1).
             MatchExpr::InDataset { probe, .. } => match probe {
-                DatasetProbe::Community => 3,
+                DatasetProbe::Community | DatasetProbe::CommunityKind(_) => 3,
                 _ => 1,
             },
             MatchExpr::NeighborIn(_) | MatchExpr::NeighborNe(_) => 2,
