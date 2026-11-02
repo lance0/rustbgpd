@@ -2151,48 +2151,122 @@ fn invalid_invocation(message: impl std::fmt::Display) -> ! {
     process::exit(2);
 }
 
-/// Hand a validation-cache delta to the peer manager without waiting for its
-/// per-peer pass: the forwarder's next RIB update must not queue behind it.
-/// Deltas still reach the peer manager, and so each session, in order.
-async fn trigger_import_validation_refresh(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    delta: rustbgpd_transport::ValidationDelta,
-) {
-    let dependency = match delta {
-        rustbgpd_transport::ValidationDelta::Rpki(_) => ImportValidationDependency::Rpki,
-        rustbgpd_transport::ValidationDelta::Aspa(_) => ImportValidationDependency::Aspa,
-    };
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if peer_mgr_tx
-        .send(PeerManagerCommand::SoftResetImportValidationDependents {
-            delta,
-            reply: reply_tx,
-        })
-        .await
-        .is_err()
-    {
-        warn!(
-            ?dependency,
-            "peer manager unavailable while forwarding validation-cache update"
-        );
-        return;
+/// One validation forwarder's handoff to the peer manager: at most one
+/// revalidation pass in flight, and the deltas that arrive meanwhile merged
+/// into one pending delta, sent when that pass ends.
+///
+/// The forwarder never waits for a pass, so the next delta's RIB update is
+/// not held behind it, and its passes never fill the peer manager's shared
+/// command lane ahead of operator, reload and shutdown commands. Merging is
+/// sound because a session re-evaluates a delta's routes against the current
+/// table: the union of the deltas, or a full re-evaluation when any of them
+/// is one, reaches the same state as each in turn, with one Route Refresh per
+/// dependent instead of one per delta. Deltas reach the peer manager, and so
+/// each session, in order.
+struct ValidationRefreshQueue {
+    peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    in_flight: Option<oneshot::Receiver<Result<(), String>>>,
+    pending: Option<rustbgpd_transport::ValidationDelta>,
+}
+
+type ValidationPassOutcome = Result<Result<(), String>, oneshot::error::RecvError>;
+
+impl ValidationRefreshQueue {
+    fn new(peer_mgr_tx: mpsc::Sender<PeerManagerCommand>) -> Self {
+        Self {
+            peer_mgr_tx,
+            in_flight: None,
+            pending: None,
+        }
     }
 
-    tokio::spawn(async move {
-        match reply_rx.await {
+    /// Send `delta` now if no pass is in flight, else merge it into the
+    /// pending one.
+    async fn push(&mut self, delta: rustbgpd_transport::ValidationDelta) {
+        if self.in_flight.is_none() {
+            self.dispatch(delta).await;
+        } else {
+            self.pending = Some(match self.pending.take() {
+                Some(pending) => merge_validation_deltas(pending, delta),
+                None => delta,
+            });
+        }
+    }
+
+    /// The outcome of the pass in flight; pending forever while none is.
+    async fn finished(&mut self) -> ValidationPassOutcome {
+        match self.in_flight.as_mut() {
+            Some(reply) => reply.await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Record the end of the pass in flight and send the pending delta.
+    async fn complete(&mut self, outcome: ValidationPassOutcome) {
+        self.in_flight = None;
+        match outcome {
             Ok(Ok(())) => {}
             Ok(Err(error)) => warn!(
-                ?dependency,
                 error = %error,
                 "validation-cache import refresh reported failures"
             ),
             Err(error) => warn!(
-                ?dependency,
                 error = %error,
                 "validation-cache import refresh reply dropped"
             ),
         }
-    });
+        if let Some(pending) = self.pending.take() {
+            self.dispatch(pending).await;
+        }
+    }
+
+    async fn dispatch(&mut self, delta: rustbgpd_transport::ValidationDelta) {
+        let dependency = policy_validation_dependency(&delta);
+        let (reply, response) = oneshot::channel();
+        if self
+            .peer_mgr_tx
+            .send(PeerManagerCommand::SoftResetImportValidationDependents { delta, reply })
+            .await
+            .is_err()
+        {
+            warn!(
+                ?dependency,
+                "peer manager unavailable while forwarding validation-cache update"
+            );
+            return;
+        }
+        self.in_flight = Some(response);
+    }
+}
+
+fn policy_validation_dependency(
+    delta: &rustbgpd_transport::ValidationDelta,
+) -> ImportValidationDependency {
+    match delta {
+        rustbgpd_transport::ValidationDelta::Rpki(_) => ImportValidationDependency::Rpki,
+        rustbgpd_transport::ValidationDelta::Aspa(_) => ImportValidationDependency::Aspa,
+    }
+}
+
+/// One delta covering `older` then `newer`: their union, or a full
+/// re-evaluation when either is one.
+fn merge_validation_deltas(
+    older: rustbgpd_transport::ValidationDelta,
+    newer: rustbgpd_transport::ValidationDelta,
+) -> rustbgpd_transport::ValidationDelta {
+    use rustbgpd_transport::ValidationDelta::{Aspa, Rpki};
+    match (older, newer) {
+        (Rpki(Some(older)), Rpki(Some(newer))) => {
+            Rpki(Some(older.iter().chain(newer.iter()).cloned().collect()))
+        }
+        (Aspa(Some(older)), Aspa(Some(newer))) => Aspa(Some(std::sync::Arc::new(
+            older.union(&newer).copied().collect(),
+        ))),
+        // A full re-evaluation covers everything; one forwarder never mixes
+        // the two caches, but the safe answer for either is a full one.
+        (_, Rpki(_)) => Rpki(None),
+        (_, Aspa(_)) => Aspa(None),
+    }
 }
 
 fn zero_static_peer_summary(dynamic_range_count: usize) -> String {
@@ -4951,7 +5025,16 @@ async fn run<T>(
             // first table re-evaluates everything (the RIB applies the same
             // rule to its own revalidation).
             let mut first_table = true;
-            while let Some(update) = rpki_table_rx.recv().await {
+            let mut refresh = ValidationRefreshQueue::new(rpki_peer_mgr_tx);
+            loop {
+                let update = tokio::select! {
+                    update = rpki_table_rx.recv() => update,
+                    outcome = refresh.finished() => {
+                        refresh.complete(outcome).await;
+                        continue;
+                    }
+                };
+                let Some(update) = update else { break };
                 validation_tx_vrp.send_modify(|snapshot| {
                     snapshot.vrp_table = Some(std::sync::Arc::clone(&update.table));
                 });
@@ -4967,11 +5050,9 @@ async fn run<T>(
                         delta: update.delta,
                     })
                     .await;
-                trigger_import_validation_refresh(
-                    &rpki_peer_mgr_tx,
-                    rustbgpd_transport::ValidationDelta::Rpki(session_delta),
-                )
-                .await;
+                refresh
+                    .push(rustbgpd_transport::ValidationDelta::Rpki(session_delta))
+                    .await;
             }
         });
         register_rpki_task_kind(
@@ -4986,7 +5067,16 @@ async fn run<T>(
         let validation_tx_aspa = validation_watch_tx.clone();
         let handle = rpki_tasks.spawn(async move {
             let mut first_table = true;
-            while let Some(update) = aspa_table_rx.recv().await {
+            let mut refresh = ValidationRefreshQueue::new(aspa_peer_mgr_tx);
+            loop {
+                let update = tokio::select! {
+                    update = aspa_table_rx.recv() => update,
+                    outcome = refresh.finished() => {
+                        refresh.complete(outcome).await;
+                        continue;
+                    }
+                };
+                let Some(update) = update else { break };
                 validation_tx_aspa.send_modify(|snapshot| {
                     snapshot.aspa_table = Some(std::sync::Arc::clone(&update.table));
                 });
@@ -5002,11 +5092,9 @@ async fn run<T>(
                         changed_customer_asns: update.changed_customer_asns,
                     })
                     .await;
-                trigger_import_validation_refresh(
-                    &aspa_peer_mgr_tx,
-                    rustbgpd_transport::ValidationDelta::Aspa(session_delta),
-                )
-                .await;
+                refresh
+                    .push(rustbgpd_transport::ValidationDelta::Aspa(session_delta))
+                    .await;
             }
         });
         register_rpki_task_kind(
@@ -7648,34 +7736,58 @@ mod tests {
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
 
-    /// The VRP and ASPA forwarders hand each delta to the peer manager and
-    /// move on: the next delta's RIB update never waits for the previous
-    /// delta's per-peer pass, which can take a command window per wedged
-    /// dependent.
+    /// Each validation forwarder keeps one revalidation pass in flight and
+    /// merges the deltas that arrive meanwhile into one, sent when that pass
+    /// ends. Forwarding never waits for a pass, so the next delta's RIB
+    /// update is not held behind it, and validation passes never fill the
+    /// peer manager's shared command lane.
     #[tokio::test]
-    async fn validation_refresh_forwarding_does_not_wait_for_the_peer_pass() {
+    async fn validation_refresh_keeps_one_pass_in_flight_and_merges_the_rest() {
         use futures::FutureExt as _;
 
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(4);
-        let mut held = Vec::new();
-        for _ in 0..2 {
-            assert!(
-                trigger_import_validation_refresh(
-                    &peer_mgr_tx,
-                    rustbgpd_transport::ValidationDelta::Rpki(None),
-                )
-                .now_or_never()
-                .is_some(),
-                "forwarding returns once the peer manager admits the delta"
-            );
-            let Ok(PeerManagerCommand::SoftResetImportValidationDependents { reply, .. }) =
-                peer_mgr_rx.try_recv()
-            else {
-                panic!("the delta reaches the peer manager");
-            };
-            // The pass has not finished: its reply is held.
-            held.push(reply);
+        fn asns(list: &[u32]) -> rustbgpd_transport::ValidationDelta {
+            rustbgpd_transport::ValidationDelta::Aspa(Some(Arc::new(
+                list.iter().copied().collect(),
+            )))
         }
+        fn sent_asns(
+            command: PeerManagerCommand,
+        ) -> (BTreeSet<u32>, oneshot::Sender<Result<(), String>>) {
+            let PeerManagerCommand::SoftResetImportValidationDependents {
+                delta: rustbgpd_transport::ValidationDelta::Aspa(Some(asns)),
+                reply,
+            } = command
+            else {
+                panic!("an ASPA delta reaches the peer manager");
+            };
+            (asns.iter().copied().collect(), reply)
+        }
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let mut queue = ValidationRefreshQueue::new(peer_mgr_tx);
+        for delta in [asns(&[1]), asns(&[2]), asns(&[3, 2])] {
+            assert!(
+                queue.push(delta).now_or_never().is_some(),
+                "forwarding never waits for a revalidation pass"
+            );
+        }
+        let (first, reply) = sent_asns(peer_mgr_rx.try_recv().unwrap());
+        assert_eq!(first, BTreeSet::from([1]));
+        assert!(
+            peer_mgr_rx.try_recv().is_err(),
+            "one revalidation pass in flight per forwarder"
+        );
+
+        reply.send(Ok(())).unwrap();
+        let outcome = queue.finished().await;
+        assert!(queue.complete(outcome).now_or_never().is_some());
+        let (merged, _reply) = sent_asns(peer_mgr_rx.try_recv().unwrap());
+        assert_eq!(
+            merged,
+            BTreeSet::from([2, 3]),
+            "the deltas that waited go as one"
+        );
+        assert!(peer_mgr_rx.try_recv().is_err());
     }
 
     #[test]
