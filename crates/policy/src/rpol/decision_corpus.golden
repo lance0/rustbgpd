@@ -1,4 +1,4 @@
-# rpol decision corpus: 263 programs, 1668 cases. Regenerate with
+# rpol decision corpus: 264 programs, 1680 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
@@ -9,10 +9,10 @@ ast.stmt.else-if 18
 ast.stmt.else 27
 ast.stmt.nested-if 13
 ast.stmt.for 75
-ast.stmt.call 13
+ast.stmt.call 25
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1146
+ast.action.accept 1156
 ast.action.reject 384
 ast.action.set-local-pref 118
 ast.action.set-med 199
@@ -47,14 +47,14 @@ ast.value.identifier 106
 ast.value.field 148
 ast.value.arithmetic 128
 ast.value.call 72
-ir.guard.true 1199
+ir.guard.true 1211
 ir.guard.prefix-in-set 220
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
 ir.guard.community-contains 26
 ir.guard.community-in-set 53
 ir.guard.as-path-matches 148
-ir.guard.as-path-len 77
+ir.guard.as-path-len 89
 ir.guard.origin-as-eq 21
 ir.guard.origin-as-ne 9
 ir.guard.origin-as-in-set 52
@@ -75,33 +75,33 @@ ir.guard.family-is 50
 ir.guard.family-ne 12
 ir.guard.rpki-is 52
 ir.guard.aspa-is 76
-ir.guard.value-cmp 159
+ir.guard.value-cmp 171
 ir.guard.exists 12
 ir.guard.local-in-asn-set 22
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 5
-ir.guard.and 140
+ir.guard.and 152
 ir.guard.or 15
 ir.guard.not 64
-ir.value.const 217
+ir.value.const 229
 ir.value.field 170
-ir.value.local 120
+ir.value.local 132
 ir.value.binary 171
 ir.value.min 50
 ir.value.max 21
 ir.value.clamp 9
-ir.action.permit 1125
-ir.action.deny 348
-ir.action.continue 184
-ir.action.bind 97
+ir.action.permit 1135
+ir.action.deny 350
+ir.action.continue 194
+ir.action.bind 109
 ir.action.for-each 75
 ir.action.break 33
 ir.action.continue-loop 22
 ir.action.community-var 43
 ir.action.remove-large-community-admin 11
 ir.action.remove-all-communities 46
-ir.action.remove-communities-in-set 23
-ir.mod.set-local-pref 102
+ir.action.remove-communities-in-set 33
+ir.mod.set-local-pref 112
 ir.mod.set-local-pref-computed 18
 ir.mod.set-med 78
 ir.mod.set-med-computed 99
@@ -137,6 +137,7 @@ docs/reference/rpol-language.md#26d7d85f21d694a7: does not compile (a deliberate
 docs/reference/rpol-language.md#4bda8464c1fc633c: policy customer-in takes parameters (in-language tests only)
 docs/reference/rpol-language.md#cb11ac47ba6f8d9c: does not compile (a deliberate error, or datasets bound by config)
 docs/reference/rpol-language.md#8e408bb0eee6c054: does not compile (a deliberate error, or datasets bound by config)
+docs/reference/rpol-language.md#bf2317ce88f600e9: policy customer-common takes parameters (in-language tests only)
 docs/reference/rpol-language.md#6f490d60b6a2b6b8: does not compile (a deliberate error, or datasets bound by config)
 docs/reference/rpol-language.md#e8ac9ed481581a62: does not compile (a deliberate error, or datasets bound by config)
 docs/reference/rpol-language.md#6812650d98349dee: does not compile (a deliberate error, or datasets bound by config)
@@ -1393,6 +1394,18 @@ docs/reference/rpol-language.md#c22f23e15ebcdbde | edge | m07-default => permit
 docs/reference/rpol-language.md#c22f23e15ebcdbde | edge | m08-host-routes => deny
 docs/reference/rpol-language.md#c22f23e15ebcdbde | edge | m09-evpn => permit
 docs/reference/rpol-language.md#c22f23e15ebcdbde | edge | m10-v6-bogon => permit
+docs/reference/rpol-language.md#bf2317ce88f600e9 | test long-path-is-dropped | customer-in => deny
+docs/reference/rpol-language.md#bf2317ce88f600e9 | test customer-route-is-scrubbed | customer-in => permit with set local-pref 200; remove community 65000:666
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m01-v4-transit => permit with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m02-v4-invalid-long => deny
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m03-v6-tagged => permit with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m04-bare => permit with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m05-internal => permit with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m06-local-as-set => permit with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m07-default => permit with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m08-host-routes => permit with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m09-evpn => permit with set local-pref 200
+docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | m10-v6-bogon => permit with set local-pref 200; remove community 65000:666
 docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | m01-v4-transit => permit with add community 65000:100; remove community 64500:1
 docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | m02-v4-invalid-long => permit with add community 65000:100; remove community 65000:666; remove community 64512:7
 docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | m03-v6-tagged => permit with add community 65000:100; remove community 65000:200; remove community 65001:999
