@@ -1423,9 +1423,9 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 | crate::ir::DatasetProbe::LocalCommunity { name: binding, .. } => {
                     format!("{binding} in {name}")
                 }
-                crate::ir::DatasetProbe::ConstAsn(value)
-                | crate::ir::DatasetProbe::ConstCommunity(value) => {
-                    format!("{value} in {name}")
+                crate::ir::DatasetProbe::ConstAsn(value) => format!("{value} in {name}"),
+                crate::ir::DatasetProbe::ConstCommunity(value) => {
+                    format!("{}:{} in {name}", value >> 16, value & 0xffff)
                 }
             }
         }
