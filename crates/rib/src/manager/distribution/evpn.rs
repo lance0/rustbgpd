@@ -1040,7 +1040,25 @@ impl RibManager {
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
         checkpoint: &mut impl FnMut(),
     ) {
+        // A member whose complete feed is current at the stamp this staging
+        // replaces renews it from its sparse delta payload alone.
+        let stamp_before = self
+            .group_ribs
+            .get(&gid)
+            .map_or(0, |group| group.evpn_table_stamp);
         let mut stage = self.stage_group_evpn_keys(gid, keys);
+        let stamps = (
+            stamp_before,
+            self.group_ribs
+                .get(&gid)
+                .map_or(0, |group| group.evpn_table_stamp),
+        );
+        let staged_keys: std::sync::Arc<[rustbgpd_wire::EvpnRouteKey]> = stage
+            .deltas
+            .iter()
+            .inspect(|_| checkpoint())
+            .map(|delta| delta.key)
+            .collect();
         let members: Vec<_> = self
             .group_ribs
             .get(&gid)
@@ -1129,7 +1147,15 @@ impl RibManager {
                 &mut withdraw,
                 checkpoint,
             );
-            let complete = if retained {
+            let sparse = retained
+                .then(|| self.sparse_evpn_feed_seal(peer, gid, stamps, &staged_keys))
+                .flatten();
+            let complete = if let Some(seal) = sparse {
+                // Current complete coverage plus this member's delta payload
+                // stays complete. No inventory is walked; the admission is
+                // still charged to the member's provenance ledger.
+                Some(seal)
+            } else if retained {
                 // Full borrowed OLD proves coverage for successful clean
                 // updates too, without replaying unchanged keys during debt.
                 let Some(feed) = self.prepare_complete_evpn_feed_before_deltas(

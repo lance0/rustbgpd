@@ -1853,21 +1853,17 @@ impl EvpnRecoveryProvenance {
         key: EvpnRouteKey,
         checkpoint: &mut impl FnMut(bool),
     ) -> Option<usize> {
-        let position = cursor.get_or_insert_with(|| {
-            keys.partition_point(|prior| {
+        // Ascending keys share one forward cursor; each step binary-searches
+        // the remaining suffix, so a batch costs O(batch log keys) however
+        // far apart its keys sit.
+        let start = cursor.unwrap_or(0).min(keys.len());
+        let position = start
+            + keys[start..].partition_point(|prior| {
                 checkpoint(false);
                 *prior < key
-            })
-        });
-        while let Some(prior) = keys.get(*position) {
-            checkpoint(false);
-            match prior.cmp(&key) {
-                std::cmp::Ordering::Less => *position += 1,
-                std::cmp::Ordering::Equal => return Some(*position),
-                std::cmp::Ordering::Greater => return None,
-            }
-        }
-        None
+            });
+        *cursor = Some(position);
+        (keys.get(position) == Some(&key)).then_some(position)
     }
 
     fn shared_batch_capacity<A: Iterator<Item = EvpnRouteKey>>(
