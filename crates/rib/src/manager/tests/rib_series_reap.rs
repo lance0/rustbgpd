@@ -322,7 +322,7 @@ fn the_rib_reap_list_is_the_families_the_rib_writes() {
         .flat_map(|(_, body)| fields_of(body))
         .filter(|field| peer_labelled.contains(field))
         .collect();
-    assert_eq!(written.len(), 24, "{written:?}");
+    assert_eq!(written.len(), 32, "{written:?}");
     assert_eq!(
         listed.difference(&written).collect::<Vec<_>>(),
         Vec::<&String>::new(),

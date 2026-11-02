@@ -37,6 +37,10 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use tokio::sync::mpsc::error::TrySendError;
+
+use crate::update::OutboundRouteUpdate;
+
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, chain_default_permit_label};
 use rustbgpd_wire::{Afi, BgpRole, LargeCommunity, Prefix, Safi, VpnAddressFamily, VpnRouteKey};
 use tracing::{debug, info, warn};
@@ -2318,12 +2322,103 @@ impl RibManager {
             .is_none_or(tokio::sync::mpsc::Sender::is_closed)
     }
 
-    /// Whether `peer`'s open outbound channel has no free slot, so a send
-    /// attempted now is certain to fail.
+    /// Whether a route-payload send to `peer`'s open outbound channel is
+    /// certain to be refused now: the channel has no free slot, or the
+    /// session's retained-byte credit is spent.
     pub(in crate::manager) fn outbound_channel_full(&self, peer: PeerId) -> bool {
         self.outbound_peers
             .get(&peer)
             .is_some_and(|sender| sender.capacity() == 0)
+            || !self.outbound_byte_credit(peer)
+    }
+
+    /// Whether `peer`'s registered session has retained-byte credit for
+    /// route payload. Unregistered peers have no account and no budget.
+    pub(in crate::manager) fn outbound_byte_credit(&self, peer: PeerId) -> bool {
+        self.outbound_retained
+            .get(&peer)
+            .is_none_or(|account| account.has_credit())
+    }
+
+    /// Whether an update carrying a complete EVPN feed for `peer` is still
+    /// queued or being sent.
+    pub(in crate::manager) fn complete_evpn_feed_in_flight(&self, peer: PeerId) -> bool {
+        self.outbound_retained
+            .get(&peer)
+            .is_some_and(|account| account.complete_feed_in_flight())
+    }
+
+    /// Reserve one slot of `sender`, which carries `peer`'s updates. Route
+    /// payload (`payload`) is refused as [`TrySendError::Full`] while the
+    /// session's retained-byte credit is spent, exactly as for a full
+    /// channel; control-only updates are bounded by the channel count alone.
+    pub(in crate::manager) fn reserve_outbound(
+        &self,
+        peer: PeerId,
+        sender: &tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
+        payload: bool,
+    ) -> Result<crate::outbound_retained::OutboundSlot, TrySendError<()>> {
+        let account = self.outbound_retained.get(&peer);
+        if payload && account.is_some_and(|account| !account.has_credit()) {
+            return Err(TrySendError::Full(()));
+        }
+        match sender.clone().try_reserve_owned() {
+            Ok(permit) => Ok(crate::outbound_retained::OutboundSlot::new(permit, account)),
+            Err(TrySendError::Full(_)) => Err(TrySendError::Full(())),
+            Err(TrySendError::Closed(_)) => Err(TrySendError::Closed(())),
+        }
+    }
+
+    /// Reserve and fill one slot; see [`Self::reserve_outbound`].
+    pub(in crate::manager) fn try_send_outbound(
+        &self,
+        peer: PeerId,
+        sender: &tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
+        update: OutboundRouteUpdate,
+        payload: bool,
+    ) -> Result<(), TrySendError<()>> {
+        self.reserve_outbound(peer, sender, payload)?
+            .send(update, false);
+        Ok(())
+    }
+
+    /// Charge an update built ahead of its send to `peer`'s session, so it
+    /// counts while it waits.
+    pub(in crate::manager) fn charge_pending_outbound(
+        &self,
+        peer: PeerId,
+        update: &mut OutboundRouteUpdate,
+    ) {
+        if let Some(account) = self.outbound_retained.get(&peer) {
+            account.charge(update, false);
+        }
+    }
+
+    /// Replace the outbound budgets before any session registers.
+    #[cfg(test)]
+    pub(in crate::manager) fn set_outbound_retained_budgets(
+        &mut self,
+        floor: usize,
+        peer: usize,
+        total: usize,
+    ) {
+        assert!(
+            self.outbound_retained.is_empty(),
+            "set budgets before PeerUp"
+        );
+        self.outbound_retained_total =
+            crate::outbound_retained::OutboundRetainedTotal::new(floor, peer, total);
+    }
+
+    /// `peer`'s session account and the daemon-wide total, in bytes.
+    #[cfg(test)]
+    pub(in crate::manager) fn outbound_retained_bytes(&self, peer: PeerId) -> (usize, usize) {
+        (
+            self.outbound_retained
+                .get(&peer)
+                .map_or(0, |account| account.bytes()),
+            self.outbound_retained_total.bytes(),
+        )
     }
 
     pub(in crate::manager) fn group_recovery_fallback(

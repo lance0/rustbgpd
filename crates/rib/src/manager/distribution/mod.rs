@@ -685,7 +685,7 @@ struct PreparedCleanPolicyTransitionPeer {
     export_policy: Option<PolicyChain>,
     snapshot: Option<Arc<dyn crate::update::ExactExportSnapshot>>,
     sender: tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
-    permit: Option<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
+    permit: Option<crate::outbound_retained::OutboundSlot>,
 }
 
 /// A successful unfenced probe, aligned with the unpublished inventory vectors.
@@ -914,7 +914,7 @@ struct CleanPolicyTransitionProbe {
     export_policy: Option<PolicyChain>,
     snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
     sender: tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
-    permit: Option<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
+    permit: Option<crate::outbound_retained::OutboundSlot>,
     cursor: usize,
     encoded_lengths: Vec<usize>,
 }
@@ -1267,10 +1267,11 @@ fn move_to_front<T>(items: &mut Vec<T>, flags: &[bool], checkpoint: &mut impl Fn
 
 #[inline(never)]
 fn enqueue_outbound_update(
-    permit: tokio::sync::mpsc::Permit<'_, OutboundRouteUpdate>,
+    slot: crate::outbound_retained::OutboundSlot,
+    complete_feed: bool,
     update: OutboundRouteUpdate,
 ) {
-    permit.send(update);
+    slot.send(update, complete_feed);
 }
 
 #[cfg(test)]
@@ -2589,7 +2590,7 @@ impl RibManager {
                         let permit = if inventory.announce.is_empty() {
                             None
                         } else {
-                            let Ok(permit) = sender.clone().try_reserve_owned() else {
+                            let Ok(permit) = manager.reserve_outbound(peer, &sender, true) else {
                                 pending.phase = Some(CleanPolicyTransitionPhase::ProbeAndPrepare { source, destination, inventory, cursor, probe_cache, prepared, active_probe, full_probe_count });
                             return CleanPolicyTransitionAdvance::Fallback(pending);
                             };
@@ -2790,14 +2791,17 @@ impl RibManager {
                         manager.clear_policy_filtered_routes_for_peer(member.peer);
                         manager.apply_clean_policy_transition_counters(member.peer, &inventory);
                         if let Some(permit) = member.permit {
-                            permit.send(OutboundRouteUpdate {
-                                exact_export_snapshot: member.snapshot,
-                                announce_source_exclusion: Some(member.peer),
-                                announce: Arc::clone(&inventory.announce),
-                                next_hop_override: Arc::clone(&inventory.next_hop_override),
-                                shared_group_encode: Some(Arc::clone(&shared_encode)),
-                                ..OutboundRouteUpdate::default()
-                            });
+                            permit.send(
+                                OutboundRouteUpdate {
+                                    exact_export_snapshot: member.snapshot,
+                                    announce_source_exclusion: Some(member.peer),
+                                    announce: Arc::clone(&inventory.announce),
+                                    next_hop_override: Arc::clone(&inventory.next_hop_override),
+                                    shared_group_encode: Some(Arc::clone(&shared_encode)),
+                                    ..OutboundRouteUpdate::default()
+                                },
+                                false,
+                            );
                         }
                         let advertised = manager
                             .grouped_advertised_unicast_lens(member.peer)
@@ -3543,7 +3547,9 @@ impl RibManager {
                 )
             };
         }
-        let Ok(permit) = tx.try_reserve() else {
+        // A spent retained-byte credit refuses like a full channel: the
+        // payload is never built into an update, and the peer resyncs.
+        let Ok(slot) = self.reserve_outbound(peer, &tx, true) else {
             batch.retire_with(
                 &mut || checkpoint(),
                 #[cfg(test)]
@@ -5443,8 +5449,14 @@ impl RibManager {
         } else {
             0
         };
+        // Only a full-table copy counts toward the one-in-flight rule; a
+        // sparse renewal is an ordinary delta.
+        let carries_complete_feed = evpn_complete_feed
+            .as_ref()
+            .is_some_and(super::evpn_recovery::EvpnFeedSeal::is_full);
         enqueue_outbound_update(
-            permit,
+            slot,
+            carries_complete_feed,
             OutboundRouteUpdate {
                 exact_export_snapshot,
                 announce_source_exclusion,
@@ -5470,6 +5482,7 @@ impl RibManager {
                 request_refresh_all_negotiated: false,
                 shared_group_encode,
                 exempt_announce,
+                retained: crate::OutboundRetainedCharge::default(),
             },
         );
         if let Some(count) = staged_evpn_count {
@@ -6523,8 +6536,8 @@ impl RibManager {
             let Some(envelopes) = prepared.remove(&peer) else {
                 continue;
             };
-            for (permit, update) in envelopes {
-                permit.send(update);
+            for (slot, update) in envelopes {
+                slot.send(update, false);
             }
             receipt.emits_succeeded += 1;
             self.apply_batched_transition_counters(peer, &inventory);
@@ -6601,13 +6614,8 @@ impl RibManager {
         inventory: &super::update_groups::BatchedTransitionInventory,
         shared_encode: Option<&Arc<crate::update::SharedGroupEncode>>,
         probe_cache: &mut SharedUnicastProbeCache,
-    ) -> Result<
-        Vec<(
-            tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>,
-            OutboundRouteUpdate,
-        )>,
-        &'static str,
-    > {
+    ) -> Result<Vec<(crate::outbound_retained::OutboundSlot, OutboundRouteUpdate)>, &'static str>
+    {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -6654,7 +6662,7 @@ impl RibManager {
             supplement_withdraw.len(),
             supplement_withdraw.capacity(),
         );
-        let result = (|| {
+        let mut result = (|| {
             // Probe the shared payload: the first member's full batch probe
             // seeds the cohort cache; every compatible member afterwards
             // proves only the largest encoded message against its own
@@ -6754,16 +6762,16 @@ impl RibManager {
             let shared_permit = if inventory.announce.is_empty() {
                 None
             } else {
-                match sender.clone().try_reserve_owned() {
-                    Ok(permit) => Some(permit),
+                match self.reserve_outbound(peer, &sender, true) {
+                    Ok(slot) => Some(slot),
                     Err(_) => return Err("outbound channel full"),
                 }
             };
             let supplement_permit = if supplement_announce == 0 && supplement_withdraw.is_empty() {
                 None
             } else {
-                match sender.clone().try_reserve_owned() {
-                    Ok(permit) => Some(permit),
+                match self.reserve_outbound(peer, &sender, true) {
+                    Ok(slot) => Some(slot),
                     Err(_) => return Err("outbound channel full"),
                 }
             };
@@ -6808,6 +6816,12 @@ impl RibManager {
             }
             Ok(envelopes)
         })();
+        // Prepared envelopes wait for the member's emit: they count from now.
+        if let Ok(envelopes) = &mut result {
+            for (_, update) in envelopes {
+                self.charge_pending_outbound(peer, update);
+            }
+        }
         self.replacement_checkpoint(true);
         super::retire_vec(&mut supplement_withdraw, &mut || checkpoint());
         self.replacement_checkpoint(true);
@@ -8703,8 +8717,21 @@ impl RibManager {
                     // and the force flag for the retry; no drop is counted because
                     // nothing was built. Only this actor sends on the channel, so a
                     // free slot seen here is still free at the send.
-                    if (is_dirty || is_force) && self.outbound_channel_full(peer) {
-                        debug!(%peer, "outbound channel still full — deferring resync");
+                    // The same holds while the session's retained-byte credit
+                    // is spent, and for an owned EVPN member while its last
+                    // complete feed is still queued or being sent: building
+                    // another full-table copy behind it would only stack
+                    // copies for a receiver that is not reading. The deferral
+                    // keeps the retained proof, so the later rebuild still
+                    // starts from actually admitted OLD.
+                    if (is_dirty || is_force)
+                        && (self.outbound_channel_full(peer)
+                            || (evpn_group_owned
+                                && !evpn_feeds.contains_key(&peer)
+                                && (is_force || !self.evpn_feed_is_current(peer))
+                                && self.complete_evpn_feed_in_flight(peer)))
+                    {
+                        debug!(%peer, "outbound channel or complete EVPN feed still pending — deferring resync");
                         self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
                         break 'member;
                     }

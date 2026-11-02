@@ -773,6 +773,7 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
     session.negotiated = Some(Arc::new(negotiated));
     session.send_route_update(OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: None,
         announce_source_exclusion: None,
@@ -831,6 +832,7 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
     session.negotiated = Some(Arc::new(negotiated));
     session.send_route_update(OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,

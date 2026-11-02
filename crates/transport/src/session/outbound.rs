@@ -107,6 +107,8 @@ impl RetiringRest {
             request_refresh_all_negotiated: _,
             shared_group_encode: _,
             exempt_announce: _,
+            // Released when the envelope itself drops, after its inventory.
+            retained: _,
         } = update;
         freed_in_one_step(withdraw);
         freed_in_one_step(end_of_rib);
@@ -551,6 +553,9 @@ impl Drop for PreparingOutbound {
 impl PeerSession {
     pub(super) async fn handle_outbound_route_update(&mut self, mut update: OutboundRouteUpdate) {
         debug_assert!(self.pending_outbound.is_none());
+        // Off the channel, but its bytes stay charged until the envelope
+        // drops, sent or retired.
+        update.retained.dequeued();
         let shared = if update.replay.is_none() {
             let mut preparing = PreparingOutbound(Some(update));
             let shared = self

@@ -21,6 +21,7 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -73,6 +74,7 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
     );
     session.send_route_update(OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -169,6 +171,7 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
     );
     session.send_route_update(OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,

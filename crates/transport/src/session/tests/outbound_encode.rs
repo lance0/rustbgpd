@@ -150,6 +150,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     };
     session.send_route_update(OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -543,6 +544,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     };
     session.send_route_update(OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -1746,6 +1748,7 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
         rustbgpd_policy::NextHopAction::Specific(IpAddr::V6("2001:db8::42".parse().unwrap()));
     session.send_route_update(OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,

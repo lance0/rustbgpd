@@ -446,11 +446,11 @@ impl RibManager {
             request_refresh_all_negotiated: true,
             ..OutboundRouteUpdate::default()
         };
-        match record.outbound_tx.try_send(update) {
+        match self.try_send_outbound(peer, &record.outbound_tx, update, false) {
             Ok(()) => {
                 self.pending_inbound_refresh.remove(&peer);
             }
-            Err(TrySendError::Full(_)) => {
+            Err(TrySendError::Full(())) => {
                 self.pending_inbound_refresh.insert(peer, session_id);
                 warn!(
                     %peer,
@@ -459,7 +459,7 @@ impl RibManager {
                      ROUTE-REFRESH request to the bounded resync timer"
                 );
             }
-            Err(TrySendError::Closed(_)) => {
+            Err(TrySendError::Closed(())) => {
                 self.pending_inbound_refresh.remove(&peer);
                 warn!(
                     %peer,
@@ -523,7 +523,7 @@ impl RibManager {
                 request_refresh_all_negotiated: true,
                 ..OutboundRouteUpdate::default()
             };
-            match sender.try_send(update) {
+            match self.try_send_outbound(peer, &sender, update, false) {
                 Ok(()) => {
                     self.pending_inbound_refresh.remove(&peer);
                     debug!(
@@ -532,8 +532,8 @@ impl RibManager {
                         "delivered deferred collision-failback inbound ROUTE-REFRESH request"
                     );
                 }
-                Err(TrySendError::Full(_)) => {}
-                Err(TrySendError::Closed(_)) => {
+                Err(TrySendError::Full(())) => {}
+                Err(TrySendError::Closed(())) => {
                     self.pending_inbound_refresh.remove(&peer);
                     warn!(
                         %peer,
@@ -1259,8 +1259,8 @@ impl RibManager {
             // re-walks it.
             if !update.withdraw.is_empty()
                 && matches!(
-                    self.outbound_peers[&peer].try_send(update),
-                    Err(TrySendError::Full(_))
+                    self.try_send_outbound(peer, &self.outbound_peers[&peer], update, true),
+                    Err(TrySendError::Full(()))
                 )
             {
                 if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
@@ -1530,6 +1530,7 @@ impl RibManager {
         self.invalidate_evpn_feed_completion(peer);
         self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
+        self.outbound_retained.remove(&peer);
         self.outbound_session_ids.remove(&peer);
         self.pending_inbound_refresh.remove(&peer);
         if self.pending_inbound_refresh.is_empty() {
@@ -2377,6 +2378,13 @@ impl RibManager {
         }
         self.initialize_outbound_registration_gauges(peer);
         self.outbound_peers.insert(peer, outbound_tx);
+        self.outbound_retained.insert(
+            peer,
+            crate::outbound_retained::OutboundRetainedAccount::new(
+                Arc::clone(&self.outbound_retained_total),
+                self.metrics.outbound_retained_gauges(&peer.label()),
+            ),
+        );
         self.outbound_session_ids.insert(peer, session_id);
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
@@ -3934,7 +3942,7 @@ impl RibManager {
                 end_of_rib: eor_families.clone(),
                 ..OutboundRouteUpdate::default()
             };
-            if tx.try_send(eor).is_err() {
+            if self.try_send_outbound(peer, &tx, eor, false).is_err() {
                 warn!(%peer, "outbound channel full — `EoR` deferred");
                 self.metrics.record_outbound_eor_deferral(&peer.label());
                 for f in &eor_families {

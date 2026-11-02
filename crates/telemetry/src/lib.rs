@@ -26,7 +26,7 @@ pub use logging::{
     LoggingError, PeerLevelHandle, init_logging, peer_level_layer, reload_per_peer_levels,
 };
 pub use metrics::{
-    BgpMetrics, evpn_es_auto_esi_states, evpn_es_core_isolation_states, interface_peer_label,
-    non_canonical_peer_labels, peer_label, scoped_peer_label,
+    BgpMetrics, OutboundRetainedGauges, evpn_es_auto_esi_states, evpn_es_core_isolation_states,
+    interface_peer_label, non_canonical_peer_labels, peer_label, scoped_peer_label,
 };
 pub use reason_labels::{NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason};

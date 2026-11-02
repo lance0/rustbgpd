@@ -785,15 +785,19 @@ impl RibManager {
             .outbound_peers
             .get(&peer)
             .ok_or_else(|| RibCommandError::not_found("outbound session disappeared"))?;
-        sender
-            .try_send(OutboundRouteUpdate {
+        self.try_send_outbound(
+            peer,
+            sender,
+            OutboundRouteUpdate {
                 end_of_rib: families,
                 replay: Some(std::sync::Arc::clone(replay)),
                 ..OutboundRouteUpdate::default()
-            })
-            .map_err(|_| {
-                RibCommandError::internal("outbound replay terminal envelope could not be admitted")
-            })?;
+            },
+            false,
+        )
+        .map_err(|_| {
+            RibCommandError::internal("outbound replay terminal envelope could not be admitted")
+        })?;
         Ok(())
     }
 
@@ -2242,7 +2246,7 @@ impl RibManager {
             end_of_rib: ready.iter().copied().collect(),
             ..OutboundRouteUpdate::default()
         };
-        if tx.try_send(eor).is_err() {
+        if self.try_send_outbound(peer, &tx, eor, false).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
             self.metrics.record_outbound_eor_deferral(&peer.label());
             self.pending_eor.entry(peer).or_default().extend(ready);

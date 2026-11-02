@@ -1225,6 +1225,7 @@ async fn export_policy_totals_survive_a_session_reset() {
 fn empty_outbound_update() -> OutboundRouteUpdate {
     OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: None,
         announce_source_exclusion: None,

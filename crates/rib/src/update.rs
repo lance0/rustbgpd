@@ -1209,6 +1209,11 @@ pub struct OutboundRouteUpdate {
     /// ordinary row replace it ahead of the RTBH path's own announcement.
     /// `0` = no ordering requirement.
     pub exempt_announce: usize,
+    /// Retained-byte charge against the receiving session's outbound budget,
+    /// released when this update is dropped. The session calls
+    /// [`crate::OutboundRetainedCharge::dequeued`] when it takes the update
+    /// from its channel.
+    pub retained: crate::OutboundRetainedCharge,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.

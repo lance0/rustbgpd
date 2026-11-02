@@ -1188,3 +1188,188 @@ async fn outbound_pacing_closed_writer_retires_admission_deadline() {
         );
     }
 }
+
+/// Poll a peer's channel series until `done` holds.
+async fn wait_channel(
+    metrics: &BgpMetrics,
+    label: &str,
+    done: impl Fn([i64; 8]) -> bool,
+    what: &str,
+) {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        while !done(metrics.peer_outbound_channel(label)) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "{what}: {:?}",
+        metrics.peer_outbound_channel(label)
+    );
+}
+
+/// Updates still queued when a session dies leave through the paced
+/// retirement task: each is counted as discarded and its retained-byte charge
+/// returns to zero, for the peer and daemon-wide.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "registration, a stalled reader and the retirement drain in one scenario"
+)]
+async fn retired_queued_updates_release_their_retained_charge() {
+    const ASN: u32 = 65001;
+    let metrics = BgpMetrics::new();
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let (_query_tx, query_rx) = mpsc::channel(1);
+    let manager = tokio::spawn(
+        rustbgpd_rib::RibManager::new(
+            rib_rx,
+            query_rx,
+            None,
+            Some(Ipv4Addr::new(10, 0, 0, 100)),
+            metrics.clone(),
+        )
+        .run(),
+    );
+    // A real session registers itself, encoder included, and then never
+    // runs its loop: a reader stalled at the channel.
+    let mut peer_config = PeerConfig::new(ASN, ASN, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.route_reflector_client = true;
+    config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let (_commands, cmd_rx) = mpsc::channel(8);
+    let mut session = PeerSession::new(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx.clone(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let (client, _wire) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: u16::try_from(ASN).unwrap(),
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities: vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                },
+                Capability::FourOctetAs { asn: ASN },
+            ],
+        }))
+        .await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+
+    let receiver = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+    let (source_tx, mut source_rx) = mpsc::channel(64);
+    rib_tx
+        .send(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: source,
+            peer_asn: ASN,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 3),
+            outbound_tx: source_tx,
+            export_policy: None,
+            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+    let label = receiver.label();
+    // [retained, bytes, high, queued, reserved, enqueued, dequeued, discarded]
+    let channel = || metrics.peer_outbound_channel(&label);
+    wait_channel(
+        &metrics,
+        &label,
+        |series| series[3] >= 1,
+        "registration End-of-RIB",
+    )
+    .await;
+    let registered = channel()[3];
+    for batch in 0..3u32 {
+        let mut route = pacing_routes(1, true).pop().unwrap();
+        route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((21 << 24) | batch), 32));
+        route.peer = source;
+        rib_tx
+            .send(RibUpdate::RoutesReceived {
+                peer: source,
+                session_id: 0,
+                announced: vec![route],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+        let expected = registered + i64::from(batch) + 1;
+        wait_channel(
+            &metrics,
+            &label,
+            |series| series[3] >= expected,
+            "route update",
+        )
+        .await;
+    }
+    let queued = channel();
+    assert_eq!(queued[3], registered + 3);
+    assert!(queued[1] > 0, "route updates are charged");
+    assert_eq!(queued[3], queued[5] - queued[6] - queued[7]);
+
+    // The session takes the head update (the End-of-RIB) and sends it.
+    let head = session.outbound_rx.try_recv().unwrap();
+    session.handle_outbound_route_update(head).await;
+    let [_, _, _, queued, _, enqueued, dequeued, discarded] = channel();
+    assert_eq!((queued, dequeued, discarded), (registered + 2, 1, 0));
+    assert_eq!(queued, enqueued - dequeued - discarded);
+
+    session.retire_off_turn(None);
+    wait_channel(
+        &metrics,
+        &label,
+        |series| series[0] == 0,
+        "paced retirement",
+    )
+    .await;
+    let [
+        retained,
+        bytes,
+        _,
+        queued,
+        reserved,
+        enqueued,
+        dequeued,
+        discarded,
+    ] = channel();
+    assert_eq!((retained, bytes, queued, reserved), (0, 0, 0, 0));
+    assert_eq!((dequeued, discarded), (1, enqueued - 1));
+    while source_rx.try_recv().is_ok() {}
+    assert_eq!(metrics.rib_outbound_retained_bytes().0, 0);
+    drop((rib_tx, session));
+    manager.await.unwrap();
+}

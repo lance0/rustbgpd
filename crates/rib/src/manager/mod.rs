@@ -656,6 +656,11 @@ pub struct RibManager {
     /// coalesced family-scoped recovery intent for those limits (ADR-0113).
     outbound_limit_control: outbound_prefix_limits::OutboundLimitControl,
     outbound_peers: HashMap<PeerId, mpsc::Sender<OutboundRouteUpdate>>,
+    /// Retained-byte account of each registered session, keyed like
+    /// `outbound_peers` (see [`crate::outbound_retained`]).
+    outbound_retained: HashMap<PeerId, Arc<crate::outbound_retained::OutboundRetainedAccount>>,
+    /// Daemon-wide retained bytes and the outbound budgets.
+    outbound_retained_total: Arc<crate::outbound_retained::OutboundRetainedTotal>,
     /// Transport session identity recorded at `PeerUp` registration,
     /// keyed like `outbound_peers`. `handle_peer_down` /
     /// `handle_peer_graceful_restart` discard a teardown whose stamped id
@@ -2742,6 +2747,12 @@ impl RibManager {
             outbound_prefix_limits: HashMap::new(),
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
+            outbound_retained: HashMap::new(),
+            outbound_retained_total: crate::outbound_retained::OutboundRetainedTotal::new(
+                crate::outbound_retained::PEER_OUTBOUND_RETAINED_FLOOR,
+                crate::outbound_retained::PEER_OUTBOUND_RETAINED_BUDGET,
+                crate::outbound_retained::OUTBOUND_RETAINED_BUDGET,
+            ),
             flush_poll_budget: initial_flush_poll_budget(),
             actor_suspended: Arc::default(),
             outbound_session_ids: HashMap::new(),

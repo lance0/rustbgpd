@@ -45,6 +45,8 @@ pub mod manager;
 mod orf;
 /// Optimal Route Reflection topology graph + SPF engine (RFC 9107).
 pub mod orr;
+/// Retained-byte accounting for the route updates the RIB hands to sessions.
+pub mod outbound_retained;
 /// Opaque neighbor identity keying every per-peer RIB structure.
 pub mod peer_id;
 /// Family-split prefix-trie map backing the compact prefix-keyed RIB indexes.
@@ -91,6 +93,7 @@ pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
     OrrState, OrrStatusSnapshot, OrrTopology, OrrTopologySnapshot, OrrVantageStatus, SpfResult,
 };
+pub use outbound_retained::OutboundRetainedCharge;
 pub use peer_id::{PeerEndpoint, PeerId, PeerScope};
 pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,

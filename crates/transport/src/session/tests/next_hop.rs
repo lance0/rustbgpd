@@ -278,6 +278,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     let v6_nh: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let update = OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -354,6 +355,7 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
     session.negotiated = Some(Arc::new(negotiated));
     let update = OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -413,6 +415,7 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     route.link_local_next_hop = Some(remote_ll);
     let update = OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -472,6 +475,7 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     let update = OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -526,6 +530,7 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
     session.negotiated = Some(Arc::new(negotiated));
     let update = OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -651,6 +656,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
     let v6_nh: Ipv6Addr = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -731,6 +737,7 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     let update = OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -790,6 +797,7 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
     let route_next_hop = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
         exempt_announce: 0,
+        retained: rustbgpd_rib::OutboundRetainedCharge::default(),
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,

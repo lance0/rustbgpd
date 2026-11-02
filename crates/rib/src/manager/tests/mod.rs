@@ -1565,6 +1565,7 @@ mod outbound_commit_accounting;
 mod outbound_limit_install;
 mod outbound_prefix_limits;
 mod outbound_resync_state;
+mod outbound_retained;
 mod paged_query;
 mod peer_identity;
 mod per_client_best;

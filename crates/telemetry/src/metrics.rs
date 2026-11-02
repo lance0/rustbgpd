@@ -662,6 +662,16 @@ struct BgpMetricsInner {
 
     // ── Outbound queue (per-peer writer back-pressure) ─────────────
     peer_outbound_queue_depth: IntGaugeVec,
+    peer_outbound_retained_updates: IntGaugeVec,
+    peer_outbound_retained_bytes: IntGaugeVec,
+    peer_outbound_retained_bytes_high_watermark: IntGaugeVec,
+    peer_outbound_queued_updates: IntGaugeVec,
+    peer_outbound_reserved_slots: IntGaugeVec,
+    peer_outbound_enqueued_updates: IntCounterVec,
+    peer_outbound_dequeued_updates: IntCounterVec,
+    peer_outbound_discarded_updates: IntCounterVec,
+    rib_outbound_retained_bytes: IntGauge,
+    rib_outbound_retained_bytes_high_watermark: IntGauge,
     peer_slow: IntGaugeVec,
     bmp_stream_diverged: IntGaugeVec,
     rejected_routes_retained: IntGaugeVec,
@@ -900,6 +910,79 @@ struct BgpMetricsInner {
     mrt_last_dump_duration_milliseconds: IntGauge,
     mrt_dump_bytes_written: IntCounter,
     mrt_dump_failures: IntCounterVec,
+}
+
+/// Metric handles for one registered session's RIB-to-session channel: its
+/// retained route updates and bytes, queue occupancy and totals, and the
+/// daemon-wide retained bytes.
+///
+/// The handles stay bound to the series they resolved, so a release that
+/// arrives after the peer's series is reaped lands in the detached series
+/// instead of recreating it below zero.
+#[derive(Clone, Debug)]
+pub struct OutboundRetainedGauges {
+    updates: IntGauge,
+    bytes: IntGauge,
+    bytes_high: IntGauge,
+    queued: IntGauge,
+    reserved: IntGauge,
+    enqueued: IntCounter,
+    dequeued: IntCounter,
+    discarded: IntCounter,
+    total: IntGauge,
+    total_high: IntGauge,
+}
+
+impl OutboundRetainedGauges {
+    /// Count one route update of `bytes` estimated bytes as retained. The
+    /// caller passes the session's and the daemon's retained bytes after the
+    /// charge, which raise the high watermarks.
+    pub fn charge(&self, bytes: i64, session_bytes: i64, total_bytes: i64) {
+        self.updates.inc();
+        self.bytes.add(bytes);
+        self.total.add(bytes);
+        if session_bytes > self.bytes_high.get() {
+            self.bytes_high.set(session_bytes);
+        }
+        if total_bytes > self.total_high.get() {
+            self.total_high.set(total_bytes);
+        }
+    }
+
+    /// Release one route update counted with [`Self::charge`].
+    pub fn release(&self, bytes: i64) {
+        self.updates.dec();
+        self.bytes.sub(bytes);
+        self.total.sub(bytes);
+    }
+
+    /// A channel slot was reserved for an update not yet sent.
+    pub fn reserve(&self) {
+        self.reserved.inc();
+    }
+
+    /// A reserved slot was filled or given back.
+    pub fn unreserve(&self) {
+        self.reserved.dec();
+    }
+
+    /// An update entered the channel.
+    pub fn enqueue(&self) {
+        self.enqueued.inc();
+        self.queued.inc();
+    }
+
+    /// The session took an update from the channel to send.
+    pub fn dequeue(&self) {
+        self.dequeued.inc();
+        self.queued.dec();
+    }
+
+    /// An update left the channel unsent.
+    pub fn discard(&self) {
+        self.discarded.inc();
+        self.queued.dec();
+    }
 }
 
 /// Prometheus metrics for the BGP daemon.
@@ -1291,6 +1374,105 @@ impl BgpMetrics {
                  drain (shrink); a value pinned near the writer's bulk-buffer \
                  capacity marks a slow or stuck client that is not draining our \
                  output during convergence.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_retained_updates = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_outbound_retained_updates",
+                "Route updates the RIB has handed to a peer's session and the \
+                 session has not yet finished sending or discarding. Exact, \
+                 updated as each update is queued and released. A value that \
+                 stays high marks a session that is not draining the RIB's output.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_retained_bytes = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_outbound_retained_bytes",
+                "Estimated bytes of route updates the RIB has handed to a peer's \
+                 session and the session has not yet finished sending or \
+                 discarding. Charged against the per-peer outbound budget; over \
+                 budget, the RIB marks the peer dirty and resyncs it once it drains.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rib_outbound_retained_bytes = IntGauge::new(
+            "bgp_rib_outbound_retained_bytes",
+            "Estimated bytes of route updates the RIB has handed to all sessions \
+             and not yet released: the sum of bgp_peer_outbound_retained_bytes, \
+             charged against the daemon-wide outbound budget.",
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_retained_bytes_high_watermark = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_outbound_retained_bytes_high_watermark",
+                "Highest bgp_peer_outbound_retained_bytes charged to one of a \
+                 peer's sessions since its series was created.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rib_outbound_retained_bytes_high_watermark = IntGauge::new(
+            "bgp_rib_outbound_retained_bytes_high_watermark",
+            "Highest bgp_rib_outbound_retained_bytes since the daemon started.",
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_queued_updates = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_outbound_queued_updates",
+                "Route updates waiting in the channel from the RIB to a peer's \
+                 session: enqueued minus dequeued minus discarded. Slots the RIB \
+                 has reserved but not yet filled are counted separately in \
+                 bgp_peer_outbound_reserved_slots.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_reserved_slots = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_outbound_reserved_slots",
+                "Slots of a peer's RIB-to-session channel the RIB has reserved for \
+                 an update it has not sent yet.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_enqueued_updates = IntCounterVec::new(
+            Opts::new(
+                "bgp_peer_outbound_enqueued_updates_total",
+                "Route updates the RIB has placed in a peer's RIB-to-session channel.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_dequeued_updates = IntCounterVec::new(
+            Opts::new(
+                "bgp_peer_outbound_dequeued_updates_total",
+                "Route updates a peer's session has taken from its RIB-to-session \
+                 channel to send.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let peer_outbound_discarded_updates = IntCounterVec::new(
+            Opts::new(
+                "bgp_peer_outbound_discarded_updates_total",
+                "Route updates dropped from a peer's RIB-to-session channel unsent \
+                 because the session ended with them still queued.",
             ),
             &["peer"],
         )
@@ -3242,6 +3424,38 @@ impl BgpMetrics {
             .register(Box::new(peer_outbound_queue_depth.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(peer_outbound_retained_updates.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_outbound_retained_bytes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_outbound_retained_bytes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(
+                peer_outbound_retained_bytes_high_watermark.clone(),
+            ))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_outbound_retained_bytes_high_watermark.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_outbound_queued_updates.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_outbound_reserved_slots.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_outbound_enqueued_updates.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_outbound_dequeued_updates.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_outbound_discarded_updates.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(peer_slow.clone()))
             .expect("metric not already registered");
         registry
@@ -3883,6 +4097,16 @@ impl BgpMetrics {
             messages_sent,
             messages_received,
             peer_outbound_queue_depth,
+            peer_outbound_retained_updates,
+            peer_outbound_retained_bytes,
+            peer_outbound_retained_bytes_high_watermark,
+            peer_outbound_queued_updates,
+            peer_outbound_reserved_slots,
+            peer_outbound_enqueued_updates,
+            peer_outbound_dequeued_updates,
+            peer_outbound_discarded_updates,
+            rib_outbound_retained_bytes,
+            rib_outbound_retained_bytes_high_watermark,
             peer_slow,
             bmp_stream_diverged,
             rejected_routes_retained,
@@ -4333,6 +4557,14 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.messages_sent, peer);
         Self::reap_peer_series_from_vec(&self.0.messages_received, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_outbound_queue_depth, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_retained_updates, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_retained_bytes, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_retained_bytes_high_watermark, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_queued_updates, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_reserved_slots, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_enqueued_updates, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_dequeued_updates, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_discarded_updates, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_slow, peer);
         Self::reap_peer_series_from_vec(&self.0.bmp_stream_diverged, peer);
         Self::reap_peer_series_from_vec(&self.0.rejected_routes_retained, peer);
@@ -4428,6 +4660,14 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&inner.rib_stale_peer_down_ignored, peer);
         Self::reap_peer_series_from_vec(&inner.rib_stale_session_message_ignored, peer);
         Self::reap_peer_series_from_vec(&inner.exact_export_rejections, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_outbound_retained_updates, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_outbound_retained_bytes, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_outbound_retained_bytes_high_watermark, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_outbound_queued_updates, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_outbound_reserved_slots, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_outbound_enqueued_updates, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_outbound_dequeued_updates, peer);
+        Self::reap_peer_series_from_vec(&inner.peer_outbound_discarded_updates, peer);
         // As in `reap_peer_series`: invalidate memoized handles after the
         // removal.
         if Self::reap_label_series_from_vec(
@@ -4947,6 +5187,72 @@ impl BgpMetrics {
             .peer_outbound_queue_depth
             .with_label_values(&[peer])
             .set(depth);
+    }
+
+    /// Resolve the gauges one registered session's retained outbound route
+    /// updates are counted in. The returned handles stay bound to the series
+    /// they resolved: releases that arrive after the peer's series is reaped
+    /// land in the detached series instead of recreating it below zero.
+    #[must_use]
+    pub fn outbound_retained_gauges(&self, peer: &str) -> OutboundRetainedGauges {
+        let inner = &self.0;
+        OutboundRetainedGauges {
+            updates: inner
+                .peer_outbound_retained_updates
+                .with_label_values(&[peer]),
+            bytes: inner
+                .peer_outbound_retained_bytes
+                .with_label_values(&[peer]),
+            bytes_high: inner
+                .peer_outbound_retained_bytes_high_watermark
+                .with_label_values(&[peer]),
+            queued: inner
+                .peer_outbound_queued_updates
+                .with_label_values(&[peer]),
+            reserved: inner
+                .peer_outbound_reserved_slots
+                .with_label_values(&[peer]),
+            enqueued: inner
+                .peer_outbound_enqueued_updates
+                .with_label_values(&[peer]),
+            dequeued: inner
+                .peer_outbound_dequeued_updates
+                .with_label_values(&[peer]),
+            discarded: inner
+                .peer_outbound_discarded_updates
+                .with_label_values(&[peer]),
+            total: inner.rib_outbound_retained_bytes.clone(),
+            total_high: inner.rib_outbound_retained_bytes_high_watermark.clone(),
+        }
+    }
+
+    /// Read a peer's RIB-to-session channel series as `[retained updates,
+    /// retained bytes, retained-bytes high watermark, queued, reserved,
+    /// enqueued, dequeued, discarded]`. Test/diagnostic helper.
+    #[must_use]
+    pub fn peer_outbound_channel(&self, peer: &str) -> [i64; 8] {
+        let gauges = self.outbound_retained_gauges(peer);
+        let count = |counter: &IntCounter| i64::try_from(counter.get()).unwrap_or(i64::MAX);
+        [
+            gauges.updates.get(),
+            gauges.bytes.get(),
+            gauges.bytes_high.get(),
+            gauges.queued.get(),
+            gauges.reserved.get(),
+            count(&gauges.enqueued),
+            count(&gauges.dequeued),
+            count(&gauges.discarded),
+        ]
+    }
+
+    /// Read the daemon-wide retained outbound bytes and their high watermark.
+    /// Test/diagnostic helper.
+    #[must_use]
+    pub fn rib_outbound_retained_bytes(&self) -> (i64, i64) {
+        (
+            self.0.rib_outbound_retained_bytes.get(),
+            self.0.rib_outbound_retained_bytes_high_watermark.get(),
+        )
     }
 
     /// Read a peer's outbound-queue-depth gauge. Test/diagnostic helper.
