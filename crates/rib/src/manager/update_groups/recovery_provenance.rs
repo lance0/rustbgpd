@@ -3793,4 +3793,55 @@ mod tests {
             }
         }
     }
+
+    /// Probe, not a contract: members that capture after churn against a
+    /// stale universe (the live group hint) copy every post-universe key into
+    /// their own sparse set; capturing against a universe rebuilt from the
+    /// current table costs one more shared universe plus a mask per member.
+    #[test]
+    #[ignore = "probe: run with --ignored --nocapture"]
+    fn probe_stale_universe_capture_versus_rebased_universe() {
+        const ROUTES: u32 = 4096;
+        println!("members churned  stale_hint_daemon  rebased_daemon  stale/rebased");
+        for (members, churned) in [(150_u16, 1024_u32), (1500, 1024), (150, 4096), (1500, 4096)] {
+            let base = (0..ROUTES).map(key).collect::<Vec<_>>();
+            let current = (0..ROUTES + churned).map(key).collect::<Vec<_>>();
+            let mut charges = Vec::new();
+            for rebase in [false, true] {
+                let mut ledger =
+                    EvpnRecoveryProvenance::with_limits(usize::MAX / 4, usize::MAX / 4);
+                // The universe the group built before churn, kept live by one member.
+                let pin = ledger.register(owner_wide(0, 7)).unwrap();
+                let stale = shared_capture(&mut ledger, pin, None, &base, &base);
+                let mut hint = if rebase { None } else { Some(stale) };
+                let mut owners = Vec::new();
+                for n in 1..=members {
+                    let handle = ledger.register(owner_wide(n, 7)).unwrap();
+                    let raw = if hint == Some(stale) { &base } else { &current };
+                    hint = Some(shared_capture(&mut ledger, handle, hint, raw, &current));
+                    owners.push(handle);
+                }
+                assert_running_charges(&ledger);
+                charges.push(ledger.daemon_usage().retained);
+                for handle in owners {
+                    assert!(ledger.retire_member(handle));
+                }
+                assert!(ledger.retire_member(pin));
+            }
+            println!(
+                "{members:>7} {churned:>7} {:>18} {:>15} {:>13}x",
+                charges[0],
+                charges[1],
+                charges[0] / charges[1]
+            );
+        }
+    }
+
+    fn owner_wide(n: u16, session_id: u64) -> PeerSession {
+        let [high, low] = n.to_be_bytes();
+        PeerSession {
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, high, low))),
+            session_id,
+        }
+    }
 }
