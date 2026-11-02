@@ -11,7 +11,9 @@
   the new kind-agnostic forms `route.any-community in S` and
   `remove any-community in S`. Datasets and set parameters filter by kind at
   runtime. Each probe still makes one pass over the route's communities of
-  its kind.
+  its kind. Policy explain output renders a kind-agnostic probe of a set that
+  mixes kinds, including a TOML community list that mixes kinds, as
+  `route.any-community in S` instead of `route.communities in S`.
 - **Breaking:** `.rpol` values carry a type. `route.origin-as`, `peer.asn`
   and loop variables over `route.as-path` or an asn-set are ASNs: they
   compare with `==`, `!=`, `>=` and `<=` against an integer literal or u32
