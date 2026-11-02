@@ -8,6 +8,7 @@
 use super::evpn_group_storage::{received, register};
 use super::*;
 use crate::PeerId;
+use crate::manager::update_groups::recovery_provenance::compactions_for_test;
 use crate::update::EvpnRecoveryResetOutcome;
 use rustbgpd_wire::{EthernetTagId, EvpnRoute, EvpnRouteKey};
 use std::collections::BTreeMap;
@@ -39,6 +40,7 @@ struct Run {
     source: PeerId,
     owned: bool,
     recovered: usize,
+    compacted: bool,
 }
 
 impl Run {
@@ -93,6 +95,7 @@ impl Run {
             source,
             owned,
             recovered: 0,
+            compacted: false,
         }
     }
 
@@ -108,6 +111,48 @@ impl Run {
                 for route in update.evpn_announce.iter() {
                     receiver.routes.insert(route.key(), route.clone());
                 }
+            }
+        }
+    }
+
+    /// Leave members with proofs open behind an owed end-of-RIB marker:
+    /// each misses `change`, takes its complete feed into the one free queue
+    /// slot, and the marker after it is refused.
+    fn hold_open(&mut self, indices: &[usize], change: EvpnRibRoute) {
+        for &index in indices {
+            let peer = self.receivers[index].peer;
+            self.manager
+                .pending_eor
+                .entry(peer)
+                .or_default()
+                .insert(EVPN);
+            self.block(index);
+        }
+        self.announce(vec![change]);
+        self.drain();
+        for &index in indices {
+            let peer = self.receivers[index].peer;
+            for _ in 0..7 {
+                self.manager.outbound_peers[&peer]
+                    .try_send(OutboundRouteUpdate::default())
+                    .unwrap();
+            }
+        }
+        for _ in 0..8 {
+            self.manager.resync_dirty_peers_bounded();
+        }
+        self.drain();
+        if self.owned {
+            for &index in indices {
+                let handle = self
+                    .manager
+                    .evpn_recovery_handle(self.receivers[index].peer)
+                    .unwrap();
+                assert!(
+                    !self.manager.evpn_recovery.is_dormant(handle),
+                    "the owed marker keeps the proof"
+                );
+                self.recovered += 1;
             }
         }
     }
@@ -182,7 +227,7 @@ impl Run {
 /// admission into a retained proof, churn with a held member, and
 /// withdrawal of everything. `table` routes start the run; later routes use
 /// tags from 1000, so the same steps cover sparse and dense proofs.
-fn scenario(owned: bool, table: u32) -> (Vec<Phase>, Vec<Vec<EvpnRouteKey>>, usize) {
+fn scenario(owned: bool, table: u32) -> (Vec<Phase>, Vec<Vec<EvpnRouteKey>>, usize, bool) {
     let mut run = Run::start(owned);
     let mut phases = Vec::new();
     run.announce((1..=table).map(|tag| route(tag, 100)).collect());
@@ -249,6 +294,26 @@ fn scenario(owned: bool, table: u32) -> (Vec<Phase>, Vec<Vec<EvpnRouteKey>>, usi
     run.withdraw(vec![route(1020, 100).key(), route(1021, 100).key()]);
     phases.push(run.heal());
 
+    // Two members keep proofs open while a burst is admitted into both and
+    // withdrawn again. When the first settles, the second still holds the
+    // top slot, so settlement renumbers the drained space.
+    let before = compactions_for_test();
+    run.hold_open(&[1, 2], route(1100, 100));
+    run.announce((3000..3400).map(|tag| route(tag, 100)).collect());
+    run.drain();
+    run.announce(vec![route(3400, 100)]);
+    run.drain();
+    run.withdraw((3000..3400).map(|tag| route(tag, 100).key()).collect());
+    run.drain();
+    let first = run.receivers[1].peer;
+    run.manager.flush_pending_eor(first);
+    run.drain();
+    if owned {
+        run.compacted = compactions_for_test() > before;
+    }
+    run.withdraw(vec![route(3400, 100).key(), route(1100, 100).key()]);
+    phases.push(run.heal());
+
     // Churn while one member is held, then withdraw everything.
     run.block(3);
     run.withdraw((7..=10).map(|tag| route(tag, 100).key()).collect());
@@ -268,7 +333,7 @@ fn scenario(owned: bool, table: u32) -> (Vec<Phase>, Vec<Vec<EvpnRouteKey>>, usi
         .iter()
         .map(|receiver| receiver.spurious.clone())
         .collect();
-    (phases, spurious, run.recovered)
+    (phases, spurious, run.recovered, run.compacted)
 }
 
 #[test]
@@ -280,12 +345,14 @@ fn owned_recovery_matches_private_routes_without_spurious_withdrawals() {
 }
 
 fn assert_owned_matches_private(table: u32) {
-    let (private, private_spurious, _) = scenario(false, table);
-    let (owned, owned_spurious, recovered) = scenario(true, table);
+    let (private, private_spurious, _, _) = scenario(false, table);
+    let (owned, owned_spurious, recovered, compacted) = scenario(true, table);
     assert!(
-        recovered >= 4,
+        recovered >= 7,
         "owned recovery held provenance {recovered} times"
     );
+    // With twelve routes the drained burst leaves at most a quarter live.
+    assert_eq!(compacted, table < 300, "owned settlement renumbered");
     assert!(
         private_spurious.iter().all(Vec::is_empty),
         "{private_spurious:?}"

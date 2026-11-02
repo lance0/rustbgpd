@@ -103,6 +103,18 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Per-thread count of completed renumberings.
+    static COMPACTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Renumberings completed on this thread.
+#[cfg(test)]
+pub(in crate::manager) fn compactions_for_test() -> u64 {
+    COMPACTIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 fn stride_work() {
     STRIDE_WORK.with(|work| work.set(work.get() + 1));
 }
@@ -1386,6 +1398,8 @@ impl EvpnRecoveryProvenance {
         checkpoint(true);
         drop(renumber);
         self.daemon_used -= bytes;
+        #[cfg(test)]
+        COMPACTIONS.with(|count| count.set(count.get() + 1));
     }
 
     /// Replace a record's held storage with `bytes` of new capacity built by
@@ -3816,6 +3830,378 @@ mod tests {
             assert_eq!(ledger.slot_usage().live, 2);
             assert_eq!(ledger.proof_keys(other).unwrap().unwrap(), [key(1), key(2)]);
             assert_running_charges(&ledger);
+        }
+    }
+
+    /// Renumbering with every kind of reference live at once: a dense
+    /// primary and its snapshot, a sealed sparse record holding the top slot,
+    /// an open capture with a repeat, and a reservation pinning an existing
+    /// and a fresh key. Every reference must still name its key afterwards.
+    #[test]
+    fn renumbering_keeps_pins_snapshots_open_captures_and_both_representations() {
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let peak = ledger.register(owner(1, 7)).unwrap();
+        let dense = ledger.register(owner(2, 7)).unwrap();
+        let sparse = ledger.register(owner(3, 7)).unwrap();
+        let open = ledger.register(owner(4, 7)).unwrap();
+        let pending = ledger.register(owner(5, 7)).unwrap();
+        let all: Vec<_> = (0..300).map(key).collect();
+        capture(&mut ledger, peak, &all);
+        let dense_keys: Vec<_> = (200..240).map(key).collect();
+        capture(&mut ledger, dense, &dense_keys);
+        assert_eq!(ledger.dense_for_test(dense), Some(true));
+        let snapshot = ledger.snapshot(dense).unwrap().unwrap();
+        capture(&mut ledger, sparse, &[key(299)]);
+        assert!(ledger.finish_recovery(open).unwrap());
+        assert!(ledger.begin_capture(open).unwrap());
+        for n in [280, 260, 280] {
+            assert!(ledger.capture_key(open, key(n)).unwrap());
+        }
+        let announced = [key(270), key(310)];
+        assert!(
+            ledger
+                .reserve_admission(pending, announced.into_iter(), &[])
+                .unwrap()
+        );
+        let before = compactions_for_test();
+        let old_len = ledger.space.keys.len();
+        assert!(ledger.finish_recovery(peak).unwrap());
+        assert_eq!(compactions_for_test(), before + 1);
+        assert!(ledger.space.keys.len() < old_len / 4);
+        ledger.assert_consistent();
+        assert_eq!(ledger.proof_keys(dense).unwrap().unwrap(), dense_keys);
+        assert_eq!(ledger.proof_keys(snapshot).unwrap().unwrap(), dense_keys);
+        assert_eq!(ledger.proof_keys(sparse).unwrap().unwrap(), [key(299)]);
+        assert_eq!(
+            ledger.retained_keys_for_test(open).unwrap(),
+            [key(260), key(280), key(280)]
+        );
+        assert!(ledger.capture_key(open, key(259)).unwrap());
+        assert!(ledger.seal_capture(open).unwrap());
+        assert!(
+            ledger
+                .preflight_admitted(pending, announced.into_iter(), &[])
+                .unwrap()
+        );
+        assert!(
+            ledger
+                .apply_admitted(pending, announced.into_iter(), &[])
+                .unwrap()
+        );
+        assert!(ledger.finish_recovery(dense).unwrap());
+        assert!(ledger.retire(snapshot));
+        ledger.assert_consistent();
+        assert_eq!(ledger.proof_keys(pending).unwrap().unwrap(), announced);
+        assert_eq!(
+            ledger.proof_keys(open).unwrap().unwrap(),
+            [key(259), key(260), key(280)]
+        );
+        assert_eq!(ledger.proof_keys(sparse).unwrap().unwrap(), [key(299)]);
+    }
+
+    /// A seeded model of six members interleaving captures, reservations
+    /// left open, applications, refusals, snapshots, finishes and
+    /// retirements, while skewed peaks drive repeated renumbering. After
+    /// every step each proof, open capture, exhausted record, pin set and
+    /// snapshot must name exactly its model keys.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one seeded model keeps every operation and its expected state together"
+    )]
+    fn renumbering_interleavings_keep_every_reference() {
+        #[derive(Clone, Debug, PartialEq)]
+        enum Model {
+            Dormant,
+            Capturing(Vec<u32>),
+            Ready,
+            Exhausted,
+        }
+        struct Member {
+            handle: ProvenanceHandle,
+            state: Model,
+            admitted: BTreeSet<u32>,
+            pending: Option<(Vec<u32>, Vec<u32>)>,
+            pinned: BTreeSet<u32>,
+            snapshots: Vec<(ProvenanceHandle, BTreeSet<u32>)>,
+        }
+        impl Member {
+            fn fresh(handle: ProvenanceHandle) -> Self {
+                Self {
+                    handle,
+                    state: Model::Ready,
+                    admitted: BTreeSet::new(),
+                    pending: None,
+                    pinned: BTreeSet::new(),
+                    snapshots: Vec::new(),
+                }
+            }
+        }
+        #[derive(Default, Debug)]
+        struct Coverage {
+            compactions: u64,
+            with_pins: u64,
+            with_capturing: u64,
+            with_snapshots: u64,
+            with_dense: u64,
+            with_exhausted: u64,
+        }
+        fn keys_of(set: &BTreeSet<u32>) -> Vec<EvpnRouteKey> {
+            set.iter().map(|n| key(*n)).collect()
+        }
+        fn check(ledger: &EvpnRecoveryProvenance, members: &[Member], context: &str) {
+            ledger.assert_consistent();
+            for (m, member) in members.iter().enumerate() {
+                let context = format!("{context} member {m} {:?}", member.state);
+                match &member.state {
+                    Model::Ready => assert_eq!(
+                        ledger.proof_keys(member.handle).unwrap().unwrap(),
+                        keys_of(&member.admitted),
+                        "{context}"
+                    ),
+                    Model::Dormant => {
+                        assert_eq!(ledger.proof_keys(member.handle).unwrap(), None, "{context}");
+                    }
+                    Model::Capturing(captured) => {
+                        let mut want: Vec<_> = captured.iter().map(|n| key(*n)).collect();
+                        want.sort_unstable();
+                        assert_eq!(
+                            ledger.retained_keys_for_test(member.handle).unwrap(),
+                            want,
+                            "{context}"
+                        );
+                    }
+                    Model::Exhausted => assert_eq!(
+                        ledger.retained_keys_for_test(member.handle).unwrap(),
+                        keys_of(&member.admitted),
+                        "{context}"
+                    ),
+                }
+                let index = ledger.index(member.handle).unwrap();
+                let pins: BTreeSet<_> = ledger.records[index]
+                    .pins
+                    .iter()
+                    .map(|slot| ledger.space.keys[*slot as usize])
+                    .collect();
+                let want: BTreeSet<_> = member.pinned.iter().map(|n| key(*n)).collect();
+                assert_eq!(pins, want, "{context} pins");
+                for (snapshot, set) in &member.snapshots {
+                    assert_eq!(
+                        ledger.retained_keys_for_test(*snapshot).unwrap(),
+                        keys_of(set),
+                        "{context} snapshot"
+                    );
+                }
+            }
+        }
+
+        const MEMBERS: u16 = 6;
+        let mut total = Coverage::default();
+        for seed in 1..=20_u64 {
+            let mut next = rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let mut ledger =
+                EvpnRecoveryProvenance::with_test_limits(usize::MAX / 4, usize::MAX / 4);
+            let mut members: Vec<Member> = (0..MEMBERS)
+                .map(|m| Member::fresh(ledger.register(owner_wide(m, 1)).unwrap()))
+                .collect();
+            let mut fresh = 10_000_u32;
+            let mut session = 2_u64;
+            for step in 0..400 {
+                let before = compactions_for_test();
+                let any_pins = members.iter().any(|m| !m.pinned.is_empty());
+                let any_capturing = members
+                    .iter()
+                    .any(|m| matches!(m.state, Model::Capturing(_)));
+                let any_snapshots = members.iter().any(|m| !m.snapshots.is_empty());
+                let any_exhausted = members.iter().any(|m| m.state == Model::Exhausted);
+                let any_dense = members
+                    .iter()
+                    .any(|m| ledger.dense_for_test(m.handle) == Some(true));
+                let m = usize::try_from(next(u64::from(MEMBERS))).unwrap();
+                let pool = |next: &mut dyn FnMut(u64) -> u64| -> u32 {
+                    match next(4) {
+                        0 => u32::try_from(next(64)).unwrap(),
+                        1 | 2 => fresh.saturating_sub(1 + u32::try_from(next(400)).unwrap()),
+                        _ => u32::try_from(next(160)).unwrap() + 100,
+                    }
+                };
+                let op = next(16);
+                let retire_roll = next(3) == 0;
+                let member = &mut members[m];
+                let exhausted = member.state == Model::Exhausted;
+                match (&mut member.state, op) {
+                    (Model::Dormant, 0..=3) => {
+                        assert!(ledger.begin_capture(member.handle).unwrap());
+                        member.state = Model::Capturing(Vec::new());
+                    }
+                    (Model::Capturing(captured), 0..=5) => {
+                        for _ in 0..=next(24) {
+                            let n = pool(&mut next);
+                            assert!(ledger.capture_key(member.handle, key(n)).unwrap());
+                            captured.push(n);
+                        }
+                    }
+                    (Model::Capturing(captured), 6..=8) => {
+                        let set: BTreeSet<_> = captured.iter().copied().collect();
+                        assert!(ledger.seal_capture(member.handle).unwrap());
+                        member.admitted = set;
+                        member.state = Model::Ready;
+                    }
+                    (Model::Ready, 0..=2) if m == 0 => {
+                        // A spike: finish, then capture a block of fresh keys.
+                        assert!(ledger.finish_recovery(member.handle).unwrap());
+                        member.admitted.clear();
+                        member.pending = None;
+                        member.pinned.clear();
+                        assert!(ledger.begin_capture(member.handle).unwrap());
+                        let block: Vec<u32> = (fresh..fresh + 300).collect();
+                        fresh += 300;
+                        for &n in &block {
+                            assert!(ledger.capture_key(member.handle, key(n)).unwrap());
+                        }
+                        assert!(ledger.seal_capture(member.handle).unwrap());
+                        member.admitted = block.into_iter().collect();
+                    }
+                    (Model::Ready, 3) => {
+                        assert!(ledger.finish_recovery(member.handle).unwrap());
+                        member.admitted.clear();
+                        member.pending = None;
+                        member.pinned.clear();
+                        member.state = Model::Dormant;
+                    }
+                    (Model::Ready, 4..=6) if member.pending.is_none() => {
+                        let mut announce: Vec<u32> =
+                            (0..=next(12)).map(|_| pool(&mut next)).collect();
+                        announce.sort_unstable();
+                        announce.dedup();
+                        let admitted: Vec<u32> = member.admitted.iter().copied().collect();
+                        let mut withdraw: Vec<u32> = if admitted.is_empty() {
+                            Vec::new()
+                        } else {
+                            (0..next(6))
+                                .map(|_| {
+                                    admitted[usize::try_from(next(admitted.len() as u64)).unwrap()]
+                                })
+                                .collect()
+                        };
+                        withdraw.sort_unstable();
+                        withdraw.dedup();
+                        let withdrawn: Vec<_> = withdraw.iter().map(|n| key(*n)).collect();
+                        assert!(
+                            ledger
+                                .reserve_admission(
+                                    member.handle,
+                                    announce.iter().map(|n| key(*n)),
+                                    &withdrawn
+                                )
+                                .unwrap()
+                        );
+                        member.pinned = announce
+                            .iter()
+                            .copied()
+                            .filter(|n| !member.admitted.contains(n))
+                            .collect();
+                        member.pending = Some((announce, withdraw));
+                    }
+                    (Model::Ready, 7..=10) if member.pending.is_some() => {
+                        let (announce, withdraw) = member.pending.take().unwrap();
+                        let announced: Vec<u32> =
+                            announce.iter().copied().filter(|_| next(4) != 0).collect();
+                        let admitted: Vec<u32> = member.admitted.iter().copied().collect();
+                        let mut withdraw = withdraw;
+                        if !admitted.is_empty() {
+                            for _ in 0..next(3) {
+                                withdraw.push(
+                                    admitted[usize::try_from(next(admitted.len() as u64)).unwrap()],
+                                );
+                            }
+                        }
+                        withdraw.sort_unstable();
+                        withdraw.dedup();
+                        let withdrawn: Vec<_> = withdraw.iter().map(|n| key(*n)).collect();
+                        assert!(
+                            ledger
+                                .preflight_admitted(
+                                    member.handle,
+                                    announced.iter().map(|n| key(*n)),
+                                    &withdrawn
+                                )
+                                .unwrap()
+                        );
+                        assert!(
+                            ledger
+                                .apply_admitted(
+                                    member.handle,
+                                    announced.iter().map(|n| key(*n)),
+                                    &withdrawn
+                                )
+                                .unwrap()
+                        );
+                        for n in &withdraw {
+                            member.admitted.remove(n);
+                        }
+                        member.admitted.extend(announced);
+                        member.pinned.clear();
+                    }
+                    (Model::Ready, 11) if member.pending.is_some() && next(4) == 0 => {
+                        // A final batch with an unreserved new key is refused,
+                        // and the exhausted record keeps its pins.
+                        let (mut announce, _) = member.pending.take().unwrap();
+                        announce.push(fresh + 7_000_000);
+                        announce.sort_unstable();
+                        let error = ledger
+                            .apply_admitted(member.handle, announce.iter().map(|n| key(*n)), &[])
+                            .unwrap_err();
+                        assert_eq!(error.cause, ExhaustionCause::AdmissionInvariant);
+                        member.state = Model::Exhausted;
+                    }
+                    (Model::Ready, 12) if member.snapshots.len() < 2 => {
+                        let snapshot = ledger.snapshot(member.handle).unwrap().unwrap();
+                        let set = member.admitted.clone();
+                        member.snapshots.push((snapshot, set));
+                    }
+                    (_, 13) if !member.snapshots.is_empty() => {
+                        let (snapshot, _) = member.snapshots.remove(0);
+                        assert!(ledger.retire(snapshot));
+                    }
+                    (_, 14) | (Model::Exhausted, _) if retire_roll || exhausted => {
+                        assert!(ledger.retire_member(member.handle));
+                        session += 1;
+                        *member = Member::fresh(
+                            ledger
+                                .register(owner_wide(u16::try_from(m).unwrap(), session))
+                                .unwrap(),
+                        );
+                    }
+                    _ => {}
+                }
+                let compacted = compactions_for_test() - before;
+                if compacted != 0 {
+                    total.compactions += compacted;
+                    total.with_pins += u64::from(any_pins) * compacted;
+                    total.with_capturing += u64::from(any_capturing) * compacted;
+                    total.with_snapshots += u64::from(any_snapshots) * compacted;
+                    total.with_dense += u64::from(any_dense) * compacted;
+                    total.with_exhausted += u64::from(any_exhausted) * compacted;
+                }
+                check(&ledger, &members, &format!("seed {seed} step {step}"));
+            }
+            for member in &members {
+                assert!(ledger.retire_member(member.handle));
+            }
+            assert_eq!(ledger.slot_usage().live, 0);
+        }
+        eprintln!("renumbering coverage {total:?}");
+        // Every reference kind was live across some renumbering.
+        assert!(total.compactions >= 20, "{total:?}");
+        for covered in [
+            total.with_pins,
+            total.with_capturing,
+            total.with_snapshots,
+            total.with_dense,
+            total.with_exhausted,
+        ] {
+            assert!(covered > 0, "{total:?}");
         }
     }
 
