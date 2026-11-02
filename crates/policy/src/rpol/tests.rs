@@ -11298,3 +11298,19 @@ mod callable_policies_bounds {
         );
     }
 }
+
+/// `apply` statements format canonically and idempotently, in term, `if`
+/// and loop bodies.
+#[test]
+fn call_statements_format_canonically() {
+    let source = "policy lib(n: u32) { term t { set med n } }
+policy p { term t { apply   lib( 5 ) ;if route.med >= 1 { apply lib(2) } for c in route.communities { apply lib(3) } accept } }";
+    let formatted = super::format_rpol(source).expect("formats");
+    assert!(formatted.contains("        apply lib(5);\n"), "{formatted}");
+    assert!(
+        formatted.contains("if route.med >= 1 { apply lib(2) }"),
+        "{formatted}"
+    );
+    assert_eq!(super::format_rpol(&formatted).unwrap(), formatted);
+    assert_eq!(compile_ok(source), compile_ok(&formatted));
+}
