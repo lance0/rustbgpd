@@ -1,9 +1,9 @@
 ### Upgrade notes
 
-- **Some `.rpol` term rows are renamed.** A term that lowers to one row
-  keeps its name, and so does the common modify-then-accept term
-  `term tag { add community 65000:1; accept }`. The renamed rows fall into
-  three groups:
+- **Some `.rpol` term rows are renamed.** A term whose only row comes from
+  its final statement keeps its name, and so does the common
+  modify-then-accept term `term tag { add community 65000:1; accept }`.
+  The renamed rows fall into four groups:
   - A final statement after earlier statements that lower to rows of their
     own takes the bare name:
     `term t { set med 10; if A { accept } }` gave `t.1` and `t.2` and now
@@ -18,6 +18,10 @@
     `term pad { set med padded(route.as-path.len); accept }`, whose
     function call lowers to six rows, gives `pad.1.1` to `pad.1.6` and
     `pad` instead of `pad.1` to `pad.7`.
+  - A final statement that lowers to no row, such as an `if` with an empty
+    body and no `else`, leaves no bare row even when the term has one row:
+    `term x { set med 5; if route.med >= 9 { } }` gave `x` and now gives
+    `x.1`.
 - **A name that still exists can now name a different row.** `.<n>` is now
   a statement number, not a row position. In
   `term t { set local-pref 500; let x = route.med - 100; set med x; accept }`
