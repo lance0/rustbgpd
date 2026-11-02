@@ -11,6 +11,7 @@ use super::*;
 use rustbgpd_api::peer_types::{
     PeerManagerReadinessQuery, PeerReconcileEffect, ReconcileFailureKind,
 };
+use rustbgpd_rib::PeerId;
 use rustbgpd_transport::PeerCommand;
 use std::collections::HashSet;
 
@@ -360,26 +361,22 @@ async fn global_graceful_shutdown_toggles_wedged_peers_in_one_window() {
     );
 }
 
-/// `healthy` acknowledging peers behind a RIB that answers each outbound
-/// refresh `answer_after` it arrives (`None`: never).
-fn gshut_manager_with_slow_rib(healthy: &[IpAddr], answer_after: Option<Duration>) -> PeerManager {
+const GSHUT_HEALTHY: [IpAddr; 3] = [
+    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 31)),
+    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 32)),
+    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 33)),
+];
+
+/// `GSHUT_HEALTHY` acknowledging peers, with the RIB's receiving end and a
+/// sender standing for the sessions' route updates.
+fn gshut_manager_with_rib_queue() -> (
+    PeerManager,
+    mpsc::Receiver<RibUpdate>,
+    mpsc::Sender<RibUpdate>,
+) {
     let (_commands_tx, commands_rx) = mpsc::channel(4);
-    let (rib_tx, mut rib_rx) = mpsc::channel(16);
-    tokio::spawn(async move {
-        let mut held = Vec::new();
-        while let Some(update) = rib_rx.recv().await {
-            let Some(answer_after) = answer_after else {
-                held.push(update);
-                continue;
-            };
-            if let RibUpdate::RefreshPeerOutbound { reply, .. } = update {
-                tokio::spawn(async move {
-                    tokio::time::sleep(answer_after).await;
-                    let _ = reply.send(Ok(()));
-                });
-            }
-        }
-    });
+    let (rib_tx, rib_rx) = mpsc::channel(16);
+    let sessions_rib_tx = rib_tx.clone();
     let mut mgr = PeerManager::new(
         commands_rx,
         65001,
@@ -390,42 +387,77 @@ fn gshut_manager_with_slow_rib(healthy: &[IpAddr], answer_after: Option<Duration
         rib_tx,
         None,
     );
-    for &addr in healthy {
+    for addr in GSHUT_HEALTHY {
         insert_test_managed_peer(&mut mgr, addr, acking_gshut_session(), false);
     }
-    mgr
+    (mgr, rib_rx, sessions_rib_tx)
 }
 
-const GSHUT_HEALTHY: [IpAddr; 3] = [
-    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 31)),
-    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 32)),
-    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 33)),
-];
-
-/// Refreshing every peer's table is `O(peers)` RIB work: a RIB that takes
-/// longer than one command's 5 s deadline to get through it has not failed.
+/// The toggle replies once the sessions acknowledge; the outbound refreshes
+/// follow one peer at a time, each sent only after the RIB answers the one
+/// before. A route update a session sends after the toggle therefore reaches
+/// the RIB ahead of the second peer's full-table replay instead of behind
+/// every replay.
 #[tokio::test(start_paused = true)]
-async fn global_graceful_shutdown_refresh_may_outlast_one_command_deadline() {
-    let mut mgr = gshut_manager_with_slow_rib(&GSHUT_HEALTHY, Some(Duration::from_secs(6)));
+async fn gshut_refreshes_interleave_with_later_route_updates() {
+    let (mut mgr, mut rib_rx, sessions_rib_tx) = gshut_manager_with_rib_queue();
+    let toggle = tokio::spawn(async move {
+        let result = mgr.set_graceful_shutdown(None, true).await;
+        (result, mgr)
+    });
+    settle().await;
+    assert!(
+        toggle.is_finished(),
+        "the toggle replies without waiting for the outbound refreshes"
+    );
+    let (result, _mgr) = toggle.await.unwrap();
+    result.expect("every session acknowledged");
+
+    let Ok(RibUpdate::RefreshPeerOutbound { reply: first, .. }) = rib_rx.try_recv() else {
+        panic!("the first outbound refresh is sent");
+    };
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "one outbound refresh in flight at a time"
+    );
+    let withdrawn_by = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 99)));
+    sessions_rib_tx
+        .send(RibUpdate::PeerDown {
+            peer: withdrawn_by,
+            session_id: 9,
+        })
+        .await
+        .unwrap();
+    first.send(Ok(())).unwrap();
+    settle().await;
+    assert!(
+        matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerDown { peer, .. }) if peer == withdrawn_by),
+        "the later route update is ahead of the next replay"
+    );
+    let mut refreshed = 1;
+    while let Ok(RibUpdate::RefreshPeerOutbound { reply, .. }) = rib_rx.try_recv() {
+        assert!(rib_rx.try_recv().is_err(), "still one at a time");
+        reply.send(Ok(())).unwrap();
+        refreshed += 1;
+        settle().await;
+    }
+    assert_eq!(
+        refreshed,
+        GSHUT_HEALTHY.len(),
+        "every peer is refreshed once"
+    );
+}
+
+/// The toggle never waits on the RIB: one that never answers neither delays
+/// nor fails it.
+#[tokio::test(start_paused = true)]
+async fn gshut_does_not_wait_for_a_rib_that_never_answers() {
+    let (mut mgr, _rib_rx, _sessions_rib_tx) = gshut_manager_with_rib_queue();
+    let started = tokio::time::Instant::now();
     mgr.set_graceful_shutdown(None, true)
         .await
-        .expect("a slow RIB refresh is not a toggle failure");
-}
-
-/// A RIB that never answers fails the refresh once, not once per peer.
-#[tokio::test(start_paused = true)]
-async fn global_graceful_shutdown_reports_a_stuck_refresh_once() {
-    let mut mgr = gshut_manager_with_slow_rib(&GSHUT_HEALTHY, None);
-    let error = mgr
-        .set_graceful_shutdown(None, true)
-        .await
-        .expect_err("a RIB that never answers fails the refresh")
-        .to_string();
-    assert_eq!(error.matches("timed out").count(), 1, "{error}");
-    assert!(
-        error.contains("RIB refresh of 3 peers"),
-        "one failure names the whole refresh: {error}"
-    );
+        .expect("a stuck refresh is not a toggle failure");
+    assert_eq!(started.elapsed(), Duration::ZERO);
 }
 
 fn validation_dependents() -> (PeerManager, mpsc::Sender<PeerManagerReadinessQuery>) {

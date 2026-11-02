@@ -17,7 +17,10 @@
   update until the previous delta's revalidation pass ends. Each keeps one
   pass in flight and merges the deltas that arrive meanwhile into the next
   one.
-- The all-peers graceful-shutdown toggle refreshes each acknowledging peer
-  in its own RIB turn, waits up to two minutes for all of them, and reports
-  one failure if that times out, instead of failing every peer whose
-  refresh took longer than five seconds.
+- `rbgp gshut` and `SetGracefulShutdown` now return once the live sessions
+  have accepted the toggle, instead of after every acknowledging peer's
+  outbound routes were re-advertised. The re-advertisement follows in the
+  background, one peer at a time, so the peers' own route updates, including
+  withdrawals, are no longer held behind every replay; a slow or failed
+  refresh is logged (`graceful-shutdown outbound refreshes complete` with
+  its counts, and a warning per failed peer) instead of failing the command.

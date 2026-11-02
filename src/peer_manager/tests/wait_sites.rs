@@ -780,17 +780,6 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "lifecycle.rs::refresh_peers_outbound_in_rib",
-        awaits: "RibUpdate::RefreshPeerOutbound of each peer that acknowledged its GSHUT toggle",
-        drive: Drive::GracefulShutdown,
-        rib: RibHold::Reply(is_outbound_refresh),
-        session: answer_all,
-        additional_entry: None,
-        window: HELD_FOREVER,
-        contract: Contract::Served,
-        completion: Completion::Finished,
-    },
-    WaitSite {
         site: "mod.rs::await_session_sweep",
         awaits: "per-peer session commands of a lifecycle sweep, all at once (here the \
                  graceful-shutdown toggles)",
@@ -2256,6 +2245,12 @@ fn wait_call_sites(file: &str, source: &str) -> BTreeMap<String, usize> {
 /// the readiness lane while a RIB send or reply is awaited bare, so `/readyz`
 /// goes unanswered for the whole wait.
 const BARE_RIB_WAIT_FNS: &[(&str, usize, &str)] = &[
+    (
+        "lifecycle.rs::run_outbound_refresher",
+        1,
+        "a detached task, not the actor: it owns no manager state, and the run loop keeps \
+         serving readiness while it waits for each outbound refresh",
+    ),
     (
         "configured_owners.rs::send_configured_owners",
         1,

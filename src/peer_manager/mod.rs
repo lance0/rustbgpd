@@ -876,6 +876,10 @@ pub struct PeerManager {
     /// At most the operator lane's capacity; dropping the manager aborts
     /// them, and their callers observe a dropped reply.
     detached_list_peers: JoinSet<()>,
+    /// Requests for the outbound refresher, which replays graceful-shutdown
+    /// toggles' outbound inventories one peer per RIB turn, off this actor.
+    /// Started on first use.
+    outbound_refresher: Option<mpsc::UnboundedSender<Vec<rustbgpd_rib::PeerId>>>,
     /// Current command's policy phase. Reset before each command; ordinary
     /// commands must not erase the last completed policy phase below.
     operator_read_seam: OperatorReadSeam,
@@ -1788,6 +1792,7 @@ impl PeerManager {
             operator_rx: None,
             deferred_operator_queries: VecDeque::new(),
             detached_list_peers: JoinSet::new(),
+            outbound_refresher: None,
             operator_read_seam: OperatorReadSeam::Unfenced,
             completed_operator_seam: None,
             internal_rx: Some(internal_rx),

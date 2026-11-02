@@ -1193,7 +1193,7 @@ added at runtime.
 | `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; persists the accepted change atomically before returning and rolls back runtime on persistence failure |
 | `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle); waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
-| `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
+| `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true`. Returns once the live sessions accepted the toggle; re-advertising already-sent routes with the change follows in the background, one peer at a time |
 
 `ListNeighbors` and `GetNeighborState` expose `stale=true` when a peer's
 session-state observation is unavailable. The row remains in the inventory;
