@@ -153,16 +153,22 @@ pub(crate) const MAX_LOOP_ITERATIONS: u32 = 4096;
 /// here; the disposition never varies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvalErrorKind {
-    /// `+` or `*` exceeded `u32::MAX`.
+    /// `+` or `*` exceeded `u32::MAX`. No longer produced: `+ - *`
+    /// saturate (LAN-2791); the label stays valid in `expect` forms.
     Overflow,
-    /// `-` went below zero (no signed types in the value model).
+    /// `-` went below zero. No longer produced: `-` saturates at 0
+    /// (LAN-2791).
     Underflow,
-    /// `/` with a zero divisor.
+    /// `/` with a zero divisor. Unreachable through the compiler — a
+    /// divisor is a non-zero constant or `max(e, k)` with `k >= 1`
+    /// (LAN-2791) — so this is the fail-closed disposition of a
+    /// compiler bug.
     DivideByZero,
-    /// `%` with a zero divisor.
+    /// `%` with a zero divisor; unreachable like
+    /// [`DivideByZero`](Self::DivideByZero).
     RemainderByZero,
-    /// `clamp(x, lo, hi)` evaluated with `lo > hi` (the statically
-    /// known case is a compile error; this is the data-dependent one).
+    /// `clamp(x, lo, hi)` with `lo > hi`. No longer produced: `clamp`
+    /// is `min(max(x, lo), hi)` (LAN-2791).
     ClampInverted,
     /// A `u32` field operand with no default was absent (origin AS on
     /// an empty/`AS_SET`-only path, unknown peer ASN).
@@ -250,21 +256,16 @@ impl fmt::Display for EvalError {
 impl EvalErrorKind {
     /// Whether this kind fails the route closed wherever it occurs,
     /// conditions included: a compiler-bug rail or a resource limit.
-    /// Only the kinds listed here as a value that cannot be computed
-    /// make a condition false instead, with the deny left to an action
-    /// that needs the value (LAN-2790), so a kind added later fails
-    /// closed until it is listed.
+    /// Only a missing value (the kinds listed here) makes a condition
+    /// false instead, with the deny left to an action that needs the
+    /// value (LAN-2790), so a kind added later fails closed until it is
+    /// listed. Arithmetic saturates and divisors are never zero
+    /// (LAN-2791), so the arithmetic kinds are not values here.
     #[must_use]
     pub fn fails_closed(self) -> bool {
         !matches!(
             self,
-            EvalErrorKind::Overflow
-                | EvalErrorKind::Underflow
-                | EvalErrorKind::DivideByZero
-                | EvalErrorKind::RemainderByZero
-                | EvalErrorKind::ClampInverted
-                | EvalErrorKind::AbsentField(_)
-                | EvalErrorKind::AbsentPrependOperand(_)
+            EvalErrorKind::AbsentField(_) | EvalErrorKind::AbsentPrependOperand(_)
         )
     }
 
@@ -416,8 +417,9 @@ pub(crate) fn exec_bind(
 /// Evaluate a compiled value expression against a route context and
 /// the current `let`-binding frame (`&[]` when the caller has none —
 /// expressions without `Local` reads never index it). Pure and
-/// allocation-free; every arithmetic step is checked (ADR-0103
-/// Decision 2 — the SIGFPE class is unrepresentable). Recursion depth
+/// allocation-free; `+ - *` saturate and divisors are never zero
+/// (LAN-2791, amending ADR-0103 Decision 2), so the SIGFPE class stays
+/// unrepresentable. Recursion depth
 /// is bounded by the frontend (`MAX_EXPR_DEPTH`).
 pub(crate) fn eval_value(
     expr: &ValueExpr,
@@ -452,7 +454,7 @@ pub(crate) fn eval_value(
         },
         ValueExpr::Binary { op, lhs, rhs } => {
             let (lhs, rhs) = both(eval_value(lhs, ctx, locals), eval_value(rhs, ctx, locals))?;
-            checked_arith(*op, lhs, rhs)
+            arith(*op, lhs, rhs)
         }
         ValueExpr::Min(a, b) => {
             let (a, b) = both(eval_value(a, ctx, locals), eval_value(b, ctx, locals))?;
@@ -467,17 +469,33 @@ pub(crate) fn eval_value(
                 eval_value(x, ctx, locals),
                 both(eval_value(lo, ctx, locals), eval_value(hi, ctx, locals)),
             )?;
-            if lo > hi {
-                return Err(EvalErrorKind::ClampInverted);
-            }
-            Ok(x.clamp(lo, hi))
+            Ok(clamp(x, lo, hi))
         }
     }
 }
 
-/// One checked arithmetic step — the only place `u32` operators are
-/// applied, shared by evaluation and compile-time constant folding so
-/// the two can never disagree about what overflows.
+/// One arithmetic step as evaluated (LAN-2791): `+ - *` saturate at 0
+/// and `u32::MAX`; `/` and `%` fail only on a zero divisor, which the
+/// typechecker rules out. Shared by evaluation and the lowerer's
+/// constant folding so the two can never disagree.
+pub(crate) fn arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> {
+    match op {
+        ArithOp::Add => Ok(lhs.saturating_add(rhs)),
+        ArithOp::Sub => Ok(lhs.saturating_sub(rhs)),
+        ArithOp::Mul => Ok(lhs.saturating_mul(rhs)),
+        ArithOp::Div => lhs.checked_div(rhs).ok_or(EvalErrorKind::DivideByZero),
+        ArithOp::Rem => lhs.checked_rem(rhs).ok_or(EvalErrorKind::RemainderByZero),
+    }
+}
+
+/// `clamp(x, lo, hi)` as `min(max(x, lo), hi)` (LAN-2791): total, so
+/// inverted bounds yield `hi` instead of failing.
+pub(crate) fn clamp(x: u32, lo: u32, hi: u32) -> u32 {
+    x.max(lo).min(hi)
+}
+
+/// The same step without saturation, for the typechecker's literal-only
+/// diagnostic: `4294967295 + 1` can only be a typo.
 pub(crate) fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> {
     match op {
         ArithOp::Add => lhs.checked_add(rhs).ok_or(EvalErrorKind::Overflow),
@@ -622,7 +640,8 @@ impl PolicyHitCounters {
     }
 
     /// Routes denied by an evaluation error (LAN-299, ADR-0103
-    /// Decision 4: checked-arithmetic failure or absent operand) since
+    /// Decision 4: an action that needs an absent operand, or a
+    /// fail-closed rail) since
     /// chain install. A nonzero value means some policy is erroring —
     /// the rate-limited WARN log and explain traces name where and
     /// why.
@@ -1945,8 +1964,8 @@ impl CompiledChain {
     /// - `Ok(Some(owned))` — a clone with every operand folded into
     ///   its literal field, so downstream consumers (merge, apply,
     ///   memoization, API surfaces) only ever see concrete values.
-    /// - `Err(kind)` — an operand is unresolvable (absent context
-    ///   value, checked-arithmetic failure): the caller fails the
+    /// - `Err(kind)` — an operand is unresolvable (an absent context
+    ///   value): the caller fails the
     ///   route **closed** on the eval-error rail (uniform Deny +
     ///   counter + rate-limited WARN + explain error trace, ADR-0103
     ///   Decision 4). ASN 0 is never prepended (RFC 7607).
@@ -2451,6 +2470,93 @@ mod tests {
         assert_eq!(evaluation.eval_error, None);
     }
 
+    /// The compiler never emits a zero divisor (divisors are non-zero
+    /// constants or `max(e, k)` with `k >= 1`), so one in hand-built IR is
+    /// a compiler bug: it fails the route closed in a guard, a `set` and a
+    /// `let`, and explain agrees.
+    #[test]
+    fn a_zero_divisor_fails_closed_in_every_position() {
+        use super::EvalErrorKind;
+        use crate::engine::PolicyChain;
+        use crate::engine::explain::explain_chain_statements;
+        use crate::ir::{ArithOp, ValueCmpNode, ValueCmpOp, ValueExpr, ValueField};
+
+        let chain_of = |terms: Vec<(MatchExpr, TermAction)>| CompiledChain {
+            policies: vec![CompiledPolicy {
+                name: None,
+                terms: terms
+                    .into_iter()
+                    .map(|(guard, action)| Term {
+                        name: None,
+                        guard,
+                        action,
+                    })
+                    .collect(),
+                default_action: PolicyAction::Permit,
+                source: PolicySource::Rpol,
+            }],
+            ..CompiledChain::empty()
+        };
+        for (op, kind) in [
+            (ArithOp::Div, EvalErrorKind::DivideByZero),
+            (ArithOp::Rem, EvalErrorKind::RemainderByZero),
+        ] {
+            let zero = || ValueExpr::Binary {
+                op,
+                lhs: Box::new(ValueExpr::Field(ValueField::Med)),
+                rhs: Box::new(ValueExpr::Const(0)),
+            };
+            let accept = || TermAction::Permit(RouteModifications::default());
+            let guard = MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+                op: ValueCmpOp::Ge,
+                lhs: zero(),
+                rhs: ValueExpr::Const(0),
+            }));
+            let set = TermAction::Permit(RouteModifications {
+                set_med_computed: Some(Arc::new(zero())),
+                ..RouteModifications::default()
+            });
+            let bind = TermAction::Bind {
+                slot: 0,
+                name: "x".into(),
+                expr: zero(),
+            };
+            for (position, chain) in [
+                ("guard", chain_of(vec![(guard, accept())])),
+                ("set", chain_of(vec![(MatchExpr::True, set)])),
+                (
+                    "let",
+                    chain_of(vec![(MatchExpr::True, bind), (MatchExpr::True, accept())]),
+                ),
+            ] {
+                let mut route = ctx(None);
+                route.med = Some(7);
+                let (result, evaluation) = chain.evaluate_with_attribution(&route);
+                assert_eq!(result.action, PolicyAction::Deny, "{kind:?} in {position}");
+                assert_eq!(
+                    evaluation.eval_error.map(|error| error.kind),
+                    Some(kind),
+                    "{position}"
+                );
+                let policy = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+                    "p".to_string(),
+                    Arc::new(chain),
+                )]);
+                let trace = explain_chain_statements(Some(&policy), &route);
+                assert_eq!(trace.action, PolicyAction::Deny, "explain, {position}");
+                assert!(
+                    trace
+                        .steps
+                        .iter()
+                        .flat_map(|step| &step.term_traces)
+                        .any(|line| line.contains(&format!("evaluation error: {kind}"))),
+                    "explain renders {kind} in {position}: {:?}",
+                    trace.steps
+                );
+            }
+        }
+    }
+
     /// Only the listed value kinds make a condition false; everything else,
     /// including a kind added later, fails closed.
     #[test]
@@ -2458,16 +2564,19 @@ mod tests {
         use super::EvalErrorKind as Kind;
         use crate::ir::ValueField;
         for kind in [
+            Kind::AbsentField(ValueField::OriginAs),
+            Kind::AbsentPrependOperand(crate::engine::PrependAs::OriginAs),
+        ] {
+            assert!(!kind.fails_closed(), "{kind:?}");
+        }
+        // Arithmetic no longer produces these (LAN-2791); a zero divisor
+        // would be a compiler bug.
+        for kind in [
             Kind::Overflow,
             Kind::Underflow,
             Kind::DivideByZero,
             Kind::RemainderByZero,
             Kind::ClampInverted,
-            Kind::AbsentField(ValueField::OriginAs),
-        ] {
-            assert!(!kind.fails_closed(), "{kind:?}");
-        }
-        for kind in [
             Kind::UnboundLocal,
             Kind::DatasetUnpinned,
             Kind::StrayLoopControl,

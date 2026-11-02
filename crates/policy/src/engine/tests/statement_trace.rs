@@ -680,13 +680,13 @@ fn deciding_term_reports_the_validation_states_it_tests() {
     // state: the error, not a verdict, decided. (A condition never fails,
     // LAN-2790, so the failing operand sits in the action.)
     let failing = rpol(
-        "policy p { term t { if route.rpki == invalid { set med route.med - 100; accept } } }",
+        "policy p { term t { if route.rpki == invalid { set med route.origin-as; accept } } }",
     );
-    let mut underflow = invalid;
-    underflow.med = Some(5);
+    let mut no_origin = invalid;
+    no_origin.origin_asn = None;
     let (result, evaluation, term, tested) = failing
         .compiled()
-        .evaluate_with_deny_attribution(&underflow);
+        .evaluate_with_deny_attribution(&no_origin);
     assert_eq!(result.action, PolicyAction::Deny);
     assert!(
         evaluation.eval_error.is_some(),
@@ -712,18 +712,19 @@ fn rpol_fallthrough_keeps_continue_mods_under_the_permit_default() {
     assert!(step.term_traces[2].ends_with("[not matched]"));
 }
 
-/// LAN-304 dual attribution: an evaluation error inside an inlined
-/// function body renders with the calling term's name AND the
-/// function-qualified binding names — the trace names both.
+/// LAN-304 dual attribution: a call whose argument has no value renders
+/// with the calling term's name AND the function-qualified binding
+/// names — the trace names both — and the action that needs the result
+/// fails closed.
 #[test]
 fn rpol_fn_body_error_names_function_and_calling_term() {
     const FN_RPOL: &str = r"
 fn share(total: u32, parts: u32) -> u32 {
-    let each = total / parts
+    let each = total / max(parts, 1)
     each
 }
 policy divide {
-    term compute { set local-pref share(100, route.med); accept }
+    term compute { set local-pref share(100, route.origin-as); accept }
 }
 ";
     let file = crate::rpol::RpolFile::parse(FN_RPOL).expect("clean rpol");
@@ -735,7 +736,7 @@ policy divide {
         "divide".to_string(),
         std::sync::Arc::new(compiled),
     )]);
-    // med absent -> implicit 0 -> divide-by-zero inside share().
+    // No origin AS: `share.each` has no value, and the action needs it.
     let trace = explain_chain_statements(Some(&chain), &plain_ctx(v4_prefix([10, 0, 0, 0], 24)));
     assert_eq!(trace.action, PolicyAction::Deny, "fail closed");
     let step = &trace.steps[0];
@@ -748,17 +749,23 @@ policy divide {
     // ...the erroring bind names the function-qualified binding...
     assert!(traces.contains("let share.each"), "{traces}");
     // ...and the error renders on the uniform rail.
-    assert!(traces.contains("division by zero"), "{traces}");
+    assert!(
+        traces.contains("`route.origin-as` has no value"),
+        "{traces}"
+    );
     assert!(traces.contains("fail closed => reject"), "{traces}");
 
     // On a resolvable route the action renders the call source-level
     // (the result slot's name) with its value.
     let mut ok = plain_ctx(v4_prefix([10, 0, 0, 0], 24));
-    ok.med = Some(50);
+    ok.origin_asn = Some(50);
     let trace = explain_chain_statements(Some(&chain), &ok);
     assert_eq!(trace.action, PolicyAction::Permit, "100/50 = 2");
     let rendered = format!("{:?}", trace.steps[0]);
-    assert!(rendered.contains("share(100, route.med)"), "{rendered}");
+    assert!(
+        rendered.contains("share(100, route.origin-as)"),
+        "{rendered}"
+    );
 }
 
 /// The rpol agreement matrix: mixed TOML + rpol chains, contexts that
@@ -912,9 +919,9 @@ policy all-actions {
 
 policy deny-action { term stop { reject } }
 policy default-action { term miss { if route.med == 999 { reject } } }
-policy permit-error { term fail { set med route.med - 100; accept } }
+policy permit-error { term fail { set med route.origin-as; accept } }
 policy continue-error {
-    term stage { set med route.med - 100 }
+    term stage { set med route.origin-as }
     term allow { accept }
 }
 ";
@@ -1126,7 +1133,7 @@ fn action_view_walks_agree_across_action_and_error_matrix() {
             "permit-error" | "continue-error" => assert!(
                 step.term_traces
                     .iter()
-                    .any(|line| line.contains("arithmetic underflow")),
+                    .any(|line| line.contains("`route.origin-as` has no value")),
                 "missing action-time error for {case_name}"
             ),
             "all-actions-oversized" => assert!(
