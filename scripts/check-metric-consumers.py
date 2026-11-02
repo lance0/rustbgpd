@@ -1065,15 +1065,21 @@ def function_body(
 ) -> tuple[str, list[str]]:
     """Return one uniquely named lexed function body and the source's strings."""
     syntax, strings = rust_lexed(production_source(source))
+    return lexed_function_body(syntax, impl_type, function, description), strings
+
+
+def lexed_function_body(
+    syntax: str, impl_type: str | None, function: str, description: str
+) -> str:
+    """Return one uniquely named function body from already lexed source."""
     if impl_type is not None:
         syntax = braced_body(
             syntax, rf"\bimpl\s+{re.escape(impl_type)}\s*\{{", f"impl {impl_type}"
         )
-    body = braced_body(
+    return braced_body(
         syntax, rf"\bfn\s+{re.escape(function)}\s*(?:<[^<>]*>\s*)?\([^{{}}]*\{{",
         description,
     )
-    return body, strings
 
 
 def syntax_literals(syntax: str, strings: list[str]) -> set[str]:
@@ -1114,12 +1120,16 @@ def policy_eval_error_labels(source: str) -> set[str]:
             "evaluate_policy", "eval_for_each", "resolve_computed", "eval_expr",
         )),
     )
+    # Strip test-gated items from the whole source first, so a gate on a
+    # runtime function or its enclosing module also removes its constructors.
+    production = STABLE_SURFACE_CHECK.strip_cfg_test_items(
+        rust_lexed(production_source(source))[0]
+    )
     syntax = "\n".join(
-        function_body(source, owner, function, f"runtime emitter {function}")[0]
+        lexed_function_body(production, owner, function, f"runtime emitter {function}")
         for owner, functions in runtime_functions
         for function in functions
     )
-    syntax = STABLE_SURFACE_CHECK.strip_cfg_test_items(syntax)
     emitted = set(re.findall(
         r"(?:\b(?:Err|ok_or|get_or_insert)\s*\(\s*\(?\s*"
         r"|\blet\s+\w+\s*=\s*|\bkind\s*:\s*)EvalErrorKind::(\w+)",

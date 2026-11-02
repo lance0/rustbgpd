@@ -1005,6 +1005,10 @@ def item_extent(text: str, start: int) -> int:
                 while cursor < len(text) and braces:
                     braces += {"{": 1, "}": -1}.get(text[cursor], 0)
                     cursor += 1
+                # A gated `if` statement also owns its `else`/`else if` branches.
+                if keyword is None and (branch := re.compile(r"\s*else\b").match(text, cursor)):
+                    cursor = branch.end()
+                    continue
                 return cursor
         cursor += 1
     return cursor

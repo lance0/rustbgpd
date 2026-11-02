@@ -756,6 +756,16 @@ fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> 
                 '        #[cfg(all(test, target_os = "linux"))]\n        {\n'
                 + fake + "        }\n" + inline_test,
             ),
+            "else branch of a test-gated if": source.replace(
+                inline_test,
+                "        #[cfg(test)]\n        if false {\n        } else {\n"
+                + fake + "        }\n" + inline_test,
+            ),
+            "else-if chain of a test-gated if": source.replace(
+                inline_test,
+                "        #[cfg(test)]\n        if false {\n        } else if true {\n"
+                "        } else {\n" + fake + "        }\n" + inline_test,
+            ),
         }.items():
             with self.subTest(scope=scope), self.assertRaisesRegex(
                 ValueError, "labels without emitters.*Overflow"
@@ -767,6 +777,27 @@ fn checked_arith(op: ArithOp, lhs: u32, rhs: u32) -> Result<u32, EvalErrorKind> 
             "        #[cfg(not(test))]\n        {\n" + fake + "        }\n" + inline_test,
         )
         self.assertIn("overflow", CHECK.policy_eval_error_labels(production))
+
+    def test_policy_eval_error_labels_ignore_test_gated_runtime_functions(self):
+        # A gate on the runtime function itself, or on its enclosing module,
+        # removes every constructor in it from production.
+        source = self.rust[CHECK.POLICY_EVAL]
+        arith = (
+            "pub(crate) fn arith(op: ArithOp, lhs: u32, rhs: u32) "
+            "-> Result<u32, EvalErrorKind> {\n"
+        )
+        self.assertEqual(source.count(arith), 1)
+        start = source.index(arith)
+        end = source.index("\n}\n", start) + 3
+        for scope, mutant in {
+            "function gate": source.replace(arith, "#[cfg(test)]\n" + arith),
+            "enclosing module gate": source[:start] + "#[cfg(test)]\nmod gated {\n"
+            + source[start:end] + "}\n" + source[end:],
+        }.items():
+            with self.subTest(scope=scope), self.assertRaisesRegex(
+                ValueError, "expected one runtime emitter arith, found 0"
+            ):
+                CHECK.policy_eval_error_labels(mutant)
 
     def test_daemon_renaming_a_selected_label_value_is_rejected(self):
         rust = dict(self.rust)
