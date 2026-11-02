@@ -465,12 +465,13 @@ policy NAME[(param: u32, ...)] {
 
 - Terms evaluate in order. Statements inside a term are: bare
   actions, `let` bindings (see "Bindings"), `for` loops (see "Loops"),
-  or `if <expr> { ... } [else if <expr> { ... }]... [else { ... }]`.
-  The first branch whose condition matches runs, and at most one does.
-  An `if` body holds actions, `let` bindings and nested `if`
-  statements, up to **four levels** of `if` (an `else if` chain of any
-  length is one level); the fifth is a compile error. Loops stay in
-  term and loop bodies.
+  `apply` statements that run another policy (see "`apply` as a
+  statement"), or `if <expr> { ... } [else if <expr> { ... }]... [else
+  { ... }]`. The first branch whose condition matches runs, and at most
+  one does. An `if` body holds actions, `let` bindings, `apply`
+  statements and nested `if` statements, up to **four levels** of `if`
+  (an `else if` chain of any length is one level); the fifth is a
+  compile error. Loops stay in term and loop bodies.
 - **Verdicts**: `accept` permits the route (with all modifications
   executed so far in this policy); `reject` denies it (a denied route
   has no attributes — modifications in a rejecting branch are
@@ -1313,6 +1314,105 @@ Two consequences worth internalizing:
   compile error names the target's first `let`. The same rule covers
   `for` loops and function calls (a call is sugar
   for a scope of lets).
+- A policy that holds an `apply` **statement**, anywhere in its terms,
+  cannot be applied either. A predicate must not have side effects: it
+  only asks whether a policy would permit the route, and a called
+  policy's writes would be a side effect. The compile error names the
+  first `apply` statement. The called policy itself stays a valid
+  predicate target.
+
+### `apply` as a statement — calling a policy
+
+`apply NAME` or `apply NAME(args)` in statement position runs another
+policy's terms in place, as IOS-XR RPL's `apply` pastes a child policy
+into its parent (ADR-0096, amendment of 2026-11-01). `apply(NAME)`, with
+parentheses, stays the predicate above; written as a statement it is a
+compile error that says which form to use.
+
+```rpol
+community-set scrub-tags { 65000:666 }
+
+policy customer-common(lp: u32) {
+    term bad { if route.as-path.len >= 5 { reject } }
+    term tag { remove community in scrub-tags; set local-pref lp }
+}
+
+policy customer-in {
+    term common { apply customer-common(200) }
+    term done { accept }
+}
+
+test long-path-is-dropped {
+    route { prefix 192.0.2.0/24; as-path "64500 64501 64502 64503 64504" }
+    expect customer-in == reject
+}
+
+test customer-route-is-scrubbed {
+    route { prefix 192.0.2.0/24; communities [65000:666, 65000:1] }
+    expect customer-in == accept with local-pref 200, removes community 65000:666,
+        not removed community 65000:1
+}
+```
+
+- **The called policy's `reject` denies the route**, from any depth, and
+  its staged writes are discarded as with any rejection.
+- **Its `accept` returns to the caller.** No later term of the called
+  policy runs, its writes are kept, and evaluation continues with the
+  caller's next statement and later terms. An `accept` in a called policy
+  never permits the route on its own.
+- **Falling off its end applies its `default-action`**: `accept`, or no
+  declaration, returns; `default-action reject` denies. A policy means the
+  same thing when called, as a chain member and under its own tests.
+- **Writes stage into the caller in order.** A later scalar write wins, and
+  for a community value the later operation wins, whether the caller's or
+  the called policy's (statement order, as across terms). Prepends add up
+  in the same order, and the prepend cap counts a called policy's prepends
+  with the call's arguments. **Every condition reads
+  the route as received**, in the called policy and in the caller after
+  the call, as everywhere else in the language.
+- **`else if` first-match is unchanged.** A branch whose body calls a
+  policy can fall through, so later branches keep its negation. After the
+  called policy returns, evaluation continues after the whole `if`.
+- **Where it goes.** A call is allowed in a term body, an `if` body and a
+  `for` body; in a loop it runs once per iteration. The called policy may
+  hold `let`, `for`, function calls, `accept` inside its loops, and its own
+  `apply` statements.
+- **Arguments** are checked against the called policy's parameters like any
+  other reference, and range-checked against every use they reach. An
+  argument is fixed at compile time, so it cannot be a `let` binding; a
+  `let` that shadows a parameter makes that name the binding, in a call
+  and in `apply(...)` alike.
+- **Composition bounds.** Calls and `apply(...)` predicates are edges of one
+  graph: a cycle through either is a compile error, and both count toward
+  the eight-level depth limit and the inline size budget.
+
+**Lowering.** A call adds no IR node kind. The called policy lowers on its
+own, monomorphized with the call's arguments, with its frame slots above
+the caller's live slots and one return-flag slot. The call emits a `Bind`
+clearing the flag, then each called term behind "flag is clear". An
+`accept` becomes a flag `Bind` and a `Continue` of its modifications behind
+"flag is that term". Inside a loop body it also leaves the loop, and an
+enclosing loop leaves too when the flag is set. A `default-action reject`
+adds a final `Deny` behind "flag is clear". No guard of the called policy is
+evaluated again after its own term, so per-route work stays linear in the
+called policy's size.
+
+**Cost.** Each call site is charged the called policy's IR nodes and
+evaluation steps, plus the call-site path and the flag check on every
+inlined term, plus the entry, return and fall-through terms. A
+parameterized policy is charged per call, because each call instantiates
+it. The caller's frame must hold its live bindings, the flag and the called
+policy's frame.
+
+**Names.** Inlined terms are named under the call:
+`<term>.<n>/<call>:<called-term>`, for example `common.3/customer-common(200):tag`.
+Nested calls compose, and the flag's own terms are named `:#enter`,
+`:#return` and `:#default` (`#` cannot begin a term name, so no source term
+can collide with them). A `:#return` term follows each called loop that
+can return, so a return from inside a loop is visible too. Explain traces, `rbgp policy test` term hits and
+`rbgp policy stats` show these names, and in-language test coverage credits
+the called policy's source terms. A call inside a `for` body is attributed
+to the loop term, like any loop body.
 
 ## Actions
 
@@ -1951,12 +2051,14 @@ policy-def  := "policy" IDENT ["(" param ("," param)* ")"] "{" [default-decl] te
 default-decl := "default-action" ("accept" | "reject") [";"]   # contextual; before all terms
 param       := IDENT ":" "u32"
 term        := "term" IDENT "{" stmt* "}"
-stmt        := if-stmt | let-stmt | for-stmt | action [";"]
+stmt        := if-stmt | let-stmt | for-stmt | call-stmt | action [";"]
+call-stmt   := "apply" IDENT ["(" call-arg ("," call-arg)* ")"] [";"]
+call-arg    := INT | IDENT | community | IP          # checked against the parameter types
 let-stmt    := "let" IDENT "=" value [";"]        # contextual `let`
 for-stmt    := "for" IDENT "in" for-source "{" stmt* "}"   # contextual `for`
 for-source  := "route" "." ("communities" | "as-path") | IDENT   # IDENT: asn-set
 if-stmt     := "if" expr "{" body-stmt* "}" ["else" "{" body-stmt* "}"]
-body-stmt   := let-stmt | action [";"]
+body-stmt   := let-stmt | call-stmt | action [";"]
 action      := "accept" | "reject"
              | "break" | "continue"               # loop bodies only
              | "set" ("local-pref" | "med") value
@@ -2486,6 +2588,7 @@ and the
 | `prepend as-path 65000 3` | `prepend as 65000 3` |
 | `set next-hop self` | `set next-hop self` |
 | `pass` followed by the policy end | `accept`, or nothing when no `default-action reject` is declared |
+| `apply NAME` / `apply NAME(args)` | `apply NAME` / `apply NAME(args)` as a statement (see [`apply` as a statement](#apply-as-a-statement--calling-a-policy)); drop `default-action reject` from a ported child, since RPL children always return when they fall through |
 | `if ... then ... elseif ... then ... else ... endif`, nested `if` | `if ... { ... } else if ... { ... } else { ... }`, nested up to four levels; one branch runs, and a branch without `accept` or `reject` continues with the rest of the policy |
 | `drop` | `reject` |
 | conditions read the route's initial data ("comparison operators always run on the initial data in the route", 24.x guide) | the same: reads never observe a staged `set` |
@@ -2838,15 +2941,6 @@ compiles now:
   end of the rendered path, so the pattern matches a path whose first ASN
   is 65001, including a one-ASN path, and never a path that starts with an
   `AS_SET`.
-- **`apply NAME` as a statement** — `.rpol` `apply(p)` is a predicate,
-  and the applied policy's actions do not run (see "`apply` — policy as
-  predicate"). A chain `[caller, child]` runs the child unconditionally,
-  after all of the caller's actions, so it matches only an unconditional
-  call at the end of the caller whose dispositions compose under the
-  chain rules. For a conditional call, or one followed by more of the
-  caller's statements, inline the callee's logic at the guarded call
-  site, or split the caller so that the guards, the action order and the
-  dispositions stay as they were.
 - **`$parameter` of a set, address or community type** — declare the
   parameter with its type, such as `pfx: prefix-set`, `tag: community` or
   `nh: ip` (see "Parameters"), and pass the set name or value in the call.

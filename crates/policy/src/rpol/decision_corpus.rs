@@ -593,6 +593,7 @@ const CONSTRUCTS: &[&str] = &[
     "ast.stmt.else",
     "ast.stmt.nested-if",
     "ast.stmt.for",
+    "ast.stmt.call",
     "ast.for.field",
     "ast.for.set",
     "ast.action.accept",
@@ -728,6 +729,9 @@ fn ast_stmts(stmts: &[Stmt], seen: &mut std::collections::BTreeSet<&'static str>
                 }
             }
             Stmt::Action(action) => ast_action(action, seen),
+            Stmt::Call(_) => {
+                seen.insert("ast.stmt.call");
+            }
             Stmt::For(for_stmt) => {
                 seen.insert("ast.stmt.for");
                 seen.insert(match for_stmt.source {

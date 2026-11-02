@@ -21,7 +21,7 @@ use crate::sets::{
 };
 
 use super::ast::{
-    ActionStmt, AsnSetDef, CallArg, CmpOp, CommunityArg, CommunityKind, CommunityLit,
+    ActionStmt, AsnSetDef, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunityLit,
     CommunitySetDef, DatasetDecl, DatasetEntryAst, ElseBody, ExpectCall, ExpectDef, ExpectVerdict,
     Expr, FieldPath, FieldRoot, FnDef, FnLet, ForSource, ForStmt, IfBranch, IfStmt, NextHopArg,
     ParamType, PeerField, PolicyDef, PrefixEntryAst, PrefixSetDef, PrependAsArg, Rhs, RouteField,
@@ -1146,9 +1146,54 @@ impl Parser<'_> {
         {
             return Ok(Stmt::For(self.for_stmt(depth)?));
         }
+        if self.at(Tok::ApplyKw) {
+            let call = self.call_stmt()?;
+            self.eat(Tok::Semi);
+            return Ok(Stmt::Call(call));
+        }
         let action = self.action()?;
         self.eat(Tok::Semi);
         Ok(Stmt::Action(action))
+    }
+
+    /// `apply <policy>[(args)]` in statement position (ADR-0096 amendment,
+    /// 2026-11-01). Statement position admitted no `apply` before, so the
+    /// form is additive; `apply(p)` stays the condition.
+    fn call_stmt(&mut self) -> PResult<CallStmt> {
+        let start = self.expect(Tok::ApplyKw, "`apply`")?.span;
+        if self.at(Tok::LParen) {
+            let span = self.here();
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Parse,
+                    span,
+                    "`apply(...)` is a condition, not a statement",
+                    "a condition goes in an `if`",
+                )
+                .with_note(
+                    "to run a policy here, write `apply NAME` or `apply NAME(args)`; \
+                     to test it, write `if apply(NAME) { ... }`",
+                ),
+            );
+            return Err(Fail);
+        }
+        let policy = self.expect_ident("a policy name")?;
+        let mut args = Vec::new();
+        let mut end = policy.span;
+        if self.eat(Tok::LParen).is_some() {
+            while !self.at(Tok::RParen) {
+                args.push(self.call_arg()?);
+                if self.eat(Tok::Comma).is_none() {
+                    break;
+                }
+            }
+            end = self.expect(Tok::RParen, "`)`")?.span;
+        }
+        Ok(CallStmt {
+            policy,
+            args,
+            span: start.to(end),
+        })
     }
 
     /// `for <var> in <source> { body }` (LAN-303); the caller has
@@ -1251,6 +1296,11 @@ impl Parser<'_> {
                     .with_note("put the loop in the term body and the `if` inside the loop"),
                 );
                 return Err(Fail);
+            }
+            if self.at(Tok::ApplyKw) {
+                body.push(Stmt::Call(self.call_stmt()?));
+                self.eat(Tok::Semi);
+                continue;
             }
             body.push(Stmt::Action(self.action()?));
             self.eat(Tok::Semi);

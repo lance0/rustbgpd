@@ -64,3 +64,31 @@ test fall-through {
     route { prefix 192.0.2.0/24; med 1 }
     expect early-verdicts == accept with only community 65000:8
 }
+
+# `apply` as a statement: the callee's reject denies, its accept returns
+# to the caller, and its writes carry into the caller's outcome.
+policy call-guard {
+    term bad { if route.med >= 100 { reject } }
+    term good { if route.med >= 50 { set local-pref 300; accept } }
+    term tag { add community 65000:1 }
+}
+
+policy calls-guard {
+    term t { apply call-guard; set med 7 }
+    term rest { accept }
+}
+
+test call-denied {
+    route { prefix 192.0.2.0/24; med 150 }
+    expect calls-guard == reject
+}
+
+test call-returned {
+    route { prefix 192.0.2.0/24; med 60 }
+    expect calls-guard == accept with local-pref 300, med 7
+}
+
+test call-fell-through {
+    route { prefix 192.0.2.0/24; med 20 }
+    expect calls-guard == accept with med 7, community 65000:1
+}

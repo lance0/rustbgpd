@@ -298,6 +298,9 @@ impl CoverageAccum {
         // term lowers to several — group greedily by that contract
         // (term names are identifiers and cannot contain `.`).
         let mut src = 0usize;
+        // Terms inlined at `apply` statements credit the called policy's
+        // own source terms, named under the call site.
+        let mut calls = CallWalk::default();
         for (i, term) in policy.terms.iter().enumerate() {
             let Some(ir_name) = term.name.as_deref() else {
                 continue;
@@ -310,12 +313,18 @@ impl CoverageAccum {
                 // bug; degrade to dropped attribution, never a panic.
                 break;
             }
-            if evaluated.get(i).copied().unwrap_or(0) > 0 {
+            let was_reached = evaluated.get(i).copied().unwrap_or(0) > 0;
+            let was_hit = matched.get(i).copied().unwrap_or(0) > 0;
+            if was_reached {
                 reached[src] = true;
             }
-            if !matches!(term.guard, MatchExpr::True) {
+            // Only the caller's own terms, and the entry of a call it makes,
+            // say whether its source term matched; a called term's guard is
+            // the called policy's condition.
+            let own = calls.step(ir_name, &term.guard, was_reached, was_hit);
+            if own && !own_guard_is_true(&term.guard) {
                 conditional[src] = true;
-                if matched.get(i).copied().unwrap_or(0) > 0 {
+                if was_hit {
                     hit[src] = true;
                 }
             }
@@ -330,6 +339,51 @@ impl CoverageAccum {
                 // An unconditional term "matches" whenever reached.
                 if hit || !conditional {
                     term.matched += 1;
+                }
+            }
+        }
+        self.credit_calls(&calls.credits);
+    }
+
+    /// Credit the called policies' source terms with this walk's facts,
+    /// each source term at most once per walk, by the rules a policy's own
+    /// terms follow, decided per call invocation: reached if any of its
+    /// terms was, matched if one of its conditional terms matched or it has
+    /// none. Each call specializes the callee, so one invocation's guard can
+    /// fold to `true` while another's stays conditional.
+    fn credit_calls(&mut self, credits: &[Credit<'_>]) {
+        let mut per_call: HashMap<(usize, usize, usize), (bool, bool, bool)> = HashMap::new();
+        for credit in credits {
+            let Some(&slot) = self.index.get(credit.policy) else {
+                continue;
+            };
+            let Some(src) = self.policies[slot]
+                .terms
+                .iter()
+                .position(|term| belongs(credit.term, &term.name))
+            else {
+                continue;
+            };
+            let entry = per_call.entry((slot, src, credit.invocation)).or_default();
+            entry.0 |= credit.reached;
+            if credit.conditional {
+                entry.1 = true;
+                entry.2 |= credit.reached && credit.hit;
+            }
+        }
+        let mut folded: HashMap<(usize, usize), (bool, bool)> = HashMap::new();
+        for ((slot, src, _), (reached, conditional, hit)) in per_call {
+            let entry = folded.entry((slot, src)).or_default();
+            entry.0 |= reached;
+            entry.1 |= reached && (hit || !conditional);
+        }
+        for ((slot, src), (reached, matched)) in folded {
+            let policy = &mut self.policies[slot];
+            policy.status = PolicyTestStatus::Tested;
+            if reached {
+                policy.terms[src].evaluated += 1;
+                if matched {
+                    policy.terms[src].matched += 1;
                 }
             }
         }
@@ -388,6 +442,7 @@ fn collect_stmt_applies<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a str>) {
                 }
             }
             Stmt::For(for_stmt) => collect_stmt_applies(&for_stmt.body, out),
+            Stmt::Call(call) => out.push(&call.policy.node),
             Stmt::Action(_) => {}
         }
     }
@@ -402,6 +457,153 @@ fn collect_expr_applies<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
         Expr::Not(inner, _) => collect_expr_applies(inner, out),
         Expr::Apply { policy, .. } => out.push(&policy.node),
         _ => {}
+    }
+}
+
+/// One walk fact for a called policy's source term.
+struct Credit<'a> {
+    policy: &'a str,
+    term: &'a str,
+    /// The call invocation, numbered by entry in walk order.
+    invocation: usize,
+    reached: bool,
+    conditional: bool,
+    hit: bool,
+}
+
+/// The per-walk state of the calls in one caller's term list: which call
+/// instances were entered and which have returned. Inlined term names say
+/// where each term came from (`t.3/a(1):x.2/b:y`), and the flag's own terms
+/// (`#enter`, `#return`, `#default`) mark a call's entry, its returns and
+/// its fall-through deny. `#` cannot begin a source term name.
+#[derive(Default)]
+struct CallWalk<'a> {
+    /// Call instance → (entered, returned, invocation) in this walk.
+    instances: HashMap<String, (bool, bool, usize)>,
+    /// Call entries so far, numbering each invocation.
+    entries: usize,
+    credits: Vec<Credit<'a>>,
+}
+
+impl<'a> CallWalk<'a> {
+    /// Fold one IR term. Returns whether the term belongs to the caller's
+    /// own source term for matching: a term of its own, or the entry of a
+    /// call it makes.
+    fn step(&mut self, ir: &'a str, guard: &MatchExpr, reached: bool, hit: bool) -> bool {
+        let segments = call_segments(ir);
+        let Some(&(_, innermost_term)) = segments.last() else {
+            return true;
+        };
+        let depth = segments.len();
+        let key = instance_key(ir, &segments);
+        if innermost_term == "#enter" {
+            self.entries += 1;
+            self.instances.insert(key, (hit, false, self.entries));
+            if depth > 1 {
+                // The entry of a nested call is a term of the call around it.
+                self.credit(&segments[..depth - 1], ir, guard, reached, hit);
+            }
+            return depth == 1;
+        }
+        if innermost_term == "#default" {
+            return false;
+        }
+        if ir.ends_with(":#return") {
+            if hit && let Some(state) = self.instances.get_mut(&key) {
+                state.1 = true;
+            }
+            return false;
+        }
+        self.credit(&segments, ir, guard, reached, hit);
+        false
+    }
+
+    /// Credit the innermost callee of `segments` when its call instance is
+    /// entered and has not returned.
+    fn credit(
+        &mut self,
+        segments: &[(&'a str, &'a str)],
+        ir: &'a str,
+        guard: &MatchExpr,
+        reached: bool,
+        hit: bool,
+    ) {
+        let key = instance_key(ir, segments);
+        let (live, invocation) = self
+            .instances
+            .get(&key)
+            .map_or((false, 0), |&(entered, returned, invocation)| {
+                (entered && !returned, invocation)
+            });
+        let &(policy, term) = segments.last().expect("non-empty");
+        self.credits.push(Credit {
+            policy,
+            term,
+            invocation,
+            reached: reached && live,
+            conditional: !own_guard_is_true(guard),
+            hit,
+        });
+    }
+}
+
+/// The `(called policy, callee IR term)` of each call an inlined IR term
+/// name passes through: `t.3/a(1):x.2/b:y` gives `(a, x.2)` and `(b, y)`.
+fn call_segments(ir: &str) -> Vec<(&str, &str)> {
+    ir.split('/')
+        .skip(1)
+        .filter_map(|segment| {
+            // `<call>:<callee-term>`; a call's arguments may hold `:`.
+            let mut depth = 0usize;
+            let colon = segment.char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    ':' if depth == 0 => return Some(i),
+                    _ => {}
+                }
+                None
+            })?;
+            let call = &segment[..colon];
+            let policy = call.split('(').next().unwrap_or(call);
+            let term = segment[colon + 1..].split(":#").next().unwrap_or("");
+            Some((policy, term))
+        })
+        .collect()
+}
+
+/// A call instance in one walk: the caller's source term, each enclosing
+/// call with its source term, and the call itself. Repeated calls of one
+/// policy from one term are told apart by walk order (each entry resets).
+fn instance_key(ir: &str, segments: &[(&str, &str)]) -> String {
+    let caller = ir.split(['.', '/']).next().unwrap_or(ir);
+    let mut key = caller.to_string();
+    for (index, (policy, term)) in segments.iter().enumerate() {
+        key.push('/');
+        key.push_str(policy);
+        if index + 1 < segments.len() {
+            key.push(':');
+            key.push_str(term.split('.').next().unwrap_or(term));
+        }
+    }
+    key
+}
+
+/// Whether the part of a guard that belongs to its own policy is `True`:
+/// the conditions after the last call's flag check (a flag check alone, as
+/// on a binding, adds no condition of its own).
+fn own_guard_is_true(guard: &MatchExpr) -> bool {
+    let is_flag = |expr: &MatchExpr| {
+        matches!(expr, MatchExpr::ValueCmp(node)
+            if matches!(&node.lhs, crate::ir::ValueExpr::Local { name, .. } if name.starts_with('#')))
+    };
+    match guard {
+        MatchExpr::True => true,
+        MatchExpr::And(children) => {
+            let start = children.iter().rposition(is_flag).map_or(0, |i| i + 1);
+            children[start..].is_empty()
+        }
+        other => is_flag(other),
     }
 }
 
@@ -627,7 +829,8 @@ fn term_always_decides(term: &TermDef) -> bool {
 pub(super) fn body_decides(body: &[Stmt]) -> bool {
     body.iter().any(|stmt| match stmt {
         Stmt::Action(action) => matches!(action, ActionStmt::Accept(_) | ActionStmt::Reject(_)),
-        Stmt::For(_) => false,
+        // A callee may return, so a call never decides on its own.
+        Stmt::For(_) | Stmt::Call(_) => false,
         Stmt::If(if_stmt) => if_decides(if_stmt),
     })
 }
@@ -661,7 +864,7 @@ fn if_decides(if_stmt: &IfStmt) -> bool {
 fn unreachable_branches(stmts: &[Stmt], policy: &str, out: &mut Vec<Lint>) {
     for stmt in stmts {
         match stmt {
-            Stmt::Action(_) => {}
+            Stmt::Action(_) | Stmt::Call(_) => {}
             Stmt::For(for_stmt) => unreachable_branches(&for_stmt.body, policy, out),
             Stmt::If(if_stmt) => {
                 let mut decided = false;
@@ -781,6 +984,10 @@ impl<'a> Refs<'a> {
     fn stmts(&mut self, stmts: &'a [Stmt]) {
         for stmt in stmts {
             match stmt {
+                Stmt::Call(call) => {
+                    self.policies.insert(&call.policy.node);
+                    self.call_args(&call.args);
+                }
                 Stmt::If(if_stmt) => {
                     for branch in &if_stmt.branches {
                         self.expr(&branch.cond);
