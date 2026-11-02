@@ -239,3 +239,39 @@ test padded-by-parameter {
     route { prefix 192.0.2.0/24; as-path "64500" }
     expect pad-by(64501) == accept with prepend as 64501 2
 }
+
+policy ext-literals {
+    term origin-tagged {
+        if route.ext-communities has RO:64510:5 {
+            add ext-community RT:192.0.2.1:7
+            remove ext-community RO:192.0.2.1:8
+            accept
+        }
+    }
+    term rest { reject }
+}
+
+test ext-literals-rewrite {
+    route { prefix 192.0.2.0/24; ext-communities [RO:64510:5, RO:192.0.2.1:8] }
+    expect ext-literals == accept with ext-community RT:192.0.2.1:7, removes ext-community RO:192.0.2.1:8
+}
+
+test ext-literals-untagged {
+    route { prefix 192.0.2.0/24; ext-communities [RO:64510:6] }
+    expect ext-literals == reject
+}
+
+policy avoid(asn: u32) {
+    term through { if route.as-path contains asn { reject } }
+    term rest { accept }
+}
+
+test avoid-through {
+    route { prefix 192.0.2.0/24; as-path "64500 64501" }
+    expect avoid(64501) == reject
+}
+
+test avoid-elsewhere {
+    route { prefix 192.0.2.0/24; as-path "64500 64502" }
+    expect avoid(64501) == accept
+}

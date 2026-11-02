@@ -3231,6 +3231,19 @@ settles these cases:
 | `ast.action.community-binding` | v1 | `add\|remove community <binding>` |
 | `ast.action.community-in-set` | v1 | `remove <kind> in <set>` |
 | `ast.action.community-not-in-set` | v1 | `remove <kind> not in <set>` |
+| `ast.community.add` | v1 | `add` community action |
+| `ast.community.remove` | v1 | `remove` community action |
+| `ast.community.kind.standard` | v1 | `community` action keyword, RFC 1997 |
+| `ast.community.kind.large` | v1 | `large-community` action keyword, RFC 8092 |
+| `ast.community.kind.extended` | v1 | `ext-community` action keyword, RFC 4360 RT/RO |
+| `ast.community.kind.any` | v1 | `remove any-community in <set>`, every kind |
+| `ast.literal.standard` | v1 | standard community literal or well-known name, `65000:100` |
+| `ast.literal.large` | v1 | large community literal, `65000:1:2` |
+| `ast.literal.route-target` | v1 | Route Target literal with an ASN administrator, `RT:65000:1` |
+| `ast.literal.route-origin` | v1 | Route Origin literal with an ASN administrator, `RO:65000:1` |
+| `ast.literal.route-target-ipv4` | v1 | Route Target literal with an IPv4 administrator, `RT:192.0.2.1:7` |
+| `ast.literal.route-origin-ipv4` | v1 | Route Origin literal with an IPv4 administrator, `RO:192.0.2.1:7` |
+| `ast.literal.well-known-ext` | v1 | `OV_VALID`/`OV_NOT_FOUND`/`OV_INVALID` literal |
 | `ast.action.prepend` | v1 | `prepend as <asn\|parameter> <count>` |
 | `ast.action.let` | v1 | immutable `let` binding |
 | `ast.action.break` | v1 | `break` out of a loop |
@@ -3246,8 +3259,14 @@ settles these cases:
 | `ast.expr.exists` | v1 | `exists <optional field>` |
 | `ast.expr.matches` | v1 | `route.as-path matches "<regex>"` |
 | `ast.expr.contains` | v1 | `route.as-path contains <asn>` |
+| `ast.contains.literal` | v1 | `route.as-path contains <asn>` with a literal ASN |
+| `ast.contains.parameter` | v1 | `route.as-path contains <parameter>` |
 | `ast.expr.value-cmp` | v1 | comparison with arithmetic or a call on either side |
 | `ast.expr.apply` | v1 | `apply(p)` predicate: would `p` accept |
+| `ast.call-arg.integer` | v1 | integer argument to a policy call, `p(200)` |
+| `ast.call-arg.name` | v1 | set, dataset or parameter name argument, `p(customers)` |
+| `ast.call-arg.community` | v1 | standard community argument, `p(65000:100)` |
+| `ast.call-arg.ip` | v1 | address argument, `p(192.0.2.1)` |
 | `ast.value.literal` | v1 | integer literal in a value position |
 | `ast.value.community` | v1 | standard community literal as a value |
 | `ast.value.identifier` | v1 | parameter or binding reference |

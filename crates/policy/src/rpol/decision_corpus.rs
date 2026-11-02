@@ -38,10 +38,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, DatasetEntryAst, ExpectDef, ExpectVerdict, Expr, FieldPath,
-    ForSource, NextHopArg, ParamType, PeerField, PolicyDef, PrependAsArg, Rhs, RouteField,
-    SourceFile, Stmt, TermDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
+    ActionStmt, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunityLit,
+    DatasetEntryAst, ExpectCall, ExpectDef, ExpectVerdict, Expr, FieldPath, ForSource, NextHopArg,
+    ParamType, PeerField, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, TermDef,
+    TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
+use super::diag::Spanned;
 use super::testing::{Fixture, override_data, render_expect};
 use super::typeck::{Field, resolve_field};
 use super::{RpolFile, lower};
@@ -755,6 +757,19 @@ const CONSTRUCTS: &[&str] = &[
     "ast.action.community-binding",
     "ast.action.community-in-set",
     "ast.action.community-not-in-set",
+    "ast.community.add",
+    "ast.community.remove",
+    "ast.community.kind.standard",
+    "ast.community.kind.large",
+    "ast.community.kind.extended",
+    "ast.community.kind.any",
+    "ast.literal.standard",
+    "ast.literal.large",
+    "ast.literal.route-target",
+    "ast.literal.route-origin",
+    "ast.literal.route-target-ipv4",
+    "ast.literal.route-origin-ipv4",
+    "ast.literal.well-known-ext",
     "ast.action.prepend",
     "ast.action.let",
     "ast.action.break",
@@ -770,8 +785,14 @@ const CONSTRUCTS: &[&str] = &[
     "ast.expr.exists",
     "ast.expr.matches",
     "ast.expr.contains",
+    "ast.contains.literal",
+    "ast.contains.parameter",
     "ast.expr.value-cmp",
     "ast.expr.apply",
+    "ast.call-arg.integer",
+    "ast.call-arg.name",
+    "ast.call-arg.community",
+    "ast.call-arg.ip",
     "ast.value.literal",
     "ast.value.community",
     "ast.value.identifier",
@@ -995,7 +1016,12 @@ fn ast_stmts(stmts: &[Stmt], seen: &mut Seen) {
                 }
             }
             Stmt::Action(action) => ast_action(action, seen),
-            Stmt::Call(_) => {
+            Stmt::Call(CallStmt {
+                policy: _,
+                args,
+                span: _,
+            }) => {
+                ast_call_args(args, seen);
                 seen.insert("ast.stmt.call");
             }
             Stmt::For(for_stmt) => {
@@ -1029,14 +1055,35 @@ fn ast_action(action: &ActionStmt, seen: &mut Seen) {
         ActionStmt::SetNextHop(NextHopArg::Self_(_), _) => "ast.action.set-next-hop-self",
         ActionStmt::SetNextHop(NextHopArg::Addr(..), _) => "ast.action.set-next-hop-address",
         ActionStmt::SetNextHop(NextHopArg::Param(_), _) => "ast.action.set-next-hop-parameter",
-        ActionStmt::Community { arg, .. } => match arg {
-            CommunityArg::Lit(_) => "ast.action.community-literal",
-            CommunityArg::LargeAdminWildcard(_) => "ast.action.large-community-admin-wildcard",
-            CommunityArg::All(_) => "ast.action.community-all",
-            CommunityArg::Var(_) => "ast.action.community-binding",
-            CommunityArg::InSet { negate: false, .. } => "ast.action.community-in-set",
-            CommunityArg::InSet { negate: true, .. } => "ast.action.community-not-in-set",
-        },
+        ActionStmt::Community {
+            add,
+            kind,
+            arg,
+            span: _,
+        } => {
+            seen.insert(if *add {
+                "ast.community.add"
+            } else {
+                "ast.community.remove"
+            });
+            seen.insert(match kind {
+                CommunityKind::Standard => "ast.community.kind.standard",
+                CommunityKind::Large => "ast.community.kind.large",
+                CommunityKind::Ext => "ast.community.kind.extended",
+                CommunityKind::Any => "ast.community.kind.any",
+            });
+            match arg {
+                CommunityArg::Lit(lit) => {
+                    ast_literal(lit.node, seen);
+                    "ast.action.community-literal"
+                }
+                CommunityArg::LargeAdminWildcard(_) => "ast.action.large-community-admin-wildcard",
+                CommunityArg::All(_) => "ast.action.community-all",
+                CommunityArg::Var(_) => "ast.action.community-binding",
+                CommunityArg::InSet { negate: false, .. } => "ast.action.community-in-set",
+                CommunityArg::InSet { negate: true, .. } => "ast.action.community-not-in-set",
+            }
+        }
         ActionStmt::Prepend { asn, .. } => {
             // Every argument form, then the operand it denotes: `origin`
             // and `path-first` arrive as a bare identifier.
@@ -1104,7 +1151,8 @@ fn ast_expr(expr: &Expr, seen: &mut Seen) {
             "ast.expr.in"
         }
         Expr::IdentIn { .. } => "ast.expr.ident-in",
-        Expr::Has { field, .. } => {
+        Expr::Has { field, lit } => {
+            ast_literal(lit.node, seen);
             ast_field(field, seen);
             "ast.expr.has"
         }
@@ -1120,7 +1168,11 @@ fn ast_expr(expr: &Expr, seen: &mut Seen) {
             ast_field(field, seen);
             "ast.expr.matches"
         }
-        Expr::Contains { field, .. } => {
+        Expr::Contains { field, asn } => {
+            seen.insert(match asn {
+                U32Arg::Lit(..) => "ast.contains.literal",
+                U32Arg::Param(_) => "ast.contains.parameter",
+            });
             ast_field(field, seen);
             "ast.expr.contains"
         }
@@ -1130,7 +1182,14 @@ fn ast_expr(expr: &Expr, seen: &mut Seen) {
             ast_cmp(*op, seen);
             "ast.expr.value-cmp"
         }
-        Expr::Apply { .. } => "ast.expr.apply",
+        Expr::Apply {
+            policy: _,
+            args,
+            span: _,
+        } => {
+            ast_call_args(args, seen);
+            "ast.expr.apply"
+        }
     };
     seen.insert(name);
 }
@@ -1164,6 +1223,39 @@ fn ast_value(value: &ValueExprAst, seen: &mut Seen) {
         }
     };
     seen.insert(name);
+}
+
+/// A community literal's form, as written in a `has` probe or an action.
+fn ast_literal(lit: CommunityLit, seen: &mut Seen) {
+    seen.insert(match lit {
+        CommunityLit::Standard(_) => "ast.literal.standard",
+        CommunityLit::Large(_) => "ast.literal.large",
+        CommunityLit::Ext {
+            route_target,
+            ipv4_admin,
+            global: _,
+            local: _,
+        } => match (route_target, ipv4_admin) {
+            (true, false) => "ast.literal.route-target",
+            (false, false) => "ast.literal.route-origin",
+            (true, true) => "ast.literal.route-target-ipv4",
+            (false, true) => "ast.literal.route-origin-ipv4",
+        },
+        CommunityLit::ExtRaw(_) => "ast.literal.well-known-ext",
+    });
+}
+
+/// The argument forms of a policy call, in `apply`, a call statement or an
+/// `expect`.
+fn ast_call_args(args: &[Spanned<CallArg>], seen: &mut Seen) {
+    for arg in args {
+        seen.insert(match arg.node {
+            CallArg::Int(_) => "ast.call-arg.integer",
+            CallArg::Name(_) => "ast.call-arg.name",
+            CallArg::Community(_) => "ast.call-arg.community",
+            CallArg::Ip(_) => "ast.call-arg.ip",
+        });
+    }
 }
 
 fn ast_cmp(op: CmpOp, seen: &mut Seen) {
@@ -1336,11 +1428,14 @@ fn test_constructs(test: &TestDef, seen: &mut Seen) {
     for expect in expects {
         let ExpectDef {
             chain,
-            calls: _,
+            calls,
             verdict,
             with,
             with_only,
         } = expect;
+        for ExpectCall { policy: _, args } in calls {
+            ast_call_args(args, seen);
+        }
         if *chain {
             seen.insert("ast.test.expect.chain");
         }

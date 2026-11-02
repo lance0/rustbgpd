@@ -1,10 +1,10 @@
-# rpol decision corpus: 270 programs, 1865 cases. Regenerate with
+# rpol decision corpus: 270 programs, 1879 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
-ast.policy.parameters 32
-ast.stmt.if 602
+ast.policy.parameters 34
+ast.stmt.if 605
 ast.stmt.else-if 31
 ast.stmt.else 76
 ast.stmt.nested-if 13
@@ -12,19 +12,32 @@ ast.stmt.for 75
 ast.stmt.call 37
 ast.for.field 64
 ast.for.set 11
-ast.action.accept 1302
-ast.action.reject 450
+ast.action.accept 1305
+ast.action.reject 461
 ast.action.set-local-pref 128
 ast.action.set-med 261
 ast.action.set-next-hop-self 3
 ast.action.set-next-hop-address 9
 ast.action.set-next-hop-parameter 1
-ast.action.community-literal 526
+ast.action.community-literal 528
 ast.action.large-community-admin-wildcard 22
 ast.action.community-all 77
 ast.action.community-binding 43
 ast.action.community-in-set 25
 ast.action.community-not-in-set 22
+ast.community.add 500
+ast.community.remove 191
+ast.community.kind.standard 567
+ast.community.kind.large 93
+ast.community.kind.extended 59
+ast.community.kind.any 2
+ast.literal.standard 483
+ast.literal.large 29
+ast.literal.route-target 11
+ast.literal.route-origin 2
+ast.literal.route-target-ipv4 2
+ast.literal.route-origin-ipv4 2
+ast.literal.well-known-ext 35
 ast.action.prepend 55
 ast.action.let 63
 ast.action.break 33
@@ -35,13 +48,19 @@ ast.expr.not 5
 ast.expr.cmp 298
 ast.expr.in 119
 ast.expr.ident-in 42
-ast.expr.has 5
+ast.expr.has 7
 ast.expr.has-parameter 1
 ast.expr.exists 4
 ast.expr.matches 37
-ast.expr.contains 5
+ast.expr.contains 6
+ast.contains.literal 5
+ast.contains.parameter 1
 ast.expr.value-cmp 120
 ast.expr.apply 1
+ast.call-arg.integer 265
+ast.call-arg.name 165
+ast.call-arg.community 60
+ast.call-arg.ip 60
 ast.value.literal 390
 ast.value.community 22
 ast.value.identifier 106
@@ -66,9 +85,9 @@ ast.rhs.field 9
 ast.field.route.prefix 148
 ast.field.route.communities 66
 ast.field.route.large-communities 1
-ast.field.route.ext-communities 5
+ast.field.route.ext-communities 7
 ast.field.route.any-community 5
-ast.field.route.as-path 73
+ast.field.route.as-path 74
 ast.field.route.as-path.len 52
 ast.field.route.communities.len 4
 ast.field.route.large-communities.len 3
@@ -103,77 +122,77 @@ ast.prepend.origin 11
 ast.prepend.path-first 11
 ast.prepend.literal 32
 ast.prepend.parameter 1
-ast.param.u32 28
+ast.param.u32 30
 ast.param.prefix-set 2
 ast.param.community-set 2
 ast.param.asn-set 2
 ast.param.community 2
 ast.param.ip 2
 ast.decl.import 20
-ast.decl.prefix-set 581
+ast.decl.prefix-set 595
 ast.decl.prefix-set.ge-le 337
-ast.decl.community-set 596
-ast.decl.asn-set 297
+ast.decl.community-set 610
+ast.decl.asn-set 311
 ast.decl.dataset.prefix-set 4
 ast.decl.dataset.asn-set 5
-ast.decl.dataset.community-set 91
+ast.decl.dataset.community-set 105
 ast.decl.fn 31
 ast.decl.fn.let 21
-ast.decl.test 1185
-ast.set.community.standard 596
+ast.decl.test 1199
+ast.set.community.standard 610
 ast.set.community.large 149
-ast.set.community.route-target 91
-ast.set.community.route-origin 91
-ast.set.community.well-known-ext 91
+ast.set.community.route-target 105
+ast.set.community.route-origin 105
+ast.set.community.well-known-ext 105
 ast.set.pattern.standard 11
 ast.set.pattern.large 71
-ast.set.pattern.route-target 151
-ast.set.pattern.route-origin 91
-ast.set.pattern-field.range 162
-ast.set.pattern-field.private-as 91
-ast.test.dataset-override 96
-ast.test.route.prefix 1095
-ast.test.route.communities 803
-ast.test.route.large-communities 431
-ast.test.route.ext-communities 151
-ast.test.route.as-path 803
+ast.set.pattern.route-target 165
+ast.set.pattern.route-origin 105
+ast.set.pattern-field.range 176
+ast.set.pattern-field.private-as 105
+ast.test.dataset-override 110
+ast.test.route.prefix 1109
+ast.test.route.communities 817
+ast.test.route.large-communities 445
+ast.test.route.ext-communities 165
+ast.test.route.as-path 817
 ast.test.route.next-hop 137
 ast.test.route.local-pref 197
 ast.test.route.med 407
 ast.test.route.rpki 108
 ast.test.route.aspa 144
 ast.test.route.route-type 137
-ast.test.route.evpn-route-type 228
-ast.test.route.family 302
-ast.test.peer.address 228
-ast.test.peer.asn 151
-ast.test.peer.local-as 91
+ast.test.route.evpn-route-type 242
+ast.test.route.family 316
+ast.test.peer.address 242
+ast.test.peer.asn 165
+ast.test.peer.local-as 105
 ast.test.peer.group 162
 ast.test.expect.chain 161
-ast.test.expect.with-only 384
-ast.test.expect.accept 1174
-ast.test.expect.reject 960
+ast.test.expect.with-only 398
+ast.test.expect.accept 1188
+ast.test.expect.reject 974
 ast.test.expect.error 23
-ast.test.with.local-pref 617
-ast.test.with.med 624
+ast.test.with.local-pref 631
+ast.test.with.med 638
 ast.test.with.next-hop 60
-ast.test.with.community 577
-ast.test.with.prepend 151
-ast.test.with.prepend-path 123
-ast.test.with.removes 300
-ast.test.with.removes-large-admin 91
-ast.test.with.removes-all 183
+ast.test.with.community 591
+ast.test.with.prepend 165
+ast.test.with.prepend-path 137
+ast.test.with.removes 405
+ast.test.with.removes-large-admin 105
+ast.test.with.removes-all 197
 ast.test.with.not-removed 200
 ast.test.with.without-community 56
-ast.test.with.without 323
-ir.guard.true 1335
+ast.test.with.without 337
+ir.guard.true 1346
 ir.guard.prefix-in-set 222
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
-ir.guard.community-contains 37
+ir.guard.community-contains 49
 ir.guard.community-in-set 25
 ir.guard.community-kind-in-set 63
-ir.guard.as-path-matches 148
+ir.guard.as-path-matches 150
 ir.guard.as-path-len 89
 ir.guard.origin-as-eq 21
 ir.guard.origin-as-ne 9
@@ -211,8 +230,8 @@ ir.value.binary 137
 ir.value.min 40
 ir.value.max 11
 ir.value.clamp 11
-ir.action.permit 1260
-ir.action.deny 394
+ir.action.permit 1263
+ir.action.deny 405
 ir.action.continue 250
 ir.action.bind 121
 ir.action.for-each 75
@@ -233,8 +252,8 @@ ir.mod.community-add 469
 ir.mod.community-remove 33
 ir.mod.large-community-add 11
 ir.mod.large-community-remove 17
-ir.mod.ext-community-add 35
-ir.mod.ext-community-remove 11
+ir.mod.ext-community-add 37
+ir.mod.ext-community-remove 13
 
 ## programs and policies without cases
 crates/policy/fuzz/seeds/rpol_compile/lan-184-deep-nesting.rpol: does not compile (a deliberate error, or datasets bound by config)
@@ -250,6 +269,7 @@ crates/policy/tests/decision_corpus/actions.rpol: policy tag-forward takes param
 crates/policy/tests/decision_corpus/surface.rpol: policy communities-by-kind probes a dataset (in-language tests only)
 crates/policy/tests/decision_corpus/surface.rpol: policy only-prefixes takes parameters (in-language tests only)
 crates/policy/tests/decision_corpus/surface.rpol: policy pad-by takes parameters (in-language tests only)
+crates/policy/tests/decision_corpus/surface.rpol: policy avoid takes parameters (in-language tests only)
 docs/adr/0096-policy-language.md#3a31b83af85b070c: does not compile (a deliberate error, or datasets bound by config)
 docs/cookbook/policy-quickstart.md#a3fd935127a98e08: policy customer-in takes parameters (in-language tests only)
 docs/reference/rpol-language.md#9ea347e0d0bb861e: policy customer-in takes parameters (in-language tests only)
@@ -579,6 +599,8 @@ crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | row tagg
 crates/policy/tests/decision_corpus/imports-a/main.rpol | tagged-only | row tagged-only t => #1 accept
 crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | row tagged-only rest => #2 reject
 crates/policy/tests/decision_corpus/imports-b/main.rpol | tagged-only | row tagged-only t => #1 accept
+crates/policy/tests/decision_corpus/surface.rpol | avoid(64501) | row avoid(64501) rest => #2 accept
+crates/policy/tests/decision_corpus/surface.rpol | avoid(64501) | row avoid(64501) through => #1 reject
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family evpn => #7 accept with set med 7
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family ls => #9 accept with set med 9
 crates/policy/tests/decision_corpus/surface.rpol | by-family | row by-family lsvpn => #10 accept with set med 10
@@ -604,6 +626,8 @@ crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr mac-ip 
 crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr not-prefix => #3 accept with add community 65000:5
 crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr prefix => #4 accept with set med 5
 crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | row evpn-rr rest => #5 reject
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | row ext-literals origin-tagged => #1 accept with add ext-community RT:192.0.2.1:7 (0x0102c00002010007); remove ext-community RO:192.0.2.1:8 (0x0103c00002010008)
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | row ext-literals rest => #2 reject
 crates/policy/tests/decision_corpus/surface.rpol | from-transit | row from-transit peer-asn => #1 accept with set local-pref 50
 crates/policy/tests/decision_corpus/surface.rpol | from-transit | row from-transit rest => #2 accept
 crates/policy/tests/decision_corpus/surface.rpol | only-prefixes(docs, transit) | row only-prefixes(docs, transit) listed => #1 accept
@@ -1429,6 +1453,10 @@ crates/policy/tests/decision_corpus/surface.rpol | test listed | only-prefixes(d
 crates/policy/tests/decision_corpus/surface.rpol | test unlisted | only-prefixes(docs, transit) => deny
 crates/policy/tests/decision_corpus/surface.rpol | test scrubbed | scrub => permit with remove community 65000:1; remove large-community 65000:7:7
 crates/policy/tests/decision_corpus/surface.rpol | test padded-by-parameter | pad-by(64501) => permit with prepend as 64501 2
+crates/policy/tests/decision_corpus/surface.rpol | test ext-literals-rewrite | ext-literals => permit with add ext-community RT:192.0.2.1:7 (0x0102c00002010007); remove ext-community RO:192.0.2.1:8 (0x0103c00002010008)
+crates/policy/tests/decision_corpus/surface.rpol | test ext-literals-untagged | ext-literals => deny
+crates/policy/tests/decision_corpus/surface.rpol | test avoid-through | avoid(64501) => deny
+crates/policy/tests/decision_corpus/surface.rpol | test avoid-elsewhere | avoid(64501) => permit
 crates/policy/tests/decision_corpus/surface.rpol | community-counts | m01-v4-transit => permit
 crates/policy/tests/decision_corpus/surface.rpol | community-counts | m02-v4-invalid-long => permit
 crates/policy/tests/decision_corpus/surface.rpol | community-counts | m03-v6-tagged => permit with set med 3
@@ -1489,6 +1517,16 @@ crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m07-default => deny
 crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m08-host-routes => deny
 crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m09-evpn => permit with set local-pref 200
 crates/policy/tests/decision_corpus/surface.rpol | evpn-rr | m10-v6-bogon => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m01-v4-transit => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m02-v4-invalid-long => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m03-v6-tagged => permit with add ext-community RT:192.0.2.1:7 (0x0102c00002010007); remove ext-community RO:192.0.2.1:8 (0x0103c00002010008)
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m04-bare => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m05-internal => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m06-local-as-set => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m07-default => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m08-host-routes => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m09-evpn => deny
+crates/policy/tests/decision_corpus/surface.rpol | ext-literals | m10-v6-bogon => deny
 crates/policy/tests/decision_corpus/term-names.rpol | test high-med | if-else => permit with set med 3
 crates/policy/tests/decision_corpus/term-names.rpol | test high-med | staged => permit with set med 4
 crates/policy/tests/decision_corpus/term-names.rpol | test high-med | verdict-first => deny
