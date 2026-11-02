@@ -9696,3 +9696,107 @@ mod typed_parameter_names {
         );
     }
 }
+
+// ─── typed parameters: round-2 regressions ─────────────────────────
+
+mod typed_parameter_round_two {
+    use super::super::run_rpol_tests;
+    use super::diagnostics_of;
+
+    fn passes(source: &str, total: usize) {
+        let report = run_rpol_tests(source).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(report.total, total);
+        assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    }
+
+    /// A set argument keeps the kind of its parameter. With an asn-set and
+    /// a community-set of the same name, a `community-set` parameter
+    /// probes the community-set, for a binding and for a `u32` constant.
+    #[test]
+    fn set_arguments_keep_their_parameter_kind() {
+        passes(
+            "asn-set shared { 65000 }
+             community-set shared { 65000:1 }
+             policy binding(s: community-set) {
+                 term t { for c in route.communities { if c in s { reject } } }
+             }
+             policy constant(s: community-set, x: u32) {
+                 term t { if x in s { reject } }
+             }
+             policy asn(s: asn-set, x: u32) {
+                 term t { if x in s { reject } }
+             }
+             test community-binding {
+                 route { prefix 192.0.2.0/24; communities [65000:1] }
+                 expect binding(shared) == reject
+             }
+             test asn-value-binding {
+                 route { prefix 192.0.2.0/24; communities [0:65000] }
+                 expect binding(shared) == accept
+             }
+             test community-constant {
+                 route { prefix 192.0.2.0/24 }
+                 expect constant(shared, 4259840001) == reject
+             }
+             test asn-value-constant {
+                 route { prefix 192.0.2.0/24 }
+                 expect constant(shared, 65000) == accept
+             }
+             test asn-kind {
+                 route { prefix 192.0.2.0/24 }
+                 expect asn(shared, 65000) == reject
+             }",
+            5,
+        );
+    }
+
+    /// A `u32` parameter in `add`/`remove community` is the community with
+    /// that value.
+    #[test]
+    fn u32_parameters_add_and_remove_communities() {
+        passes(
+            "policy plus(x: u32) { term t { add community x; accept } }
+             policy minus(x: u32) { term t { remove community x; accept } }
+             test added { route { prefix 192.0.2.0/24 } expect plus(7) == accept with community 0:7 }
+             test removed {
+                 route { prefix 192.0.2.0/24; communities [0:7, 0:8] }
+                 expect minus(7) == accept with removes community 0:7, not removed community 0:8
+             }",
+            2,
+        );
+    }
+
+    /// The value-use analysis behind argument checks stays shallow over a
+    /// long `apply` chain: validating a literal argument on a small stack
+    /// reports the depth error instead of overflowing.
+    #[test]
+    fn deep_apply_chain_checks_arguments_on_a_small_stack() {
+        use std::fmt::Write as _;
+        const DEPTH: usize = 5_000;
+        let mut source = String::new();
+        for level in 0..DEPTH {
+            writeln!(
+                source,
+                "policy p{level} {{ term t {{ if apply(p{}) {{ accept }} }} }}",
+                level + 1
+            )
+            .unwrap();
+        }
+        writeln!(source, "policy p{DEPTH} {{ term t {{ accept }} }}").unwrap();
+        source.push_str(
+            "policy w(n: u32) { term t { prepend as 65000 n; if apply(p0) { accept } } }
+             test x { route { prefix 192.0.2.0/24 } expect w(1) == accept }\n",
+        );
+        let rendered = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || diagnostics_of(&source).1)
+            .unwrap()
+            .join()
+            .expect("validation finishes on a 1 MiB stack");
+        assert!(
+            rendered.contains("composition depth limit"),
+            "{}",
+            &rendered[..rendered.len().min(400)]
+        );
+    }
+}

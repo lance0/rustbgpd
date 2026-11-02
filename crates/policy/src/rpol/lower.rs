@@ -68,7 +68,7 @@ use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
     ActionStmt, CallArg, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, IfStmt,
-    NextHopArg, PolicyDef, PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
+    NextHopArg, ParamType, PolicyDef, PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Spanned};
 use super::typeck::{Field, community_attribute, resolve_field, value_field_of};
@@ -251,10 +251,10 @@ pub(super) struct Lowerer<'a> {
     dataset_ids: HashMap<String, DatasetId>,
     bindings: DatasetBindings,
     missing_datasets: Vec<String>,
-    /// The set and address arguments of each policy being lowered,
-    /// innermost last (`apply` lowers its target inside its caller).
-    /// `u32` and community arguments ride the `env` map instead.
-    typed_frames: Vec<HashMap<String, PolicyArg>>,
+    /// The non-`u32` arguments of each policy being lowered, with their
+    /// parameter types, innermost last (`apply` lowers its target inside
+    /// its caller). `u32` arguments ride the `env` map instead.
+    typed_frames: Vec<HashMap<String, (PolicyArg, ParamType)>>,
 }
 
 /// The interned set data of one source file: every defined
@@ -619,13 +619,13 @@ impl<'a> Lowerer<'a> {
         // typechecker resolved to a parameter of that type.
         let mut env: HashMap<&str, u32> = HashMap::new();
         let mut frame = HashMap::new();
-        for (param, arg) in def.params.iter().zip(args) {
+        for ((param, arg), ty) in def.params.iter().zip(args).zip(&def.param_types) {
             match arg {
                 PolicyArg::U32(value) => {
                     env.insert(param.node.as_str(), *value);
                 }
                 typed => {
-                    frame.insert(param.node.clone(), typed.clone());
+                    frame.insert(param.node.clone(), (typed.clone(), *ty));
                 }
             }
         }
@@ -1123,7 +1123,9 @@ impl<'a> Lowerer<'a> {
             // probe folds to its truth value here (True / empty-Or =
             // never matches).
             Expr::IdentIn { ident, set } => {
-                let set = &self.bound_set(set);
+                let bound = &self.bound_set(set);
+                let asn_set = self.probes_asn_set(set, bound);
+                let set = bound;
                 // LAN-305: `<binding|param> in <dataset>` stays a
                 // runtime probe either way — dataset content swaps at
                 // runtime, so even a parameter probe cannot fold.
@@ -1152,11 +1154,11 @@ impl<'a> Lowerer<'a> {
                     };
                 }
                 if let Some(slot) = lets.lookup(&ident.node) {
-                    if let Some(&id) = self.asn_set_ids.get(&set.node) {
+                    if asn_set {
                         MatchExpr::LocalInAsnSet {
                             slot,
                             name: ident.node.clone().into_boxed_str(),
-                            set: id,
+                            set: self.asn_set_ids[&set.node],
                         }
                     } else {
                         MatchExpr::LocalInCommunitySet {
@@ -1169,7 +1171,8 @@ impl<'a> Lowerer<'a> {
                     let value = *env
                         .get(ident.node.as_str())
                         .expect("typechecked: parameter in scope");
-                    let matched = if let Some(&id) = self.asn_set_ids.get(&set.node) {
+                    let matched = if asn_set {
+                        let id = self.asn_set_ids[&set.node];
                         self.asn_sets[id.0 as usize].contains(value)
                     } else {
                         let id = self.community_set_ids[&set.node];
@@ -1184,7 +1187,7 @@ impl<'a> Lowerer<'a> {
             }
             Expr::Has { lit, .. } => MatchExpr::CommunityContains(lit.node.to_match()),
             Expr::HasParam { param, .. } => MatchExpr::CommunityContains(
-                CommunityLit::Standard(self.community(param)).to_match(),
+                CommunityLit::Standard(self.community(param, env)).to_match(),
             ),
             Expr::Matches { pattern, .. } => {
                 MatchExpr::AsPathMatches(self.intern_regex(&pattern.node, store))
@@ -1231,14 +1234,35 @@ impl<'a> Lowerer<'a> {
     /// The set or address argument bound to parameter `name` in the policy
     /// being lowered, if any.
     fn bound(&self, name: &str) -> Option<&PolicyArg> {
-        self.typed_frames.last().and_then(|frame| frame.get(name))
+        self.typed_frames
+            .last()
+            .and_then(|frame| frame.get(name))
+            .map(|(arg, _)| arg)
     }
 
-    /// The value of the `community` parameter `name`.
-    fn community(&self, name: &Spanned<String>) -> u32 {
+    /// Whether a `<value> in <set>` probe reads an asn-set: a set
+    /// parameter's declared kind decides, never a second lookup by the
+    /// bound name, which an asn-set and a community-set can share.
+    fn probes_asn_set(&self, set: &Spanned<String>, bound: &Spanned<String>) -> bool {
+        match self
+            .typed_frames
+            .last()
+            .and_then(|frame| frame.get(&set.node))
+        {
+            Some((_, ty)) => *ty == ParamType::AsnSet,
+            None => self.asn_set_ids.contains_key(&bound.node),
+        }
+    }
+
+    /// The community a parameter `name` stands for in a community
+    /// position: a `u32` parameter's value, or a `community` argument.
+    fn community(&self, name: &Spanned<String>, env: &HashMap<&str, u32>) -> u32 {
+        if let Some(value) = env.get(name.node.as_str()) {
+            return *value;
+        }
         match self.bound(&name.node) {
             Some(PolicyArg::Community(value)) => *value,
-            _ => unreachable!("typechecked: `community` parameter in scope"),
+            _ => unreachable!("typechecked: `u32` or `community` parameter in scope"),
         }
     }
 
@@ -1704,7 +1728,7 @@ impl Lowerer<'_> {
                 arg: CommunityArg::Var(name),
                 ..
             } => {
-                let value = self.community(name);
+                let value = self.community(name, env);
                 if *add {
                     mods.communities_add.push(value);
                 } else {

@@ -2984,7 +2984,11 @@ pub(super) struct ValueUses<'a> {
 
 /// The [`ValueUses`] of `def`'s parameters, following `apply` arguments.
 /// Each policy is analysed once; a policy met again on its own path (a
-/// cycle, rejected on its own) contributes nothing.
+/// cycle) contributes nothing, and the walk stops past
+/// [`MAX_APPLY_DEPTH`]. Both are rejected on their own, and in a file
+/// that passes those checks neither cut is ever taken. The cut keeps
+/// the recursion within the depth limit, since this runs before the
+/// composition checks.
 pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> ValueUses<'a> {
     fn exprs<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
         match expr {
@@ -3016,8 +3020,12 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
     fn uses<'a>(
         file: &'a SourceFile,
         def: &'a PolicyDef,
+        depth: u32,
         memo: &mut HashMap<&'a str, Option<ValueUses<'a>>>,
     ) -> ValueUses<'a> {
+        if depth > MAX_APPLY_DEPTH {
+            return ValueUses::default();
+        }
         match memo.get(def.name.node.as_str()) {
             Some(Some(done)) => return done.clone(),
             Some(None) => return ValueUses::default(),
@@ -3055,7 +3063,7 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
             let Some(callee) = file.policies.iter().find(|p| p.name.node == policy.node) else {
                 continue;
             };
-            let inner = uses(file, callee, memo);
+            let inner = uses(file, callee, depth + 1, memo);
             for (arg, param) in args.iter().zip(&callee.params) {
                 let CallArg::Name(name) = &arg.node else {
                     continue;
@@ -3079,7 +3087,7 @@ pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> 
         memo.insert(&def.name.node, Some(out.clone()));
         out
     }
-    uses(file, def, &mut HashMap::new())
+    uses(file, def, 0, &mut HashMap::new())
 }
 
 /// One literal argument against the callee's parameter at `index`: its
@@ -3655,41 +3663,49 @@ fn collect_applies<'a>(expr: &'a Expr, out: &mut Vec<(&'a str, Span)>) {
     }
 }
 
-/// DFS cycle detection over the `apply` graph. `path` is the current
-/// DFS stack; returns the cycle (closed: `a -> b -> a`) and the span of
-/// the closing edge.
+/// DFS cycle detection over the `apply` (or function call) graph, with
+/// an explicit stack: an acyclic chain of any length cannot exhaust the
+/// thread stack before the depth checks reject it. `path` is the current
+/// DFS path; returns the cycle (closed: `a -> b -> a`) and the span of
+/// the closing edge. Every node the walk leaves, including on a cycle, is
+/// recorded in `done`.
 fn find_cycle<'a>(
-    node: &'a str,
+    start: &'a str,
     edges: &HashMap<&'a str, Vec<(&'a str, Span)>>,
     path: &mut Vec<&'a str>,
     done: &mut HashSet<&'a str>,
 ) -> Option<(Vec<String>, Span)> {
-    if let Some(position) = path.iter().position(|&seen| seen == node) {
-        let mut cycle: Vec<String> = path[position..].iter().map(ToString::to_string).collect();
-        cycle.push(node.to_string());
-        // The span is filled in by the caller (the closing edge).
-        return Some((cycle, Span::new(0..0)));
-    }
-    if done.contains(node) {
+    if done.contains(start) {
         return None;
     }
-    path.push(node);
-    if let Some(targets) = edges.get(node) {
-        for &(target, span) in targets {
-            if let Some((cycle, cycle_span)) = find_cycle(target, edges, path, done) {
+    // Each frame is a node on the path and the index of its next edge.
+    let mut stack: Vec<(&'a str, usize)> = vec![(start, 0)];
+    path.push(start);
+    while let Some(&(node, next)) = stack.last() {
+        let targets = edges.get(node).map_or(&[][..], Vec::as_slice);
+        let Some(&(target, span)) = targets.get(next) else {
+            stack.pop();
+            path.pop();
+            done.insert(node);
+            continue;
+        };
+        if let Some(frame) = stack.last_mut() {
+            frame.1 += 1;
+        }
+        if let Some(position) = path.iter().position(|&seen| seen == target) {
+            let mut cycle: Vec<String> = path[position..].iter().map(ToString::to_string).collect();
+            cycle.push(target.to_string());
+            for (left, _) in stack.drain(..).rev() {
                 path.pop();
-                done.insert(node);
-                let span = if cycle_span == Span::new(0..0) {
-                    span
-                } else {
-                    cycle_span
-                };
-                return Some((cycle, span));
+                done.insert(left);
             }
+            return Some((cycle, span));
+        }
+        if !done.contains(target) {
+            stack.push((target, 0));
+            path.push(target);
         }
     }
-    path.pop();
-    done.insert(node);
     None
 }
 
