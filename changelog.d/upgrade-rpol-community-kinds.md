@@ -4,12 +4,19 @@
   probes a set mixing kinds with `route.communities in S` (or the large or
   extended list), or removes from it with `remove community in S` or
   `remove community not in S` (or the large or extended form), no longer
-  loads; the error names the member of the other kind. Write
-  `route.any-community in S` or `remove any-community in S` to keep matching
-  every kind, or split the set by kind. Datasets and set parameters filter
-  by kind at runtime instead: `route.large-communities in D` used to ignore
-  its field and match a route whose standard communities were in `D`; it now
-  reads only large communities.
+  loads; the error names the member of the other kind.
+  - A probe that should match every kind becomes `route.any-community in S`.
+  - A removal keeps its behaviour when the set is split by kind and each
+    removal keeps its kind and its `in` or `not in` over its own part.
+    `remove any-community in S` also replaces an `in` removal that should
+    take the listed values of every kind; there is no `not in` form,
+    because a `not in` allow-list is per kind and `any-community` would
+    remove the allowed values instead.
+
+  Datasets and set parameters filter by kind at runtime instead:
+  `route.large-communities in D` used to ignore its field and match a route
+  whose standard communities were in `D`; it now reads only large
+  communities.
 - **`.rpol` ASNs and communities are typed values.** These forms no longer
   load:
   - arithmetic on `route.origin-as`, `peer.asn`, an AS-path or asn-set loop

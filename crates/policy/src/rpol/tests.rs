@@ -11484,7 +11484,20 @@ test scrub-cancels-earlier-additions-of-every-kind {
         );
         assert!(
             rendered.contains("has a large-community member")
-                && rendered.contains("remove any-community in twins"),
+                && rendered.contains("write `remove any-community in twins`"),
+            "{rendered}"
+        );
+        // An allow-list is per kind: `any-community` would reverse it.
+        let (_, rendered) = diagnostics_of(
+            "community-set twins { 65000:666, 65000:666:0 } \
+             policy p { term t { remove community not in twins; accept } }",
+        );
+        assert!(
+            rendered.contains("split `twins` by kind and keep `remove community not in`"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("write `remove any-community in twins`"),
             "{rendered}"
         );
         for bad in [

@@ -4544,7 +4544,9 @@ enum RemovalSetProblem {
 }
 
 /// LAN-2794: the diagnostic for a named removal set with a member of
-/// another kind, at `member_span`.
+/// another kind, at `member_span`. An `in` removal of every listed value
+/// can become `remove any-community in`; a `not in` allow-list is per kind,
+/// so it keeps its kind and operator over a set split by kind.
 fn other_kind_removal(
     set: &Spanned<String>,
     member: CommunityKind,
@@ -4552,6 +4554,22 @@ fn other_kind_removal(
     kind: CommunityKind,
     form: &str,
 ) -> Diagnostic {
+    let note = if form == "in" {
+        format!(
+            "for a set that mixes kinds, write `remove any-community in {}`, or split the set \
+             by kind",
+            set.node
+        )
+    } else {
+        format!(
+            "an allow-list is per kind: split `{set}` by kind and keep `remove {keyword} not in` \
+             over its {kind} members; `remove any-community in {set}` would remove the allowed \
+             members instead, of every kind",
+            set = set.node,
+            keyword = kind_keyword(kind),
+            kind = kind_describe(kind),
+        )
+    };
     Diagnostic::coded(
         DiagnosticCode::Typecheck,
         set.span,
@@ -4559,11 +4577,7 @@ fn other_kind_removal(
         "a member of another kind",
     )
     .with_label(member_span, format!("{} member", kind_describe(member)))
-    .with_note(format!(
-        "for a set that mixes kinds, write `remove any-community in {}`, or split the set \
-         by kind",
-        set.node
-    ))
+    .with_note(note)
 }
 
 /// LAN-2794: the message for a removal set with a member of another kind.

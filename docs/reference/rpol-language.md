@@ -1446,7 +1446,8 @@ test scrubbed {
   removed, `in` with none would remove nothing and `not in` every value, and
   all three are compile errors. `remove any-community in SET` takes a set that
   mixes kinds and removes the members of every kind; it has no `not in` form,
-  because an allow-list is per kind. For `ext-community not in` the
+  because an allow-list is per kind: split a mixed allow-list by kind and
+  keep one `remove <kind> not in` per kind. For `ext-community not in` the
   set needs a route-target or route-origin member. Datasets are not accepted
   here yet; probe a dataset in a guard instead.
 - **Removal only, in statement order.** `add <kind> in` is a compile error.
