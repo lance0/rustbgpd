@@ -1258,7 +1258,7 @@ fn run_evpn_recovery_scan(
     }
     let anchor = ledger.primary_handle(owner(0)).unwrap();
     ledger
-        .finish_recovery(anchor)
+        .finish_recovery_with_checkpoint(anchor, &mut |_| {})
         .map_err(|e| e.cause.as_str())?;
     ledger.begin_capture(anchor).map_err(|e| e.cause.as_str())?;
     for n in 0..spec.keys {
@@ -1291,7 +1291,7 @@ fn run_evpn_recovery_scan(
     phase("capture", true);
     let captured = (|| {
         ledger
-            .finish_recovery(target)
+            .finish_recovery_with_checkpoint(target, &mut |_| {})
             .map_err(|e| e.cause.as_str())?;
         ledger.begin_capture(target).map_err(|e| e.cause.as_str())?;
         for route in &old {
@@ -1322,7 +1322,7 @@ fn run_evpn_recovery_scan(
     }
     for index in 0..spec.records {
         if let Some(handle) = ledger.primary_handle(owner(index)) {
-            assert!(ledger.retire(handle));
+            assert!(ledger.retire_with_checkpoint(handle, &mut |_| {}));
         }
     }
     receipt.settled_bytes = ledger.daemon_usage().retained;

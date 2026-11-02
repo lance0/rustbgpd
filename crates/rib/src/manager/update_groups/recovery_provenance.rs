@@ -1774,9 +1774,10 @@ impl EvpnRecoveryProvenance {
             reason = "G2 EVPN regroup wiring will consume charged key snapshots"
         )
     )]
-    pub(in crate::manager) fn snapshot(
+    pub(in crate::manager) fn snapshot_with_checkpoint(
         &mut self,
         handle: ProvenanceHandle,
+        checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<ProvenanceHandle>, Exhaustion> {
         if self.proof(handle)?.is_none() {
             return Ok(None);
@@ -1785,8 +1786,8 @@ impl EvpnRecoveryProvenance {
             Ok(snapshot) => snapshot,
             Err(error) => return Err(self.mark_exhausted(handle, error)),
         };
-        if let Err(error) = self.copy_snapshot(handle, snapshot) {
-            self.retire(snapshot);
+        if let Err(error) = self.copy_snapshot(handle, snapshot, checkpoint) {
+            self.retire_with_checkpoint(snapshot, checkpoint);
             return Err(self.mark_exhausted(handle, error));
         }
         Ok(Some(snapshot))
@@ -1796,6 +1797,7 @@ impl EvpnRecoveryProvenance {
         &mut self,
         handle: ProvenanceHandle,
         snapshot: ProvenanceHandle,
+        checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Exhaustion> {
         let peer = handle.owner.peer;
         let source = self.index(handle).expect("snapshot source remains owned");
@@ -1825,7 +1827,7 @@ impl EvpnRecoveryProvenance {
         let copy = &mut records[destination];
         copy.held = held;
         copy.masked = masked;
-        for slot in copy.held.view().slots(|_| {}) {
+        for slot in copy.held.view().slots(&mut *checkpoint) {
             space.hold(slot);
         }
         Ok(())
@@ -2307,10 +2309,12 @@ impl EvpnRecoveryProvenance {
         self.settle_space(checkpoint);
     }
 
-    /// Exhaustion cannot become a fresh capture.
-    pub(in crate::manager) fn finish_recovery(
+    /// Exhaustion cannot become a fresh capture. Releasing walks every held
+    /// slot, so it checkpoints at the ledger stride.
+    pub(in crate::manager) fn finish_recovery_with_checkpoint(
         &mut self,
         handle: ProvenanceHandle,
+        checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Exhaustion> {
         let Some(index) = self.checked_handle_index(handle)? else {
             return Ok(false);
@@ -2318,14 +2322,44 @@ impl EvpnRecoveryProvenance {
         if !self.records[index].primary || !matches!(self.records[index].state, State::Ready) {
             return Ok(false);
         }
-        self.free_keys(index, &mut |_| {});
+        self.free_keys(index, checkpoint);
         self.records[index].state = State::Dormant;
         Ok(true)
     }
 
+    #[cfg(test)]
+    pub(in crate::manager) fn finish_recovery(
+        &mut self,
+        handle: ProvenanceHandle,
+    ) -> Result<bool, Exhaustion> {
+        self.finish_recovery_with_checkpoint(handle, &mut |_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn retire_member(&mut self, handle: ProvenanceHandle) -> bool {
+        self.retire_member_with_checkpoint(handle, &mut |_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn retire(&mut self, handle: ProvenanceHandle) -> bool {
+        self.retire_with_checkpoint(handle, &mut |_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn snapshot(
+        &mut self,
+        handle: ProvenanceHandle,
+    ) -> Result<Option<ProvenanceHandle>, Exhaustion> {
+        self.snapshot_with_checkpoint(handle, &mut |_| {})
+    }
+
     /// Release this member and all its ledger-owned snapshots. The primary
     /// handle fences a replacement, even if its peer/session tuple is reused.
-    pub(in crate::manager) fn retire_member(&mut self, handle: ProvenanceHandle) -> bool {
+    pub(in crate::manager) fn retire_member_with_checkpoint(
+        &mut self,
+        handle: ProvenanceHandle,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> bool {
         let Some(index) = self.index(handle) else {
             return false;
         };
@@ -2338,18 +2372,22 @@ impl EvpnRecoveryProvenance {
                 (record.handle.generation == handle.generation).then_some(record.handle)
             })
         {
-            self.retire(owned);
+            self.retire_with_checkpoint(owned, checkpoint);
         }
         true
     }
 
     /// Retiring a handle cannot free a replacement record, even if ownership
     /// was re-registered with the same peer/session tuple.
-    pub(in crate::manager) fn retire(&mut self, handle: ProvenanceHandle) -> bool {
+    pub(in crate::manager) fn retire_with_checkpoint(
+        &mut self,
+        handle: ProvenanceHandle,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> bool {
         let Some(index) = self.index(handle) else {
             return false;
         };
-        self.free_keys(index, &mut |_| {});
+        self.free_keys(index, checkpoint);
         let retained = self.peer_usage(handle.owner.peer).retained - self.records[index].charge();
         drop(self.records.remove(index));
         self.set_peer_retained(handle.owner.peer, retained);
@@ -3530,6 +3568,59 @@ mod tests {
         admit(&mut ledger, handle, &[key(CEILING)], &[key(0)]);
         assert!(ledger.peer_usage(handle.owner.peer).peak <= PEER_LIMIT_BYTES);
         assert_running_charges(&ledger);
+    }
+
+    /// Releasing and growing walk every slot; both offer the readiness
+    /// checkpoint at the ledger stride rather than running uninterrupted.
+    #[test]
+    fn release_and_growth_offer_checkpoints_at_the_stride() {
+        const KEYS: u32 = 10_000;
+        let mut ledger = EvpnRecoveryProvenance::new();
+        let first = ledger.register(owner(1, 7)).unwrap();
+        let second = ledger.register(owner(2, 7)).unwrap();
+        let keys: Vec<_> = (0..KEYS).map(key).collect();
+        let (mut visits, mut edges) = (0_usize, 0_usize);
+        assert!(ledger.finish_recovery(first).unwrap());
+        assert!(ledger.begin_capture(first).unwrap());
+        for &key in &keys {
+            assert!(
+                ledger
+                    .capture_key_with_checkpoint(first, key, &mut |force| {
+                        if force {
+                            edges += 1;
+                        } else {
+                            visits += 1;
+                        }
+                    })
+                    .unwrap()
+            );
+        }
+        // Growth rebuilds its index with a visit per 1024 slots.
+        assert!(visits >= KEYS as usize / 1024, "{visits} growth visits");
+        assert_eq!(edges % 2, 0, "every allocation is bracketed");
+        assert!(ledger.seal_capture(first).unwrap());
+        capture(&mut ledger, second, &keys);
+        for (handle, last) in [(first, false), (second, true)] {
+            visits = 0;
+            if last {
+                assert!(ledger.retire_member_with_checkpoint(handle, &mut |force| {
+                    visits += usize::from(!force);
+                }));
+            } else {
+                assert!(
+                    ledger
+                        .finish_recovery_with_checkpoint(handle, &mut |force| {
+                            visits += usize::from(!force);
+                        })
+                        .unwrap()
+                );
+            }
+            assert!(
+                visits >= KEYS as usize / 64,
+                "{visits} release visits, last holder: {last}"
+            );
+        }
+        assert_eq!(ledger.slot_usage().live, 0);
     }
 
     /// Guarantee 1: a key and its mapping outlive churn, other members'

@@ -736,7 +736,13 @@ impl RibManager {
             return false;
         }
         let handle = completion.provenance;
-        if self.evpn_recovery.finish_recovery(handle) != Ok(true) {
+        if self
+            .evpn_recovery
+            .finish_recovery_with_checkpoint(handle, &mut |force| {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+            })
+            != Ok(true)
+        {
             return false;
         }
         self.replace_evpn_feed_completion(peer, None);
@@ -1150,7 +1156,14 @@ impl RibManager {
                 if !fresh {
                     // An existing session needs G2's filtered prior capture;
                     // a new record's sealed empty proof is for fresh sessions.
-                    let _ = self.evpn_recovery.finish_recovery(handle);
+                    let _ =
+                        self.evpn_recovery
+                            .finish_recovery_with_checkpoint(handle, &mut |force| {
+                                super::replacement_readiness_checkpoint(
+                                    &self.replacement_readiness,
+                                    force,
+                                );
+                            });
                 }
                 true
             }
@@ -1694,7 +1707,13 @@ impl RibManager {
             self.mark_outbound_dirty(peer);
             return false;
         }
-        if self.evpn_recovery.finish_recovery(handle) != Ok(true) {
+        if self
+            .evpn_recovery
+            .finish_recovery_with_checkpoint(handle, &mut |force| {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+            })
+            != Ok(true)
+        {
             self.mark_outbound_dirty(peer);
             return false;
         }
@@ -1725,7 +1744,10 @@ impl RibManager {
 
     pub(in crate::manager) fn retire_evpn_recovery(&mut self, peer: PeerId) {
         if let Some(handle) = self.evpn_recovery_handle(peer) {
-            self.evpn_recovery.retire_member(handle);
+            self.evpn_recovery
+                .retire_member_with_checkpoint(handle, &mut |force| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+                });
         }
         if let Some(owner) = self.evpn_recovery_owner(peer)
             && let Some(outbound) = self.outbound_peers.get(&peer)
