@@ -14,10 +14,12 @@
   - on an origin-less route, `route.origin-as + 0 == 64500` used to deny
     with `absent-operand`; it is now false.
 
-  Review guards that compare a computed expression. Compare the field itself
-  where a floor at zero is not wanted (`route.med <= 105`), and where a route
-  without the value must still be rejected, add a presence test:
-  `if !exists route.origin-as { reject }`.
+  Review guards that compare a computed expression. To keep only the values
+  the old guard could match, give the range both bounds:
+  `route.med - 100 <= 5` becomes `route.med >= 100 && route.med <= 105`. To
+  keep v0.81.0's deny for the rest, reject them ahead of it:
+  `if route.med <= 99 { reject }`. Where a route without the value must still
+  be rejected, add a presence test: `if !exists route.origin-as { reject }`.
 - **`let` bindings and actions.** A `let` that cannot be computed no longer
   denies the route unless an action uses it. An action that needs a missing
   value (`set med route.origin-as`, a computed prepend operand, a community
