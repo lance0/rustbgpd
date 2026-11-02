@@ -294,9 +294,9 @@ impl CoverageAccum {
         let mut hit = vec![false; src_count];
         let mut conditional = vec![false; src_count];
         // IR terms are emitted per source term, in order, named either
-        // exactly like the source term or `<term>.<n>` when one source
-        // term lowers to several — group greedily by that contract
-        // (term names are identifiers and cannot contain `.`).
+        // exactly like the source term or `<term>.<...>` / `<term>/<call>`
+        // when one source term lowers to several — group greedily by that
+        // contract (term names are identifiers and cannot contain `.`).
         let mut src = 0usize;
         // Terms inlined at `apply` statements credit the called policy's
         // own source terms, named under the call site.

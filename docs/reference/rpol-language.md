@@ -561,7 +561,8 @@ to one or more IR terms:
   [term-name rulings](#term-name-rulings) give the stability promise and
   the edge cases. Explain traces, `rbgp policy test` term hits, and
   `rbgp policy stats` render these names, and the
-  [decision corpus](#compatibility) pins every row's name and contents.
+  [decision corpus](#compatibility) pins every row's name, position and
+  action, with the values, bindings and loop body it holds.
 
 ### Parameters
 
@@ -1224,7 +1225,9 @@ Consequences:
   denies the route on the uniform eval-error rail.
 - **Term identity survives.** The inlined binds become IR terms of the
   *calling* statement, named like any statement that lowers to several
-  terms (`<term>.<statement>.<k>`), so the counter grid and trace skeleton
+  terms (`<term>[.<statement>].<k>`, the statement omitted in a
+  one-statement term, and one row of the final statement bare), so the
+  counter grid and trace skeleton
   stay a function of the source; per-function hit counting is explicitly out of scope
   (Decision 6.3 — it would need runtime call frames).
 - **Attribution names both sides.** A body's bindings render with the
@@ -2303,8 +2306,9 @@ Changes (up to 2):
   `rejected_routes` when rejection sampling is requested.
 
 Per-term hit counters answer "which term is doing the work" (the
-IOS-XR `show pcl` idea); a term lowered to several IR steps reports as
-`name.1`, `name.2`, ....
+IOS-XR `show pcl` idea); a term lowered to several IR steps reports one
+row per step, named by the source statement it runs, such as `name.1` and
+`name` (see [Lowering into the IR](#lowering-into-the-ir-normative)).
 
 ### Comparing a candidate with the installed export chain
 
@@ -3156,7 +3160,9 @@ from the inventory.
 
 Lowered term names are part of the frozen surface: explain, test term hits
 and policy stats rows show them, and the decision corpus pins each row's
-name and contents. The [lowering rule](#lowering-into-the-ir-normative)
+name, position and action (not its guard; the decisions pin that), and
+fails if one policy lowers two rows with one name. The
+[lowering rule](#lowering-into-the-ir-normative)
 settles these cases:
 
 - **Stability.** A lowering change that keeps the source term and its final
