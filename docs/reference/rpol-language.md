@@ -3257,6 +3257,12 @@ settles these cases:
 | `ast.cmp.ne` | v1 | `!=` |
 | `ast.cmp.ge` | v1 | `>=` |
 | `ast.cmp.le` | v1 | `<=` |
+| `ast.rhs.integer` | v1 | integer right-hand side, `route.med >= 50` |
+| `ast.rhs.identifier` | v1 | enum value or parameter right-hand side, `route.rpki == valid` |
+| `ast.rhs.ip` | v1 | address right-hand side, `route.next-hop == 192.0.2.1` |
+| `ast.rhs.prefix` | v1 | prefix right-hand side, `route.prefix == 10.0.0.0/8` |
+| `ast.rhs.string` | v1 | string right-hand side, `peer.group == "leaf"` |
+| `ast.rhs.field` | v1 | field right-hand side, `route.next-hop == peer.address` |
 | `ast.field.route.prefix` | v1 | `route.prefix` field |
 | `ast.field.route.communities` | v1 | `route.communities` field |
 | `ast.field.route.large-communities` | v1 | `route.large-communities` field |
@@ -3295,6 +3301,8 @@ settles these cases:
 | `ast.prepend.peer` | v1 | `prepend as peer <count>` |
 | `ast.prepend.origin` | v1 | `prepend as origin <count>` |
 | `ast.prepend.path-first` | v1 | `prepend as path-first <count>` |
+| `ast.prepend.literal` | v1 | `prepend as <asn> <count>` with a literal ASN |
+| `ast.prepend.parameter` | v1 | `prepend as <parameter> <count>` |
 | `ast.param.u32` | v1 | `u32` parameter type |
 | `ast.param.prefix-set` | v1 | `prefix-set` parameter type |
 | `ast.param.community-set` | v1 | `community-set` parameter type |

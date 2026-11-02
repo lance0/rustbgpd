@@ -36,9 +36,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::ast::{
-    ActionStmt, CmpOp, CommunityArg, DatasetEntryAst, ExpectVerdict, Expr, FieldPath, ForSource,
-    NextHopArg, ParamType, PeerField, PolicyDef, Rhs, RouteField, Stmt, ValueExprAst,
-    WithAssertion,
+    ActionStmt, CmpOp, CommunityArg, DatasetEntryAst, ExpectDef, ExpectVerdict, Expr, FieldPath,
+    ForSource, NextHopArg, ParamType, PeerField, PolicyDef, PrependAsArg, Rhs, RouteField,
+    SourceFile, Stmt, TermDef, TestDef, U32Arg, ValueExprAst, WithAssertion,
 };
 use super::testing::{Fixture, override_data, render_expect};
 use super::typeck::{Field, resolve_field};
@@ -230,18 +230,28 @@ impl Corpus {
         }
         for (index, def) in policies.iter().enumerate() {
             let source_terms = &matched_source_terms[index.min(matched_source_terms.len() - 1)];
-            for term in &def.terms {
-                if source_terms.contains(term.name.node.as_str()) {
-                    ast_stmts(&term.stmts, &mut seen);
+            // Destructured without `..`: a new policy-level form does not
+            // compile until it is named.
+            let PolicyDef {
+                name: _,
+                params,
+                param_types,
+                default_action,
+                terms,
+            } = def;
+            for term in terms {
+                let TermDef { name, stmts } = term;
+                if source_terms.contains(name.node.as_str()) {
+                    ast_stmts(stmts, &mut seen);
                 }
             }
-            if def.default_action.is_some() {
+            if default_action.is_some() {
                 seen.insert("ast.policy.default-action");
             }
-            if !def.params.is_empty() {
+            if !params.is_empty() {
                 seen.insert("ast.policy.parameters");
             }
-            for ty in &def.param_types {
+            for ty in param_types {
                 seen.insert(param_type_name(*ty));
             }
         }
@@ -742,6 +752,12 @@ const CONSTRUCTS: &[&str] = &[
     "ast.cmp.ne",
     "ast.cmp.ge",
     "ast.cmp.le",
+    "ast.rhs.integer",
+    "ast.rhs.identifier",
+    "ast.rhs.ip",
+    "ast.rhs.prefix",
+    "ast.rhs.string",
+    "ast.rhs.field",
     "ast.field.route.prefix",
     "ast.field.route.communities",
     "ast.field.route.large-communities",
@@ -780,6 +796,8 @@ const CONSTRUCTS: &[&str] = &[
     "ast.prepend.peer",
     "ast.prepend.origin",
     "ast.prepend.path-first",
+    "ast.prepend.literal",
+    "ast.prepend.parameter",
     "ast.param.u32",
     "ast.param.prefix-set",
     "ast.param.community-set",
@@ -985,14 +1003,20 @@ fn ast_action(action: &ActionStmt, seen: &mut Seen) {
             CommunityArg::InSet { negate: true, .. } => "ast.action.community-not-in-set",
         },
         ActionStmt::Prepend { asn, .. } => {
-            if let Some(operand) = asn.operand() {
-                seen.insert(match operand {
-                    PrependAs::LocalAs => "ast.prepend.self",
-                    PrependAs::PeerAs => "ast.prepend.peer",
-                    PrependAs::OriginAs => "ast.prepend.origin",
-                    PrependAs::PathFirst => "ast.prepend.path-first",
-                });
-            }
+            // Every argument form, then the operand it denotes: `origin`
+            // and `path-first` arrive as a bare identifier.
+            let form = match (asn, asn.operand()) {
+                (PrependAsArg::SelfAs, _) => "ast.prepend.self",
+                (PrependAsArg::Peer, _) => "ast.prepend.peer",
+                (PrependAsArg::Value(_), Some(PrependAs::OriginAs)) => "ast.prepend.origin",
+                (PrependAsArg::Value(_), Some(PrependAs::PathFirst)) => "ast.prepend.path-first",
+                (PrependAsArg::Value(_), Some(PrependAs::LocalAs | PrependAs::PeerAs)) => {
+                    unreachable!("self and peer have their own argument forms")
+                }
+                (PrependAsArg::Value(U32Arg::Lit(..)), None) => "ast.prepend.literal",
+                (PrependAsArg::Value(U32Arg::Param(_)), None) => "ast.prepend.parameter",
+            };
+            seen.insert(form);
             "ast.action.prepend"
         }
         ActionStmt::Let { init, .. } => {
@@ -1023,9 +1047,21 @@ fn ast_expr(expr: &Expr, seen: &mut Seen) {
         Expr::Cmp { field, op, rhs, .. } => {
             ast_field(field, seen);
             ast_cmp(*op, seen);
-            if let Rhs::Field(path) = rhs {
-                ast_field(path, seen);
-            }
+            let operand = match rhs {
+                Rhs::Int(..) => "ast.rhs.integer",
+                Rhs::Ident(_) => "ast.rhs.identifier",
+                Rhs::Ip(..) => "ast.rhs.ip",
+                Rhs::Prefix(..) => "ast.rhs.prefix",
+                Rhs::Str(_) => "ast.rhs.string",
+                Rhs::Field(path) => {
+                    ast_field(path, seen);
+                    "ast.rhs.field"
+                }
+                // Parsed only so the typechecker can point at `has` and `in`;
+                // no compiled program holds one.
+                Rhs::Community(_) => unreachable!("typechecked: no community comparison"),
+            };
+            seen.insert(operand);
             "ast.expr.cmp"
         }
         Expr::In { field, .. } => {
@@ -1165,104 +1201,139 @@ fn family_name(family: RouteFamily) -> &'static str {
 /// grammar its tests use. Each is credited to every case the program runs.
 fn declared_constructs(file: &RpolFile) -> Seen {
     let mut seen = Seen::new();
-    let source = &file.file;
+    // Destructured without `..`: a new declaration kind, or a new test or
+    // expectation form, does not compile until it is named here.
+    let SourceFile {
+        // Dissolved by the resolver; `ast.decl.import` reads the modules.
+        imports: _,
+        prefix_sets,
+        community_sets,
+        asn_sets,
+        datasets,
+        fns,
+        // Walked per evaluated case by `Corpus::count`.
+        policies: _,
+        tests,
+    } = &file.file;
     if file.modules.len() > 1 {
         seen.insert("ast.decl.import");
     }
-    for set in &source.prefix_sets {
+    for set in prefix_sets {
         seen.insert("ast.decl.prefix-set");
         if set.entries.iter().any(|e| e.ge.is_some() || e.le.is_some()) {
             seen.insert("ast.decl.prefix-set.ge-le");
         }
     }
-    for set in &source.community_sets {
+    for set in community_sets {
         seen.insert("ast.decl.community-set");
         for member in &set.entries {
             community_member(&member.node, &mut seen);
         }
     }
-    if !source.asn_sets.is_empty() {
+    if !asn_sets.is_empty() {
         seen.insert("ast.decl.asn-set");
     }
-    for dataset in &source.datasets {
+    for dataset in datasets {
         seen.insert(match dataset.kind {
             DatasetKind::Prefix => "ast.decl.dataset.prefix-set",
             DatasetKind::Asn => "ast.decl.dataset.asn-set",
             DatasetKind::Community => "ast.decl.dataset.community-set",
         });
     }
-    for function in &source.fns {
+    for function in fns {
         seen.insert("ast.decl.fn");
         if !function.lets.is_empty() {
             seen.insert("ast.decl.fn.let");
         }
     }
-    for test in &source.tests {
-        seen.insert("ast.decl.test");
-        for dataset in &test.datasets {
-            seen.insert("ast.test.dataset-override");
-            for entry in &dataset.entries {
-                if let DatasetEntryAst::Community(member) = &entry.node {
-                    community_member(member, &mut seen);
-                }
-            }
-        }
-        for field in &test.route {
-            seen.insert(match field {
-                RouteField::Prefix(..) => "ast.test.route.prefix",
-                RouteField::Communities(..) => "ast.test.route.communities",
-                RouteField::LargeCommunities(..) => "ast.test.route.large-communities",
-                RouteField::ExtCommunities(..) => "ast.test.route.ext-communities",
-                RouteField::AsPath(_) => "ast.test.route.as-path",
-                RouteField::NextHop(..) => "ast.test.route.next-hop",
-                RouteField::LocalPref(..) => "ast.test.route.local-pref",
-                RouteField::Med(..) => "ast.test.route.med",
-                RouteField::Rpki(_) => "ast.test.route.rpki",
-                RouteField::Aspa(_) => "ast.test.route.aspa",
-                RouteField::RouteType(_) => "ast.test.route.route-type",
-                RouteField::EvpnRouteType(..) => "ast.test.route.evpn-route-type",
-                RouteField::Family(_) => "ast.test.route.family",
-            });
-        }
-        for field in &test.peer {
-            seen.insert(match field {
-                PeerField::Address(_) => "ast.test.peer.address",
-                PeerField::Asn(_) => "ast.test.peer.asn",
-                PeerField::LocalAs(_) => "ast.test.peer.local-as",
-                PeerField::Group(_) => "ast.test.peer.group",
-            });
-        }
-        for expect in &test.expects {
-            if expect.chain {
-                seen.insert("ast.test.expect.chain");
-            }
-            if expect.with_only {
-                seen.insert("ast.test.expect.with-only");
-            }
-            seen.insert(match expect.verdict {
-                ExpectVerdict::Accept => "ast.test.expect.accept",
-                ExpectVerdict::Reject => "ast.test.expect.reject",
-                ExpectVerdict::Error(_) => "ast.test.expect.error",
-            });
-            for assertion in &expect.with {
-                seen.insert(match assertion {
-                    WithAssertion::LocalPref(_) => "ast.test.with.local-pref",
-                    WithAssertion::Med(_) => "ast.test.with.med",
-                    WithAssertion::NextHop(_) => "ast.test.with.next-hop",
-                    WithAssertion::Community(_) => "ast.test.with.community",
-                    WithAssertion::Prepend(..) => "ast.test.with.prepend",
-                    WithAssertion::PrependPath(_) => "ast.test.with.prepend-path",
-                    WithAssertion::Removes(_) => "ast.test.with.removes",
-                    WithAssertion::RemovesLargeAdmin(_) => "ast.test.with.removes-large-admin",
-                    WithAssertion::RemovesAll(_) => "ast.test.with.removes-all",
-                    WithAssertion::NotRemoved(_) => "ast.test.with.not-removed",
-                    WithAssertion::WithoutCommunity(_) => "ast.test.with.without-community",
-                    WithAssertion::Without(_) => "ast.test.with.without",
-                });
+    for test in tests {
+        test_constructs(test, &mut seen);
+    }
+    seen
+}
+
+/// A `test` block's forms: dataset overrides, fixture fields and
+/// expectations.
+fn test_constructs(test: &TestDef, seen: &mut Seen) {
+    let TestDef {
+        name: _,
+        datasets,
+        route,
+        peer,
+        expects,
+    } = test;
+    seen.insert("ast.decl.test");
+    for dataset in datasets {
+        seen.insert("ast.test.dataset-override");
+        for entry in &dataset.entries {
+            match &entry.node {
+                DatasetEntryAst::Community(member) => community_member(member, seen),
+                // Prefix and ASN members are the set forms already named.
+                DatasetEntryAst::Prefix(_) | DatasetEntryAst::Asn(_) => {}
             }
         }
     }
-    seen
+    for field in route {
+        seen.insert(match field {
+            RouteField::Prefix(..) => "ast.test.route.prefix",
+            RouteField::Communities(..) => "ast.test.route.communities",
+            RouteField::LargeCommunities(..) => "ast.test.route.large-communities",
+            RouteField::ExtCommunities(..) => "ast.test.route.ext-communities",
+            RouteField::AsPath(_) => "ast.test.route.as-path",
+            RouteField::NextHop(..) => "ast.test.route.next-hop",
+            RouteField::LocalPref(..) => "ast.test.route.local-pref",
+            RouteField::Med(..) => "ast.test.route.med",
+            RouteField::Rpki(_) => "ast.test.route.rpki",
+            RouteField::Aspa(_) => "ast.test.route.aspa",
+            RouteField::RouteType(_) => "ast.test.route.route-type",
+            RouteField::EvpnRouteType(..) => "ast.test.route.evpn-route-type",
+            RouteField::Family(_) => "ast.test.route.family",
+        });
+    }
+    for field in peer {
+        seen.insert(match field {
+            PeerField::Address(_) => "ast.test.peer.address",
+            PeerField::Asn(_) => "ast.test.peer.asn",
+            PeerField::LocalAs(_) => "ast.test.peer.local-as",
+            PeerField::Group(_) => "ast.test.peer.group",
+        });
+    }
+    for expect in expects {
+        let ExpectDef {
+            chain,
+            calls: _,
+            verdict,
+            with,
+            with_only,
+        } = expect;
+        if *chain {
+            seen.insert("ast.test.expect.chain");
+        }
+        if *with_only {
+            seen.insert("ast.test.expect.with-only");
+        }
+        seen.insert(match verdict {
+            ExpectVerdict::Accept => "ast.test.expect.accept",
+            ExpectVerdict::Reject => "ast.test.expect.reject",
+            ExpectVerdict::Error(_) => "ast.test.expect.error",
+        });
+        for assertion in with {
+            seen.insert(match assertion {
+                WithAssertion::LocalPref(_) => "ast.test.with.local-pref",
+                WithAssertion::Med(_) => "ast.test.with.med",
+                WithAssertion::NextHop(_) => "ast.test.with.next-hop",
+                WithAssertion::Community(_) => "ast.test.with.community",
+                WithAssertion::Prepend(..) => "ast.test.with.prepend",
+                WithAssertion::PrependPath(_) => "ast.test.with.prepend-path",
+                WithAssertion::Removes(_) => "ast.test.with.removes",
+                WithAssertion::RemovesLargeAdmin(_) => "ast.test.with.removes-large-admin",
+                WithAssertion::RemovesAll(_) => "ast.test.with.removes-all",
+                WithAssertion::NotRemoved(_) => "ast.test.with.not-removed",
+                WithAssertion::WithoutCommunity(_) => "ast.test.with.without-community",
+                WithAssertion::Without(_) => "ast.test.with.without",
+            });
+        }
+    }
 }
 
 /// A community-set or community-dataset member: its exact kind, or its

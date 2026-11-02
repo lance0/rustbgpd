@@ -152,3 +152,12 @@ test scrubbed {
     }
     expect scrub == accept with removes large-community 65000:*:*, removes community *
 }
+
+policy pad-by(asn: u32) {
+    term pad { prepend as asn 2; accept }
+}
+
+test padded-by-parameter {
+    route { prefix 192.0.2.0/24; as-path "64500" }
+    expect pad-by(64501) == accept with prepend as 64501 2
+}
