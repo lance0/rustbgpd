@@ -525,6 +525,8 @@ const CONSTRUCTS: &[&str] = &[
     "ast.action.large-community-admin-wildcard",
     "ast.action.community-all",
     "ast.action.community-binding",
+    "ast.action.community-in-set",
+    "ast.action.community-not-in-set",
     "ast.action.prepend",
     "ast.action.let",
     "ast.action.break",
@@ -597,6 +599,7 @@ const CONSTRUCTS: &[&str] = &[
     "ir.action.community-var",
     "ir.action.remove-large-community-admin",
     "ir.action.remove-all-communities",
+    "ir.action.remove-communities-in-set",
     "ir.mod.set-local-pref",
     "ir.mod.set-local-pref-computed",
     "ir.mod.set-med",
@@ -669,6 +672,8 @@ fn ast_action(action: &ActionStmt, seen: &mut std::collections::BTreeSet<&'stati
             CommunityArg::LargeAdminWildcard(_) => "ast.action.large-community-admin-wildcard",
             CommunityArg::All(_) => "ast.action.community-all",
             CommunityArg::Var(_) => "ast.action.community-binding",
+            CommunityArg::InSet { negate: false, .. } => "ast.action.community-in-set",
+            CommunityArg::InSet { negate: true, .. } => "ast.action.community-not-in-set",
         },
         ActionStmt::Prepend { .. } => "ast.action.prepend",
         ActionStmt::Let { init, .. } => {
@@ -777,6 +782,10 @@ fn ir_term(term: &Term, seen: &mut std::collections::BTreeSet<&'static str>) {
         }
         TermAction::RemoveAllCommunities { .. } => {
             seen.insert("ir.action.remove-all-communities");
+            None
+        }
+        TermAction::RemoveCommunitiesInSet { .. } => {
+            seen.insert("ir.action.remove-communities-in-set");
             None
         }
     };

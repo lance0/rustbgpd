@@ -726,6 +726,17 @@ impl<'a> Lowerer<'a> {
                 }
                 Stmt::Action(ActionStmt::Community {
                     kind,
+                    arg: CommunityArg::InSet { set, negate },
+                    ..
+                }) => {
+                    flush_pending(&mut out, &mut pending);
+                    out.push((
+                        MatchExpr::True,
+                        self.remove_in_set(*kind, &set.node, *negate),
+                    ));
+                }
+                Stmt::Action(ActionStmt::Community {
+                    kind,
                     arg: CommunityArg::All(_),
                     ..
                 }) => {
@@ -1491,6 +1502,14 @@ impl Lowerer<'_> {
                 }
                 ActionStmt::Community {
                     kind,
+                    arg: CommunityArg::InSet { set, negate },
+                    ..
+                } => {
+                    flush(&mut tail, &mut mods);
+                    tail.push(self.remove_in_set(*kind, &set.node, *negate));
+                }
+                ActionStmt::Community {
+                    kind,
                     arg: CommunityArg::All(_),
                     ..
                 } => {
@@ -1531,6 +1550,10 @@ impl Lowerer<'_> {
     /// (LAN-304); the caller emits them ahead of the term that carries
     /// the staged modifications, so the computed expression's `Local`
     /// reads always follow their writes in walk order.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per action kind; splitting would scatter the staging rules"
+    )]
     fn apply_action(
         &self,
         mods: &mut RouteModifications,
@@ -1580,9 +1603,12 @@ impl Lowerer<'_> {
             // their own CommunityVar terms by the statement/body lowerers
             // and never reach here.)
             ActionStmt::Community {
-                arg: CommunityArg::LargeAdminWildcard(_) | CommunityArg::All(_),
+                arg:
+                    CommunityArg::LargeAdminWildcard(_)
+                    | CommunityArg::All(_)
+                    | CommunityArg::InSet { .. },
                 ..
-            } => unreachable!("route-dependent wildcard action handled by callers"),
+            } => unreachable!("route-dependent community action handled by callers"),
             ActionStmt::Community {
                 add,
                 arg: CommunityArg::Var(name),
@@ -1662,6 +1688,21 @@ impl Lowerer<'_> {
 }
 
 impl<'a> Lowerer<'a> {
+    /// `remove <kind> in SET` / `not in SET` as its scan action; the
+    /// typechecker has resolved `set` to a community-set.
+    fn remove_in_set(
+        &self,
+        kind: super::ast::CommunityKind,
+        set: &str,
+        negate: bool,
+    ) -> TermAction {
+        TermAction::RemoveCommunitiesInSet {
+            attribute: community_attribute(kind),
+            set: self.community_set_ids[set],
+            negate,
+        }
+    }
+
     /// Lower a value expression to IR: parameters substituted, `let`
     /// bindings resolved to frame slots (innermost first — LAN-302
     /// shadowing), constant subtrees folded bottom-up with checked
@@ -1924,7 +1965,8 @@ fn accept_predicate(policy: &CompiledPolicy) -> MatchExpr {
         match term.action {
             TermAction::Continue(_)
             | TermAction::RemoveLargeCommunityAdmin { .. }
-            | TermAction::RemoveAllCommunities { .. } => {}
+            | TermAction::RemoveAllCommunities { .. }
+            | TermAction::RemoveCommunitiesInSet { .. } => {}
             // LAN-302/LAN-303: the typechecker rejects `apply` of a
             // policy that declares bindings or contains loops, so an
             // inlined predicate never contains these terms.

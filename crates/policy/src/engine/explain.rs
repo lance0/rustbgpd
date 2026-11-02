@@ -629,6 +629,27 @@ fn trace_rpol_policy(
                     break;
                 }
             }
+            TermActionView::RemoveCommunitiesInSet {
+                attribute,
+                set,
+                negate,
+            } => {
+                if !crate::eval::exec_remove_communities_in_set(
+                    attribute,
+                    &tables.community_sets[set.0 as usize],
+                    negate,
+                    ctx,
+                    &mut continued,
+                ) {
+                    term_traces.push(format!(
+                        "term {}: community input exceeds the `{}` bound — fail closed => reject",
+                        term.name.as_deref().unwrap_or("<unnamed>"),
+                        render_remove_in_set(attribute, set, negate, tables),
+                    ));
+                    decided = Some((index, term));
+                    break;
+                }
+            }
             // Policy-level loop control is a compiler-bug rail.
             TermActionView::Break | TermActionView::ContinueLoop => {
                 term_traces.push(format!(
@@ -776,6 +797,11 @@ fn render_term_action(action: &TermAction, tables: &CompiledChain) -> String {
             return format!("remove large-community {global_admin}:*:*");
         }
         TermAction::RemoveAllCommunities { attributes } => return attributes.render(),
+        TermAction::RemoveCommunitiesInSet {
+            attribute,
+            set,
+            negate,
+        } => return render_remove_in_set(*attribute, *set, *negate, tables),
     };
     let mut parts = mods.map_or_else(Vec::new, render_action_stmts);
     parts.push(verdict.to_string());
@@ -1130,6 +1156,21 @@ fn community_field(
     } else {
         "route.communities"
     }
+}
+
+/// `remove large-community not in scrub` — the `.rpol` spelling.
+fn render_remove_in_set(
+    attribute: crate::ir::CommunityAttribute,
+    set: crate::ir::SetId,
+    negate: bool,
+    tables: &CompiledChain,
+) -> String {
+    format!(
+        "remove {} {}in {}",
+        attribute.keyword(),
+        if negate { "not " } else { "" },
+        set_label(&tables.community_set_names, set.0, "community-set")
+    )
 }
 
 fn set_label(names: &[Option<String>], id: u32, kind: &str) -> String {

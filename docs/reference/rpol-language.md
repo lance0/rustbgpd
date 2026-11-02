@@ -1191,6 +1191,7 @@ Two consequences worth internalizing:
 | `add large-community 65000:1:2` / `remove ...` | large communities |
 | `remove large-community 65000:*:*` | every arrived large community with global administrator 65000 |
 | `remove community *` / `remove large-community *:*:*` / `remove ext-community *` | every arrived community of that kind, except that `remove community *` keeps well-known communities (see below) |
+| `remove community in scrub` / `remove community not in allow` | every arrived community of that kind that is (or, with `not in`, is not) a member of the community-set; `large-community` and `ext-community` likewise (see below) |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (ASN: 1–4294967295; count: literal 1–255) |
 | `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
@@ -1258,6 +1259,74 @@ loop, `for c in route.communities { remove community c }`, which is subject
 to the loop's 4,096-element bound. Large and extended communities have no
 well-known range: `remove large-community *:*:*` and `remove ext-community *`
 remove every value.
+
+### Removing by set membership
+
+`remove <kind> in SET` removes every arrived community of the kind that is a
+member of the community-set, exact or by [pattern](#community-patterns);
+`remove <kind> not in SET` removes every arrived community of the kind that is
+not. They are the RPL `delete community in` / `delete community not in`
+forms, and they work for all three kinds:
+
+```rpol
+community-set scrub { 65000:666, 65000:1000..1999 }
+community-set customer-tags { 65000:*:* }
+
+policy customer-out {
+    term scrub {
+        remove community in scrub              # drop internal tags
+        remove large-community not in customer-tags
+        accept
+    }
+}
+
+test scrubbed {
+    route {
+        prefix 192.0.2.0/24
+        communities [65000:666, 65000:1500, 65000:100, NO_EXPORT]
+        large-communities [65000:1:1, 64496:1:1]
+    }
+    expect customer-out == accept with only removes community 65000:666,
+        removes community 65000:1500, removes large-community 64496:1:1,
+        not removed community 65000:100, not removed community NO_EXPORT,
+        not removed large-community 65000:1:1
+}
+```
+
+- **Well-known communities.** A standard community in the RFC 1997
+  well-known range is removed only by `in`, and only when the set names it
+  as an exact member: `community-set kill { NO_EXPORT }` with
+  `remove community in kill` strips `NO_EXPORT`. A pattern never names a
+  well-known value, so `remove community in s` with `*:*` or `65535:*` in `s`
+  keeps them, as `remove community *` does. `not in` never removes one, so an
+  allow-list scrub (`remove community not in allow`) cannot strip
+  `NO_EXPORT`. Large communities have no well-known range.
+- **Extended communities with `not in`.** `remove ext-community not in SET`
+  considers only route targets and route origins, in every encoding
+  (2-octet AS, 4-octet AS, IPv4 administrator, transitive or not), and keeps
+  every other extended community: BGP encapsulation (RFC 9012), color, EVPN
+  types such as Router's MAC and ES-Import, link bandwidth, origin-validation
+  state and opaque or experimental values. A set can name only RT, RO and
+  origin-validation values, so without this rule an allow-list of route
+  targets would strip the encapsulation, color and EVPN communities that EVPN
+  reflection and SR-TE steering depend on. `remove ext-community in SET`
+  removes whatever the set names, the origin-validation state included.
+- **The set** must be a `community-set` with at least one member of the
+  action's kind: otherwise `in` would remove nothing and `not in` would remove
+  every value, and both are compile errors. For `ext-community not in` the
+  set needs a route-target or route-origin member. Datasets are not accepted
+  here yet; probe a dataset in a guard instead.
+- **Removal only, arrived route only.** `add <kind> in` is a compile error.
+  The scan reads the route as it arrived and stages concrete, deduplicated
+  removals; values staged by earlier actions are not staged again. As with
+  the strip-all forms, a later `add` of an arrived value cancels its removal.
+- **Cost.** One pass over the route's arrived values of the kind, bounded by
+  the wire (16,383 standard, 8,191 extended, 5,461 large communities); a route
+  carrying more fails closed before the scan. The compiler pre-pays one
+  evaluation step per value, as for `remove community *`. Each step is one
+  exact-member hash probe plus at most 64 pattern comparisons, so a set at
+  the pattern limit costs up to about 1.05 million comparisons per route for
+  one standard-community scan.
 
 ### Routes that carry too many communities
 
@@ -1727,6 +1796,7 @@ action      := "accept" | "reject"
              | "set" "next-hop" (IP | "self")
              | ("add" | "remove") ("community" | "large-community" | "ext-community") community
              | ("add" | "remove") "community" IDENT      # binding-valued
+             | "remove" community-kw ["not"] "in" IDENT     # IDENT: community-set; contextual `not`
              | "prepend" "as" (u32arg | "self" | "peer" | "origin" | "path-first") INT
 expr        := and ("||" and)*
 and         := unary ("&&" unary)*
@@ -2242,6 +2312,8 @@ and the
 | `set community (65000:100) additive` | `add community 65000:100` |
 | `set community (65000:100)` | `remove community *; add community 65000:100`, when nothing earlier on the path added a community the route did not arrive with (see 4 below) |
 | `delete community all` | `remove community *` |
+| `delete community in NAME` / `delete community not in NAME` | `remove community in NAME` / `remove community not in NAME` (well-known values: see [Removing by set membership](#removing-by-set-membership)) |
+| `delete extcommunity rt in NAME` / `delete extcommunity rt not in NAME` | `remove ext-community in NAME` / `remove ext-community not in NAME`; `not in` acts on route targets and route origins only, so other extended communities stay |
 | `prepend as-path 65000 3` | `prepend as 65000 3` |
 | `set next-hop self` | `set next-hop self` |
 | `pass` followed by the policy end | `accept`, or nothing when no `default-action reject` is declared |
@@ -2622,13 +2694,6 @@ test scrub-all-removes-no-export {
 These RPL constructs have no `.rpol` spelling today. Each has a form that
 compiles now:
 
-- **`delete community in NAME`** — loop over the route's standard
-  communities and remove those in the set, which may hold patterns. The
-  loop variable is a standard community, so the set's large and extended
-  members never match it; a
-  named removal also removes a well-known member such as `NO_EXPORT`; and a
-  route with more than 4,096 standard communities is denied (the loop's
-  iteration cap).
 - **`as-path neighbor-is '65001'`**, with one ASN —
   `route.as-path matches "^65001_"`. `_` matches a space, a brace or either
   end of the rendered path, so the pattern matches a path whose first ASN
@@ -2660,18 +2725,6 @@ compiles now:
   import policies still run after the last configured member.
 
 ```rpol
-community-set scrub { 65000:666, 65000:667 }
-
-# RPL `delete community in scrub`.
-policy delete-in-set {
-    term t {
-        for c in route.communities {
-            if c in scrub { remove community c }
-        }
-        accept
-    }
-}
-
 # RPL `if gold then set local-preference 300 elseif silver then set
 # local-preference 200 endif`, then `if as-path length ge 10 then drop
 # endif`, then `pass`: a native `else if` whose branches continue to the
@@ -2696,12 +2749,6 @@ policy from-65001 {
         if route.as-path matches "^65001_" { set local-pref 150; accept }
     }
     term rest { accept }
-}
-
-test delete-in-set-removes-members-only {
-    route { prefix 192.0.2.0/24; communities [65000:666, 65010:1] }
-    expect delete-in-set == accept with removes community 65000:666,
-        not removed community 65010:1
 }
 
 test first-branch-wins-over-a-later-branch {

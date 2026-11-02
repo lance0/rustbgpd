@@ -1,17 +1,17 @@
-# rpol decision corpus: 255 programs, 1562 cases. Regenerate with
+# rpol decision corpus: 256 programs, 1573 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 27
-ast.stmt.if 1090
+ast.stmt.if 1079
 ast.stmt.else-if 13
 ast.stmt.else 13
 ast.stmt.nested-if 13
-ast.stmt.for 75
-ast.for.field 64
+ast.stmt.for 64
+ast.for.field 53
 ast.for.set 11
-ast.action.accept 1348
+ast.action.accept 1359
 ast.action.reject 903
 ast.action.set-local-pref 270
 ast.action.set-med 220
@@ -20,7 +20,9 @@ ast.action.set-next-hop-address 12
 ast.action.community-literal 544
 ast.action.large-community-admin-wildcard 11
 ast.action.community-all 66
-ast.action.community-binding 43
+ast.action.community-binding 32
+ast.action.community-in-set 22
+ast.action.community-not-in-set 22
 ast.action.prepend 54
 ast.action.let 63
 ast.action.break 22
@@ -30,7 +32,7 @@ ast.expr.and 104
 ast.expr.not 21
 ast.expr.cmp 655
 ast.expr.in 296
-ast.expr.ident-in 53
+ast.expr.ident-in 42
 ast.expr.has 24
 ast.expr.matches 137
 ast.expr.contains 12
@@ -41,7 +43,7 @@ ast.value.identifier 112
 ast.value.field 160
 ast.value.arithmetic 140
 ast.value.call 75
-ir.guard.true 1277
+ir.guard.true 1288
 ir.guard.prefix-in-set 258
 ir.guard.prefix-eq 287
 ir.guard.prefix-ne 12
@@ -71,7 +73,7 @@ ir.guard.rpki-is 78
 ir.guard.aspa-is 84
 ir.guard.value-cmp 157
 ir.guard.local-in-asn-set 31
-ir.guard.local-in-community-set 32
+ir.guard.local-in-community-set 21
 ir.guard.in-dataset 5
 ir.guard.and 130
 ir.guard.or 16
@@ -83,16 +85,17 @@ ir.value.binary 171
 ir.value.min 53
 ir.value.max 23
 ir.value.clamp 11
-ir.action.permit 1348
+ir.action.permit 1359
 ir.action.deny 903
 ir.action.continue 257
 ir.action.bind 84
-ir.action.for-each 75
+ir.action.for-each 64
 ir.action.break 22
 ir.action.continue-loop 11
-ir.action.community-var 43
+ir.action.community-var 32
 ir.action.remove-large-community-admin 11
 ir.action.remove-all-communities 66
+ir.action.remove-communities-in-set 22
 ir.mod.set-local-pref 249
 ir.mod.set-local-pref-computed 21
 ir.mod.set-med 102
@@ -516,6 +519,7 @@ crates/policy/tests/decision_corpus/actions.rpol | test next-hop-self | next-hop
 crates/policy/tests/decision_corpus/actions.rpol | test next-hop-address | next-hop-rewrite => permit with set next-hop 198.51.100.254
 crates/policy/tests/decision_corpus/actions.rpol | test prepend-peer | computed-prepend => permit with prepend as 64500 2
 crates/policy/tests/decision_corpus/actions.rpol | test tag-and-scrub | tag-and-scrub => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
+crates/policy/tests/decision_corpus/actions.rpol | test scrub-by-set | scrub-by-set => permit with remove large-community 65000:1:1; remove ext-community RT:64496:1
 crates/policy/tests/decision_corpus/actions.rpol | branches | m01-v4-transit => permit with set med 3
 crates/policy/tests/decision_corpus/actions.rpol | branches | m02-v4-invalid-long => permit with set med 2
 crates/policy/tests/decision_corpus/actions.rpol | branches | m03-v6-tagged => permit with set med 3
@@ -556,6 +560,16 @@ crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m07-default =
 crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m08-host-routes => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
 crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m09-evpn => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
 crates/policy/tests/decision_corpus/actions.rpol | tag-and-scrub | m10-v6-bogon => permit with add large-community 65000:1:2; remove ext-community RT:65000:1
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m01-v4-transit => permit
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m02-v4-invalid-long => permit
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m03-v6-tagged => permit with remove large-community 65000:1:2; remove ext-community RO:64510:5
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m04-bare => permit
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m05-internal => permit
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m06-local-as-set => permit with remove large-community 65000:0:0; remove large-community 65000:1000:5; remove ext-community RT:192.0.2.1:7
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m07-default => permit
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m08-host-routes => permit
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m09-evpn => permit
+crates/policy/tests/decision_corpus/actions.rpol | scrub-by-set | m10-v6-bogon => permit
 crates/policy/tests/decision_corpus/guards.rpol | test prefix-ne | not-bogon => permit
 crates/policy/tests/decision_corpus/guards.rpol | test prefix-ne-bogon | not-bogon => deny
 crates/policy/tests/decision_corpus/guards.rpol | test origin-eq | origin-lock => permit with set local-pref 200
@@ -1287,6 +1301,17 @@ docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | m07-default => permit
 docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | m08-host-routes => permit with add community 65000:100; remove community 65000:200; remove community 65000:300
 docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | m09-evpn => permit with add community 65000:100
 docs/reference/rpol-language.md#8d4ad683bb2e2b4b | retag | m10-v6-bogon => permit with add community 65000:100; remove community 65000:666
+docs/reference/rpol-language.md#5b4fb9e56401d801 | test scrubbed | customer-out => permit with remove community 65000:666; remove community 65000:1500; remove large-community 64496:1:1
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m01-v4-transit => permit
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m02-v4-invalid-long => permit with remove community 65000:666
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m03-v6-tagged => permit with remove large-community 64510:0:1; remove large-community 4200000000:7:7
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m04-bare => permit
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m05-internal => permit
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m06-local-as-set => permit
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m07-default => permit
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m08-host-routes => permit
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m09-evpn => permit
+docs/reference/rpol-language.md#5b4fb9e56401d801 | customer-out | m10-v6-bogon => permit with remove community 65000:666; remove large-community 64512:666:0
 docs/reference/rpol-language.md#44f6dee15d76fa13 | strip-many-communities | m01-v4-transit => permit
 docs/reference/rpol-language.md#44f6dee15d76fa13 | strip-many-communities | m02-v4-invalid-long => permit
 docs/reference/rpol-language.md#44f6dee15d76fa13 | strip-many-communities | m03-v6-tagged => permit
@@ -1533,90 +1558,79 @@ docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m07-default => per
 docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m08-host-routes => permit with add community 65000:1
 docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m09-evpn => permit with add community 65000:1
 docs/reference/rpol-language.md#676dbec9960661f7 | tag-only | m10-v6-bogon => permit with add community 65000:1
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test delete-in-set-removes-members-only | delete-in-set => permit with remove community 65000:666
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test first-branch-wins-over-a-later-branch | tiers-then-check => permit with set local-pref 300
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test later-check-runs-after-a-modifying-branch | tiers-then-check => deny
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test second-branch-applies-alone | tiers-then-check => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test neighbor-is-matches-first-asn | from-65001 => permit with set local-pref 150
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test neighbor-is-is-boundary-anchored | from-65001 => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test neighbor-is-matches-a-one-asn-path | from-65001 => permit with set local-pref 150
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test neighbor-is-ignores-later-asns | from-65001 => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test accept-does-not-stop-the-chain | chain [finish, later-member] => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test last-in-the-chain-keeps-its-scalar-write | chain [later-member, finish] => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test a-rejection-wins-in-either-order | chain [reject-long, finish] => deny
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test a-rejection-wins-in-either-order | chain [finish, reject-long] => deny
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test done-path-skips-the-later-check | done-then-checks => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | test other-paths-still-run-the-check | done-then-checks => deny
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m01-v4-transit => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m02-v4-invalid-long => permit with remove community 65000:666
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m03-v6-tagged => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m04-bare => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m05-internal => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m06-local-as-set => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m07-default => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m08-host-routes => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m09-evpn => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | delete-in-set | m10-v6-bogon => permit with remove community 65000:666
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m01-v4-transit => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m02-v4-invalid-long => deny
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m03-v6-tagged => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m04-bare => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m05-internal => permit with set local-pref 300
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m06-local-as-set => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m07-default => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m08-host-routes => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m09-evpn => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | tiers-then-check | m10-v6-bogon => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m01-v4-transit => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m02-v4-invalid-long => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m03-v6-tagged => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m04-bare => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m05-internal => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m06-local-as-set => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m07-default => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m08-host-routes => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m09-evpn => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | from-65001 | m10-v6-bogon => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m01-v4-transit => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m02-v4-invalid-long => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m03-v6-tagged => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m04-bare => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m05-internal => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m06-local-as-set => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m07-default => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m08-host-routes => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m09-evpn => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | finish | m10-v6-bogon => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m01-v4-transit => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m02-v4-invalid-long => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m03-v6-tagged => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m04-bare => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m05-internal => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m06-local-as-set => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m07-default => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m08-host-routes => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m09-evpn => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | later-member | m10-v6-bogon => permit with set local-pref 100
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m01-v4-transit => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m02-v4-invalid-long => deny
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m03-v6-tagged => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m04-bare => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m05-internal => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m06-local-as-set => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m07-default => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m08-host-routes => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m09-evpn => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | reject-long | m10-v6-bogon => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m01-v4-transit => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m02-v4-invalid-long => deny
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m03-v6-tagged => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m04-bare => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m05-internal => permit with set local-pref 200
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m06-local-as-set => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m07-default => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m08-host-routes => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m09-evpn => permit
-docs/reference/rpol-language.md#c817d026a53cbdc6 | done-then-checks | m10-v6-bogon => permit
+docs/reference/rpol-language.md#6765c1041b72308b | test first-branch-wins-over-a-later-branch | tiers-then-check => permit with set local-pref 300
+docs/reference/rpol-language.md#6765c1041b72308b | test later-check-runs-after-a-modifying-branch | tiers-then-check => deny
+docs/reference/rpol-language.md#6765c1041b72308b | test second-branch-applies-alone | tiers-then-check => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | test neighbor-is-matches-first-asn | from-65001 => permit with set local-pref 150
+docs/reference/rpol-language.md#6765c1041b72308b | test neighbor-is-is-boundary-anchored | from-65001 => permit
+docs/reference/rpol-language.md#6765c1041b72308b | test neighbor-is-matches-a-one-asn-path | from-65001 => permit with set local-pref 150
+docs/reference/rpol-language.md#6765c1041b72308b | test neighbor-is-ignores-later-asns | from-65001 => permit
+docs/reference/rpol-language.md#6765c1041b72308b | test accept-does-not-stop-the-chain | chain [finish, later-member] => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | test last-in-the-chain-keeps-its-scalar-write | chain [later-member, finish] => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | test a-rejection-wins-in-either-order | chain [reject-long, finish] => deny
+docs/reference/rpol-language.md#6765c1041b72308b | test a-rejection-wins-in-either-order | chain [finish, reject-long] => deny
+docs/reference/rpol-language.md#6765c1041b72308b | test done-path-skips-the-later-check | done-then-checks => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | test other-paths-still-run-the-check | done-then-checks => deny
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m01-v4-transit => permit
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m02-v4-invalid-long => deny
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m03-v6-tagged => permit
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m04-bare => permit
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m05-internal => permit with set local-pref 300
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m06-local-as-set => permit
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m07-default => permit
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m08-host-routes => permit
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m09-evpn => permit
+docs/reference/rpol-language.md#6765c1041b72308b | tiers-then-check | m10-v6-bogon => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m01-v4-transit => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m02-v4-invalid-long => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m03-v6-tagged => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m04-bare => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m05-internal => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m06-local-as-set => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m07-default => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m08-host-routes => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m09-evpn => permit
+docs/reference/rpol-language.md#6765c1041b72308b | from-65001 | m10-v6-bogon => permit
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m01-v4-transit => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m02-v4-invalid-long => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m03-v6-tagged => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m04-bare => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m05-internal => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m06-local-as-set => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m07-default => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m08-host-routes => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m09-evpn => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | finish | m10-v6-bogon => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m01-v4-transit => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m02-v4-invalid-long => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m03-v6-tagged => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m04-bare => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m05-internal => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m06-local-as-set => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m07-default => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m08-host-routes => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m09-evpn => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | later-member | m10-v6-bogon => permit with set local-pref 100
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m01-v4-transit => permit
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m02-v4-invalid-long => deny
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m03-v6-tagged => permit
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m04-bare => permit
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m05-internal => permit
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m06-local-as-set => permit
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m07-default => permit
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m08-host-routes => permit
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m09-evpn => permit
+docs/reference/rpol-language.md#6765c1041b72308b | reject-long | m10-v6-bogon => permit
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m01-v4-transit => permit
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m02-v4-invalid-long => deny
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m03-v6-tagged => permit
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m04-bare => permit
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m05-internal => permit with set local-pref 200
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m06-local-as-set => permit
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m07-default => permit
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m08-host-routes => permit
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m09-evpn => permit
+docs/reference/rpol-language.md#6765c1041b72308b | done-then-checks | m10-v6-bogon => permit
 examples/manrs-action1/member-a-irr.rpol | test authorized-origin-and-prefix-is-accepted | member-a-irr => permit
 examples/manrs-action1/member-a-irr.rpol | test registered-prefix-with-wrong-origin-is-rejected | member-a-irr => deny
 examples/manrs-action1/member-a-irr.rpol | test registered-origin-with-other-prefix-is-rejected | member-a-irr => deny

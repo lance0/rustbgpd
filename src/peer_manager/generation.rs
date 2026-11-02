@@ -129,6 +129,11 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
         let compiled = chain.compiled();
         chain.policies.iter().all(|named| {
             named.rpol.as_ref().is_some_and(|rpol| {
+                let community_named = |id: SetId| {
+                    let (names, sets) = (&rpol.community_set_names, &rpol.community_sets);
+                    let compiled_names = &compiled.community_set_names;
+                    retains_set_name(id, sets, names, &compiled.community_sets, compiled_names)
+                };
                 rpol.policies.iter().all(|policy| {
                     policy.terms.iter().all(|term| {
                         let action_comparable = match &term.action {
@@ -142,6 +147,8 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
                             | TermAction::CommunityVar { .. }
                             | TermAction::RemoveLargeCommunityAdmin { .. }
                             | TermAction::RemoveAllCommunities { .. } => true,
+                            // The action names its set, like a set guard.
+                            TermAction::RemoveCommunitiesInSet { set, .. } => community_named(*set),
                         };
                         action_comparable
                             && !term.guard.any_node(&|guard| match guard {
@@ -154,13 +161,7 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
                                     &compiled.prefix_sets,
                                     &compiled.prefix_set_names,
                                 ),
-                                MatchExpr::CommunityInSet(id) => !retains_set_name(
-                                    *id,
-                                    &rpol.community_sets,
-                                    &rpol.community_set_names,
-                                    &compiled.community_sets,
-                                    &compiled.community_set_names,
-                                ),
+                                MatchExpr::CommunityInSet(id) => !community_named(*id),
                                 MatchExpr::OriginAsInSet(id) | MatchExpr::PeerAsInSet(id) => {
                                     !retains_set_name(
                                         *id,

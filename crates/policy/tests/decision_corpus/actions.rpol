@@ -59,3 +59,25 @@ test tag-and-scrub {
     expect tag-and-scrub == accept with large-community 65000:1:2,
         removes ext-community RT:65000:1, not removed ext-community RT:65000:2
 }
+
+community-set route-targets { RT:65000:* }
+community-set own-large { 65000:*:* }
+
+policy scrub-by-set {
+    term t {
+        remove ext-community not in route-targets
+        remove large-community in own-large
+        accept
+    }
+}
+
+test scrub-by-set {
+    route {
+        prefix 192.0.2.0/24
+        ext-communities [RT:65000:1, RT:64496:1, OV_VALID]
+        large-communities [65000:1:1, 64496:1:1]
+    }
+    expect scrub-by-set == accept with only removes ext-community RT:64496:1,
+        removes large-community 65000:1:1, not removed ext-community RT:65000:1,
+        not removed ext-community OV_VALID, not removed large-community 64496:1:1
+}
