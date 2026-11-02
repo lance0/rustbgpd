@@ -20,7 +20,11 @@ INTERMEDIATE = "bdb7bc34dfe0e6a66fc8c0f1d56d3e57184dea00"
 SCAN_SCHEMA = "rustbgpd.recovery-scan.v3"
 SCAN_PROFILES = {"full-uc": 1_230_000, "full-vpn": 1_230_000, "evpn-soak": 37_500}
 SHARED_STRATEGY = {"full-uc": "uc-slab-shared", "full-vpn": "vpn-pool-shared",
-                   "evpn-soak": "evpn-sort-shared"}
+                   "evpn-soak": "evpn-dense-slots"}
+# EVPN provenance has one representation, so both arms of an EVPN cell run
+# the same capture path: its ratio is a run-to-run control, and the cost
+# against the earlier universe design is a separate component comparison.
+SINGLE_REPRESENTATION = {"evpn-soak"}
 SCAN_DISPATCH = (
     "mod recovery_scan;\n",
     '    if mode == "recovery-scan" {\n        recovery_scan::main(&args[2..]);\n        return;\n    }\n',
@@ -1217,7 +1221,7 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                         and row.get("leg") == leg and row.get("arm") == arm
                         and row.get("measured") is True, "scan shape/order/mode mismatch")
                 require(row.get("comparison_counter_scope") == (
-                    "ordered-evpn-checkpoints-minus-old-visits" if profile == "evpn-soak"
+                    "none-dense-slot-capture" if profile == "evpn-soak"
                     else "typed-full-old-shape"), "comparison counter scope differs")
                 refusal = row.get("refusal")
                 require(refusal is None or refusal in (
@@ -1233,15 +1237,22 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                     continue
                 keys = SCAN_PROFILES[profile]
                 require(row["old_keys"] == row["proof_keys"] == keys, "incomplete scan proof")
-                expected_shared = arm == "candidate"
+                single = profile in SINGLE_REPRESENTATION
+                expected_shared = single or arm == "candidate"
                 expected_strategy = SHARED_STRATEGY[profile] if expected_shared else "exact-flat"
-                expected_reason = "explicit-flat-control" if arm == "flat" else "eligible"
+                expected_reason = ("single-representation" if single
+                                   else "explicit-flat-control" if arm == "flat" else "eligible")
                 require(row.get("selected_strategy") in (*SHARED_STRATEGY.values(), "exact-flat")
                         and row.get("selection_reason") in (
                             "explicit-flat-control", "eligible", "sharing-disabled",
-                            "missing-index", "slot-churn", "representation", "share-refused"),
+                            "missing-index", "slot-churn", "representation", "share-refused",
+                            "single-representation"),
                         "unknown capture selection")
                 selection_ok = row["selected_strategy"] == expected_strategy and row["selection_reason"] == expected_reason
+                # EVPN has no other storage to select, so another one is not
+                # a refused comparison but a receipt from the wrong design.
+                require(selection_ok or not single,
+                        "EVPN receipt is not the single dense-slot representation")
                 require(row.get("shared") is (row["selected_strategy"] != "exact-flat"),
                         "selected storage and shared flag disagree")
                 qualified.append(selection_ok)
@@ -1274,12 +1285,10 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                 else:
                     require(row["source_slots"] == 0 and row["mismatches"] == 0,
                             "non-slab path reported slot work")
-                    require(row["shape_callbacks"] == keys + row["comparisons"],
-                            "comparison count is not separate from key visits")
-                    if expected_shared and selection_ok:
-                        minimum = 2 * keys - 1 if layout == "dense" else keys
-                        require(minimum <= row["comparisons"] <= 2 * keys + keys.bit_length() + 2,
-                                "missing sorted merge work or non-linear classification")
+                    # Dense-slot capture orders no keys and walks no shape;
+                    # its only callbacks are index rebuilds, one per 1024 slots.
+                    require(row["comparisons"] == 0 and row["shape_callbacks"] <= 4 * (keys // 1024 + 1),
+                            "EVPN capture ordered keys or walked a per-key shape")
                 if row["selected_strategy"] == "exact-flat":
                     require(row["comparisons"] == 0 or not selection_ok,
                             "flat path performed indexed classification")
@@ -1288,7 +1297,9 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                         and row["empty_bytes"] < row["retained_bytes"] <= row["peak_bytes"],
                         "proof charge or last-owner retirement differs")
                 phases = row.get("phases")
-                require(isinstance(phases, dict) and set(phases) == {"shape", "capture", "cold_anchor_capture"},
+                require(isinstance(phases, dict) and set(phases) == (
+                    {"capture", "cold_anchor_capture"} if profile in SINGLE_REPRESENTATION
+                    else {"shape", "capture", "cold_anchor_capture"}),
                         "missing measured capture phases")
                 if profile == "evpn-soak":
                     require(phases["cold_anchor_capture"] is None
@@ -1309,7 +1320,7 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
             eligible = all(qualified)
             ratios = {}
             if eligible:
-                for phase in ("shape", "capture"):
+                for phase in (("capture",) if profile in SINGLE_REPRESENTATION else ("shape", "capture")):
                     ratios[phase] = {}
                     for quantity in ("wall_ns", "cpu_ticks"):
                         flat = sum(rows[i]["phases"][phase][quantity] for i in (0, 3))
@@ -1319,6 +1330,8 @@ def validate_scan_log(path: Path, profile: str, old_order: str = "sorted") -> di
                               "candidate_over_flat": ratios if eligible else None})
     return {"schema": SCAN_SCHEMA, "profile": profile, "old_order": old_order, "samples": samples,
             "comparisons": summaries, "cpu_ticks_per_second": ticks,
+            "arm_scope": ("both arms run the single dense-slot path; the ratio is a run-to-run control"
+                          if profile in SINGLE_REPRESENTATION else "flat control against shared candidate"),
             "phase_passes": environment["phase_passes"], "fixture_lineage": environment["fixture_lineage"],
             "cold_scope": environment["cold_scope"], "credit_scope": environment["credit_scope"],
             "workload_identity": groups["recovery_identity"][0],
