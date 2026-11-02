@@ -14,10 +14,12 @@
 //! case executes fails the test. Programs are identified by their
 //! entrypoint and resolved imports. An evaluation error is recorded with
 //! its outcome, which must be a deny with no modifications, and extended
-//! communities carry their exact wire value. The golden also pins the IR
-//! term names every instantiation lowers to, the names explain, test term
-//! hits and policy stats show, so a lowering change that renames a row
-//! fails like a decision change.
+//! communities carry their exact wire value. The golden also pins every
+//! row each instantiation lowers to: its name (the name explain, test term
+//! hits and policy stats show), its position, and its action with the
+//! values, bindings and loop body it holds, though not its guard. A
+//! lowering change that renames, reorders or refills a row fails like a
+//! decision change, and two rows with one name fail outright.
 //!
 //! [`CONSTRUCTS`] is the exhaustive construct list: the name functions
 //! below match every AST, IR and declaration enum without a wildcard, so a
@@ -48,7 +50,7 @@ use crate::engine::{
     CommunityMatch, NextHopAction, PolicyAction, PrependAs, RouteFamily, RouteModifications,
 };
 use crate::ir::{
-    ArithOp, CommunityAttribute, CompiledChain, MatchExpr, Term, TermAction, ValueExpr,
+    ArithOp, CommunityAttribute, CompiledChain, LoopSource, MatchExpr, Term, TermAction, ValueExpr,
 };
 use crate::sets::{CommunityField, CommunityMember, CommunityPattern, SetStore};
 
@@ -178,14 +180,22 @@ fn content_id(text: &str) -> String {
 impl Corpus {
     /// Record every row of every member of `chain` under `key`: its name and
     /// what it holds, so a rename and a moved action both show.
+    /// Each row records its 1-based position, so the emission order is
+    /// pinned too. A name repeated within one policy fails: it would make
+    /// two stats rows indistinguishable.
     fn record_names(&mut self, key: &str, chain: &CompiledChain) {
         for policy in &chain.policies {
             let member = policy.name.as_deref().unwrap_or("-");
-            for term in &policy.terms {
+            let mut names = std::collections::HashSet::new();
+            for (position, term) in policy.terms.iter().enumerate() {
                 let name = term.name.as_deref().unwrap_or("-");
+                assert!(
+                    names.insert(name),
+                    "{key}: policy {member} lowers two rows named {name}"
+                );
                 self.names.insert(
                     format!("{key} | row {member} {name}"),
-                    row_contents(&term.action, chain),
+                    format!("#{} {}", position + 1, row_contents(&term.action, chain)),
                 );
             }
         }
@@ -303,8 +313,24 @@ pub(super) fn row_contents(action: &TermAction, chain: &CompiledChain) -> String
         TermAction::Permit(mods) => staged("accept", mods),
         TermAction::Deny => "reject".to_string(),
         TermAction::Continue(mods) => staged("continue", mods),
-        TermAction::Bind { name, .. } => format!("let {name}"),
-        TermAction::ForEach(node) => format!("for {} ({} body rows)", node.var, node.body.len()),
+        TermAction::Bind { name, expr, .. } => format!("let {name} = {expr}"),
+        TermAction::ForEach(node) => {
+            let source = match node.source {
+                LoopSource::Communities => "route.communities",
+                LoopSource::AsPath => "route.as-path",
+                LoopSource::AsnSet(set) => chain
+                    .asn_set_names
+                    .get(set.0 as usize)
+                    .and_then(Option::as_deref)
+                    .unwrap_or("?"),
+            };
+            let body: Vec<String> = node
+                .body
+                .iter()
+                .map(|term| row_contents(&term.action, chain))
+                .collect();
+            format!("for {} in {source} {{ {} }}", node.var, body.join(" | "))
+        }
         TermAction::Break => "break".to_string(),
         TermAction::ContinueLoop => "next iteration".to_string(),
         TermAction::CommunityVar { add, name, .. } => {
@@ -340,11 +366,19 @@ pub(super) fn row_contents(action: &TermAction, chain: &CompiledChain) -> String
 fn render_mods(mods: &RouteModifications) -> String {
     let std = |value: &u32| format!("{}:{}", value >> 16, value & 0xFFFF);
     let mut parts = Vec::new();
+    // A lowered row stages computed values; an evaluated result never holds
+    // one, so these render only in the term-name rows.
     if let Some(value) = mods.set_local_pref {
         parts.push(format!("set local-pref {value}"));
     }
+    if let Some(expr) = &mods.set_local_pref_computed {
+        parts.push(format!("set local-pref {expr}"));
+    }
     if let Some(value) = mods.set_med {
         parts.push(format!("set med {value}"));
+    }
+    if let Some(expr) = &mods.set_med_computed {
+        parts.push(format!("set med {expr}"));
     }
     match &mods.set_next_hop {
         Some(NextHopAction::Self_) => parts.push("set next-hop self".to_string()),
@@ -353,17 +387,18 @@ fn render_mods(mods: &RouteModifications) -> String {
     }
     // One part per prepend, in the order they run (each later one lands
     // to the left).
-    let mut computed = false;
     for prepend in &mods.as_path_prepend {
-        match prepend.asn {
-            crate::engine::PrependAsn::Asn(asn) => {
-                parts.push(format!("prepend as {asn} {}", prepend.count));
+        let asn = match prepend.asn {
+            crate::engine::PrependAsn::Asn(asn) => asn.to_string(),
+            crate::engine::PrependAsn::Computed(operand) => match operand {
+                PrependAs::LocalAs => "self",
+                PrependAs::PeerAs => "peer",
+                PrependAs::OriginAs => "origin",
+                PrependAs::PathFirst => "path-first",
             }
-            crate::engine::PrependAsn::Computed(_) => computed = true,
-        }
-    }
-    if computed || mods.set_local_pref_computed.is_some() || mods.set_med_computed.is_some() {
-        parts.push("UNRESOLVED-COMPUTED".to_string());
+            .to_string(),
+        };
+        parts.push(format!("prepend as {asn} {}", prepend.count));
     }
     for (verb, values) in [
         ("add", &mods.communities_add),

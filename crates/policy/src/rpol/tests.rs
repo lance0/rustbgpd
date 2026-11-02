@@ -675,7 +675,7 @@ fn term_names_are_anchored_to_source_statements() {
         "cv.1 = accept",
         "cv = reject",
         "cv.3 = continue with set med 1",
-        "c.1/lib:#enter = let #return",
+        "c.1/lib:#enter = let #return = 0",
         "c.2/lib:bad = reject",
         "c/lib:tag = continue with add community 65000:9",
     ];
