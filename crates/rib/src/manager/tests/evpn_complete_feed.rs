@@ -2510,6 +2510,22 @@ fn exact_rejection_outlives_its_source_while_the_loc_rib_keeps_the_row() {
     assert!(manager.evpn_feed_is_current(peer));
     assert_eq!(resets.load(Ordering::SeqCst), 0);
     assert_eq!(manager.evpn_admitted_count(peer), 1);
+    // The renewed feed's view is exactly what the member was sent.
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    let mut proof = manager.evpn_recovery.proof_keys(handle).unwrap().unwrap();
+    proof.sort_unstable();
+    let mut projection: Vec<_> = manager.group_ribs[&gid]
+        .evpn_member_projection(
+            peer,
+            manager.cluster_id,
+            None,
+            manager.peer_unexportable.get(&peer),
+        )
+        .map(EvpnRibRoute::key)
+        .collect();
+    projection.sort_unstable();
+    assert_eq!(projection, proof);
+    assert_eq!(proof, vec![kept.key()]);
 }
 
 /// A sparse renewal whose delta the member's encoder rejects keeps the feed

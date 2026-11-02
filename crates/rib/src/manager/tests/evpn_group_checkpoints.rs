@@ -148,7 +148,7 @@ fn evpn_private_capture_preserves_keys_and_checkpoints_projection_and_insertion(
 }
 
 #[test]
-fn evpn_denial_replacement_checkpoints_retained_and_inserted_rows() {
+fn evpn_denial_replacement_checkpoints_staged_and_inserted_rows() {
     let (mut manager, _member, gid, _output) = fixture();
     let routes = install_routes(&mut manager, gid, 3);
     let group = manager.group_ribs.get_mut(&gid).unwrap();
