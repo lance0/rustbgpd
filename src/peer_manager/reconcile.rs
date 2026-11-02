@@ -116,11 +116,9 @@ impl PeerManager {
             .filter(|(_, delete)| delete.purge_reset)
             .map(|(_, delete)| delete.peer().clone())
             .collect();
-        let mut purged: HashMap<PeerKey, Result<(), PeerLifecycleError>> = purging
-            .iter()
-            .cloned()
-            .zip(self.purge_reset_for_delete(&purging).await)
-            .collect();
+        let purge = self.purge_reset_for_delete(&purging).await;
+        let mut purged: HashMap<PeerKey, Result<(), PeerLifecycleError>> =
+            purging.iter().cloned().zip(purge.results).collect();
         let mut replaced = Vec::with_capacity(changed.len());
         for (cfg, delete) in prepared {
             let addr = delete.peer().clone();
@@ -136,6 +134,10 @@ impl PeerManager {
                 Err(e) => remove_failures.push((addr, e)),
             }
         }
+        // Every purged peer is detached now, so retiring the failed peers'
+        // candidates cannot mistake a purged peer's BackToIdle for a live
+        // session failure.
+        self.retire_purged_candidates(purge.retiring).await;
         for (addr, e) in remove_failures {
             warn!(peer = %addr, error = %e, "reconcile: failed to remove changed peer");
             failures.push(ReconcileFailure {

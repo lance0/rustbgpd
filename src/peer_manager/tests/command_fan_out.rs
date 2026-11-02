@@ -591,3 +591,95 @@ async fn reap_beyond_the_concurrency_cap_still_takes_one_window() {
     assert_eq!(removed, 65);
     assert!(mgr.peers.is_empty());
 }
+
+#[derive(Default)]
+struct CandidateCounters {
+    claim: std::sync::atomic::AtomicU32,
+    activate: std::sync::atomic::AtomicU32,
+}
+
+/// A collision candidate that keeps running after a purge and answers a
+/// promotion claim.
+fn promotable_candidate(counters: Arc<CandidateCounters>) -> PeerHandle {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (commands, mut receiver) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = receiver.recv().await {
+            match command {
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::UpdateGracefulShutdown { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(false));
+                }
+                PeerCommand::ClaimCollisionPromotion { reply } => {
+                    counters.claim.fetch_add(1, SeqCst);
+                    let _ = reply.send(true);
+                }
+                PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
+                    counters.activate.fetch_add(1, SeqCst);
+                    let _ = reply.send(());
+                }
+                PeerCommand::CollisionDump | PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
+/// Two changed peers whose discard list changes, each with a collision
+/// candidate: A's purge is admitted, and its primary answers it with
+/// `BackToIdle`; C's primary is wedged, so C's purge fails and its candidate
+/// is retired. Retiring C's candidate must not handle A's purge-driven
+/// `BackToIdle` while A is still installed: that would treat A's primary as
+/// failed and promote A's candidate in the middle of A's reconfiguration.
+#[tokio::test(start_paused = true)]
+async fn a_failed_purge_does_not_promote_another_purged_peers_candidate() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut mgr = test_peer_manager();
+    let a = IpAddr::V4(Ipv4Addr::new(127, 0, 4, 1));
+    let c = IpAddr::V4(Ipv4Addr::new(127, 0, 4, 2));
+    let notify_tx = mgr.session_notify_tx.clone();
+    let a_primary = purge_back_to_idle_peer_handle(
+        a,
+        1,
+        rustbgpd_transport::SessionRole::Primary,
+        notify_tx,
+        Arc::new(FakePeerCounters::default()),
+    );
+    insert_test_managed_peer(&mut mgr, a, a_primary, false);
+    assert_eq!(mgr.peers[&key(a)].session_id(), 1);
+    insert_test_managed_peer(&mut mgr, c, wedged_session(), false);
+    let a_candidate = Arc::new(CandidateCounters::default());
+    attach_test_pending_inbound(&mut mgr, a, promotable_candidate(a_candidate.clone()), 101);
+    attach_test_pending_inbound(
+        &mut mgr,
+        c,
+        promotable_candidate(Arc::new(CandidateCounters::default())),
+        102,
+    );
+    let changed: Vec<_> = [a, c]
+        .into_iter()
+        .map(|addr| {
+            let mut config = make_config(addr, 65002);
+            config.discard_path_attributes = std::sync::Arc::from([16_u8]);
+            config
+        })
+        .collect();
+    let outcome = mgr.reconcile_peers(Vec::new(), Vec::new(), changed).await;
+    assert_eq!(
+        outcome.effects,
+        vec![PeerReconcileEffect::Replaced(key(a))],
+        "{:?}",
+        outcome.failures
+    );
+    assert_eq!(
+        a_candidate.claim.load(SeqCst) + a_candidate.activate.load(SeqCst),
+        0,
+        "a purged peer under reconfiguration must not have its candidate promoted"
+    );
+}
