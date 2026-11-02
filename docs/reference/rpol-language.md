@@ -579,6 +579,21 @@ and a SIGHUP reload reject a bad argument without runtime effect.
 A set parameter cannot share a name with a set or dataset, and it is
 not a loop source: a loop's bound is its set's size at compile time.
 
+**Reserved names.** Some names already have a fixed meaning in the
+positions a parameter could fill, so no parameter can take them:
+- a well-known community name: `NO_EXPORT`, `NO_ADVERTISE`,
+  `NO_EXPORT_SUBCONFED`, `BLACKHOLE`, `GRACEFUL_SHUTDOWN`, `OV_VALID`,
+  `OV_NOT_FOUND`, `OV_INVALID`;
+- an enum value of `route.rpki`, `route.aspa`, `route.route-type` or
+  `route.family` (`valid`, `internal`, `ipv4-unicast`, …);
+- the `prepend as` operands `origin` and `path-first`.
+
+A set or dataset cannot take a well-known community name either: as
+an argument the name is that community.
+
+A `let` binding still shadows a parameter of the same name in value
+positions and in `add`/`remove community`.
+
 ## Expressions
 
 Boolean operators, loosest to tightest: `||`, `&&`, `!`. Parentheses
@@ -791,9 +806,8 @@ error naming the u32 field set.
   at each use. The initializer is resolved *before* its own name is
   declared, so `let x = x + 1` reads the outer `x` — shadowing, never
   self-reference.
-- Resolution is **position-typed**, the same rule that lets a
-  parameter named `origin` keep its meaning under `prepend as`:
-  bindings are readable only in value positions. Enum
+- Resolution is **position-typed**: bindings are readable only in
+  value positions. Enum
   members (`valid`, `internal`, …) still win in enum comparisons,
   `min`/`max`/`clamp` followed by `(` are still builtin calls, and
   `prepend as origin` still means the origin operand even with a
@@ -1351,11 +1365,10 @@ must remove those too. Pin the threshold with fixtures on both sides of it and
 - **`peer`** — the evaluation peer's ASN.
 - **`origin`** — the route's origin AS: the last ASN of the rightmost
   non-empty `AS_SEQUENCE` (the same value `route.origin-as` reads).
-  A policy *parameter* named `origin` shadows the operand — the
-  parameter keeps its existing meaning.
+  No parameter can be named `origin` (see "Parameters").
 - **`path-first`** — the first ASN of a non-empty leading
-  `AS_SEQUENCE` in the typed route `AS_PATH`. A parameter with this
-  name also shadows the operand.
+  `AS_SEQUENCE` in the typed route `AS_PATH`. No parameter can be
+  named `path-first` either.
 
 **Direction legality.** `self`, `origin`, and `path-first` are legal on import and
 export chains. `peer` is **import-only**: on an export chain it would

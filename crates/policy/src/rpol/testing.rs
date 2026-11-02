@@ -566,13 +566,7 @@ fn render_expect(expect: &ExpectDef) -> String {
 /// Typechecked `expect` arguments for instantiation: literals become
 /// constants and a name is a set (tests have no parameters of their own).
 pub(super) fn policy_args(args: &[CallArg]) -> Vec<PolicyArg> {
-    args.iter()
-        .map(|arg| match arg {
-            CallArg::Int(value) | CallArg::Community(value) => PolicyArg::U32(*value),
-            CallArg::Ip(addr) => PolicyArg::Ip(*addr),
-            CallArg::Name(set) => PolicyArg::Set(set.clone()),
-        })
-        .collect()
+    args.iter().map(PolicyArg::from_literal).collect()
 }
 
 pub(super) fn render_call(name: &str, args: &[CallArg]) -> String {

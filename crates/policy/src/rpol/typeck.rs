@@ -224,6 +224,35 @@ pub(super) const FAMILY_MEMBERS: &[&str] = &[
     "bgp-ls-vpn",
 ];
 
+/// Whether a comparison against `field` resolves an identifier to an `ip`
+/// parameter: the address fields. Shared with lowering, so both passes
+/// read a name the same way.
+pub(super) fn takes_ip_param(field: Field) -> bool {
+    matches!(field, Field::NextHop | Field::PeerAddress)
+}
+
+/// What a reserved parameter name already means, or `None` for a free
+/// name: an enum value, a well-known community, or a `prepend as`
+/// operand. Reserving them at the declaration gives every pass the same
+/// reading of the name.
+fn reserved_param_meaning(name: &str) -> Option<String> {
+    if super::parser::is_well_known_alias(name) {
+        return Some("a well-known community".to_string());
+    }
+    if matches!(name, "origin" | "path-first") {
+        return Some(format!("the `prepend as {name}` operand"));
+    }
+    [
+        ("route.rpki", RPKI_MEMBERS),
+        ("route.aspa", ASPA_MEMBERS),
+        ("route.route-type", ROUTE_TYPE_MEMBERS),
+        ("route.family", FAMILY_MEMBERS),
+    ]
+    .iter()
+    .find(|(_, members)| members.contains(&name))
+    .map(|(field, _)| format!("a `{field}` value"))
+}
+
 /// Resolve a dotted field path to a [`Field`], or a diagnostic with a
 /// suggestion.
 pub(super) fn resolve_field(path: &FieldPath) -> Result<Field, Diagnostic> {
@@ -376,6 +405,38 @@ impl<'a> Checker<'a> {
                     )
                     .with_label(span, "set defined here")
                     .with_note("rename one of them — `in` could not tell which to probe"),
+                );
+            }
+        }
+        let set_names = self
+            .file
+            .prefix_sets
+            .iter()
+            .map(|s| ("prefix-set", &s.name))
+            .chain(
+                self.file
+                    .community_sets
+                    .iter()
+                    .map(|s| ("community-set", &s.name)),
+            )
+            .chain(self.file.asn_sets.iter().map(|s| ("asn-set", &s.name)))
+            .chain(self.file.datasets.iter().map(|d| ("dataset", &d.name)));
+        for (kind, name) in set_names {
+            if super::parser::is_well_known_alias(&name.node) {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        name.span,
+                        format!(
+                            "{kind} `{}` has the name of a well-known community",
+                            name.node
+                        ),
+                        "reserved name",
+                    )
+                    .with_note(
+                        "an argument spelled like a well-known community is that community, \
+                         so a set with this name could never be passed; rename the set",
+                    ),
                 );
             }
         }
@@ -675,6 +736,24 @@ impl<'a> Checker<'a> {
     fn check_policy(&mut self, policy: &PolicyDef) {
         self.duplicate_check("parameter", policy.params.iter());
         self.duplicate_check("term", policy.terms.iter().map(|t| &t.name));
+        for param in &policy.params {
+            if let Some(meaning) = reserved_param_meaning(&param.node) {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        param.span,
+                        format!("parameter `{}` has the name of {meaning}", param.node),
+                        "reserved name",
+                    )
+                    .with_note(
+                        "a parameter cannot be named like an enum value, a well-known \
+                         community or the `prepend as` operands `origin` and `path-first`: \
+                         those positions read the name with its fixed meaning; rename the \
+                         parameter",
+                    ),
+                );
+            }
+        }
         let mut params = Vec::new();
         let mut typed = Vec::new();
         for (param, ty) in policy.params.iter().zip(&policy.param_types) {
@@ -1212,13 +1291,16 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
-                let community_param = scope.typed_param(&name.node) == Some(ParamType::Community);
-                if !community_param && self.typed_param_misused(name, scope, "a community") {
+                // A `let` shadows an outer parameter here, as in value
+                // positions; lowering resolves the same way.
+                let local = scope.is_local(&name.node);
+                let community_param =
+                    !local && scope.typed_param(&name.node) == Some(ParamType::Community);
+                if local || community_param {
+                    // Resolved.
+                } else if self.typed_param_misused(name, scope, "a community") {
                     // Reported.
-                } else if !community_param
-                    && !scope.is_local(&name.node)
-                    && !scope.is_param(&name.node)
-                {
+                } else if !scope.is_param(&name.node) {
                     let mut diag = Diagnostic::coded(
                         DiagnosticCode::Typecheck,
                         name.span,
@@ -1239,15 +1321,15 @@ impl<'a> Checker<'a> {
                 }
             }
             ActionStmt::Prepend { asn, count, .. } => {
-                // A computed operand (`self`/`peer`, or an `origin`/`path-first`
-                // identifier that is not a declared parameter —
-                // LAN-296) needs no parameter check; the operand
-                // decision itself is shared with lowering via
-                // `PrependAsArg::operand`. `let` bindings deliberately
+                // A computed operand (`self`, `peer`, `origin`,
+                // `path-first`) needs no parameter check. Parameters
+                // cannot take the operand names, so the operand decision
+                // (`PrependAsArg::operand`, shared with lowering) depends
+                // on the name alone. `let` bindings deliberately
                 // do not resolve here: this is not a value position
                 // (LAN-302 scoping rule), so `prepend as origin` keeps
                 // its operand meaning even under a `let origin`.
-                if asn.operand(|name| scope.is_param(name)).is_none()
+                if asn.operand().is_none()
                     && let PrependAsArg::Value(arg) = asn
                 {
                     self.check_u32_arg(arg, scope);
@@ -2019,7 +2101,9 @@ impl<'a> Checker<'a> {
                 eq_only(self);
                 self.expect_enum_rhs(field, rhs, FAMILY_MEMBERS, scope);
             }
-            Field::NextHop | Field::PeerAddress if matches!(rhs, Rhs::Ident(name) if scope.typed_param(&name.node) == Some(ParamType::Ip)) =>
+            field
+                if takes_ip_param(field)
+                    && matches!(rhs, Rhs::Ident(name) if scope.typed_param(&name.node) == Some(ParamType::Ip)) =>
             {
                 eq_only(self);
             }
@@ -2886,38 +2970,116 @@ fn bound_policy<'a>(
     None
 }
 
-/// The parameters a policy uses as a `prepend` count and as a `set
-/// next-hop` operand: their arguments are range-checked at instantiation.
-pub(super) fn param_value_uses(def: &PolicyDef) -> (Vec<&str>, Vec<&str>) {
-    fn visit<'a>(action: &'a ActionStmt, counts: &mut Vec<&'a str>, next_hops: &mut Vec<&'a str>) {
-        match action {
-            ActionStmt::Prepend {
-                count: U32Arg::Param(name),
-                ..
-            } => counts.push(&name.node),
-            ActionStmt::SetNextHop(NextHopArg::Param(name), _) => next_hops.push(&name.node),
+/// How a policy uses its parameters where a value has a range: as a
+/// `prepend` count (1–255), a `prepend` ASN (not 0, RFC 7607) or a `set
+/// next-hop` operand (a usable unicast address). A parameter passed on
+/// through `apply(q(...))` inherits the uses of `q`'s parameter, so an
+/// argument is checked against every place its value reaches.
+#[derive(Clone, Default)]
+pub(super) struct ValueUses<'a> {
+    counts: Vec<&'a str>,
+    prepend_asns: Vec<&'a str>,
+    next_hops: Vec<&'a str>,
+}
+
+/// The [`ValueUses`] of `def`'s parameters, following `apply` arguments.
+/// Each policy is analysed once; a policy met again on its own path (a
+/// cycle, rejected on its own) contributes nothing.
+pub(super) fn param_value_uses<'a>(file: &'a SourceFile, def: &'a PolicyDef) -> ValueUses<'a> {
+    fn exprs<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match expr {
+            Expr::And(lhs, rhs) | Expr::Or(lhs, rhs) => {
+                exprs(lhs, out);
+                exprs(rhs, out);
+            }
+            Expr::Not(inner, _) => exprs(inner, out),
+            Expr::Apply { .. } => out.push(expr),
             _ => {}
         }
     }
-    fn walk<'a>(stmts: &'a [Stmt], counts: &mut Vec<&'a str>, next_hops: &mut Vec<&'a str>) {
+    fn walk<'a>(stmts: &'a [Stmt], actions: &mut Vec<&'a ActionStmt>, applies: &mut Vec<&'a Expr>) {
         for stmt in stmts {
             match stmt {
-                Stmt::Action(action) => visit(action, counts, next_hops),
+                Stmt::Action(action) => actions.push(action),
                 Stmt::If(if_stmt) => {
+                    for branch in &if_stmt.branches {
+                        exprs(&branch.cond, applies);
+                    }
                     for body in if_stmt.bodies() {
-                        walk(body, counts, next_hops);
+                        walk(body, actions, applies);
                     }
                 }
-                Stmt::For(for_stmt) => walk(&for_stmt.body, counts, next_hops),
+                Stmt::For(for_stmt) => walk(&for_stmt.body, actions, applies),
             }
         }
     }
-    let mut counts = Vec::new();
-    let mut next_hops = Vec::new();
-    for term in &def.terms {
-        walk(&term.stmts, &mut counts, &mut next_hops);
+    fn uses<'a>(
+        file: &'a SourceFile,
+        def: &'a PolicyDef,
+        memo: &mut HashMap<&'a str, Option<ValueUses<'a>>>,
+    ) -> ValueUses<'a> {
+        match memo.get(def.name.node.as_str()) {
+            Some(Some(done)) => return done.clone(),
+            Some(None) => return ValueUses::default(),
+            None => {}
+        }
+        memo.insert(&def.name.node, None);
+        let mut actions = Vec::new();
+        let mut applies = Vec::new();
+        for term in &def.terms {
+            walk(&term.stmts, &mut actions, &mut applies);
+        }
+        let mut out = ValueUses::default();
+        for action in actions {
+            match action {
+                ActionStmt::Prepend { asn, count, .. } => {
+                    if let U32Arg::Param(name) = count {
+                        out.counts.push(&name.node);
+                    }
+                    if asn.operand().is_none()
+                        && let PrependAsArg::Value(U32Arg::Param(name)) = asn
+                    {
+                        out.prepend_asns.push(&name.node);
+                    }
+                }
+                ActionStmt::SetNextHop(NextHopArg::Param(name), _) => {
+                    out.next_hops.push(&name.node);
+                }
+                _ => {}
+            }
+        }
+        for apply in applies {
+            let Expr::Apply { policy, args, .. } = apply else {
+                continue;
+            };
+            let Some(callee) = file.policies.iter().find(|p| p.name.node == policy.node) else {
+                continue;
+            };
+            let inner = uses(file, callee, memo);
+            for (arg, param) in args.iter().zip(&callee.params) {
+                let CallArg::Name(name) = &arg.node else {
+                    continue;
+                };
+                let Some(own) = def.params.iter().find(|p| p.node == *name) else {
+                    continue;
+                };
+                let own = own.node.as_str();
+                let param = param.node.as_str();
+                for (theirs, ours) in [
+                    (&inner.counts, &mut out.counts),
+                    (&inner.prepend_asns, &mut out.prepend_asns),
+                    (&inner.next_hops, &mut out.next_hops),
+                ] {
+                    if theirs.contains(&param) && !ours.contains(&own) {
+                        ours.push(own);
+                    }
+                }
+            }
+        }
+        memo.insert(&def.name.node, Some(out.clone()));
+        out
     }
-    (counts, next_hops)
+    uses(file, def, &mut HashMap::new())
 }
 
 /// One literal argument against the callee's parameter at `index`: its
@@ -2933,19 +3095,24 @@ pub(super) fn check_call_arg(
 ) -> Result<(), String> {
     let ty = def.param_types[index];
     let param = def.params[index].node.as_str();
-    let (counts, next_hops) = param_value_uses(def);
+    let uses = param_value_uses(file, def);
     match (ty, arg) {
         (ParamType::U32, CallArg::Int(value)) => {
-            if counts.contains(&param) && !(1..=255).contains(value) {
+            if uses.counts.contains(&param) && !(1..=255).contains(value) {
                 return Err(format!(
                     "prepend count {value} out of range for parameter `{param}` (must be 1-255)"
+                ));
+            }
+            if uses.prepend_asns.contains(&param) && *value == 0 {
+                return Err(format!(
+                    "AS 0 cannot be prepended (RFC 7607) for parameter `{param}`"
                 ));
             }
             Ok(())
         }
         (ParamType::Community, CallArg::Community(_)) => Ok(()),
         (ParamType::Ip, CallArg::Ip(addr)) => {
-            if next_hops.contains(&param)
+            if uses.next_hops.contains(&param)
                 && let Err(why) = crate::engine::NextHopAction::check_specific(*addr)
             {
                 return Err(format!(
@@ -2971,9 +3138,11 @@ pub(super) fn check_call_arg(
                 Ok(())
             } else {
                 Err(format!(
-                    "unknown {} `{name}` for parameter `{param}` (name a {} or a {kind} dataset)",
+                    "unknown {} `{name}` for parameter `{param}` (name {} {} or {} {kind} dataset)",
                     ty.keyword(),
-                    ty.keyword()
+                    ty.article(),
+                    ty.keyword(),
+                    ty.article()
                 ))
             }
         }

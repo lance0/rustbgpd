@@ -332,13 +332,13 @@ impl Parser<'_> {
                 // Well-known community names (standard and extended)
                 // share the TOML frontend's alias table via
                 // `parse_community_match`.
-                let well_known_shape = well_known_shape(&text);
+                let well_known = is_well_known_alias(&text);
                 match parse_community_match(&text) {
-                    Ok(CommunityMatch::Standard { value }) if well_known_shape => {
+                    Ok(CommunityMatch::Standard { value }) if well_known => {
                         self.bump();
                         CommunityLit::Standard(value)
                     }
-                    Ok(CommunityMatch::ExactExt(raw)) if well_known_shape => {
+                    Ok(CommunityMatch::ExactExt(raw)) if well_known => {
                         self.bump();
                         CommunityLit::ExtRaw(raw)
                     }
@@ -969,13 +969,26 @@ impl Parser<'_> {
                 Ok(Spanned::new(CallArg::Int(value), span))
             }
             Some(Tok::Ident) => {
+                // A well-known name is that community; no set or parameter
+                // can take one (the typechecker reserves them).
                 if let Some(token) = self.peek()
-                    && well_known_shape(self.text(token))
-                    && let Ok(CommunityMatch::Standard { value }) =
-                        parse_community_match(self.text(token))
+                    && self.is_well_known_community(token)
                 {
-                    self.bump();
-                    return Ok(Spanned::new(CallArg::Community(value), token.span));
+                    let lit = self.community_lit()?;
+                    let CommunityLit::Standard(value) = lit.node else {
+                        let message = format!(
+                            "`{}` is an extended community; an argument takes a standard community",
+                            self.text(token)
+                        );
+                        self.diags.push(Diagnostic::coded(
+                            DiagnosticCode::Parse,
+                            lit.span,
+                            message,
+                            "not a standard community",
+                        ));
+                        return Err(Fail);
+                    };
+                    return Ok(Spanned::new(CallArg::Community(value), lit.span));
                 }
                 let name = self.expect_ident(EXPECTED)?;
                 Ok(Spanned::new(CallArg::Name(name.node), name.span))
@@ -1389,9 +1402,7 @@ impl Parser<'_> {
     /// binding-vs-literal split in community actions (LAN-303) cannot
     /// disagree with literal parsing.
     fn is_well_known_community(&self, token: Token) -> bool {
-        let text = self.text(token);
-        text.chars().all(|c| c.is_ascii_uppercase() || c == '_')
-            && parse_community_match(text).is_ok()
+        is_well_known_alias(self.text(token))
     }
 
     /// `let <name> = <value expression>` (LAN-302); the caller has
@@ -1796,10 +1807,10 @@ impl Parser<'_> {
             Tok::HasKw => {
                 self.bump();
                 // A well-known name (`NO_EXPORT`) stays a literal; any other
-                // identifier names a `community` parameter.
+                // identifier, `TAG` included, names a `community` parameter.
                 if let Some(token) = self.peek()
                     && token.kind == Tok::Ident
-                    && !well_known_shape(self.text(token))
+                    && !self.is_well_known_community(token)
                 {
                     let param = self.expect_ident("a community parameter")?;
                     return Ok(Expr::HasParam { field, param });
@@ -2400,8 +2411,45 @@ fn address_bits(prefix: Prefix) -> u8 {
 
 /// Whether an identifier is spelled like a well-known community name
 /// (`NO_EXPORT`, `OV_INVALID`): upper case and underscores only.
-fn well_known_shape(text: &str) -> bool {
-    text.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+/// Whether `text` is a well-known community name (`NO_EXPORT`,
+/// `OV_INVALID`, …): the exact alias list the literal parser accepts,
+/// not any all-caps identifier. Parser and typechecker share it, so an
+/// argument, a `has` operand and a reserved name agree.
+pub(super) fn is_well_known_alias(text: &str) -> bool {
+    text.chars().all(|c| c.is_ascii_uppercase() || c == '_') && parse_community_match(text).is_ok()
+}
+
+/// One call-form argument from its text, through the language's own
+/// lexer and argument grammar: configured chain references and the
+/// policy dry-run RPCs accept exactly what an `expect` or `apply` does.
+///
+/// # Errors
+///
+/// The lexer or parser diagnostic for a malformed argument.
+pub(crate) fn parse_call_arg_text(text: &str) -> Result<CallArg, String> {
+    let (tokens, lex_diags) = lex(text, 0);
+    if let Some(diag) = lex_diags.first() {
+        return Err(diag.message.clone());
+    }
+    let mut parser = Parser {
+        src: text,
+        tokens,
+        pos: 0,
+        file: 0,
+        diags: Vec::new(),
+    };
+    let Ok(arg) = parser.call_arg() else {
+        return Err(parser.diags.first().map_or_else(
+            || format!("invalid argument {text:?}"),
+            |diag| diag.message.clone(),
+        ));
+    };
+    if parser.peek().is_some() {
+        return Err(format!(
+            "argument {text:?} is not a single integer, standard community, IP address or set name"
+        ));
+    }
+    Ok(arg.node)
 }
 
 /// Parse dataset file text as `kind` — the operator-facing file

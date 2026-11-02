@@ -1357,13 +1357,13 @@ fn validate_site_local(
             if !roster.insert(name.clone()) {
                 refusals.push(format!("duplicate policy `{name}` across extra files"));
             }
-            let Some(compiled) = file.compile_policy_bound(
+            let Ok(compiled) = file.compile_policy_bound(
                 &name,
                 &[],
                 &mut store,
                 &rustbgpd_policy::datasets::DatasetBindings::new(),
             ) else {
-                unreachable!("policy came from the parsed roster")
+                unreachable!("a zero-parameter policy from the parsed roster")
             };
             let chain = match compiled {
                 Ok(chain) => chain,

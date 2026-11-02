@@ -1299,14 +1299,6 @@ impl CompiledChain {
         None
     }
 
-    /// Whether a resolved literal prepend uses AS 0, including inside loops.
-    /// The daemon rejects such chains at attachment after policy parameters
-    /// have been substituted; AS 0 is prohibited in `AS_PATH` by RFC 7607.
-    #[must_use]
-    pub fn has_zero_as_path_prepend(&self) -> bool {
-        self.any_action_mods(&|mods| matches!(mods.as_path_prepend, Some((0, _))))
-    }
-
     /// The first `(policy, term)` whose `set next-hop` can execute for a
     /// route of `family`, including inside loop bodies. A term counts unless
     /// its guard provably never matches that family: only `route.family` and

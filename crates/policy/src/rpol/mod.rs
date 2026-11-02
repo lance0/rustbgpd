@@ -265,25 +265,27 @@ impl RpolFile {
             .map(|p| (p.name.node.as_str(), p.params.len()))
     }
 
-    /// Monomorphize one policy with concrete arguments into a
+    /// Monomorphize one policy with concrete `u32` arguments into a
     /// single-policy [`CompiledChain`] carrying the file's set tables,
     /// binding dataset references (LAN-305) through an empty binding
     /// set — a convenience for dataset-free files (tests, benches).
-    /// Returns `None` for an unknown policy name.
+    ///
+    /// # Errors
+    ///
+    /// An unknown policy, or arguments that [`Self::resolve_call`]
+    /// rejects: a wrong count, a parameter of another type, or a value
+    /// out of a parameter's range (a `prepend` count of 300).
     ///
     /// # Panics
     ///
-    /// If `args.len()` does not match the policy's declared parameter
-    /// count — callers check arity first (via [`Self::policies`]) —
-    /// or if the policy references a dataset (use
+    /// If the policy references a dataset (use
     /// [`Self::compile_policy_bound`] with real bindings).
-    #[must_use]
     pub fn compile_policy(
         &self,
         name: &str,
         args: &[u32],
         store: &mut SetStore,
-    ) -> Option<CompiledChain> {
+    ) -> Result<CompiledChain, String> {
         self.compile_policy_bound(name, args, store, &DatasetBindings::new())
             .map(|result| result.expect("policy references no datasets"))
     }
@@ -326,11 +328,7 @@ impl RpolFile {
             .map(|(index, arg)| {
                 typeck::check_call_arg(&self.file, def, index, arg)
                     .map_err(|reason| format!("policy {name:?}: {reason}"))?;
-                Ok(match arg {
-                    CallArg::Int(value) | CallArg::Community(value) => PolicyArg::U32(*value),
-                    CallArg::Ip(addr) => PolicyArg::Ip(*addr),
-                    CallArg::Name(set) => PolicyArg::Set(set.clone()),
-                })
+                Ok(PolicyArg::from_literal(arg))
             })
             .collect()
     }
@@ -357,22 +355,21 @@ impl RpolFile {
 
     /// [`Self::compile_policy`] with explicit dataset bindings
     /// (LAN-305): referenced-but-unbound (or kind-mismatched) datasets yield
-    /// `Err` naming them. Literal sets are interned through
+    /// the inner `Err` naming them. Literal sets are interned through
     /// `store`, preserving content sharing with other sources compiled through
     /// that same caller-owned store.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `args.len()` does not match the policy's declared parameter
-    /// count — callers check arity first (via [`Self::policies`]).
-    #[must_use]
+    /// The outer `Err`: an unknown policy, or arguments that
+    /// [`Self::resolve_call`] rejects.
     pub fn compile_policy_bound(
         &self,
         name: &str,
         args: &[u32],
         store: &mut SetStore,
         datasets: &DatasetBindings,
-    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+    ) -> Result<Result<CompiledChain, MissingDatasets>, String> {
         self.compile_policy_bound_impl(name, args, store, datasets, false)
     }
 
@@ -387,17 +384,16 @@ impl RpolFile {
     /// roster resolver uses this variant because one `RpolFile` fans out to
     /// hundreds of peer chains at IRR scale.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `args.len()` does not match the policy's declared parameter count.
-    #[must_use]
+    /// As [`Self::compile_policy_bound`].
     pub fn compile_policy_bound_cached_tables(
         &self,
         name: &str,
         args: &[u32],
         store: &mut SetStore,
         datasets: &DatasetBindings,
-    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+    ) -> Result<Result<CompiledChain, MissingDatasets>, String> {
         self.compile_policy_bound_impl(name, args, store, datasets, true)
     }
 
@@ -408,9 +404,14 @@ impl RpolFile {
         store: &mut SetStore,
         datasets: &DatasetBindings,
         cached_tables: bool,
-    ) -> Option<Result<CompiledChain, MissingDatasets>> {
-        let args: Vec<PolicyArg> = args.iter().copied().map(PolicyArg::U32).collect();
-        self.compile_policy_typed(name, &args, store, datasets, cached_tables)
+    ) -> Result<Result<CompiledChain, MissingDatasets>, String> {
+        // The same argument check a chain reference gets: arity, `u32`
+        // parameters only, and the range of each parameter's uses.
+        let args: Vec<CallArg> = args.iter().copied().map(CallArg::Int).collect();
+        let args = self.resolve_call(name, &args)?;
+        Ok(self
+            .compile_policy_typed(name, &args, store, datasets, cached_tables)
+            .expect("resolve_call found the policy"))
     }
 
     fn compile_policy_typed(
@@ -447,7 +448,7 @@ impl RpolFile {
 pub struct RpolPolicyEntry {
     /// The owning parsed file (shared across every policy it defines).
     pub file: Arc<RpolFile>,
-    /// Declared parameter count (all parameters are `u32` in V1).
+    /// Declared parameter count.
     pub params: usize,
     /// Display path of the source file, for error messages.
     pub path: String,
@@ -595,39 +596,16 @@ pub fn parse_call_args(reference: &str) -> Result<(&str, Vec<CallArg>), String> 
     Ok((base, args))
 }
 
-/// One call-form argument's text.
+/// One call-form argument's text, read by the language's own lexer and
+/// argument grammar.
 fn parse_call_arg(arg: &str) -> Result<CallArg, String> {
-    if arg.bytes().all(|b| b.is_ascii_digit()) && !arg.is_empty() {
+    if !arg.is_empty() && arg.bytes().all(|b| b.is_ascii_digit()) {
         return arg
             .parse::<u32>()
             .map(CallArg::Int)
             .map_err(|e| format!("argument {arg:?} is not a u32: {e}"));
     }
-    if let Ok(addr) = arg.parse::<std::net::IpAddr>() {
-        return Ok(CallArg::Ip(addr));
-    }
-    if let Some((asn, value)) = arg.split_once(':')
-        && let (Ok(asn), Ok(value)) = (asn.parse::<u16>(), value.parse::<u16>())
-    {
-        return Ok(CallArg::Community(
-            (u32::from(asn) << 16) | u32::from(value),
-        ));
-    }
-    if arg.chars().all(|c| c.is_ascii_uppercase() || c == '_')
-        && let Ok(crate::engine::CommunityMatch::Standard { value }) =
-            crate::engine::parse_community_match(arg)
-    {
-        return Ok(CallArg::Community(value));
-    }
-    let mut chars = arg.chars();
-    if chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Ok(CallArg::Name(arg.to_string()));
-    }
-    Err(format!(
-        "argument {arg:?} is not an integer, a standard community, an IP address, or a set name"
-    ))
+    parser::parse_call_arg_text(arg)
 }
 
 impl PartialEq for RpolPolicySet {

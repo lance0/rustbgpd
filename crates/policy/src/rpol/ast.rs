@@ -448,12 +448,9 @@ impl U32Arg {
 #[derive(Debug)]
 pub enum PrependAsArg {
     /// Literal ASN or parameter reference (`prepend as 65001 3`,
-    /// `prepend as n 3`). A bare identifier `origin` that is **not** a
-    /// declared parameter of the enclosing policy also arrives here
-    /// and denotes the origin operand (see [`Self::operand`]) — the
-    /// grammar-evolution rules (ADR-0103 Decision 2) forbid reserving
-    /// `origin`, so a parameter of that name keeps its existing
-    /// meaning. `path-first` follows the same contextual rule.
+    /// `prepend as n 3`). The bare identifiers `origin` and
+    /// `path-first` also arrive here and denote their computed operands
+    /// (see [`Self::operand`]); no parameter can take those names.
     Value(U32Arg),
     /// `prepend as self <count>` — the local speaker's ASN.
     SelfAs,
@@ -464,17 +461,16 @@ pub enum PrependAsArg {
 
 impl PrependAsArg {
     /// The computed operand this argument denotes, or `None` for the
-    /// literal/parameter form. `is_param` answers whether a name is a
-    /// declared parameter of the enclosing policy — the single
-    /// decision point shared by the typechecker and the lowerer, so
-    /// the two passes cannot disagree about an `origin` identifier.
-    pub fn operand(&self, is_param: impl Fn(&str) -> bool) -> Option<crate::engine::PrependAs> {
+    /// literal/parameter form: the single decision point shared by the
+    /// typechecker and the lowerer. Parameters cannot be named `origin`
+    /// or `path-first`, so the name alone decides.
+    #[must_use]
+    pub fn operand(&self) -> Option<crate::engine::PrependAs> {
         match self {
             PrependAsArg::SelfAs => Some(crate::engine::PrependAs::LocalAs),
             PrependAsArg::Peer => Some(crate::engine::PrependAs::PeerAs),
             PrependAsArg::Value(U32Arg::Param(name))
-                if matches!(name.node.as_str(), "origin" | "path-first")
-                    && !is_param(&name.node) =>
+                if matches!(name.node.as_str(), "origin" | "path-first") =>
             {
                 Some(if name.node == "origin" {
                     crate::engine::PrependAs::OriginAs

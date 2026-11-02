@@ -331,12 +331,26 @@ impl SetTables {
 /// argument is a compile-time constant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PolicyArg {
-    /// A `u32` value, or a `community` argument as its RFC 1997 value.
+    /// A `u32` value.
     U32(u32),
+    /// A standard community, as its RFC 1997 value.
+    Community(u32),
     /// The name of a set or dataset, for a set-typed parameter.
     Set(String),
     /// An address, for an `ip` parameter.
     Ip(std::net::IpAddr),
+}
+
+impl PolicyArg {
+    /// A literal call argument, typechecked against its parameter.
+    pub(super) fn from_literal(arg: &CallArg) -> Self {
+        match arg {
+            CallArg::Int(value) => Self::U32(*value),
+            CallArg::Community(value) => Self::Community(*value),
+            CallArg::Ip(addr) => Self::Ip(*addr),
+            CallArg::Name(set) => Self::Set(set.clone()),
+        }
+    }
 }
 
 impl<'a> Lowerer<'a> {
@@ -600,6 +614,9 @@ impl<'a> Lowerer<'a> {
         store: &mut SetStore,
     ) -> CompiledPolicy {
         debug_assert_eq!(def.params.len(), args.len(), "typechecked arity");
+        // `env` holds the `u32` parameters only; every other argument is
+        // resolved through the typed frame, at the positions the
+        // typechecker resolved to a parameter of that type.
         let mut env: HashMap<&str, u32> = HashMap::new();
         let mut frame = HashMap::new();
         for (param, arg) in def.params.iter().zip(args) {
@@ -1050,7 +1067,11 @@ impl<'a> Lowerer<'a> {
                 MatchExpr::Not(Box::new(self.lower_expr(inner, env, lets, store, binds)))
             }
             Expr::Cmp { field, op, rhs, .. } => {
+                // An `ip` parameter resolves only where the typechecker
+                // resolves one: against an address field. Elsewhere the
+                // name is an enum member or a `u32` parameter.
                 if let Rhs::Ident(name) = rhs
+                    && resolve_field(field).is_ok_and(super::typeck::takes_ip_param)
                     && let Some(PolicyArg::Ip(addr)) = self.bound(&name.node)
                 {
                     return lower_cmp(field, *op, &Rhs::Ip(*addr, name.span), env, lets);
@@ -1163,11 +1184,7 @@ impl<'a> Lowerer<'a> {
             }
             Expr::Has { lit, .. } => MatchExpr::CommunityContains(lit.node.to_match()),
             Expr::HasParam { param, .. } => MatchExpr::CommunityContains(
-                CommunityLit::Standard(
-                    *env.get(param.node.as_str())
-                        .expect("typechecked: community parameter in scope"),
-                )
-                .to_match(),
+                CommunityLit::Standard(self.community(param)).to_match(),
             ),
             Expr::Matches { pattern, .. } => {
                 MatchExpr::AsPathMatches(self.intern_regex(&pattern.node, store))
@@ -1182,11 +1199,12 @@ impl<'a> Lowerer<'a> {
                 // inlined predicate no larger than MAX_APPLY_EXPANSION
                 // nodes, so this cannot overflow or explode (lowering
                 // only ever sees typechecked ASTs).
+                // A name is the caller's own parameter (passed through
+                // with its bound value) or a set, as the typechecker
+                // resolved it.
                 let args: Vec<PolicyArg> = args
                     .iter()
                     .map(|arg| match &arg.node {
-                        CallArg::Int(value) | CallArg::Community(value) => PolicyArg::U32(*value),
-                        CallArg::Ip(addr) => PolicyArg::Ip(*addr),
                         CallArg::Name(name) => env.get(name.as_str()).map_or_else(
                             || {
                                 self.bound(name)
@@ -1195,6 +1213,7 @@ impl<'a> Lowerer<'a> {
                             },
                             |value| PolicyArg::U32(*value),
                         ),
+                        literal => PolicyArg::from_literal(literal),
                     })
                     .collect();
                 let def = self
@@ -1213,6 +1232,14 @@ impl<'a> Lowerer<'a> {
     /// being lowered, if any.
     fn bound(&self, name: &str) -> Option<&PolicyArg> {
         self.typed_frames.last().and_then(|frame| frame.get(name))
+    }
+
+    /// The value of the `community` parameter `name`.
+    fn community(&self, name: &Spanned<String>) -> u32 {
+        match self.bound(&name.node) {
+            Some(PolicyArg::Community(value)) => *value,
+            _ => unreachable!("typechecked: `community` parameter in scope"),
+        }
     }
 
     /// A `set next-hop` operand, with an `ip` parameter resolved.
@@ -1677,9 +1704,7 @@ impl Lowerer<'_> {
                 arg: CommunityArg::Var(name),
                 ..
             } => {
-                let value = *env
-                    .get(name.node.as_str())
-                    .expect("typechecked: non-binding community var is a parameter");
+                let value = self.community(name);
                 if *add {
                     mods.communities_add.push(value);
                 } else {
@@ -1730,19 +1755,22 @@ impl Lowerer<'_> {
                 }
             },
             ActionStmt::Prepend { asn, count, .. } => {
-                // A literal is range-checked at typecheck and a parameter where
-                // the policy is instantiated. Only an `apply` target, whose
-                // modifications never run, can see an unchecked value here.
+                // A literal is range-checked at typecheck. A parameter's
+                // argument is checked where the policy is instantiated,
+                // against every use it reaches through `apply` arguments
+                // (`typeck::param_value_uses`), on every instantiation path:
+                // a test `expect`, `apply`, a configured chain and the
+                // `&[u32]` compile APIs.
                 let count = u8::try_from(resolve_u32(count, env))
                     .ok()
                     .filter(|count| *count != 0)
-                    .unwrap_or(1);
+                    .expect("checked at typecheck or instantiation: prepend count is 1-255");
                 // LAN-296: computed operands lower to the staged
                 // `as_path_prepend_computed` slot (resolved per route by
                 // the evaluator); the literal/parameter form keeps its
                 // existing lowering. The operand decision is shared with
                 // the typechecker (`PrependAsArg::operand`).
-                if let Some(operand) = asn.operand(|name| env.contains_key(name)) {
+                if let Some(operand) = asn.operand() {
                     mods.as_path_prepend_computed = Some((operand, count));
                 } else {
                     let PrependAsArg::Value(arg) = asn else {
