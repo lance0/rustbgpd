@@ -250,7 +250,10 @@ rank changes, holds ORF-gated End-of-RIB behind its table toward possible
 stale-route holders, and bounds RIB actor work and serves readiness through
 graceful-restart, LLGR and full-table growth. It publishes wire 0.27.0,
 FSM 0.14.0 and RPKI 0.9.0. It ships on its per-change regression tests and
-main CI; no flagship receipt covers it. Under the
+main CI. The [2026-11-01 run](../soaks/soak-rs-flagship-24h-2026-11-01.md) on
+the v0.81.0 tag passes every route-server flagship gate on its on-host
+verdict; it does not exercise the release's FlowSpec, graceful-restart or
+LLGR changes. Under the
 [release checklist](release-checklist.md#flagship-operating-proof), a
 qualifying 24-hour management-load soak on the selected candidate is what a
 flagship operating claim requires; a release may ship without one when this

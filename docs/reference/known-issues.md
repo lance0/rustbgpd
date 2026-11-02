@@ -34,8 +34,11 @@ resolved.
   [2026-10-28 run](../soaks/soak-rs-flagship-24h-2026-10-28.md) of the same
   shape on untagged main, which has the concurrent probe halves but predates
   the session-free Established count, had 147 of 147 `doctor` runs `ok` and no
-  bad `/readyz` samples. One clean run is consistent with the fix, not proof
-  of it, and no soak yet covers the current probe path.
+  bad `/readyz` samples. The
+  [v0.81.0 run](../soaks/soak-rs-flagship-24h-2026-11-01.md), which includes
+  the session-free Established count, had the same result: 147 of 147
+  `doctor` runs `ok` and no bad `/readyz` samples. Two clean runs are
+  consistent with the fix, not proof of it.
   `bgp_readiness_probe_failures_total{reason}` names the failing component.
   Timing instrumentation supports investigation but does not establish that
   the underlying delay is fixed.
