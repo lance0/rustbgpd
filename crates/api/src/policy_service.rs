@@ -5782,8 +5782,9 @@ policy client-x {
     }
 
     /// An installed `.rpol` export chain, `customer-in`, that has evaluated 7
-    /// routes, all matching `customer-routes`: 2 overflowed its computed `set`
-    /// value (a condition never fails, so the error sits in the action).
+    /// routes, all matching `customer-routes`: 2 had no origin AS for its
+    /// computed `set` value (a condition never fails, so the error sits in
+    /// the action).
     fn stats_export_chain() -> rustbgpd_policy::PolicyChain {
         use rustbgpd_policy::rpol::compile_rpol;
         use rustbgpd_policy::sets::SetStore;
@@ -5791,7 +5792,7 @@ policy client-x {
 
         let compiled = compile_rpol(
             "policy customer-in {\n\
-             term customer-routes { set med route.med + 1; accept }\n\
+             term customer-routes { set med route.origin-as; accept }\n\
              term rest { accept }\n\
              }",
             &mut SetStore::new(),
@@ -5802,8 +5803,8 @@ policy client-x {
             Arc::new(compiled),
         )]);
         let mut context = roster_support::route_context();
-        for med in [5, 5, 5, 5, 5, u32::MAX, u32::MAX] {
-            context.med = Some(med);
+        for origin in [64500, 64500, 64500, 64500, 64500, 0, 0] {
+            context.origin_asn = (origin != 0).then_some(origin);
             let _ = chain.evaluate(&context);
         }
         chain
@@ -5880,7 +5881,7 @@ policy client-x {
         assert_eq!(chain.eval_errors, 2);
         assert_eq!(
             chain.last_error,
-            "overflow in policy customer-in term customer-routes"
+            "absent-operand in policy customer-in term customer-routes"
         );
         // LAN-305: dataset status rides the same response.
         assert_eq!(resp.datasets.len(), 1);

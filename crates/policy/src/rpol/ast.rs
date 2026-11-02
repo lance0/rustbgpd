@@ -366,12 +366,12 @@ impl IfStmt {
     }
 }
 
-/// A `u32` value expression (LAN-299): checked arithmetic over
-/// literals, parameters, u32-typed context fields, and the bounded
+/// A `u32` value expression (LAN-299): saturating arithmetic (LAN-2791)
+/// over literals, parameters, u32-typed context fields, and the bounded
 /// builtins (`min`/`max`/`clamp`). Appears in `set local-pref`/`set
 /// med` value positions and on either side of a comparison; the
-/// typechecker enforces u32 operand typing, the lowerer
-/// constant-folds (with checked ops) into [`crate::ir::ValueExpr`].
+/// typechecker enforces u32 operand typing and non-zero divisors, the
+/// lowerer constant-folds into [`crate::ir::ValueExpr`].
 #[derive(Debug, Clone)]
 pub enum ValueExprAst {
     /// Integer literal.
@@ -381,7 +381,7 @@ pub enum ValueExprAst {
     /// A `route.`/`peer.` field read (u32-typed fields only, checked
     /// by the typechecker).
     Field(FieldPath),
-    /// A checked binary arithmetic operation.
+    /// A binary arithmetic operation (`+ - *` saturate).
     Binary {
         /// The operator.
         op: crate::ir::ArithOp,
@@ -538,7 +538,7 @@ pub enum ActionStmt {
     Let {
         /// The binding name.
         name: Spanned<String>,
-        /// The initializer (a checked u32 value expression).
+        /// The initializer (a saturating u32 value expression).
         init: ValueExprAst,
         /// Whole-statement span.
         span: Span,
@@ -778,9 +778,9 @@ pub enum Expr {
     /// A comparison containing arithmetic or a builtin on either side
     /// (LAN-299): `route.med + 50 >= p`, `route.as-path.len * 10 >=
     /// route.med`, `route.med == min(a, b)`. Plain comparisons keep
-    /// the [`Cmp`](Self::Cmp) shape. This shape evaluates checked; an
-    /// operand that is missing or cannot be computed makes it false,
-    /// like the plain shape's absent field (LAN-2790).
+    /// the [`Cmp`](Self::Cmp) shape. This shape evaluates with
+    /// saturating arithmetic; a missing operand makes it false, like the
+    /// plain shape's absent field (LAN-2790).
     ValueCmp {
         /// Left value expression.
         lhs: ValueExprAst,

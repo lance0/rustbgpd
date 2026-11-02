@@ -128,7 +128,7 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked**, never wraps or traps: a value that cannot be computed makes a condition false and denies the route only in an action (see "Conditions never fail") |
+| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — `+ - *` **saturate** at 0 and 4294967295, never wrap or trap, and a divisor can never be zero (see "Saturating u32 value expressions") |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -568,7 +568,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.origin-as in customers` | asn-set membership (one hash probe) |
 | `peer.asn in customers` | evaluation-peer ASN against the same asn-sets |
 | `route.local-pref >= 200`, `route.med <= 50` | u32 comparisons; `==`/`!=` also allowed |
-| `route.med + 50 >= threshold`, `route.as-path.len * 10 >= route.med` | checked-arithmetic comparison (see "Value expressions"); an operand that is missing or cannot be computed makes it false |
+| `route.med + 50 >= threshold`, `route.as-path.len * 10 >= route.med` | saturating-arithmetic comparison (see "Saturating u32 value expressions"); a missing operand makes it false |
 | `exists route.origin-as` | the route carries the value; also `peer.asn`, `route.med`, `route.local-pref` and `route.next-hop` (see "Conditions never fail") |
 | `route.next-hop == 10.0.0.1` | next-hop equality (`==`/`!=` only) |
 | `route.next-hop == peer.address` | strict next-hop — the one field-vs-field comparison; reads peer identity, so an export chain using it makes the peer ineligible for update-group sharing (`policy_peer_context`) |
@@ -621,7 +621,7 @@ the negation and test an absent-field fixture when it is intentional. The
 lint does not flag defaulted `route.local-pref` or `route.med`, total fields
 such as `route.rpki`, or field-to-field comparisons.
 
-### Checked u32 value expressions
+### Saturating u32 value expressions
 
 u32 value positions — either side of a u32 comparison, and the
 `set local-pref` / `set med` arguments — accept **value expressions**
@@ -648,25 +648,37 @@ if route.med >= threshold + 20 { set local-pref 90 }
   permanent maximal munch, so `route.med - 1` is subtraction and
   `route.med-1` is an unknown-field error.
 - **Builtins**: `min(a, b)`, `max(a, b)`, `clamp(x, lo, hi)`.
-  Statically inverted clamp bounds (`lo > hi` with both constant) are
-  a compile error; a data-dependent inversion is an evaluation error.
-- **Everything is checked.** All arithmetic is checked u32: overflow,
-  underflow, and division/modulo by zero are **evaluation errors**,
-  never wraps or process traps.
-- **Constant folding.** Constant subexpressions fold at compile time
-  with the same checked operators: `set med 25 + 25` compiles to
-  exactly what `set med 50` does, and a statically invalid constant
-  expression (`4294967295 + 1`, `1 / 0`) is a compile error at its
-  source span.
+  `clamp(x, lo, hi)` is `min(max(x, lo), hi)`, so it never fails;
+  literal-only inverted bounds (`clamp(x, 10, 2)`) are a compile error,
+  as a typo.
+- **Arithmetic saturates.** `+`, `-` and `*` saturate per operation at 0
+  and 4294967295 in every value position — comparisons, `let` and
+  `set` — and never wrap, trap or fail: `set med route.med - 10` on a
+  route with MED 4 sets 0, and `route.med - 100 <= 5` matches every MED
+  below 100. There is no per-field ceiling.
+- **Divisors cannot be zero.** The divisor of `/` or `%` must be a
+  non-zero constant, or `max(e, k)` with a constant `k >= 1`; anything
+  else is a compile error. Bound a variable divisor explicitly:
+  `route.med / max(route.as-path.len, 1)`.
+- **Constant folding.** Constant subexpressions fold at compile time:
+  `set med 25 + 25` compiles to exactly what `set med 50` does. A
+  literal-only expression that leaves u32 (`4294967295 + 1`, `5 - 10`)
+  can only be a typo and is a compile error at its source span; an
+  expression with a parameter folds with saturation, so an argument
+  value never decides whether a policy loads.
+- **The top of the range.** RFC 4451 notes that some implementations
+  treat MED 4294967295 as "infinity" and ignore or rewrite it. Saturation
+  can produce that value, so where a peer must not see it, cap one below
+  it: `set med min(route.med + 50, 4294967294)`.
 
 ### Conditions never fail
 
 **A condition never fails: a comparison or probe whose operand is missing
 or cannot be computed is false, and only an action that needs a value it
 cannot compute denies the route.** A missing operand is `route.origin-as`
-on an empty or `AS_SET`-only path or an unknown `peer.asn`; a value that
-cannot be computed is a checked-arithmetic failure (overflow, underflow,
-division or modulo by zero) or a data-dependent inverted `clamp`.
+on an empty or `AS_SET`-only path or an unknown `peer.asn`. Arithmetic
+saturates, divisors are never zero and `clamp` is total, so a value that
+cannot be computed is one built from a missing operand.
 `route.local-pref` and `route.med` read their implicit defaults (100 / 0)
 when absent, consistent with comparisons. Every form of a comparison
 agrees: `route.origin-as == 64500`, `route.origin-as == (64500)`,
@@ -746,10 +758,9 @@ policy pad-med {
 
 The difference under the syntax: BIRD's integer arithmetic evaluates
 in a general-purpose interpreter, and an out-of-range result is
-whatever the interpreter does that day; `.rpol` arithmetic is checked
-u32 with a pinned failure contract (deny + counter + explain), and
-the `min` cap makes the local-pref doubling total instead of relying
-on it.
+whatever the interpreter does that day; `.rpol` arithmetic is saturating
+u32, so an out-of-range result sticks at 0 or 4294967295, and the `min`
+cap keeps the local-pref doubling at 400.
 
 ### Bindings — `let`
 
@@ -810,8 +821,8 @@ error naming the u32 field set.
 **Evaluation is eager.** The initializer evaluates when its statement
 executes — reached in the term walk, branch taken — whether or not the
 value is ever read. An initializer that is missing or cannot be computed
-(an absent `route.origin-as` or `peer.asn`, overflow, underflow,
-division/modulo by zero) binds that state instead of a value: a condition
+(an absent `route.origin-as` or `peer.asn`) binds that state instead of
+a value: a condition
 that reads the binding is false, and an action that needs it (`set med x`,
 `add community x`) denies the route with the original error kind (see
 "Conditions never fail"). Explain notes the binding as having no value. A
@@ -1092,22 +1103,22 @@ Consequences:
 
 - **Evaluation is eager, like `let`.** Arguments and the body evaluate
   when the walk reaches the statement containing the call — even if a
-  `&&` short-circuit would have skipped the value. A call whose value
-  cannot be computed (checked arithmetic; functions are pure and
-  terminating but *not* total) has no value, like a `let`: a condition
-  on it is false, and an action that needs it denies the route on the
-  uniform eval-error rail.
+  `&&` short-circuit would have skipped the value. A body's arithmetic
+  saturates and its divisors cannot be zero, so a call has no value only
+  when an argument has none (an absent `route.origin-as` or `peer.asn`),
+  like a `let`: a condition on it is false, and an action that needs it
+  denies the route on the uniform eval-error rail.
 - **Term identity survives.** The inlined binds become `<term>.<n>`
   IR terms of the *calling* term (the established multi-term split
   naming), so the counter grid and trace skeleton stay a function of
   the source; per-function hit counting is explicitly out of scope
   (Decision 6.3 — it would need runtime call frames).
-- **Attribution names both sides.** An error inside a body renders
-  with the calling term's name and the qualified binding, e.g.
-  `term compute.3: let share.each = share.total / share.parts [matched]`
-  followed by
-  `term compute.3: evaluation error: division by zero — fail closed => reject`;
-  the live-path WARN carries the same `(let share.each)` label.
+- **Attribution names both sides.** A body's bindings render with the
+  calling term's name and the qualified binding, e.g.
+  `term compute.3: let share.each = share.total / max(share.parts, 1)`,
+  and an action that needs a call without a value fails closed on the
+  calling term, e.g.
+  `term compute.4: evaluation error: `route.origin-as` has no value for this route — fail closed => reject`.
   Guards render calls source-level:
   `penalty(route.as-path.len, 10) >= route.med`.
 - **Budgets compound honestly.** The cost DP charges the fully-inlined
@@ -1564,8 +1575,8 @@ fail-closed rail; a condition never fails) FAILS an `accept` *or* `reject` expec
 the error kind and the failing policy/term rendered — a test cannot
 accidentally pin a broken policy as "rejects correctly". To pin the
 rail itself, expect it: `expect p == error` passes on any evaluation
-error, and `expect p == error KIND` pins the kind (`error overflow`,
-`error divide-by-zero`, `error absent-prepend-operand`, ...; unknown
+error, and `expect p == error KIND` pins the kind (`error absent-operand`,
+`error absent-prepend-operand`, ...; unknown
 kinds are compile diagnostics with a suggestion). `with` assertions
 cannot follow `== error` — an error discards every staged
 modification. In the daemon the same route is denied; the test form
@@ -1841,7 +1852,7 @@ predicate   := field (("=="|"!="|">="|"<=") (rhs | value) | "in" IDENT | "has" c
              | "matches" STRING | "contains" u32arg)
              | field arith-tail ("=="|"!="|">="|"<=") value    # LHS arithmetic
              | "exists" field                                  # contextual `exists`
-value       := mul (("+"|"-") mul)*                            # checked u32
+value       := mul (("+"|"-") mul)*                            # saturating u32
 mul         := atom (("*"|"/"|"%") atom)*
 atom        := INT | STD-COMMUNITY | IDENT | field | "(" value ")"   # IDENT: parameter or binding
              | ("min"|"max") "(" value "," value ")"
@@ -2190,7 +2201,7 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
 - Chains that have denied routes through the **evaluation-error rail**
   (ADR-0103 Decision 4) report the count and the most recent blame
   line above the term table — `2 routes denied by evaluation errors
-  (fail closed); last: overflow in policy pad-med term pad` — the
+  (fail closed); last: absent-operand in policy origin-med term t` — the
   drill-down for a nonzero `bgp_policy_eval_errors_total{direction,
   kind}` rate. Error counts reset with the chain instance, like every
   other counter here.
@@ -2534,30 +2545,17 @@ test unmatched-route-is-accepted {
 
 **2. `set med +N` and `set med -N`.** RPL saturates: a subtraction that
 would go below zero sets 0, and an addition that would exceed
-4294967295 sets 4294967295. `.rpol` arithmetic is checked, so
-`set med route.med - 10` on a route with MED 4 is an evaluation error and
-the route is denied (see "Checked u32 value expressions"). Write the
-saturation out:
+4294967295 sets 4294967295. `.rpol` arithmetic saturates the same way
+(see "Saturating u32 value expressions"), so the literal port is exact:
 
 ```rpol
-# A literal port of `set med -10`.
-policy med-minus-literal {
+# `set med -10` and `set med +10`.
+policy med-minus {
     term t { set med route.med - 10; accept }
 }
 
-# RPL's floor at zero, written out.
-policy med-minus {
-    term t { set med max(route.med, 10) - 10; accept }
-}
-
-# RPL's ceiling at 4294967295, written out for `set med +10`.
 policy med-plus {
-    term t { set med min(route.med, 4294967285) + 10; accept }
-}
-
-test literal-underflow-denies {
-    route { prefix 192.0.2.0/24; med 4 }
-    expect med-minus-literal == error underflow
+    term t { set med route.med + 10; accept }
 }
 
 test floor-at-zero {
@@ -2901,7 +2899,7 @@ IPv6 literals (use `::` compression). These are scope decisions, not
 parser accidents; each has an error message steering to the
 supported form.
 
-The ADR-0103 v2 extension program is **complete**: checked
+The ADR-0103 v2 extension program is **complete**: u32
 arithmetic, `let` bindings, bounded loops, pure functions, modules
 and imports, external datasets, and the metered-runtime operator
 surface — eval-error counters, `rbgp policy stats` exposure,

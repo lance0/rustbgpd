@@ -70,11 +70,12 @@ fn tagged_predicate() -> PolicyChain {
     )
 }
 
-/// Selects MED 0, rejects any other MED, and errors on MED `u32::MAX` in the
-/// fall-through `set med` action (a condition never fails; only an action can).
+/// Selects MED 0, rejects any other MED, and errors on a route without an
+/// origin AS in the fall-through `set med route.origin-as` action (a
+/// condition never fails and arithmetic saturates; only an action can).
 fn med_predicate() -> PolicyChain {
     rpol(
-        "policy guard { term t { if route.med == 0 { accept } } term t3 { set med route.med + 1 } term rest { reject } }",
+        "policy guard { term t { if route.med == 0 { accept } } term t3 { set med route.origin-as } term rest { reject } }",
         "guard",
     )
 }
@@ -859,11 +860,18 @@ async fn evaluation_error_fails_closed_and_differs_from_a_clean_reject() {
         });
         route
     };
-    announce(
-        &mut manager,
-        SOURCE,
-        vec![med(controlled(), u32::MAX), med(other(), 5)],
-    );
+    // The controlled route's AS_SET-only path has no origin AS.
+    let mut set_only = med(controlled(), 5);
+    AttrSet::edit(&mut set_only.attributes, |attrs| {
+        for attr in attrs.iter_mut() {
+            if let PathAttribute::AsPath(path) = attr {
+                *path = AsPath {
+                    segments: vec![AsPathSegment::AsSet(vec![65100, 65101])],
+                };
+            }
+        }
+    });
+    announce(&mut manager, SOURCE, vec![set_only, med(other(), 5)]);
     let mut rx = peer_up(&mut manager, TARGET, Shape::default());
     assert_eq!(drain(&mut rx), wire(&[(other(), 0)], &[]));
 
