@@ -5763,6 +5763,12 @@ impl RibManager {
                             .map(|route| ExactExportKey::Rtc(route.key()).nlri_identity()),
                     )
             })
+            // See `exact_export_nlri_is_live`: a deferred Loc-RIB row stays live.
+            .chain(
+                self.loc_rib
+                    .iter_evpn()
+                    .map(|route| ExactExportKey::Evpn(route.key())),
+            )
             .collect()
     }
 
@@ -5787,11 +5793,16 @@ impl RibManager {
                     .inspect(|_| checkpoint())
                     .any(|route| route.selection_key() == *key)
             }),
-            ExactExportKey::Evpn(key) => self
-                .ribs
-                .values()
-                .inspect(|_| checkpoint())
-                .any(|rib| rib.get_evpn(key).is_some()),
+            // A Loc-RIB row frozen by selection deferral still stages the
+            // route to members; its exact rejection must outlive the source.
+            ExactExportKey::Evpn(key) => {
+                self.loc_rib.get_evpn(key).is_some()
+                    || self
+                        .ribs
+                        .values()
+                        .inspect(|_| checkpoint())
+                        .any(|rib| rib.get_evpn(key).is_some())
+            }
             ExactExportKey::BgpLs(key) => self.ribs.values().any(|rib| {
                 checkpoint();
                 rib.iter_bgpls().inspect(|_| checkpoint()).any(|route| {

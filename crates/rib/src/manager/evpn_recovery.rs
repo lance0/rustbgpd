@@ -42,6 +42,9 @@ pub(in crate::manager) struct EvpnFeedSeal {
     target: EvpnFeedTarget,
     revision: u64,
     pub(in crate::manager) required_markers: u8,
+    /// A sparse renewal's staged keys: the only keys whose admission or
+    /// eligibility can differ from the complete feed it renews.
+    sparse_keys: Option<std::sync::Arc<[EvpnRouteKey]>>,
 }
 
 /// A sparse clean diff, consumed once in the operation that moved membership.
@@ -217,6 +220,12 @@ impl RibManager {
         peer: PeerId,
         feed: &mut Option<EvpnCompleteFeed>,
     ) -> bool {
+        // A sparse renewal is verified on its staged keys only; carrying its
+        // revision past an invalidation would skip the full check.
+        debug_assert!(
+            feed.as_ref()
+                .is_none_or(|feed| feed.seal.sparse_keys.is_none())
+        );
         let current = feed
             .as_ref()
             .is_some_and(|feed| self.evpn_feed_seal_is_current(peer, &feed.seal));
@@ -466,6 +475,98 @@ impl RibManager {
             target: EvpnFeedTarget::PrivateHandoff,
             revision: completion.revision,
             required_markers: 0,
+            sparse_keys: None,
+        })
+    }
+
+    /// Renew a complete feed that was current at `stamp_before`, before one
+    /// staging moved `group_id` to `stamp_after` over `staged_keys`. Only
+    /// those keys changed since that admission, so the member's sparse delta
+    /// payload keeps the feed complete; neither inventory is walked again.
+    /// Verification after admission reads only those keys
+    /// ([`Self::complete_evpn_feed_admitted`]).
+    pub(in crate::manager) fn sparse_evpn_feed_seal(
+        &self,
+        peer: PeerId,
+        group_id: usize,
+        (stamp_before, stamp_after): (u64, u64),
+        staged_keys: &std::sync::Arc<[EvpnRouteKey]>,
+    ) -> Option<EvpnFeedSeal> {
+        let record = self.evpn_completion_record(peer)?;
+        let completion = record.evpn_feed_completion.as_ref()?;
+        let group = self
+            .group_ribs
+            .get(&group_id)
+            .filter(|group| group.owns_evpn_routes())?;
+        if !completion.complete
+            || completion.revision == 0
+            || stamp_before == 0
+            || stamp_after == 0
+            || group.evpn_table_stamp != stamp_after
+            || completion.target
+                != (EvpnFeedTarget::Grouped {
+                    group_id,
+                    table_stamp: stamp_before,
+                })
+            || self.evpn_recovery_handle(peer) != Some(completion.provenance)
+            || record.outbound_tx.is_closed()
+            || self.evpn_recovery_reset_pending(peer)
+            || self.selection_deferred(EVPN_FAMILY)
+            || self.evpn_grouped_member_of(peer) != Some(group_id)
+            || !group.members.contains(&peer)
+        {
+            return None;
+        }
+        Some(EvpnFeedSeal {
+            session_id: record.session_id,
+            outbound: record.outbound_tx.clone(),
+            provenance: completion.provenance,
+            target: EvpnFeedTarget::Grouped {
+                group_id,
+                table_stamp: stamp_after,
+            },
+            revision: completion.revision,
+            required_markers: 0,
+            sparse_keys: Some(std::sync::Arc::clone(staged_keys)),
+        })
+    }
+
+    /// [`Self::evpn_projection_matches_proof`] over a sparse renewal's keys:
+    /// each is admitted exactly when the member's projection holds it. The
+    /// renewed feed matched its proof on every other key.
+    fn evpn_sparse_keys_match_proof(
+        &self,
+        peer: PeerId,
+        seal: &EvpnFeedSeal,
+        keys: &[EvpnRouteKey],
+    ) -> bool {
+        let Ok(Some(proof)) = self.evpn_recovery.proof(seal.provenance) else {
+            return false;
+        };
+        let EvpnFeedTarget::Grouped { group_id, .. } = seal.target else {
+            return false;
+        };
+        let Some(group) = self.group_ribs.get(&group_id) else {
+            return false;
+        };
+        let filter = self.member_rt_filter(peer);
+        let rejected = self.peer_unexportable.get(&peer);
+        keys.iter().all(|key| {
+            self.replacement_checkpoint(false);
+            let route = group.table.get_evpn(key);
+            let input = group.evpn_inputs.get(key);
+            route.is_some() == input.is_some()
+                && proof.contains(key)
+                    == route.zip(input).is_some_and(|(route, input)| {
+                        input.eligible(
+                            route,
+                            peer,
+                            group,
+                            self.cluster_id,
+                            filter.as_ref(),
+                            rejected,
+                        )
+                    })
         })
     }
 
@@ -484,7 +585,10 @@ impl RibManager {
         if !self.evpn_feed_seal_is_current(peer, &seal) {
             return false;
         }
-        let matches = self.evpn_projection_matches_proof(peer, &seal);
+        let matches = match seal.sparse_keys.as_deref() {
+            Some(keys) => self.evpn_sparse_keys_match_proof(peer, &seal, keys),
+            None => self.evpn_projection_matches_proof(peer, &seal),
+        };
         #[cfg(test)]
         let matches = matches
             && !std::mem::take(&mut self.adj_rib_out_commit_stats.fail_evpn_feed_completion);
@@ -734,58 +838,97 @@ impl RibManager {
         }
         for peer in peers {
             self.evpn_marker_cursor = Some(peer);
-            let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
-                continue;
-            };
-            let session_id = self.outbound_session_ids.get(&peer).copied();
-            let owed = if self.evpn_feed_is_current(peer) {
-                self.evpn_completion_record(peer)
-                    .and_then(|record| record.evpn_feed_completion.as_ref())
-                    .map_or(0, |completion| completion.owed_markers)
-            } else {
-                0
-            };
-            let mut end_of_rib = self
-                .pending_eor
+            self.try_send_evpn_feed_markers(peer, true);
+        }
+    }
+
+    /// One standalone attempt at `peer`'s ready terminal markers: the EVPN
+    /// EoR/EoRR its current complete feed owes, plus, with
+    /// `pending_families`, its other ready pending End-of-RIB families. A
+    /// refused send leaves them for the resync tick.
+    fn try_send_evpn_feed_markers(&mut self, peer: PeerId, pending_families: bool) {
+        let Some(sender) = self.outbound_peers.get(&peer).cloned() else {
+            return;
+        };
+        let session_id = self.outbound_session_ids.get(&peer).copied();
+        let owed = if self.evpn_feed_is_current(peer) {
+            self.evpn_completion_record(peer)
+                .and_then(|record| record.evpn_feed_completion.as_ref())
+                .map_or(0, |completion| completion.owed_markers)
+        } else {
+            0
+        };
+        let mut end_of_rib = if pending_families {
+            self.pending_eor
                 .get(&peer)
                 .into_iter()
                 .flat_map(|families| families.iter().copied())
                 .filter(|&family| self.pending_marker_family_ready(peer, family))
-                .collect::<Vec<_>>();
-            let evpn_ready = self.pending_marker_family_ready(peer, EVPN_FAMILY);
-            if owed & EVPN_EOR != 0 && evpn_ready && !end_of_rib.contains(&EVPN_FAMILY) {
-                end_of_rib.push(EVPN_FAMILY);
-            }
-            let refresh_markers = if owed & EVPN_EORR != 0 && evpn_ready {
-                vec![(
-                    EVPN_FAMILY.0,
-                    EVPN_FAMILY.1,
-                    rustbgpd_wire::RouteRefreshSubtype::EoRR,
-                )]
-            } else {
-                vec![]
-            };
-            let bits = Self::evpn_admitted_marker_bits(&end_of_rib, &refresh_markers);
-            let update = OutboundRouteUpdate {
-                end_of_rib: end_of_rib.clone(),
-                refresh_markers,
-                ..OutboundRouteUpdate::default()
-            };
-            if sender.try_send(update).is_ok()
-                && self.outbound_session_ids.get(&peer).copied() == session_id
-                && self
-                    .outbound_peers
-                    .get(&peer)
-                    .is_some_and(|current| current.same_channel(&sender))
-            {
-                if let Some(pending) = self.pending_eor.get_mut(&peer) {
-                    pending.retain(|family| !end_of_rib.contains(family));
-                    if pending.is_empty() {
-                        self.pending_eor.remove(&peer);
-                    }
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let evpn_ready = self.pending_marker_family_ready(peer, EVPN_FAMILY);
+        if owed & EVPN_EOR != 0 && evpn_ready && !end_of_rib.contains(&EVPN_FAMILY) {
+            end_of_rib.push(EVPN_FAMILY);
+        }
+        let refresh_markers = if owed & EVPN_EORR != 0 && evpn_ready {
+            vec![(
+                EVPN_FAMILY.0,
+                EVPN_FAMILY.1,
+                rustbgpd_wire::RouteRefreshSubtype::EoRR,
+            )]
+        } else {
+            vec![]
+        };
+        if end_of_rib.is_empty() && refresh_markers.is_empty() {
+            return;
+        }
+        let bits = Self::evpn_admitted_marker_bits(&end_of_rib, &refresh_markers);
+        let update = OutboundRouteUpdate {
+            end_of_rib: end_of_rib.clone(),
+            refresh_markers,
+            ..OutboundRouteUpdate::default()
+        };
+        if sender.try_send(update).is_ok()
+            && self.outbound_session_ids.get(&peer).copied() == session_id
+            && self
+                .outbound_peers
+                .get(&peer)
+                .is_some_and(|current| current.same_channel(&sender))
+        {
+            if let Some(pending) = self.pending_eor.get_mut(&peer) {
+                pending.retain(|family| !end_of_rib.contains(family));
+                if pending.is_empty() {
+                    self.pending_eor.remove(&peer);
                 }
-                self.evpn_feed_markers_admitted(peer, &sender, bits);
             }
+            self.evpn_feed_markers_admitted(peer, &sender, bits);
+        }
+    }
+
+    /// A refresh replay strips the EVPN markers its complete feed owes from
+    /// the data; once that data is admitted, send them behind it instead of
+    /// leaving them to the resync tick, which retries a refused or held one.
+    /// Other families' pending End-of-RIB, and EVPN's own pending initial
+    /// one, stay with `flush_pending_eor` and its completion hooks.
+    pub(in crate::manager) fn send_evpn_refresh_markers(&mut self, peer: PeerId) {
+        let owed = self.evpn_feed_is_current(peer)
+            && self
+                .evpn_completion_record(peer)
+                .and_then(|record| record.evpn_feed_completion.as_ref())
+                .is_some_and(|completion| completion.owed_markers != 0);
+        if owed
+            && !self.dirty_peers.contains(&peer)
+            && !self.evpn_recovery_reset_pending(peer)
+            && !self.outbound_channel_gone(peer)
+            && self.pending_marker_family_ready(peer, EVPN_FAMILY)
+            && !self
+                .pending_eor
+                .get(&peer)
+                .is_some_and(|families| families.contains(&EVPN_FAMILY))
+        {
+            self.try_send_evpn_feed_markers(peer, false);
         }
     }
 
@@ -943,6 +1086,7 @@ impl RibManager {
                 target,
                 revision,
                 required_markers: 0,
+                sparse_keys: None,
             },
             announce,
             withdraw,

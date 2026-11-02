@@ -2182,6 +2182,9 @@ impl RibManager {
             if (initial_eor_owed || deferred_eor) && !self.dirty_peers.contains(&peer) {
                 self.flush_pending_eor(peer);
             }
+            if family == (Afi::L2Vpn, Safi::Evpn) {
+                self.send_evpn_refresh_markers(peer);
+            }
         }
         super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         super::retire_hash_set(&mut all_prefixes, &mut || {

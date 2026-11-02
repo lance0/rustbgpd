@@ -4833,10 +4833,10 @@ impl GroupRibOut {
         denials: impl IntoIterator<Item = (rustbgpd_wire::EvpnRouteKey, VpnDenialRecord)>,
         checkpoint: &mut impl FnMut(),
     ) {
-        self.evpn_policy_denied.retain(|key, _| {
+        for key in keys {
             checkpoint();
-            !keys.contains(key)
-        });
+            self.evpn_policy_denied.remove(key);
+        }
         self.evpn_policy_denied
             .extend(denials.into_iter().inspect(|_| checkpoint()));
     }
