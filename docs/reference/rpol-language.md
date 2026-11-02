@@ -1044,6 +1044,16 @@ and evaluation enforce the following bounds:
   (4,096 × 4,096 steps) is rejected at compile time against the
   1,000,000-step worst-case budget (`MAX_EVAL_COST`), not metered per
   route. Nest small set loops, or restructure with membership probes.
+- **At most 255 prepended ASNs per route** (`MAX_PREPEND_ASNS`, one wire
+  `AS_SEQUENCE` segment). The bound sums every prepend's count, each `if`
+  branch included, and multiplies a prepend inside a loop by the loop's
+  iteration bound: an asn-set's member count, or 4,096 for a route
+  attribute, so a loop over a route attribute cannot prepend. The
+  typechecker checks it with a parameter count at its smallest value, 1;
+  instantiation rechecks with the argument, and chain attachment (and a
+  test's `expect chain`) adds the members' bounds. A chain composed
+  without these checks fails a route closed above 255
+  (`prepend-limit-exceeded`).
 - **Runtime fuel.** Every evaluation starts with `MAX_EVAL_COST` fuel,
   decremented **only at loop iteration steps** — straight-line code is
   pre-paid by the compile-time bound, so a chain with no loops pays
@@ -1280,7 +1290,7 @@ Two consequences worth internalizing:
 | `remove community *` / `remove large-community *:*:*` / `remove ext-community *` | every arrived community of that kind, except that `remove community *` keeps well-known communities (see below) |
 | `remove community in scrub` / `remove community not in allow` | every arrived community of that kind that is (or, with `not in`, is not) a member of the community-set; `large-community` and `ext-community` likewise (see below) |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
-| `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (ASN: 1–4294967295; count: literal 1–255) |
+| `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (ASN: 1–4294967295; count: literal 1–255); prepends accumulate, each later one to the left, up to 255 ASNs per route (see below) |
 | `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
 
 Literal AS 0 is a compile error. A parameter that resolves to AS 0 in a
@@ -1293,10 +1303,13 @@ The kind keyword must match the literal's kind (`add community
 RT:...` is a compile error pointing at `add ext-community`). Within a
 policy, later `set`s of the same attribute win; across a chain, the
 existing merge semantics apply (later policy wins scalars, add/remove
-lists merge with later-policy-wins cancellation). Literal and computed
-prepends share one scalar slot: a later prepend of either form
-replaces an earlier one of either form; computed `set` values share
-their attribute's slot the same way. A computed `set` value resolves
+lists merge with later-policy-wins cancellation). Prepends accumulate
+instead, in statement order across terms and chain members: each
+prepend places its copies in front of the path as it stands, so a later
+prepend's ASNs land to the left of an earlier one's, as RPL `prepend
+as-path` does. A computed operand resolves where its prepend runs.
+Computed `set` values share their attribute's slot with the literal
+form: a later `set` of either form replaces an earlier one. A computed `set` value resolves
 when the matched term's action executes — constant expressions have
 already folded to literals at compile time, and expressions reading
 route/peer fields evaluate per route (an evaluation error denies the
@@ -1562,7 +1575,8 @@ has none). An empty string is a route without an AS path.
 | assertion | passes when |
 |---|---|
 | `local-pref N`, `med N`, `next-hop IP\|self` | the policy sets that value |
-| `prepend as ASN COUNT` | the policy prepends `COUNT` copies of `ASN` |
+| `prepend as ASN COUNT` | the policy's prepends place exactly `COUNT` copies of `ASN` in front of the path |
+| `prepend "ASN ASN ..."` | the policy's prepends place exactly these ASNs in front of the path, leftmost first; asplain or asdot (`"666.5 666.5 2.5"`) |
 | `community LIT` | `LIT` is in the add list (`large-community` / `ext-community` likewise) |
 | `removes community LIT` | `LIT` is in the remove list (any community kind keyword) |
 | `removes large-community GA:*:*` | every matching fixture value is in the remove list; the fixture must contain at least one match |
@@ -1909,7 +1923,7 @@ expect      := "expect" (call | "chain" "[" call ("," call)* "]") "=="   # conte
                (("accept"|"reject") ["with" assertion,*] | "error" [IDENT])   # IDENT: error kind
 call        := IDENT ["(" INT,* ")"]
 assertion   := ("local-pref" | "med") INT | "next-hop" (IP | "self")
-             | "prepend" "as" INT INT
+             | "prepend" "as" INT INT | "prepend" STRING   # STRING: ASNs, leftmost first
              | ["removes" | "without"] community-kw COMMUNITY   # contextual `removes`/`without`
              | "without" ("local-pref" | "med" | "next-hop" | "prepend")
 community-kw := "community" | "large-community" | "ext-community"
@@ -2617,47 +2631,40 @@ test ceiling-at-max {
 }
 ```
 
-**3. Repeated prepends.** RPL accumulates every `prepend as-path` in a
-policy. In `.rpol` a prepend is one scalar slot, so a later prepend
-replaces an earlier one, in the same policy or in a later member of the
-chain (see "Actions"). When every prepend on a path uses the same ASN and
-the counts total 255 or less, fold them into one prepend; the compiler
-rejects a count above 255. Prepends of different ASNs, such as 65000 once
-and then 65001 twice, have no `.rpol` equivalent: only the last prepend
-takes effect.
+**3. Repeated prepends.** RPL runs every `prepend as-path` in sequence,
+each to the left of the last, and so does `.rpol`, across terms and chain
+members. A literal port keeps RPL's result. The one difference is a
+bound: one evaluation prepends at most 255 ASNs, the most one wire
+`AS_SEQUENCE` segment holds. The compiler adds up every prepend, each
+`if` branch included, and multiplies a prepend inside a loop by the
+loop's iteration bound, so a policy, or a chain when it is attached, that
+could exceed 255 is rejected; a prepend inside a loop over a route
+attribute can never fit. RPL has no such static limit.
 
 ```rpol
-# A literal port of two RPL prepends: the second replaces the first.
-policy prepend-literal {
+# RPL's documented example, `prepend as-path 2.5 3` then
+# `prepend as-path 666.5 2`, in asplain (2.5 is 131077, 666.5 is 43646981).
+policy prepend-twice {
     term t {
-        prepend as 65000 1
-        prepend as 65000 2
+        prepend as 131077 3
+        prepend as 43646981 2
         accept
     }
 }
 
-# One prepend with the total count.
-policy prepend-total {
-    term t { prepend as 65000 3; accept }
-}
-
-test later-prepend-replaces {
+test later-prepend-lands-to-the-left {
     route { prefix 192.0.2.0/24; as-path "65010" }
-    expect prepend-literal == accept with only prepend as 65000 2
+    expect prepend-twice == accept with only prepend "666.5 666.5 2.5 2.5 2.5"
 }
 
-test total-count {
-    route { prefix 192.0.2.0/24; as-path "65010" }
-    expect prepend-total == accept with only prepend as 65000 3
-}
-
-# Mixed ASNs: the second prepend replaces the first, here across a chain.
+# Across a chain, the later member's prepend lands to the left.
 policy prepend-65000 { term t { prepend as 65000 1 } }
 policy prepend-65001 { term t { prepend as 65001 2 } }
 
-test mixed-asn-prepends-keep-only-the-last {
+test chain-prepends-accumulate {
     route { prefix 192.0.2.0/24; as-path "65010" }
-    expect chain [prepend-65000, prepend-65001] == accept with only prepend as 65001 2
+    expect chain [prepend-65000, prepend-65001] == accept
+        with only prepend "65001 65001 65000"
 }
 ```
 

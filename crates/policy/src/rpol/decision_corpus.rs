@@ -253,13 +253,18 @@ fn render_mods(mods: &RouteModifications) -> String {
         Some(NextHopAction::Specific(addr)) => parts.push(format!("set next-hop {addr}")),
         None => {}
     }
-    if let Some((asn, count)) = mods.as_path_prepend {
-        parts.push(format!("prepend as {asn} {count}"));
+    // One part per prepend, in the order they run (each later one lands
+    // to the left).
+    let mut computed = false;
+    for prepend in &mods.as_path_prepend {
+        match prepend.asn {
+            crate::engine::PrependAsn::Asn(asn) => {
+                parts.push(format!("prepend as {asn} {}", prepend.count));
+            }
+            crate::engine::PrependAsn::Computed(_) => computed = true,
+        }
     }
-    if mods.as_path_prepend_computed.is_some()
-        || mods.set_local_pref_computed.is_some()
-        || mods.set_med_computed.is_some()
-    {
+    if computed || mods.set_local_pref_computed.is_some() || mods.set_med_computed.is_some() {
         parts.push("UNRESOLVED-COMPUTED".to_string());
     }
     for (verb, values) in [
@@ -850,6 +855,13 @@ fn visited_guards(
 
 /// The constructs an executed term's action uses; loop bodies are walked
 /// with their visited guards.
+/// Whether `mods` stages a computed (or, with `false`, a literal) prepend.
+fn prepend_kind(mods: &crate::engine::RouteModifications, computed: bool) -> bool {
+    mods.as_path_prepend
+        .iter()
+        .any(|p| matches!(p.asn, crate::engine::PrependAsn::Computed(_)) == computed)
+}
+
 fn ir_action(
     term: &Term,
     seen: &mut std::collections::BTreeSet<&'static str>,
@@ -907,6 +919,7 @@ fn ir_action(
         }
     };
     let Some(mods) = mods else { return };
+    let prepends = |computed: bool| prepend_kind(mods, computed);
     for (present, name) in [
         (mods.set_local_pref.is_some(), "ir.mod.set-local-pref"),
         (
@@ -916,11 +929,8 @@ fn ir_action(
         (mods.set_med.is_some(), "ir.mod.set-med"),
         (mods.set_med_computed.is_some(), "ir.mod.set-med-computed"),
         (mods.set_next_hop.is_some(), "ir.mod.set-next-hop"),
-        (mods.as_path_prepend.is_some(), "ir.mod.prepend"),
-        (
-            mods.as_path_prepend_computed.is_some(),
-            "ir.mod.prepend-computed",
-        ),
+        (prepends(false), "ir.mod.prepend"),
+        (prepends(true), "ir.mod.prepend-computed"),
         (!mods.communities_add.is_empty(), "ir.mod.community-add"),
         (
             !mods.communities_remove.is_empty(),

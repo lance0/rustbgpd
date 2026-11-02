@@ -1490,7 +1490,7 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
         ))),
         communities_add: vec![added_standard],
         large_communities_add: vec![added_large],
-        as_path_prepend: Some((64512, 2)),
+        as_path_prepend: vec![rustbgpd_policy::AsPathPrepend::asn(64512, 2)],
         ..rustbgpd_policy::RouteModifications::default()
     };
     let mut suppress_modifications = modifications.clone();

@@ -346,6 +346,7 @@ pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
     for policy in &file.policies {
         checker.check_policy(policy);
         checker.check_policy_frames(policy, &fn_costs);
+        checker.check_prepend_bound(policy);
     }
     checker.check_apply_dag();
     checker.check_apply_bounds(&fn_costs);
@@ -358,7 +359,67 @@ struct Checker<'a> {
     diags: Vec<Diagnostic>,
 }
 
+/// The most ASNs `stmts` can prepend in one evaluation: every prepend's
+/// count, an `if`'s branches summed, a loop body times the loop's static
+/// iteration bound. A parameter count counts its smallest value, 1;
+/// instantiation re-checks with the argument
+/// ([`crate::ir::CompiledChain::prepend_bound`]).
+fn prepend_bound(stmts: &[Stmt], file: &SourceFile) -> u64 {
+    stmts
+        .iter()
+        .map(|stmt| match stmt {
+            Stmt::Action(ActionStmt::Prepend { count, .. }) => match count {
+                U32Arg::Lit(value, _) => u64::from(*value),
+                U32Arg::Param(_) => 1,
+            },
+            Stmt::Action(_) => 0,
+            Stmt::If(if_stmt) => if_stmt
+                .branches
+                .iter()
+                .map(|branch| prepend_bound(&branch.body, file))
+                .chain(
+                    if_stmt
+                        .else_body
+                        .iter()
+                        .map(|body| prepend_bound(&body.body, file)),
+                )
+                .fold(0, u64::saturating_add),
+            Stmt::For(for_stmt) => loop_iteration_bound(&for_stmt.source, file)
+                .saturating_mul(prepend_bound(&for_stmt.body, file)),
+        })
+        .fold(0, u64::saturating_add)
+}
+
 impl<'a> Checker<'a> {
+    /// The static prepend cap: one evaluation of the policy can place at
+    /// most [`crate::engine::MAX_PREPEND_ASNS`] ASNs in front of a path.
+    fn check_prepend_bound(&mut self, def: &PolicyDef) {
+        let bound = def
+            .terms
+            .iter()
+            .map(|term| prepend_bound(&term.stmts, self.file))
+            .fold(0, u64::saturating_add);
+        let limit = crate::engine::MAX_PREPEND_ASNS;
+        if bound > limit as u64 {
+            self.diags.push(
+                Diagnostic::coded(
+                    DiagnosticCode::Typecheck,
+                    def.name.span,
+                    format!(
+                        "policy `{}` can prepend {bound} ASNs to one route; at most {limit} fit",
+                        def.name.node
+                    ),
+                    "prepend limit exceeded",
+                )
+                .with_note(
+                    "every prepend counts, each `if` branch included, and a prepend inside a \
+                     loop counts once per iteration: 4,096 times in a loop over a route \
+                     attribute, so such a loop cannot prepend",
+                ),
+            );
+        }
+    }
+
     fn policy(&self, name: &str) -> Option<&PolicyDef> {
         self.file.policies.iter().find(|p| p.name.node == name)
     }

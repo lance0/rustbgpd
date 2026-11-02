@@ -46,7 +46,7 @@ use std::fmt::Write as _;
 
 use super::{
     CommunityMatch, IMPLICIT_LOCAL_PREF, IMPLICIT_MED, NextHopAction, PolicyAction, PolicyChain,
-    PolicyStatement, RouteContext, RouteModifications, RouteType,
+    PolicyStatement, PrependAsn, RouteContext, RouteModifications, RouteType,
 };
 use crate::ir::{Cmp, CompiledChain, CompiledPolicy, MatchExpr, Term, TermAction, TermActionView};
 
@@ -403,25 +403,28 @@ fn render_modifications(
     for lc in &mods.large_communities_remove {
         out.push(format!("large_community - {lc}"));
     }
-    if let Some((asn, count)) = mods.as_path_prepend {
-        out.push(format!("as_path prepend {asn} x{count}"));
-    }
-    // LAN-296: a computed operand renders with its source spelling plus
-    // the value it resolves to for this route (`tables` carries the
-    // chain's attach-time `local_asn` for `self`). The unresolvable
-    // case never reaches here — the trace walk denies at the failing
-    // term first — but renders honestly if it ever did.
-    if let Some((operand, count)) = mods.as_path_prepend_computed {
-        let resolved = tables.and_then(|chain| operand.resolve(chain.local_asn, ctx));
-        match resolved {
-            Some(asn) => out.push(format!(
-                "as_path prepend {}={asn} x{count}",
-                operand.as_str()
-            )),
-            None => out.push(format!(
-                "as_path prepend {} x{count} (unresolvable)",
-                operand.as_str()
-            )),
+    // One line per prepend, in the order they run (each later one lands
+    // to the left). LAN-296: a computed operand renders with its source
+    // spelling plus the value it resolves to for this route (`tables`
+    // carries the chain's attach-time `local_asn` for `self`). The
+    // unresolvable case never reaches here — the trace walk denies at
+    // the failing term first — but renders honestly if it ever did.
+    for prepend in &mods.as_path_prepend {
+        let count = prepend.count;
+        match prepend.asn {
+            PrependAsn::Asn(asn) => out.push(format!("as_path prepend {asn} x{count}")),
+            PrependAsn::Computed(operand) => {
+                match tables.and_then(|chain| operand.resolve(chain.local_asn, ctx)) {
+                    Some(asn) => out.push(format!(
+                        "as_path prepend {}={asn} x{count}",
+                        operand.as_str()
+                    )),
+                    None => out.push(format!(
+                        "as_path prepend {} x{count} (unresolvable)",
+                        operand.as_str()
+                    )),
+                }
+            }
         }
     }
     out
@@ -860,12 +863,14 @@ fn render_action_stmts(mods: &RouteModifications) -> Vec<String> {
     for ec in &mods.extended_communities_remove {
         out.push(format!("remove community {ec}"));
     }
-    if let Some((asn, count)) = mods.as_path_prepend {
-        out.push(format!("prepend {asn} {count}"));
-    }
     // LAN-296 computed operands render in their source form.
-    if let Some((operand, count)) = mods.as_path_prepend_computed {
-        out.push(format!("prepend as {} {count}", operand.as_str()));
+    for prepend in &mods.as_path_prepend {
+        match prepend.asn {
+            PrependAsn::Asn(asn) => out.push(format!("prepend {asn} {}", prepend.count)),
+            PrependAsn::Computed(operand) => {
+                out.push(format!("prepend as {} {}", operand.as_str(), prepend.count));
+            }
+        }
     }
     out
 }

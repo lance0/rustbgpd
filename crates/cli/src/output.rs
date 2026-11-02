@@ -753,10 +753,8 @@ pub struct JsonExplainModifications {
     pub extended_communities_remove: Vec<u64>,
     pub large_communities_add: Vec<String>,
     pub large_communities_remove: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub as_path_prepend_asn: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub as_path_prepend_count: Option<u32>,
+    /// Prepended ASNs, leftmost first.
+    pub as_path_prepend: Vec<u32>,
 }
 
 #[derive(Serialize)]

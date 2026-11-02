@@ -1343,11 +1343,47 @@ impl CompiledChain {
                 TermAction::ForEach(node) if node.source == LoopSource::AsPath
             )
         }) || self.any_action_mods(&|mods| {
-            matches!(
-                mods.as_path_prepend_computed,
-                Some((crate::engine::PrependAs::PathFirst, _))
-            )
+            mods.as_path_prepend.iter().any(|prepend| {
+                prepend.asn
+                    == crate::engine::PrependAsn::Computed(crate::engine::PrependAs::PathFirst)
+            })
         })
+    }
+
+    /// The most ASNs one evaluation of `policy` (a policy of this chain)
+    /// can prepend: every prepend action's count, a loop body's times the
+    /// loop's static iteration bound (the member count of an asn-set in
+    /// this chain's tables, the per-loop cap for a route attribute). The
+    /// typechecker's bound with parameter arguments substituted; at most
+    /// [`crate::engine::MAX_PREPEND_ASNS`] is accepted.
+    #[must_use]
+    pub fn prepend_bound(&self, policy: &CompiledPolicy) -> u64 {
+        fn terms_bound(chain: &CompiledChain, terms: &[Term]) -> u64 {
+            terms
+                .iter()
+                .map(|term| match &term.action {
+                    TermAction::Permit(mods) | TermAction::Continue(mods) => {
+                        mods.prepend_len() as u64
+                    }
+                    TermAction::ForEach(node) => {
+                        let bound = match node.source {
+                            LoopSource::AsnSet(id) => chain
+                                .asn_sets
+                                .get(id.0 as usize)
+                                .map_or(u64::from(crate::eval::MAX_LOOP_ITERATIONS), |set| {
+                                    set.asns().len() as u64
+                                }),
+                            LoopSource::Communities | LoopSource::AsPath => {
+                                u64::from(crate::eval::MAX_LOOP_ITERATIONS)
+                            }
+                        };
+                        bound.saturating_mul(terms_bound(chain, &node.body))
+                    }
+                    _ => 0,
+                })
+                .fold(0, u64::saturating_add)
+        }
+        terms_bound(self, &policy.terms)
     }
 
     /// The first `prepend as peer` action in the chain, as the owning
@@ -1367,7 +1403,9 @@ impl CompiledChain {
             let (TermAction::Permit(mods) | TermAction::Continue(mods)) = &term.action else {
                 return false;
             };
-            matches!(mods.as_path_prepend_computed, Some((PrependAs::PeerAs, _)))
+            mods.as_path_prepend.iter().any(|prepend| {
+                prepend.asn == crate::engine::PrependAsn::Computed(PrependAs::PeerAs)
+            })
         };
         for policy in &self.policies {
             for term in &policy.terms {
@@ -1579,7 +1617,10 @@ fn guard_truth(
 }
 
 fn clean_modifications(modifications: &RouteModifications) -> bool {
-    modifications.as_path_prepend_computed.is_none()
+    modifications
+        .as_path_prepend
+        .iter()
+        .all(|prepend| matches!(prepend.asn, crate::engine::PrependAsn::Asn(_)))
         && modifications.set_local_pref_computed.is_none()
         && modifications.set_med_computed.is_none()
 }

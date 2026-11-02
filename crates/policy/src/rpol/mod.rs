@@ -411,9 +411,20 @@ impl RpolFile {
         // parameters only, and the range of each parameter's uses.
         let args: Vec<CallArg> = args.iter().copied().map(CallArg::Int).collect();
         let args = self.resolve_call(name, &args)?;
-        Ok(self
+        let compiled = self
             .compile_policy_typed(name, &args, store, datasets, cached_tables)
-            .expect("resolve_call found the policy"))
+            .expect("resolve_call found the policy");
+        // The static prepend cap with the arguments substituted.
+        if let Ok(chain) = &compiled {
+            let bound = chain.prepend_bound(&chain.policies[0]);
+            let limit = crate::engine::MAX_PREPEND_ASNS;
+            if bound > limit as u64 {
+                return Err(format!(
+                    "policy {name:?} can prepend {bound} ASNs to one route; at most {limit} fit"
+                ));
+            }
+        }
+        Ok(compiled)
     }
 
     fn compile_policy_typed(

@@ -1873,8 +1873,8 @@ struct JsonImportExplainModifications {
     extended_communities_remove: Vec<u64>,
     large_communities_add: Vec<String>,
     large_communities_remove: Vec<String>,
-    as_path_prepend_asn: Option<u32>,
-    as_path_prepend_count: Option<u32>,
+    /// Prepended ASNs, leftmost first.
+    as_path_prepend: Vec<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2281,8 +2281,7 @@ fn modifications_to_json(m: &proto::ExplainModifications) -> JsonImportExplainMo
         extended_communities_remove: m.extended_communities_remove.clone(),
         large_communities_add: m.large_communities_add.clone(),
         large_communities_remove: m.large_communities_remove.clone(),
-        as_path_prepend_asn: m.as_path_prepend_asn,
-        as_path_prepend_count: m.as_path_prepend_count,
+        as_path_prepend: m.as_path_prepend.clone(),
     }
 }
 
@@ -2315,8 +2314,15 @@ fn modifications_summary(m: &proto::ExplainModifications) -> String {
     if !m.large_communities_remove.is_empty() {
         parts.push(format!("largecomm-={}", m.large_communities_remove.len()));
     }
-    if let (Some(asn), Some(count)) = (m.as_path_prepend_asn, m.as_path_prepend_count) {
-        parts.push(format!("prepend={asn}x{count}"));
+    if !m.as_path_prepend.is_empty() {
+        parts.push(format!(
+            "prepend={}",
+            m.as_path_prepend
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
     }
     parts.join(" ")
 }
@@ -2881,8 +2887,7 @@ mod tests {
                     extended_communities_remove: vec![9],
                     large_communities_add: vec!["65001:1:2".into()],
                     large_communities_remove: vec!["65002:3:4".into()],
-                    as_path_prepend_asn: Some(u32::MAX - 1),
-                    as_path_prepend_count: Some(3),
+                    as_path_prepend: vec![u32::MAX - 1; 3],
                 }),
                 statements: vec![proto::ImportExplainStatementStep {
                     policy_index: 2,
@@ -2906,7 +2911,7 @@ mod tests {
                 "communities_add": [u32::MAX, 0], "communities_remove": [7],
                 "extended_communities_add": [u64::MAX, 0], "extended_communities_remove": [9],
                 "large_communities_add": ["65001:1:2"], "large_communities_remove": ["65002:3:4"],
-                "as_path_prepend_asn": u32::MAX - 1, "as_path_prepend_count": 3
+                "as_path_prepend": [u32::MAX - 1, u32::MAX - 1, u32::MAX - 1]
             },
             "statements": [{"policy_index": 2, "policy_name": "edge-in", "default_action": false,
                 "statement_index": 5, "action": "permit",
@@ -3013,15 +3018,14 @@ mod tests {
             extended_communities_remove: vec![],
             large_communities_add: vec![],
             large_communities_remove: vec![],
-            as_path_prepend_asn: None,
-            as_path_prepend_count: None,
+            as_path_prepend: vec![],
         };
         assert_eq!(
             serde_json::to_value(modifications_to_json(&empty_modifications)).unwrap(),
             serde_json::json!({"set_local_pref": null, "set_med": null, "set_next_hop": null,
                 "communities_add": [], "communities_remove": [], "extended_communities_add": [],
                 "extended_communities_remove": [], "large_communities_add": [], "large_communities_remove": [],
-                "as_path_prepend_asn": null, "as_path_prepend_count": null})
+                "as_path_prepend": []})
         );
     }
 

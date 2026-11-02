@@ -2323,8 +2323,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 extended_communities_remove: vec![],
                 large_communities_add: vec![],
                 large_communities_remove: vec![],
-                as_path_prepend_asn: None,
-                as_path_prepend_count: None,
+                as_path_prepend: vec![],
             }),
             orr_vantage: String::new(),
             orr_candidates: vec![],
@@ -3163,8 +3162,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             extended_communities_remove: vec![],
             large_communities_add: vec![],
             large_communities_remove: vec![],
-            as_path_prepend_asn: None,
-            as_path_prepend_count: None,
+            as_path_prepend: vec![],
         });
         let permit = |path_id: u32| server_proto::ImportExplainMatch {
             outcome: server_proto::ImportExplainOutcome::Permit as i32,

@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use crate::datasets::{DatasetData, DatasetSnapshot, MAX_UNIT_DATASETS};
 use crate::engine::{
-    IMPLICIT_LOCAL_PREF, IMPLICIT_MED, PolicyAction, PolicyEvaluation, PolicyResult, PrependAs,
-    RouteContext, RouteModifications,
+    AsPathPrepend, IMPLICIT_LOCAL_PREF, IMPLICIT_MED, PolicyAction, PolicyEvaluation, PolicyResult,
+    PrependAs, PrependAsn, RouteContext, RouteModifications,
 };
 use crate::ir::{
     ArithOp, Cmp, CommunityAttribute, CommunityAttributes, CompiledChain, CompiledPolicy,
@@ -202,6 +202,12 @@ pub enum EvalErrorKind {
     /// fail-closed disposition of a compiler bug, like
     /// [`UnboundLocal`](Self::UnboundLocal).
     StrayLoopControl,
+    /// The chain's prepends would place more than
+    /// [`MAX_PREPEND_ASNS`](crate::engine::MAX_PREPEND_ASNS) ASNs in front
+    /// of the path. Unreachable for a chain that passed the static cap
+    /// (typecheck, instantiation, chain attach), so this is defence in
+    /// depth for a chain composed without it.
+    PrependLimitExceeded,
     /// A dataset probe found no pinned snapshot in its slot, or a
     /// snapshot of the wrong kind (LAN-305). Unreachable through the
     /// compiler — lowering binds every referenced dataset or fails the
@@ -284,6 +290,7 @@ impl EvalErrorKind {
             EvalErrorKind::FuelExhausted => "fuel-exhausted",
             EvalErrorKind::LoopLimitExceeded => "loop-limit-exceeded",
             EvalErrorKind::StrayLoopControl => "stray-loop-control",
+            EvalErrorKind::PrependLimitExceeded => "prepend-limit-exceeded",
             EvalErrorKind::DatasetUnpinned => "dataset-unpinned",
         }
     }
@@ -304,6 +311,7 @@ impl EvalErrorKind {
         "fuel-exhausted",
         "loop-limit-exceeded",
         "stray-loop-control",
+        "prepend-limit-exceeded",
         "dataset-unpinned",
     ];
 }
@@ -350,6 +358,11 @@ impl fmt::Display for EvalErrorKind {
                     "internal error: break/continue outside a loop (fail closed)"
                 )
             }
+            EvalErrorKind::PrependLimitExceeded => write!(
+                f,
+                "prepends exceed {} ASNs (fail closed)",
+                crate::engine::MAX_PREPEND_ASNS
+            ),
             EvalErrorKind::DatasetUnpinned => {
                 write!(
                     f,
@@ -989,6 +1002,10 @@ pub(crate) fn exec_remove_communities_in_set(
 /// term (an `.rpol`-only construct) pay the clone. `Error` is the
 /// LAN-299 evaluation-error rail: a guard or action-time value
 /// expression failed; the caller denies the route, counts, and warns.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transient per-policy return value, never stored or collected"
+)]
 enum PolicyDecision<'a> {
     Permit(Option<&'a RouteModifications>),
     PermitOwned(RouteModifications),
@@ -1262,6 +1279,20 @@ impl CompiledChain {
                 }
             }
         }
+        if let Some((policy, error)) = self.prepend_limit_error(&accumulated) {
+            if COUNT && let Some(hits) = hits {
+                hits.record_eval_error(&error);
+            }
+            return (
+                PolicyResult::deny(),
+                PolicyEvaluation {
+                    action: PolicyAction::Deny,
+                    matched_policy: if ATTR { policy.name.clone() } else { None },
+                    eval_error: Some(error),
+                },
+                None,
+            );
+        }
         // A nonempty chain that completes without rejection has no
         // terminal member. Retain one process-shared sentinel instead;
         // a genuinely empty chain remains inline / unattributed.
@@ -1282,6 +1313,28 @@ impl CompiledChain {
             },
             None,
         )
+    }
+
+    /// Defence in depth behind the static prepend cap (typecheck,
+    /// instantiation and chain attach bound it): an evaluation error,
+    /// attributed to the last member and logged, when the chain's
+    /// prepends exceed [`MAX_PREPEND_ASNS`](crate::engine::MAX_PREPEND_ASNS).
+    fn prepend_limit_error(
+        &self,
+        accumulated: &RouteModifications,
+    ) -> Option<(&CompiledPolicy, EvalError)> {
+        if accumulated.prepend_len() <= crate::engine::MAX_PREPEND_ASNS {
+            return None;
+        }
+        let policy = self.policies.last()?;
+        let kind = EvalErrorKind::PrependLimitExceeded;
+        warn_eval_error(policy.name.as_deref(), None, kind);
+        let error = EvalError {
+            kind,
+            policy: policy.name.as_ref().map(ToString::to_string),
+            term: None,
+        };
+        Some((policy, error))
     }
 
     /// A zeroed per-term hit-counter grid shaped like this chain, for
@@ -1558,6 +1611,10 @@ impl CompiledChain {
             if !merged.is_empty() {
                 accumulated.merge_applicable(merged, ctx);
             }
+        }
+        // The live walk's defence-in-depth prepend cap.
+        if accumulated.prepend_len() > crate::engine::MAX_PREPEND_ASNS {
+            return PolicyResult::deny();
         }
         PolicyResult {
             action: PolicyAction::Permit,
@@ -1975,19 +2032,27 @@ impl CompiledChain {
         ctx: &RouteContext<'_>,
         locals: &[LocalSlot],
     ) -> Result<Option<RouteModifications>, EvalErrorKind> {
-        if mods.as_path_prepend_computed.is_none()
+        let computed_prepend = |prepend: &AsPathPrepend| match prepend.asn {
+            PrependAsn::Computed(operand) => Some(operand),
+            PrependAsn::Asn(_) => None,
+        };
+        if !mods
+            .as_path_prepend
+            .iter()
+            .any(|p| computed_prepend(p).is_some())
             && mods.set_local_pref_computed.is_none()
             && mods.set_med_computed.is_none()
         {
             return Ok(None);
         }
         let mut resolved = mods.clone();
-        if let Some((operand, count)) = mods.as_path_prepend_computed {
-            let asn = operand
-                .resolve(self.local_asn, ctx)
-                .ok_or(EvalErrorKind::AbsentPrependOperand(operand))?;
-            resolved.as_path_prepend = Some((asn, count));
-            resolved.as_path_prepend_computed = None;
+        for prepend in &mut resolved.as_path_prepend {
+            if let Some(operand) = computed_prepend(prepend) {
+                let asn = operand
+                    .resolve(self.local_asn, ctx)
+                    .ok_or(EvalErrorKind::AbsentPrependOperand(operand))?;
+                prepend.asn = PrependAsn::Asn(asn);
+            }
         }
         if let Some(expr) = &mods.set_local_pref_computed {
             resolved.set_local_pref = Some(eval_value(expr, ctx, locals)?);

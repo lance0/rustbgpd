@@ -178,11 +178,6 @@ fn cached_outcome_to_proto(outcome: CachedOutcome) -> proto::ImportExplainOutcom
 fn explain_modifications_to_proto(
     modifications: &rustbgpd_policy::RouteModifications,
 ) -> proto::ExplainModifications {
-    let (as_path_prepend_asn, as_path_prepend_count) = modifications
-        .as_path_prepend
-        .map_or((None, None), |(asn, count)| {
-            (Some(asn), Some(u32::from(count)))
-        });
     proto::ExplainModifications {
         set_local_pref: modifications.set_local_pref,
         set_med: modifications.set_med,
@@ -215,8 +210,7 @@ fn explain_modifications_to_proto(
             .iter()
             .map(ToString::to_string)
             .collect(),
-        as_path_prepend_asn,
-        as_path_prepend_count,
+        as_path_prepend: modifications.prepended_asns(),
     }
 }
 
@@ -2667,8 +2661,12 @@ fn render_modification_changes(
     for ec in &mods.extended_communities_remove {
         changes.push(format!("extended_communities - 0x{:016x}", ec.as_u64()));
     }
-    if let Some((asn, count)) = mods.as_path_prepend {
-        changes.push(format!("as_path prepend {asn} x{count}"));
+    // One line per prepend, in the order they run (each later one lands
+    // to the left); evaluation has resolved every computed operand.
+    for prepend in &mods.as_path_prepend {
+        if let rustbgpd_policy::PrependAsn::Asn(asn) = prepend.asn {
+            changes.push(format!("as_path prepend {asn} x{}", prepend.count));
+        }
     }
     changes
 }

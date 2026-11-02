@@ -363,11 +363,10 @@ impl NextHopAction {
 /// render the failing operand and reason in the deciding term's line.
 ///
 /// **Source compatibility.** The fixed-AS form
-/// (`prepend as 65001 3`, including parameter references) is
-/// untouched and still lowers to the literal
-/// [`RouteModifications::as_path_prepend`]; a policy parameter named
-/// `origin` keeps its parameter meaning (the operand reading applies
-/// only where no such parameter is in scope).
+/// (`prepend as 65001 3`, including parameter references) lowers to a
+/// [`PrependAsn::Asn`] action; a policy parameter named `origin` keeps
+/// its parameter meaning (the operand reading applies only where no such
+/// parameter is in scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrependAs {
     /// `prepend as self` — the local speaker's ASN (from the compiled
@@ -415,6 +414,46 @@ impl PrependAs {
     }
 }
 
+/// The most ASNs one evaluation prepends to a route's `AS_PATH`: one wire
+/// `AS_SEQUENCE` segment's worth. `.rpol` enforces it statically, summing
+/// every prepend times its enclosing loop bounds per policy at compile
+/// time and across the chain when the chain attaches; evaluation fails
+/// the route closed above it as defence in depth.
+pub const MAX_PREPEND_ASNS: usize = 255;
+
+/// The ASN one prepend action places: a fixed ASN, or a computed operand
+/// the evaluator resolves per route (LAN-296, see [`PrependAs`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrependAsn {
+    /// A fixed ASN: a literal, a parameter, or a resolved operand.
+    Asn(u32),
+    /// A computed operand, before the evaluator resolves it.
+    Computed(PrependAs),
+}
+
+/// One prepend action: `count` copies of `asn`, placed in front of the
+/// `AS_PATH` as it stands when the action runs, so a later action's ASNs
+/// land to the left of an earlier one's (IOS-XR RPL `prepend as-path`
+/// order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AsPathPrepend {
+    /// The ASN to prepend.
+    pub asn: PrependAsn,
+    /// How many copies (1–255).
+    pub count: u8,
+}
+
+impl AsPathPrepend {
+    /// `count` copies of the fixed `asn`.
+    #[must_use]
+    pub fn asn(asn: u32, count: u8) -> Self {
+        Self {
+            asn: PrependAsn::Asn(asn),
+            count,
+        }
+    }
+}
+
 /// Route attribute modifications to apply after a policy match.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteModifications {
@@ -436,20 +475,17 @@ pub struct RouteModifications {
     pub large_communities_add: Vec<LargeCommunity>,
     /// Large communities (RFC 8092) to remove.
     pub large_communities_remove: Vec<LargeCommunity>,
-    /// `(ASN, count)` — prepend `count` copies of `ASN` to the `AS_PATH`.
-    pub as_path_prepend: Option<(u32, u8)>,
-    /// Computed prepend operand (LAN-296, `.rpol`
-    /// `prepend as self|peer|origin <count>`) — see [`PrependAs`] for
-    /// the full decision note. Shares one logical "prepend" slot with
-    /// [`as_path_prepend`](Self::as_path_prepend): at most one of the
-    /// pair is `Some` in frontend-produced modifications, and merges
-    /// treat them as a single scalar (a later prepend of either form
-    /// replaces an earlier one of either form). The evaluator resolves
-    /// this into a concrete `as_path_prepend` at term execution (or
-    /// fails the route closed), so **evaluation results and everything
-    /// downstream of them — [`apply_modifications`], the export memo,
-    /// API explain surfaces — only ever see the literal field.**
-    pub as_path_prepend_computed: Option<(PrependAs, u8)>,
+    /// Prepend actions in the order they run; merges append, so prepends
+    /// accumulate across terms and chain members, each later one to the
+    /// left. Computed operands ([`PrependAsn::Computed`], LAN-296) appear
+    /// only in frontend-produced modifications: the evaluator resolves
+    /// each to a fixed ASN at term execution (or fails the route closed),
+    /// so **evaluation results and everything downstream of them —
+    /// [`apply_modifications`], the export memo, API explain surfaces —
+    /// only ever see [`PrependAsn::Asn`].**
+    /// [`prepended_asns`](Self::prepended_asns) expands the actions into
+    /// the sequence placed in front of the path.
+    pub as_path_prepend: Vec<AsPathPrepend>,
     /// Computed `LOCAL_PREF` value (LAN-299, `.rpol`
     /// `set local-pref <expr>` where the expression reads route/peer
     /// fields). Shares one logical "set local-pref" slot with
@@ -459,8 +495,7 @@ pub struct RouteModifications {
     /// literal field at term execution (an evaluation error fails the
     /// route closed, ADR-0103 Decision 4), so evaluation results and
     /// everything downstream only ever see the literal field —
-    /// exactly the [`as_path_prepend_computed`](Self::as_path_prepend_computed)
-    /// discipline. `Arc`: modifications clone on the evaluation path
+    /// exactly the [`PrependAsn::Computed`] discipline. `Arc`: modifications clone on the evaluation path
     /// and the expression tree is immutable compile-time data.
     pub set_local_pref_computed: Option<Arc<crate::ir::ValueExpr>>,
     /// Computed `MED` value (LAN-299) — see
@@ -509,6 +544,32 @@ impl RouteModifications {
         self.merge_from(other);
     }
 
+    /// The ASNs the prepend actions place in front of the `AS_PATH`,
+    /// leftmost first: the last action's copies, then the one before.
+    /// A computed operand contributes nothing; the evaluator resolves
+    /// every one before modifications leave it.
+    #[must_use]
+    pub fn prepended_asns(&self) -> Vec<u32> {
+        self.as_path_prepend
+            .iter()
+            .rev()
+            .flat_map(|prepend| match prepend.asn {
+                PrependAsn::Asn(asn) => std::iter::repeat_n(asn, usize::from(prepend.count)),
+                PrependAsn::Computed(_) => std::iter::repeat_n(0, 0),
+            })
+            .collect()
+    }
+
+    /// How many ASNs the prepend actions place, computed operands
+    /// included.
+    #[must_use]
+    pub fn prepend_len(&self) -> usize {
+        self.as_path_prepend
+            .iter()
+            .map(|prepend| usize::from(prepend.count))
+            .sum()
+    }
+
     /// Returns `true` if no modifications are configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -517,8 +578,7 @@ impl RouteModifications {
             && self.set_local_pref_computed.is_none()
             && self.set_med_computed.is_none()
             && self.set_next_hop.is_none()
-            && self.as_path_prepend.is_none()
-            && self.as_path_prepend_computed.is_none()
+            && self.as_path_prepend.is_empty()
             && self.communities_add.is_empty()
             && self.communities_remove.is_empty()
             && self.extended_communities_add.is_empty()
@@ -549,7 +609,6 @@ impl RouteModifications {
             large_communities_add,
             large_communities_remove,
             as_path_prepend,
-            as_path_prepend_computed,
             set_local_pref_computed,
             set_med_computed,
         } = self;
@@ -565,16 +624,16 @@ impl RouteModifications {
             )
             && same_list(large_communities_add, &other.large_communities_add)
             && same_list(large_communities_remove, &other.large_communities_remove)
-            && *as_path_prepend == other.as_path_prepend
-            && *as_path_prepend_computed == other.as_path_prepend_computed
+            && same_list(as_path_prepend, &other.as_path_prepend)
             && *set_local_pref_computed == other.set_local_pref_computed
             && *set_med_computed == other.set_med_computed
     }
 
     /// Merge another set of modifications into this one.
     ///
-    /// Scalar fields (`set_local_pref`, `set_med`, `set_next_hop`,
-    /// `as_path_prepend`): `other` wins if `Some`.
+    /// Scalar fields (`set_local_pref`, `set_med`, `set_next_hop`):
+    /// `other` wins if `Some`. Prepends accumulate: `other`'s actions run
+    /// after this one's, so their ASNs land to the left.
     /// List fields (community add/remove): merged with later policy winning
     /// on conflicts. A later remove cancels an earlier add of the same
     /// logical value, and a later add cancels an earlier remove.
@@ -593,14 +652,7 @@ impl RouteModifications {
         if other.set_next_hop.is_some() {
             self.set_next_hop = other.set_next_hop;
         }
-        // Literal and computed prepends share one logical slot: a
-        // later prepend of either form replaces an earlier one of
-        // either form (scalar last-writer-wins, like the other
-        // scalars).
-        if other.as_path_prepend.is_some() || other.as_path_prepend_computed.is_some() {
-            self.as_path_prepend = other.as_path_prepend;
-            self.as_path_prepend_computed = other.as_path_prepend_computed;
-        }
+        self.as_path_prepend.extend(other.as_path_prepend);
         merge_exact_list(
             &mut self.communities_add,
             &mut self.communities_remove,
@@ -1990,7 +2042,8 @@ pub fn evaluate_chain_with_reject_term(
 /// 3. `communities_add/remove` — modify `Communities`
 /// 4. `extended_communities_add/remove` — modify `ExtendedCommunities`
 /// 5. `large_communities_add/remove` — modify `LargeCommunities`
-/// 6. `as_path_prepend` — prepend to the first `AS_SEQUENCE` or create one
+/// 6. `as_path_prepend` — place [`RouteModifications::prepended_asns`] in
+///    front of the first `AS_SEQUENCE`, or in a new one
 ///
 /// Returns `Some(NextHopAction)` if the caller should rewrite the next-hop.
 pub fn apply_modifications(
@@ -2072,7 +2125,9 @@ pub fn apply_modifications(
     // ever reach an apply site; there is no context here to resolve
     // one against, and silently skipping it would fail open.
     debug_assert!(
-        mods.as_path_prepend_computed.is_none(),
+        mods.as_path_prepend
+            .iter()
+            .all(|prepend| matches!(prepend.asn, PrependAsn::Asn(_))),
         "computed prepend operand reached apply_modifications unresolved"
     );
     // Same contract for computed set-values (LAN-299): the evaluator
@@ -2082,8 +2137,8 @@ pub fn apply_modifications(
         mods.set_local_pref_computed.is_none() && mods.set_med_computed.is_none(),
         "computed set-value reached apply_modifications unresolved"
     );
-    if let Some((asn, count)) = mods.as_path_prepend {
-        apply_as_path_prepend(attrs, asn, count);
+    if !mods.as_path_prepend.is_empty() {
+        apply_as_path_prepend(attrs, mods.prepended_asns());
     }
 
     // 7. Next-hop: for Specific(IPv4), update PathAttribute::NextHop directly
@@ -2260,9 +2315,13 @@ pub(crate) fn ext_community_identity(ec: ExtendedCommunity) -> ExtCommunityIdent
     }
 }
 
-/// Prepend ASN to `AS_PATH`.
-fn apply_as_path_prepend(attrs: &mut Vec<PathAttribute>, asn: u32, count: u8) {
-    let prepend: Vec<u32> = vec![asn; count as usize];
+/// Place `prepend` (leftmost first, at most [`MAX_PREPEND_ASNS`]) in front
+/// of the `AS_PATH`.
+fn apply_as_path_prepend(attrs: &mut Vec<PathAttribute>, prepend: Vec<u32>) {
+    debug_assert!(
+        prepend.len() <= MAX_PREPEND_ASNS,
+        "evaluation caps prepends"
+    );
     if let Some(existing) = attrs.iter_mut().find_map(|a| match a {
         PathAttribute::AsPath(p) => Some(p),
         _ => None,

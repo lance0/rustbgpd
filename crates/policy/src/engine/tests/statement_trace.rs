@@ -307,7 +307,7 @@ fn modifications_render_before_and_after_from_pre_policy_values() {
         )))),
         communities_add: vec![(65001 << 16) | 0x029a],
         communities_remove: vec![(65001 << 16) | 0x0064],
-        as_path_prepend: Some((65001, 3)),
+        as_path_prepend: vec![crate::AsPathPrepend::asn(65001, 3)],
         ..RouteModifications::default()
     };
     let chain = PolicyChain::from_named(vec![named(

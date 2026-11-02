@@ -247,7 +247,7 @@ mod tests {
                 ..Default::default()
             },
             RouteModifications {
-                as_path_prepend: Some((65000, 3)),
+                as_path_prepend: vec![rustbgpd_policy::AsPathPrepend::asn(65000, 3)],
                 set_med: Some(0),
                 ..Default::default()
             },

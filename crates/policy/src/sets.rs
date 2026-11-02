@@ -1446,7 +1446,8 @@ mod tests {
         use std::mem::size_of;
         assert_eq!(size_of::<CommunityMatch>(), 16);
         assert_eq!(size_of::<crate::ir::MatchExpr>(), 32);
-        assert_eq!(size_of::<crate::ir::Term>(), 272);
+        // 16 bytes of it are the ordered prepend list.
+        assert_eq!(size_of::<crate::ir::Term>(), 288);
         assert_eq!(size_of::<CommunityMember>(), 16);
         // One pointer for a set's optional pattern index.
         assert_eq!(size_of::<Option<Box<CommunityPatterns>>>(), 8);

@@ -2861,8 +2861,14 @@ message ExplainModifications {
   repeated uint64 extended_communities_remove = 7;
   repeated string large_communities_add = 8;
   repeated string large_communities_remove = 9;
-  optional uint32 as_path_prepend_asn = 10;
-  optional uint32 as_path_prepend_count = 11;
+  // Replaced by `as_path_prepend`: a single ASN and count cannot represent
+  // an ordered sequence such as `666.5 666.5 2.5 2.5 2.5`.
+  reserved 10, 11;
+  reserved "as_path_prepend_asn", "as_path_prepend_count";
+  // The ASNs the policy places in front of the AS_PATH, leftmost first,
+  // with computed operands resolved; at most 255. Empty when the policy
+  // prepends nothing.
+  repeated uint32 as_path_prepend = 12;
 }
 
 // One candidate path in an RFC 9107 ORR advertised-route explanation.

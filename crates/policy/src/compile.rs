@@ -40,13 +40,16 @@ const CHAIN_NODE_LIMIT: &str = "compiled policy chain exceeds MAX_CHAIN_NODES (1
 /// Each policy, term, action, guard and value-expression node counts once.
 /// Loop bodies count once structurally, and repeated members count separately.
 /// [`Self::add_named`] also bounds the chain's merged dataset table by the
-/// [`MAX_UNIT_DATASETS`] slots one evaluation pins.
+/// [`MAX_UNIT_DATASETS`] slots one evaluation pins, and the ASNs its members
+/// can prepend to one route by [`crate::engine::MAX_PREPEND_ASNS`].
 /// Public infallible compilation and hand-built IR remain trusted embedding
 /// boundaries; callers accepting untrusted chains must check this budget.
 #[derive(Debug)]
 pub struct ChainNodeBudget {
     nodes: Cell<usize>,
     datasets: Vec<DatasetSlot>,
+    /// The most ASNs the members charged so far can prepend to one route.
+    prepends: u64,
 }
 
 impl Default for ChainNodeBudget {
@@ -54,6 +57,7 @@ impl Default for ChainNodeBudget {
         Self {
             nodes: Cell::new(MAX_CHAIN_NODES),
             datasets: Vec::new(),
+            prepends: 0,
         }
     }
 }
@@ -115,9 +119,39 @@ impl ChainNodeBudget {
     /// table with the same deduplication [`compile_chain`] applies.
     ///
     /// # Errors
-    /// Returns a diagnostic when the cumulative chain exceeds the node cap, or
-    /// references more datasets than one evaluation pins.
+    /// Returns a diagnostic when the cumulative chain exceeds the node cap,
+    /// references more datasets than one evaluation pins, or can prepend more
+    /// ASNs to one route than [`crate::engine::MAX_PREPEND_ASNS`].
     pub fn add_named(&mut self, named: &NamedPolicy, store: &mut SetStore) -> Result<(), String> {
+        self.add_named_nodes(named, store)?;
+        // Prepends accumulate across the chain, so the members' bounds add.
+        // A TOML policy runs one statement, so it adds its largest.
+        let bound = match named.rpol.as_deref() {
+            Some(chain) => chain
+                .policies
+                .iter()
+                .map(|policy| chain.prepend_bound(policy))
+                .fold(0, u64::saturating_add),
+            None => named
+                .policy
+                .entries
+                .iter()
+                .map(|statement| statement.modifications.prepend_len() as u64)
+                .max()
+                .unwrap_or(0),
+        };
+        self.prepends = self.prepends.saturating_add(bound);
+        let limit = crate::engine::MAX_PREPEND_ASNS;
+        if self.prepends > limit as u64 {
+            return Err(format!(
+                "the chain can prepend {} ASNs to one route; at most {limit} fit",
+                self.prepends
+            ));
+        }
+        Ok(())
+    }
+
+    fn add_named_nodes(&mut self, named: &NamedPolicy, store: &mut SetStore) -> Result<(), String> {
         if let Some(chain) = named.rpol.as_deref() {
             // Lowering can allocate a slot whose probe emits no term (an empty
             // `if` body); splicing keeps only slots a retained guard probes.
