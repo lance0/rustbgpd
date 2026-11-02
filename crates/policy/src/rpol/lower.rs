@@ -1617,31 +1617,33 @@ impl Lowerer<'_> {
                 let value = *env
                     .get(name.node.as_str())
                     .expect("typechecked: non-binding community var is a parameter");
-                if *add {
-                    mods.communities_add.push(value);
-                } else {
-                    mods.communities_remove.push(value);
-                }
+                stage(mods, |step| {
+                    if *add {
+                        step.communities_add.push(value);
+                    } else {
+                        step.communities_remove.push(value);
+                    }
+                });
             }
             ActionStmt::Community {
                 add,
                 arg: CommunityArg::Lit(lit),
                 ..
             } => match lit.node {
-                CommunityLit::Standard(value) => {
+                CommunityLit::Standard(value) => stage(mods, |step| {
                     if *add {
-                        mods.communities_add.push(value);
+                        step.communities_add.push(value);
                     } else {
-                        mods.communities_remove.push(value);
+                        step.communities_remove.push(value);
                     }
-                }
-                CommunityLit::Large(lc) => {
+                }),
+                CommunityLit::Large(lc) => stage(mods, |step| {
                     if *add {
-                        mods.large_communities_add.push(lc);
+                        step.large_communities_add.push(lc);
                     } else {
-                        mods.large_communities_remove.push(lc);
+                        step.large_communities_remove.push(lc);
                     }
-                }
+                }),
                 CommunityLit::Ext {
                     route_target,
                     global,
@@ -1649,21 +1651,25 @@ impl Lowerer<'_> {
                     ipv4_admin,
                 } => {
                     let value = ext_community_value(route_target, global, local, ipv4_admin);
-                    if *add {
-                        mods.extended_communities_add.push(value);
-                    } else {
-                        mods.extended_communities_remove.push(value);
-                    }
+                    stage(mods, |step| {
+                        if *add {
+                            step.extended_communities_add.push(value);
+                        } else {
+                            step.extended_communities_remove.push(value);
+                        }
+                    });
                 }
                 // Well-known extended communities (RFC 8097 OV_* states):
                 // add/remove by exact raw wire value.
                 CommunityLit::ExtRaw(raw) => {
                     let value = ExtendedCommunity::new(raw);
-                    if *add {
-                        mods.extended_communities_add.push(value);
-                    } else {
-                        mods.extended_communities_remove.push(value);
-                    }
+                    stage(mods, |step| {
+                        if *add {
+                            step.extended_communities_add.push(value);
+                        } else {
+                            step.extended_communities_remove.push(value);
+                        }
+                    });
                 }
             },
             ActionStmt::Prepend { asn, count, .. } => {
@@ -1685,6 +1691,16 @@ impl Lowerer<'_> {
             }
         }
     }
+}
+
+/// Stage one community action in statement order. The action merges into
+/// the term's modifications the way a later term's do, so the later
+/// operation on a value wins: `add X; remove X` leaves X absent and
+/// `remove X; add X` leaves it present.
+fn stage(mods: &mut RouteModifications, fill: impl FnOnce(&mut RouteModifications)) {
+    let mut step = RouteModifications::default();
+    fill(&mut step);
+    mods.merge_from(step);
 }
 
 impl<'a> Lowerer<'a> {

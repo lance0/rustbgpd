@@ -723,6 +723,13 @@ pub(crate) fn exec_remove_large_community_admin(
             mods.large_communities_remove.push(*community);
         }
     }
+    // Statement order: the scan also cancels an earlier staged add it
+    // matches, as a named removal would.
+    if let Some(current) = continued.as_mut() {
+        current
+            .large_communities_add
+            .retain(|community| community.global_admin != global_admin);
+    }
     if !mods.large_communities_remove.is_empty() {
         continued
             .get_or_insert_with(RouteModifications::default)
@@ -779,12 +786,41 @@ pub(crate) fn exec_remove_all_communities(
             &mut mods.large_communities_remove,
         );
     }
+    // Statement order: the scan also cancels every earlier staged add of a
+    // listed attribute, except a well-known standard community, which
+    // `remove community *` keeps even when the policy just added it.
+    if let Some(current) = continued.as_mut() {
+        if attributes.standard {
+            current
+                .communities_add
+                .retain(|&value| is_well_known_community(value));
+        }
+        if attributes.extended {
+            current.extended_communities_add.clear();
+        }
+        if attributes.large {
+            current.large_communities_add.clear();
+        }
+    }
     if !mods.is_empty() {
         continued
             .get_or_insert_with(RouteModifications::default)
             .merge_from(mods);
     }
     true
+}
+
+/// `mods` with a next-hop action that does not apply to the route dropped,
+/// as [`RouteModifications::merge_applicable`] drops one.
+fn applicable(mut mods: RouteModifications, ctx: &RouteContext<'_>) -> RouteModifications {
+    if mods
+        .set_next_hop
+        .as_ref()
+        .is_some_and(|action| !action.applies_to(ctx))
+    {
+        mods.set_next_hop = None;
+    }
+    mods
 }
 
 /// Append to `out` every arrived value that `keep` rejects and that is not
@@ -835,43 +871,66 @@ pub(crate) fn exec_remove_communities_in_set(
     if u64::try_from(arrived).unwrap_or(u64::MAX) > max_communities_per_route(attribute) {
         return false;
     }
+    // Which values the scan keeps; it removes the rest, among the arrived
+    // values and, in statement order, among the earlier staged adds.
+    let keep_standard = |value: u32| {
+        if is_well_known_community(value) {
+            negate || !set.contains_standard_exact(value)
+        } else {
+            set.contains_standard(value) == negate
+        }
+    };
+    // `not in` scrubs route targets and route origins only: every other
+    // extended type (encapsulation, color, EVPN, link bandwidth, origin
+    // validation) stays, as a set cannot name most of them.
+    let keep_extended = |value: rustbgpd_wire::ExtendedCommunity| {
+        if negate && value.route_target().is_none() && value.route_origin().is_none() {
+            true
+        } else {
+            set.contains_ext(&value) == negate
+        }
+    };
+    let keep_large = |value: rustbgpd_wire::LargeCommunity| set.contains_large(&value) == negate;
     let staged = continued.as_ref();
     let mut mods = RouteModifications::default();
     match attribute {
         CommunityAttribute::Standard => stage_removals(
             ctx.communities,
             staged.map_or(&[], |mods| &mods.communities_remove),
-            |value| {
-                if is_well_known_community(value) {
-                    negate || !set.contains_standard_exact(value)
-                } else {
-                    set.contains_standard(value) == negate
-                }
-            },
+            keep_standard,
             &mut mods.communities_remove,
         ),
         CommunityAttribute::Extended => stage_removals(
             ctx.extended_communities,
             staged.map_or(&[], |mods| &mods.extended_communities_remove),
-            // `not in` scrubs route targets and route origins only: every
-            // other extended type (encapsulation, color, EVPN, link
-            // bandwidth, origin validation) stays, as a set cannot name
-            // most of them.
-            |value| {
-                if negate && value.route_target().is_none() && value.route_origin().is_none() {
-                    true
-                } else {
-                    set.contains_ext(&value) == negate
-                }
-            },
+            keep_extended,
             &mut mods.extended_communities_remove,
         ),
         CommunityAttribute::Large => stage_removals(
             ctx.large_communities,
             staged.map_or(&[], |mods| &mods.large_communities_remove),
-            |value| set.contains_large(&value) == negate,
+            keep_large,
             &mut mods.large_communities_remove,
         ),
+    }
+    if let Some(current) = continued.as_mut() {
+        match attribute {
+            CommunityAttribute::Standard => {
+                current
+                    .communities_add
+                    .retain(|&value| keep_standard(value));
+            }
+            CommunityAttribute::Extended => {
+                current
+                    .extended_communities_add
+                    .retain(|&value| keep_extended(value));
+            }
+            CommunityAttribute::Large => {
+                current
+                    .large_communities_add
+                    .retain(|&value| keep_large(value));
+            }
+        }
     }
     if !mods.is_empty() {
         continued
@@ -1094,7 +1153,11 @@ impl CompiledChain {
             } else {
                 None
             };
-            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel, pinned) {
+            // Each member starts from the modifications the earlier members
+            // staged, so its statements apply after theirs: a later scan or
+            // removal cancels an earlier member's add, as within a policy.
+            let seed = (!accumulated.is_empty()).then(|| std::mem::take(&mut accumulated));
+            match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel, pinned, seed) {
                 PolicyDecision::Deny { term_index } => {
                     let matched_term = if TERM {
                         term_index.and_then(|index| policy.terms.get(index))
@@ -1150,15 +1213,15 @@ impl CompiledChain {
                         if TERM { term } else { None },
                     );
                 }
+                // Unseeded (nothing staged before this member): merge as the
+                // only contribution.
                 PolicyDecision::Permit(Some(mods)) if !mods.is_empty() => {
                     accumulated.merge_applicable(mods.clone(), ctx);
                 }
                 PolicyDecision::Permit(_) => {}
-                PolicyDecision::PermitOwned(mods) => {
-                    if !mods.is_empty() {
-                        accumulated.merge_applicable(mods, ctx);
-                    }
-                }
+                // Seeded or owned: the member's result already includes the
+                // earlier members' modifications.
+                PolicyDecision::PermitOwned(mods) => accumulated = applicable(mods, ctx),
             }
         }
         // A nonempty chain that completes without rejection has no
@@ -1290,7 +1353,10 @@ impl CompiledChain {
         let mut fuel: u64 = MAX_EVAL_COST;
         let mut accumulated = RouteModifications::default();
         for (policy_index, policy) in self.policies.iter().enumerate() {
-            let mut continued: Option<RouteModifications> = None;
+            // As in the live walk, each member starts from what the earlier
+            // members staged.
+            let mut continued: Option<RouteModifications> =
+                (!accumulated.is_empty()).then(|| std::mem::take(&mut accumulated));
             // `Some(None)` = permit with no deciding-term mods;
             // `None` after the loop = fell through to default_action.
             let mut permit_mods: Option<Option<RouteModifications>> = None;
@@ -1454,9 +1520,7 @@ impl CompiledChain {
             if let Some(Some(mods)) = permit_mods {
                 merged.merge_applicable(mods, ctx);
             }
-            if !merged.is_empty() {
-                accumulated.merge_applicable(merged, ctx);
-            }
+            accumulated = applicable(merged, ctx);
         }
         PolicyResult {
             action: PolicyAction::Permit,
@@ -1482,8 +1546,9 @@ impl CompiledChain {
         hits: Option<&[AtomicU64]>,
         fuel: &mut u64,
         pinned: &PinnedDatasets,
+        seed: Option<RouteModifications>,
     ) -> PolicyDecision<'a> {
-        let mut continued: Option<RouteModifications> = None;
+        let mut continued: Option<RouteModifications> = seed;
         // LAN-302: the `let`-binding register file, materialized (one
         // stack zeroing, no heap) only when the walk reaches a Bind
         // term — binding-free policies never touch it.

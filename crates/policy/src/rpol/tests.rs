@@ -645,7 +645,15 @@ fn large_community_admin_wildcard_is_route_only_and_concrete_end_to_end() {
         live.modifications.large_communities_remove,
         vec![own_a, own_b]
     );
-    assert_eq!(live.modifications.large_communities_add, vec![staged]);
+    // Statement order: the scan cancels the earlier staged add it matches.
+    assert_eq!(live.modifications.large_communities_add, vec![]);
+    let later = compile_ok(
+        "policy scrub { term remove-own { remove large-community 65501:*:* } term stage { add large-community 65501:9:9 } term allow { accept } }",
+    );
+    assert_eq!(
+        later.evaluate(&ctx).modifications.large_communities_add,
+        vec![staged]
+    );
     let mut hits = compiled.zero_term_hits();
     assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
     let oversized = vec![own_a; 5_462];
@@ -657,7 +665,7 @@ fn large_community_admin_wildcard_is_route_only_and_concrete_end_to_end() {
     assert_eq!(dry, crate::PolicyResult::deny());
     let mut attrs = vec![PathAttribute::LargeCommunities(communities.to_vec())];
     apply_modifications(&mut attrs, &live.modifications);
-    let expected = vec![PathAttribute::LargeCommunities(vec![foreign, staged])];
+    let expected = vec![PathAttribute::LargeCommunities(vec![foreign])];
     assert_eq!(attrs, expected);
 
     compiled.policies[0].terms.remove(0);
@@ -815,9 +823,9 @@ fn community_counts_compare_and_strip_at_exact_boundaries() {
     }
 }
 
-/// Strip-all stages concrete removals from the arrived route only: an
-/// earlier add of a value the route lacks survives, a later add of an
-/// arrived value cancels its removal (same term or a later chain member),
+/// Strip-all stages concrete removals from the arrived route and cancels
+/// the earlier staged adds (statement order), a later add of an arrived
+/// value cancels its removal (same term or a later chain member),
 /// an empty list is a no-op, the scan fails closed above each wire bound,
 /// and nothing reads peer context.
 #[test]
@@ -845,10 +853,7 @@ fn strip_all_communities_are_route_only_concrete_and_bounded() {
     );
     let live = compiled.evaluate(&ctx);
     assert_eq!(live.modifications.communities_remove, vec![0xFDE8_0001]);
-    assert_eq!(
-        live.modifications.communities_add,
-        vec![0xFDE8_0009, 0xFDE8_0002]
-    );
+    assert_eq!(live.modifications.communities_add, vec![0xFDE8_0002]);
     assert_eq!(live.modifications.large_communities_remove, large.to_vec());
     assert_eq!(live.modifications.extended_communities_remove, ext.to_vec());
     let mut hits = compiled.zero_term_hits();
@@ -858,10 +863,7 @@ fn strip_all_communities_are_route_only_concrete_and_bounded() {
         PathAttribute::LargeCommunities(large.to_vec()),
     ];
     apply_modifications(&mut attrs, &live.modifications);
-    assert_eq!(
-        attrs,
-        vec![PathAttribute::Communities(vec![0xFDE8_0002, 0xFDE8_0009])]
-    );
+    assert_eq!(attrs, vec![PathAttribute::Communities(vec![0xFDE8_0002])]);
 
     // An empty route stages nothing.
     let empty = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
@@ -1442,6 +1444,13 @@ fn route_community_actions_lower_to_exact_rfc_bytes() {
                  add ext-community RT:192.0.2.1:100;
                  add ext-community RO:192.0.2.1:200;
                  add ext-community RT:65535:70000;
+                 accept
+             }
+         }",
+    );
+    let removing = compile_ok(
+        "policy p {
+             term t {
                  remove ext-community RT:65001:100;
                  remove ext-community RO:65001:200;
                  remove ext-community RT:100000:100;
@@ -1470,7 +1479,10 @@ fn route_community_actions_lower_to_exact_rfc_bytes() {
         .iter()
         .map(|community| community.as_u64())
         .collect();
-    let removed: Vec<u64> = mods
+    let TermAction::Permit(removing) = &removing.policies[0].terms[0].action else {
+        panic!("expected permit")
+    };
+    let removed: Vec<u64> = removing
         .extended_communities_remove
         .iter()
         .map(|community| community.as_u64())
@@ -7536,7 +7548,7 @@ fn exact_assertions_compile_and_format_without_ordering_community_sets() {
 policy p { term t {
     set local-pref 200; set med 5; set next-hop self; prepend as 65000 2
     add community 65000:1; add community 65000:2; remove community 65000:3
-    add large-community 65000:1:2; remove large-community 65000:*:*
+    remove large-community 65000:*:*; add large-community 65000:1:2
     add ext-community RT:65000:1; remove ext-community OV_VALID; accept
 } }
 test exact { route { large-communities [65000:3:4, 65000:5:6, 65001:7:8] }
@@ -9436,5 +9448,148 @@ test else-branch {
         assert_eq!(size_of::<crate::ir::TermAction>(), 216);
         assert_eq!(size_of::<crate::ir::Term>(), 272);
         assert_eq!(size_of::<crate::ir::MatchExpr>(), 32);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Community actions apply in statement order
+// ─────────────────────────────────────────────────────────────────────
+
+mod statement_order {
+    use super::super::run_rpol_tests;
+    use super::{compile_ok, route_ctx, v4};
+    use rustbgpd_wire::RpkiValidation;
+
+    fn assert_passes(source: &str, tests: usize) {
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, tests);
+        assert!(report.all_passed(), "{:#?}", report.failures);
+    }
+
+    /// Within a term the later operation on a value wins, for every kind,
+    /// with extended communities compared by their decoded identity.
+    #[test]
+    fn the_later_operation_wins_within_a_term() {
+        assert_passes(
+            r"
+policy add-then-remove {
+    term t {
+        add community 65000:1; remove community 65000:1
+        add large-community 65000:1:1; remove large-community 65000:1:1
+        add ext-community RT:65000:1; remove ext-community RT:65000:1
+        accept
+    }
+}
+policy remove-then-add {
+    term t {
+        remove community 65000:1; add community 65000:1
+        remove large-community 65000:1:1; add large-community 65000:1:1
+        remove ext-community RT:65000:1; add ext-community RT:65000:1
+        accept
+    }
+}
+test add-then-remove {
+    route { prefix 192.0.2.0/24; communities [65000:1]; large-communities [65000:1:1]
+        ext-communities [RT:65000:1] }
+    expect add-then-remove == accept with only removes community 65000:1,
+        removes large-community 65000:1:1, removes ext-community RT:65000:1
+}
+test remove-then-add {
+    route { prefix 192.0.2.0/24 }
+    expect remove-then-add == accept with only community 65000:1,
+        large-community 65000:1:1, ext-community RT:65000:1
+}
+",
+            2,
+        );
+    }
+
+    /// Across terms and across chain members, a scan cancels the earlier
+    /// staged additions it selects, while a later addition stays. The
+    /// well-known range survives `remove community *` even when just added.
+    #[test]
+    fn scans_cancel_earlier_additions_across_terms_and_chain_members() {
+        assert_passes(
+            r"
+community-set own { 65000:* }
+community-set allow { 65001:* }
+policy tag { term t { add community 65000:7; add community 65001:7; add community NO_EXPORT } }
+policy tag-large { term t { add large-community 65000:1:1; add large-community 64496:1:1 } }
+policy tag-ext { term t { add ext-community RT:65000:1 } }
+policy strip { term t { remove community *; accept } }
+policy strip-large-own { term t { remove large-community 65000:*:*; accept } }
+policy strip-ext { term t { remove ext-community *; accept } }
+policy scrub-own { term t { remove community in own; accept } }
+policy keep-allowed { term t { remove community not in allow; accept } }
+policy strip-then-tag {
+    term s { remove community * }
+    term t { add community 65000:7; accept }
+}
+test strip-cancels-an-earlier-member {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, strip] == accept with only community NO_EXPORT,
+        without community 65000:7, without community 65001:7
+}
+test in-set-cancels-what-it-selects {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, scrub-own] == accept with only community 65001:7,
+        community NO_EXPORT, without community 65000:7
+}
+test not-in-cancels-the-rest-but-not-well-known {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag, keep-allowed] == accept with only community 65001:7,
+        community NO_EXPORT
+}
+test admin-wildcard-cancels-its-administrator {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-large, strip-large-own] == accept with only
+        large-community 64496:1:1
+}
+test ext-strip-cancels {
+    route { prefix 192.0.2.0/24 }
+    expect chain [tag-ext, strip-ext] == accept with only without ext-community RT:65000:1
+}
+test a-later-addition-stays {
+    route { prefix 192.0.2.0/24; communities [65000:7] }
+    expect strip-then-tag == accept with only community 65000:7
+}
+",
+            6,
+        );
+    }
+
+    /// A later chain member's literal removal of an earlier member's
+    /// addition, and the reverse, follow the same rule.
+    #[test]
+    fn chain_members_apply_in_order() {
+        assert_passes(
+            r"
+policy add-it { term t { add community 65000:1 } }
+policy remove-it { term t { remove community 65000:1 } }
+test add-then-remove {
+    route { prefix 192.0.2.0/24 }
+    expect chain [add-it, remove-it] == accept with only removes community 65000:1
+}
+test remove-then-add {
+    route { prefix 192.0.2.0/24 }
+    expect chain [remove-it, add-it] == accept with only community 65000:1
+}
+",
+            2,
+        );
+    }
+
+    /// Conditions read the route as received: a later term's guard does not
+    /// see an earlier term's addition.
+    #[test]
+    fn conditions_read_the_received_route() {
+        let compiled = compile_ok(
+            "policy p { term t { add community 65000:1 } \
+             term u { if route.communities has 65000:1 { reject } } term r { accept } }",
+        );
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound);
+        let result = compiled.evaluate(&ctx);
+        assert_eq!(result.action, crate::PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_add, [(65_000 << 16) + 1]);
     }
 }
