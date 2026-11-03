@@ -214,6 +214,14 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When a writer on this thread last began a write, on the tokio clock:
+    /// the instant its RFC 9687 send hold runs from.
+    pub(super) static LAST_WRITE_START: std::cell::Cell<Option<tokio::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// A point inside a publication where a test can run one interleaved step.
 #[cfg(test)]
 type InterleavePoint = std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn FnOnce()>>>>;
@@ -772,6 +780,8 @@ impl WriterTask {
     /// signal — a writer wedged mid-write on a saturated TCP window
     /// must not delay the teardown indefinitely.
     async fn write_message(&mut self, bytes: &Bytes) -> Result<(), WriterExit> {
+        #[cfg(test)]
+        LAST_WRITE_START.with(|start| start.set(Some(tokio::time::Instant::now())));
         let Self {
             write_half,
             teardown_rx,

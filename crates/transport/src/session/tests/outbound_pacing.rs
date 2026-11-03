@@ -1596,15 +1596,22 @@ async fn bytes_and_frames_exhausted_together_defer_to_the_send_hold() {
 /// A peer that stops reading altogether is still torn down with send hold
 /// enabled, though the byte budget now holds admission long before the
 /// frame queue fills: the writer has a write in flight, and its send hold
-/// ends it. Real sockets with small buffers; the paused clock advances only
-/// while every task is idle.
+/// ends it within the send hold of that write's start. Real sockets with
+/// small buffers on a paused clock, which also advances while socket I/O is
+/// still landing, so the write that finally blocks can start at any virtual
+/// time: the test records each write's start and checks, every tick, that
+/// the session is not still up past the latest start plus the send hold
+/// plus one tick.
 #[tokio::test(start_paused = true)]
 async fn a_stopped_reader_behind_the_byte_budget_meets_the_send_hold() {
+    use super::super::writer::LAST_WRITE_START;
+    const SEND_HOLD: u64 = 600;
+    let tick = Duration::from_secs(10);
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
     session.commands = cmd_rx;
     let (server, _peer) = small_buffer_pair().await;
-    session.config.peer.send_hold_time = 600;
+    session.config.peer.send_hold_time = u32::try_from(SEND_HOLD).unwrap();
     session.test_install_stream(server);
     establish_test_session(&mut session, 65002).await;
     session.timers.hold = None;
@@ -1617,8 +1624,23 @@ async fn a_stopped_reader_behind_the_byte_budget_meets_the_send_hold() {
     let actor = tokio::spawn(async move {
         let _ = session.run().await;
     });
-    tokio::time::sleep(Duration::from_secs(601)).await;
-    assert_ne!(settle(&cmd_tx).await, SessionState::Established);
+    let mut torn_down = false;
+    for _ in 0..1_000 {
+        tokio::time::sleep(tick).await;
+        if settle(&cmd_tx).await != SessionState::Established {
+            torn_down = true;
+            break;
+        }
+        let started = LAST_WRITE_START
+            .with(std::cell::Cell::get)
+            .expect("the writer has written");
+        assert!(
+            tokio::time::Instant::now() <= started + Duration::from_secs(SEND_HOLD) + tick,
+            "still up {:?} after the last write began",
+            tokio::time::Instant::now().saturating_duration_since(started)
+        );
+    }
+    assert!(torn_down, "a stopped reader was never torn down");
     assert_eq!(metrics.peer_outbound_writer_bytes(&label), 0);
     cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
     actor.await.unwrap();
