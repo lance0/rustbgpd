@@ -3,8 +3,8 @@
 - The `l3vpn_ipv4_flowspec` family (IPv4 VPN FlowSpec, AFI 1 / SAFI 134,
   RFC 8955 §8) can be listed in `families` and `required_families`. It is
   advertised in OPEN only when configured and never with Add-Path. This first
-  slice of ADR-0146 adds the wire codec and negotiation only: received VPN
-  FlowSpec rules are decoded, then
+  slice of [ADR-0146](../docs/adr/0146-vpn-flowspec.md) adds the wire codec
+  and negotiation only: received VPN FlowSpec rules are decoded, then
   discarded before the Adj-RIB-In and counted in
   `bgp_vpn_flowspec_nlri_discarded_total{peer}`. They are never stored,
   reflected or validated, and the daemon never sends a ROUTE-REFRESH for the
