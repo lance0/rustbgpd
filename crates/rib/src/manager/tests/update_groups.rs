@@ -11181,6 +11181,9 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
     let (tx, rx) = mpsc::channel(8);
     let (query_tx, query_rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    // The fixture queues its whole setup undrained and counts it at the
+    // end: the default row credit, whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     manager.flush_poll_budget = Duration::ZERO;
     let source = Ipv4Addr::new(192, 0, 2, 35);
     let survivor = Ipv4Addr::new(192, 0, 2, 36);
@@ -11536,6 +11539,9 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
         Some(Ipv4Addr::new(192, 0, 2, 254)),
         BgpMetrics::new(),
     );
+    // A full channel is one retirement under test: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     manager.flush_poll_budget = Duration::ZERO;
     let peer = PeerId::from_addr(Ipv4Addr::new(10, 223, 4, 1).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);

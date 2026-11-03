@@ -2039,14 +2039,23 @@ fn injected_unicast_is_exported_during_selection_deferral() {
         let target = PeerId::from_addr(v4(2));
         let mut target_rx = deferred_unicast_peer(&mut manager, target, mode, false);
         assert!(deferred_unicast_drain(&mut target_rx).is_empty());
+        // The session sends each export as it comes, as a live one does.
+        let mut exported = Vec::new();
+        let mut send = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+            exported.extend(deferred_unicast_drain(rx).into_iter().map(delivered));
+        };
         let hosts = deferred_unicast_hosts();
         inject(&mut manager, deferred_unicast_local(hosts[0], 17, 150));
+        send(&mut target_rx);
         let generation =
             deferred_unicast_lease(&mut manager, deferred_unicast_local(hosts[1], 17, 150));
+        send(&mut target_rx);
         for prefix in hosts {
             inject(&mut manager, deferred_unicast_local(prefix, 23, 100));
+            send(&mut target_rx);
         }
         let source = deferred_unicast_received(&mut manager, &hosts);
+        send(&mut target_rx);
         for prefix in hosts {
             let best = manager.loc_rib.get(&prefix).expect("local path selected");
             assert_eq!((best.peer, best.path_id), (LOCAL_PEER, 17), "{mode:?}");
@@ -2112,7 +2121,8 @@ fn injected_unicast_is_exported_during_selection_deferral() {
                 .0,
             Some(generation)
         );
-        assert_deferred_unicast_replay(&deferred_unicast_drain(&mut target_rx), mode, &hosts, true);
+        send(&mut target_rx);
+        assert_deferred_unicast_replay(&exported, mode, &hosts, true);
 
         let late = PeerId::from_addr(v4(3));
         let mut late_rx = deferred_unicast_peer(&mut manager, late, mode, false);
@@ -2582,7 +2592,20 @@ fn dormant_selection_arming_replays_frozen_routes_to_late_joiners() {
                 .collect();
             check_advertised(&mut manager, late, &expected);
         }
-        let replay = deferred_unicast_drain(&mut late_rx);
+        // The session sends what it got; a credit-refused replay is
+        // completed by the resync ticks.
+        let mut replay: Vec<_> = deferred_unicast_drain(&mut late_rx)
+            .into_iter()
+            .map(delivered)
+            .collect();
+        for _ in 0..4 {
+            manager.resync_dirty_peers_bounded();
+            replay.extend(
+                deferred_unicast_drain(&mut late_rx)
+                    .into_iter()
+                    .map(delivered),
+            );
+        }
         assert_eq!(
             replay
                 .iter()

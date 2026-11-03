@@ -1315,7 +1315,10 @@ async fn flowspec_source_no_advertise_precedes_removal_policy() {
     other_afi.afi = Afi::Ipv6;
     let other_afi_key = other_afi.selection_key();
     replace_flowspec_routes(&tx, source, vec![victim.clone(), sibling, other_afi]).await;
-    let plain = out_rx.try_recv().expect("plain rules advertise");
+    let plain = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("plain rules advertise");
     assert_eq!(plain.flowspec_announce.len(), 3);
     assert_eq!(plain.flowspec_withdraw.len(), 0);
     for key in [&victim_key, &sibling_key, &other_afi_key] {
@@ -1332,6 +1335,7 @@ async fn flowspec_source_no_advertise_precedes_removal_policy() {
     replace_flowspec_routes(&tx, source, vec![scoped_replacement]).await;
     let withdrawn = out_rx
         .try_recv()
+        .map(delivered)
         .expect("source restriction withdraws exact prior rule");
     assert!(withdrawn.flowspec_announce.is_empty());
     assert_eq!(withdrawn.flowspec_withdraw, vec![victim_key.clone()]);
