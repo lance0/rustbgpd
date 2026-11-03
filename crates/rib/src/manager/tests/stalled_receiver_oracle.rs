@@ -746,12 +746,17 @@ struct Arm {
 }
 
 impl Arm {
-    fn spawn() -> Self {
+    fn spawn(arm: usize) -> Self {
         let (tx, rx) = mpsc::channel(512);
         let mut manager =
             RibManager::new(rx, dummy_query_rx(), None, Some(CLUSTER), BgpMetrics::new());
         // Every resync tick runs to completion, whatever the host load.
         manager.flush_poll_budget = Duration::MAX;
+        // A credit override applies to the subject; the reference keeps the
+        // default credit, which no case reaches.
+        if arm == REFERENCE {
+            manager.outbound_row_credit_override = None;
+        }
         Self {
             tx,
             handle: tokio::spawn(manager.run()),
@@ -938,7 +943,7 @@ impl Harness {
     async fn new(config: [PeerConfig; PEERS]) -> Result<Self, String> {
         let mut harness = Self {
             config,
-            arms: [Arm::spawn(), Arm::spawn()],
+            arms: [Arm::spawn(REFERENCE), Arm::spawn(SUBJECT)],
             session: [1; PEERS],
             restarting: [false; PEERS],
             op: 0,
