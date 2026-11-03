@@ -1254,8 +1254,16 @@ async fn outbound_pacing_closed_writer_retires_admission_deadline() {
 fn hand_writer(
     session: &mut PeerSession,
 ) -> (mpsc::Receiver<Bytes>, tokio::sync::watch::Sender<u64>) {
+    hand_writer_with(session, 1 << 16)
+}
+
+/// [`hand_writer`] with a frame queue of `slots`.
+fn hand_writer_with(
+    session: &mut PeerSession,
+    slots: usize,
+) -> (mpsc::Receiver<Bytes>, tokio::sync::watch::Sender<u64>) {
     session.writer_join.take().unwrap().abort();
-    let (bulk, frames) = mpsc::channel(1 << 16);
+    let (bulk, frames) = mpsc::channel(slots);
     let (completed_tx, completed) = tokio::sync::watch::channel(0);
     session.writer_bulk_tx = Some(bulk);
     session.writer_completed = Some(completed);
@@ -1343,9 +1351,8 @@ async fn envelope_wakes(session: &PeerSession) -> bool {
 const BYTE_BUDGET: u64 = super::super::writer::WRITER_BYTE_BUDGET;
 
 /// A reader that stops draining holds the writer at its byte budget, not at
-/// its frame count: admission stops with the cursor kept, the RIB's next
-/// envelope stays queued with its credit charged, no deadline runs and no
-/// Cease is queued. Completing the backlog wakes and resumes the same
+/// its frame count: admission stops with the cursor kept, and with send hold
+/// enabled no deadline runs and no Cease is queued. Completing the backlog wakes and resumes the same
 /// envelope, and the peer receives every route exactly once, in order, each
 /// envelope's End-of-RIB after its routes.
 #[tokio::test(start_paused = true)]
@@ -1363,10 +1370,10 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     session
         .handle_outbound_route_update(pacing_update(&session, routes))
         .await;
-    let credit = Arc::new(rustbgpd_rib::OutboundCredit::default());
-    let mut behind = pacing_update(&session, last);
-    behind.credit = Some(rustbgpd_rib::OutboundCharge::new(&credit, 1));
-    session.outbound_tx.try_send(behind).unwrap();
+    session
+        .outbound_tx
+        .try_send(pacing_update(&session, last))
+        .unwrap();
 
     admit_until_blocked(&mut session);
     let held = session.writer_bytes_held();
@@ -1389,11 +1396,6 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     );
     assert!(session.writer_priority_tx.is_some(), "no teardown");
     assert_eq!(session.fsm.state(), SessionState::Established);
-    assert_eq!(
-        credit.rows(),
-        1,
-        "the next envelope waits in the RIB channel"
-    );
     session.sample_outbound_queue_depth();
     assert_eq!(
         session
@@ -1434,11 +1436,6 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
         }
     }
     assert!(session.pending_outbound.is_none());
-    assert_eq!(
-        credit.rows(),
-        0,
-        "the queued envelope retired after delivery"
-    );
     session.sample_outbound_queue_depth();
     assert_eq!(
         session
@@ -1456,55 +1453,419 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
     );
 }
 
-/// The budget is per session: a paused peer's held writer does not hold a
-/// draining peer beside it.
+/// The waiting envelope wakes on the first completed byte that brings the
+/// backlog under the budget, not before: at exactly the budget it is still
+/// held, so an earlier wake would only spin the session.
 #[tokio::test(start_paused = true)]
-async fn draining_peer_beside_a_paused_one_is_not_held() {
-    // One registry, as in the daemon.
-    let metrics = BgpMetrics::new();
-    let mut peers = Vec::new();
-    for _ in 0..2 {
-        let (mut session, commands, rib_rx) = make_test_session_with_channels(65001, 65002, 64);
-        session.metrics = metrics.clone();
-        let (client, server) = connected_stream_pair().await;
+async fn byte_wait_wakes_exactly_when_the_backlog_drops_under_the_budget() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    let (_frames, completed) = hand_writer(&mut session);
+    session
+        .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
+        .await;
+    admit_until_blocked(&mut session);
+    let at_budget = session.writer_bulk_admitted - BYTE_BUDGET;
+    completed.send_replace(at_budget);
+    assert!(session.writer_bytes_exhausted());
+    assert!(!envelope_wakes(&session).await, "still at the budget");
+    completed.send_replace(at_budget + 1);
+    assert!(envelope_wakes(&session).await, "one byte under the budget");
+}
+
+/// Ask the running session for its state, so that every event it was
+/// handed before has been processed.
+async fn settle(commands: &mpsc::Sender<PeerCommand>) -> SessionState {
+    let (reply, response) = oneshot::channel();
+    commands
+        .send(PeerCommand::QueryState { reply })
+        .await
+        .unwrap();
+    response.await.unwrap().fsm_state
+}
+
+fn assert_cease_out_of_resources(mut encoded: Bytes) {
+    let message =
+        rustbgpd_wire::decode_message(&mut encoded, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap();
+    assert!(matches!(
+        message,
+        Message::Notification(NotificationMessage {
+            code: NotificationCode::Cease,
+            subcode: 8,
+            ..
+        })
+    ));
+}
+
+/// With RFC 9687 send hold disabled, a byte wait still has the documented
+/// finite resource deadline. Each completed write re-arms it, even one that
+/// leaves the backlog over the budget, so a reader that keeps reading is
+/// never torn down; once writes stop completing, the deadline sends
+/// Cease/Out-of-Resources one interval after the last of them.
+#[tokio::test(start_paused = true)]
+async fn byte_wait_deadline_rearms_on_each_write_and_ends_a_stopped_reader() {
+    let (mut session, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    session.config.peer.hold_time = 0;
+    session.config.peer.send_hold_time = 0;
+    let (_frames, completed) = hand_writer(&mut session);
+    let (priority, mut priority_rx) = mpsc::unbounded_channel();
+    session.writer_priority_tx = Some(priority);
+    session
+        .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
+        .await;
+    admit_until_blocked(&mut session);
+    assert!(session.writer_bytes_held() >= BYTE_BUDGET + 3);
+    let interval = Duration::from_secs(u64::from(rustbgpd_fsm::default_send_hold_time(0)));
+    let armed = session
+        .outbound_admission_timer
+        .as_ref()
+        .expect("a byte wait with send hold disabled has a deadline")
+        .deadline();
+    assert_eq!(armed - tokio::time::Instant::now(), interval);
+    let actor = tokio::spawn(async move {
+        let _ = session.run().await;
+    });
+    let just_before = interval.checked_sub(Duration::from_millis(1)).unwrap();
+    for written in 1..=3 {
+        tokio::time::advance(just_before).await;
+        completed.send_replace(written);
+        assert_eq!(settle(&commands).await, SessionState::Established);
+        assert!(
+            priority_rx.try_recv().is_err(),
+            "torn down while writes complete"
+        );
+    }
+    tokio::time::advance(just_before).await;
+    settle(&commands).await;
+    assert!(priority_rx.try_recv().is_err(), "deadline fired early");
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert_cease_out_of_resources(priority_rx.recv().await.expect("Cease/8"));
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+}
+
+/// With send hold enabled a byte wait runs no admission deadline, even when
+/// the step that crossed the budget also filled the frame queue: a write is
+/// in flight and the writer's send hold bounds it, while a peer that keeps
+/// completing writes, however slowly, is not sent Cease/8. With send hold
+/// disabled the same state runs the deadline.
+#[tokio::test(start_paused = true)]
+async fn bytes_and_frames_exhausted_together_defer_to_the_send_hold() {
+    for send_hold in [true, false] {
+        let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+        let (client, _server) = connected_stream_pair().await;
         session.test_install_stream(client);
         establish_test_session(&mut session, 65002).await;
         session.timers.hold = None;
-        let writer = hand_writer(&mut session);
+        if !send_hold {
+            session.config.peer.send_hold_time = 0;
+        }
+        let (_frames, _completed) = hand_writer(&mut session);
+        // Over the budget already, and the only frame slot taken.
+        session.writer_bulk_admitted = BYTE_BUDGET;
+        let (bulk, _held) = mpsc::channel(1);
+        bulk.try_send(Bytes::from_static(b"held")).unwrap();
+        session.writer_bulk_tx = Some(bulk);
         session
-            .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
+            .handle_outbound_route_update(pacing_update(&session, heavy_routes(10)))
             .await;
-        peers.push((session, writer, (commands, rib_rx, server)));
+        let pending = session.pending_outbound.as_ref().unwrap();
+        assert!(pending.bytes_blocked());
+        assert_eq!(
+            session.outbound_admission_timer.is_some(),
+            !send_hold,
+            "send hold {send_hold}"
+        );
     }
-    let [(paused, ..), (draining, (frames, completed), _)] = &mut peers[..] else {
-        unreachable!()
+}
+
+/// A peer that stops reading altogether is still torn down with send hold
+/// enabled, though the byte budget now holds admission long before the
+/// frame queue fills: the writer has a write in flight, and its send hold
+/// ends it. Real sockets with small buffers; the paused clock advances only
+/// while every task is idle.
+#[tokio::test(start_paused = true)]
+async fn a_stopped_reader_behind_the_byte_budget_meets_the_send_hold() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    session.commands = cmd_rx;
+    let (server, _peer) = small_buffer_pair().await;
+    session.config.peer.send_hold_time = 600;
+    session.test_install_stream(server);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    let metrics = session.metrics.clone();
+    let label = session.peer_label.clone();
+    session
+        .outbound_tx
+        .try_send(pacing_update(&session, heavy_routes(6_000)))
+        .unwrap();
+    let actor = tokio::spawn(async move {
+        let _ = session.run().await;
+    });
+    tokio::time::sleep(Duration::from_secs(601)).await;
+    assert_ne!(settle(&cmd_tx).await, SessionState::Established);
+    assert_eq!(metrics.peer_outbound_writer_bytes(&label), 0);
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+}
+
+/// A listener and client pair with 4 KiB socket buffers, so a peer that
+/// stops reading stalls the writer after a few frames: the server end for
+/// the session, the client end for the peer.
+async fn small_buffer_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        socket.connect(addr).await.unwrap()
+    });
+    let (server, _) = listener.accept().await.unwrap();
+    socket2::SockRef::from(&server)
+        .set_send_buffer_size(4096)
+        .unwrap();
+    (server, connect.await.unwrap())
+}
+
+/// Through the real run loop and writer: a peer that stops reading leaves
+/// the writer holding its byte budget plus at most one admission step, the
+/// envelope behind stays in the RIB channel, and the session stays up. Once
+/// the peer reads, every route arrives exactly once, in order, each
+/// envelope's End-of-RIB after its routes.
+#[tokio::test]
+async fn a_paused_reader_holds_the_real_writer_at_its_budget_and_resumes_in_order() {
+    // Full frames, so one admission step is a few frames.
+    const ROUTES: u32 = 400_000;
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    session.commands = cmd_rx;
+    let (server, mut peer) = small_buffer_pair().await;
+    session.test_install_stream(server);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    read_single_bgp_message(&mut peer).await;
+    read_single_bgp_message(&mut peer).await;
+    let metrics = session.metrics.clone();
+    let label = session.peer_label.clone();
+    let outbound = session.outbound_tx.clone();
+    let mut routes = pacing_routes(ROUTES + 1, false);
+    let last = routes.split_off(ROUTES as usize);
+    outbound.try_send(pacing_update(&session, routes)).unwrap();
+    outbound.try_send(pacing_update(&session, last)).unwrap();
+    let actor = tokio::spawn(async move {
+        let _ = session.run().await;
+    });
+
+    // Settled: the session answers many state queries in a row, each one a
+    // full turn of its loop, without the backlog or the RIB channel moving.
+    // A session still admitting would move them between turns.
+    let observe = || {
+        (
+            metrics.peer_outbound_writer_bytes(&label),
+            outbound.capacity(),
+        )
     };
-    admit_until_blocked(paused);
-    assert!(paused.pending_outbound.as_ref().unwrap().bytes_blocked());
-    let mut sink = Vec::new();
-    for _ in 0..1_000 {
-        admit_until_blocked(draining);
-        complete_all(draining, frames, completed, &mut sink);
-        if draining.pending_outbound.is_none() {
-            break;
+    let started = std::time::Instant::now();
+    let mut unchanged = 0;
+    while unchanged < 64 {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the session never settled"
+        );
+        let before = observe();
+        assert_eq!(settle(&cmd_tx).await, SessionState::Established);
+        unchanged = if observe() == before {
+            unchanged + 1
+        } else {
+            0
+        };
+    }
+    let held = metrics.peer_outbound_writer_bytes(&label);
+    assert!(
+        held >= i64::try_from(BYTE_BUDGET).unwrap(),
+        "settled below the budget: {held}"
+    );
+    assert!(
+        held < i64::try_from(BYTE_BUDGET).unwrap() + 64 * 1024,
+        "at most one admission step past the budget: {held}"
+    );
+    assert_eq!(
+        outbound.max_capacity() - outbound.capacity(),
+        1,
+        "the envelope behind waits in the RIB channel"
+    );
+    assert_eq!(settle(&cmd_tx).await, SessionState::Established);
+
+    let mut seen = Vec::new();
+    while seen
+        .iter()
+        .filter(|entry: &&Option<u32>| entry.is_none())
+        .count()
+        < 2
+    {
+        let message =
+            tokio::time::timeout(Duration::from_secs(30), read_single_bgp_message(&mut peer))
+                .await
+                .expect("delivery resumes once the peer reads");
+        let Message::Update(message) = message else {
+            panic!("non-UPDATE before the End-of-RIBs");
+        };
+        let parsed = message.parse(true, false, &[]).unwrap();
+        if parsed.announced.is_empty() {
+            seen.push(None);
+        }
+        for route in parsed.announced {
+            seen.push(Some(u32::from(route.prefix.addr) & 0x00ff_ffff));
         }
     }
+    let mut expected: Vec<_> = (0..ROUTES).map(Some).collect();
+    expected.extend([None, Some(ROUTES), None]);
+    assert_eq!(seen, expected, "every route once, in order");
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+}
+
+/// The slow-peer detector sees a lagging peer by its writer's unwritten
+/// bytes: at production frame capacity, with full frames, the byte budget
+/// holds admission far below the frame threshold, which alone would never
+/// start an episode.
+#[tokio::test(start_paused = true)]
+async fn a_lagging_peer_held_by_bytes_is_flagged_slow_at_production_queue_capacity() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    let (mut frames, completed) = hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
+    // Shared attributes pack each frame full, as many real tables do.
+    session
+        .handle_outbound_route_update(pacing_update(&session, pacing_routes(140_000, false)))
+        .await;
+    admit_until_blocked(&mut session);
+    assert!(session.writer_bytes_exhausted());
+    let frame_threshold = (super::super::OUTBOUND_BUFFER
+        * usize::from(session.config.slow_peer_threshold_pct))
+    .div_ceil(100);
     assert!(
-        draining.pending_outbound.is_none(),
-        "the draining peer finished"
+        frames.len() < frame_threshold,
+        "frames alone stay under the threshold"
     );
-    assert_eq!(draining.writer_bytes_held(), 0);
-    assert!(paused.pending_outbound.as_ref().unwrap().bytes_blocked());
-    assert!(paused.writer_bytes_held() >= BYTE_BUDGET);
-    assert!(paused.outbound_admission_timer.is_none());
-    assert!(draining.outbound_admission_timer.is_none());
-    // The hand writer does not publish its completions; sample both as the
-    // sessions and their writers would.
-    paused.sample_outbound_queue_depth();
-    draining.sample_outbound_queue_depth();
+    session.evaluate_slow_peer();
+    assert!(
+        session.slow_peer_backlog_since.is_some(),
+        "an episode starts"
+    );
+    assert!(session.slow_peer_timer.is_some());
+    session.slow_peer_backlog_since = std::time::Instant::now().checked_sub(Duration::from_secs(
+        u64::from(session.config.slow_peer_duration),
+    ));
+    session.evaluate_slow_peer();
+    assert!(session.slow_peer, "flagged slow");
+
+    let mut sink = Vec::new();
+    complete_all(&session, &mut frames, &completed, &mut sink);
+    session.evaluate_slow_peer();
+    assert!(!session.slow_peer, "cleared once the backlog drains");
+}
+
+/// Both shared paths stop at the byte budget and resume without a gap: the
+/// elected encoder stops its own copy at the budget but still publishes the
+/// whole stream, a follower stops its snapshot at its own budget, and each
+/// resumes from its first unsent chunk. The follower drains to the end while
+/// the encoder's reader stays paused.
+#[tokio::test(start_paused = true)]
+async fn shared_members_stop_at_their_byte_budget_and_resume_without_gaps() {
+    const ROUTES: u32 = 6_000;
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let announce = Arc::new(heavy_routes(ROUTES));
+    let excluded = Ipv4Addr::new(10, 99, 0, 1);
+
+    let (mut encoder, _encoder_wire) = shared_group_member(65001).await;
+    let (mut encoder_frames, encoder_done) = hand_writer(&mut encoder);
+    encoder
+        .handle_outbound_route_update(shared_group_envelope(
+            &encoder, &shared, excluded, &announce,
+        ))
+        .await;
+    let (chunks, terminal) = shared
+        .cell
+        .get()
+        .expect("the encoder publishes the stream")
+        .downcast_ref::<super::shared_group::ProgressiveGroupEncode>()
+        .unwrap()
+        .test_snapshot();
     assert_eq!(
-        metrics.outbound_writer_bytes(),
-        i64::try_from(paused.writer_bytes_held()).unwrap(),
-        "the total is the paused peer's backlog"
+        terminal,
+        Some(super::shared_group::StreamTerminal::Complete),
+        "publication does not wait for the encoder's own reader"
     );
+    assert_eq!(chunks, ROUTES as usize);
+    admit_until_blocked(&mut encoder);
+    let mut encoder_sink = Vec::new();
+    while let Ok(frame) = encoder_frames.try_recv() {
+        encoder_sink.push(frame);
+    }
+    let chunk = encoder_sink.iter().map(Bytes::len).max().unwrap() as u64;
+    assert!(encoder.pending_outbound.as_ref().unwrap().bytes_blocked());
+    assert!(
+        encoder.writer_bytes_held() < BYTE_BUDGET + chunk,
+        "the encoder's own copy stops at the budget"
+    );
+
+    let (mut follower, _follower_wire) = shared_group_member(65001).await;
+    let (mut follower_frames, follower_done) = hand_writer(&mut follower);
+    follower
+        .handle_outbound_route_update(shared_group_envelope(
+            &follower, &shared, excluded, &announce,
+        ))
+        .await;
+    admit_until_blocked(&mut follower);
+    assert!(follower.pending_outbound.as_ref().unwrap().bytes_blocked());
+    assert!(
+        follower.writer_bytes_held() < BYTE_BUDGET + chunk,
+        "the follower's snapshot stops at its budget"
+    );
+    let mut follower_sink = Vec::new();
+    for _ in 0..1_000 {
+        complete_all(
+            &follower,
+            &mut follower_frames,
+            &follower_done,
+            &mut follower_sink,
+        );
+        if follower.pending_outbound.is_none() {
+            break;
+        }
+        admit_until_blocked(&mut follower);
+    }
+    assert!(follower.pending_outbound.is_none(), "the follower finished");
+    assert!(encoder.pending_outbound.as_ref().unwrap().bytes_blocked());
+
+    for _ in 0..1_000 {
+        complete_all(
+            &encoder,
+            &mut encoder_frames,
+            &encoder_done,
+            &mut encoder_sink,
+        );
+        if encoder.pending_outbound.is_none() {
+            break;
+        }
+        admit_until_blocked(&mut encoder);
+    }
+    assert!(encoder.pending_outbound.is_none(), "the encoder finished");
+    let every: Vec<_> = (0..ROUTES).map(Some).collect();
+    for (member, sink) in [("encoder", encoder_sink), ("follower", follower_sink)] {
+        let mut seen = delivered(sink);
+        seen.sort_unstable();
+        assert_eq!(seen, every, "{member}: every route once");
+    }
 }

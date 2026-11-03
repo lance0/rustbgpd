@@ -32,8 +32,10 @@ pub(super) struct PendingOutbound {
     capacity_blocked: bool,
     /// Set while the writer holds its whole byte budget: the completion
     /// watermark at which the backlog is back under it. The cursor stays
-    /// where it is; no deadline runs, since a paused peer is not a failed
-    /// one (the writer's send hold timer still bounds a stuck write).
+    /// where it is. A paused peer is not a failed one: with RFC 9687 send
+    /// hold enabled no admission deadline runs, since the writer's send hold
+    /// bounds the write in flight; with it disabled the admission deadline
+    /// does, re-armed by every completed write.
     bytes_wait: Option<(tokio::sync::watch::Receiver<u64>, u64)>,
     /// Route budget for the next ordinary slice. It halves after a slice
     /// overruns [`SLICE_TIME_BUDGET`] and doubles back after a cheap one, so
@@ -955,28 +957,32 @@ impl PeerSession {
                     .as_ref()
                     .is_some_and(|tx| tx.capacity() == 0);
             }
-            let blocked = pending.capacity_blocked;
+            let slots_full = self
+                .writer_bulk_tx
+                .as_ref()
+                .is_some_and(|tx| tx.capacity() == 0);
+            // The deadline bounds a wait for writer room during which no
+            // write completes: the run loop re-arms it on every completed
+            // write, so a slow peer that keeps reading is never torn down.
+            // A byte wait runs it only with RFC 9687 send hold disabled;
+            // otherwise a write is in flight and the writer's send hold
+            // bounds it. Filtering can advance a slice without admitting a
+            // frame, so the deadline belongs only to a continuous wait.
+            let deadline = if pending.bytes_wait.is_some() {
+                self.config.peer.send_hold_time == 0
+            } else {
+                pending.capacity_blocked && slots_full
+            };
             self.pending_outbound = Some(pending);
-            // Filtering can advance a slice without admitting a frame. The
-            // deadline belongs only to a continuous wait for writer capacity.
-            if !blocked {
+            if !deadline {
                 self.outbound_admission_timer = None;
-            }
-            if blocked
-                && self
-                    .writer_bulk_tx
-                    .as_ref()
-                    .is_some_and(|tx| tx.capacity() == 0)
-                && self.outbound_admission_timer.is_none()
-            {
-                let seconds = if self.config.peer.send_hold_time == 0 {
-                    rustbgpd_fsm::default_send_hold_time(self.config.peer.hold_time)
-                } else {
-                    self.config.peer.send_hold_time
-                };
-                self.outbound_admission_timer = Some(Box::pin(tokio::time::sleep(
-                    std::time::Duration::from_secs(u64::from(seconds)),
-                )));
+            } else if self.outbound_admission_timer.is_none() {
+                self.outbound_admission_timer =
+                    Some(Box::pin(tokio::time::sleep(self.admission_deadline())));
+                self.admission_progress = self.writer_completed.clone();
+                if let Some(progress) = &mut self.admission_progress {
+                    progress.borrow_and_update();
+                }
             }
         } else {
             // Finished, or the writer closed: either way only release remains.
@@ -988,6 +994,32 @@ impl PeerSession {
 }
 
 impl PeerSession {
+    /// How long admission may wait for writer room with no completed write
+    /// before the session ends with Cease/Out-of-Resources: the send hold
+    /// time, or its default when send hold is disabled.
+    pub(super) fn admission_deadline(&self) -> Duration {
+        let seconds = if self.config.peer.send_hold_time == 0 {
+            rustbgpd_fsm::default_send_hold_time(self.config.peer.hold_time)
+        } else {
+            self.config.peer.send_hold_time
+        };
+        Duration::from_secs(u64::from(seconds))
+    }
+
+    /// A completed write is progress: re-arm a running admission deadline
+    /// from now. A writer that has gone ends the watch; its exit arm owns
+    /// the outcome.
+    pub(super) fn note_write_progress(&mut self, progressed: bool) {
+        if !progressed {
+            self.admission_progress = None;
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + self.admission_deadline();
+        if let Some(timer) = &mut self.outbound_admission_timer {
+            timer.as_mut().reset(deadline);
+        }
+    }
+
     /// While the writer holds its whole byte budget, the completion
     /// watermark that brings the backlog back under it.
     fn writer_bytes_wait(&self) -> Option<(tokio::sync::watch::Receiver<u64>, u64)> {
