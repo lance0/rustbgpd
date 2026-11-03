@@ -153,6 +153,9 @@ const GR_MARKER_IO_DEADLINE: Duration = Duration::from_secs(5);
 /// actor round trip, so the bound matches the five-second actor drains below
 /// rather than any mutation budget.
 const RUNTIME_CONFIG_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+/// How long shutdown waits for the RIB's primary queue to admit
+/// `BeginClose`; the same bound as the EVPN originator drains after it.
+const RIB_BEGIN_CLOSE_DEADLINE: Duration = Duration::from_secs(5);
 static MARKER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static WARM_CHECKPOINT_REVISION: AtomicU64 = AtomicU64::new(0);
 
@@ -3288,6 +3291,19 @@ async fn shutdown_wait<T>(
         outcome = bounded => outcome.map_or(ShutdownWait::DeadlineExpired, ShutdownWait::Completed),
         () = stop_waiting.cancelled() => ShutdownWait::SecondSignal,
     }
+}
+
+/// Shutdown step 1.9a-close: queue `BeginClose` on the RIB's primary lane,
+/// for at most `deadline`. `Completed(false)`: the RIB is gone.
+async fn begin_rib_outbound_close(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    deadline: Duration,
+    stop_waiting: &tokio_util::sync::CancellationToken,
+) -> ShutdownWait<bool> {
+    shutdown_wait(Some(deadline), stop_waiting, async {
+        rib_tx.send(RibUpdate::BeginClose).await.is_ok()
+    })
+    .await
 }
 
 /// Cancel the returned token on the next SIGINT or SIGTERM. Armed once
@@ -7499,10 +7515,10 @@ async fn run<T>(
     // its Cease.
     // This orders state only: a withdrawal still needs room in its
     // session's channel and reaches the wire only within the close budget.
-    let begin_close = shutdown_wait(None, &stop_waiting, async {
-        rib_tx.send(RibUpdate::BeginClose).await.is_ok()
-    })
-    .await;
+    // Bounded: a primary queue that never drains must not keep the peer
+    // manager from starting its own bounded session close.
+    let begin_close =
+        begin_rib_outbound_close(&rib_tx, RIB_BEGIN_CLOSE_DEADLINE, &stop_waiting).await;
     match begin_close {
         ShutdownWait::Completed(true) => {}
         ShutdownWait::Completed(false) => {
@@ -9174,6 +9190,34 @@ mod tests {
         assert_eq!(
             shutdown_wait(None, &stop_waiting, std::future::ready(7)).await,
             ShutdownWait::Completed(7)
+        );
+    }
+
+    /// A primary RIB queue that never drains holds `BeginClose` only until
+    /// its deadline, with no second signal; a queue with room admits it.
+    #[tokio::test(start_paused = true)]
+    async fn begin_close_gives_up_on_a_full_rib_queue_at_its_deadline() {
+        let stop_waiting = tokio_util::sync::CancellationToken::new();
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        assert_eq!(
+            begin_rib_outbound_close(&rib_tx, RIB_BEGIN_CLOSE_DEADLINE, &stop_waiting).await,
+            ShutdownWait::Completed(true)
+        );
+        let started = tokio::time::Instant::now();
+        let expired = tokio::time::timeout(
+            2 * RIB_BEGIN_CLOSE_DEADLINE,
+            begin_rib_outbound_close(&rib_tx, RIB_BEGIN_CLOSE_DEADLINE, &stop_waiting),
+        )
+        .await
+        .expect("the wait is bounded by its own deadline");
+        assert_eq!(expired, ShutdownWait::DeadlineExpired);
+        assert_eq!(started.elapsed(), RIB_BEGIN_CLOSE_DEADLINE);
+        assert!(!stop_waiting.is_cancelled());
+        assert!(matches!(rib_rx.try_recv(), Ok(RibUpdate::BeginClose)));
+        drop(rib_rx);
+        assert_eq!(
+            begin_rib_outbound_close(&rib_tx, RIB_BEGIN_CLOSE_DEADLINE, &stop_waiting).await,
+            ShutdownWait::Completed(false)
         );
     }
 
