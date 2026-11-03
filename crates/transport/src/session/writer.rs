@@ -195,7 +195,7 @@ pub(super) struct WriterBytes {
     published: AtomicU64,
 }
 
-/// `WriterBytes::published` once retired.
+/// `WriterBytes::published` once retired; no backlog reaches it.
 const RETIRED: u64 = u64::MAX;
 
 #[cfg(test)]
@@ -233,8 +233,7 @@ impl WriterBytes {
         let held = self
             .admitted
             .load(Ordering::Acquire)
-            .saturating_sub(completed)
-            .min(RETIRED - 1);
+            .saturating_sub(completed);
         let mut previous = self.published.load(Ordering::Acquire);
         loop {
             if previous == RETIRED || previous == held {
