@@ -1869,3 +1869,44 @@ async fn shared_members_stop_at_their_byte_budget_and_resume_without_gaps() {
         assert_eq!(seen, every, "{member}: every route once");
     }
 }
+
+/// Each slow-peer threshold is the configured share of its own limit: the
+/// frame queue's capacity and the writer's byte budget. One frame, or one
+/// byte, under the share starts no episode; reaching it does.
+#[tokio::test(start_paused = true)]
+async fn slow_peer_thresholds_are_the_configured_share_of_frames_and_bytes() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let (_frames, _completed) = hand_writer_with(&mut session, super::super::OUTBOUND_BUFFER);
+    let pct = usize::from(session.config.slow_peer_threshold_pct);
+    let frames = (super::super::OUTBOUND_BUFFER * pct).div_ceil(100);
+    let bytes = (BYTE_BUDGET * pct as u64).div_ceil(100);
+    let bulk = session.writer_bulk_tx.clone().unwrap();
+    for _ in 1..frames {
+        bulk.try_send(Bytes::from_static(b"frame")).unwrap();
+    }
+    session.evaluate_slow_peer();
+    assert!(session.slow_peer_backlog_since.is_none(), "one frame under");
+    bulk.try_send(Bytes::from_static(b"frame")).unwrap();
+    session.evaluate_slow_peer();
+    assert!(
+        session.slow_peer_backlog_since.is_some(),
+        "at the frame share"
+    );
+
+    let (fresh, _fresh_frames) = mpsc::channel(super::super::OUTBOUND_BUFFER);
+    session.writer_bulk_tx = Some(fresh);
+    session.evaluate_slow_peer();
+    assert!(session.slow_peer_backlog_since.is_none(), "drained");
+    session.writer_bulk_admitted = bytes - 1;
+    session.evaluate_slow_peer();
+    assert!(session.slow_peer_backlog_since.is_none(), "one byte under");
+    session.writer_bulk_admitted = bytes;
+    session.evaluate_slow_peer();
+    assert!(
+        session.slow_peer_backlog_since.is_some(),
+        "at the byte share"
+    );
+}
