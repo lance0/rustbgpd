@@ -2766,7 +2766,7 @@ fn grouped_operator_replay_withdraws_a_newly_rejected_route() {
     let mut withdrawn = Vec::new();
     while let Ok(update) = member_rx.try_recv() {
         assert!(update.announce.is_empty(), "the rejected route stays off");
-        withdrawn.extend(update.withdraw);
+        withdrawn.extend(update.unicast_withdrawals().copied());
     }
     assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
 }

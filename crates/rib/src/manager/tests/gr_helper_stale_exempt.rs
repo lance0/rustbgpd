@@ -2035,7 +2035,7 @@ fn dormant_family_keys_retire_once_its_end_of_rib_is_sent() {
         let mut markers = 0;
         while let Ok(update) = new_rx.try_recv() {
             assert!(
-                !update.unicast_withdrawals().any(|row| row == &key),
+                update.unicast_withdrawals().next().is_none(),
                 "nothing is withdrawn"
             );
             for route in update.announce.iter() {
@@ -2248,7 +2248,7 @@ fn settled_carry_retires_its_family_once_its_end_of_rib_goes_out() {
     for _ in 0..8 {
         while let Ok(update) = new_rx.try_recv() {
             assert!(
-                !update.unicast_withdrawals().any(|row| row == &key),
+                update.unicast_withdrawals().next().is_none(),
                 "nothing is withdrawn"
             );
             if update.end_of_rib.contains(&FAMILY) {

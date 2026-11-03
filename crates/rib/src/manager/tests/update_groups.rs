@@ -7571,7 +7571,7 @@ fn apply_enhanced_refresh(
                 *stale = true;
             }
         }
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             assert!(
                 held.remove(key).is_some(),
                 "withdrawal of {key:?}, which the receiver does not hold"
@@ -7822,7 +7822,7 @@ fn grouped_refresh_answer_withdraws_only_the_family_keys_the_member_left() {
     let mut withdrawn = Vec::new();
     let mut announced = BTreeSet::new();
     while let Ok(update) = stuck_rx.try_recv() {
-        withdrawn.extend(update.withdraw.iter().copied());
+        withdrawn.extend(update.unicast_withdrawals().copied());
         announced.extend(update.announce.iter().map(|route| route.prefix));
     }
     assert_eq!(withdrawn, vec![(ipv4(1), 0)]);
@@ -7833,7 +7833,7 @@ fn grouped_refresh_answer_withdraws_only_the_family_keys_the_member_left() {
     manager.resync_dirty_peers_bounded();
     let mut resync_withdrawn = Vec::new();
     while let Ok(update) = stuck_rx.try_recv() {
-        resync_withdrawn.extend(update.withdraw.iter().copied());
+        resync_withdrawn.extend(update.unicast_withdrawals().copied());
     }
     assert_eq!(resync_withdrawn, vec![(ipv6, 0)]);
 }
