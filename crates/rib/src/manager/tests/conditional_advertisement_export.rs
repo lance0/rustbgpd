@@ -1115,11 +1115,11 @@ async fn restore_during_a_settle_window_reinstates_state_and_wire() {
     let capture = manager
         .handle_install_conditional_advertisements(ConditionalAdvertisementSet::default(), &[]);
     resync(&mut manager);
-    let _ = drain(&mut rx);
+    let mut withdrawn = drain(&mut rx).withdrawn;
     assert_eq!(manager.next_conditional_advertisement_deadline(), None);
     manager.handle_restore_conditional_advertisements(capture);
     resync(&mut manager);
-    let _ = drain(&mut rx);
+    withdrawn.extend(drain(&mut rx).withdrawn);
     assert_eq!(
         manager.next_conditional_advertisement_deadline(),
         deadline,
@@ -1135,10 +1135,8 @@ async fn restore_during_a_settle_window_reinstates_state_and_wire() {
     );
 
     elapse(&mut manager, Duration::from_secs(3)).await;
-    assert_eq!(
-        drain(&mut rx).withdrawn,
-        BTreeSet::from([(v4(controlled()), 0)])
-    );
+    withdrawn.extend(drain(&mut rx).withdrawn);
+    assert_eq!(withdrawn, BTreeSet::from([(v4(controlled()), 0)]));
 }
 
 /// A dataset swap reaches both predicates: `ReevaluatePeerExportPolicies`
@@ -1413,9 +1411,11 @@ async fn same_address_neighbors_keep_their_own_conditional_attachments() {
         outbound_rx
     });
     // The sessions send their initial dumps before the settle timer fires.
-    for rx in &mut receivers {
-        drain(rx);
-    }
+    let initial = receivers.each_mut().map(drain);
+    assert!(
+        !initial[1].announced.contains(&(v4(controlled()), 0)),
+        "eth1's initial dump does not export it"
+    );
     elapse(&mut manager, SETTLE).await;
     let exported = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
         drain(rx).announced.contains(&(v4(controlled()), 0))

@@ -1788,7 +1788,7 @@ fn paths_limit_survives_collision_failback() {
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 5);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "one end-to-end dual-stack scenario covers initial dump, churn, withdrawal, and refresh replay"
@@ -1880,7 +1880,7 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
     let mut wire = HashMap::new();
     apply_unicast_updates(&mut out_rx, &mut wire);
     // The limits' resync waits for the initial dump to be sent, then runs
-    // on the resync tick.
+    // on the resync tick (paused time: each sleep advances the clock).
     for _ in 0..40 {
         if wire.keys().filter(|(p, _)| *p == Prefix::V6(v6)).count() == 2 {
             break;

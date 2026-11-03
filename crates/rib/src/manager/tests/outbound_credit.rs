@@ -1585,6 +1585,8 @@ fn row_credit_follows_the_registered_peer_count() {
     assert_eq!(row_credit_for(10_000), MIN_ROW_CREDIT);
 
     let mut manager = manager();
+    // Sizing under test: no credit override.
+    manager.outbound_row_credit_override = None;
     manager.test_force_ungrouped = true;
     let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 13, 1));
@@ -1648,6 +1650,8 @@ fn row_credit_follows_the_registered_peer_count() {
 fn peers_that_become_private_are_held_to_the_fleet_credit() {
     use crate::outbound_credit::row_credit_for;
     let mut manager = manager();
+    // Sizing under test: no credit override.
+    manager.outbound_row_credit_override = None;
     let mut source = peer_up_v4(&mut manager, peer_v4(SOURCE), 4096);
     let mut peers: Vec<_> = (0..40u8)
         .map(|index| {
@@ -1716,6 +1720,8 @@ fn peers_that_become_private_are_held_to_the_fleet_credit() {
 fn grouped_otc_diagnostics_are_charged_against_the_fleet_credit() {
     use crate::outbound_credit::row_credit_for;
     let mut manager = manager();
+    // Sizing under test: no credit override.
+    manager.outbound_row_credit_override = None;
     let mut source = peer_up_v4(&mut manager, peer_v4(SOURCE), 4096);
     let peers: Vec<_> = (0..40u8)
         .map(|index| peer_v4(Ipv4Addr::new(10, 0, 19, index + 1)))
