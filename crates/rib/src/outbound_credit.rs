@@ -121,25 +121,34 @@ impl Drop for OutboundCharge {
 }
 
 /// One whole-table operation for one peer. Every envelope of the operation
-/// holds a clone; the operation is live until the last one drops, and its
-/// drop wakes the RIB so work deferred behind it is retried at once rather
-/// than at the next resync tick.
+/// holds a clone; the operation is live until the last one drops. When an
+/// operation that sent an envelope drops, it wakes the RIB so work deferred
+/// behind it is retried at once rather than at the next resync tick. A
+/// reservation abandoned unsent (a refused resync) wakes nothing, so a peer
+/// that keeps failing stays on the ordinary retry interval.
 #[derive(Debug)]
 pub struct OperationLatch {
     released: Arc<tokio::sync::Notify>,
+    published: std::sync::atomic::AtomicBool,
 }
 
 impl OperationLatch {
-    /// A latch that notifies `released` when it drops.
+    /// A latch that notifies `released` when it drops after an envelope of
+    /// its operation was sent.
     #[must_use]
     pub fn new(released: Arc<tokio::sync::Notify>) -> Self {
-        Self { released }
+        Self {
+            released,
+            published: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 }
 
 impl Drop for OperationLatch {
     fn drop(&mut self) {
-        self.released.notify_one();
+        if *self.published.get_mut() {
+            self.released.notify_one();
+        }
     }
 }
 
@@ -152,6 +161,7 @@ pub(crate) struct OutboundSlot {
 impl OutboundSlot {
     /// Fill the slot with an envelope of the operation.
     pub(crate) fn send(self, mut update: OutboundRouteUpdate) {
+        self.latch.published.store(true, Ordering::Relaxed);
         update.latch = Some(self.latch);
         self.permit.send(update);
     }
@@ -190,9 +200,7 @@ impl OutboundOperation {
         }
         Some(Self {
             sender: sender.clone(),
-            latch: Arc::new(OperationLatch {
-                released: Arc::clone(released),
-            }),
+            latch: Arc::new(OperationLatch::new(Arc::clone(released))),
             permits,
         })
     }

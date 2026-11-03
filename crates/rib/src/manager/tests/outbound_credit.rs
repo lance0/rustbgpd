@@ -2018,3 +2018,54 @@ fn a_dirty_peer_behind_its_resync_is_not_restaged_every_pass() {
     );
     drop(kept);
 }
+
+/// Commit refusals counted with `reason`, summed over peers.
+fn refusals_for(metrics: &BgpMetrics, reason: &str) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| family.name() == "bgp_outbound_commit_refusals_total")
+        .flat_map(|family| family.get_metric().to_vec())
+        .filter(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "reason" && label.value() == reason)
+        })
+        .map(|metric| metric.get_counter().get_value())
+        .sum()
+}
+
+/// A dirty peer whose resync keeps failing after its operation was
+/// reserved (here: no export encoder) stays on the ordinary 1 s retry
+/// interval: an abandoned, unsent reservation does not wake the RIB. Red
+/// with every latch drop waking it: the resync retries every 10 ms.
+#[tokio::test(start_paused = true)]
+async fn an_unsent_resync_reservation_keeps_the_ordinary_retry_interval() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
+    routes_received(&mut manager, vec![source_route(0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 51, 1));
+    let mut out = up(&mut manager, peer, ipv4_sendable(), 64, 0);
+    send_all(&mut out);
+    manager.peer_export_encoders.remove(&peer);
+    routes_received(&mut manager, vec![source_route(1)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    assert!(
+        manager.dirty_peers.contains(&peer),
+        "refused without an encoder"
+    );
+    let metrics = manager.metrics.clone();
+    let refused = refusals_for(&metrics, "missing_encoder");
+    let handle = tokio::spawn(manager.run());
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let attempts = refusals_for(&metrics, "missing_encoder") - refused;
+    assert!(attempts >= 1.0, "the resync was attempted");
+    assert!(attempts <= 5.0, "{attempts} resync attempts in 3.5 s");
+    drop(tx);
+    let _ = handle.await;
+}
