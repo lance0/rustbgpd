@@ -5701,6 +5701,58 @@ mod tests {
         assert_eq!(decoded[0], PathAttribute::MpUnreachNlri(Box::new(mp)));
     }
     #[test]
+    fn mp_vpn_flowspec_encodes_only_for_afi_1() {
+        let reach = |afi| {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+                afi,
+                safi: Safi::FlowSpecVpn,
+                next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
+            }))
+        };
+        let unreach = |afi| {
+            PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
+                afi,
+                safi: Safi::FlowSpecVpn,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: vec![],
+                bgpls_withdrawn: vec![],
+                labeled_withdrawn: vec![],
+                vpn_withdrawn: vec![],
+                rtc_withdrawn: vec![],
+                vpn_flowspec_withdrawn: vec![],
+            }))
+        };
+        let mut buf = Vec::new();
+        encode_path_attributes(&[reach(Afi::Ipv4)], &mut buf, true, false).unwrap();
+        assert_eq!(buf, [0x80, 14, 5, 0, 1, 134, 0, 0]);
+        let mut buf = Vec::new();
+        encode_path_attributes(&[unreach(Afi::Ipv4)], &mut buf, true, false).unwrap();
+        assert_eq!(buf, [0x80, 15, 3, 0, 1, 134]);
+        for attr in [reach(Afi::Ipv6), unreach(Afi::Ipv6)] {
+            let mut buf = vec![0xaa];
+            let err = encode_path_attributes(&[attr], &mut buf, true, false).unwrap_err();
+            assert_eq!(
+                err,
+                EncodeError::ValueOutOfRange {
+                    field: "VPN FlowSpec AFI",
+                    value: "2".to_string(),
+                }
+            );
+            assert_eq!(buf, [0xaa]);
+        }
+    }
+
+    #[test]
     fn mp_reach_flowspec_oversized_rule_returns_encode_error() {
         let attr = PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
