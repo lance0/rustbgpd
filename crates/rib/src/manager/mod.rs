@@ -2683,11 +2683,6 @@ fn test_outbound_row_credit() -> Option<usize> {
         .and_then(|rows| rows.parse().ok())
 }
 
-#[cfg(not(test))]
-const fn test_outbound_row_credit() -> Option<usize> {
-    None
-}
-
 impl RibManager {
     /// Create a new RIB manager with the given update channel and optional export policy.
     #[must_use]
@@ -2782,7 +2777,14 @@ impl RibManager {
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
             outbound_credit: HashMap::new(),
-            outbound_row_credit_override: test_outbound_row_credit(),
+            // A test-only override; production sizes the credit itself.
+            outbound_row_credit_override: {
+                #[cfg(test)]
+                let rows = test_outbound_row_credit();
+                #[cfg(not(test))]
+                let rows = None;
+                rows
+            },
             outbound_closing: false,
             outbound_latch_released: Arc::default(),
             #[cfg(test)]
