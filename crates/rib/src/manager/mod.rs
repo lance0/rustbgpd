@@ -662,8 +662,6 @@ pub struct RibManager {
     /// collision supersede and re-registration: envelopes of an earlier
     /// session still count against the same peer (`crate::outbound_credit`).
     outbound_credit: HashMap<PeerId, outbound_credit::PeerCredit>,
-    /// Per-peer row credit at the current number of private peers.
-    outbound_row_credit: usize,
     /// Fixed per-peer row credit for tests and bench builds.
     outbound_row_credit_override: Option<usize>,
     /// Notified whenever a whole-table operation's last envelope drops, so
@@ -2778,8 +2776,6 @@ impl RibManager {
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
             outbound_credit: HashMap::new(),
-            outbound_row_credit: test_outbound_row_credit()
-                .unwrap_or_else(|| crate::outbound_credit::row_credit_for(0)),
             outbound_row_credit_override: test_outbound_row_credit(),
             outbound_closing: false,
             outbound_latch_released: Arc::default(),

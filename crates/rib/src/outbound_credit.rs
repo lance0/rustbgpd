@@ -18,9 +18,12 @@
 //!   response, dirty or forced resync, complete EVPN feed, operator replay).
 //!   Every envelope of one operation holds a clone of its [`OperationLatch`];
 //!   the RIB keeps only a weak reference, and a second operation is refused
-//!   while the first is live. An operation reserves every envelope it needs,
-//!   nested markers included, before it sends anything, and charges no rows:
-//!   it is bounded by the latch, so a whole table never exhausts credit.
+//!   while the first is live. An operation reserves its envelopes before it
+//!   sends anything: all of them for an operator replay; otherwise its data
+//!   envelope and, when the channel has room, its nested End-of-RIB (a marker
+//!   that finds no reserved slot takes channel capacity alone, as before). It
+//!   charges no rows: it is bounded by the latch, so a whole table never
+//!   exhausts credit.
 //!
 //! Markers and control-only envelopes take channel capacity only.
 
@@ -32,35 +35,41 @@ use tokio::sync::mpsc::{OwnedPermit, Sender};
 
 use crate::update::OutboundRouteUpdate;
 
-/// Daemon-wide ordinary private rows, divided among the peers with a
-/// private family.
+/// Daemon-wide ordinary rows, divided among every registered outbound peer.
 ///
+/// Every registered peer counts, private family or not, so the per-peer
+/// credits of the live peers sum to at most this (or `P` times
+/// [`MIN_ROW_CREDIT`] above 2,048 peers) with no membership tracking.
 /// The RIB stages private rows at about 0.6 µs per row per peer (measured
 /// with every private peer in each pass), so a peer receives at most about
 /// `1 / (P · 0.6 µs)` rows per second, and a credit of `D / P` rows
 /// tolerates a receiver that drains nothing for about `D · 0.6 µs`, about
 /// 10 s at 16M rows, wherever the credit is unclamped: P = 16 to 2,048.
 /// Below that [`MAX_ROW_CREDIT`] applies (about 0.6 s of stall at P = 1);
-/// above it [`MIN_ROW_CREDIT`] tolerates longer. Sparse fanout spreads less
-/// of the RIB's work over each peer, so these are not universal stall
-/// times. 16M rows is 2.2× the 50,000 rows a receiver queued when 150 peers
-/// restarted during a 100,000-route source dump, and about 2 GiB of
-/// ordinary private rows daemon-wide at saturation (about 121 bytes a row).
-/// The per-peer limit is read from the current peer count at each
-/// admission; envelopes admitted under an earlier, larger limit are held
-/// until they drop. Re-tune by measuring the staging cost and choosing the
-/// tolerated stall.
+/// above it [`MIN_ROW_CREDIT`] tolerates longer. Grouped peers in the count
+/// and sparse fanout both mean these are not universal stall times. 16M rows
+/// is 2.2× the 50,000 rows a receiver queued when 150 peers restarted during
+/// a 100,000-route source dump.
+///
+/// Bound: charged rows ≤ `max(D, P · MIN_ROW_CREDIT)` plus, per peer, one
+/// oversize pass (a peer under its credit is always admitted) plus a
+/// transient excess: envelopes admitted while fewer peers were registered,
+/// under a larger limit, stay charged until they drop, and their peer is
+/// refused until it is back under the current limit, so that excess only
+/// drains, and is under [`MAX_ROW_CREDIT`] per peer. About 2 GiB of steady-state rows at saturation (about 121 bytes
+/// a row). Re-tune by measuring the staging cost and choosing the tolerated
+/// stall.
 pub(crate) const DAEMON_ROW_CREDIT: usize = 16_777_216;
-/// Smallest per-peer credit, whatever the number of private peers.
+/// Smallest per-peer credit, whatever the number of peers.
 pub(crate) const MIN_ROW_CREDIT: usize = 8_192;
-/// Largest per-peer credit, whatever the number of private peers.
+/// Largest per-peer credit, whatever the number of peers.
 pub(crate) const MAX_ROW_CREDIT: usize = 1_048_576;
 /// Rows per ordinary private envelope once a larger pass is chunked.
 pub(crate) const CHUNK_ROWS: usize = 1_024;
 
-/// Per-peer row credit when `private_peers` peers have a private family.
-pub(crate) fn row_credit_for(private_peers: usize) -> usize {
-    (DAEMON_ROW_CREDIT / private_peers.max(1)).clamp(MIN_ROW_CREDIT, MAX_ROW_CREDIT)
+/// Per-peer row credit with `peers` registered outbound peers.
+pub(crate) fn row_credit_for(peers: usize) -> usize {
+    (DAEMON_ROW_CREDIT / peers.max(1)).clamp(MIN_ROW_CREDIT, MAX_ROW_CREDIT)
 }
 
 /// Live private-family rows owed to one peer, across every session

@@ -322,7 +322,6 @@ fn first_refresh_of_an_orf_helper_sends_its_table_before_the_eor_without_credit(
         let (mut rx, mut rib) = flapped(&mut manager, Open::HelperOnly);
         assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
         if spent {
-            manager.outbound_row_credit = 0;
             manager.outbound_row_credit_override = Some(0);
         }
         refresh(&mut manager, 182);

@@ -1043,7 +1043,6 @@ fn shutdown_withdrawals_bypass_spent_credit_after_begin_close() {
         send_all(&mut source);
         let stalled = held(&mut rx);
         assert_eq!(rows(&stalled), 20);
-        manager.outbound_row_credit = 1;
         manager.outbound_row_credit_override = Some(1);
         if fill {
             while tx.try_send(OutboundRouteUpdate::default()).is_ok() {}
@@ -1354,12 +1353,13 @@ fn every_release_path_returns_the_credit_to_zero() {
     );
 }
 
-/// M4. The per-peer credit follows the current number of private peers:
-/// a peer that filled its credit before more peers registered holds the
-/// excess until its envelopes drop and is refused meanwhile; a deregistered
-/// peer's retained envelopes still count when it returns.
+/// M4. The per-peer credit divides `D` among every registered outbound
+/// peer, read at each admission with no override: a peer that filled its
+/// credit before more peers registered keeps the excess until its envelopes
+/// drop and is refused meanwhile; a deregistered peer's retained envelopes
+/// still count when it returns.
 #[test]
-fn row_credit_follows_the_private_peer_count() {
+fn row_credit_follows_the_registered_peer_count() {
     use crate::outbound_credit::{
         DAEMON_ROW_CREDIT, MAX_ROW_CREDIT, MIN_ROW_CREDIT, row_credit_for,
     };
@@ -1376,7 +1376,7 @@ fn row_credit_follows_the_private_peer_count() {
     let mut rx = up_session(&mut manager, peer, 1, ipv4_sendable(), 4096, 0);
     send_all(&mut rx);
     assert_eq!(manager.outbound_row_credit(), row_credit_for(2));
-    // The peer fills the larger credit it had with two private peers.
+    // The peer fills the larger credit it had with two registered peers.
     let filled = crate::OutboundCharge::new(
         &manager.outbound_credit_handle(peer),
         row_credit_for(20) + 1,
@@ -1406,6 +1406,7 @@ fn row_credit_follows_the_private_peer_count() {
         peer,
         session_id: 1,
     });
+    assert_eq!(manager.outbound_row_credit(), row_credit_for(19));
     let mut rx = up_session(&mut manager, peer, 2, ipv4_sendable(), 4096, 0);
     send_all(&mut rx);
     assert!(manager.outbound_credit_rows(peer) > manager.outbound_row_credit());
@@ -1420,6 +1421,134 @@ fn row_credit_follows_the_private_peer_count() {
         !send_all(&mut rx).is_empty(),
         "admitted once the excess drops"
     );
+}
+
+/// Membership changes after registration do not move the credit: grouped
+/// peers count from registration, so a grouped peer that a policy
+/// replacement or slow-peer isolation makes private is held to the same
+/// fleet limit and refused at it, while grouped members still stream. Red
+/// with the credit divided among private peers only: the two newly private
+/// peers get the 1M-row ceiling and are admitted.
+#[test]
+fn peers_that_become_private_are_held_to_the_fleet_credit() {
+    use crate::outbound_credit::row_credit_for;
+    let mut manager = manager();
+    let mut source = peer_up_v4(&mut manager, peer_v4(SOURCE), 4096);
+    let mut peers: Vec<_> = (0..40u8)
+        .map(|index| {
+            let peer = peer_v4(Ipv4Addr::new(10, 0, 18, index + 1));
+            (peer, peer_up_v4(&mut manager, peer, 4096))
+        })
+        .collect();
+    let fleet = row_credit_for(41);
+    assert_eq!(manager.outbound_row_credit(), fleet, "default sizing");
+    let (moved, slow) = (peers[0].0, peers[1].0);
+    assert!(manager.grouped_member_of(moved).is_some());
+    assert!(manager.grouped_member_of(slow).is_some());
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: moved,
+        export_policy: Some(super::update_groups_oracle::peer_context_permit_chain()),
+        reply,
+    });
+    result.try_recv().unwrap().unwrap();
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer: slow,
+        session_id: 0,
+        slow: true,
+    });
+    assert!(
+        manager.grouped_member_of(moved).is_none(),
+        "policy made it private"
+    );
+    assert!(
+        manager.grouped_member_of(slow).is_none(),
+        "isolation made it private"
+    );
+    assert_eq!(
+        manager.outbound_row_credit(),
+        fleet,
+        "the count did not move"
+    );
+    for (_, rx) in &mut peers {
+        send_all(rx);
+    }
+    let held_charges = [moved, slow]
+        .map(|peer| crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), fleet));
+    routes_received(&mut manager, vec![source_route(0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    for (index, peer) in [moved, slow].into_iter().enumerate() {
+        assert!(
+            send_all(&mut peers[index].1).is_empty(),
+            "{peer} refused at the fleet credit"
+        );
+        assert!(manager.dirty_peers.contains(&peer));
+    }
+    assert!(
+        !send_all(&mut peers[2].1).is_empty(),
+        "a grouped peer streams"
+    );
+    drop(held_charges);
+}
+
+/// A grouped peer's OTC egress diagnostics are charged rows, and grouped
+/// peers are in the credit's divisor, so diagnostic-only traffic to a
+/// grouped fleet is held to the same daemon-wide sum: a grouped customer at
+/// the fleet credit is refused its diagnostic, the others are charged one
+/// row each. Red with the credit divided among private peers only: no peer
+/// is private, the credit is the 1M-row ceiling and the full one is admitted.
+#[test]
+fn grouped_otc_diagnostics_are_charged_against_the_fleet_credit() {
+    use crate::outbound_credit::row_credit_for;
+    let mut manager = manager();
+    let mut source = peer_up_v4(&mut manager, peer_v4(SOURCE), 4096);
+    let peers: Vec<_> = (0..40u8)
+        .map(|index| peer_v4(Ipv4Addr::new(10, 0, 19, index + 1)))
+        .collect();
+    let mut receivers: Vec<_> = peers
+        .iter()
+        .map(|&peer| {
+            manager.handle_update(RibUpdate::SetPeerExportContext {
+                peer,
+                session_id: 0,
+                local_role: Some(rustbgpd_wire::BgpRole::Customer),
+            });
+            peer_up_v4(&mut manager, peer, 4096)
+        })
+        .collect();
+    assert!(
+        peers
+            .iter()
+            .all(|peer| manager.grouped_member_of(*peer).is_some())
+    );
+    let fleet = row_credit_for(41);
+    assert_eq!(manager.outbound_row_credit(), fleet);
+    let full = peers[0];
+    let held_charge = crate::OutboundCharge::new(&manager.outbound_credit_handle(full), fleet);
+    let mut route = source_route(0);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::OnlyToCustomerPartial(64512));
+    });
+    routes_received(&mut manager, vec![route], vec![], vec![], vec![]);
+    send_all(&mut source);
+    assert!(
+        held(&mut receivers[0]).is_empty(),
+        "refused at the fleet credit"
+    );
+    assert!(manager.dirty_peers.contains(&full));
+    for (peer, rx) in peers.iter().zip(&mut receivers).skip(1) {
+        let queued = held(rx);
+        assert_eq!(rows(&queued), 1, "{peer}: one diagnostic, no wire row");
+        assert_eq!(
+            queued
+                .iter()
+                .map(|update| update.otc_blocked.len())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(manager.outbound_credit_rows(*peer), 1, "{peer}: charged");
+    }
+    drop(held_charge);
 }
 
 /// M5. Sharing deduplicates one batch, not a group's history: members that

@@ -4,7 +4,6 @@
 use std::sync::{Arc, Weak};
 
 use rustbgpd_telemetry::reason_labels::OutboundCommitRefusal;
-use rustbgpd_wire::Safi;
 
 use super::RibManager;
 use super::distribution::OutboundCommitFailure;
@@ -33,46 +32,30 @@ pub(super) const CREDIT_REFUSAL: OutboundCommitFailure =
 
 impl RibManager {
     /// Fix every peer's ordinary row credit at `rows` instead of sizing it
-    /// from the number of private peers. For tests and bench builds.
+    /// from the number of registered peers. For tests and bench builds.
+    #[cfg(any(test, feature = "bench-internals"))]
     #[must_use]
     pub fn with_outbound_row_credit(mut self, rows: usize) -> Self {
         self.outbound_row_credit_override = Some(rows);
-        self.outbound_row_credit = rows;
         self
     }
 
-    /// Ensure `peer` has a credit entry and re-size the per-peer credit.
+    /// Ensure `peer` has a credit entry.
     pub(super) fn register_outbound_credit(&mut self, peer: PeerId) {
         self.outbound_credit.entry(peer).or_default();
-        self.refresh_outbound_row_credit();
     }
 
-    /// Re-size the per-peer credit from the registered peers that hold a
-    /// private family. O(peers), at registration and deregistration only.
-    pub(super) fn refresh_outbound_row_credit(&mut self) {
-        if self.outbound_row_credit_override.is_some() {
-            return;
-        }
-        let private = self
-            .outbound_peers
-            .keys()
-            .filter(|&&peer| self.has_private_family(peer))
-            .count();
-        self.outbound_row_credit = row_credit_for(private);
-    }
-
-    fn has_private_family(&self, peer: PeerId) -> bool {
-        let private = self.private_families(peer);
-        self.peer_sendable_families
-            .get(&peer)
-            .is_none_or(|families| {
-                families.iter().any(|&(_, safi)| match safi {
-                    Safi::Unicast => private.unicast,
-                    Safi::MplsVpn => private.vpn,
-                    Safi::Evpn => private.evpn,
-                    _ => true,
-                })
-            })
+    /// The per-peer row credit at the current number of registered outbound
+    /// peers, read at each admission. Every registered peer counts, private
+    /// family or not (a grouped peer's OTC diagnostics are charged too), so
+    /// the count needs no membership tracking and the credits of the live
+    /// peers sum to at most `DAEMON_ROW_CREDIT` (or `P` times the floor).
+    /// Envelopes admitted while fewer peers were registered stay charged
+    /// until they drop; such a peer is refused until it is back under the
+    /// current credit, so that excess only drains.
+    pub(super) fn outbound_row_credit(&self) -> usize {
+        self.outbound_row_credit_override
+            .unwrap_or_else(|| row_credit_for(self.outbound_peers.len()))
     }
 
     /// Which of `peer`'s families it holds in its own Adj-RIB-Out.
@@ -93,7 +76,7 @@ impl RibManager {
             && self
                 .outbound_credit
                 .get(&peer)
-                .is_some_and(|entry| entry.credit.rows() >= self.outbound_row_credit)
+                .is_some_and(|entry| entry.credit.rows() >= self.outbound_row_credit())
     }
 
     /// Count a preflight refusal like a refused send.
@@ -143,7 +126,7 @@ impl RibManager {
         let Some(entry) = self.outbound_credit.get(&peer) else {
             return Ok(None);
         };
-        if entry.credit.rows() < self.outbound_row_credit
+        if entry.credit.rows() < self.outbound_row_credit()
             || (self.outbound_closing && closing_admissible())
         {
             Ok(Some(Arc::clone(&entry.credit)))
@@ -152,9 +135,12 @@ impl RibManager {
         }
     }
 
-    /// Admit a whole-table operation of `envelopes` envelopes, nested
+    /// Admit a whole-table operation of up to `envelopes` envelopes, nested
     /// markers included: refused while another operation of `peer` is live,
-    /// or when the channel cannot take every envelope now. Nothing is sent.
+    /// or when the channel has no room at all. With less room than
+    /// `envelopes`, it reserves what there is ([`OutboundOperation::reserve`]);
+    /// a caller that must be accepted whole checks
+    /// [`OutboundOperation::reserved`]. Nothing is sent.
     pub(super) fn begin_outbound_operation(
         &mut self,
         peer: PeerId,
@@ -222,11 +208,5 @@ impl RibManager {
     #[cfg(test)]
     pub(super) fn outbound_credit_handle(&mut self, peer: PeerId) -> Arc<OutboundCredit> {
         Arc::clone(&self.outbound_credit.entry(peer).or_default().credit)
-    }
-
-    /// The per-peer row credit in force.
-    #[cfg(test)]
-    pub(super) fn outbound_row_credit(&self) -> usize {
-        self.outbound_row_credit
     }
 }

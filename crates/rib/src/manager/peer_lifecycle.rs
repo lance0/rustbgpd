@@ -1566,9 +1566,6 @@ impl RibManager {
         self.invalidate_evpn_feed_completion(peer);
         self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
-        if was_registered {
-            self.refresh_outbound_row_credit();
-        }
         self.outbound_session_ids.remove(&peer);
         self.pending_inbound_refresh.remove(&peer);
         if self.pending_inbound_refresh.is_empty() {
