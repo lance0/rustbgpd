@@ -129,6 +129,14 @@ pub struct OperationLatch {
     released: Arc<tokio::sync::Notify>,
 }
 
+impl OperationLatch {
+    /// A latch that notifies `released` when it drops.
+    #[must_use]
+    pub fn new(released: Arc<tokio::sync::Notify>) -> Self {
+        Self { released }
+    }
+}
+
 impl Drop for OperationLatch {
     fn drop(&mut self) {
         self.released.notify_one();
