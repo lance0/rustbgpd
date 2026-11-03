@@ -2906,26 +2906,33 @@ fn a_gone_channel_clears_only_its_own_suppressed_answer() {
     assert_eq!(ipv4_eors(&sent), 0, "the answer carries no End-of-RIB");
 }
 
-/// Receive envelopes on `rx` until every prefix in `wanted` has been
-/// announced, within `limit` of the paused clock.
-async fn receive_announced(
+/// Receive envelopes on `rx` until `keys` has yielded every key in
+/// `wanted`, within 5,000 turns of 1 ms on the paused clock. The test drives
+/// the clock and yields to the actor each turn, so an actor that waits, or
+/// one that keeps yielding without delivering, fails here instead of
+/// hanging the test.
+async fn receive_wanted<K: std::hash::Hash + Eq>(
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
-    mut wanted: std::collections::HashSet<Prefix>,
-    limit: Duration,
+    mut wanted: std::collections::HashSet<K>,
+    keys: impl Fn(&OutboundRouteUpdate) -> Vec<K>,
 ) -> bool {
-    tokio::time::timeout(limit, async {
-        while !wanted.is_empty() {
-            let Some(update) = rx.recv().await else {
-                return false;
-            };
-            for route in update.announce.iter() {
-                wanted.remove(&route.prefix);
+    for _ in 0..5_000 {
+        while let Ok(update) = rx.try_recv() {
+            for key in keys(&update) {
+                wanted.remove(&key);
             }
         }
-        true
-    })
-    .await
-    .unwrap_or(false)
+        if wanted.is_empty() {
+            return true;
+        }
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+    }
+    false
+}
+
+fn announced_prefixes(update: &OutboundRouteUpdate) -> Vec<Prefix> {
+    update.announce.iter().map(|route| route.prefix).collect()
 }
 
 fn other_source_route(other: Ipv4Addr, index: u32) -> Route {
@@ -2934,59 +2941,94 @@ fn other_source_route(other: Ipv4Addr, index: u32) -> Route {
     route
 }
 
+fn received(peer: PeerId, announced: Vec<Route>, evpn_announced: Vec<EvpnRibRoute>) -> RibUpdate {
+    RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced,
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    }
+}
+
 /// A peer whose session has stopped taking envelopes (its writer held at
 /// the byte budget, so its channel stays full) never makes the RIB wait:
 /// a healthy peer keeps receiving every later batch, and later input and
-/// End-of-RIB from another source are still applied, in order. The paused
-/// clock bounds each wait, so a stalled actor fails the test rather than
-/// hanging it. Red with any wait on the held peer's channel in the actor,
-/// such as reserving a slot on every peer's channel before each turn.
-#[tokio::test(start_paused = true)]
-async fn a_peer_held_by_its_writer_never_holds_the_rib_or_a_healthy_peer() {
+/// End-of-RIB from another source are still applied, in order. `evpn` runs
+/// the batches through the private EVPN path; `credit` caps every peer's
+/// row credit, so the held peer's is spent. Red with any wait on the held
+/// peer in the actor, such as reserving a slot on every peer's channel
+/// before each turn.
+async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>) {
     let (tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 100)),
+        BgpMetrics::new(),
+    );
+    if let Some(credit) = credit {
+        manager = manager.with_outbound_row_credit(credit);
+    }
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
-    let _source_rx = actor_source(&tx).await;
+    let families = if evpn {
+        [ipv4_sendable(), evpn_sendable()].concat()
+    } else {
+        ipv4_sendable()
+    };
+    let up = |peer: Ipv4Addr, outbound| {
+        let mut update = actor_peer_up(peer_v4(peer), outbound);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut update
+        {
+            sendable_families.clone_from(&families);
+        }
+        update
+    };
+    let (source_tx, _source_rx) = mpsc::channel(1 << 12);
+    tx.send(up(SOURCE, source_tx)).await.unwrap();
     let other = Ipv4Addr::new(10, 0, 0, 2);
-    let (other_tx, _other_rx) = mpsc::channel(64);
-    tx.send(actor_peer_up(peer_v4(other), other_tx))
-        .await
-        .unwrap();
+    let (other_tx, _other_rx) = mpsc::channel(1 << 12);
+    tx.send(up(other, other_tx)).await.unwrap();
     // The held peer's channel takes one envelope and is never read.
     let (held_tx, _held_rx) = mpsc::channel(1);
-    tx.send(actor_peer_up(peer_v4(Ipv4Addr::new(10, 0, 53, 1)), held_tx))
+    tx.send(up(Ipv4Addr::new(10, 0, 53, 1), held_tx))
         .await
         .unwrap();
     let (healthy_tx, mut healthy_rx) = mpsc::channel(1 << 12);
-    tx.send(actor_peer_up(
-        peer_v4(Ipv4Addr::new(10, 0, 53, 2)),
-        healthy_tx,
-    ))
-    .await
-    .unwrap();
-    let limit = Duration::from_secs(5);
-
-    for round in 0..8u32 {
-        let announced: Vec<Route> = (100 + round * 16..116 + round * 16)
-            .map(source_route)
-            .collect();
-        let wanted = announced.iter().map(|route| route.prefix).collect();
-        tx.send(RibUpdate::RoutesReceived {
-            session_id: 0,
-            peer: peer_v4(SOURCE),
-            announced,
-            withdrawn: vec![],
-            flowspec_announced: vec![],
-            flowspec_withdrawn: vec![],
-            evpn_announced: vec![],
-            evpn_withdrawn: vec![],
-            validated_with: None,
-        })
+    tx.send(up(Ipv4Addr::new(10, 0, 53, 2), healthy_tx))
         .await
         .unwrap();
+
+    for round in 0..8u32 {
+        let keys = 100 + round * 16..116 + round * 16;
+        let delivered = if evpn {
+            let routes: Vec<_> = keys.map(|tag| evpn_route(tag, round)).collect();
+            let wanted = routes.iter().map(EvpnRibRoute::key).collect();
+            tx.send(received(peer_v4(SOURCE), vec![], routes))
+                .await
+                .unwrap();
+            receive_wanted(&mut healthy_rx, wanted, |update| {
+                update.evpn_announce.iter().map(EvpnRibRoute::key).collect()
+            })
+            .await
+        } else {
+            let routes: Vec<_> = keys.map(source_route).collect();
+            let wanted = routes.iter().map(|route| route.prefix).collect();
+            tx.send(received(peer_v4(SOURCE), routes, vec![]))
+                .await
+                .unwrap();
+            receive_wanted(&mut healthy_rx, wanted, announced_prefixes).await
+        };
         assert!(
-            receive_announced(&mut healthy_rx, wanted, limit).await,
+            delivered,
             "round {round}: the healthy peer stalled behind the held one"
         );
     }
@@ -2995,33 +3037,40 @@ async fn a_peer_held_by_its_writer_never_holds_the_rib_or_a_healthy_peer() {
     let before = other_source_route(other, 5_000);
     let after = other_source_route(other, 5_001);
     let wanted = [before.prefix, after.prefix].into_iter().collect();
-    for update in [vec![before], Vec::new(), vec![after]] {
-        let message = if update.is_empty() {
-            RibUpdate::EndOfRib {
-                peer: peer_v4(other),
-                session_id: 0,
-                afi: Afi::Ipv4,
-                safi: Safi::Unicast,
-            }
-        } else {
-            RibUpdate::RoutesReceived {
-                session_id: 0,
-                peer: peer_v4(other),
-                announced: update,
-                withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-                evpn_announced: vec![],
-                evpn_withdrawn: vec![],
-                validated_with: None,
-            }
-        };
-        tx.send(message).await.unwrap();
-    }
+    tx.send(received(peer_v4(other), vec![before], vec![]))
+        .await
+        .unwrap();
+    tx.send(RibUpdate::EndOfRib {
+        peer: peer_v4(other),
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    tx.send(received(peer_v4(other), vec![after], vec![]))
+        .await
+        .unwrap();
     assert!(
-        receive_announced(&mut healthy_rx, wanted, limit).await,
+        receive_wanted(&mut healthy_rx, wanted, announced_prefixes).await,
         "input after the other source's End-of-RIB was not applied"
     );
     drop(tx);
     let _ = handle.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_peer_held_by_its_writer_never_holds_the_rib_or_a_healthy_peer() {
+    assert_held_peer_never_holds_the_rib(false, None).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_peer_with_spent_credit_never_holds_the_rib() {
+    assert_held_peer_never_holds_the_rib(false, Some(4)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_private_evpn_peer_never_holds_the_rib() {
+    assert_held_peer_never_holds_the_rib(true, None).await;
+    assert_held_peer_never_holds_the_rib(true, Some(4)).await;
 }
