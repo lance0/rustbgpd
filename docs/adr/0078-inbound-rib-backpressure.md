@@ -137,19 +137,60 @@ messages. A message that finds the channel full is held, and every later
 RIB-bound message from that session queues behind it; the run loop delivers
 the FIFO in order through a channel reservation that keeps its place among
 waiting senders. While anything is held, the session reads nothing more
-from its socket and processes no further buffered PDU, so rule 1's TCP
-backpressure and the per-session order the RIB sees are unchanged.
+from its socket and decodes no further buffered PDU, so rule 1's TCP
+backpressure and the per-session order the RIB sees are unchanged. The
+session task delivers everything held before it returns, sending the head
+through its queued reservation first.
 
-Meanwhile the run loop keeps draining outbound into the writer under the
-existing writer admission, enforces the hold timer (rule 3's pending-input
-re-arm still applies), observes writer exit, including RFC 9687 send-hold
-expiry, answers state snapshots, and runs Shutdown, Stop, administrative
-reset, purge reset and BFD down at once. Other commands, any command
-queued behind one of them, and the refresh-accounting timer wait until the
-held messages are delivered, as before. Refresh-accounting state that rule 4 ties to channel acceptance
-(BoRR, EoRR, refresh timeout) changes when the held message is admitted.
-The session task delivers everything held before it returns.
+While parked, the run loop:
 
-Two sends still wait for channel admission inside their handler: an ORF
-update, whose RIB reply the session awaits, and the messages an
-export-policy or runtime-config command acknowledges to the peer manager.
+- drains outbound into the writer under the existing writer admission,
+  including envelopes that span many writer slots;
+- polls the hold timer and observes writer exit, including RFC 9687
+  send-hold expiry;
+- answers state snapshots;
+- runs Shutdown, Stop, purge reset and BFD down at once, whether they
+  arrive on the command channel or were deferred by an owned wait, and an
+  administrative reset when it closes an Established session.
+
+Other commands, any command queued behind one of them, a reset with no
+Established session to close, the reconnect a close schedules, and the
+refresh-accounting timer wait until the held messages are delivered, as
+before. Repeated resets therefore queue at most one `PeerDown` behind the
+held messages.
+
+Refresh-accounting state that rule 4 ties to channel acceptance (BoRR,
+EoRR, refresh timeout) changes when the held message is admitted, and no
+buffered PDU is decoded while such a message is held. If the connection
+goes down first, the held markers still reach the RIB in order, but their
+local effects are dropped with that connection's windows.
+
+Being parked no longer suspends hold expiry by itself. The held batch
+restarts the hold timer when it is held, at the start of the park, not
+when the RIB admits it. At expiry, a complete frame that cannot be
+processed yet (rule 3's pending input) renews the hold time once; a further
+renewal needs bytes received since that renewal, found by one bounded
+socket read. A peer that goes silent is therefore expired within two hold
+times even while parked, as RFC 4271 section 6.5 requires, while a peer
+whose input keeps arriving stays up. A frame larger than our receive window
+(possible with RFC 8654) cannot complete while the socket is unread, so a
+live peer sending only such frames could be expired during a park longer
+than the hold time.
+
+These waits remain inside their handlers, as existing exceptions to the
+servicing above; the whole session waits on channel admission:
+
+- an ORF update, which awaits admission and then its RIB reply;
+- an export-policy update, which reserves a slot before acknowledging the
+  peer manager;
+- the runtime-config IPv6 unicast unlock, which is acknowledged the same
+  way;
+- an operator replay's `ReplayPeerOutbound`, which runs only with nothing
+  held, waits under the replay deadline and answers state snapshots
+  meanwhile.
+
+Draining outbound while parked bounds the writer queue by its existing
+limits: 4096 frames, at most 16 MiB of standard messages or just under
+256 MiB with RFC 8654. That is a bound on frames and their bytes, not a cap
+on the total outbound heap: the RIB→session envelope queue and an envelope
+being encoded still hold workload-sized route payloads.
