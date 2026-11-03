@@ -63,8 +63,8 @@
 //! shrunk by proptest and then by one-op deletion, and printed as a trace.
 //! `ORACLE_TRACE=1` prints each operation and delivered envelope.
 //!
-//! Three open defects on main are tolerated only by their exact signature
-//! ([`KNOWN`]); each has an ignored regression test with its minimized trace.
+//! One open defect on main is tolerated only by its exact signature
+//! ([`KNOWN`]); it has an ignored regression test with its minimized trace.
 //! A tolerated defect excuses only its own observation: the case still runs
 //! every other property (a livelocked receiver alone skips P1 and P4).
 //! `ORACLE_STRICT=1` reports them as failures. A run of the default case
@@ -111,21 +111,10 @@ const REPEAT_ROUNDS: usize = 8;
 /// The signature of an open defect the default run tolerates;
 /// `ORACLE_STRICT=1` reports it.
 const KNOWN_REFRESH_RETRY_LIVELOCK: &str = "known: grouped refresh-retry livelock at one free slot";
-/// The second open defect: an empty-view dirty resync drops an owed refresh
-/// answer, and with it a GR peer's ORF-gated initial `EoR`.
-const KNOWN_EMPTY_RESYNC_DROPS_REFRESH: &str =
-    "known: empty-view resync drops an owed refresh and its initial EoR";
-/// The third: a resync withdraws a route the peer's `EoRR` already purged.
-const KNOWN_WITHDRAWAL_AFTER_EORR_PURGE: &str =
-    "known: resync withdraws a route an EoRR already purged";
 /// The default case count, below which coverage floors are not enforced.
 const DEFAULT_CASES: u32 = 256;
 /// Every tolerated signature.
-const KNOWN: [&str; 3] = [
-    KNOWN_REFRESH_RETRY_LIVELOCK,
-    KNOWN_EMPTY_RESYNC_DROPS_REFRESH,
-    KNOWN_WITHDRAWAL_AFTER_EORR_PURGE,
-];
+const KNOWN: [&str; 1] = [KNOWN_REFRESH_RETRY_LIVELOCK];
 
 const V4: (u16, u8) = (Afi::Ipv4 as u16, Safi::Unicast as u8);
 const V6: (u16, u8) = (Afi::Ipv6 as u16, Safi::Unicast as u8);
@@ -452,8 +441,6 @@ struct Wire {
     gr_stale: BTreeSet<Key>,
     /// Open RFC 7313 refresh windows and their not-yet-replaced keys.
     refresh_stale: BTreeMap<(u16, u8), BTreeSet<Key>>,
-    /// Keys an `EoRR` purged and nothing has announced since.
-    eorr_purged: BTreeSet<Key>,
     eor: BTreeSet<(u16, u8)>,
     /// Collapsed per-(session, prefix) path-set sequence, one entry per
     /// envelope that changed it; the empty set is "not held".
@@ -489,7 +476,6 @@ impl Wire {
         self.session = session;
         self.enhanced = enhanced;
         self.refresh_stale.clear();
-        self.eorr_purged.clear();
         self.eor.clear();
         if retain {
             // "To deal with possible consecutive restarts, a route (from
@@ -653,13 +639,6 @@ impl Wire {
         }));
         for key in &withdrawn {
             if !self.held.contains_key(key) {
-                // Known defect: a refresh answered while a grouped member
-                // still owes withdrawals leaves them owed after the EoRR has
-                // purged those routes. Only the subject is ever deferred.
-                if arm == SUBJECT && self.eorr_purged.contains(key) {
-                    self.tolerated.insert(KNOWN_WITHDRAWAL_AFTER_EORR_PURGE);
-                    continue;
-                }
                 return Err(where_(&format!(
                     "P2: withdrawal of {key:?}, which the receiver does not hold"
                 )));
@@ -671,7 +650,6 @@ impl Wire {
             }
         }
         for (key, value) in announced {
-            self.eorr_purged.remove(&key);
             self.record(&key, Some(value));
             self.gr_stale.remove(&key);
             for stale in self.refresh_stale.values_mut() {
@@ -698,7 +676,6 @@ impl Wire {
             let Some(stale) = self.refresh_stale.remove(&family) else {
                 return Err(where_(&format!("P3: EoRR for {family:?} without a BoRR")));
             };
-            self.eorr_purged.extend(stale.iter().cloned());
             self.purge(stale);
             barrier(self, family, "EoRR");
         }
@@ -1394,12 +1371,10 @@ impl Harness {
     )]
     fn check(&mut self) -> Result<(), String> {
         // RFC 7313 §4: every BoRR is closed by an EoRR once both arms are
-        // quiet.
+        // quiet. A livelocked receiver is held to this too: its refresh is
+        // never answered, so no BoRR of it may stay open.
         for (arm, side) in self.arms.iter().enumerate() {
             for (peer, wire) in side.wire.iter().enumerate() {
-                if arm == SUBJECT && self.livelocked.contains(&peer) {
-                    continue;
-                }
                 if let Some(family) = wire.refresh_stale.keys().next() {
                     return Err(format!(
                         "P3: {} peer {peer} BoRR for {family:?} never closed by an EoRR",
@@ -1465,17 +1440,7 @@ impl Harness {
             let routes_match = reference.session == subject.session
                 && settled(path_sets(&reference.held, None))
                     == settled(path_sets(&subject.held, None));
-            // Known defect: the subject lacks exactly the ORF-gated IPv4
-            // initial EoR of a GR + ORF peer.
-            let config = self.config[peer];
-            let lost_gated_eor = routes_match
-                && config.gr
-                && config.orf
-                && subject.eor.is_subset(&reference.eor)
-                && reference.eor.difference(&subject.eor).eq([V4].iter());
-            if lost_gated_eor {
-                self.tolerated.insert(KNOWN_EMPTY_RESYNC_DROPS_REFRESH);
-            } else if !routes_match || reference.eor != subject.eor {
+            if !routes_match || reference.eor != subject.eor {
                 return Err(format!(
                     "P1: peer {peer} final wire differs\n reference (session {}, EoR \
                      {:?}): {:?}\n subject (session {}, EoR {:?}): {:?}",
@@ -1650,6 +1615,16 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 }
 
 fn run(config: [PeerConfig; PEERS], ops: &[Op]) -> Result<Outcome, String> {
+    run_seeded(config, ops, |_| {})
+}
+
+/// [`run`], with `seed` applied to the quiet harness just before the
+/// properties are checked: a checker's red proof plants a broken observation.
+fn run_seeded(
+    config: [PeerConfig; PEERS],
+    ops: &[Op],
+    seed: impl FnOnce(&mut Harness),
+) -> Result<Outcome, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
@@ -1661,6 +1636,7 @@ fn run(config: [PeerConfig; PEERS], ops: &[Op]) -> Result<Outcome, String> {
             harness.apply(op).await?;
         }
         harness.drain_until_quiet().await?;
+        seed(&mut harness);
         harness.check()?;
         let mut tolerated = std::mem::take(&mut harness.tolerated);
         for arm in &harness.arms {
@@ -1870,6 +1846,23 @@ fn known_refresh_retry_livelock_signature_matches_its_trace() {
     );
 }
 
+/// The livelock tolerance skips only P1 and P4 for the livelocked receiver:
+/// a refresh it saw opened (`BoRR`) but never closed (`EoRR`) still fails P3.
+/// Red proof: skipping livelocked receivers in the unclosed-`BoRR` check
+/// passes this planted open window.
+#[test]
+fn livelocked_receiver_still_fails_an_unclosed_borr() {
+    let reason = run_seeded(livelock_config(), &livelock_ops(), |harness| {
+        assert!(harness.livelocked.contains(&0), "the livelock shape");
+        harness.arms[SUBJECT].wire[0]
+            .refresh_stale
+            .insert(V4, BTreeSet::new());
+    })
+    .err()
+    .expect("an open BoRR fails the case");
+    assert!(reason.contains("never closed by an EoRR"), "{reason}");
+}
+
 /// The case holds every property and tolerates nothing.
 fn assert_clean(config: &[PeerConfig; PEERS], ops: &[Op]) {
     let outcome = run(*config, ops).unwrap();
@@ -1922,23 +1915,13 @@ fn livelock_ops() -> Vec<Op> {
 /// refresh arrives while the channel still holds the EVPN `EoR`, so its
 /// answer is refused and owed (`pending_refresh`) and the peer is marked
 /// dirty. The dirty resync then finds an empty export view and takes the
-/// empty-inventory path in `distribute_changes`, which clears the dirty
-/// mark without `flush_pending_eor` or `retry_pending_refresh` (the two
-/// other clear sites call both). The refresh is never answered and the
-/// IPv4 `EoR` is never sent (RFC 4724 §4). Un-ignore with the fix.
+/// empty-inventory path in `distribute_changes`, which must still flush the
+/// pending `EoR` and retry the owed refresh, as the other clear sites do;
+/// otherwise the refresh is never answered and the IPv4 `EoR` is never sent
+/// (RFC 4724 §4).
 #[test]
-#[ignore = "open defect: empty-view resync drops an owed refresh and its initial EoR"]
 fn refused_gate_lifting_refresh_still_sends_the_initial_eor() {
     assert_clean(&lost_eor_config(), &lost_eor_ops());
-}
-
-#[test]
-fn known_empty_resync_signature_matches_its_trace() {
-    assert_tolerates_only(
-        &lost_eor_config(),
-        &lost_eor_ops(),
-        KNOWN_EMPTY_RESYNC_DROPS_REFRESH,
-    );
 }
 
 fn lost_eor_config() -> [PeerConfig; PEERS] {
@@ -1967,22 +1950,12 @@ fn lost_eor_ops() -> Vec<Op> {
 /// while peer 1's channel is full, so peer 1 goes dirty owing the
 /// withdrawal. Peer 1 then sends a ROUTE-REFRESH for IPv6: the answer is
 /// `BoRR`, the current (empty) table and `EoRR`, so the peer purges the route
-/// (RFC 7313 §4). The member's owed withdrawal survives the refresh, and the
-/// next dirty resync withdraws a route the peer no longer holds. Un-ignore
-/// with the fix.
+/// (RFC 7313 §4). The answer must carry the member's owed withdrawal;
+/// otherwise the next dirty resync withdraws a route the peer no longer
+/// holds.
 #[test]
-#[ignore = "open defect: resync withdraws a route an EoRR already purged"]
 fn refresh_answer_settles_withdrawals_owed_to_a_dirty_member() {
     assert_clean(&purge_config(), &purge_ops());
-}
-
-#[test]
-fn known_withdrawal_after_eorr_purge_signature_matches_its_trace() {
-    assert_tolerates_only(
-        &purge_config(),
-        &purge_ops(),
-        KNOWN_WITHDRAWAL_AFTER_EORR_PURGE,
-    );
 }
 
 fn purge_config() -> [PeerConfig; PEERS] {
