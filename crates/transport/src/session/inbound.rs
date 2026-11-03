@@ -1049,38 +1049,162 @@ impl PeerSession {
         prototype
     }
 
-    /// Deliver a `RoutesReceived` batch to the RIB manager — block, never
-    /// drop (ADR-0078). The fast path is a `try_send`; when the channel
-    /// is full the saturation counter increments and the session task
-    /// parks on `send().await`. Parking here is the contract: the select
-    /// loop stops reading the TCP socket, the kernel receive window
-    /// fills, and the sender is paced — overload is shed to the party
-    /// that can slow down instead of becoming a silently dropped batch
-    /// (a permanently missing route or a permanently stale one). The
-    /// peer's hold timer stays fed by the writer-owned KEEPALIVE
-    /// cadence while parked.
+    /// Deliver a `RoutesReceived` batch to the RIB manager: hold, never
+    /// drop (ADR-0078). A batch that finds the channel full is held by
+    /// [`Self::send_to_rib`] and counted; the session then stops reading
+    /// its socket until the run loop has delivered it, so the kernel
+    /// receive window paces the sender. Outbound, timers and terminal
+    /// commands stay serviced meanwhile.
     ///
     /// `Err` means the RIB actor is unavailable — the caller should
     /// abandon the rest of its turn.
-    pub(super) async fn deliver_routes_to_rib(&self, update: RibUpdate) -> Result<(), ()> {
+    pub(super) fn deliver_routes_to_rib(&mut self, update: RibUpdate) -> Result<(), ()> {
+        let parked = !self.rib_backlog.is_empty();
+        let delivered = self.send_to_rib(update);
+        if !parked && !self.rib_backlog.is_empty() {
+            self.metrics
+                .record_inbound_rib_backpressure(&self.peer_label);
+        }
+        delivered
+    }
+
+    /// Hand one message to the RIB manager in session order, without
+    /// waiting. When the channel is full, or messages are already held, it
+    /// joins `rib_backlog`; the run loop delivers the backlog in order and
+    /// meanwhile reads no further peer input. `Err` means the RIB manager
+    /// is gone.
+    pub(super) fn send_to_rib(&mut self, update: RibUpdate) -> Result<(), ()> {
+        self.send_to_rib_then(update, OnRibAdmission::Nothing)
+    }
+
+    /// [`Self::send_to_rib`], applying `then` to transport-local state once
+    /// the RIB has admitted `update`, so that state never leads the RIB.
+    pub(super) fn send_to_rib_then(
+        &mut self,
+        update: RibUpdate,
+        then: OnRibAdmission,
+    ) -> Result<(), ()> {
+        if !self.rib_backlog.is_empty() {
+            self.rib_backlog.push_back((update, then));
+            return Ok(());
+        }
         match self.rib_tx.try_send(update) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.on_rib_admission(then);
+                Ok(())
+            }
             Err(tokio::sync::mpsc::error::TrySendError::Full(update)) => {
-                self.metrics
-                    .record_inbound_rib_backpressure(&self.peer_label);
                 debug!(
                     peer = %self.peer_label,
-                    "RIB channel full; session parks until the RIB drains (TCP backpressure)"
+                    "RIB channel full; input parks until the RIB drains (TCP backpressure)"
                 );
-                self.rib_tx.send(update).await.map_err(|_| ())
+                self.rib_backlog.push_back((update, then));
+                self.rib_reserve = Some(tokio_util::sync::PollSender::new(self.rib_tx.clone()));
+                Ok(())
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(()),
         }
     }
+
+    fn on_rib_admission(&mut self, then: OnRibAdmission) {
+        match then {
+            OnRibAdmission::Nothing => {}
+            OnRibAdmission::BeginRefreshAccounting(afi, safi) => {
+                self.begin_refresh_accounting(afi, safi);
+            }
+            OnRibAdmission::EndRefreshAccounting(afi, safi) => {
+                self.end_refresh_accounting(afi, safi);
+            }
+        }
+    }
+
+    /// Deliver `update` once everything held before it was admitted. For a
+    /// message whose effect the caller acknowledges to another actor, or
+    /// whose reply it awaits: channel admission, not the backlog, orders it
+    /// before that actor's next message. Waits like a blocking send.
+    pub(super) async fn send_to_rib_admitted(&mut self, update: RibUpdate) -> Result<(), ()> {
+        self.flush_rib_backlog().await;
+        self.rib_tx.send(update).await.map_err(|_| ())
+    }
+
+    /// Deliver every held message, waiting for channel capacity: before the
+    /// session task ends, and before an admission-ordered send.
+    pub(super) async fn flush_rib_backlog(&mut self) {
+        // The head goes through the queued reservation, keeping its place
+        // among waiting senders. Cancel-safe: the reservation and the
+        // backlog stay as they were until the wait completes.
+        if let Some(reserve) = self.rib_reserve.as_mut() {
+            let reserved = std::future::poll_fn(|cx| reserve.poll_reserve(cx))
+                .await
+                .is_ok();
+            if let Some((update, then)) = self.rib_backlog.pop_front() {
+                if reserved && reserve.send_item(update).is_ok() {
+                    self.on_rib_admission(then);
+                } else {
+                    self.drop_rib_backlog();
+                }
+            }
+        }
+        // An unused reservation would hold capacity the sends below wait for.
+        self.rib_reserve = None;
+        while let Some((update, then)) = self.rib_backlog.pop_front() {
+            if self.rib_tx.send(update).await.is_ok() {
+                self.on_rib_admission(then);
+            } else {
+                self.drop_rib_backlog();
+            }
+        }
+    }
+
+    /// The RIB manager is gone: like a failed blocking send, the held
+    /// messages and their local effects are abandoned.
+    fn drop_rib_backlog(&mut self) {
+        warn!(
+            peer = %self.peer_label,
+            held = self.rib_backlog.len() + 1,
+            "RIB manager unavailable; held RIB-bound messages dropped"
+        );
+        self.rib_backlog.clear();
+        self.rib_reserve = None;
+    }
+
+    /// Run-loop step for a reservation: send the head of the backlog, then
+    /// whatever else the channel takes now. Once the backlog is empty, the
+    /// peer input parked behind it resumes in order.
+    pub(super) async fn advance_rib_backlog(&mut self, reserved: Result<(), ()>) {
+        let mut reserved = reserved.is_ok();
+        while let Some((update, then)) = self.rib_backlog.pop_front() {
+            let sent = if std::mem::take(&mut reserved) {
+                self.rib_reserve
+                    .as_mut()
+                    .map_or(Err(()), |reserve| reserve.send_item(update).map_err(|_| ()))
+            } else {
+                match self.rib_tx.try_send(update) {
+                    Ok(()) => Ok(()),
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(update)) => {
+                        // Wait for the next reservation.
+                        self.rib_backlog.push_front((update, then));
+                        return;
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(()),
+                }
+            };
+            if sent.is_err() {
+                self.drop_rib_backlog();
+                break;
+            }
+            self.on_rib_admission(then);
+        }
+        self.rib_reserve = None;
+        if self.read_buf.has_complete_frame() {
+            self.process_read_buffer().await;
+        }
+    }
+
     /// Keep classification in the same admitted primary-lane batch. Ordinary
     /// production has no installed history consumer and preserves its variant.
-    async fn deliver_wire_routes_to_rib(
-        &self,
+    fn deliver_wire_routes_to_rib(
+        &mut self,
         batch: RibUpdate,
         original_unicast_withdrawals: usize,
         record_wire_history: bool,
@@ -1093,7 +1217,7 @@ impl PeerSession {
         } else {
             batch
         };
-        self.deliver_routes_to_rib(batch).await
+        self.deliver_routes_to_rib(batch)
     }
 
     /// Maximum message length we may SEND to this peer: 65535 if the PEER
@@ -1560,7 +1684,6 @@ impl PeerSession {
                     original_unicast_withdrawals,
                     record_wire_history,
                 )
-                .await
                 .is_err()
             {
                 return;
@@ -1578,7 +1701,6 @@ impl PeerSession {
                     announced: vec![],
                     withdrawn: loop_bgpls_withdrawn,
                 })
-                .await
                 .is_err()
             {
                 return;
@@ -1596,7 +1718,6 @@ impl PeerSession {
                     announced: vec![],
                     withdrawn: loop_l3vpn_withdrawn,
                 })
-                .await
                 .is_err()
             {
                 return;
@@ -1614,7 +1735,6 @@ impl PeerSession {
                     announced: vec![],
                     withdrawn: loop_labeled_withdrawn,
                 })
-                .await
                 .is_err()
             {
                 return;
@@ -1632,7 +1752,6 @@ impl PeerSession {
                     announced: vec![],
                     withdrawn: loop_rtc_withdrawn,
                 })
-                .await
                 .is_err()
             {
                 return;
@@ -2092,15 +2211,12 @@ impl PeerSession {
                 info!(peer = %self.peer_label, family = "ipv4_unicast", "received End-of-RIB");
                 self.received_eor_families
                     .insert((Afi::Ipv4, Safi::Unicast));
-                let _ = self
-                    .rib_tx
-                    .send(RibUpdate::EndOfRib {
-                        peer: self.rib_peer(),
-                        session_id: self.session_identity.id,
-                        afi: Afi::Ipv4,
-                        safi: Safi::Unicast,
-                    })
-                    .await;
+                let _ = self.send_to_rib(RibUpdate::EndOfRib {
+                    peer: self.rib_peer(),
+                    session_id: self.session_identity.id,
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                });
                 if from_wire {
                     self.drive_fsm(Event::UpdateReceived).await;
                 }
@@ -2144,15 +2260,12 @@ impl PeerSession {
                     "received End-of-RIB"
                 );
                 self.received_eor_families.insert((mp.afi, mp.safi));
-                let _ = self
-                    .rib_tx
-                    .send(RibUpdate::EndOfRib {
-                        peer: self.rib_peer(),
-                        session_id: self.session_identity.id,
-                        afi: mp.afi,
-                        safi: mp.safi,
-                    })
-                    .await;
+                let _ = self.send_to_rib(RibUpdate::EndOfRib {
+                    peer: self.rib_peer(),
+                    session_id: self.session_identity.id,
+                    afi: mp.afi,
+                    safi: mp.safi,
+                });
                 if from_wire {
                     self.drive_fsm(Event::UpdateReceived).await;
                 }
@@ -3723,7 +3836,6 @@ impl PeerSession {
                     original_unicast_withdrawals,
                     record_wire_history,
                 )
-                .await
                 .is_err()
             {
                 return;
@@ -3742,7 +3854,6 @@ impl PeerSession {
                     announced: bgpls_announced,
                     withdrawn: bgpls_withdrawn,
                 })
-                .await
                 .is_err()
             {
                 return;
@@ -3760,7 +3871,6 @@ impl PeerSession {
                     announced: vpn_announced,
                     withdrawn: vpn_withdrawn,
                 })
-                .await
                 .is_err()
             {
                 return;
@@ -3779,7 +3889,6 @@ impl PeerSession {
                     announced: labeled_announced,
                     withdrawn: labeled_withdrawn,
                 })
-                .await
                 .is_err()
             {
                 return;
@@ -3797,7 +3906,6 @@ impl PeerSession {
                     announced: rtc_announced,
                     withdrawn: rtc_withdrawn,
                 })
-                .await
                 .is_err()
             {
                 return;
@@ -3812,6 +3920,31 @@ impl PeerSession {
         }
     }
 }
+
+/// Transport-local state a held RIB-bound message changes once the RIB has
+/// admitted it, as it did right after the blocking send it replaces.
+#[derive(Clone, Copy)]
+pub(super) enum OnRibAdmission {
+    Nothing,
+    /// A peer `BoRR`: open the local refresh window when the RIB opens its own.
+    BeginRefreshAccounting(rustbgpd_wire::Afi, rustbgpd_wire::Safi),
+    /// A peer `EoRR` or a local refresh timeout: close and sweep the window.
+    EndRefreshAccounting(rustbgpd_wire::Afi, rustbgpd_wire::Safi),
+}
+
+/// Poll the backlog's reservation. Cancel-safe: the reservation keeps its
+/// place in the channel's queue of waiting senders when this future drops.
+pub(super) async fn poll_rib_reserve(
+    reserve: &mut Option<tokio_util::sync::PollSender<RibUpdate>>,
+) -> Result<(), ()> {
+    match reserve {
+        Some(reserve) => std::future::poll_fn(|cx| reserve.poll_reserve(cx))
+            .await
+            .map_err(|_| ()),
+        None => std::future::pending().await,
+    }
+}
+
 #[cfg(test)]
 mod policy_attr_summary_tests {
     use super::*;

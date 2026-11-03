@@ -192,18 +192,17 @@ impl PeerSession {
     ///
     /// The timeout is first enqueued to the RIB as a distinct local boundary so
     /// it is ordered ahead of the next UPDATE from this session without being
-    /// mistaken for a peer `EoRR`. Only after that send succeeds may transport
+    /// mistaken for a peer `EoRR`. Only once the RIB admits it may transport
     /// consume/sweep the matching local window. The RIB's own timer remains an
     /// idempotent safety net.
-    pub(super) async fn expire_refresh_accounting_windows(&mut self) -> Result<(), ()> {
+    pub(super) fn expire_refresh_accounting_windows(&mut self) -> Result<(), ()> {
         if self.refresh_accounting.windows.is_empty() {
             self.refresh_accounting_timer = None;
             return Ok(());
         }
 
         loop {
-            // Recompute after every awaited send: another family can become due
-            // while the RIB channel is applying backpressure.
+            // Recompute after every admitted timeout, which closes its window.
             let now = Instant::now();
             let next_due = self
                 .refresh_accounting
@@ -218,14 +217,15 @@ impl PeerSession {
             };
 
             if self
-                .rib_tx
-                .send(rustbgpd_rib::RibUpdate::RouteRefreshTimeout {
-                    peer: self.rib_peer(),
-                    session_id: self.session_identity.id,
-                    afi,
-                    safi,
-                })
-                .await
+                .send_to_rib_then(
+                    rustbgpd_rib::RibUpdate::RouteRefreshTimeout {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        afi,
+                        safi,
+                    },
+                    super::inbound::OnRibAdmission::EndRefreshAccounting(afi, safi),
+                )
                 .is_err()
             {
                 // Preserve this and every later window. Re-arming an already
@@ -248,13 +248,22 @@ impl PeerSession {
                 timeout_secs = rustbgpd_rib::ERR_REFRESH_TIMEOUT.as_secs(),
                 "enhanced route refresh timed out — reconciling max-prefix accounting"
             );
-            self.end_refresh_accounting(afi, safi);
+            if !self.rib_backlog.is_empty() {
+                // Held: the window closes, and the timer re-arms, once the RIB
+                // admits the timeout.
+                return Ok(());
+            }
         }
     }
 
     pub(super) fn clear_refresh_accounting(&mut self) {
         self.refresh_accounting.windows.clear();
         self.refresh_accounting_timer = None;
+        // Held markers of the torn-down connection still reach the RIB in
+        // order, but must not reopen or sweep this connection's windows.
+        for (_, then) in &mut self.rib_backlog {
+            *then = super::inbound::OnRibAdmission::Nothing;
+        }
     }
 
     fn arm_refresh_accounting_timer(&mut self) {

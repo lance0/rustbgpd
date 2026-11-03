@@ -120,3 +120,102 @@ decoupled from processing.**
 - Outbound (RIB→session) delivery is unchanged: that direction already
   has the `dirty_peers` resync contract and a slow *peer* must not be
   able to stall the RIB.
+
+## Amendments
+
+### 2026-11-03 — A parked session keeps servicing outbound, timers and closes
+
+Rule 1 parked the whole session task on `send().await`. While it was
+parked, the task also stopped draining its RIB→session outbound queue and
+admitting frames to its writer, left its hold timer and writer-exit arms
+unpolled, and did not act on operator commands. Under a saturated RIB every
+session parks at once, so every per-peer outbound queue fills to its bound
+and a closing session's Cease waits for the RIB.
+
+The blocking send is replaced by a per-session FIFO of held RIB-bound
+messages. A message that finds the channel full is held, and every later
+RIB-bound message from that session queues behind it; the run loop delivers
+the FIFO in order through a channel reservation that keeps its place among
+waiting senders. While anything is held, the session reads nothing more
+from its socket and decodes no further buffered PDU, so rule 1's TCP
+backpressure and the per-session order the RIB sees are unchanged. The
+session task delivers everything held before it returns, sending the head
+through its queued reservation first.
+
+While parked, the run loop:
+
+- drains outbound into the writer under the existing writer admission,
+  including envelopes that span many writer slots;
+- polls the hold timer and observes writer exit, including RFC 9687
+  send-hold expiry;
+- answers state snapshots;
+- runs Shutdown, Stop, purge reset and BFD down at once, whether they
+  arrive on the command channel or were deferred by an owned wait, and an
+  administrative reset when it closes an Established session.
+
+Other commands, any command queued behind one of them, a reset with no
+Established session to close, the reconnect a close schedules, and the
+refresh-accounting timer wait until the held messages are delivered, as
+before. Repeated resets therefore queue at most one `PeerDown` behind the
+held messages.
+
+Refresh-accounting state that rule 4 ties to channel acceptance (BoRR,
+EoRR, refresh timeout) changes when the held message is admitted, and no
+buffered PDU is decoded while such a message is held. If the connection
+goes down first, the held markers still reach the RIB in order, but their
+local effects are dropped with that connection's windows.
+
+Being parked no longer suspends hold expiry indefinitely. While input is
+deliberately left unprocessed, it cannot prove the peer's liveness, so the
+deferral is bounded as a local-overload policy rather than inferred. The
+budget counts deferrals since the last peer message processed; a wait that
+our own message starts (a revalidation chunk, a refresh timeout) does not
+restore it. A held batch restarts the hold timer when it is held.
+
+- The first hold expiry is deferred for the wait itself, even when only
+  part of a frame is buffered.
+- The second is deferred only for newly read bytes, from one probe of at
+  most 4 KiB, or for a read buffer already full of unprocessed input. A
+  socket read cannot tell fresh arrivals from data that was already
+  queued; that leniency is acceptable only because both the renewals and
+  the bytes they may read are bounded.
+- The third closes the session with Cease/Out of Resources (RFC 4486
+  subcode 8), logged as RIB admission stalled past the local budget. Under
+  RFC 8538 this is a NOTIFICATION teardown: a graceful-restart peer keeps
+  its routes only when Notification GR was negotiated.
+
+A session whose RIB admission stays blocked for about three hold times
+since the last processed peer message is therefore closed deliberately, as
+a local overload, not because the peer's messages went missing. Probes
+never take the unprocessed read buffer past two maximum-size messages
+(8 KiB, or 128 KiB with RFC 8654), whatever the number of waits. The rule 3
+pending-input re-arm still applies outside a wait. A frame larger than our
+receive window (possible with RFC 8654) cannot complete while the socket is
+unread; the first deferral covers one hold time of that, not more.
+
+Operational risk: the threshold scales with the hold time. With short hold
+times (3 to 9 s), a session whose RIB admission stays blocked for about
+three hold times, 9 to 27 s, during heavy but progressing convergence is
+closed with Cease/8, and its re-establishment re-floods its routes into the
+same saturated RIB. `bgp_notifications_sent_total{code="6",subcode="8"}`
+counts these closes; `bgp_hold_timer_rearmed_pending_input_total` counts
+the deferrals before them, and `bgp_inbound_rib_backpressure_total` the
+waits.
+
+These waits remain inside their handlers, as existing exceptions to the
+servicing above; the whole session waits on channel admission:
+
+- an ORF update, which awaits admission and then its RIB reply;
+- an export-policy update, which reserves a slot before acknowledging the
+  peer manager;
+- the runtime-config IPv6 unicast unlock, which is acknowledged the same
+  way;
+- an operator replay's `ReplayPeerOutbound`, which runs only with nothing
+  held, waits under the replay deadline and answers state snapshots
+  meanwhile.
+
+Draining outbound while parked bounds the writer queue by its existing
+limits: 4096 frames, at most 16 MiB of standard messages or just under
+256 MiB with RFC 8654. That is a bound on frames and their bytes, not a cap
+on the total outbound heap: the RIB→session envelope queue and an envelope
+being encoded still hold workload-sized route payloads.

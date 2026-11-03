@@ -167,6 +167,8 @@ pub enum SessionFailureCause {
     WriterCancelled,
     /// The bounded outbound writer queue saturated.
     OutboundSaturation,
+    /// RIB admission stayed blocked past the session's local hold budget.
+    RibAdmissionStalled,
     /// A route-bearing envelope omitted its exact export snapshot.
     ExportSnapshotMissing,
     /// An exact export snapshot had an incompatible concrete type.
@@ -185,6 +187,7 @@ impl std::fmt::Display for SessionFailureCause {
             Self::WriterPanicked => f.write_str("TCP writer task panicked"),
             Self::WriterCancelled => f.write_str("TCP writer task cancelled"),
             Self::OutboundSaturation => f.write_str("outbound writer queue saturated"),
+            Self::RibAdmissionStalled => f.write_str("RIB admission stalled past local budget"),
             Self::ExportSnapshotMissing => f.write_str("exact export snapshot missing"),
             Self::ExportSnapshotIncompatible => {
                 f.write_str("exact export snapshot type incompatible")
@@ -852,6 +855,20 @@ impl PeerCommand {
             Self::QueryImportPolicyTermHits { reply } => reply.is_closed(),
             _ => false,
         }
+    }
+
+    /// Session closes that must not wait for a full RIB channel to drain: a
+    /// parked session still sends their NOTIFICATION and closes TCP at once.
+    /// Their RIB-bound messages queue behind the held ones, in order.
+    pub(crate) fn runs_while_rib_parked(&self) -> bool {
+        matches!(
+            self,
+            Self::Shutdown
+                | Self::Stop { .. }
+                | Self::AdministrativeReset { .. }
+                | Self::PurgeReset
+                | Self::BfdDown
+        )
     }
 
     /// Wake shared-output consumers when their deferred snapshot is abandoned.
