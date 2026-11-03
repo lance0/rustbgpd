@@ -146,9 +146,11 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// the writer already keep. At or above it the session takes no further
 /// outbound work (no slice, shared chunk, marker or RIB envelope); its
 /// pending envelope keeps its cursor and resumes when a completed write
-/// brings the backlog back under the budget. It is never a teardown: a
-/// peer that stops reading altogether is still ended only by the RFC 9687
-/// send hold timer, in the writer.
+/// brings the backlog back under the budget. Waiting is not a failure: a
+/// peer that keeps completing writes is never torn down for it. One that
+/// stops reading altogether is ended by the RFC 9687 send hold timer in the
+/// writer or, with send hold disabled, by the admission deadline, which
+/// every completed write re-arms.
 ///
 /// Derivation. The kernel socket buffer, not this queue, covers the path's
 /// bandwidth-delay product: `write_all` returns once bytes are in the socket
@@ -163,7 +165,10 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// Separate allowance, not counted against the budget:
 /// - the admission step that crosses it: admission is checked before each
 ///   step, so the backlog can exceed the budget by one step, at most
-///   `PROGRESSIVE_SLICE_ROUTES` (2,048) frames;
+///   `PROGRESSIVE_SLICE_ROUTES` (2,048) frames of at most the peer's
+///   maximum message size each (a few KiB for small EVPN frames, several
+///   MiB for large unicast attribute sets); shared group chunks are checked
+///   one at a time;
 /// - coalescing: the writer copies a batch into one buffer whose growth can
 ///   leave up to one more batch of unused capacity while it is in flight;
 /// - allocation: the writer channel's fixed slot storage
@@ -177,10 +182,44 @@ pub(super) const WRITER_BYTE_BUDGET: u64 =
 /// The bytes admitted to one writer, shared by the session that admits them
 /// and the writer that completes them, so either can publish the backlog:
 /// the session as it grows, the writer as it drains.
+///
+/// Each publication moves both gauges by the same delta, taken from the
+/// compare-and-swap that recorded it, so the per-peer and all-session
+/// gauges agree however the session's and the writer's publications
+/// interleave. Retirement is final: once the writer is gone, a late
+/// publication (the session sampling before it sees the exit) records
+/// nothing, so an aborted session cannot leave the total inflated.
 #[derive(Debug, Default)]
 pub(super) struct WriterBytes {
     admitted: AtomicU64,
     published: AtomicU64,
+}
+
+/// `WriterBytes::published` once retired.
+const RETIRED: u64 = u64::MAX;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once inside the next publication, after it reads the published
+    /// value and before it records its own, so a test can interleave a
+    /// second publication there.
+    static BEFORE_RECORD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Runs once inside the next publication, after it records its value
+    /// and before it moves the gauges.
+    static BEFORE_GAUGES: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A point inside a publication where a test can run one interleaved step.
+#[cfg(test)]
+type InterleavePoint = std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn FnOnce()>>>>;
+
+#[cfg(test)]
+fn interleave(point: &'static InterleavePoint) {
+    if let Some(hook) = point.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
 }
 
 impl WriterBytes {
@@ -189,32 +228,48 @@ impl WriterBytes {
         self.admitted.store(admitted, Ordering::Release);
     }
 
-    /// Publish the backlog given the completion watermark. The swap keeps
-    /// the all-session total equal to the sum of each writer's last
-    /// published value whichever side publishes.
+    /// Publish the backlog given the completion watermark.
     pub(super) fn publish(&self, completed: u64, metrics: &BgpMetrics, peer: &str) {
         let held = self
             .admitted
             .load(Ordering::Acquire)
-            .saturating_sub(completed);
-        self.set(held, metrics, peer);
+            .saturating_sub(completed)
+            .min(RETIRED - 1);
+        let mut previous = self.published.load(Ordering::Acquire);
+        loop {
+            if previous == RETIRED || previous == held {
+                return;
+            }
+            #[cfg(test)]
+            interleave(&BEFORE_RECORD);
+            match self.published.compare_exchange_weak(
+                previous,
+                held,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => previous = current,
+            }
+        }
+        #[cfg(test)]
+        interleave(&BEFORE_GAUGES);
+        move_gauges(metrics, peer, held, previous);
     }
 
     /// The writer is gone, and its queue with it.
     pub(super) fn retire(&self, metrics: &BgpMetrics, peer: &str) {
-        self.set(0, metrics, peer);
-    }
-
-    fn set(&self, held: u64, metrics: &BgpMetrics, peer: &str) {
-        let previous = self.published.swap(held, Ordering::AcqRel);
-        if previous != held {
-            let gauge = |bytes: u64| i64::try_from(bytes).unwrap_or(i64::MAX);
-            metrics.set_peer_outbound_writer_bytes(
-                peer,
-                gauge(held),
-                gauge(held).saturating_sub(gauge(previous)),
-            );
+        let previous = self.published.swap(RETIRED, Ordering::AcqRel);
+        if previous != RETIRED {
+            move_gauges(metrics, peer, 0, previous);
         }
+    }
+}
+
+fn move_gauges(metrics: &BgpMetrics, peer: &str, held: u64, previous: u64) {
+    if held != previous {
+        let gauge = |bytes: u64| i64::try_from(bytes).unwrap_or(i64::MAX);
+        metrics.add_peer_outbound_writer_bytes(peer, gauge(held) - gauge(previous));
     }
 }
 
@@ -1089,6 +1144,59 @@ mod tests {
         drop(handle.bulk_tx);
         drop(handle.priority_tx);
         handle.join.await.unwrap().unwrap();
+    }
+
+    /// Publish `completed` from inside the next publication, at `point`.
+    fn publish_inside(
+        point: &'static InterleavePoint,
+        bytes: &Arc<WriterBytes>,
+        metrics: &BgpMetrics,
+        completed: u64,
+    ) {
+        let (bytes, metrics) = (Arc::clone(bytes), metrics.clone());
+        point.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || bytes.publish(completed, &metrics, "p")));
+        });
+    }
+
+    /// Whatever order the session's and the writer's publications land in,
+    /// both gauges end at the value last recorded. One publication lands
+    /// inside the other: after it read the published value, and after it
+    /// recorded its own.
+    #[test]
+    fn interleaved_publications_leave_both_gauges_at_the_recorded_value() {
+        for before_record in [true, false] {
+            let metrics = BgpMetrics::new();
+            let bytes = Arc::new(WriterBytes::default());
+            bytes.admitted(10);
+            let point = if before_record {
+                &BEFORE_RECORD
+            } else {
+                &BEFORE_GAUGES
+            };
+            publish_inside(point, &bytes, &metrics, 7);
+            bytes.publish(5, &metrics, "p");
+            let recorded = i64::try_from(bytes.published.load(Ordering::Acquire)).unwrap();
+            assert_eq!(recorded, if before_record { 5 } else { 3 });
+            assert_eq!(metrics.peer_outbound_writer_bytes("p"), recorded);
+            assert_eq!(metrics.outbound_writer_bytes(), recorded);
+        }
+    }
+
+    /// Retirement is final: a publication after it (the session sampling
+    /// before it sees its writer's exit) records nothing, so the total does
+    /// not stay inflated after the session is aborted.
+    #[test]
+    fn a_publication_after_retirement_records_nothing() {
+        let metrics = BgpMetrics::new();
+        let bytes = WriterBytes::default();
+        bytes.admitted(10);
+        bytes.publish(4, &metrics, "p");
+        assert_eq!(metrics.outbound_writer_bytes(), 6);
+        bytes.retire(&metrics, "p");
+        bytes.publish(0, &metrics, "p");
+        assert_eq!(metrics.peer_outbound_writer_bytes("p"), 0);
+        assert_eq!(metrics.outbound_writer_bytes(), 0);
     }
 
     /// The budget is the derivation its docs give: two coalesced writes,

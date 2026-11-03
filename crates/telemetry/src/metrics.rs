@@ -5003,14 +5003,14 @@ impl BgpMetrics {
             .set(depth);
     }
 
-    /// Set the encoded bytes a peer's writer holds to `held`, and move the
-    /// all-session total by `delta`, the change since this peer's previous
-    /// value. Sampled at the same points as the queue depth.
-    pub fn set_peer_outbound_writer_bytes(&self, peer: &str, held: i64, delta: i64) {
+    /// Move a peer's writer-bytes gauge and the all-session total by the
+    /// same `delta`, so the two always agree. Sampled at the same points as
+    /// the queue depth.
+    pub fn add_peer_outbound_writer_bytes(&self, peer: &str, delta: i64) {
         self.0
             .peer_outbound_writer_bytes
             .with_label_values(&[peer])
-            .set(held);
+            .add(delta);
         self.0.outbound_writer_bytes.add(delta);
     }
 
@@ -10680,7 +10680,7 @@ mod tests {
         m.set_rib_prefixes(peer, "ipv4_unicast", 42);
         m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
         m.set_peer_outbound_queue_depth(peer, 3);
-        m.set_peer_outbound_writer_bytes(peer, 3, 3);
+        m.add_peer_outbound_writer_bytes(peer, 3);
         m.set_peer_slow(peer, true);
         m.set_bmp_stream_diverged(peer, true);
         m.set_rejected_routes_retained(peer, 4);
@@ -11105,15 +11105,15 @@ mod tests {
     #[test]
     fn writer_bytes_total_follows_each_peers_published_change() {
         let m = BgpMetrics::new();
-        m.set_peer_outbound_writer_bytes("10.0.0.1", 5, 5);
-        m.set_peer_outbound_writer_bytes("10.0.0.2", 7, 7);
-        m.set_peer_outbound_writer_bytes("10.0.0.1", 2, -3);
+        m.add_peer_outbound_writer_bytes("10.0.0.1", 5);
+        m.add_peer_outbound_writer_bytes("10.0.0.2", 7);
+        m.add_peer_outbound_writer_bytes("10.0.0.1", -3);
         assert_eq!(m.peer_outbound_writer_bytes("10.0.0.1"), 2);
         assert_eq!(m.peer_outbound_writer_bytes("10.0.0.2"), 7);
         assert_eq!(m.outbound_writer_bytes(), 9);
-        m.set_rib_outbound_credit(11, 1);
+        m.set_rib_outbound_credit(11, 2);
         assert_eq!(m.rib_outbound_credit_rows(), 11);
-        assert_eq!(m.rib_outbound_operations_live(), 1);
+        assert_eq!(m.rib_outbound_operations_live(), 2);
         m.initialize_outbound_commit_refusal_series("10.0.0.1");
         let text = gather_text(&m);
         for reason in crate::reason_labels::OutboundCommitRefusal::ALL {
