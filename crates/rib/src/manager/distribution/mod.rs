@@ -409,7 +409,7 @@ pub(in crate::manager) fn sort_evpn_announcements(
 }
 
 impl OutboundCommitBatch {
-    fn retire_with(
+    pub(in crate::manager) fn retire_with(
         &mut self,
         checkpoint: &mut impl FnMut(),
         #[cfg(test)] observer: Option<&(dyn Fn(&'static str) + Send + Sync)>,

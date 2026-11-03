@@ -1101,6 +1101,62 @@ fn producers_stage_nothing_for_a_peer_without_credit() {
     }
 }
 
+/// A selection release's replay toward a private peer is an ordinary
+/// envelope: with the peer's credit spent it stages nothing and leaves the
+/// peer dirty, its End-of-RIB still owed; with credit it stages the family
+/// and sends the End-of-RIB. Red without the preflight: the replay stages
+/// the family before the send is refused.
+#[test]
+fn a_selection_release_without_credit_stages_nothing() {
+    use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter};
+    const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+    let waiter = Ipv4Addr::new(192, 0, 2, 83);
+    let address = Ipv4Addr::new(192, 0, 2, 84);
+    let peer = peer_v4(address);
+    for spent in [false, true] {
+        let mut manager = manager_with_dormant_waiter();
+        let _waiter_rx = connect(&mut manager, waiter, 64, true, false);
+        assert!(manager.selection_deferred(FAMILY));
+        let mut rx = connect(&mut manager, address, 64, false, true);
+        assert!(manager.grouped_member_of(peer).is_none(), "private");
+        send_all(&mut rx);
+        assert!(manager.pending_eor[&peer].contains(&FAMILY), "EoR held");
+        let charge = spent.then(|| {
+            crate::OutboundCharge::new(
+                &manager.outbound_credit_handle(peer),
+                manager.outbound_row_credit(),
+            )
+        });
+        let before = manager.outbound_stagings(peer);
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: peer_v4(waiter),
+            session_id: u64::from(waiter.octets()[3]),
+            afi: FAMILY.0,
+            safi: FAMILY.1,
+        });
+        assert!(!manager.selection_deferred(FAMILY), "released");
+        let sent = send_all(&mut rx);
+        let staged = manager.outbound_stagings(peer) - before;
+        if spent {
+            assert_eq!(staged, 0, "nothing staged without credit");
+            assert!(manager.dirty_peers.contains(&peer));
+            assert!(
+                manager.pending_eor[&peer].contains(&FAMILY),
+                "EoR still owed"
+            );
+            assert!(sent.iter().all(|update| update.end_of_rib.is_empty()));
+        } else {
+            assert!(staged > 0, "the release replays the family");
+            assert!(
+                sent.iter()
+                    .any(|update| update.end_of_rib.contains(&FAMILY))
+            );
+            assert!(!manager.dirty_peers.contains(&peer));
+        }
+        drop(charge);
+    }
+}
+
 /// `passes` passes of 1,024 new keys from the source, unicast or EVPN.
 fn fresh_passes(manager: &mut RibManager, first: u32, passes: u32, evpn: bool) {
     for pass in first..first + passes {

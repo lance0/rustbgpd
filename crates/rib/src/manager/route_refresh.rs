@@ -1003,7 +1003,16 @@ impl RibManager {
             },
         };
         let admitted = match operation {
-            None if !latched => Some((None, None)),
+            // Spent credit refuses the release's ordinary envelope: stage
+            // nothing, and the caller leaves the peer dirty.
+            None if !latched => {
+                if self.outbound_credit_exhausted(peer) {
+                    self.refuse_outbound_for_credit(peer);
+                    None
+                } else {
+                    Some((None, None))
+                }
+            }
             None => None,
             Some(operation) => operation.slot().map(|slot| (Some(operation), Some(slot))),
         };
@@ -1025,6 +1034,9 @@ impl RibManager {
             }
             return FamilyReplayOutcome::Failed;
         };
+        if !latched {
+            self.note_outbound_staging(peer);
+        }
         let orf_filter = self
             .peer_orf_filters
             .get(&peer)

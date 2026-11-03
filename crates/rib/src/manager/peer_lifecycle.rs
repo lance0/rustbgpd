@@ -1204,6 +1204,24 @@ impl RibManager {
         }
     }
 
+    /// Credit preflight for a helper flush toward `peer`: spent ordinary
+    /// credit would refuse the withdrawals, so walk nothing and keep the
+    /// whole set, re-checked once credit is back, without marking the peer
+    /// dirty. While closing, withdrawals need capacity alone.
+    fn helper_stale_flush_refused(&mut self, peer: PeerId, changed: &HashSet<Prefix>) -> bool {
+        if self.outbound_credit_exhausted(peer) {
+            if let Some(carried) = self.helper_stale_exempt.get_mut(&peer)
+                && carried.settled
+                && touches_changed(&carried.keys, changed)
+            {
+                carried.settled = false;
+            }
+            return true;
+        }
+        self.note_outbound_staging(peer);
+        false
+    }
+
     /// Withdraw the carried stale exempt keys a caught-up session does not
     /// advertise while our End-of-RIB for their family is held. Its live
     /// exempt rows are already on the wire, so no prefix loses its last
@@ -1216,6 +1234,9 @@ impl RibManager {
         }
         self.retire_helper_stale_exempt();
         for peer in self.helper_stale_exempt_ready(changed) {
+            if self.helper_stale_flush_refused(peer, changed) {
+                continue;
+            }
             // A route-bearing envelope carries the current session's export
             // snapshot, or the transport resets the session.
             let Some(encoder) = self.peer_export_encoders.get(&peer) else {
@@ -3908,42 +3929,53 @@ impl RibManager {
         } else {
             Ok(None)
         };
-        let sent = match admitted {
-            Err(failure) => self.outbound_commit_failed(peer, failure),
-            Ok(slot) if has_outbound_diff => self
+        let batch = has_outbound_diff.then(|| OutboundCommitBatch {
+            local_sources: unicast.local_sources,
+            force_unicast_replay: true,
+            unicast_otc_prechecked,
+            announce_source_exclusion,
+            shared_group_encode,
+            exact_export_snapshot: unicast.exact_export_snapshot,
+            withdraw: unicast.withdraw,
+            flowspec_announce: fs_announce,
+            flowspec_withdraw: fs_withdraw,
+            evpn_announce: evpn_announce.into(),
+            evpn_withdraw,
+            evpn_complete_feed,
+            bgpls_announce,
+            bgpls_withdraw,
+            vpn_announce: vpn_announce.into(),
+            vpn_withdraw,
+            labeled_announce,
+            labeled_withdraw,
+            rtc_announce,
+            rtc_withdraw,
+            ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
+        });
+        let sent = match (admitted, batch) {
+            (Err(failure), batch) => {
+                // A refused dump's staged table retires at checkpoints, as a
+                // refused send's does.
+                if let Some(mut batch) = batch {
+                    batch.retire_with(
+                        &mut checkpoint,
+                        #[cfg(test)]
+                        None,
+                    );
+                }
+                self.outbound_commit_failed(peer, failure)
+            }
+            (Ok(slot), Some(batch)) => self
                 .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                     peer,
-                    OutboundCommitBatch {
-                        local_sources: unicast.local_sources,
-                        force_unicast_replay: true,
-                        unicast_otc_prechecked,
-                        announce_source_exclusion,
-                        shared_group_encode,
-                        exact_export_snapshot: unicast.exact_export_snapshot,
-                        withdraw: unicast.withdraw,
-                        flowspec_announce: fs_announce,
-                        flowspec_withdraw: fs_withdraw,
-                        evpn_announce: evpn_announce.into(),
-                        evpn_withdraw,
-                        evpn_complete_feed,
-                        bgpls_announce,
-                        bgpls_withdraw,
-                        vpn_announce: vpn_announce.into(),
-                        vpn_withdraw,
-                        labeled_announce,
-                        labeled_withdraw,
-                        rtc_announce,
-                        rtc_withdraw,
-                        slot,
-                        ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
-                    },
+                    OutboundCommitBatch { slot, ..batch },
                     crate::fast_hash::FastSet::default(),
                     shared_unicast_precommit,
                     member_of.is_none().then_some(&otc_prefixes),
                     None,
                     None,
                 ),
-            Ok(_) => Ok(()),
+            (Ok(_), None) => Ok(()),
         };
         export_memo.retire_with(&mut checkpoint);
         if let Err(failure) = sent {

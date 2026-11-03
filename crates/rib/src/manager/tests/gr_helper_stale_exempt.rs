@@ -994,6 +994,40 @@ fn full_writer_unsettles_a_withdrawable_carried_key() {
     assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
 }
 
+/// The GR-helper producer's credit preflight (T5's eighth arm): with the
+/// receiver's ordinary credit spent, a withdrawable carried key is walked
+/// by no flush and the whole set is kept, the receiver not marked dirty;
+/// once the credit drains the timer withdraws it. Red without the
+/// preflight: each flush builds the candidates before the send is refused.
+#[test]
+fn spent_credit_keeps_the_carried_set_unwalked() {
+    let (mut manager, mut rib, (_tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
+    let observer = peer_v4(OBSERVER);
+    let charge = crate::OutboundCharge::new(
+        &manager.outbound_credit_handle(observer),
+        manager.outbound_row_credit(),
+    );
+    let stagings = manager.outbound_stagings(observer);
+    withdraw_received(&mut manager, rtbh);
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert_eq!(
+        manager.outbound_stagings(observer),
+        stagings,
+        "nothing walked"
+    );
+    assert!(!manager.dirty_peers.contains(&observer));
+    assert!(
+        manager.helper_stale_exempt[&observer]
+            .keys
+            .contains(&(Prefix::V4(rtbh), 0)),
+        "the whole set is kept"
+    );
+    drop(charge);
+    assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
+}
+
 /// A settled key's last covering route goes while its receiver is dirty
 /// and not caught up, so the flush skips it. Red proof: without unsettling
 /// the skipped set, the recovered session never re-checks the key.
