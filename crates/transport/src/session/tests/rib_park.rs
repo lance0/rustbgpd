@@ -327,7 +327,12 @@ async fn rib_park_shutdown_sends_cease_then_delivers_in_order() {
             announced.extend(announced_v4(&update));
         }
     };
-    let (result, announced) = tokio::join!(run, drain);
+    // Bounded: the test owns the session, so its RIB sender never closes and
+    // a missing flush would otherwise hang instead of failing.
+    let (result, announced) =
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(run, drain) })
+            .await
+            .expect("run() must deliver the held UPDATE and PeerDown, then return");
     result.unwrap();
     assert_eq!(
         announced,
