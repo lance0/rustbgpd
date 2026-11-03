@@ -37,6 +37,28 @@ pub(super) enum FamilyReplayOutcome {
     Failed,
 }
 
+/// Append to `withdraw` every `held` key the answer neither announces nor
+/// already withdraws: the withdrawals a dirty peer still owes for the
+/// refreshed family.
+fn sweep_owed_withdrawals<K: Clone + Eq + std::hash::Hash>(
+    announced: impl Iterator<Item = K>,
+    withdraw: &mut Vec<K>,
+    held: impl Iterator<Item = K>,
+    checkpoint: &mut impl FnMut(bool),
+) {
+    let mut answered: HashSet<K> = announced
+        .chain(withdraw.iter().cloned())
+        .inspect(|_| checkpoint(false))
+        .collect();
+    for key in held {
+        checkpoint(false);
+        if answered.insert(key.clone()) {
+            withdraw.push(key);
+        }
+    }
+    super::retire_hash_set(&mut answered, &mut || checkpoint(false));
+}
+
 /// Remove one family from a per-peer family set, dropping the peer's entry
 /// when the set empties and never creating one. Readers such as
 /// `clean_policy_transition_peer_ready` check the key, so for these maps a
@@ -1532,6 +1554,37 @@ impl RibManager {
                         unicast.announce.push(route);
                     }
                 }
+                // A dirty member's admitted proof names the routes it may still
+                // hold; those it no longer retains are owed withdrawals. Send
+                // them inside this answer: its EoRR purges them otherwise, and
+                // the resync would then withdraw a route the peer no longer
+                // holds (RFC 7313 §4). Operator replay, prefix-limit recovery
+                // and selection release share this body and settle the same
+                // withdrawals (a held family never reaches here).
+                if self.dirty_peers.contains(&peer)
+                    && let Some(admitted) = self.pending_group_admitted.get(&peer)
+                {
+                    let rs_control = rs_control_asn.zip(target_peer_asn);
+                    unicast.withdraw.extend(
+                        admitted
+                            .iter_with_checkpoint(|force| {
+                                super::replacement_readiness_checkpoint(
+                                    &self.replacement_readiness,
+                                    force,
+                                );
+                            })
+                            .filter_map(|key| match key {
+                                crate::update::ExactExportKey::Unicast(prefix, path_id)
+                                    if prefix_family(&prefix) == family
+                                        && !group
+                                            .member_retains(peer, &prefix, path_id, rs_control) =>
+                                {
+                                    Some((prefix, path_id))
+                                }
+                                _ => None,
+                            }),
+                    );
+                }
                 let filtered = group
                     .policy_filtered_for_member_with_checkpoint(peer, &all_prefixes, &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
@@ -1751,19 +1804,63 @@ impl RibManager {
             // re-advertised for ROUTE-REFRESH. That empty view cannot discover
             // routes that were advertised before a deferred ORF update and are
             // now denied by the installed filter, so withdraw those explicitly
-            // from the real Adj-RIB-Out.
-            if let (Some(filter), Some(rib_out)) =
-                (orf_filter.as_ref(), self.adj_ribs_out.get(&peer))
-            {
+            // from the real Adj-RIB-Out. Nor can it discover a withdrawal a
+            // dirty peer still owes: send that inside this answer too, since
+            // its EoRR purges the route and a later resync would withdraw a
+            // route the peer no longer holds (RFC 7313 §4). The owed keys are
+            // its Adj-RIB-Out rows and, for a dirty member that left its group,
+            // the admitted proof it kept (its Adj-RIB-Out was never seeded).
+            // As in the grouped arm, every replay kind sharing this body
+            // settles them.
+            let owes = self.dirty_peers.contains(&peer);
+            let rib_out = self.adj_ribs_out.get(&peer);
+            if orf_filter.is_some() || owes {
+                let mut answered: HashSet<(Prefix, u32)> = HashSet::new();
+                if owes {
+                    answered.extend(
+                        unicast
+                            .announce
+                            .iter()
+                            .map(|route| (route.prefix, route.path_id))
+                            .chain(unicast.withdraw.iter().copied())
+                            .inspect(|_| {
+                                super::replacement_readiness_checkpoint(
+                                    &self.replacement_readiness,
+                                    false,
+                                );
+                            }),
+                    );
+                }
                 for route in rib_out
-                    .iter()
+                    .into_iter()
+                    .flat_map(AdjRibOut::iter)
                     .inspect(|_| {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     })
-                    .filter(|r| prefix_family(&r.prefix) == family && !filter.permits(&r.prefix))
+                    .filter(|r| prefix_family(&r.prefix) == family)
                 {
-                    unicast.withdraw.push((route.prefix, route.path_id));
+                    let denied = orf_filter
+                        .as_ref()
+                        .is_some_and(|filter| !filter.permits(&route.prefix));
+                    if denied || (owes && answered.insert((route.prefix, route.path_id))) {
+                        unicast.withdraw.push((route.prefix, route.path_id));
+                    }
                 }
+                if owes && let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                    for key in admitted.iter_with_checkpoint(|force| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+                    }) {
+                        if let crate::update::ExactExportKey::Unicast(prefix, path_id) = key
+                            && prefix_family(&prefix) == family
+                            && answered.insert((prefix, path_id))
+                        {
+                            unicast.withdraw.push((prefix, path_id));
+                        }
+                    }
+                }
+                super::retire_hash_set(&mut answered, &mut || {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                });
             }
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
             #[cfg(feature = "bench-internals")]
@@ -1772,6 +1869,126 @@ impl RibManager {
                 super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
             });
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+        }
+        // The other families are staged against the same empty view, so the
+        // same owed withdrawals of a dirty peer go inside this answer: its
+        // Adj-RIB-Out rows of the family that the answer does not cover, and
+        // a grouped VPN member's proof keys (RFC 7313 §4). An owned EVPN
+        // member's complete feed carries its own withdrawals.
+        if self.dirty_peers.contains(&peer) {
+            let rib_out = self.adj_ribs_out.get(&peer);
+            let checkpoint = &mut |force| {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+            };
+            if safi == Safi::FlowSpec {
+                sweep_owed_withdrawals(
+                    fs_announce.iter().map(FlowSpecRoute::selection_key),
+                    &mut fs_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_flowspec)
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint_at(
+                                &self.replacement_readiness,
+                                "refresh_owed_sweep",
+                                false,
+                            );
+                        })
+                        .filter(|route| route.afi == afi)
+                        .map(FlowSpecRoute::selection_key),
+                    checkpoint,
+                );
+            } else if family == (Afi::L2Vpn, Safi::Evpn) && owned_evpn.is_none() {
+                sweep_owed_withdrawals(
+                    evpn_announce.iter().map(crate::route::EvpnRibRoute::key),
+                    &mut evpn_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_evpn)
+                        .map(crate::route::EvpnRibRoute::key),
+                    checkpoint,
+                );
+            } else if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
+                sweep_owed_withdrawals(
+                    bgpls_announce.iter().map(crate::route::BgpLsRibRoute::key),
+                    &mut bgpls_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_bgpls)
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint_at(
+                                &self.replacement_readiness,
+                                "refresh_owed_sweep",
+                                false,
+                            );
+                        })
+                        .filter(|route| route.family == bgpls_family)
+                        .map(crate::route::BgpLsRibRoute::key),
+                    checkpoint,
+                );
+            } else if safi == Safi::MplsVpn {
+                let proof = self.pending_group_admitted.get(&peer);
+                sweep_owed_withdrawals(
+                    vpn_announce.iter().map(crate::route::VpnRibRoute::key),
+                    &mut vpn_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_vpn)
+                        .map(crate::route::VpnRibRoute::key)
+                        .chain(proof.into_iter().flat_map(|proof| {
+                            proof
+                                .iter_with_checkpoint(|force| {
+                                    super::replacement_readiness_checkpoint(
+                                        &self.replacement_readiness,
+                                        force,
+                                    );
+                                })
+                                .filter_map(|key| match key {
+                                    crate::update::ExactExportKey::Vpn(key) => Some(key),
+                                    _ => None,
+                                })
+                        }))
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint_at(
+                                &self.replacement_readiness,
+                                "refresh_owed_sweep",
+                                false,
+                            );
+                        })
+                        .filter(|key| key.afi_safi() == family),
+                    checkpoint,
+                );
+            } else if safi == Safi::LabeledUnicast {
+                sweep_owed_withdrawals(
+                    labeled_announce
+                        .iter()
+                        .map(crate::route::LabeledRibRoute::key),
+                    &mut labeled_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_labeled)
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint_at(
+                                &self.replacement_readiness,
+                                "refresh_owed_sweep",
+                                false,
+                            );
+                        })
+                        .filter(|route| route.afi_safi() == family)
+                        .map(crate::route::LabeledRibRoute::key),
+                    checkpoint,
+                );
+            } else if safi == Safi::RtConstrain {
+                sweep_owed_withdrawals(
+                    rtc_announce.iter().map(crate::route::RtcRibRoute::key),
+                    &mut rtc_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_rtc)
+                        .map(crate::route::RtcRibRoute::key),
+                    checkpoint,
+                );
+            }
         }
 
         crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
@@ -1971,9 +2188,12 @@ impl RibManager {
                 .and_then(|gid| self.group_ribs.get(&gid))
                 .is_some_and(|group| !group.per_client_best);
         let mut group_prior = crate::fast_hash::FastSet::default();
+        // An admitted proof replaces the unicast prior at every commit read
+        // (a refused proof falls back conservatively), so skip the clone.
         if !defer_grouped_refresh_prior
             && !matches!(replay_kind, FamilyReplayKind::SelectionRelease)
             && member_of.is_some()
+            && !self.pending_group_admitted.contains_key(&peer)
             && let Some(routes) = self.grouped_advertised_routes(peer)
         {
             group_prior.extend(routes.into_iter().map(|route| {

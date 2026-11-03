@@ -4258,3 +4258,134 @@ fn parked_evpn_withdrawal_survives_its_source_going_down() {
         vec![0; usize::from(receivers)]
     );
 }
+
+/// A private EVPN receiver on the transport's outbound channel capacity
+/// holds a route. It stops reading while the source announces until its
+/// channel is full; the route's withdrawal is then refused, so the receiver
+/// goes dirty owing it. It drains and sends an EVPN ROUTE-REFRESH before the
+/// resync tick: the answer (`BoRR`, the current table, `EoRR`) must carry
+/// the owed withdrawal, so the resync does not withdraw the route again.
+/// The model is an RFC 7313 receiver: `BoRR` marks its routes stale, `EoRR`
+/// purges what stayed stale, and a withdrawal must name a route it holds.
+/// Red proof: without the answer's EVPN sweep, the resync withdraws a route
+/// the `EoRR` already purged.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript fills a real session channel, then refreshes and resyncs"
+)]
+fn evpn_refresh_answer_settles_the_owed_withdrawal() {
+    use rustbgpd_wire::RouteRefreshSubtype;
+    const SESSION_CHANNEL: u32 = 4096;
+    const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+    let source: Ipv4Addr = "192.0.2.10".parse().unwrap();
+    let pass = |manager: &mut RibManager, announced: Option<u32>, withdrawn: Option<u32>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(source),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: announced
+                .map(|tag| make_evpn_imet(source, tag))
+                .into_iter()
+                .collect(),
+            evpn_withdrawn: withdrawn
+                .map(|tag| make_evpn_imet(source, tag).key())
+                .into_iter()
+                .collect(),
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    let apply = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+                 held: &mut BTreeMap<rustbgpd_wire::EvpnRouteKey, bool>| {
+        while let Ok(update) = rx.try_recv() {
+            let marker = |subtype| {
+                update
+                    .refresh_markers
+                    .iter()
+                    .any(|&(afi, safi, kind)| (afi, safi) == EVPN && kind == subtype)
+            };
+            if marker(RouteRefreshSubtype::BoRR) {
+                for stale in held.values_mut() {
+                    *stale = true;
+                }
+            }
+            for key in &update.evpn_withdraw {
+                assert!(
+                    held.remove(key).is_some(),
+                    "withdrawal of {key:?}, which the receiver does not hold"
+                );
+            }
+            for route in update.evpn_announce.iter() {
+                held.insert(route.key(), false);
+            }
+            if marker(RouteRefreshSubtype::EoRR) {
+                held.retain(|_, stale| !*stale);
+            }
+        }
+    };
+    let (_tx, rx) = mpsc::channel(4);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some("192.0.2.254".parse().unwrap()),
+        BgpMetrics::new(),
+    );
+    let stuck = PeerId::from_addr("192.0.2.31".parse().unwrap());
+    let (outbound_tx, mut stuck_rx) = mpsc::channel(usize::try_from(SESSION_CHANNEL).unwrap());
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: stuck,
+        peer_asn: 65000,
+        peer_router_id: "192.0.2.31".parse().unwrap(),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while stuck_rx.try_recv().is_ok() {}
+    let mut held = BTreeMap::new();
+    pass(&mut manager, Some(0), None);
+    apply(&mut stuck_rx, &mut held);
+    assert!(held.contains_key(&make_evpn_imet(source, 0).key()));
+    for tag in 1..=SESSION_CHANNEL {
+        pass(&mut manager, Some(tag), None);
+    }
+    assert!(manager.outbound_channel_full(stuck));
+    assert!(!manager.dirty_peers.contains(&stuck));
+    pass(&mut manager, None, Some(0));
+    assert!(
+        manager.dirty_peers.contains(&stuck),
+        "the refused withdrawal"
+    );
+
+    apply(&mut stuck_rx, &mut held);
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        peer: stuck,
+        session_id: 0,
+        afi: EVPN.0,
+        safi: EVPN.1,
+    });
+    apply(&mut stuck_rx, &mut held);
+    assert!(!held.contains_key(&make_evpn_imet(source, 0).key()));
+    manager.resync_dirty_peers_bounded();
+    apply(&mut stuck_rx, &mut held);
+    assert!(!manager.dirty_peers.contains(&stuck));
+    let expected: BTreeSet<_> = (1..=SESSION_CHANNEL)
+        .map(|tag| make_evpn_imet(source, tag).key())
+        .collect();
+    assert_eq!(held.keys().copied().collect::<BTreeSet<_>>(), expected);
+}

@@ -2518,3 +2518,89 @@ fn rejected_private_evpn_payload_retires_at_each_checkpoint() {
         "each released route must be followed by a checkpoint"
     );
 }
+
+/// A clean grouped member's operator replay re-probes its table: a route its
+/// encoder now rejects is owed a withdrawal only because the replay's grouped
+/// prior (the member's advertised view) shows it was sent. Only a peer
+/// refresh of a plain group defers that prior to the probe; operator replay
+/// takes it eagerly. Red proof: skipping the eager prior for operator replay
+/// leaves the rejected route on the member.
+#[test]
+fn grouped_operator_replay_withdraws_a_newly_rejected_route() {
+    let mut manager = test_manager();
+    let member = peer_v4(Ipv4Addr::new(192, 0, 2, 45));
+    let sibling = peer_v4(Ipv4Addr::new(192, 0, 2, 46));
+    let member_encoder = MockExactExportEncoder::accepting(1);
+    let mut receivers = Vec::new();
+    for (peer, encoder) in [
+        (member, Arc::clone(&member_encoder)),
+        (sibling, MockExactExportEncoder::accepting(1)),
+    ] {
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 7,
+            encoder,
+        });
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 7,
+            peer,
+            peer_asn: 65_100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        receivers.push(outbound_rx);
+    }
+    let mut member_rx = receivers.remove(0);
+    assert!(manager.grouped_member_of(member).is_some());
+    assert_eq!(
+        manager.grouped_member_of(member),
+        manager.grouped_member_of(sibling)
+    );
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 119, 0), 24);
+    let source = Ipv4Addr::new(198, 51, 100, 45);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(source),
+        session_id: 0,
+        announced: vec![make_route(prefix, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while manager.process_next_route_chunk() {}
+    let announced = member_rx.try_recv().expect("the route reached the member");
+    assert_eq!(announced.announce.len(), 1);
+
+    member_encoder.set_profile(2, [ExactExportKey::Unicast(Prefix::V4(prefix), 0)]);
+    let (replay, _enrolled) = rustbgpd_bmp::BmpReplay::new(Duration::from_secs(5));
+    let (ack, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplayPeerOutbound {
+        peer: member,
+        session_id: 7,
+        families: ipv4_sendable(),
+        replay,
+        reply: ack,
+    });
+    response.try_recv().unwrap().unwrap();
+    let mut withdrawn = Vec::new();
+    while let Ok(update) = member_rx.try_recv() {
+        assert!(update.announce.is_empty(), "the rejected route stays off");
+        withdrawn.extend(update.withdraw);
+    }
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+}

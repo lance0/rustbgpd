@@ -9367,9 +9367,18 @@ impl RibManager {
                         // The residue drop is safe here: pending extra
                         // withdraws feed the enumerations above, so an empty
                         // enumeration proves there is no residue to emit.
+                        // An empty view is still a completed resync: send the
+                        // markers and refresh answers that waited for it, as
+                        // the commit and unchanged exits below do.
                         if is_dirty && !self.selection_resync_held(peer) {
                             self.dirty_peers.remove(&peer);
                             self.clear_grouped_member_synced(peer);
+                            self.flush_pending_eor(peer);
+                            if !self.dirty_peers.contains(&peer) {
+                                self.retry_pending_refresh(peer);
+                            }
+                        } else if is_dirty {
+                            self.flush_pending_eor(peer);
                         }
                         if is_force && !self.selection_resync_held(peer) {
                             self.force_outbound_peers.remove(&peer);

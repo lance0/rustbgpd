@@ -7349,6 +7349,290 @@ fn ungrouped_dirty_peer_with_full_channel_defers_resync_until_drained() {
     dirty_member_with_full_channel_defers_resync(true);
 }
 
+/// Applies queued updates as an RFC 7313 receiver does: `BoRR` marks every
+/// held route stale, announcements refresh them, and `EoRR` purges what is
+/// still stale. A withdrawal must name a route the receiver holds.
+fn apply_enhanced_refresh(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    held: &mut BTreeMap<(Prefix, u32), bool>,
+) {
+    use rustbgpd_wire::RouteRefreshSubtype;
+    while let Ok(update) = rx.try_recv() {
+        let marker = |subtype| {
+            update
+                .refresh_markers
+                .iter()
+                .any(|&(_, _, kind)| kind == subtype)
+        };
+        if marker(RouteRefreshSubtype::BoRR) {
+            for stale in held.values_mut() {
+                *stale = true;
+            }
+        }
+        for key in &update.withdraw {
+            assert!(
+                held.remove(key).is_some(),
+                "withdrawal of {key:?}, which the receiver does not hold"
+            );
+        }
+        for route in update.announce.iter() {
+            held.insert((route.prefix, route.path_id), false);
+        }
+        if marker(RouteRefreshSubtype::EoRR) {
+            held.retain(|_, stale| !*stale);
+        }
+    }
+}
+
+/// Two members on the transport's outbound channel capacity hold a route.
+/// One stops reading while the source announces until its channel is full;
+/// the route's withdrawal is then refused, so the member goes dirty owing it.
+/// The member drains and sends a ROUTE-REFRESH before the resync tick: the
+/// answer (`BoRR`, the current table, `EoRR`) settles the owed withdrawal,
+/// and the resync must not withdraw the route again. Red proof: without the
+/// answer's owed withdrawals the grouped member's `EoRR` purges the route
+/// and the resync then withdraws a route the receiver no longer holds.
+/// `leave`: the dirty member's export policy turns peer-context dependent
+/// first, so it leaves its group still owing, with its admitted proof and no
+/// seeded Adj-RIB-Out.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript fills a real session channel, then refreshes and resyncs"
+)]
+fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
+    const SESSION_CHANNEL: usize = 4096;
+    let prefix = |index: u32| {
+        Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::from(u32::from(Ipv4Addr::new(198, 18, 0, 0)) + index),
+            32,
+        ))
+    };
+    let pass = |manager: &mut RibManager, announced: Option<u32>, withdrawn: Option<u32>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(FULL_CHANNEL_SOURCE),
+            announced: announced
+                .map(|index| {
+                    let Prefix::V4(prefix) = prefix(index) else {
+                        unreachable!()
+                    };
+                    make_route(prefix, FULL_CHANNEL_SOURCE)
+                })
+                .into_iter()
+                .collect(),
+            withdrawn: withdrawn
+                .map(|index| (prefix(index), 0))
+                .into_iter()
+                .collect(),
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = ungrouped;
+    let stuck = peer_v4(Ipv4Addr::new(10, 44, 0, 1));
+    let live = peer_v4(Ipv4Addr::new(10, 44, 0, 2));
+    let mut receivers = Vec::new();
+    for peer in [stuck, live] {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(SESSION_CHANNEL);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        receivers.push(outbound_rx);
+    }
+    let mut live_rx = receivers.pop().unwrap();
+    let mut stuck_rx = receivers.pop().unwrap();
+    assert_eq!(manager.grouped_member_of(stuck).is_none(), ungrouped);
+    let mut held = BTreeMap::new();
+    pass(&mut manager, Some(0), None);
+    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    assert!(held.contains_key(&(prefix(0), 0)));
+    for index in 1..=u32::try_from(SESSION_CHANNEL).unwrap() {
+        pass(&mut manager, Some(index), None);
+        while live_rx.try_recv().is_ok() {}
+    }
+    assert!(manager.outbound_channel_full(stuck));
+    assert!(!manager.dirty_peers.contains(&stuck));
+    pass(&mut manager, None, Some(0));
+    assert!(
+        manager.dirty_peers.contains(&stuck),
+        "the refused withdrawal"
+    );
+    if leave {
+        assert!(manager.pending_group_admitted.contains_key(&stuck));
+        manager
+            .replace_peer_export_policy_synchronously(stuck, Some(peer_context_chain()))
+            .unwrap();
+        assert!(manager.grouped_member_of(stuck).is_none(), "left dirty");
+        assert!(manager.dirty_peers.contains(&stuck));
+        assert!(
+            manager
+                .adj_ribs_out
+                .get(&stuck)
+                .is_none_or(AdjRibOut::is_empty)
+        );
+    }
+
+    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        peer: stuck,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    assert!(!held.contains_key(&(prefix(0), 0)));
+    manager.resync_dirty_peers_bounded();
+    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    assert!(!manager.dirty_peers.contains(&stuck));
+    let expected: BTreeSet<_> = (1..=u32::try_from(SESSION_CHANNEL).unwrap())
+        .map(|index| (prefix(index), 0))
+        .collect();
+    assert_eq!(held.keys().copied().collect::<BTreeSet<_>>(), expected);
+}
+
+#[test]
+fn grouped_refresh_answer_settles_the_owed_withdrawal() {
+    refresh_answer_settles_the_owed_withdrawal(false, false);
+}
+
+#[test]
+fn ungrouped_refresh_answer_settles_the_owed_withdrawal() {
+    refresh_answer_settles_the_owed_withdrawal(true, false);
+}
+
+/// Red proof: without the proof sweep in the per-peer arm, the leaver's
+/// `EoRR` purges the route and its resync withdraws it again.
+#[test]
+fn group_leaver_refresh_answer_settles_the_owed_withdrawal() {
+    refresh_answer_settles_the_owed_withdrawal(false, true);
+}
+
+/// A dirty dual-stack member's proof admits IPv4 and IPv6 keys it may hold:
+/// one IPv4 and one IPv6 route it is owed withdrawals for, and IPv4 routes it
+/// still retains. Its IPv4 refresh answer withdraws only the owed IPv4 key;
+/// the IPv6 withdrawal is left to the resync. Red proof: dropping either half
+/// of the grouped sweep's guard (the family or the retention check)
+/// withdraws other keys in the answer.
+#[test]
+fn grouped_refresh_answer_withdraws_only_the_family_keys_the_member_left() {
+    let ipv4 = |third: u8| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, third, 0), 24));
+    let ipv6 = Prefix::V6(Ipv6Prefix::new("2001:db8:c::".parse().unwrap(), 48));
+    let route = |prefix: Prefix| {
+        let mut route = make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 0, 0), 24),
+            FULL_CHANNEL_SOURCE,
+        );
+        route.prefix = prefix;
+        route
+    };
+    let pass = |manager: &mut RibManager, announced: Vec<Prefix>, withdrawn: Vec<Prefix>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(FULL_CHANNEL_SOURCE),
+            announced: announced.into_iter().map(route).collect(),
+            withdrawn: withdrawn.into_iter().map(|prefix| (prefix, 0)).collect(),
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let stuck = peer_v4(Ipv4Addr::new(10, 45, 0, 1));
+    let live = peer_v4(Ipv4Addr::new(10, 45, 0, 2));
+    let mut receivers = Vec::new();
+    for (peer, capacity) in [(stuck, FULL_CHANNEL_CAPACITY), (live, 64)] {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(capacity);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: dual_stack_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        receivers.push(outbound_rx);
+    }
+    let mut live_rx = receivers.pop().unwrap();
+    let mut stuck_rx = receivers.pop().unwrap();
+    assert!(manager.grouped_member_of(stuck).is_some());
+    pass(&mut manager, vec![ipv4(1), ipv4(2), ipv6], vec![]);
+    while stuck_rx.try_recv().is_ok() {}
+    for third in 10..10 + u8::try_from(FULL_CHANNEL_CAPACITY).unwrap() {
+        pass(&mut manager, vec![ipv4(third)], vec![]);
+    }
+    while live_rx.try_recv().is_ok() {}
+    assert!(manager.outbound_channel_full(stuck));
+    pass(&mut manager, vec![], vec![ipv4(1), ipv6]);
+    assert!(manager.dirty_peers.contains(&stuck));
+    let proof = manager.pending_group_admitted.get(&stuck).expect("a proof");
+    assert!(proof.contains(&ExactExportKey::Unicast(ipv6, 0)));
+    assert!(proof.contains(&ExactExportKey::Unicast(ipv4(2), 0)));
+    while stuck_rx.try_recv().is_ok() {}
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        peer: stuck,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    let mut withdrawn = Vec::new();
+    let mut announced = BTreeSet::new();
+    while let Ok(update) = stuck_rx.try_recv() {
+        withdrawn.extend(update.withdraw.iter().copied());
+        announced.extend(update.announce.iter().map(|route| route.prefix));
+    }
+    assert_eq!(withdrawn, vec![(ipv4(1), 0)]);
+    assert!(
+        announced.contains(&ipv4(2)),
+        "the retained route is replayed"
+    );
+    manager.resync_dirty_peers_bounded();
+    let mut resync_withdrawn = Vec::new();
+    while let Ok(update) = stuck_rx.try_recv() {
+        resync_withdrawn.extend(update.withdraw.iter().copied());
+    }
+    assert_eq!(resync_withdrawn, vec![(ipv6, 0)]);
+}
+
 /// A forced peer that is already dirty still records later missed passes,
 /// but does not rebuild its whole table while the receiver is full. Once
 /// the receiver drains, force re-announces an unchanged advertised prefix.

@@ -835,3 +835,123 @@ async fn unlock_after_the_cap_under_a_hold_goes_out_at_release() {
     release_hold(&mut manager);
     assert_eq!(apply(&mut rx, &mut rib), vec!["eor"]);
 }
+
+/// The transport's per-session outbound channel capacity.
+const SESSION_CHANNEL: usize = 4096;
+
+fn local(mut route: Route) -> Route {
+    set_peer(&mut route, crate::PeerId::LOCAL);
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route
+}
+
+fn inject(manager: &mut RibManager, route: Route) {
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route, reply });
+    while manager.process_next_route_chunk() {}
+    result.try_recv().unwrap().unwrap();
+}
+
+fn withdraw_injected(manager: &mut RibManager, prefix: Prefix) {
+    let (reply, mut removed) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix,
+        path_id: 0,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    while manager.process_next_route_chunk() {}
+    assert!(removed.try_recv().unwrap().unwrap().removed);
+}
+
+/// An IPv4 + IPv6 helper-only session of the observer on a `capacity` channel.
+fn register_dual_stack(
+    manager: &mut RibManager,
+    session_id: u64,
+    capacity: usize,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (tx, rx) = mpsc::channel(capacity);
+    manager.handle_update(context(session_id, Open::HelperOnly));
+    let mut up = peer_up(session_id, tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    {
+        sendable_families.push((Afi::Ipv6, Safi::Unicast));
+    }
+    manager.handle_update(up);
+    rx
+}
+
+/// A GR helper reconnects at the transport's channel capacity, holding our
+/// host route stale; its ORF-gated IPv4 End-of-RIB waits for its first
+/// ROUTE-REFRESH. It reads its initial IPv6 End-of-RIB, then stops reading
+/// while one IPv6 route flaps until the channel is full and the session goes
+/// dirty with nothing advertised. Its IPv4 refresh is refused and owed, the
+/// host route is withdrawn, and the receiver drains. The dirty resync then
+/// finds an empty export view; it must still answer the refresh, whose
+/// End-of-RIB lets the helper delete the stale host route (RFC 4724 §4.2).
+/// Red proof: without the flush and retry on the empty-view exit the refresh
+/// is dropped, no End-of-RIB comes (not even at the hold's cap), and the
+/// helper keeps the route.
+#[tokio::test(start_paused = true)]
+async fn empty_view_resync_answers_the_owed_refresh_and_its_held_eor() {
+    let mut manager = manager();
+    let peer = peer_v4(OBSERVER);
+    let mut old_rx = register_dual_stack(&mut manager, 82, 64);
+    permit_all_orf(&mut manager, 82);
+    inject_host(&mut manager);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib);
+    assert_eq!(rib.get(&host().1), Some(&false));
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 82,
+    });
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+
+    let mut rx = register_dual_stack(&mut manager, 182, SESSION_CHANNEL);
+    assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
+    assert!(queued(&manager.gr_deferred_eor, peer));
+    let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48);
+    let route = local(crate::test_support::make_v6_route(
+        prefix,
+        "2001:db8::81".parse().unwrap(),
+    ));
+    let flapping = Prefix::V6(prefix);
+    for _ in 0..SESSION_CHANNEL / 2 {
+        inject(&mut manager, route.clone());
+        withdraw_injected(&mut manager, flapping);
+    }
+    assert!(manager.outbound_channel_full(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    inject(&mut manager, route);
+    assert!(manager.dirty_peers.contains(&peer), "the refused announce");
+    withdraw_injected(&mut manager, flapping);
+    refresh(&mut manager, 182);
+    assert!(queued(&manager.pending_refresh, peer), "the refused answer");
+    withdraw_injected(&mut manager, host().1.0);
+    assert!(manager.loc_rib.is_empty());
+    assert!(
+        manager
+            .adj_ribs_out
+            .get(&peer)
+            .is_none_or(AdjRibOut::is_empty),
+        "nothing is advertised to the dirty session"
+    );
+
+    let mut seen = apply(&mut rx, &mut rib);
+    manager.resync_dirty_peers_bounded();
+    seen.extend(apply(&mut rx, &mut rib));
+    tokio::time::advance(ORF_EOR_HOLD_CAP).await;
+    manager.expire_eor_holds(tokio::time::Instant::now());
+    seen.extend(apply(&mut rx, &mut rib));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(seen, vec!["eor"]);
+    assert!(rib.is_empty(), "the helper deleted the stale host route");
+}
