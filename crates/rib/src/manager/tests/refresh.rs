@@ -1508,9 +1508,17 @@ fn owed_families(source: Ipv4Addr) -> Vec<OwedFamily> {
 /// family, its answer omits the withdrawal and the resync sends it after
 /// the `EoRR`.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript per family and grouping, from refusal to resync"
+)]
 fn refresh_answer_settles_owed_withdrawals_of_every_family() {
     let source = Ipv4Addr::new(192, 0, 2, 70);
-    for case in owed_families(source) {
+    for (grouped, case) in [false, true].into_iter().flat_map(|grouped| {
+        owed_families(source)
+            .into_iter()
+            .map(move |case| (grouped, case))
+    }) {
         let (_tx, rx) = mpsc::channel(4);
         let mut manager = RibManager::new(
             rx,
@@ -1520,26 +1528,39 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
             BgpMetrics::new(),
         );
         let receiver = peer_v4(Ipv4Addr::new(192, 0, 2, 71));
-        let (outbound_tx, mut receiver_rx) = mpsc::channel(1);
-        manager.handle_update(RibUpdate::PeerUp {
-            per_client_best: false,
-            interpret_rfc1997: true,
-            session_id: 0,
-            peer: receiver,
-            peer_asn: 65_000,
-            peer_router_id: Ipv4Addr::new(192, 0, 2, 71),
-            outbound_tx,
-            export_policy: None,
-            sendable_families: case.sendable.clone(),
-            is_ebgp: false,
-            route_reflector_client: true,
-            orr_vantage: None,
-            add_path_send_families: vec![],
-            add_path_send_max: 0,
-            negotiated_orf_recv: vec![],
-            negotiated_llgr_families: vec![],
-        });
-        while receiver_rx.try_recv().is_ok() {}
+        // `grouped` adds a sibling with the same configuration, so the
+        // receiver shares an update group where its families allow one.
+        let mut receivers = Vec::new();
+        for (address, capacity) in [(71, 1), (72, 64)]
+            .into_iter()
+            .take(1 + usize::from(grouped))
+        {
+            let (outbound_tx, mut outbound_rx) = mpsc::channel(capacity);
+            manager.handle_update(RibUpdate::PeerUp {
+                per_client_best: false,
+                interpret_rfc1997: true,
+                session_id: 0,
+                peer: peer_v4(Ipv4Addr::new(192, 0, 2, address)),
+                peer_asn: 65_000,
+                peer_router_id: Ipv4Addr::new(192, 0, 2, address),
+                outbound_tx,
+                export_policy: None,
+                sendable_families: case.sendable.clone(),
+                is_ebgp: false,
+                route_reflector_client: true,
+                orr_vantage: None,
+                add_path_send_families: vec![],
+                add_path_send_max: 0,
+                negotiated_orf_recv: vec![],
+                negotiated_llgr_families: vec![],
+            });
+            while outbound_rx.try_recv().is_ok() {}
+            receivers.push(outbound_rx);
+        }
+        let mut receiver_rx = receivers.remove(0);
+        if grouped && case.family.1 == Safi::MplsVpn {
+            assert!(manager.vpn_grouped_member_of(receiver).is_some());
+        }
         let views = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
             let mut announced = Vec::new();
             let mut withdrawn = Vec::new();
@@ -1553,12 +1574,28 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
 
         manager.handle_update((case.update)(true));
         while manager.process_next_route_chunk() {}
-        assert!(manager.outbound_channel_full(receiver), "{:?}", case.family);
+        assert!(
+            manager.outbound_channel_full(receiver),
+            "{:?} grouped={grouped}",
+            case.family
+        );
         manager.handle_update((case.update)(false));
         while manager.process_next_route_chunk() {}
-        assert!(manager.dirty_peers.contains(&receiver), "{:?}", case.family);
+        assert!(
+            manager.dirty_peers.contains(&receiver),
+            "{:?} grouped={grouped}",
+            case.family
+        );
+        if grouped && case.family.1 == Safi::MplsVpn {
+            assert!(manager.pending_group_admitted.contains_key(&receiver));
+        }
         let (announced, _) = views(&mut receiver_rx);
-        assert_eq!(announced, vec![case.key.clone()], "{:?}", case.family);
+        assert_eq!(
+            announced,
+            vec![case.key.clone()],
+            "{:?} grouped={grouped}",
+            case.family
+        );
 
         manager.handle_update(RibUpdate::RouteRefreshRequest {
             queued: Arc::default(),
@@ -1568,10 +1605,19 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
             safi: case.family.1,
         });
         let (_, answer) = views(&mut receiver_rx);
-        assert_eq!(answer, vec![case.key.clone()], "{:?}", case.family);
+        assert_eq!(
+            answer,
+            vec![case.key.clone()],
+            "{:?} grouped={grouped}",
+            case.family
+        );
         manager.resync_dirty_peers_bounded();
         let (_, resync) = views(&mut receiver_rx);
-        assert!(resync.is_empty(), "{:?}: {resync:?}", case.family);
+        assert!(
+            resync.is_empty(),
+            "{:?} grouped={grouped}: {resync:?}",
+            case.family
+        );
         assert!(!manager.dirty_peers.contains(&receiver));
     }
 }
