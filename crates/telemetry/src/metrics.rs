@@ -11103,6 +11103,29 @@ mod tests {
     }
 
     #[test]
+    fn writer_bytes_total_follows_each_peers_published_change() {
+        let m = BgpMetrics::new();
+        m.set_peer_outbound_writer_bytes("10.0.0.1", 5, 5);
+        m.set_peer_outbound_writer_bytes("10.0.0.2", 7, 7);
+        m.set_peer_outbound_writer_bytes("10.0.0.1", 2, -3);
+        assert_eq!(m.peer_outbound_writer_bytes("10.0.0.1"), 2);
+        assert_eq!(m.peer_outbound_writer_bytes("10.0.0.2"), 7);
+        assert_eq!(m.outbound_writer_bytes(), 9);
+        m.set_rib_outbound_credit(11, 1);
+        assert_eq!(m.rib_outbound_credit_rows(), 11);
+        assert_eq!(m.rib_outbound_operations_live(), 1);
+        m.initialize_outbound_commit_refusal_series("10.0.0.1");
+        let text = gather_text(&m);
+        for reason in crate::reason_labels::OutboundCommitRefusal::ALL {
+            let series = format!(
+                "bgp_outbound_commit_refusals_total{{peer=\"10.0.0.1\",reason=\"{}\"}} 0",
+                reason.as_str()
+            );
+            assert!(text.contains(&series), "missing {series}");
+        }
+    }
+
+    #[test]
     fn bmp_replay_attempts_counter() {
         let m = BgpMetrics::new();
         m.record_bmp_replay_attempt("127.0.0.1:5000");

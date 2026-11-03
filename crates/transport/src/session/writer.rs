@@ -1091,6 +1091,43 @@ mod tests {
         handle.join.await.unwrap().unwrap();
     }
 
+    /// The budget is the derivation its docs give: two coalesced writes,
+    /// each with one extended message of overshoot.
+    #[test]
+    fn writer_byte_budget_is_two_batches_and_two_extended_messages() {
+        assert_eq!(WRITER_BYTE_BUDGET, 655_358);
+    }
+
+    /// The writer publishes the backlog as its writes complete, against the
+    /// session's admission watermark, and withdraws it from the total when
+    /// it exits.
+    #[tokio::test]
+    async fn writer_publishes_its_backlog_as_it_drains_and_retires_it_on_exit() {
+        let (server, mut client) = tcp_pair().await;
+        let (_read, write) = server.into_split();
+        let metrics = BgpMetrics::new();
+        let handle = spawn(write, 8, metrics.clone(), "bytes-peer".into(), None);
+        // The session admitted two frames and published them.
+        handle.bytes.admitted(6);
+        handle.bytes.publish(0, &metrics, "bytes-peer");
+        assert_eq!(metrics.outbound_writer_bytes(), 6);
+        handle
+            .bulk_tx
+            .send(Bytes::from_static(b"row"))
+            .await
+            .unwrap();
+        let mut bulk = [0; 3];
+        client.read_exact(&mut bulk).await.unwrap();
+        let mut completed = handle.completed.clone();
+        completed.wait_for(|done| *done == 3).await.unwrap();
+        assert_eq!(metrics.peer_outbound_writer_bytes("bytes-peer"), 3);
+        assert_eq!(metrics.outbound_writer_bytes(), 3);
+        handle.join.abort();
+        let _ = handle.join.await;
+        assert_eq!(metrics.peer_outbound_writer_bytes("bytes-peer"), 0);
+        assert_eq!(metrics.outbound_writer_bytes(), 0);
+    }
+
     #[tokio::test]
     async fn replay_partial_bulk_write_failure_never_advances_watermark() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
