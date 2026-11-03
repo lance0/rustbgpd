@@ -255,6 +255,232 @@ fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
     assert!(!after_expiry.contains("SessionFailureCause::OutboundSaturation"));
 }
 
+/// A local Cease/8 caller class, by the session input that raises it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalCease8 {
+    /// The writer's bulk queue saturates.
+    BulkSaturation,
+    /// The writer admission deadline expires.
+    AdmissionExpiry,
+    /// A route-bearing envelope arrives without its export snapshot.
+    ExportSnapshot,
+    /// A single route cannot fit the negotiated message size.
+    UnsendableOutput,
+}
+
+/// Negotiate graceful restart for IPv4 unicast on an Established session,
+/// with or without the RFC 8538 N bit.
+fn negotiate_graceful_restart(session: &mut PeerSession, notification_gr: bool) {
+    session.config.peer.graceful_restart = true;
+    let mut negotiated = (*session.negotiated.clone().unwrap()).clone();
+    negotiated.peer_gr_capable = true;
+    negotiated.peer_notification_gr = notification_gr;
+    negotiated.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+    }];
+    session.negotiated = Some(Arc::new(negotiated));
+}
+
+/// The session-end messages queued for the RIB, in order.
+fn session_ends(rib_rx: &mut mpsc::Receiver<RibUpdate>) -> Vec<&'static str> {
+    let mut ends = Vec::new();
+    while let Ok(update) = rib_rx.try_recv() {
+        match update {
+            RibUpdate::PeerDown { .. } => ends.push("PeerDown"),
+            RibUpdate::PeerGracefulRestart { .. } => ends.push("PeerGracefulRestart"),
+            _ => {}
+        }
+    }
+    ends
+}
+
+/// The session end RFC 4724 §4 and RFC 8538 §4 require after a NOTIFICATION
+/// that is not a Hard Reset: retention only with the N bit.
+fn notification_end(notification_gr: bool) -> Vec<&'static str> {
+    vec![if notification_gr {
+        "PeerGracefulRestart"
+    } else {
+        "PeerDown"
+    }]
+}
+
+/// Drive one local Cease/8 teardown of an Established graceful-restart
+/// session through writer exit; return the session-end messages it queued.
+async fn local_cease8_end(caller: LocalCease8, notification_gr: bool) -> Vec<&'static str> {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    negotiate_graceful_restart(&mut session, notification_gr);
+    let cause = match caller {
+        LocalCease8::BulkSaturation => {
+            session.trigger_outbound_saturation_teardown();
+            crate::handle::SessionFailureCause::OutboundSaturation
+        }
+        LocalCease8::AdmissionExpiry => {
+            session.expire_outbound_admission();
+            crate::handle::SessionFailureCause::OutboundSaturation
+        }
+        LocalCease8::ExportSnapshot => {
+            let mut update = empty_outbound_update();
+            update.announce = vec![make_route(100)].into();
+            update.next_hop_override = vec![None].into();
+            session.send_route_update(update);
+            crate::handle::SessionFailureCause::ExportSnapshotMissing
+        }
+        LocalCease8::UnsendableOutput => {
+            let mut route = make_route(100);
+            let mut attributes = route.attributes.to_vec();
+            attributes.push(PathAttribute::Communities((0..1_100).collect()));
+            route.attributes = AttrSet::new(attributes);
+            let mut update = empty_outbound_update();
+            update.exact_export_snapshot = Some(session.publish_export_profile());
+            update.announce = vec![route].into();
+            update.next_hop_override = vec![None].into();
+            session.send_route_update(update);
+            crate::handle::SessionFailureCause::PostCommitInvariant
+        }
+    };
+    assert_eq!(
+        session.pending_outbound_teardown_cause,
+        Some(cause),
+        "{caller:?}: the Cease/8 path fired"
+    );
+    let join = session.writer_join.take().expect("writer join");
+    let exit = join.await;
+    session.handle_writer_exit(exit).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle, "{caller:?}");
+    assert!(
+        !session.notification_teardown,
+        "SessionDown clears the latch"
+    );
+    session_ends(&mut rib_rx)
+}
+
+/// Every local Cease/8 is a NOTIFICATION we sent, so a graceful-restart peer
+/// without the N bit has its routes purged (`PeerDown`, RFC 4724 §4); with
+/// the N bit they stay on the graceful-restart path (RFC 8538 §4). The
+/// close-drain class is pinned below and the RIB-stall class in
+/// `rib_park.rs`.
+/// Mutation-red: without the latch in the shared Cease/8 teardown, every
+/// N-bit-less case queues `PeerGracefulRestart`.
+#[tokio::test]
+async fn local_cease8_purges_without_notification_gr_for_every_caller() {
+    let mut got = Vec::new();
+    let mut want = Vec::new();
+    for caller in [
+        LocalCease8::BulkSaturation,
+        LocalCease8::AdmissionExpiry,
+        LocalCease8::ExportSnapshot,
+        LocalCease8::UnsendableOutput,
+    ] {
+        for notification_gr in [false, true] {
+            got.push((
+                caller,
+                notification_gr,
+                local_cease8_end(caller, notification_gr).await,
+            ));
+            want.push((caller, notification_gr, notification_end(notification_gr)));
+        }
+    }
+    // Compared whole, so a failure names every caller class that regressed.
+    assert_eq!(got, want);
+}
+
+/// A Cease/8 raised by the drain before a close ends the session through
+/// `finish_drain_teardown`, for every command that drains; it gets the same
+/// RFC 4724 §4 / RFC 8538 §4 session end as any other local Cease/8.
+/// Mutation-red: without the latch in the shared Cease/8 teardown, every
+/// N-bit-less command queues `PeerGracefulRestart`.
+#[tokio::test]
+async fn close_drain_cease8_purges_without_notification_gr() {
+    let mut got = Vec::new();
+    let mut want = Vec::new();
+    for path in ["stop", "shutdown", "reset"] {
+        for notification_gr in [false, true] {
+            let command = match path {
+                "stop" => PeerCommand::Stop { reason: None },
+                "shutdown" => PeerCommand::Shutdown,
+                _ => PeerCommand::AdministrativeReset { reason: None },
+            };
+            let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+            let (client, _peer) = connected_stream_pair().await;
+            session.test_install_stream(client);
+            establish_test_session(&mut session, 65002).await;
+            negotiate_graceful_restart(&mut session, notification_gr);
+            // No export snapshot: the drain raises Cease/8 on this envelope.
+            session
+                .outbound_tx
+                .send(OutboundRouteUpdate {
+                    announce: vec![make_route(100)].into(),
+                    next_hop_override: vec![None].into(),
+                    ..OutboundRouteUpdate::default()
+                })
+                .await
+                .unwrap();
+            let _ = session.handle_command(command).await;
+            assert_eq!(session.fsm.state(), SessionState::Idle, "{path}");
+            assert_eq!(
+                session.config.neighbor_counters.notifications_sent(),
+                1,
+                "{path}: only the drain's Cease/8 was sent"
+            );
+            assert!(!session.notification_teardown, "{path}: latch cleared");
+            got.push((path, notification_gr, session_ends(&mut rib_rx)));
+            want.push((path, notification_gr, notification_end(notification_gr)));
+        }
+    }
+    assert_eq!(got, want);
+}
+
+/// Before Established the writer-exit `TcpConnectionFails` emits no
+/// `SessionDown` to consume the latch, so a Cease/8 there (`OpenConfirm` here)
+/// must not leave it set: the next Established session of an N-bit-less
+/// graceful-restart peer, lost to a plain TCP close, still retains.
+/// Mutation-red: latching regardless of state turns that loss into `PeerDown`.
+#[tokio::test]
+async fn local_cease8_before_established_does_not_leak_into_next_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities: vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                },
+                Capability::FourOctetAs { asn: 65002 },
+            ],
+        }))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+    session.trigger_outbound_out_of_resources_teardown(
+        crate::handle::SessionFailureCause::OutboundSaturation,
+    );
+    assert!(session.pending_outbound_teardown_cause.is_some());
+    assert!(!session.notification_teardown);
+    let join = session.writer_join.take().expect("writer join");
+    let exit = join.await;
+    session.handle_writer_exit(exit).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(session_ends(&mut rib_rx), Vec::<&str>::new());
+
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    negotiate_graceful_restart(&mut session, false);
+    session.handle_tcp_read_result(Ok(0)).await;
+    assert_eq!(session_ends(&mut rib_rx), vec!["PeerGracefulRestart"]);
+}
+
 /// ADR-0051: when the writer's bulk channel saturates, the session must
 /// emit a `Cease` / `Out of Resources` (RFC 4486 §4 subcode 8)
 /// NOTIFICATION on the priority channel and tear the session down,

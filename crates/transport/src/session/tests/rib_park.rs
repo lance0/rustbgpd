@@ -634,8 +634,8 @@ async fn exhausted_with_graceful_restart(notification_gr: bool) -> RibUpdate {
 
 /// RFC 8538: the stall budget's Cease is a NOTIFICATION, so a graceful
 /// restart peer without the N bit has its routes purged, not retained.
-/// Mutation-red: without the NOTIFICATION latch the teardown queues
-/// `PeerGracefulRestart`.
+/// Mutation-red: without the NOTIFICATION latch in the shared Cease/8
+/// teardown, this queues `PeerGracefulRestart`.
 #[tokio::test(start_paused = true)]
 async fn rib_park_stall_cease_purges_without_notification_gr() {
     assert!(matches!(
