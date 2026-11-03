@@ -6701,6 +6701,26 @@ mod tests {
                 .collect()
         }
 
+        /// Removal marker for the [`table_families`] filter. VPN `FlowSpec`
+        /// storage adds a Route Distinguisher to `FlowSpecRoute`, which stops
+        /// this exhaustive pattern compiling: at that point the filter must
+        /// go, so these tests cover (1, 134) like every other family.
+        #[test]
+        fn flowspec_storage_holds_no_vpn_scope_yet() {
+            let crate::route::FlowSpecRoute {
+                rule: _,
+                afi: _,
+                peer: _,
+                attributes: _,
+                received_at: _,
+                origin_type: _,
+                peer_router_id: _,
+                is_stale: _,
+                is_llgr_stale: _,
+                path_id: _,
+            } = crate::test_support::make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+        }
+
         #[test]
         fn detached_retirement_visits_all_family_storage_and_owned_tags() {
             let peer = PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 1).into());
