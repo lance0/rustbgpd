@@ -501,6 +501,65 @@ async fn rib_park_m63_shape_survives_one_long_park() {
     assert_eq!(session.parked_hold_renewals, 0);
 }
 
+/// Run a parked session with graceful restart negotiated until its stall
+/// budget is spent; return the RIB message its teardown queued.
+async fn exhausted_with_graceful_restart(notification_gr: bool) -> RibUpdate {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        server: _server,
+        ..
+    } = parked(&[]).await;
+    session.config.peer.graceful_restart = true;
+    let mut negotiated = (*session.negotiated.clone().unwrap()).clone();
+    negotiated.peer_gr_capable = true;
+    negotiated.peer_notification_gr = notification_gr;
+    negotiated.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+    }];
+    session.negotiated = Some(Arc::new(negotiated));
+    {
+        let run = session.run();
+        // Past the second deadline: 90 s deferred, 180 s spent.
+        let steps = tokio::time::sleep(Duration::from_secs(182));
+        tokio::select! {
+            result = run => panic!("run() ended while parked: {result:?}"),
+            () = steps => {}
+        }
+    }
+    assert_ne!(session.fsm.state(), SessionState::Established);
+    session
+        .rib_backlog
+        .pop_back()
+        .expect("a teardown message")
+        .0
+}
+
+/// RFC 8538: the stall budget's Cease is a NOTIFICATION, so a graceful
+/// restart peer without the N bit has its routes purged, not retained.
+/// Mutation-red: without the NOTIFICATION latch the teardown queues
+/// `PeerGracefulRestart`.
+#[tokio::test(start_paused = true)]
+async fn rib_park_stall_cease_purges_without_notification_gr() {
+    assert!(matches!(
+        exhausted_with_graceful_restart(false).await,
+        RibUpdate::PeerDown { .. }
+    ));
+}
+
+/// RFC 8538: with Notification GR (the N bit) negotiated, the same Cease
+/// keeps the graceful-restart retention.
+#[tokio::test(start_paused = true)]
+async fn rib_park_stall_cease_retains_with_notification_gr() {
+    assert!(matches!(
+        exhausted_with_graceful_restart(true).await,
+        RibUpdate::PeerGracefulRestart { .. }
+    ));
+}
+
 /// Repeated administrative resets while parked: the first closes the
 /// Established session at once; its reconnect, and every later reset, wait
 /// for the held messages, so the backlog stays at the held UPDATE plus one
