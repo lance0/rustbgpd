@@ -234,13 +234,14 @@ async fn rib_park_keeps_keepalives_and_expires_a_silent_peer() {
     }
 }
 
-/// ADR-0078 rule 3 while parked: the peer's input waiting behind the held
-/// UPDATE proves it alive, so each hold expiry re-arms instead of tearing
-/// down a session that only our RIB is holding up.
-/// Mutation-red: expiring the hold timer whenever input is parked sends Hold
-/// Timer Expired to a live peer.
-#[tokio::test(start_paused = true)]
-async fn rib_park_rearms_hold_on_pending_input() {
+/// Hold-time counters of a parked session whose read buffer holds `pending`
+/// behind the held UPDATE, sampled at each of `checkpoints` (seconds after
+/// the park). `fresh_at` writes one more KEEPALIVE to the socket then.
+async fn hold_while_parked(
+    pending: &[u8],
+    fresh_at: Option<u64>,
+    checkpoints: &[u64],
+) -> Vec<(f64, f64)> {
     let RibPark {
         mut session,
         commands: _commands,
@@ -249,36 +250,107 @@ async fn rib_park_rearms_hold_on_pending_input() {
         ..
     } = rib_park().await;
     let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
-    let rearmed = || {
-        counter(
-            &metrics,
-            "bgp_hold_timer_rearmed_pending_input_total",
-            &[("peer", &peer)],
+    let sample = || {
+        (
+            counter(
+                &metrics,
+                "bgp_hold_timer_rearmed_pending_input_total",
+                &[("peer", &peer)],
+            ),
+            counter(
+                &metrics,
+                "bgp_notifications_sent_total",
+                &[("peer", &peer), ("code", "4")],
+            ),
         )
     };
-    let hold_expiries = || {
-        counter(
-            &metrics,
-            "bgp_notifications_sent_total",
-            &[("peer", &peer), ("code", "4")],
-        )
-    };
-    let established = tokio::time::Instant::now();
+    let parked = tokio::time::Instant::now();
     let run = session.run();
     let steps = async {
-        // One write: the KEEPALIVE lands in the read buffer behind `held`.
+        // One write: `pending` lands in the read buffer behind `held`.
         let mut input = encoded_announce(held());
-        input.extend_from_slice(&rustbgpd_wire::encode_message(&Message::Keepalive).unwrap());
+        input.extend_from_slice(pending);
         server.write_all(&input).await.unwrap();
         until_parked(&metrics, &peer).await;
-        tokio::time::sleep_until(established + Duration::from_secs(200)).await;
-        assert_eq!(hold_expiries(), 0.0, "a live peer must not be expired");
-        assert_eq!(rearmed(), 2.0, "hold re-armed at 90 s and 180 s");
+        let mut samples = Vec::new();
+        let mut fresh_at = fresh_at;
+        for &at in checkpoints {
+            if let Some(fresh) = fresh_at.filter(|&fresh| fresh < at) {
+                tokio::time::sleep_until(parked + Duration::from_secs(fresh)).await;
+                let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
+                server.write_all(&keepalive).await.unwrap();
+                // Loopback delivery, not task ordering: let the kernel queue
+                // the bytes before the paused clock moves on.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                fresh_at = None;
+            }
+            tokio::time::sleep_until(parked + Duration::from_secs(at)).await;
+            samples.push(sample());
+        }
+        samples
     };
     tokio::select! {
         result = run => panic!("run() ended while parked: {result:?}"),
-        () = steps => {}
+        samples = steps => samples,
     }
+}
+
+fn keepalive_pdu() -> Vec<u8> {
+    rustbgpd_wire::encode_message(&Message::Keepalive)
+        .unwrap()
+        .to_vec()
+}
+
+/// RFC 4271 section 6.5 while parked: a complete frame waiting behind the
+/// held UPDATE proves the peer alive once (ADR-0078 rule 3), so the first
+/// hold expiry re-arms. With no input received since, the next one expires:
+/// the same unprocessed frame is not fresh evidence.
+/// Mutation-red: re-arming on any pending frame renews hold indefinitely.
+#[tokio::test(start_paused = true)]
+async fn rib_park_grants_pending_input_one_hold_grace() {
+    let samples = hold_while_parked(&keepalive_pdu(), None, &[100, 190]).await;
+    assert_eq!(samples[0], (1.0, 0.0), "one grace at 90 s");
+    assert_eq!(samples[1], (1.0, 1.0), "expired at 180 s without new input");
+}
+
+/// A buffered NOTIFICATION or malformed complete frame, which the parked
+/// session cannot process yet, earns the same single grace and no more.
+#[tokio::test(start_paused = true)]
+async fn rib_park_unprocessable_pending_frames_get_one_grace() {
+    let notification =
+        rustbgpd_wire::encode_message(&Message::Notification(NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+            Bytes::new(),
+        )))
+        .unwrap()
+        .to_vec();
+    // A complete 19-byte frame with a broken marker.
+    let mut malformed = keepalive_pdu();
+    malformed[..16].fill(0);
+    for pending in [notification, malformed] {
+        let samples = hold_while_parked(&pending, None, &[100, 190]).await;
+        assert_eq!(samples, [(1.0, 0.0), (1.0, 1.0)]);
+    }
+}
+
+/// Input received after a grace renews hold again; once it stops, the next
+/// expiry tears the session down.
+/// Mutation-red: granting only one grace per park expires a peer that keeps
+/// sending.
+#[tokio::test(start_paused = true)]
+async fn rib_park_fresh_input_renews_hold() {
+    let samples = hold_while_parked(&keepalive_pdu(), Some(120), &[200, 280]).await;
+    assert_eq!(
+        samples[0],
+        (2.0, 0.0),
+        "re-armed at 90 s and, on fresh input, at 180 s"
+    );
+    assert_eq!(
+        samples[1],
+        (2.0, 1.0),
+        "expired at 270 s once input stopped"
+    );
 }
 
 /// An operator shutdown while parked puts the Cease on the wire at once.

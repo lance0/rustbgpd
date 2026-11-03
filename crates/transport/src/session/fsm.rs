@@ -489,14 +489,15 @@ impl PeerSession {
     /// silence) re-arm forever and hold a zombie session open. FRR's
     /// equivalent rule likewise counts parsed packets. Only a peer with
     /// no complete frame outstanding expires.
+    ///
+    /// Input that processing cannot consume yet (held behind RIB-bound
+    /// messages, or behind a collision verdict) renews hold once. Another
+    /// renewal needs bytes received since that grace: the same unprocessed
+    /// frame is not fresh evidence, and re-arming on it every period would
+    /// hold a session open for as long as the RIB stays full (RFC 4271
+    /// §6.5).
     pub(super) async fn handle_hold_timer_expiry(&mut self) {
         if self.take_pending_input() {
-            self.metrics
-                .record_hold_timer_rearmed_pending_input(&self.peer_label);
-            debug!(
-                peer = %self.peer_label,
-                "hold timer expired with unprocessed peer input pending; re-arming instead"
-            );
             self.process_read_buffer().await;
             // Processing may have torn the session down (the pending
             // frame was a NOTIFICATION, or failed decode): the FSM has
@@ -512,6 +513,20 @@ impl PeerSession {
                 );
                 return;
             }
+            if self.read_buf.has_complete_frame() && !self.take_hold_grace() {
+                debug!(
+                    peer = %self.peer_label,
+                    "hold timer expired; no peer input received since the last pending-input grace"
+                );
+                self.drive_fsm(Event::HoldTimerExpires).await;
+                return;
+            }
+            self.metrics
+                .record_hold_timer_rearmed_pending_input(&self.peer_label);
+            debug!(
+                peer = %self.peer_label,
+                "hold timer expired with unprocessed peer input pending; re-arming instead"
+            );
             if self.timers.hold.is_none()
                 && let Some(secs) = self.timers.last_hold_secs
             {
@@ -533,6 +548,27 @@ impl PeerSession {
     /// processable: the parser resolves it as a NOTIFICATION once
     /// processing resumes). A partial frame is NOT liveness — see
     /// [`Self::handle_hold_timer_expiry`].
+    /// Grant one hold renewal for input that cannot be processed yet, if
+    /// any bytes arrived since the previous grant. When none were counted,
+    /// one bounded socket read looks for new input first.
+    fn take_hold_grace(&mut self) -> bool {
+        if self.hold_grace_mark == Some(self.input_bytes_received) {
+            let mut tmp = [0u8; 4096];
+            if let Some(read_half) = self.read_half.as_ref()
+                && let Ok(n) = read_half.try_read(&mut tmp)
+                && n > 0
+            {
+                self.read_buf.buf.extend_from_slice(&tmp[..n]);
+                self.input_bytes_received += n as u64;
+            }
+        }
+        if self.hold_grace_mark == Some(self.input_bytes_received) {
+            return false;
+        }
+        self.hold_grace_mark = Some(self.input_bytes_received);
+        true
+    }
+
     fn take_pending_input(&mut self) -> bool {
         if self.read_buf.has_complete_frame() {
             return true;
@@ -551,6 +587,7 @@ impl PeerSession {
             match read_half.try_read(&mut tmp) {
                 Ok(n) if n > 0 => {
                     self.read_buf.buf.extend_from_slice(&tmp[..n]);
+                    self.input_bytes_received += n as u64;
                     if self.read_buf.has_complete_frame() {
                         return true;
                     }
