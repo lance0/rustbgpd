@@ -760,7 +760,11 @@ impl PeerSession {
                 return;
             }
             let raw_pdu = match self.read_buf.try_frame() {
-                Ok(Some(raw)) => raw,
+                Ok(Some(raw)) => {
+                    // A processed peer PDU restores the parked hold budget.
+                    self.parked_hold_renewals = 0;
+                    raw
+                }
                 Ok(None) => break,
                 Err(error) => {
                     error!(peer = %self.peer_label, %error, "BGP decode error");

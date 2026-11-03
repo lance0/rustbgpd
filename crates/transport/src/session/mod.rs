@@ -221,10 +221,10 @@ impl ConnectFailureEpisode {
     }
 }
 
-/// Hold expiries one wait for RIB admission may defer (ADR-0078
-/// amendment). A session whose RIB admission stays blocked for about three
-/// hold times is then closed with Cease/Out of Resources, as a local
-/// overload.
+/// Hold expiries that waits for RIB admission may defer since the last peer
+/// PDU processed (ADR-0078 amendment). A session whose RIB admission stays
+/// blocked for about three hold times since then is closed with
+/// Cease/Out of Resources, as a local overload.
 const MAX_PARKED_HOLD_RENEWALS: u8 = 2;
 /// Bytes one parked hold expiry may read from the socket looking for new
 /// input.
@@ -321,8 +321,8 @@ pub(crate) struct PeerSession {
     /// Reservation for the head of `rib_backlog`. It keeps its place in the
     /// channel's FIFO of waiting senders across run-loop turns.
     rib_reserve: Option<tokio_util::sync::PollSender<RibUpdate>>,
-    /// Hold renewals spent in the current wait for RIB admission, which
-    /// lasts from `rib_backlog` becoming non-empty until it fully drains.
+    /// Hold renewals spent while RIB-bound messages are held, since the
+    /// last peer PDU processed.
     parked_hold_renewals: u8,
     /// Canonical `peer` metric/log label from
     /// [`TransportConfig::peer_label`]: the neighbor address, scoped to its

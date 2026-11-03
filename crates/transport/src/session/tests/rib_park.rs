@@ -441,14 +441,14 @@ async fn rib_park_partial_extended_frame_gets_its_first_deadline() {
     );
 }
 
-/// A wait that ends in time leaves the session up and resets its budget;
-/// admitting only the head of a longer backlog does not. The next wait then
-/// gets its full allowance again.
-/// Mutation-red: keeping the count across waits expires the next wait at its
-/// first deadline; resetting it whenever the head is admitted grants more
+/// The budget counts renewals since the last processed peer PDU: admitting
+/// the head of a longer backlog, or draining it, leaves it spent, and the
+/// next peer PDU processed restores the full allowance.
+/// Mutation-red: not resetting on a processed PDU expires the next wait at
+/// its first deadline; resetting whenever the head is admitted grants more
 /// than the budget within one wait.
 #[tokio::test]
-async fn rib_park_budget_resets_only_when_the_wait_ends() {
+async fn rib_park_budget_resets_on_processed_peer_input() {
     let RibPark {
         mut session,
         mut server,
@@ -467,14 +467,16 @@ async fn rib_park_budget_resets_only_when_the_wait_ends() {
     while rib_rx.try_recv().is_ok() {}
     deliver_held_rib_messages(&mut session).await;
     assert!(session.rib_backlog.is_empty());
-    assert_eq!(session.parked_hold_renewals, 0, "the wait ended");
+    assert_eq!(session.parked_hold_renewals, 1, "no peer PDU processed yet");
     assert_eq!(session.fsm.state(), SessionState::Established);
     while session
         .rib_tx
         .try_send(placeholder_routes_received())
         .is_ok()
     {}
+    // Parking on a peer UPDATE processes it: the budget is restored.
     park_with_buffered(&mut session, &[]).await;
+    assert_eq!(session.parked_hold_renewals, 0);
     assert!(hold_expiry(&mut session).await, "a full allowance again");
     peer_sends(&mut server, &mut session, &[0]).await;
     assert!(hold_expiry(&mut session).await);
@@ -498,7 +500,89 @@ async fn rib_park_m63_shape_survives_one_long_park() {
     deliver_held_rib_messages(&mut session).await;
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert!(session.timers.hold.is_some(), "hold re-armed");
+    // The queued KEEPALIVE, once read and processed, restores the budget.
+    let mut input = [0_u8; 64];
+    let read = session
+        .read_half
+        .as_ref()
+        .unwrap()
+        .try_read(&mut input)
+        .unwrap();
+    session.read_buf.buf.extend_from_slice(&input[..read]);
+    session.process_read_buffer().await;
     assert_eq!(session.parked_hold_renewals, 0);
+}
+
+/// Waits that our own RIB-bound messages start (an RFC 9324 revalidation
+/// chunk, a refresh timeout), not peer input, do not restore the budget: a
+/// silent peer is closed at its second deadline however often such waits
+/// end and restart.
+/// Mutation-red: resetting the budget whenever a wait drains keeps the
+/// silent peer up on the free first deferral of each new wait.
+#[tokio::test]
+async fn rib_park_local_waits_do_not_renew_a_silent_peer() {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        mut rib_rx,
+        server: _server,
+        ..
+    } = parked(&[]).await;
+    let mut survived = 0;
+    for _ in 0..10 {
+        if !hold_expiry(&mut session).await {
+            break;
+        }
+        survived += 1;
+        // The RIB admits the held message: this wait ends.
+        rib_rx.try_recv().unwrap();
+        deliver_held_rib_messages(&mut session).await;
+        assert!(session.rib_backlog.is_empty());
+        // A locally generated batch finds the channel full: a new wait.
+        session.send_to_rib(placeholder_routes_received()).unwrap();
+        assert_eq!(session.rib_backlog.len(), 1);
+    }
+    assert_eq!(
+        survived, 1,
+        "a silent peer gets only the free first deferral since its last PDU"
+    );
+}
+
+/// A live peer whose unprocessed input already fills the read buffer to the
+/// probe cap (a large RFC 8654 read) still earns its second deferral: the
+/// full buffer is its evidence, and nothing more is read.
+/// Mutation-red: requiring newly read bytes at the cap closes it at the
+/// second hold time.
+#[tokio::test]
+async fn rib_park_full_read_buffer_counts_for_the_second_deferral() {
+    let behind = keepalive_pdu().repeat(8192 / 19 + 1);
+    let RibPark {
+        mut session,
+        mut server,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        ..
+    } = parked(&behind).await;
+    session
+        .read_buf
+        .set_max_message_len(rustbgpd_wire::MAX_MESSAGE_LEN);
+    let full = session.read_buf.buf.len();
+    assert!(full >= 2 * usize::from(rustbgpd_wire::MAX_MESSAGE_LEN));
+    assert!(hold_expiry(&mut session).await, "first deferral");
+    peer_sends(&mut server, &mut session, &keepalive_pdu()).await;
+    assert!(
+        hold_expiry(&mut session).await,
+        "a live peer still sending is not closed at the second hold time"
+    );
+    assert_eq!(
+        session.read_buf.buf.len(),
+        full,
+        "nothing read past the cap"
+    );
+    assert!(
+        !hold_expiry(&mut session).await,
+        "the count cap still holds"
+    );
 }
 
 /// Run a parked session with graceful restart negotiated until its stall

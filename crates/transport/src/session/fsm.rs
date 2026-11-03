@@ -558,25 +558,29 @@ impl PeerSession {
 
     /// Local-overload policy for a hold expiry while RIB-bound messages are
     /// held. Input is deliberately left unprocessed then, so it proves
-    /// nothing about the peer's liveness; renewals are bounded instead:
+    /// nothing about the peer's liveness; renewals are bounded instead,
+    /// counted since the last peer PDU processed:
     ///
-    /// - the first renewal in a wait is granted for the wait itself, even
-    ///   when only part of a frame is buffered;
-    /// - each later one needs newly read bytes from one bounded probe. A
-    ///   socket read cannot tell fresh arrivals from data already queued,
-    ///   which is acceptable only because both the renewals and the bytes
-    ///   are bounded;
+    /// - the first renewal is granted for the wait itself, even when only
+    ///   part of a frame is buffered;
+    /// - each later one needs newly read bytes from one bounded probe, or a
+    ///   read buffer already full of unprocessed input. A socket read cannot
+    ///   tell fresh arrivals from data already queued, which is acceptable
+    ///   only because both the renewals and the bytes are bounded;
     /// - after [`MAX_PARKED_HOLD_RENEWALS`], the caller closes the session
     ///   with Cease/Out of Resources.
     ///
     /// Probes stop once the read buffer holds two maximum-size messages,
-    /// whatever the wait, so repeated waits cannot grow it. The count
-    /// resets only when the wait ends: the backlog has fully drained.
+    /// whatever the wait, so repeated waits cannot grow it. Processing a
+    /// peer PDU resets the count; a wait that our own message starts does
+    /// not, so it cannot buy a silent peer more time.
     fn renew_parked_hold(&mut self) -> bool {
         match self.parked_hold_renewals {
             0 => {}
             spent if spent < MAX_PARKED_HOLD_RENEWALS => {
-                if self.probe_parked_input() == 0 {
+                if self.read_buf.buf.len() < self.parked_input_cap()
+                    && self.probe_parked_input() == 0
+                {
                     return false;
                 }
             }
@@ -586,12 +590,18 @@ impl PeerSession {
         true
     }
 
+    /// Unprocessed input the parked probes may accumulate: two maximum-size
+    /// messages (8 KiB, or 128 KiB with RFC 8654).
+    fn parked_input_cap(&self) -> usize {
+        2 * usize::from(self.read_buf.max_message_len())
+    }
+
     /// Read at most one [`PARKED_HOLD_PROBE`] from the socket into the read
-    /// buffer, without taking it past two maximum-size messages. Returns the
-    /// bytes read.
+    /// buffer, without taking it past [`Self::parked_input_cap`]. Returns
+    /// the bytes read.
     fn probe_parked_input(&mut self) -> usize {
-        let cap = 2 * usize::from(self.read_buf.max_message_len());
-        let room = cap
+        let room = self
+            .parked_input_cap()
             .saturating_sub(self.read_buf.buf.len())
             .min(PARKED_HOLD_PROBE);
         if room == 0 {

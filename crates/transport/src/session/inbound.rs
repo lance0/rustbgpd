@@ -1154,7 +1154,6 @@ impl PeerSession {
                 self.drop_rib_backlog();
             }
         }
-        self.parked_hold_renewals = 0;
     }
 
     /// The RIB manager is gone: like a failed blocking send, the held
@@ -1197,8 +1196,6 @@ impl PeerSession {
             self.on_rib_admission(then);
         }
         self.rib_reserve = None;
-        // The wait has ended: the next one gets its full hold allowance.
-        self.parked_hold_renewals = 0;
         if self.read_buf.has_complete_frame() {
             self.process_read_buffer().await;
         }
