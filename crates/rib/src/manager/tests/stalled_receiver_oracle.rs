@@ -29,7 +29,8 @@
 //! stays private.
 //!
 //! Properties, checked once every subject receiver has drained and no peer
-//! is dirty:
+//! is dirty. Each records a changed value only, so a one-off duplicate of an
+//! unchanged route or table is invisible by construction:
 //!
 //! - P1, final state: each receiver's wire state (and the families it has
 //!   seen an `EoR` for) equals the reference arm's. Each prefix is compared
@@ -39,15 +40,17 @@
 //! - P2, no spurious withdrawal: never a withdrawal of a key the receiver
 //!   does not hold.
 //! - P3, barriers: no `BoRR` before the session's initial `EoR` for that
-//!   family (RFC 7313 §4), `EoRR` only inside an open `BoRR`, and at every
-//!   `EoR`, `EoRR` and replay terminal the peer already holds every path the
-//!   reference held for that family after the operation that produced the
-//!   marker (RFC 4724 §4, RFC 7313 §4, RFC 5291 §6). Routes a pending resync
-//!   still owes a withdrawal may remain: that withdrawal is an ordinary later
-//!   UPDATE.
+//!   family (RFC 7313 §4), `EoRR` only inside an open `BoRR`, every `BoRR`
+//!   closed by an `EoRR` once quiet, and a replay terminal carrying markers
+//!   only. At every `EoR`, `EoRR` and replay terminal the family's wire state
+//!   equals the reference's after the operation that produced the marker
+//!   (RFC 4724 §4, RFC 7313 §4, RFC 5291 §6). While the subject receiver is
+//!   deferred, it need only hold every reference path: routes a pending
+//!   resync still owes a withdrawal may remain, as that withdrawal is an
+//!   ordinary later UPDATE.
 //! - P4, per-key sequence: per (receiver, session, key), the collapsed value
-//!   sequence equals the reference's, or is a prefix of it when the session
-//!   ended with queued envelopes. Only keys the reference changed while the
+//!   sequence equals the reference's, or is a prefix of it for a key a flap
+//!   discarded queued envelopes of. Only keys the reference changed while the
 //!   subject receiver was dirty (the deferral and its resync operation)
 //!   relax to a subsequence. A key a graceful end carried into the session
 //!   with a different value has no common starting point; P1-P3 still apply
@@ -62,7 +65,16 @@
 //!
 //! Three open defects on main are tolerated only by their exact signature
 //! ([`KNOWN`]); each has an ignored regression test with its minimized trace.
-//! `ORACLE_STRICT=1` reports them as failures.
+//! A tolerated defect excuses only its own observation: the case still runs
+//! every other property (a livelocked receiver alone skips P1 and P4).
+//! `ORACLE_STRICT=1` reports them as failures. A run of the default case
+//! count or more also fails when any [`Coverage`] counter stays at zero.
+//!
+//! The actor's wall-clock poll budget is unbounded here, as in the EVPN
+//! recovery differential, so a loaded host cannot reslice a resync tick and
+//! `RUSTBGPD_TEST_FLUSH_BUDGET_US` has no effect. Outcomes are reproducible
+//! for a seed; exact traces can vary by one resync where the manager iterates
+//! a hash set.
 //!
 //! Not modelled: VPN, LLGR, selection deferral, eBGP, RT-Constrain and the
 //! owned-EVPN group path (off in production).
@@ -84,7 +96,8 @@ const REFERENCE: usize = 0;
 const SUBJECT: usize = 1;
 /// "Unbounded" for the reference arm: never reached by a case.
 const REFERENCE_CAPACITY: usize = 1 << 20;
-const CAPACITIES: [usize; 8] = [1, 2, 3, 4, 8, 16, 64, 4096];
+/// 4096 is the lag-free control; the rest fill under the generated churn.
+const CAPACITIES: [usize; 7] = [1, 2, 3, 4, 6, 8, 4096];
 /// 0 is no Add-Path; `u32::MAX` is what negotiation maps send-all to.
 const SEND_MAX: [u32; 5] = [0, 1, 2, 8, u32::MAX];
 const CLUSTER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
@@ -105,6 +118,8 @@ const KNOWN_EMPTY_RESYNC_DROPS_REFRESH: &str =
 /// The third: a resync withdraws a route the peer's `EoRR` already purged.
 const KNOWN_WITHDRAWAL_AFTER_EORR_PURGE: &str =
     "known: resync withdraws a route an EoRR already purged";
+/// The default case count, below which coverage floors are not enforced.
+const DEFAULT_CASES: u32 = 256;
 /// Every tolerated signature.
 const KNOWN: [&str; 3] = [
     KNOWN_REFRESH_RETRY_LIVELOCK,
@@ -445,10 +460,12 @@ struct Wire {
     history: BTreeMap<(u64, Nlri), Vec<Vec<Value>>>,
     /// Each prefix's set when its envelope began, until [`Self::commit`].
     before: BTreeMap<Nlri, Vec<Value>>,
-    /// Sessions that ended with queued envelopes the peer never received.
-    truncated: BTreeSet<u64>,
+    /// Prefixes a flap discarded queued envelopes for, by session.
+    lost: BTreeSet<(u64, Nlri)>,
     /// Prefixes whose path set changed in each operation.
     touched: BTreeMap<usize, BTreeSet<(u64, Nlri)>>,
+    /// Known-defect signatures this wire tolerated.
+    tolerated: BTreeSet<&'static str>,
 }
 
 impl Wire {
@@ -535,6 +552,26 @@ impl Wire {
             evpn_withdraw,
             ..
         } = message;
+        let session = self.session;
+        let where_ = |what: &str| {
+            format!(
+                "{what} ({} peer {peer} session {session}, produced at op {op})",
+                arm_name(arm)
+            )
+        };
+        // `transport/src/session/replay.rs` sends only the markers of an
+        // envelope that carries a replay token.
+        if replay
+            && !(announce.is_empty()
+                && withdraw.is_empty()
+                && evpn_announce.is_empty()
+                && evpn_withdraw.is_empty()
+                && refresh_markers.is_empty())
+        {
+            return Err(where_(
+                "P3: a replay terminal carries rows or refresh markers",
+            ));
+        }
         // `transport/src/session/outbound.rs`: outside a replay, an RFC 7313
         // peer gets EoRR in place of an EoR beside refresh markers, and an
         // RFC 2918 peer gets no markers at all.
@@ -549,13 +586,6 @@ impl Wire {
                 refresh_markers.clear();
             }
         }
-        let session = self.session;
-        let where_ = |what: &str| {
-            format!(
-                "{what} ({} peer {peer} session {session}, produced at op {op})",
-                arm_name(arm)
-            )
-        };
         for (afi, safi, _) in refresh_markers
             .iter()
             .filter(|(_, _, kind)| *kind == RouteRefreshSubtype::BoRR)
@@ -625,14 +655,13 @@ impl Wire {
             if !self.held.contains_key(key) {
                 // Known defect: a refresh answered while a grouped member
                 // still owes withdrawals leaves them owed after the EoRR has
-                // purged those routes.
-                let known = if self.eorr_purged.contains(key) {
-                    format!(" ({KNOWN_WITHDRAWAL_AFTER_EORR_PURGE})")
-                } else {
-                    String::new()
-                };
+                // purged those routes. Only the subject is ever deferred.
+                if arm == SUBJECT && self.eorr_purged.contains(key) {
+                    self.tolerated.insert(KNOWN_WITHDRAWAL_AFTER_EORR_PURGE);
+                    continue;
+                }
                 return Err(where_(&format!(
-                    "P2: withdrawal of {key:?}, which the receiver does not hold{known}"
+                    "P2: withdrawal of {key:?}, which the receiver does not hold"
                 )));
             }
             self.record(key, None);
@@ -731,7 +760,10 @@ struct Arm {
 impl Arm {
     fn spawn() -> Self {
         let (tx, rx) = mpsc::channel(512);
-        let manager = RibManager::new(rx, dummy_query_rx(), None, Some(CLUSTER), BgpMetrics::new());
+        let mut manager =
+            RibManager::new(rx, dummy_query_rx(), None, Some(CLUSTER), BgpMetrics::new());
+        // Every resync tick runs to completion, whatever the host load.
+        manager.flush_poll_budget = Duration::MAX;
         Self {
             tx,
             handle: tokio::spawn(manager.run()),
@@ -755,7 +787,7 @@ impl Arm {
     }
 
     /// A FIFO round trip: every earlier update and its sends are done.
-    async fn quiesce(&self) {
+    async fn round_trip(&self) {
         let (reply, response) = oneshot::channel();
         self.send(RibUpdate::QueryBestRoutes {
             deadline: full_snapshot_query_deadline(),
@@ -839,15 +871,39 @@ impl Arm {
         let Some(mut rx) = self.rx[peer].take() else {
             return;
         };
-        let mut lost = false;
+        let wire = &mut self.wire[peer];
         while let Ok(update) = rx.try_recv() {
             let produced = self.stamps[peer].pop_front().expect("stamped");
             self.retention[peer].push((produced, op, Self::rows(&update)));
-            lost = true;
-        }
-        if lost {
-            let session = self.wire[peer].session;
-            self.wire[peer].truncated.insert(session);
+            let message = normalize(&update);
+            let prefixes = message
+                .announce
+                .iter()
+                .map(|row| (row.0, row.1))
+                .chain(message.withdraw.iter().copied())
+                .map(|(prefix, path_id)| Key {
+                    family: match prefix {
+                        Prefix::V4(_) => V4,
+                        Prefix::V6(_) => V6,
+                    },
+                    nlri: prefix.to_string(),
+                    path_id,
+                })
+                .chain(
+                    message
+                        .evpn_announce
+                        .iter()
+                        .map(|row| row.0.clone())
+                        .chain(message.evpn_withdraw.iter().cloned())
+                        .map(|nlri| Key {
+                            family: EVPN,
+                            nlri,
+                            path_id: 0,
+                        }),
+                );
+            for key in prefixes {
+                wire.lost.insert((wire.session, nlri(&key)));
+            }
         }
     }
 }
@@ -868,6 +924,12 @@ struct Harness {
     /// path set different from the reference's.
     carried: BTreeSet<(usize, u64, Nlri)>,
     peak_envelopes: [usize; PEERS],
+    /// Subject queue depth after the previous operation.
+    depths: [usize; PEERS],
+    /// Subject receivers in the known livelock, excused from P1 and P4.
+    livelocked: BTreeSet<usize>,
+    tolerated: BTreeSet<&'static str>,
+    coverage: Coverage,
 }
 
 impl Harness {
@@ -883,6 +945,10 @@ impl Harness {
             dirty: Vec::new(),
             carried: BTreeSet::new(),
             peak_envelopes: [0; PEERS],
+            depths: [0; PEERS],
+            livelocked: BTreeSet::new(),
+            tolerated: BTreeSet::new(),
+            coverage: Coverage::default(),
         };
         for peer in 0..PEERS {
             harness.establish(peer, false, false).await;
@@ -973,13 +1039,13 @@ impl Harness {
 
     async fn tick(&self) {
         tokio::time::advance(TICK).await;
-        // A quiesce can be served ahead of the due resync; the second
-        // round trip cannot (see `Oracle::settle`).
+        // The actor can serve the first round trip ahead of the resync timer
+        // that woke with it, but it runs that resync before the second.
         for arm in &self.arms {
-            arm.quiesce().await;
+            arm.round_trip().await;
         }
         for arm in &self.arms {
-            arm.quiesce().await;
+            arm.round_trip().await;
         }
     }
 
@@ -987,7 +1053,7 @@ impl Harness {
     /// record the reference wire and the subject's dirty state.
     async fn end_op(&mut self) -> Result<(), String> {
         for arm in &self.arms {
-            arm.quiesce().await;
+            arm.round_trip().await;
         }
         let op = self.op;
         let reference = &mut self.arms[REFERENCE];
@@ -1004,15 +1070,24 @@ impl Harness {
         );
         let depths = self.arms[SUBJECT].stamp(op);
         let mut dirty = [false; PEERS];
+        let was_dirty = self.dirty.last().copied().unwrap_or_default();
         for peer in 0..PEERS {
             self.peak_envelopes[peer] = self.peak_envelopes[peer].max(depths[peer]);
+            let capacity = self.config[peer].capacity;
+            if depths[peer] == capacity && self.depths[peer] < capacity {
+                self.coverage.capacity_crossings += 1;
+            }
             if self.arms[REFERENCE].dirty(peer).await {
                 return Err(format!(
                     "INVALID: the reference arm marked peer {peer} dirty at op {op}"
                 ));
             }
             dirty[peer] = self.arms[SUBJECT].dirty(peer).await;
+            if dirty[peer] && !was_dirty[peer] {
+                self.coverage.dirty_episodes += 1;
+            }
         }
+        self.depths = depths.try_into().expect("one depth per peer");
         self.dirty.push(dirty);
         Ok(())
     }
@@ -1026,6 +1101,7 @@ impl Harness {
         if tracing_ops() {
             eprintln!("op {}: {op:?}", self.op);
         }
+        let dirty = self.dirty.last().copied().unwrap_or_default();
         match *op {
             Op::Announce {
                 src,
@@ -1081,7 +1157,7 @@ impl Harness {
                 }
             }
             Op::Policy { peer, variant } => {
-                // The reply arrives at commit; the quiesce below orders it.
+                // The reply arrives at commit; the round trip below orders it.
                 for arm in &mut self.arms {
                     let reply = arm.reply();
                     arm.send(RibUpdate::ReplacePeerExportPolicy {
@@ -1105,6 +1181,7 @@ impl Harness {
             Op::Flap { peer } => {
                 let session_id = self.session[peer];
                 self.restarting[peer] = false;
+                self.coverage.flaps_while_dirty += usize::from(dirty[peer]);
                 self.both(|| RibUpdate::PeerDown {
                     peer: peer_id(peer),
                     session_id,
@@ -1114,6 +1191,8 @@ impl Harness {
             }
             Op::Refresh { peer, family } => {
                 if self.config[peer].carries(family) {
+                    let backlog = dirty[peer] || !self.arms[SUBJECT].stamps[peer].is_empty();
+                    self.coverage.refreshes_during_backlog += usize::from(backlog);
                     let session_id = self.session[peer];
                     let (afi, safi) = family.afi_safi();
                     self.both(|| RibUpdate::RouteRefreshRequest {
@@ -1128,6 +1207,7 @@ impl Harness {
             }
             Op::GrRestart { peer } => {
                 if self.config[peer].gr && !self.restarting[peer] {
+                    self.coverage.flaps_while_dirty += usize::from(dirty[peer]);
                     let session_id = self.session[peer];
                     let families = self.config[peer].families();
                     self.both(|| RibUpdate::PeerGracefulRestart {
@@ -1148,6 +1228,7 @@ impl Harness {
             Op::SourceEor { peer } => {
                 if self.restarting[peer] {
                     self.restarting[peer] = false;
+                    self.coverage.gr_sweeps += 1;
                     let session_id = self.session[peer];
                     for (afi, safi) in self.config[peer].families() {
                         self.both(|| RibUpdate::EndOfRib {
@@ -1162,6 +1243,9 @@ impl Harness {
             }
             Op::Orf { peer, deny } => {
                 if self.config[peer].orf {
+                    // The push lifts a gate still holding the initial EoR.
+                    let held = !self.arms[SUBJECT].wire[peer].eor.contains(&V4);
+                    self.coverage.orf_holds += usize::from(held);
                     let session_id = self.session[peer];
                     for arm in &mut self.arms {
                         let reply = arm.reply();
@@ -1204,7 +1288,7 @@ impl Harness {
     async fn reconnect(&mut self, peer: usize, graceful: bool) {
         let op = self.op;
         for arm in &mut self.arms {
-            arm.quiesce().await;
+            arm.round_trip().await;
             arm.stamp(op);
             arm.discard(peer, op);
         }
@@ -1214,7 +1298,7 @@ impl Harness {
     }
 
     /// Drain and tick until every subject receiver is clean and quiet.
-    async fn quiesce(&mut self) -> Result<(), String> {
+    async fn drain_until_quiet(&mut self) -> Result<(), String> {
         let mut quiet = 0;
         let mut rounds: Vec<Vec<Vec<NormMsg>>> = Vec::new();
         for _ in 0..QUIESCE_ROUNDS {
@@ -1234,11 +1318,7 @@ impl Harness {
             self.tick().await;
             self.end_op().await?;
             if tracing_ops() {
-                eprintln!(
-                    "op {}: quiesce round, dirty {:?}",
-                    self.op,
-                    self.dirty.last()
-                );
+                eprintln!("op {}: drain round, dirty {:?}", self.op, self.dirty.last());
             }
             let clean = !self.dirty.last().unwrap().contains(&true)
                 && self.arms[SUBJECT].stamps.iter().all(VecDeque::is_empty);
@@ -1255,30 +1335,44 @@ impl Harness {
         // Known defect: a grouped member with one free slot per tick spends
         // it on a full-table resync, its owed ROUTE-REFRESH response is then
         // refused and re-marks it dirty, and the next tick repeats the same
-        // table forever.
-        let repeating = (0..PEERS).filter(|&peer| dirty[peer]).all(|peer| {
-            let last: Vec<&Vec<NormMsg>> = rounds
+        // table forever. Every dirty receiver is a one-slot grouped-shape
+        // member repeating one marker-free envelope per round, and every
+        // other receiver is silent.
+        let last = |peer: usize| -> Vec<&Vec<NormMsg>> {
+            rounds
                 .iter()
                 .rev()
                 .take(REPEAT_ROUNDS)
                 .map(|round| &round[peer])
-                .collect();
-            self.config[peer].capacity == 1
-                && last.iter().all(|sent| {
-                    sent.len() == 1
-                        && sent[0] == last[0][0]
-                        && sent[0].end_of_rib.is_empty()
-                        && sent[0].refresh_markers.is_empty()
-                })
-        });
-        let known = if repeating {
-            format!(" ({KNOWN_REFRESH_RETRY_LIVELOCK})")
-        } else {
-            String::new()
+                .collect()
         };
+        let livelocked = dirty.contains(&true)
+            && rounds.len() >= REPEAT_ROUNDS
+            && (0..PEERS).all(|peer| {
+                let last = last(peer);
+                if !dirty[peer] {
+                    return last.iter().all(|sent| sent.is_empty());
+                }
+                let config = self.config[peer];
+                config.capacity == 1
+                    && config.add_path == 0
+                    && !config.orf
+                    && last.iter().all(|sent| {
+                        sent.len() == 1
+                            && sent[0] == last[0][0]
+                            && sent[0].end_of_rib.is_empty()
+                            && sent[0].refresh_markers.is_empty()
+                            && !sent[0].announce.is_empty()
+                    })
+            });
+        if livelocked {
+            self.tolerated.insert(KNOWN_REFRESH_RETRY_LIVELOCK);
+            self.livelocked = (0..PEERS).filter(|&peer| dirty[peer]).collect();
+            return Ok(());
+        }
         Err(format!(
             "liveness: subject not clean after {QUIESCE_ROUNDS} drain rounds (dirty \
-             {dirty:?}){known}"
+             {dirty:?})"
         ))
     }
 
@@ -1293,20 +1387,42 @@ impl Harness {
         clippy::too_many_lines,
         reason = "the five properties read best side by side"
     )]
-    fn check(&self) -> Result<(), String> {
+    fn check(&mut self) -> Result<(), String> {
+        // RFC 7313 §4: every BoRR is closed by an EoRR once both arms are
+        // quiet.
+        for (arm, side) in self.arms.iter().enumerate() {
+            for (peer, wire) in side.wire.iter().enumerate() {
+                if arm == SUBJECT && self.livelocked.contains(&peer) {
+                    continue;
+                }
+                if let Some(family) = wire.refresh_stale.keys().next() {
+                    return Err(format!(
+                        "P3: {} peer {peer} BoRR for {family:?} never closed by an EoRR",
+                        arm_name(arm)
+                    ));
+                }
+            }
+        }
+        let deferred: Vec<BTreeSet<usize>> =
+            (0..PEERS).map(|peer| self.deferred_ops(peer)).collect();
         for barrier in &self.barriers {
             let (session, table) = &self.snapshots[barrier.op][barrier.peer];
             let expected = path_sets(table, Some(barrier.family));
-            // Every path the reference holds must have reached the peer
-            // ahead of the marker. The peer may still hold routes a pending
-            // resync will withdraw: a withdrawal after a marker is an
-            // ordinary later UPDATE.
-            let complete = expected.iter().all(|(prefix, values)| {
-                barrier
-                    .state
-                    .get(prefix)
-                    .is_some_and(|held| values.iter().all(|value| held.contains(value)))
-            });
+            // A deferred subject receiver must hold every reference path
+            // ahead of the marker, but may still hold routes a pending resync
+            // will withdraw: a withdrawal after a marker is an ordinary later
+            // UPDATE. Otherwise the family matches exactly.
+            let complete = if barrier.arm == SUBJECT && deferred[barrier.peer].contains(&barrier.op)
+            {
+                expected.iter().all(|(prefix, values)| {
+                    barrier
+                        .state
+                        .get(prefix)
+                        .is_some_and(|held| values.iter().all(|value| held.contains(value)))
+                })
+            } else {
+                expected == barrier.state
+            };
             if *session != barrier.session || !complete {
                 return Err(format!(
                     "P3: {} peer {} {} for {:?} produced at op {} (session {}) arrived with \
@@ -1322,7 +1438,10 @@ impl Harness {
                 ));
             }
         }
-        for peer in 0..PEERS {
+        for (peer, deferred) in deferred.iter().enumerate() {
+            if self.livelocked.contains(&peer) {
+                continue;
+            }
             let reference = &self.arms[REFERENCE].wire[peer];
             let subject = &self.arms[SUBJECT].wire[peer];
             // A prefix a graceful end carried in with different stale paths
@@ -1341,21 +1460,19 @@ impl Harness {
             let routes_match = reference.session == subject.session
                 && settled(path_sets(&reference.held, None))
                     == settled(path_sets(&subject.held, None));
-            if !routes_match || reference.eor != subject.eor {
-                // Known defect: only an initial EoR of a GR + ORF peer is
-                // missing.
-                let config = self.config[peer];
-                let known = if routes_match
-                    && config.gr
-                    && config.orf
-                    && subject.eor.is_subset(&reference.eor)
-                {
-                    format!(" ({KNOWN_EMPTY_RESYNC_DROPS_REFRESH})")
-                } else {
-                    String::new()
-                };
+            // Known defect: the subject lacks exactly the ORF-gated IPv4
+            // initial EoR of a GR + ORF peer.
+            let config = self.config[peer];
+            let lost_gated_eor = routes_match
+                && config.gr
+                && config.orf
+                && subject.eor.is_subset(&reference.eor)
+                && reference.eor.difference(&subject.eor).eq([V4].iter());
+            if lost_gated_eor {
+                self.tolerated.insert(KNOWN_EMPTY_RESYNC_DROPS_REFRESH);
+            } else if !routes_match || reference.eor != subject.eor {
                 return Err(format!(
-                    "P1: peer {peer} final wire differs{known}\n reference (session {}, EoR \
+                    "P1: peer {peer} final wire differs\n reference (session {}, EoR \
                      {:?}): {:?}\n subject (session {}, EoR {:?}): {:?}",
                     reference.session,
                     reference.eor,
@@ -1365,7 +1482,6 @@ impl Harness {
                     subject.held
                 ));
             }
-            let deferred = self.deferred_ops(peer);
             let covered: BTreeSet<&(u64, Nlri)> = deferred
                 .iter()
                 .filter_map(|op| reference.touched.get(op))
@@ -1388,7 +1504,7 @@ impl Harness {
                 let relaxed = covered.contains(key);
                 let ok = if relaxed {
                     is_subsequence(actual, expected)
-                } else if subject.truncated.contains(&key.0) {
+                } else if subject.lost.contains(key) {
                     expected.starts_with(actual)
                 } else {
                     actual == expected
@@ -1452,10 +1568,72 @@ fn is_subsequence<T: PartialEq>(needle: &[T], haystack: &[T]) -> bool {
 struct Peaks {
     envelopes: usize,
     rows: usize,
-    dirty_ops: usize,
 }
 
-fn run(config: [PeerConfig; PEERS], ops: &[Op]) -> Result<Peaks, String> {
+/// How often a run reached each backpressure state. A run of the default
+/// case count fails if any stays at zero, so a change that stops producing
+/// one cannot leave the oracle quietly vacuous.
+#[derive(Clone, Copy, Debug, Default)]
+struct Coverage {
+    /// A subject queue reached its capacity.
+    capacity_crossings: usize,
+    /// A subject receiver went from clean to dirty.
+    dirty_episodes: usize,
+    /// A flap or GR restart of a dirty receiver.
+    flaps_while_dirty: usize,
+    /// A ROUTE-REFRESH from a receiver that was dirty or had queued output.
+    refreshes_during_backlog: usize,
+    /// A restarted source's End-of-RIB swept its stale routes.
+    gr_sweeps: usize,
+    /// An ORF push lifted a gate that still held the initial IPv4 `EoR`.
+    orf_holds: usize,
+}
+
+impl Coverage {
+    fn add(&mut self, other: Self) {
+        self.capacity_crossings += other.capacity_crossings;
+        self.dirty_episodes += other.dirty_episodes;
+        self.flaps_while_dirty += other.flaps_while_dirty;
+        self.refreshes_during_backlog += other.refreshes_during_backlog;
+        self.gr_sweeps += other.gr_sweeps;
+        self.orf_holds += other.orf_holds;
+    }
+
+    fn missing(&self) -> Vec<&'static str> {
+        [
+            ("capacity_crossings", self.capacity_crossings),
+            ("dirty_episodes", self.dirty_episodes),
+            ("flaps_while_dirty", self.flaps_while_dirty),
+            ("refreshes_during_backlog", self.refreshes_during_backlog),
+            ("gr_sweeps", self.gr_sweeps),
+            ("orf_holds", self.orf_holds),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count == 0)
+        .map(|(name, _)| name)
+        .collect()
+    }
+}
+
+/// A case that held every property, apart from the known defects it
+/// tolerated.
+struct Outcome {
+    peaks: Peaks,
+    coverage: Coverage,
+    tolerated: BTreeSet<&'static str>,
+}
+
+/// [`run`], with each tolerated known defect turned into a failure when
+/// `strict`.
+fn evaluate(config: [PeerConfig; PEERS], ops: &[Op], strict: bool) -> Result<Outcome, String> {
+    let outcome = run(config, ops)?;
+    if strict && let Some(known) = outcome.tolerated.first() {
+        return Err(format!("{known} (ORACLE_STRICT)"));
+    }
+    Ok(outcome)
+}
+
+fn run(config: [PeerConfig; PEERS], ops: &[Op]) -> Result<Outcome, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
@@ -1466,19 +1644,24 @@ fn run(config: [PeerConfig; PEERS], ops: &[Op]) -> Result<Peaks, String> {
         for op in ops {
             harness.apply(op).await?;
         }
-        harness.quiesce().await?;
+        harness.drain_until_quiet().await?;
         harness.check()?;
-        let peaks = Peaks {
-            envelopes: harness.peak_envelopes.iter().copied().max().unwrap_or(0),
-            rows: harness.peak_rows().into_iter().max().unwrap_or(0),
-            dirty_ops: harness
-                .dirty
-                .iter()
-                .filter(|dirty| dirty.contains(&true))
-                .count(),
+        let mut tolerated = std::mem::take(&mut harness.tolerated);
+        for arm in &harness.arms {
+            for wire in &arm.wire {
+                tolerated.extend(wire.tolerated.iter().copied());
+            }
+        }
+        let outcome = Outcome {
+            peaks: Peaks {
+                envelopes: harness.peak_envelopes.iter().copied().max().unwrap_or(0),
+                rows: harness.peak_rows().into_iter().max().unwrap_or(0),
+            },
+            coverage: harness.coverage,
+            tolerated,
         };
         harness.finish().await;
-        Ok(peaks)
+        Ok(outcome)
     })
 }
 
@@ -1543,7 +1726,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         3 => (peer(), family_strategy(), 0..PREFIXES)
             .prop_map(|(src, family, index)| Op::Withdraw { src, family, index }),
         1 => (peer(), 0..4u8).prop_map(|(peer, variant)| Op::Policy { peer, variant }),
-        4 => (peer(), proptest::option::of(0..4u8)).prop_map(|(peer, k)| Op::Drain { peer, k }),
+        4 => (peer(), proptest::option::of(1..4u8)).prop_map(|(peer, k)| Op::Drain { peer, k }),
         2 => Just(Op::Tick),
         1 => peer().prop_map(|peer| Op::Flap { peer }),
         2 => (peer(), family_strategy()).prop_map(|(peer, family)| Op::Refresh { peer, family }),
@@ -1554,17 +1737,20 @@ fn op_strategy() -> impl Strategy<Value = Op> {
     ]
 }
 
-/// The failed property's label (`P1`..`P5`, `liveness`, `INVALID`), or the
-/// panic text.
+/// The failed property's label (`P1`..`P5`, `liveness`, `INVALID`), the
+/// known signature a strict run reports, or the panic text.
 fn label(reason: &str) -> &str {
-    ["P1:", "P2:", "P3:", "P4:", "P5:", "liveness:", "INVALID:"]
+    KNOWN
         .into_iter()
+        .chain(["P1:", "P2:", "P3:", "P4:", "P5:", "liveness:", "INVALID:"])
         .find(|label| reason.contains(label))
         .unwrap_or(reason)
 }
 
-/// Greedy one-op deletion to a fixpoint, keeping the failing property.
-fn minimize(config: [PeerConfig; PEERS], mut ops: Vec<Op>, reason: &str) -> Vec<Op> {
+/// Greedy one-op deletion to a fixpoint, keeping the failing property. A
+/// default run never fails on a tolerated signature, so shrinking cannot
+/// land on a known defect in place of the failure that was found.
+fn minimize(config: [PeerConfig; PEERS], mut ops: Vec<Op>, reason: &str, strict: bool) -> Vec<Op> {
     let wanted = label(reason).to_string();
     loop {
         let before = ops.len();
@@ -1572,7 +1758,7 @@ fn minimize(config: [PeerConfig; PEERS], mut ops: Vec<Op>, reason: &str) -> Vec<
         while index < ops.len() {
             let mut fewer = ops.clone();
             fewer.remove(index);
-            if run(config, &fewer).is_err_and(|reason| label(&reason) == wanted) {
+            if evaluate(config, &fewer, strict).is_err_and(|reason| label(&reason) == wanted) {
                 ops = fewer;
             } else {
                 index += 1;
@@ -1594,43 +1780,54 @@ fn stalled_receivers_converge_to_the_unbounded_reference() {
         config_strategy(),
         proptest::collection::vec(op_strategy(), 1..48),
     );
+    let cases = runner.config().cases;
     let strict = std::env::var_os("ORACLE_STRICT").is_some();
     let peaks = std::cell::Cell::new(Peaks::default());
+    let coverage = std::cell::Cell::new(Coverage::default());
+    let checked = std::cell::Cell::new(0_usize);
     let allowed = std::cell::Cell::new([0_usize; KNOWN.len()]);
     let result = runner.run(&strategy, |(config, ops)| {
-        let observed = match run(config, &ops) {
-            Err(reason) if !strict && KNOWN.iter().any(|known| reason.contains(known)) => {
-                let mut counts = allowed.get();
-                for (count, known) in counts.iter_mut().zip(KNOWN) {
-                    *count += usize::from(reason.contains(known));
-                }
-                allowed.set(counts);
-                return Ok(());
-            }
-            observed => observed.map_err(TestCaseError::fail)?,
-        };
+        let observed = evaluate(config, &ops, strict).map_err(TestCaseError::fail)?;
+        checked.set(checked.get() + 1);
+        let mut counts = allowed.get();
+        for (count, known) in counts.iter_mut().zip(KNOWN) {
+            *count += usize::from(observed.tolerated.contains(known));
+        }
+        allowed.set(counts);
         let seen = peaks.get();
         peaks.set(Peaks {
-            envelopes: seen.envelopes.max(observed.envelopes),
-            rows: seen.rows.max(observed.rows),
-            dirty_ops: seen.dirty_ops + observed.dirty_ops,
+            envelopes: seen.envelopes.max(observed.peaks.envelopes),
+            rows: seen.rows.max(observed.peaks.rows),
         });
+        let mut total = coverage.get();
+        total.add(observed.coverage);
+        coverage.set(total);
         Ok(())
     });
-    eprintln!("stalled-receiver oracle peaks: {:?}", peaks.get());
+    eprintln!(
+        "stalled-receiver oracle: {} cases checked, peaks {:?}, coverage {:?}",
+        checked.get(),
+        peaks.get(),
+        coverage.get()
+    );
     for (known, count) in KNOWN.iter().zip(allowed.get()) {
-        eprintln!("stalled-receiver oracle cases allowed as {known}: {count}");
+        eprintln!("stalled-receiver oracle cases tolerating {known}: {count}");
     }
-    let Err(error) = result else {
-        return;
-    };
-    let proptest::test_runner::TestError::Fail(reason, (config, ops)) = error else {
-        panic!("{error}");
-    };
-    let reason = reason.to_string();
-    let ops = minimize(config, ops, &reason);
-    let reason = run(config, &ops).err().unwrap_or(reason);
-    panic!("{reason}\nconfig: {config:#?}\nops: {ops:#?}");
+    if let Err(error) = result {
+        let proptest::test_runner::TestError::Fail(reason, (config, ops)) = error else {
+            panic!("{error}");
+        };
+        let reason = reason.to_string();
+        eprintln!("stalled-receiver oracle failure before minimizing: {reason}");
+        let ops = minimize(config, ops, &reason, strict);
+        let reason = evaluate(config, &ops, strict).err().unwrap_or(reason);
+        panic!("{reason}\nconfig: {config:#?}\nops: {ops:#?}");
+    }
+    let missing = coverage.get().missing();
+    assert!(
+        cases < DEFAULT_CASES || missing.is_empty(),
+        "coverage: {missing:?} never reached in {cases} cases"
+    );
 }
 
 /// Minimized by the oracle. Peer 0 is a grouped unicast member with a
@@ -1644,14 +1841,29 @@ fn stalled_receivers_converge_to_the_unbounded_reference() {
 #[test]
 #[ignore = "open defect: grouped refresh-retry livelock at one free slot"]
 fn grouped_refresh_retry_converges_with_one_free_slot() {
-    run(livelock_config(), &livelock_ops()).unwrap();
+    assert_clean(&livelock_config(), &livelock_ops());
 }
 
 /// The default run tolerates the open livelock only by its exact signature.
 #[test]
 fn known_refresh_retry_livelock_signature_matches_its_trace() {
-    let reason = run(livelock_config(), &livelock_ops()).expect_err("the open livelock reproduces");
-    assert!(reason.contains(KNOWN_REFRESH_RETRY_LIVELOCK), "{reason}");
+    assert_tolerates_only(
+        &livelock_config(),
+        &livelock_ops(),
+        KNOWN_REFRESH_RETRY_LIVELOCK,
+    );
+}
+
+/// The case holds every property and tolerates nothing.
+fn assert_clean(config: &[PeerConfig; PEERS], ops: &[Op]) {
+    let outcome = run(*config, ops).unwrap();
+    assert!(outcome.tolerated.is_empty(), "{:?}", outcome.tolerated);
+}
+
+/// The case holds every other property and tolerates exactly `known`.
+fn assert_tolerates_only(config: &[PeerConfig; PEERS], ops: &[Op], known: &'static str) {
+    let outcome = run(*config, ops).unwrap();
+    assert_eq!(outcome.tolerated, BTreeSet::from([known]));
 }
 
 fn livelock_config() -> [PeerConfig; PEERS] {
@@ -1701,15 +1913,15 @@ fn livelock_ops() -> Vec<Op> {
 #[test]
 #[ignore = "open defect: empty-view resync drops an owed refresh and its initial EoR"]
 fn refused_gate_lifting_refresh_still_sends_the_initial_eor() {
-    run(lost_eor_config(), &lost_eor_ops()).unwrap();
+    assert_clean(&lost_eor_config(), &lost_eor_ops());
 }
 
 #[test]
 fn known_empty_resync_signature_matches_its_trace() {
-    let reason = run(lost_eor_config(), &lost_eor_ops()).expect_err("the open defect reproduces");
-    assert!(
-        reason.contains(KNOWN_EMPTY_RESYNC_DROPS_REFRESH),
-        "{reason}"
+    assert_tolerates_only(
+        &lost_eor_config(),
+        &lost_eor_ops(),
+        KNOWN_EMPTY_RESYNC_DROPS_REFRESH,
     );
 }
 
@@ -1745,15 +1957,15 @@ fn lost_eor_ops() -> Vec<Op> {
 #[test]
 #[ignore = "open defect: resync withdraws a route an EoRR already purged"]
 fn refresh_answer_settles_withdrawals_owed_to_a_dirty_member() {
-    run(purge_config(), &purge_ops()).unwrap();
+    assert_clean(&purge_config(), &purge_ops());
 }
 
 #[test]
 fn known_withdrawal_after_eorr_purge_signature_matches_its_trace() {
-    let reason = run(purge_config(), &purge_ops()).expect_err("the open defect reproduces");
-    assert!(
-        reason.contains(KNOWN_WITHDRAWAL_AFTER_EORR_PURGE),
-        "{reason}"
+    assert_tolerates_only(
+        &purge_config(),
+        &purge_ops(),
+        KNOWN_WITHDRAWAL_AFTER_EORR_PURGE,
     );
 }
 
