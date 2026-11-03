@@ -96,6 +96,7 @@ SHARDS = {
                 "family_rib_pages",
                 "flowspec_json",
                 "flowspec_redirect_ip",
+                "flowspec_vpn",
                 "golden",
                 "health",
                 "help",
