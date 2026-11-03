@@ -7636,6 +7636,9 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
     };
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // A full channel is the refusal under test: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     manager.test_force_ungrouped = ungrouped;
     let stuck = peer_v4(Ipv4Addr::new(10, 44, 0, 1));
     let live = peer_v4(Ipv4Addr::new(10, 44, 0, 2));

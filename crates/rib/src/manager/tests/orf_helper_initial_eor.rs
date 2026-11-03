@@ -938,6 +938,9 @@ fn register_dual_stack(
 #[tokio::test(start_paused = true)]
 async fn empty_view_resync_answers_the_owed_refresh_and_its_held_eor() {
     let mut manager = manager();
+    // A full channel is the refusal under test: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     let peer = peer_v4(OBSERVER);
     let mut old_rx = register_dual_stack(&mut manager, 82, 64);
     permit_all_orf(&mut manager, 82);

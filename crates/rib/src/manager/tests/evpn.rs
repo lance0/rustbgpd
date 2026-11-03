@@ -4360,6 +4360,9 @@ fn evpn_refresh_answer_settles_the_owed_withdrawal() {
         BgpMetrics::new(),
     );
     let stuck = PeerId::from_addr("192.0.2.31".parse().unwrap());
+    // A full channel is the refusal under test: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     let (outbound_tx, mut stuck_rx) = mpsc::channel(usize::try_from(SESSION_CHANNEL).unwrap());
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
