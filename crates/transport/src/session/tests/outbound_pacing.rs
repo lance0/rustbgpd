@@ -1267,7 +1267,11 @@ fn hand_writer_with(
     let (completed_tx, completed) = tokio::sync::watch::channel(0);
     session.writer_bulk_tx = Some(bulk);
     session.writer_completed = Some(completed);
-    session.writer_bytes = Some(Arc::new(super::super::writer::WriterBytes::default()));
+    session.writer_bytes = Some(Arc::new(super::super::writer::WriterBytes::new(
+        session
+            .metrics
+            .outbound_writer_bytes_gauges(&session.peer_label),
+    )));
     session.writer_bulk_admitted = 0;
     (frames, completed_tx)
 }
@@ -1909,4 +1913,42 @@ async fn slow_peer_thresholds_are_the_configured_share_of_frames_and_bytes() {
         session.slow_peer_backlog_since.is_some(),
         "at the byte share"
     );
+}
+
+/// A write that completes in the same turn as the admission deadline is
+/// progress even when the expiry is handled first: the deadline is re-armed
+/// for a full interval instead of sending Cease/8. With no further progress
+/// the next expiry ends the session.
+#[tokio::test(start_paused = true)]
+async fn a_write_completing_with_the_deadline_rearms_it() {
+    let (mut session, _commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.timers.hold = None;
+    session.config.peer.hold_time = 0;
+    session.config.peer.send_hold_time = 0;
+    let (_frames, completed) = hand_writer(&mut session);
+    let (priority, mut priority_rx) = mpsc::unbounded_channel();
+    session.writer_priority_tx = Some(priority);
+    session
+        .handle_outbound_route_update(pacing_update(&session, heavy_routes(6_000)))
+        .await;
+    admit_until_blocked(&mut session);
+    let interval = session.admission_deadline();
+    tokio::time::advance(interval).await;
+    completed.send_replace(1);
+    session.expire_outbound_admission();
+    assert!(
+        priority_rx.try_recv().is_err(),
+        "no Cease/8 beside fresh progress"
+    );
+    let rearmed = session
+        .outbound_admission_timer
+        .as_ref()
+        .expect("the deadline runs again")
+        .deadline();
+    assert_eq!(rearmed - tokio::time::Instant::now(), interval);
+    session.expire_outbound_admission();
+    assert_cease_out_of_resources(priority_rx.try_recv().expect("Cease/8"));
 }

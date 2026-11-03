@@ -906,6 +906,23 @@ struct BgpMetricsInner {
     mrt_dump_failures: IntCounterVec,
 }
 
+/// One writer's handles on its peer's `bgp_peer_outbound_writer_bytes`
+/// series and on `bgp_outbound_writer_bytes`; see
+/// [`BgpMetrics::outbound_writer_bytes_gauges`].
+#[derive(Clone, Debug)]
+pub struct OutboundWriterBytesGauges {
+    peer: IntGauge,
+    total: IntGauge,
+}
+
+impl OutboundWriterBytesGauges {
+    /// Move both gauges by the same `delta`, so they always agree.
+    pub fn add(&self, delta: i64) {
+        self.peer.add(delta);
+        self.total.add(delta);
+    }
+}
+
 /// Prometheus metrics for the BGP daemon.
 ///
 /// All metrics are registered against an explicit [`Registry`], not the
@@ -5003,15 +5020,17 @@ impl BgpMetrics {
             .set(depth);
     }
 
-    /// Move a peer's writer-bytes gauge and the all-session total by the
-    /// same `delta`, so the two always agree. Sampled at the same points as
-    /// the queue depth.
-    pub fn add_peer_outbound_writer_bytes(&self, peer: &str, delta: i64) {
-        self.0
-            .peer_outbound_writer_bytes
-            .with_label_values(&[peer])
-            .add(delta);
-        self.0.outbound_writer_bytes.add(delta);
+    /// Handles on `peer`'s writer-bytes gauge and the all-session total,
+    /// for one writer to hold for its lifetime. Its series exists from here
+    /// at zero. A writer that outlives the reap of its peer's series updates
+    /// a detached handle, so it cannot recreate the series with a stale
+    /// offset.
+    #[must_use]
+    pub fn outbound_writer_bytes_gauges(&self, peer: &str) -> OutboundWriterBytesGauges {
+        OutboundWriterBytesGauges {
+            peer: self.0.peer_outbound_writer_bytes.with_label_values(&[peer]),
+            total: self.0.outbound_writer_bytes.clone(),
+        }
     }
 
     /// Read a peer's writer-bytes gauge. Test/diagnostic helper.
@@ -10680,7 +10699,7 @@ mod tests {
         m.set_rib_prefixes(peer, "ipv4_unicast", 42);
         m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
         m.set_peer_outbound_queue_depth(peer, 3);
-        m.add_peer_outbound_writer_bytes(peer, 3);
+        m.outbound_writer_bytes_gauges(peer).add(3);
         m.set_peer_slow(peer, true);
         m.set_bmp_stream_diverged(peer, true);
         m.set_rejected_routes_retained(peer, 4);
@@ -11105,9 +11124,10 @@ mod tests {
     #[test]
     fn writer_bytes_total_follows_each_peers_published_change() {
         let m = BgpMetrics::new();
-        m.add_peer_outbound_writer_bytes("10.0.0.1", 5);
-        m.add_peer_outbound_writer_bytes("10.0.0.2", 7);
-        m.add_peer_outbound_writer_bytes("10.0.0.1", -3);
+        let first = m.outbound_writer_bytes_gauges("10.0.0.1");
+        first.add(5);
+        m.outbound_writer_bytes_gauges("10.0.0.2").add(7);
+        first.add(-3);
         assert_eq!(m.peer_outbound_writer_bytes("10.0.0.1"), 2);
         assert_eq!(m.peer_outbound_writer_bytes("10.0.0.2"), 7);
         assert_eq!(m.outbound_writer_bytes(), 9);

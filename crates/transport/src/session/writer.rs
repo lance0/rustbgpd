@@ -92,6 +92,7 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::metrics::OutboundWriterBytesGauges;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::{mpsc, watch};
@@ -189,10 +190,11 @@ pub(super) const WRITER_BYTE_BUDGET: u64 =
 /// interleave. Retirement is final: once the writer is gone, a late
 /// publication (the session sampling before it sees the exit) records
 /// nothing, so an aborted session cannot leave the total inflated.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct WriterBytes {
     admitted: AtomicU64,
     published: AtomicU64,
+    gauges: OutboundWriterBytesGauges,
 }
 
 /// `WriterBytes::published` once retired; no backlog reaches it.
@@ -223,19 +225,30 @@ fn interleave(point: &'static InterleavePoint) {
 }
 
 impl WriterBytes {
+    /// Accounting for one writer, publishing to `gauges`.
+    pub(super) fn new(gauges: OutboundWriterBytesGauges) -> Self {
+        Self {
+            admitted: AtomicU64::new(0),
+            published: AtomicU64::new(0),
+            gauges,
+        }
+    }
+
     /// Record the session's admission watermark.
     pub(super) fn admitted(&self, admitted: u64) {
         self.admitted.store(admitted, Ordering::Release);
     }
 
-    /// Publish the backlog given the completion watermark.
-    pub(super) fn publish(&self, completed: u64, metrics: &BgpMetrics, peer: &str) {
-        let held = self
-            .admitted
-            .load(Ordering::Acquire)
-            .saturating_sub(completed);
+    /// Publish the backlog given the completion watermark. The backlog is
+    /// read again on every retry, so a publication that loses a race to a
+    /// newer admission records that admission too, not its stale reading.
+    pub(super) fn publish(&self, completed: u64) {
         let mut previous = self.published.load(Ordering::Acquire);
-        loop {
+        let held = loop {
+            let held = self
+                .admitted
+                .load(Ordering::Acquire)
+                .saturating_sub(completed);
             if previous == RETIRED || previous == held {
                 return;
             }
@@ -247,28 +260,28 @@ impl WriterBytes {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => break,
+                Ok(_) => break held,
                 Err(current) => previous = current,
             }
-        }
+        };
         #[cfg(test)]
         interleave(&BEFORE_GAUGES);
-        move_gauges(metrics, peer, held, previous);
+        self.move_gauges(held, previous);
     }
 
     /// The writer is gone, and its queue with it.
-    pub(super) fn retire(&self, metrics: &BgpMetrics, peer: &str) {
+    pub(super) fn retire(&self) {
         let previous = self.published.swap(RETIRED, Ordering::AcqRel);
         if previous != RETIRED {
-            move_gauges(metrics, peer, 0, previous);
+            self.move_gauges(0, previous);
         }
     }
-}
 
-fn move_gauges(metrics: &BgpMetrics, peer: &str, held: u64, previous: u64) {
-    if held != previous {
-        let gauge = |bytes: u64| i64::try_from(bytes).unwrap_or(i64::MAX);
-        metrics.add_peer_outbound_writer_bytes(peer, gauge(held) - gauge(previous));
+    fn move_gauges(&self, held: u64, previous: u64) {
+        if held != previous {
+            let gauge = |bytes: u64| i64::try_from(bytes).unwrap_or(i64::MAX);
+            self.gauges.add(gauge(held) - gauge(previous));
+        }
     }
 }
 
@@ -464,7 +477,9 @@ pub(super) fn spawn(
 ) -> WriterHandle {
     let (bulk_tx, bulk_rx) = mpsc::channel::<Bytes>(bulk_buffer);
     let (completed_tx, completed) = watch::channel(0);
-    let bytes = Arc::new(WriterBytes::default());
+    let bytes = Arc::new(WriterBytes::new(
+        metrics.outbound_writer_bytes_gauges(&peer_label),
+    ));
     // Unbounded so the session never waits on its own writer, and bounded by
     // state: one writer per connection queues its OPEN, the KEEPALIVE
     // answering the peer's OPEN, at most one normal ROUTE-REFRESH request
@@ -534,7 +549,7 @@ impl Drop for WriterTask {
     fn drop(&mut self) {
         self.metrics
             .set_peer_outbound_queue_depth(&self.peer_label, 0);
-        self.bytes.retire(&self.metrics, &self.peer_label);
+        self.bytes.retire();
     }
 }
 
@@ -680,7 +695,7 @@ impl WriterTask {
                 WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
             })?;
         self.completed_tx.send_replace(next);
-        self.bytes.publish(next, &self.metrics, &self.peer_label);
+        self.bytes.publish(next);
         Ok(())
     }
 
@@ -1145,17 +1160,13 @@ mod tests {
         handle.join.await.unwrap().unwrap();
     }
 
-    /// Publish `completed` from inside the next publication, at `point`.
-    fn publish_inside(
-        point: &'static InterleavePoint,
-        bytes: &Arc<WriterBytes>,
-        metrics: &BgpMetrics,
-        completed: u64,
-    ) {
-        let (bytes, metrics) = (Arc::clone(bytes), metrics.clone());
-        point.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || bytes.publish(completed, &metrics, "p")));
-        });
+    fn writer_bytes(metrics: &BgpMetrics) -> Arc<WriterBytes> {
+        Arc::new(WriterBytes::new(metrics.outbound_writer_bytes_gauges("p")))
+    }
+
+    /// Run `step` inside the next publication, at `point`.
+    fn inside(point: &'static InterleavePoint, step: impl FnOnce() + 'static) {
+        point.with(|hook| *hook.borrow_mut() = Some(Box::new(step)));
     }
 
     /// Whatever order the session's and the writer's publications land in,
@@ -1166,20 +1177,43 @@ mod tests {
     fn interleaved_publications_leave_both_gauges_at_the_recorded_value() {
         for before_record in [true, false] {
             let metrics = BgpMetrics::new();
-            let bytes = Arc::new(WriterBytes::default());
+            let bytes = writer_bytes(&metrics);
             bytes.admitted(10);
             let point = if before_record {
                 &BEFORE_RECORD
             } else {
                 &BEFORE_GAUGES
             };
-            publish_inside(point, &bytes, &metrics, 7);
-            bytes.publish(5, &metrics, "p");
+            let inner = Arc::clone(&bytes);
+            inside(point, move || inner.publish(7));
+            bytes.publish(5);
             let recorded = i64::try_from(bytes.published.load(Ordering::Acquire)).unwrap();
             assert_eq!(recorded, if before_record { 5 } else { 3 });
             assert_eq!(metrics.peer_outbound_writer_bytes("p"), recorded);
             assert_eq!(metrics.outbound_writer_bytes(), recorded);
         }
+    }
+
+    /// A writer publication that loses its race to a newer admission reads
+    /// the backlog again: the writer had drained to zero, the session then
+    /// admitted more and published it, and the writer's retry must not
+    /// record its stale zero over that, or a stalled next write would leave
+    /// the gauges at zero under a full budget.
+    #[test]
+    fn a_publication_retried_after_an_admission_records_the_new_backlog() {
+        let metrics = BgpMetrics::new();
+        let bytes = writer_bytes(&metrics);
+        bytes.admitted(15);
+        bytes.publish(10);
+        let session = Arc::clone(&bytes);
+        inside(&BEFORE_RECORD, move || {
+            session.admitted(25);
+            session.publish(15);
+        });
+        bytes.publish(15);
+        assert_eq!(bytes.published.load(Ordering::Acquire), 10);
+        assert_eq!(metrics.peer_outbound_writer_bytes("p"), 10);
+        assert_eq!(metrics.outbound_writer_bytes(), 10);
     }
 
     /// Retirement is final: a publication after it (the session sampling
@@ -1188,14 +1222,33 @@ mod tests {
     #[test]
     fn a_publication_after_retirement_records_nothing() {
         let metrics = BgpMetrics::new();
-        let bytes = WriterBytes::default();
+        let bytes = writer_bytes(&metrics);
         bytes.admitted(10);
-        bytes.publish(4, &metrics, "p");
+        bytes.publish(4);
         assert_eq!(metrics.outbound_writer_bytes(), 6);
-        bytes.retire(&metrics, "p");
-        bytes.publish(0, &metrics, "p");
+        bytes.retire();
+        bytes.publish(0);
         assert_eq!(metrics.peer_outbound_writer_bytes("p"), 0);
         assert_eq!(metrics.outbound_writer_bytes(), 0);
+    }
+
+    /// An aborted session's writer can outlive the reap of its peer's
+    /// series. Its late retirement must not recreate the series below zero,
+    /// where a re-added neighbor at the same label would inherit the offset;
+    /// the total still sheds the bytes it counted.
+    #[test]
+    fn a_retirement_after_the_peer_is_reaped_leaves_no_offset() {
+        let metrics = BgpMetrics::new();
+        let bytes = writer_bytes(&metrics);
+        bytes.admitted(10);
+        bytes.publish(4);
+        metrics.reap_peer_series("p");
+        bytes.retire();
+        assert_eq!(metrics.outbound_writer_bytes(), 0);
+        let readded = writer_bytes(&metrics);
+        readded.admitted(3);
+        readded.publish(0);
+        assert_eq!(metrics.peer_outbound_writer_bytes("p"), 3);
     }
 
     /// The budget is the derivation its docs give: two coalesced writes,
@@ -1216,7 +1269,7 @@ mod tests {
         let handle = spawn(write, 8, metrics.clone(), "bytes-peer".into(), None);
         // The session admitted two frames and published them.
         handle.bytes.admitted(6);
-        handle.bytes.publish(0, &metrics, "bytes-peer");
+        handle.bytes.publish(0);
         assert_eq!(metrics.outbound_writer_bytes(), 6);
         handle
             .bulk_tx

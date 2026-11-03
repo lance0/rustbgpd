@@ -365,7 +365,7 @@ impl PeerSession {
             );
         }
         if let (Some(bytes), Some(completed)) = (&self.writer_bytes, &self.writer_completed) {
-            bytes.publish(*completed.borrow(), &self.metrics, &self.peer_label);
+            bytes.publish(*completed.borrow());
         }
         self.evaluate_slow_peer();
     }
@@ -644,7 +644,7 @@ impl PeerSession {
         self.outbound_admission_timer = None;
         self.writer_completed = None;
         if let Some(bytes) = self.writer_bytes.take() {
-            bytes.retire(&self.metrics, &self.peer_label);
+            bytes.retire();
         }
         if let Some(task) = self.connect_task.take() {
             task.abort();
@@ -706,7 +706,7 @@ impl PeerSession {
         self.outbound_admission_timer = None;
         self.writer_completed = None;
         if let Some(bytes) = self.writer_bytes.take() {
-            bytes.retire(&self.metrics, &self.peer_label);
+            bytes.retire();
         }
         debug!(peer = %self.peer_label, "TCP disconnected");
         if let Some(task) = self.connect_task.take() {
