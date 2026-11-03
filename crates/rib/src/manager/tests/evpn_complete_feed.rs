@@ -1415,6 +1415,69 @@ fn full_mutable_input_reevaluation_proves_noop_without_reannouncing_owned_routes
     assert_eq!(resets.load(Ordering::SeqCst), 0);
 }
 
+/// A sparse renewal seal rides an ordinary delta, not a whole-table
+/// operation: two EVPN deltas to a member whose recovery is retained queue
+/// side by side, with neither delivered, and no resync follows. Red with the
+/// renewal latched as a complete feed: the second delta is refused behind
+/// the first's latch and the member goes dirty.
+#[test]
+fn sparse_renewals_while_recovery_is_retained_queue_without_a_resync() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
+    output.try_recv().map(delivered).unwrap();
+    assert!(manager.capture_shared_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, Some(gid), true)
+        .unwrap();
+    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: feed.announce.into(),
+                    evpn_withdraw: feed.withdraw,
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    while output.try_recv().map(delivered).is_ok() {}
+    manager
+        .rtc_eor_hold
+        .insert(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager
+        .ribs
+        .entry(route.peer)
+        .or_insert_with(|| AdjRibIn::new(route.peer))
+        .insert_evpn(route.clone());
+    let resets = count_reset_attempts(&mut manager);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let mut queued = Vec::new();
+    for value in [200, 250] {
+        let changed = received(value);
+        manager.process_evpn_announce_chunk(changed.peer, vec![changed]);
+        queued.extend(std::iter::from_fn(|| output.try_recv().ok()));
+    }
+    let deltas = queued
+        .iter()
+        .filter(|update| !update.evpn_announce.is_empty())
+        .count();
+    assert_eq!(deltas, 2, "both deltas queued");
+    assert!(
+        queued.iter().all(|update| update.latch.is_none()),
+        "ordinary envelopes"
+    );
+    assert!(!manager.dirty_peers.contains(&peer), "no resync");
+    assert!(manager.evpn_feed_is_current(peer));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn successful_replacement_during_held_eor_or_eorr_preserves_sparse_sequence() {
     for eorr in [false, true] {

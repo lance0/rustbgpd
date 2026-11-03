@@ -3699,9 +3699,14 @@ impl RibManager {
         // Admission (`crate::outbound_credit`): an operation's envelope fills
         // its reserved slot; a complete EVPN feed sent outside one is its own
         // one-envelope operation; an envelope with private rows needs credit.
+        // A sparse renewal seal (owned EVPN only) rides an ordinary delta.
         let admission = if let Some(slot) = batch.slot.take() {
             Ok(LadderAdmission::Slot(slot))
-        } else if batch.evpn_complete_feed.is_some() {
+        } else if batch
+            .evpn_complete_feed
+            .as_ref()
+            .is_some_and(|seal| !seal.is_sparse_renewal())
+        {
             self.begin_outbound_operation(peer, 1).map(|mut operation| {
                 LadderAdmission::Slot(operation.slot().expect("one slot reserved"))
             })
