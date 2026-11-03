@@ -53,12 +53,15 @@ use crate::update::OutboundRouteUpdate;
 ///
 /// Bound: charged rows ≤ `max(D, P · MIN_ROW_CREDIT)` plus, per peer, one
 /// oversize pass (a peer under its credit is always admitted) plus a
-/// transient excess: envelopes admitted while fewer peers were registered,
+/// retained excess: envelopes admitted while fewer peers were registered,
 /// under a larger limit, stay charged until they drop, and their peer is
-/// refused until it is back under the current limit, so that excess only
-/// drains, and is under [`MAX_ROW_CREDIT`] per peer. About 2 GiB of steady-state rows at saturation (about 121 bytes
-/// a row). Re-tune by measuring the staging cost and choosing the tolerated
-/// stall.
+/// refused until it is back under the current limit. That excess only
+/// drains, but a stalled receiver holds it until its session ends. It is
+/// under [`MAX_ROW_CREDIT`] per peer; in aggregate, with peers registering
+/// one at a time and each filling its credit first, at most
+/// `Σ_{k≤P} C(k) − P · C(P)`, about 37M rows at P = 150. About 2 GiB of
+/// steady-state rows at saturation (about 121 bytes a row). Re-tune by
+/// measuring the staging cost and choosing the tolerated stall.
 pub(crate) const DAEMON_ROW_CREDIT: usize = 16_777_216;
 /// Smallest per-peer credit, whatever the number of peers.
 pub(crate) const MIN_ROW_CREDIT: usize = 8_192;

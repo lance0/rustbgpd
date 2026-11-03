@@ -3979,7 +3979,11 @@ impl RibManager {
         };
         export_memo.retire_with(&mut checkpoint);
         if let Err(failure) = sent {
-            warn!(%peer, reason = failure.as_str(), "initial dump not sent — marking dirty");
+            if failure == super::outbound_credit::CREDIT_REFUSAL {
+                debug!(%peer, reason = failure.as_str(), "initial dump deferred behind a live whole-table update — marking dirty");
+            } else {
+                warn!(%peer, reason = failure.as_str(), "initial dump not sent — marking dirty");
+            }
             for f in &eor_families {
                 self.pending_eor.entry(peer).or_default().insert(*f);
             }
