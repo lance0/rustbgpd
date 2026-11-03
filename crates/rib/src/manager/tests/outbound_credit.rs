@@ -2905,3 +2905,123 @@ fn a_gone_channel_clears_only_its_own_suppressed_answer() {
     assert!(!manager.pending_refresh.contains_key(&second), "answered");
     assert_eq!(ipv4_eors(&sent), 0, "the answer carries no End-of-RIB");
 }
+
+/// Receive envelopes on `rx` until every prefix in `wanted` has been
+/// announced, within `limit` of the paused clock.
+async fn receive_announced(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    mut wanted: std::collections::HashSet<Prefix>,
+    limit: Duration,
+) -> bool {
+    tokio::time::timeout(limit, async {
+        while !wanted.is_empty() {
+            let Some(update) = rx.recv().await else {
+                return false;
+            };
+            for route in update.announce.iter() {
+                wanted.remove(&route.prefix);
+            }
+        }
+        true
+    })
+    .await
+    .unwrap_or(false)
+}
+
+fn other_source_route(other: Ipv4Addr, index: u32) -> Route {
+    let mut route = make_indexed_route(index, other);
+    route.peer = peer_v4(other);
+    route
+}
+
+/// A peer whose session has stopped taking envelopes (its writer held at
+/// the byte budget, so its channel stays full) never makes the RIB wait:
+/// a healthy peer keeps receiving every later batch, and later input and
+/// End-of-RIB from another source are still applied, in order. The paused
+/// clock bounds each wait, so a stalled actor fails the test rather than
+/// hanging it. Red with any wait on the held peer's channel in the actor,
+/// such as reserving a slot on every peer's channel before each turn.
+#[tokio::test(start_paused = true)]
+async fn a_peer_held_by_its_writer_never_holds_the_rib_or_a_healthy_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let handle = tokio::spawn(manager.run());
+    let _source_rx = actor_source(&tx).await;
+    let other = Ipv4Addr::new(10, 0, 0, 2);
+    let (other_tx, _other_rx) = mpsc::channel(64);
+    tx.send(actor_peer_up(peer_v4(other), other_tx))
+        .await
+        .unwrap();
+    // The held peer's channel takes one envelope and is never read.
+    let (held_tx, _held_rx) = mpsc::channel(1);
+    tx.send(actor_peer_up(peer_v4(Ipv4Addr::new(10, 0, 53, 1)), held_tx))
+        .await
+        .unwrap();
+    let (healthy_tx, mut healthy_rx) = mpsc::channel(1 << 12);
+    tx.send(actor_peer_up(
+        peer_v4(Ipv4Addr::new(10, 0, 53, 2)),
+        healthy_tx,
+    ))
+    .await
+    .unwrap();
+    let limit = Duration::from_secs(5);
+
+    for round in 0..8u32 {
+        let announced: Vec<Route> = (100 + round * 16..116 + round * 16)
+            .map(source_route)
+            .collect();
+        let wanted = announced.iter().map(|route| route.prefix).collect();
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(SOURCE),
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            receive_announced(&mut healthy_rx, wanted, limit).await,
+            "round {round}: the healthy peer stalled behind the held one"
+        );
+    }
+
+    // Another source's input, its End-of-RIB, then more input: all applied.
+    let before = other_source_route(other, 5_000);
+    let after = other_source_route(other, 5_001);
+    let wanted = [before.prefix, after.prefix].into_iter().collect();
+    for update in [vec![before], Vec::new(), vec![after]] {
+        let message = if update.is_empty() {
+            RibUpdate::EndOfRib {
+                peer: peer_v4(other),
+                session_id: 0,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            }
+        } else {
+            RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: peer_v4(other),
+                announced: update,
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            }
+        };
+        tx.send(message).await.unwrap();
+    }
+    assert!(
+        receive_announced(&mut healthy_rx, wanted, limit).await,
+        "input after the other source's End-of-RIB was not applied"
+    );
+    drop(tx);
+    let _ = handle.await;
+}
