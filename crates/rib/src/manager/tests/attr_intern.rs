@@ -1127,3 +1127,219 @@ async fn unicast_attr_gc_amortizes_sparse_large_capacity_tables() {
     manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)], None);
     assert_eq!(manager.attr_intern.len(), 1);
 }
+
+/// Permit, adding `community`, for EVPN route type `evpn_route_type` (or
+/// every route).
+fn add_community_statement(
+    evpn_route_type: Option<u8>,
+    community: u32,
+) -> rustbgpd_policy::PolicyStatement {
+    use rustbgpd_policy::{PolicyAction, PolicyStatement, RouteModifications};
+    PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: evpn_route_type,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications {
+            communities_add: vec![community],
+            ..RouteModifications::default()
+        },
+    }
+}
+
+fn add_community_chain(
+    entries: Vec<rustbgpd_policy::PolicyStatement>,
+) -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries,
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
+fn evpn_add_community_policy(community: u32) -> rustbgpd_policy::PolicyChain {
+    add_community_chain(vec![add_community_statement(None, community)])
+}
+
+const EXPORT_COMMUNITY_A: u32 = (65400 << 16) + 1000;
+const EXPORT_COMMUNITY_B: u32 = (65400 << 16) + 2000;
+
+/// One source and three private eBGP EVPN receivers, each with its own export
+/// policy. The source announces two keys with the same inbound attribute set.
+/// By default two receivers add community A on export and one adds B.
+struct EvpnExportFixture {
+    manager: RibManager,
+    source: PeerId,
+    receivers: [PeerId; 3],
+    keys: [rustbgpd_wire::EvpnRouteKey; 2],
+    outbound: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+}
+
+fn evpn_export_fixture() -> EvpnExportFixture {
+    evpn_export_fixture_with(
+        [
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_B),
+        ],
+        [100, 200].map(|tag| make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), tag)),
+    )
+}
+
+fn evpn_export_fixture_with(
+    receiver_policies: [rustbgpd_policy::PolicyChain; 3],
+    routes: [EvpnRibRoute; 2],
+) -> EvpnExportFixture {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let receivers = [2, 3, 4].map(|host| peer_v4(Ipv4Addr::new(10, 0, 0, host)));
+    let policies = std::iter::once(None).chain(receiver_policies.map(Some));
+    let mut outbound = Vec::new();
+    for ((peer, export_policy), peer_asn) in std::iter::once(source)
+        .chain(receivers)
+        .zip(policies)
+        .zip(65101..)
+    {
+        let (outbound_tx, outbound_rx) = mpsc::channel(4096);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy,
+            sendable_families: evpn_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        outbound.push(outbound_rx);
+    }
+    manager.ribs.insert(source, AdjRibIn::new(source));
+    let keys = routes.each_ref().map(EvpnRibRoute::key);
+    manager.process_evpn_announce_chunk(source, Vec::from(routes));
+    EvpnExportFixture {
+        manager,
+        source,
+        receivers,
+        keys,
+        outbound,
+    }
+}
+
+impl EvpnExportFixture {
+    fn exported(&self, receiver: usize, key: usize) -> EvpnRibRoute {
+        self.manager.adj_ribs_out[&self.receivers[receiver]]
+            .get_evpn(&self.keys[key])
+            .expect("receiver must hold the exported EVPN route")
+            .clone()
+    }
+}
+
+#[test]
+fn evpn_export_equal_policy_output_shares_one_interned_allocation() {
+    let fixture = evpn_export_fixture();
+    let first = fixture.exported(0, 0);
+    assert!(first.communities().contains(&EXPORT_COMMUNITY_A));
+    for (receiver, key) in [(0, 1), (1, 0), (1, 1)] {
+        assert!(
+            Arc::ptr_eq(
+                &first.attributes,
+                &fixture.exported(receiver, key).attributes
+            ),
+            "receiver {receiver} key {key}: equal post-policy EVPN attributes \
+             must share one interned allocation across rows and peers"
+        );
+    }
+}
+
+#[test]
+fn evpn_export_distinct_policy_output_stays_distinct() {
+    let fixture = evpn_export_fixture();
+    let a = fixture.exported(0, 0);
+    let b = fixture.exported(2, 0);
+    assert!(!Arc::ptr_eq(&a.attributes, &b.attributes));
+    assert_ne!(a.attributes, b.attributes);
+    assert!(a.communities().contains(&EXPORT_COMMUNITY_A));
+    assert!(!a.communities().contains(&EXPORT_COMMUNITY_B));
+    assert!(b.communities().contains(&EXPORT_COMMUNITY_B));
+    assert!(!b.communities().contains(&EXPORT_COMMUNITY_A));
+    assert!(Arc::ptr_eq(
+        &b.attributes,
+        &fixture.exported(2, 1).attributes
+    ));
+}
+
+#[test]
+fn evpn_export_same_source_with_different_policy_outcomes_stays_distinct() {
+    // One staging call sees both routes with one interned source set, but the
+    // policy modifies them differently by EVPN route type.
+    let split = || {
+        add_community_chain(vec![
+            add_community_statement(Some(3), EXPORT_COMMUNITY_A),
+            add_community_statement(Some(6), EXPORT_COMMUNITY_B),
+        ])
+    };
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let fixture = evpn_export_fixture_with(
+        [split(), split(), split()],
+        [make_evpn_imet(source, 100), make_evpn_smet(source, 0)],
+    );
+    let imet = fixture.exported(0, 0);
+    let smet = fixture.exported(0, 1);
+    assert!(imet.communities().contains(&EXPORT_COMMUNITY_A));
+    assert!(!imet.communities().contains(&EXPORT_COMMUNITY_B));
+    assert!(smet.communities().contains(&EXPORT_COMMUNITY_B));
+    assert!(!smet.communities().contains(&EXPORT_COMMUNITY_A));
+    assert!(Arc::ptr_eq(
+        &imet.attributes,
+        &fixture.exported(1, 0).attributes
+    ));
+    assert!(Arc::ptr_eq(
+        &smet.attributes,
+        &fixture.exported(2, 1).attributes
+    ));
+}
+
+#[test]
+fn evpn_export_interned_policy_output_reclaimed_after_withdrawal() {
+    let mut fixture = evpn_export_fixture();
+    let exported = [0, 2].map(|receiver| Arc::downgrade(&fixture.exported(receiver, 0).attributes));
+    // The transport consumes announce envelopes; only Adj-RIB-Out rows and
+    // the table may still hold the exported sets.
+    for rx in &mut fixture.outbound {
+        while rx.try_recv().is_ok() {}
+    }
+    let source = fixture.source;
+    let keys = fixture.keys.to_vec();
+    fixture.manager.process_evpn_withdraw_chunk(source, keys);
+    for receiver in fixture.receivers {
+        assert_eq!(fixture.manager.adj_ribs_out[&receiver].evpn_len(), 0);
+    }
+    for weak in exported {
+        assert!(
+            weak.upgrade().is_none(),
+            "withdrawal GC must reclaim interned post-policy EVPN attributes"
+        );
+    }
+}
