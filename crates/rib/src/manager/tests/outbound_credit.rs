@@ -2069,3 +2069,57 @@ async fn an_unsent_resync_reservation_keeps_the_ordinary_retry_interval() {
     drop(tx);
     let _ = handle.await;
 }
+
+/// A ROUTE-REFRESH held by the selection hold is answered at release
+/// after the convergence End-of-RIB, so the answer carries none of its own.
+/// When a live sibling-family operation defers that answer, the retry keeps
+/// the suppression: the peer gets exactly one IPv4 End-of-RIB. Red with the
+/// deferred intent saving only the family: the retried answer carries a
+/// second End-of-RIB.
+#[test]
+fn a_deferred_answer_after_the_convergence_eor_sends_no_second_eor() {
+    use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter};
+    const V4: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+    const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+    let waiter = Ipv4Addr::new(192, 0, 2, 83);
+    let mut manager = manager_with_dormant_waiter();
+    let _waiter_rx = connect(&mut manager, waiter, 64, true, false);
+    assert!(manager.selection_deferred(V4));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 86));
+    let mut rx = up(&mut manager, peer, dual_stack_sendable(), 64, 0);
+    let initial = send_all(&mut rx);
+    assert!(
+        initial
+            .iter()
+            .all(|update| !update.end_of_rib.contains(&V4)),
+        "held"
+    );
+    // A live IPv6 answer: a whole-table operation the IPv4 answer waits on.
+    refresh_request(&mut manager, peer, 0, V6);
+    let sibling = held(&mut rx);
+    assert_eq!(latches(&sibling).len(), 1);
+    refresh_request(&mut manager, peer, 0, V4);
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(waiter),
+        session_id: u64::from(waiter.octets()[3]),
+        afi: V4.0,
+        safi: V4.1,
+    });
+    assert!(!manager.selection_deferred(V4), "released");
+    let mut sent = send_all(&mut rx);
+    assert!(
+        manager.pending_refresh[&peer].contains(&V4),
+        "the IPv4 answer waits for the live operation"
+    );
+    drop(sibling);
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+        sent.extend(send_all(&mut rx));
+    }
+    assert!(!manager.pending_refresh.contains_key(&peer), "answered");
+    let eors = sent
+        .iter()
+        .filter(|update| update.end_of_rib.contains(&V4))
+        .count();
+    assert_eq!(eors, 1, "one IPv4 End-of-RIB");
+}

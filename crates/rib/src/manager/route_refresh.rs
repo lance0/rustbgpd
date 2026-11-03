@@ -1046,7 +1046,7 @@ impl RibManager {
                     // operation drains (`retry_deferred_refreshes`), without a
                     // resync of its own that would take the room it needs.
                     debug!(%peer, ?family, "route refresh response deferred: a whole-table update is still live or the channel is full");
-                    self.pending_refresh.entry(peer).or_default().insert(family);
+                    self.defer_refresh_answer(peer, family, suppress_eor);
                 }
                 FamilyReplayKind::PrefixLimitRecovery
                 | FamilyReplayKind::OperatorReplay
@@ -2465,7 +2465,7 @@ impl RibManager {
             match replay_kind {
                 FamilyReplayKind::PeerRefresh { .. } => {
                     warn!(%peer, ?family, reason = failure.as_str(), "route refresh response not sent");
-                    self.pending_refresh.entry(peer).or_default().insert(family);
+                    self.defer_refresh_answer(peer, family, suppress_eor);
                     self.mark_outbound_dirty(peer);
                 }
                 FamilyReplayKind::PrefixLimitRecovery => {
@@ -2496,6 +2496,7 @@ impl RibManager {
             // Same key-checked reader as `lift_orf_gate`: a completed
             // response must not leave (or create) an empty entry.
             remove_family_drop_empty(&mut self.pending_refresh, peer, family);
+            self.pending_refresh_suppress_eor.remove(&(peer, family));
             if deferred_eor {
                 if let Some(families) = self.gr_deferred_eor.get_mut(&peer) {
                     families.remove(&family);
@@ -2605,6 +2606,20 @@ impl RibManager {
         }
     }
 
+    /// Owe `peer` the answer to its ROUTE-REFRESH for `family`, keeping
+    /// whether it must carry no End-of-RIB of its own.
+    pub(super) fn defer_refresh_answer(
+        &mut self,
+        peer: PeerId,
+        family: (Afi, Safi),
+        suppress_eor: bool,
+    ) {
+        self.pending_refresh.entry(peer).or_default().insert(family);
+        if suppress_eor {
+            self.pending_refresh_suppress_eor.insert((peer, family));
+        }
+    }
+
     /// Retry any deferred enhanced route refresh responses for a peer.
     pub(super) fn retry_pending_refresh(&mut self, peer: PeerId) {
         self.retry_pending_refresh_in(peer, None);
@@ -2651,13 +2666,14 @@ impl RibManager {
         };
         for (afi, safi) in families {
             self.replacement_checkpoint(false);
+            let suppress_eor = self
+                .pending_refresh_suppress_eor
+                .remove(&(peer, (afi, safi)));
             let _ = self.send_route_refresh_response_in(
                 peer,
                 afi,
                 safi,
-                FamilyReplayKind::PeerRefresh {
-                    suppress_eor: false,
-                },
+                FamilyReplayKind::PeerRefresh { suppress_eor },
                 operation.as_deref_mut(),
             );
             self.replacement_checkpoint(true);
@@ -2684,6 +2700,8 @@ impl RibManager {
             self.replacement_checkpoint(false);
             if self.outbound_channel_gone(peer) {
                 self.pending_refresh.remove(&peer);
+                self.pending_refresh_suppress_eor
+                    .retain(|(owed, _)| *owed != peer);
             } else if !self.dirty_peers.contains(&peer)
                 && !self.outbound_operation_live(peer)
                 && !self.outbound_channel_full(peer)

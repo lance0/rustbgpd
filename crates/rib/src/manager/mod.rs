@@ -841,6 +841,9 @@ pub struct RibManager {
     /// Families with an outstanding enhanced route refresh response retry.
     /// Entries are never left empty: readers check the key.
     pending_refresh: HashMap<PeerId, HashSet<(Afi, Safi)>>,
+    /// The deferred answers of `pending_refresh` whose convergence End-of-RIB
+    /// was already queued, so the answer carries none of its own.
+    pending_refresh_suppress_eor: HashSet<(PeerId, (Afi, Safi))>,
     /// The peer whose deferred refresh responses were retried last, where
     /// the next budgeted retry slice resumes.
     deferred_refresh_cursor: Option<PeerId>,
@@ -2828,6 +2831,7 @@ impl RibManager {
             force_outbound_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             pending_refresh: HashMap::new(),
+            pending_refresh_suppress_eor: HashSet::new(),
             deferred_refresh_cursor: None,
             pending_initial_registrations: VecDeque::new(),
             registration_wait_sample_at: None,
@@ -3677,6 +3681,8 @@ impl RibManager {
     /// Clear all enhanced route refresh state for a peer.
     fn clear_peer_refresh_state(&mut self, peer: PeerId) {
         self.pending_refresh.remove(&peer);
+        self.pending_refresh_suppress_eor
+            .retain(|(owed, _)| *owed != peer);
         self.refresh_in_progress.remove(&peer);
         self.refresh_stale_routes.remove(&peer);
         self.refresh_stale_flowspec.remove(&peer);

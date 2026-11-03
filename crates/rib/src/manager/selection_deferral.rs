@@ -1650,8 +1650,9 @@ impl RibManager {
             }
             if self.dirty_peers.contains(&peer) {
                 // The dirty-resync success path flushes or piggybacks the
-                // convergence EoR before retrying this response.
-                self.pending_refresh.entry(peer).or_default().insert(family);
+                // convergence EoR before retrying this response, which then
+                // carries none of its own.
+                self.defer_refresh_answer(peer, family, peers.contains_key(&peer));
             } else {
                 // The convergence EoR loop above already queued/flushed the
                 // genuine EoR for every sendable peer, so the response must
