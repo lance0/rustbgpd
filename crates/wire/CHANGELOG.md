@@ -16,8 +16,15 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   `vpn_flowspec_withdrawn`. `MP_REACH_NLRI` for (1, 134) requires NH-Len 0,
   as SAFI 133 does, and an empty `MP_UNREACH_NLRI` is its End-of-RIB.
   (1, 134) attributes that failed as an unsupported SAFI now decode; (2, 134)
-  stays unsupported. The new public fields break struct literals, so this is
-  a new minor compatibility line.
+  stays unsupported in both directions: the VPN codec takes no AFI, and an
+  `MpReachNlri`/`MpUnreachNlri` with SAFI 134 and any AFI but 1 fails to
+  encode with `EncodeError::ValueOutOfRange` before writing a byte. The new
+  public fields break struct literals, so this is a new minor compatibility
+  line.
+- Component type 13 (Flow Label) now decodes only for IPv6 FlowSpec, as
+  RFC 8956 defines it. In an IPv4 rule, global (SAFI 133) or VPN (SAFI 134),
+  it is an unknown component type and the NLRI is malformed (RFC 8955 §4.2);
+  earlier releases accepted it.
 - Pair this wire line with FSM 0.15 and RPKI 0.10 when sharing public wire
   types. These crate versions are not published by this change.
 

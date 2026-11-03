@@ -2457,7 +2457,7 @@ fn decode_mp_reach_nlri(
         })));
     }
     if family == MpNlriFamily::VpnFlowSpec {
-        let rules = crate::flowspec::decode_vpn_flowspec_nlri(nlri_bytes, afi)?;
+        let rules = crate::flowspec::decode_vpn_flowspec_nlri(nlri_bytes)?;
         return Ok(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi,
             safi,
@@ -2704,7 +2704,7 @@ fn decode_mp_unreach_nlri(
         })));
     }
     if family == MpNlriFamily::VpnFlowSpec {
-        let rules = crate::flowspec::decode_vpn_flowspec_nlri(withdrawn_bytes, afi)?;
+        let rules = crate::flowspec::decode_vpn_flowspec_nlri(withdrawn_bytes)?;
         return Ok(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi,
             safi,
@@ -3550,6 +3550,19 @@ fn encode_attribute_triplet(flags: u8, type_code: u8, value: &[u8], buf: &mut Ve
     }
     buf.extend_from_slice(value);
 }
+/// RFC 8955 §8 defines VPN `FlowSpec` for AFI 1 only; the decoder refuses
+/// (2, 134), so the encoder never emits it. Checked before any byte is
+/// written.
+fn check_vpn_flowspec_afi(afi: Afi) -> Result<(), EncodeError> {
+    if afi == Afi::Ipv4 {
+        Ok(())
+    } else {
+        Err(EncodeError::ValueOutOfRange {
+            field: "VPN FlowSpec AFI",
+            value: (afi as u16).to_string(),
+        })
+    }
+}
 /// Encode `MP_REACH_NLRI` value bytes.
 ///
 /// When `add_path` is true, each NLRI entry includes a 4-byte path ID
@@ -3559,6 +3572,9 @@ fn encode_mp_reach_nlri(
     buf: &mut Vec<u8>,
     add_path: bool,
 ) -> Result<(), EncodeError> {
+    if mp.safi == Safi::FlowSpecVpn {
+        check_vpn_flowspec_afi(mp.afi)?;
+    }
     buf.extend_from_slice(&(mp.afi as u16).to_be_bytes());
     buf.push(mp.safi as u8);
     // FlowSpec: NH length = 0, reserved = 0, then FlowSpec NLRI
@@ -3571,7 +3587,7 @@ fn encode_mp_reach_nlri(
     if mp.safi == Safi::FlowSpecVpn {
         buf.push(0); // NH-Len = 0
         buf.push(0); // Reserved
-        crate::flowspec::try_encode_vpn_flowspec_nlri(&mp.vpn_flowspec_announced, buf, mp.afi)?;
+        crate::flowspec::try_encode_vpn_flowspec_nlri(&mp.vpn_flowspec_announced, buf)?;
         return Ok(());
     }
     // EVPN: next-hop is the VTEP loopback IP (4 or 16 bytes), then EVPN NLRI
@@ -3700,6 +3716,9 @@ fn encode_mp_unreach_nlri(
     buf: &mut Vec<u8>,
     add_path: bool,
 ) -> Result<(), EncodeError> {
+    if mp.safi == Safi::FlowSpecVpn {
+        check_vpn_flowspec_afi(mp.afi)?;
+    }
     buf.extend_from_slice(&(mp.afi as u16).to_be_bytes());
     buf.push(mp.safi as u8);
     // FlowSpec: encode FlowSpec NLRI rules
@@ -3708,7 +3727,7 @@ fn encode_mp_unreach_nlri(
         return Ok(());
     }
     if mp.safi == Safi::FlowSpecVpn {
-        crate::flowspec::try_encode_vpn_flowspec_nlri(&mp.vpn_flowspec_withdrawn, buf, mp.afi)?;
+        crate::flowspec::try_encode_vpn_flowspec_nlri(&mp.vpn_flowspec_withdrawn, buf)?;
         return Ok(());
     }
     // EVPN: encode EVPN NLRI routes

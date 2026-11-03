@@ -188,11 +188,11 @@ fn route_distinguisher_alone_moves_the_length_past_240() {
         rule,
     };
     let mut wire = Vec::new();
-    try_encode_vpn_flowspec_nlri(std::slice::from_ref(&vpn), &mut wire, Afi::Ipv4).unwrap();
+    try_encode_vpn_flowspec_nlri(std::slice::from_ref(&vpn), &mut wire).unwrap();
     assert_eq!(&wire[..2], &[0xf0, 243]);
     assert_eq!(&wire[2..10], &vpn.rd.0);
     assert_eq!(&wire[10..], &global[1..]);
-    assert_eq!(decode_vpn_flowspec_nlri(&wire, Afi::Ipv4).unwrap(), [vpn]);
+    assert_eq!(decode_vpn_flowspec_nlri(&wire).unwrap(), [vpn]);
 }
 
 /// Port terms (`=80`) written out by hand, independent of the encoder.
@@ -240,10 +240,10 @@ fn rd_inclusive_payloads_of_239_and_240_octets() {
     ] {
         let golden = [header, payload.as_slice()].concat();
         let mut wire = Vec::new();
-        try_encode_vpn_flowspec_nlri(std::slice::from_ref(rule), &mut wire, Afi::Ipv4).unwrap();
+        try_encode_vpn_flowspec_nlri(std::slice::from_ref(rule), &mut wire).unwrap();
         assert_eq!(wire, golden, "encode {}", payload.len());
         assert_eq!(
-            decode_vpn_flowspec_nlri(&golden, Afi::Ipv4).unwrap(),
+            decode_vpn_flowspec_nlri(&golden).unwrap(),
             std::slice::from_ref(rule),
             "decode {}",
             payload.len()
@@ -253,10 +253,7 @@ fn rd_inclusive_payloads_of_239_and_240_octets() {
     // also arrive as 0xf0ef. It decodes to the same rule and re-encodes
     // canonically.
     let two_octet = [&[0xf0, 0xef][..], &payload_239].concat();
-    assert_eq!(
-        decode_vpn_flowspec_nlri(&two_octet, Afi::Ipv4).unwrap(),
-        [rule_239]
-    );
+    assert_eq!(decode_vpn_flowspec_nlri(&two_octet).unwrap(), [rule_239]);
 }
 
 #[test]
@@ -267,18 +264,18 @@ fn the_4095_octet_bound_includes_the_route_distinguisher() {
         rule: port_rule(4087),
     };
     let mut wire = Vec::new();
-    try_encode_vpn_flowspec_nlri(std::slice::from_ref(&fits), &mut wire, Afi::Ipv4).unwrap();
+    try_encode_vpn_flowspec_nlri(std::slice::from_ref(&fits), &mut wire).unwrap();
     assert_eq!(&wire[..2], &[0xff, 0xff]);
     assert_eq!(wire.len(), 2 + 4095);
-    assert_eq!(decode_vpn_flowspec_nlri(&wire, Afi::Ipv4).unwrap(), [fits]);
+    assert_eq!(decode_vpn_flowspec_nlri(&wire).unwrap(), [fits]);
 
     // 4089 octets fit SAFI 133 but not SAFI 134, and a refusal leaves the
     // buffer as it was.
     let rule = port_rule(4089);
     try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut Vec::new(), Afi::Ipv4).unwrap();
     let mut wire = vec![0xaa];
-    let error = try_encode_vpn_flowspec_nlri(&[VpnFlowSpecRule { rd, rule }], &mut wire, Afi::Ipv4)
-        .unwrap_err();
+    let error =
+        try_encode_vpn_flowspec_nlri(&[VpnFlowSpecRule { rd, rule }], &mut wire).unwrap_err();
     assert_eq!(
         error,
         EncodeError::ValueOutOfRange {
@@ -293,9 +290,7 @@ fn the_4095_octet_bound_includes_the_route_distinguisher() {
 fn malformed_nlri_is_refused() {
     let rd = [0, 0, 0xad, 0x77, 0, 0, 0, 0x28];
     // A length below the 8-octet RD.
-    let detail = malformed_detail(
-        decode_vpn_flowspec_nlri(&[5, 0, 0, 0xad, 0x77, 0], Afi::Ipv4).unwrap_err(),
-    );
+    let detail = malformed_detail(decode_vpn_flowspec_nlri(&[5, 0, 0, 0xad, 0x77, 0]).unwrap_err());
     assert!(
         detail.contains("shorter than its 8-octet Route Distinguisher"),
         "{detail}"
@@ -303,20 +298,17 @@ fn malformed_nlri_is_refused() {
     // An RD with no components.
     let mut wire = vec![8];
     wire.extend_from_slice(&rd);
-    let detail = malformed_detail(decode_vpn_flowspec_nlri(&wire, Afi::Ipv4).unwrap_err());
+    let detail = malformed_detail(decode_vpn_flowspec_nlri(&wire).unwrap_err());
     assert!(detail.contains("no components"), "{detail}");
     // Truncated input: the length promises more than the buffer holds.
     let whole = nlri(rd);
     for cut in 1..whole.len() {
-        assert!(
-            decode_vpn_flowspec_nlri(&whole[..cut], Afi::Ipv4).is_err(),
-            "{cut}"
-        );
+        assert!(decode_vpn_flowspec_nlri(&whole[..cut]).is_err(), "{cut}");
     }
     // An extended length that overruns the buffer.
     let mut wire = vec![0xf1, 0x00];
     wire.extend(&whole[1..]);
-    let detail = malformed_detail(decode_vpn_flowspec_nlri(&wire, Afi::Ipv4).unwrap_err());
+    let detail = malformed_detail(decode_vpn_flowspec_nlri(&wire).unwrap_err());
     assert!(detail.contains("truncated: need 256"), "{detail}");
 }
 
@@ -325,7 +317,7 @@ fn malformed_second_nlri_does_not_misframe_the_first() {
     let first = nlri([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]);
     let second = nlri([0, 2, 0, 1, 0, 0, 0, 10]);
     let both = [first.clone(), second].concat();
-    let decoded = decode_vpn_flowspec_nlri(&both, Afi::Ipv4).unwrap();
+    let decoded = decode_vpn_flowspec_nlri(&both).unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].rd.to_string(), "44407:40");
     assert_eq!(decoded[1].rd.to_string(), "65536:10");
@@ -334,7 +326,7 @@ fn malformed_second_nlri_does_not_misframe_the_first() {
     // error naming the second NLRI's length, not a shifted reading of the first.
     let mut bad = first.clone();
     bad.extend([3, 0, 0, 1]);
-    let detail = malformed_detail(decode_vpn_flowspec_nlri(&bad, Afi::Ipv4).unwrap_err());
+    let detail = malformed_detail(decode_vpn_flowspec_nlri(&bad).unwrap_err());
     assert!(detail.contains("NLRI length 3"), "{detail}");
     // Reading the same bytes as SAFI 133 frames them differently: the RD
     // octets are not a rule, so the families cannot be decoded as each other.
@@ -367,6 +359,50 @@ fn ipv6_vpn_flowspec_stays_unsupported() {
     );
     assert_eq!(family_label(Afi::Ipv6, Safi::FlowSpecVpn), None);
     assert_eq!(Safi::from_u8(134), Some(Safi::FlowSpecVpn));
+}
+
+#[test]
+fn ipv6_flow_label_is_malformed_in_ipv4_vpn_flowspec() {
+    // RD 44407:40, then type 13 (Flow Label, IPv6-only per RFC 8956) = 1.
+    let mut nlri = vec![11, 0, 0, 0xad, 0x77, 0, 0, 0, 0x28];
+    nlri.extend([0x0d, 0x81, 0x01]);
+    let mut reach = vec![0x00, 0x01, 0x86, 0x00, 0x00];
+    reach.extend(&nlri);
+    let mut unreach = vec![0x00, 0x01, 0x86];
+    unreach.extend(&nlri);
+    for wire in [attr(14, &reach), attr(15, &unreach)] {
+        let detail = malformed_detail(decode(&wire).unwrap_err());
+        assert!(detail.contains("component type 13"), "{detail}");
+    }
+}
+
+#[test]
+fn vpn_flowspec_is_never_encoded_outside_afi_1() {
+    let rule = VpnFlowSpecRule {
+        rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]),
+        rule: rule(),
+    };
+    for afi in [Afi::Ipv6, Afi::L2Vpn, Afi::BgpLs] {
+        let mut reach = mp_reach(vec![rule.clone()]);
+        reach.afi = afi;
+        let mut unreach = mp_unreach(vec![rule.clone()]);
+        unreach.afi = afi;
+        for attribute in [
+            PathAttribute::MpReachNlri(Box::new(reach)),
+            PathAttribute::MpUnreachNlri(Box::new(unreach)),
+        ] {
+            let mut wire = vec![0xaa, 0xbb];
+            let error = encode_path_attributes(&[attribute], &mut wire, true, false).unwrap_err();
+            assert_eq!(
+                error,
+                EncodeError::ValueOutOfRange {
+                    field: "VPN FlowSpec AFI",
+                    value: (afi as u16).to_string(),
+                }
+            );
+            assert_eq!(wire, [0xaa, 0xbb], "a refused encode leaves the buffer");
+        }
+    }
 }
 
 fn arb_numeric() -> impl Strategy<Value = Vec<NumericMatch>> {

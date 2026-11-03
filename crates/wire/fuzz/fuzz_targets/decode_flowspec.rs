@@ -10,13 +10,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode_flowspec_nlri(data, Afi::Ipv6);
     // VPN FlowSpec (SAFI 134): a decoded NLRI list re-encodes canonically
     // and decodes back to the same rules.
-    if let Ok(rules) = decode_vpn_flowspec_nlri(data, Afi::Ipv4) {
+    if let Ok(rules) = decode_vpn_flowspec_nlri(data) {
         let mut wire = Vec::new();
-        try_encode_vpn_flowspec_nlri(&rules, &mut wire, Afi::Ipv4)
+        try_encode_vpn_flowspec_nlri(&rules, &mut wire)
             .expect("a decoded VPN FlowSpec NLRI fits the length field");
-        assert_eq!(
-            decode_vpn_flowspec_nlri(&wire, Afi::Ipv4).as_ref(),
-            Ok(&rules)
-        );
+        assert_eq!(decode_vpn_flowspec_nlri(&wire).as_ref(), Ok(&rules));
     }
 });

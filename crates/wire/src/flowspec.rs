@@ -572,7 +572,9 @@ pub fn decode_flowspec_nlri(buf: &[u8], afi: Afi) -> Result<Vec<FlowSpecRule>, D
     Ok(rules)
 }
 
-/// Decode one or more RFC 8955 §8 VPN `FlowSpec` NLRIs from wire bytes.
+/// Decode one or more RFC 8955 §8 VPN `FlowSpec` NLRIs (AFI 1 / SAFI 134)
+/// from wire bytes. Only IPv4 VPN `FlowSpec` is supported, so the rules use
+/// the IPv4 component grammar.
 ///
 /// Each NLRI uses the `FlowSpec` length prefix, whose value covers the
 /// 8-octet Route Distinguisher and the rule that follows it.
@@ -583,7 +585,7 @@ pub fn decode_flowspec_nlri(buf: &[u8], afi: Afi) -> Result<Vec<FlowSpecRule>, D
 /// components, or is otherwise truncated or malformed. Framing is exact:
 /// one malformed NLRI fails the whole attribute rather than shifting the
 /// boundaries of the others.
-pub fn decode_vpn_flowspec_nlri(buf: &[u8], afi: Afi) -> Result<Vec<VpnFlowSpecRule>, DecodeError> {
+pub fn decode_vpn_flowspec_nlri(buf: &[u8]) -> Result<Vec<VpnFlowSpecRule>, DecodeError> {
     let mut rules = Vec::new();
     for_each_flowspec_nlri(buf, |value| {
         let Some((rd, rule)) = value.split_first_chunk::<8>() else {
@@ -597,7 +599,7 @@ pub fn decode_vpn_flowspec_nlri(buf: &[u8], afi: Afi) -> Result<Vec<VpnFlowSpecR
         };
         rules.push(VpnFlowSpecRule {
             rd: RouteDistinguisher(*rd),
-            rule: decode_validated_rule(rule, afi)?,
+            rule: decode_validated_rule(rule, Afi::Ipv4)?,
         });
         Ok(())
     })?;
@@ -650,7 +652,8 @@ pub fn try_encode_flowspec_nlri(
     })
 }
 
-/// Encode RFC 8955 §8 VPN `FlowSpec` NLRIs to wire bytes.
+/// Encode RFC 8955 §8 VPN `FlowSpec` NLRIs (AFI 1 / SAFI 134) to wire
+/// bytes, in the IPv4 component grammar.
 ///
 /// # Errors
 ///
@@ -659,11 +662,10 @@ pub fn try_encode_flowspec_nlri(
 pub fn try_encode_vpn_flowspec_nlri(
     rules: &[VpnFlowSpecRule],
     buf: &mut Vec<u8>,
-    afi: Afi,
 ) -> Result<(), EncodeError> {
     try_encode_framed(rules, buf, |vpn, value| {
         value.extend_from_slice(&vpn.rd.0);
-        encode_flowspec_rule(&vpn.rule, value, afi);
+        encode_flowspec_rule(&vpn.rule, value, Afi::Ipv4);
     })
 }
 
@@ -807,7 +809,9 @@ fn decode_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecComponent, usize), 
             let (ops, consumed) = decode_bitmask_ops(rest)?;
             Ok((FlowSpecComponent::Fragment(ops), 1 + consumed))
         }
-        13 => {
+        // RFC 8956 §3.7 defines the Flow Label only for IPv6. RFC 8955 §4.2
+        // defines no type 13 for IPv4, so there it is an unknown type.
+        13 if afi == Afi::Ipv6 => {
             let (ops, consumed) = decode_numeric_ops(rest)?;
             Ok((FlowSpecComponent::FlowLabel(ops), 1 + consumed))
         }
@@ -1541,13 +1545,13 @@ mod tests {
             },
         };
         let mut wire = Vec::new();
-        try_encode_vpn_flowspec_nlri(std::slice::from_ref(&vpn), &mut wire, Afi::Ipv4).unwrap();
+        try_encode_vpn_flowspec_nlri(std::slice::from_ref(&vpn), &mut wire).unwrap();
         assert_eq!(
             wire,
             [11, 0, 0, 0xad, 0x77, 0, 0, 0, 0x28, 0x03, 0x81, 0x11]
         );
         assert_eq!(
-            decode_vpn_flowspec_nlri(&wire, Afi::Ipv4).unwrap(),
+            decode_vpn_flowspec_nlri(&wire).unwrap(),
             std::slice::from_ref(&vpn)
         );
         assert_eq!(vpn.to_string(), format!("rd 44407:40 {}", vpn.rule));
@@ -1892,9 +1896,9 @@ mod tests {
     #[test]
     #[expect(
         clippy::too_many_lines,
-        reason = "round-trip test intentionally covers all component encodings in one ordered fixture"
+        reason = "round-trip test intentionally covers all IPv4 component encodings in one ordered fixture"
     )]
-    fn all_13_component_types_in_order() {
+    fn all_ipv4_component_types_in_order() {
         let rule = FlowSpecRule {
             components: vec![
                 FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(Ipv4Prefix::new(
@@ -1983,14 +1987,6 @@ mod tests {
                     match_bit: true,
                     value: 0x01,
                 }]),
-                FlowSpecComponent::FlowLabel(vec![NumericMatch {
-                    end_of_list: true,
-                    and_bit: false,
-                    lt: false,
-                    gt: false,
-                    eq: true,
-                    value: 99999,
-                }]),
             ],
         };
         assert!(rule.validate().is_ok());
@@ -1998,6 +1994,32 @@ mod tests {
         try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv4).unwrap();
         let decoded = decode_flowspec_nlri(&buf, Afi::Ipv4).unwrap();
         assert_eq!(decoded[0], rule);
+
+        // Type 13 (Flow Label) is IPv6-only (RFC 8956 §3.7): IPv4 global and
+        // VPN decoding both treat it as an unknown, malformed component.
+        let mut with_label = rule;
+        with_label
+            .components
+            .push(FlowSpecComponent::FlowLabel(vec![NumericMatch {
+                end_of_list: true,
+                and_bit: false,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: 99999,
+            }]));
+        let mut buf = Vec::new();
+        try_encode_flowspec_nlri(std::slice::from_ref(&with_label), &mut buf, Afi::Ipv4).unwrap();
+        let err = decode_flowspec_nlri(&buf, Afi::Ipv4).unwrap_err();
+        assert!(err.to_string().contains("component type 13"), "{err}");
+        let vpn = VpnFlowSpecRule {
+            rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]),
+            rule: with_label,
+        };
+        let mut buf = Vec::new();
+        try_encode_vpn_flowspec_nlri(std::slice::from_ref(&vpn), &mut buf).unwrap();
+        let err = decode_vpn_flowspec_nlri(&buf).unwrap_err();
+        assert!(err.to_string().contains("component type 13"), "{err}");
     }
 
     #[test]
