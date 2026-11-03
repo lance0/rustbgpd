@@ -555,14 +555,24 @@ async fn rib_park_local_waits_do_not_renew_a_silent_peer() {
 /// second hold time.
 #[tokio::test]
 async fn rib_park_full_read_buffer_counts_for_the_second_deferral() {
-    let behind = keepalive_pdu().repeat(8192 / 19 + 1);
+    // Past the cap, and exactly at it (431 KEEPALIVEs and three header
+    // bytes: 8192), where the probe has no room left.
+    let mut exact = keepalive_pdu().repeat(431);
+    exact.extend_from_slice(&[0xff; 3]);
+    assert_eq!(exact.len(), 8192);
+    for behind in [keepalive_pdu().repeat(8192 / 19 + 1), exact] {
+        Box::pin(full_read_buffer_case(&behind)).await;
+    }
+}
+
+async fn full_read_buffer_case(behind: &[u8]) {
     let RibPark {
         mut session,
         mut server,
         commands: _commands,
         rib_rx: _rib_rx,
         ..
-    } = parked(&behind).await;
+    } = parked(behind).await;
     session
         .read_buf
         .set_max_message_len(rustbgpd_wire::MAX_MESSAGE_LEN);
@@ -1104,4 +1114,117 @@ async fn rib_park_expires_writer_admission() {
     assert_eq!(cease_out_of_resources(&metrics, &peer), 1.0);
     assert_ne!(session.fsm.state(), SessionState::Established);
     assert_held_then_peer_down(&mut session, &mut rib_rx, fillers).await;
+}
+
+/// A command outside the close allowlist that arrives while parked waits:
+/// it runs only once the held messages are admitted, after them.
+/// Mutation-red: treating every command as a close runs it at once, while
+/// the held UPDATE is still waiting.
+#[tokio::test]
+async fn rib_park_defers_a_non_terminal_command() {
+    let RibPark {
+        mut session,
+        commands,
+        mut rib_rx,
+        server: _server,
+        fillers,
+        ..
+    } = parked(&[]).await;
+    let (reply, mut response) = oneshot::channel();
+    commands
+        .send(PeerCommand::SendRouteRefresh {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            reply,
+        })
+        .await
+        .unwrap();
+    let mut run = std::pin::pin!(session.run());
+    // The command is ready and nothing else is: one poll takes it.
+    let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+    assert!(polled.is_pending());
+    assert!(
+        response.try_recv().is_err(),
+        "the command must wait while RIB-bound messages are held"
+    );
+    let steps = async {
+        for _ in 0..fillers {
+            assert_eq!(announced_v4(&rib_rx.recv().await.unwrap()), []);
+        }
+        tokio::time::timeout(Duration::from_secs(5), &mut response)
+            .await
+            .expect("the command runs once the backlog drains")
+            .unwrap()
+    };
+    tokio::select! {
+        result = &mut run => panic!("run() ended: {result:?}"),
+        _ = steps => {}
+    }
+    // It ran only after the held UPDATE was admitted.
+    assert_eq!(
+        announced_v4(&rib_rx.try_recv().unwrap()),
+        vec![Prefix::V4(held())]
+    );
+}
+
+/// The backpressure counter counts park episodes: a batch delivered at once
+/// does not count, the batch that finds the channel full does, and a batch
+/// queued behind an existing park does not count again.
+/// Mutation-red: counting on either condition alone counts the direct
+/// delivery, or the batch queued behind the park.
+#[tokio::test]
+async fn rib_backpressure_counts_park_episodes() {
+    let (mut session, mut rib_rx, metrics) = backpressure_test_session(1);
+    let peer = session.peer_label.clone();
+    let parks = || {
+        counter(
+            &metrics,
+            "bgp_inbound_rib_backpressure_total",
+            &[("peer", &peer)],
+        )
+    };
+    session
+        .deliver_routes_to_rib(placeholder_routes_received())
+        .unwrap();
+    assert_eq!(parks(), 0.0, "delivered at once");
+    session
+        .deliver_routes_to_rib(placeholder_routes_received())
+        .unwrap();
+    assert_eq!(parks(), 1.0, "found the channel full");
+    session
+        .deliver_routes_to_rib(placeholder_routes_received())
+        .unwrap();
+    assert_eq!(parks(), 1.0, "queued behind the same park");
+    assert_eq!(session.rib_backlog.len(), 2);
+    rib_rx.try_recv().unwrap();
+}
+
+/// The RIB channel closing while messages are held drops them: the session
+/// is no longer parked, sends nothing further, and still shuts down cleanly.
+/// Mutation-red: keeping the held messages leaves the session parked with
+/// no reservation to deliver them.
+#[tokio::test]
+async fn rib_park_drops_held_messages_when_the_rib_closes() {
+    let RibPark {
+        mut session,
+        commands,
+        rib_rx,
+        server: _server,
+        ..
+    } = parked(&[]).await;
+    session.send_to_rib(placeholder_routes_received()).unwrap();
+    assert_eq!(session.rib_backlog.len(), 2);
+    drop(rib_rx);
+    let reserved = inbound::poll_rib_reserve(&mut session.rib_reserve).await;
+    assert!(reserved.is_err(), "the reservation sees the closed channel");
+    session.advance_rib_backlog(reserved).await;
+    assert!(session.rib_backlog.is_empty(), "held messages dropped");
+    assert!(session.rib_reserve.is_none());
+    assert!(session.send_to_rib(placeholder_routes_received()).is_err());
+    assert!(session.rib_backlog.is_empty(), "nothing further is held");
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), session.run())
+        .await
+        .expect("shutdown completes with the RIB gone")
+        .unwrap();
 }
