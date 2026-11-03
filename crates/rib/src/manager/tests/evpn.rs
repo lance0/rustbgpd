@@ -43,13 +43,13 @@ fn smet_obeys_family_export_policy_and_rr_client_gates() {
             negotiated_orf_recv: vec![],
             negotiated_llgr_families: vec![],
         });
-        while out.try_recv().is_ok() {}
+        while out.try_recv().map(delivered).is_ok() {}
         let mut route = make_evpn_smet("192.0.2.10".parse().unwrap(), 0xf2);
         route.origin_type = crate::route::RouteOrigin::Ibgp;
         manager.ribs.insert(route.peer, AdjRibIn::new(route.peer));
         manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
         assert!(manager.loc_rib.get_evpn(&route.key()).is_some());
-        let announcements: Vec<_> = std::iter::from_fn(|| out.try_recv().ok())
+        let announcements: Vec<_> = std::iter::from_fn(|| out.try_recv().map(delivered).ok())
             .flat_map(|update| Arc::unwrap_or_clone(update.evpn_announce))
             .collect();
         assert_eq!(
@@ -98,7 +98,7 @@ fn smet_flags_replace_selected_payload_fallback_and_originators_stay_distinct() 
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
-    while out.try_recv().is_ok() {}
+    while out.try_recv().map(delivered).is_ok() {}
     let mut winner = make_evpn_smet("192.0.2.10".parse().unwrap(), 0xf2);
     AttrSet::edit(&mut winner.attributes, |attrs| {
         attrs.push(PathAttribute::LocalPref(200));
@@ -110,7 +110,7 @@ fn smet_flags_replace_selected_payload_fallback_and_originators_stay_distinct() 
     }
     let key = winner.key();
     assert_eq!(manager.loc_rib.get_evpn(&key).unwrap().peer, winner.peer);
-    let initial = out.try_recv().unwrap();
+    let initial = out.try_recv().map(delivered).unwrap();
     assert_eq!(initial.evpn_announce[0].route, winner.route);
     assert!(out.try_recv().is_err());
     assert_eq!(live.try_recv().unwrap().event_type, RouteEventType::Added);
@@ -124,7 +124,7 @@ fn smet_flags_replace_selected_payload_fallback_and_originators_stay_distinct() 
     assert_eq!(winner.key(), key);
     assert_eq!(manager.ribs[&winner.peer].evpn_len(), 1);
     assert_eq!(manager.loc_rib.get_evpn(&key).unwrap().route, winner.route);
-    let changed = out.try_recv().unwrap();
+    let changed = out.try_recv().map(delivered).unwrap();
     assert_eq!(changed.evpn_announce.len(), 1);
     assert_eq!(changed.evpn_announce[0].route, winner.route);
     assert_eq!(changed.evpn_withdraw.len(), 0);
@@ -153,7 +153,7 @@ fn smet_flags_replace_selected_payload_fallback_and_originators_stay_distinct() 
     manager.process_evpn_announce_chunk(winner.peer, vec![other_originator.clone()]);
     assert_eq!(manager.loc_rib.iter_evpn().count(), 2);
     assert_eq!(
-        out.try_recv().unwrap().evpn_announce[0].key(),
+        out.try_recv().map(delivered).unwrap().evpn_announce[0].key(),
         other_originator.key()
     );
 
@@ -162,12 +162,15 @@ fn smet_flags_replace_selected_payload_fallback_and_originators_stay_distinct() 
         manager.loc_rib.get_evpn(&key).unwrap().route,
         fallback.route
     );
-    let changed = out.try_recv().unwrap();
+    let changed = out.try_recv().map(delivered).unwrap();
     assert_eq!(changed.evpn_announce[0].peer, fallback.peer);
     assert_eq!(changed.evpn_announce[0].route, fallback.route);
     manager.process_evpn_withdraw_chunk(fallback.peer, vec![key]);
     assert!(manager.loc_rib.get_evpn(&key).is_none());
-    assert_eq!(out.try_recv().unwrap().evpn_withdraw, vec![key]);
+    assert_eq!(
+        out.try_recv().map(delivered).unwrap().evpn_withdraw,
+        vec![key]
+    );
     assert!(manager.loc_rib.get_evpn(&other_originator.key()).is_some());
     let (reply, mut received) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryEvpnDataplaneRoutes {
@@ -208,7 +211,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
-    while out.try_recv().is_ok() {}
+    while out.try_recv().map(delivered).is_ok() {}
     let sid = "2001:db8:111:1::".parse().unwrap();
     let valid = service_attribute(6, sid, 23, Some([40, 24, 16, 0, 0, 0]));
     let mut fallback = make_evpn_macip(
@@ -265,7 +268,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
         );
     };
     announce(&mut manager, &fallback);
-    while out.try_recv().is_ok() {}
+    while out.try_recv().map(delivered).is_ok() {}
     announce(&mut manager, &invalid);
     assert_eq!(
         manager.loc_rib.get_evpn(&fallback.key()).unwrap().peer,
@@ -283,7 +286,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
     assert_eq!(explain.reason, Some(crate::BestPathReason::Srv6SidInvalid));
     assert_eq!(explain.received.unwrap().attributes, invalid.attributes);
     assert_eq!(explain.selection_best.unwrap().peer, fallback.peer);
-    while let Ok(update) = out.try_recv() {
+    while let Ok(update) = out.try_recv().map(delivered) {
         assert!(update.evpn_announce.is_empty());
         assert_eq!(update.evpn_withdraw.len(), 0);
     }
@@ -300,7 +303,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
     drain_route_chunks(&mut manager);
     query(&mut manager, None);
     let mut withdrawn = Vec::new();
-    while let Ok(update) = out.try_recv() {
+    while let Ok(update) = out.try_recv().map(delivered) {
         assert!(update.evpn_announce.is_empty());
         withdrawn.extend(update.evpn_withdraw);
     }
@@ -323,7 +326,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
     announce(&mut manager, &invalid);
     query(&mut manager, Some(invalid.peer));
     let mut announced = Vec::new();
-    while let Ok(update) = out.try_recv() {
+    while let Ok(update) = out.try_recv().map(delivered) {
         announced.extend(update.evpn_announce.iter().cloned());
     }
     assert_eq!(announced.len(), 1);
@@ -727,7 +730,7 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
             negotiated_orf_recv: vec![],
             negotiated_llgr_families: vec![],
         });
-        while out.try_recv().is_ok() {}
+        while out.try_recv().map(delivered).is_ok() {}
         receivers.push(out);
     }
     let closed_rx = receivers.remove(0);
@@ -825,7 +828,7 @@ fn blocked_per_peer_evpn_send_warns_once_per_dirty_episode() {
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
-    while out.try_recv().is_ok() {}
+    while out.try_recv().map(delivered).is_ok() {}
 
     // The announce fills the one-slot channel. Forget it in the
     // Adj-RIB-Out so every later pass stages it again.
@@ -866,7 +869,7 @@ fn blocked_per_peer_evpn_send_warns_once_per_dirty_episode() {
     );
 
     // The receiver drains; the dirty resync commits and ends the episode.
-    while out.try_recv().is_ok() {}
+    while out.try_recv().map(delivered).is_ok() {}
     while manager.resync_dirty_peers_bounded() {}
     assert!(!manager.dirty_peers.contains(&peer));
     assert_eq!(manager.dirty_resync_commits, 1);
@@ -2464,12 +2467,16 @@ async fn evpn_no_export_honors_neighbor_mode_and_source_precedence() {
     let _ = query_evpn_routes(&tx).await;
 
     for out_rx in [&mut honor_rx, &mut transparent_rx, &mut internal_rx] {
-        let update = out_rx.try_recv().expect("plain EVPN routes advertise");
+        let update = out_rx
+            .try_recv()
+            .map(delivered)
+            .expect("plain EVPN routes advertise");
         assert_eq!(update.evpn_announce.len(), 3);
         assert_eq!(update.evpn_withdraw.len(), 0);
     }
     let added_update = adder_rx
         .try_recv()
+        .map(delivered)
         .expect("policy-added NO_EXPORT EVPN route is delivered");
     let added_route = added_update
         .evpn_announce
@@ -2503,18 +2510,23 @@ async fn evpn_no_export_honors_neighbor_mode_and_source_precedence() {
 
     let honor_update = honor_rx
         .try_recv()
+        .map(delivered)
         .expect("honor-mode eBGP peer receives exact withdrawal");
     assert!(honor_update.evpn_announce.is_empty());
     assert_eq!(honor_update.evpn_withdraw, vec![primary_key]);
     for out_rx in [&mut transparent_rx, &mut internal_rx] {
         let update = out_rx
             .try_recv()
+            .map(delivered)
             .expect("transparent and iBGP peers retain the tagged route");
         assert_eq!(update.evpn_announce.len(), 1);
         assert_eq!(update.evpn_announce[0].key(), primary_key);
         assert_eq!(update.evpn_withdraw.len(), 0);
     }
-    assert!(honor_rx.try_recv().is_err(), "sibling must not churn");
+    assert!(
+        honor_rx.try_recv().map(delivered).is_err(),
+        "sibling must not churn"
+    );
     assert_ne!(primary_key, sibling_key, "fixture keys must be distinct");
 
     drop(tx);
@@ -2594,7 +2606,7 @@ async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
         .unwrap();
         let _ = query_evpn_routes(&tx).await;
         assert!(
-            out_rx.try_recv().is_err(),
+            out_rx.try_recv().map(delivered).is_err(),
             "first-seen and repeated source-scoped EVPN routes stay silent"
         );
     }
@@ -2617,7 +2629,10 @@ async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
     .await
     .unwrap();
     let _ = query_evpn_routes(&tx).await;
-    let initial = out_rx.try_recv().expect("plain EVPN routes must advertise");
+    let initial = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("plain EVPN routes must advertise");
     assert_eq!(initial.evpn_announce.len(), 2);
     assert!(
         initial
@@ -2651,6 +2666,7 @@ async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
     let _ = query_evpn_routes(&tx).await;
     let scoped = out_rx
         .try_recv()
+        .map(delivered)
         .expect("source NO_ADVERTISE must withdraw the prior EVPN route");
     assert!(scoped.evpn_announce.is_empty());
     assert_eq!(scoped.evpn_withdraw, vec![primary_key]);
@@ -2672,12 +2688,13 @@ async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
     let _ = query_evpn_routes(&tx).await;
     let recovered = out_rx
         .try_recv()
+        .map(delivered)
         .expect("removing source NO_ADVERTISE must re-announce EVPN");
     assert_eq!(recovered.evpn_announce.len(), 1);
     assert_eq!(recovered.evpn_announce[0].key(), primary_key);
     assert_eq!(recovered.evpn_withdraw.len(), 0);
     assert!(
-        out_rx.try_recv().is_err(),
+        out_rx.try_recv().map(delivered).is_err(),
         "sibling EVPN route must not churn"
     );
 
@@ -2748,6 +2765,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
     let _ = query_evpn_routes(&tx).await;
     let first_seen = out_rx
         .try_recv()
+        .map(delivered)
         .expect("unscoped EVPN sibling must advertise");
     assert_eq!(first_seen.evpn_announce.len(), 1);
     assert_eq!(first_seen.evpn_announce[0].key(), sibling_key);
@@ -2772,7 +2790,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
     .unwrap();
     let _ = query_evpn_routes(&tx).await;
     assert!(
-        out_rx.try_recv().is_err(),
+        out_rx.try_recv().map(delivered).is_err(),
         "repeated policy-scoped EVPN route stays silent"
     );
 
@@ -2788,6 +2806,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
     let _ = query_evpn_routes(&tx).await;
     let recovered = out_rx
         .try_recv()
+        .map(delivered)
         .expect("removing policy-added NO_ADVERTISE must announce EVPN");
     assert_eq!(recovered.evpn_announce.len(), 1);
     assert_eq!(recovered.evpn_announce[0].key(), primary_key);
@@ -2805,6 +2824,7 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
     let _ = query_evpn_routes(&tx).await;
     let scoped = out_rx
         .try_recv()
+        .map(delivered)
         .expect("policy-added NO_ADVERTISE must withdraw prior EVPN");
     assert!(scoped.evpn_announce.is_empty());
     assert_eq!(scoped.evpn_withdraw, vec![primary_key]);
@@ -2821,12 +2841,13 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
     let _ = query_evpn_routes(&tx).await;
     let recovered_again = out_rx
         .try_recv()
+        .map(delivered)
         .expect("EVPN must recover after repeated policy scope");
     assert_eq!(recovered_again.evpn_announce.len(), 1);
     assert_eq!(recovered_again.evpn_announce[0].key(), primary_key);
     assert_eq!(recovered_again.evpn_withdraw.len(), 0);
     assert!(
-        out_rx.try_recv().is_err(),
+        out_rx.try_recv().map(delivered).is_err(),
         "sibling EVPN route must not churn"
     );
 
@@ -3060,7 +3081,10 @@ async fn partial_pmsi_survives_type3_imet_distribution_and_wire_encoding() {
     .unwrap();
     let _ = query_evpn_routes(&tx).await;
 
-    let update = out_rx.try_recv().expect("Type 3 IMET is distributed");
+    let update = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("Type 3 IMET is distributed");
     let advertised = update
         .evpn_announce
         .first()
@@ -3730,7 +3754,7 @@ async fn session_up(
     })
     .await
     .unwrap();
-    tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+    tokio::spawn(async move { while out_rx.recv().await.map(delivered).is_some() {} });
 }
 
 async fn evpn_eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, session_id: u64) {
@@ -3999,7 +4023,7 @@ async fn evpn_sessions_synced_resets_on_collision_replacement_and_failover() {
         .unwrap();
         drain_eor(&mut out_rx).await;
         // Keep the outbound channel open so failover finds a live sender.
-        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+        tokio::spawn(async move { while out_rx.recv().await.map(delivered).is_some() {} });
     }
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -4085,7 +4109,7 @@ fn readiness_answered_during_evpn_fanout(receivers: u8, queued: usize) -> usize 
     // A fanout parked at a receiver boundary finishes on later steps.
     while manager.process_next_route_chunk() {}
     for outbound_rx in &mut outbound {
-        let announced: usize = std::iter::from_fn(|| outbound_rx.try_recv().ok())
+        let announced: usize = std::iter::from_fn(|| outbound_rx.try_recv().map(delivered).ok())
             .map(|update| update.evpn_announce.len())
             .sum();
         assert_eq!(announced, routes.len(), "every receiver got the chunk");
@@ -4336,6 +4360,9 @@ fn evpn_refresh_answer_settles_the_owed_withdrawal() {
         BgpMetrics::new(),
     );
     let stuck = PeerId::from_addr("192.0.2.31".parse().unwrap());
+    // A full channel is the refusal under test: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     let (outbound_tx, mut stuck_rx) = mpsc::channel(usize::try_from(SESSION_CHANNEL).unwrap());
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,

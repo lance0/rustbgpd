@@ -160,8 +160,8 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     .await
     .unwrap();
 
-    let _initial = out_rx.recv().await.unwrap();
-    let _eor = out_rx.recv().await.unwrap();
+    let _initial = out_rx.recv().await.map(delivered).unwrap();
+    let _eor = out_rx.recv().await.map(delivered).unwrap();
 
     tx.send(RibUpdate::RouteRefreshRequest {
         queued: Arc::default(),
@@ -173,9 +173,9 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.bgpls_announce[0].key(), key);
     assert_eq!(update.bgpls_withdraw.len(), 0);
@@ -895,7 +895,7 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
     })
     .await
     .unwrap();
-    let announce = out_rx.recv().await.unwrap();
+    let announce = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announce.vpn_announce.len(), 2);
 
     tx.send(RibUpdate::BeginRouteRefresh {
@@ -924,7 +924,7 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
     .await
     .unwrap();
 
-    let swept = out_rx.recv().await.unwrap();
+    let swept = out_rx.recv().await.map(delivered).unwrap();
     assert!(swept.vpn_announce.is_empty());
     assert_eq!(swept.vpn_withdraw, vec![omitted_key]);
 
@@ -1322,7 +1322,7 @@ fn route_refresh_request_releases_its_queued_flag_on_dequeue() {
         negotiated_orf_recv: Vec::new(),
         negotiated_llgr_families: Vec::new(),
     });
-    while outbound_rx.try_recv().is_ok() {}
+    while outbound_rx.try_recv().map(delivered).is_ok() {}
 
     for (session_id, replays) in [(0, 1), (1, 0)] {
         let queued = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1338,7 +1338,7 @@ fn route_refresh_request_releases_its_queued_flag_on_dequeue() {
             "session {session_id}: dequeue must release the flag"
         );
         let mut eors = 0;
-        while let Ok(update) = outbound_rx.try_recv() {
+        while let Ok(update) = outbound_rx.try_recv().map(delivered) {
             eors += usize::from(update.end_of_rib.contains(&(Afi::Ipv4, Safi::Unicast)));
         }
         assert_eq!(eors, replays, "session {session_id}");

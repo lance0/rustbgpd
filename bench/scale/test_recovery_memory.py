@@ -557,6 +557,53 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(derived, original.replace(receipt.HARNESS_SWAPS, ""))
         self.assertNotIn("swaps", derived)
 
+    def test_control_api_reads_own_withdrawals_only_before_shared_withdrawals(self) -> None:
+        def shared_tree(shared: bool) -> tuple[Path, Path, Path]:
+            tree, harness = self.control_api_tree(swaps=True)
+            if shared:
+                update = tree / "crates/rib/src/update.rs"
+                update.write_text(
+                    update.read_text(encoding="utf-8")
+                    + "pub struct OutboundRouteUpdate {\n"
+                    + receipt.SHARED_WITHDRAW_FIELD + "Arc<Vec<(Prefix, u32)>>,\n}\n",
+                    encoding="utf-8",
+                )
+            harness.write_text(
+                harness.read_text(encoding="utf-8")
+                + receipt.HARNESS_SHARED_WITHDRAW_ROWS + "        }\n"
+                + "        assert!(update.announce.is_empty()\n"
+                + receipt.HARNESS_SHARED_WITHDRAW_EMPTY + "            && update.withdraw.is_empty());\n",
+                encoding="utf-8",
+            )
+            entrypoint = harness.parent / "main.rs"
+            entrypoint.write_text(
+                "let n = update.announce.len() + " + receipt.HARNESS_DRAINED_WITHDRAWALS + ";\n",
+                encoding="utf-8",
+            )
+            return tree, harness, entrypoint
+
+        tree, harness, entrypoint = shared_tree(shared=True)
+        original = (harness.read_bytes(), entrypoint.read_bytes())
+        receipt.derive_control_api(tree)
+        self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
+        tree, harness, entrypoint = shared_tree(shared=False)
+        receipt.derive_control_api(tree)
+        derived = harness.read_text(encoding="utf-8")
+        self.assertNotIn("shared_withdraw", derived)
+        self.assertIn(receipt.CONTROL_WITHDRAW_ROWS, derived)
+        self.assertEqual(
+            entrypoint.read_text(encoding="utf-8"),
+            "let n = update.announce.len() + " + receipt.CONTROL_DRAINED_WITHDRAWALS + ";\n",
+        )
+        # A use the derivation does not know is refused, with nothing changed.
+        tree, harness, entrypoint = shared_tree(shared=False)
+        harness.write_text(harness.read_text(encoding="utf-8") + "let _ = update.shared_withdraw;\n",
+                           encoding="utf-8")
+        original = (harness.read_bytes(), entrypoint.read_bytes())
+        with self.assertRaisesRegex(receipt.InvalidReceipt, "shared withdrawal"):
+            receipt.derive_control_api(tree)
+        self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
+
     def test_control_api_drops_member_full_pass_hook_only_without_the_builder(self) -> None:
         tree, harness = self.control_api_tree(swaps=True)
         original = harness.read_text(encoding="utf-8")

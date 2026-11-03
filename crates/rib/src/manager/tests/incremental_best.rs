@@ -128,7 +128,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
     for (_, out) in &mut receivers {
         while let Ok(update) = out.try_recv() {
             assert!(update.announce.is_empty());
-            assert_eq!(update.withdraw.len(), 0);
+            assert_eq!(update.unicast_withdrawals().count(), 0);
         }
     }
     for peer in std::iter::once(None).chain(receivers.iter().map(|(peer, _)| Some(*peer))) {
@@ -192,7 +192,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
         let mut withdrawn = Vec::new();
         while let Ok(update) = out.try_recv() {
             assert!(update.announce.is_empty());
-            withdrawn.extend(update.withdraw);
+            withdrawn.extend(update.unicast_withdrawals().copied().collect::<Vec<_>>());
         }
         assert_eq!(withdrawn.len(), 1);
     }
@@ -232,7 +232,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
         let mut withdrawn = Vec::new();
         while let Ok(update) = out.try_recv() {
             assert!(update.announce.is_empty());
-            withdrawn.extend(update.withdraw);
+            withdrawn.extend(update.unicast_withdrawals().copied().collect::<Vec<_>>());
         }
         assert_eq!(withdrawn.len(), 1);
     }

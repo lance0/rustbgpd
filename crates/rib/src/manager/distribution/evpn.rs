@@ -954,6 +954,12 @@ impl RibManager {
         {
             return;
         }
+        // Preflight: a peer without credit stages nothing (its resync covers
+        // these keys).
+        if self.outbound_preflight_refused(peer) {
+            return;
+        }
+        self.note_outbound_staging(peer);
 
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
@@ -1155,6 +1161,12 @@ impl RibManager {
                 // stays complete. No inventory is walked; the admission is
                 // still charged to the member's provenance ledger.
                 Some(seal)
+            } else if retained && self.outbound_operation_live(peer) {
+                // A live whole-table operation: build no second feed. The
+                // operation still owns actual OLD; the resync builds the feed.
+                self.capture_shared_evpn_before_deltas(peer, &stage.deltas);
+                self.complete_feed_deferred(peer);
+                continue;
             } else if retained {
                 // Full borrowed OLD proves coverage for successful clean
                 // updates too, without replaying unchanged keys during debt.

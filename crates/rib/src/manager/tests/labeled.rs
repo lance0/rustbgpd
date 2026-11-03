@@ -72,7 +72,7 @@ fn drain_labeled_delta(
 ) {
     let mut announced = Vec::new();
     let mut withdrawn = Vec::new();
-    while let Ok(update) = rx.try_recv() {
+    while let Ok(update) = rx.try_recv().map(delivered) {
         for route in update.labeled_announce {
             state.insert(route.key(), route.clone());
             announced.push(route);
@@ -492,9 +492,9 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
     assert_eq!(
@@ -513,7 +513,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.unwrap();
+    let withdraw = out_rx.recv().await.map(delivered).unwrap();
     assert!(withdraw.labeled_announce.is_empty());
     assert_eq!(withdraw.labeled_withdraw, vec![key]);
 
@@ -576,7 +576,7 @@ async fn labeled_rr_reflects_non_client_route_to_clients_only() {
     .await
     .unwrap();
 
-    let reflected = client_rx.recv().await.unwrap();
+    let reflected = client_rx.recv().await.map(delivered).unwrap();
     assert_eq!(reflected.labeled_announce.len(), 1);
     assert_eq!(reflected.labeled_announce[0].key(), key);
 
@@ -646,7 +646,7 @@ async fn labeled_same_peer_relabel_triggers_re_advertise() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(first.labeled_announce.len(), 1);
     assert_eq!(first.labeled_announce[0].nlri.labels[0].label, 100);
 
@@ -658,7 +658,7 @@ async fn labeled_same_peer_relabel_triggers_re_advertise() {
     })
     .await
     .unwrap();
-    let second = out_rx.recv().await.unwrap();
+    let second = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         second.labeled_announce.len(),
         1,
@@ -713,7 +713,7 @@ async fn labeled_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(first.labeled_announce.len(), 1);
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -996,13 +996,13 @@ async fn send_initial_table_includes_labeled_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
     assert_eq!(update.labeled_withdraw.len(), 0);
 
-    let eor = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, labeled_sendable());
 
     drop(tx);
@@ -1053,8 +1053,8 @@ async fn route_refresh_labeled_re_advertises_routes() {
     .await
     .unwrap();
 
-    let _initial = out_rx.recv().await.unwrap();
-    let _eor = out_rx.recv().await.unwrap();
+    let _initial = out_rx.recv().await.map(delivered).unwrap();
+    let _eor = out_rx.recv().await.map(delivered).unwrap();
 
     tx.send(RibUpdate::RouteRefreshRequest {
         queued: Arc::default(),
@@ -1066,9 +1066,9 @@ async fn route_refresh_labeled_re_advertises_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
     assert_eq!(update.labeled_withdraw.len(), 0);
@@ -1275,7 +1275,7 @@ async fn labeled_gr_family_not_in_capability_is_withdrawn() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.labeled_announce.len(), 1);
 
     // GR capability carries only unicast: labeled is withdrawn, not retained.
@@ -1292,7 +1292,7 @@ async fn labeled_gr_family_not_in_capability_is_withdrawn() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.unwrap();
+    let withdraw = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         withdraw.labeled_withdraw,
         vec![key],
@@ -1353,7 +1353,7 @@ async fn labeled_gr_eor_clears_stale() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.labeled_announce.len(), 2);
 
     tx.send(RibUpdate::PeerGracefulRestart {
@@ -1401,7 +1401,7 @@ async fn labeled_gr_eor_clears_stale() {
 
     // The removal must be withdrawn downstream.
     loop {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         if update.labeled_withdraw.is_empty() {
             continue;
         }
@@ -1798,7 +1798,7 @@ async fn labeled_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(first.labeled_announce.len(), 1);
 
     let family = vec![(Afi::Ipv4, Safi::LabeledUnicast)];
@@ -1811,7 +1811,7 @@ async fn labeled_llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
     assert!(query_labeled_routes(&tx).await[0].is_llgr_stale);
 
     let mut withdrawn = false;
-    while let Ok(update) = out_rx.try_recv() {
+    while let Ok(update) = out_rx.try_recv().map(delivered) {
         assert!(
             !update.labeled_announce.iter().any(|route| route
                 .communities()
@@ -1865,7 +1865,16 @@ async fn labeled_llgr_stale_unchanged_toward_llgr_capable_ebgp_peer() {
     })
     .await
     .unwrap();
-    assert_eq!(out_rx.recv().await.unwrap().labeled_announce.len(), 1);
+    assert_eq!(
+        out_rx
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .labeled_announce
+            .len(),
+        1
+    );
 
     let family = vec![(Afi::Ipv4, Safi::LabeledUnicast)];
     tx.send(gr_with_llgr(source, 2, family.clone(), family, 3600))
@@ -1877,7 +1886,7 @@ async fn labeled_llgr_stale_unchanged_toward_llgr_capable_ebgp_peer() {
     assert!(query_labeled_routes(&tx).await[0].is_llgr_stale);
 
     let mut reannounced = false;
-    while let Ok(update) = out_rx.try_recv() {
+    while let Ok(update) = out_rx.try_recv().map(delivered) {
         assert!(
             !update.labeled_withdraw.contains(&key),
             "LLGR-stale labeled route must not be withdrawn from an LLGR-capable peer"
@@ -1939,7 +1948,7 @@ async fn labeled_addpath_llgr_stale_candidates_gated_individually() {
     // Both paths staged with Add-Path ranks 1..=2 before the LLGR phase.
     assert_eq!(query_labeled_routes(&tx).await.len(), 1);
     let mut ranks_seen: HashSet<u32> = HashSet::new();
-    while let Ok(update) = out_rx.try_recv() {
+    while let Ok(update) = out_rx.try_recv().map(delivered) {
         for route in &update.labeled_announce {
             ranks_seen.insert(route.path_id);
         }
@@ -1960,7 +1969,7 @@ async fn labeled_addpath_llgr_stale_candidates_gated_individually() {
     let _ = query_labeled_routes(&tx).await;
 
     let mut rank2_withdrawn = false;
-    while let Ok(update) = out_rx.try_recv() {
+    while let Ok(update) = out_rx.try_recv().map(delivered) {
         assert!(
             !update.labeled_announce.iter().any(|route| route
                 .communities()

@@ -275,7 +275,7 @@ async fn expiry_withdraws_both_families_and_reaches_the_peer() {
     assert_eq!(
         withdrawn
             .iter()
-            .flat_map(|u| u.withdraw.iter())
+            .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
             .collect::<Vec<_>>(),
         vec![&(host(1), 0)]
     );
@@ -336,7 +336,11 @@ async fn renewal_prevents_expiry_and_adds_never_shorten() {
 
     tokio::time::advance(Duration::from_secs(1)).await;
     h.settle().await;
-    let withdrawn: usize = h.drain().iter().map(|u| u.withdraw.len()).sum();
+    let withdrawn: usize = h
+        .drain()
+        .iter()
+        .map(|u| u.unicast_withdrawals().count())
+        .sum();
     assert_eq!(withdrawn, 2);
     assert_eq!(local_prefixes(&h.tx).await, Vec::<Prefix>::new());
     h.stop().await;
@@ -350,7 +354,13 @@ async fn expired_renewal_fails_and_readd_starts_a_new_generation() {
     let (_, g1) = leased_route(&h.tx, local_route(1), "ctl", 5).await.unwrap();
     tokio::time::advance(Duration::from_secs(5)).await;
     h.settle().await;
-    assert_eq!(h.drain().iter().map(|u| u.withdraw.len()).sum::<usize>(), 1);
+    assert_eq!(
+        h.drain()
+            .iter()
+            .map(|u| u.unicast_withdrawals().count())
+            .sum::<usize>(),
+        1
+    );
     assert_eq!(h.leases.renew("ctl", g1, 5), None);
 
     let (outcome, g2) = leased_route(&h.tx, local_route(1), "ctl", 5).await.unwrap();
@@ -384,7 +394,7 @@ async fn expiry_spares_other_owners_and_unowned_intent() {
     assert_eq!(
         withdrawn
             .iter()
-            .flat_map(|u| u.withdraw.iter())
+            .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
             .collect::<Vec<_>>(),
         vec![&(host(1), 0)]
     );
@@ -1383,7 +1393,7 @@ async fn queue_delete(
 fn withdrawn_hosts(updates: &[OutboundRouteUpdate]) -> Vec<Prefix> {
     let mut hosts: Vec<Prefix> = updates
         .iter()
-        .flat_map(|update| update.withdraw.iter().map(|(prefix, _)| *prefix))
+        .flat_map(|update| update.unicast_withdrawals().map(|(prefix, _)| *prefix))
         .collect();
     hosts.sort_unstable();
     hosts
@@ -1604,7 +1614,7 @@ async fn expiry_batch_turn() {
     let turn = started.elapsed();
     let mut withdrawn = 0;
     while let Ok(update) = out_rx.try_recv() {
-        withdrawn += update.withdraw.len();
+        withdrawn += update.unicast_withdrawals().count();
     }
     assert_eq!(withdrawn, owners * MAX_KEYS_PER_OWNER);
     eprintln!(
@@ -1692,7 +1702,7 @@ async fn peer_down_turn() {
     let turn = started.elapsed();
     let mut withdrawn = 0;
     while let Ok(update) = out_rx.try_recv() {
-        withdrawn += update.withdraw.len();
+        withdrawn += update.unicast_withdrawals().count();
     }
     assert_eq!(withdrawn, total);
     eprintln!(
@@ -1802,7 +1812,7 @@ async fn a_multi_owner_expiry_batch_keeps_answering_readiness() {
     assert_eq!(manager.loc_rib.len(), 0);
     let mut withdrawn: Vec<Prefix> = Vec::new();
     while let Ok(update) = out_rx.try_recv() {
-        withdrawn.extend(update.withdraw.iter().map(|(prefix, _)| *prefix));
+        withdrawn.extend(update.unicast_withdrawals().map(|(prefix, _)| *prefix));
     }
     withdrawn.sort_unstable();
     assert_eq!(withdrawn, (0..2 * KEYS).map(host).collect::<Vec<_>>());

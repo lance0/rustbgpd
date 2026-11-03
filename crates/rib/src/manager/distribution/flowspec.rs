@@ -711,14 +711,23 @@ impl RibManager {
             }
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
-            let has_fs = sendable.as_ref().is_some_and(|families| {
-                families.contains(&(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::FlowSpec))
-                    || families.contains(&(rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::FlowSpec))
-            });
-            if !has_fs {
+            // Only a change in a FlowSpec family the peer negotiated can
+            // reach it.
+            if !changed_keys.iter().any(|key| {
+                sendable.as_ref().is_some_and(|families| {
+                    families.contains(&(key.afi, rustbgpd_wire::Safi::FlowSpec))
+                })
+            }) {
                 continue;
             }
 
+            // Preflight, once the pass touches a family the peer negotiated:
+            // a peer without credit stages nothing (its resync covers this
+            // pass); unrelated churn leaves it clean.
+            if self.outbound_preflight_refused(peer) {
+                continue;
+            }
+            self.note_outbound_staging(peer);
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
             let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);

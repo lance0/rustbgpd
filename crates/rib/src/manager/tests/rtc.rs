@@ -172,7 +172,7 @@ async fn rtc_route_reflects_between_ibgp_clients_with_originator_and_cluster_lis
     .await
     .unwrap();
 
-    let reflected = b_rx.recv().await.unwrap();
+    let reflected = b_rx.recv().await.map(delivered).unwrap();
     assert_eq!(reflected.rtc_announce.len(), 1);
     assert_eq!(reflected.rtc_announce[0].key(), key);
     assert_eq!(
@@ -250,6 +250,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let _ = query_rtc_routes(&tx).await;
     let initial = out_rx
         .try_recv()
+        .map(delivered)
         .expect("plain RTC route must be announced");
     assert_eq!(initial.rtc_announce.len(), 1);
     assert_eq!(initial.rtc_announce[0].key(), key);
@@ -265,6 +266,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let _ = query_rtc_routes(&tx).await;
     let source_scoped = out_rx
         .try_recv()
+        .map(delivered)
         .expect("source NO_ADVERTISE must withdraw the prior RTC route");
     assert!(source_scoped.rtc_announce.is_empty());
     assert_eq!(source_scoped.rtc_withdraw, vec![key.clone()]);
@@ -278,7 +280,10 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     .await
     .unwrap();
     let _ = query_rtc_routes(&tx).await;
-    let source_recovered = out_rx.try_recv().expect("plain RTC route must recover");
+    let source_recovered = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("plain RTC route must recover");
     assert_eq!(source_recovered.rtc_announce.len(), 1);
     assert_eq!(source_recovered.rtc_withdraw.len(), 0);
 
@@ -294,6 +299,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let _ = query_rtc_routes(&tx).await;
     let policy_scoped = out_rx
         .try_recv()
+        .map(delivered)
         .expect("policy-added NO_ADVERTISE must withdraw the RTC route");
     assert!(policy_scoped.rtc_announce.is_empty());
     assert_eq!(policy_scoped.rtc_withdraw, vec![key]);
@@ -310,10 +316,14 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let _ = query_rtc_routes(&tx).await;
     let policy_recovered = out_rx
         .try_recv()
+        .map(delivered)
         .expect("removing policy-added NO_ADVERTISE must re-announce RTC");
     assert_eq!(policy_recovered.rtc_announce.len(), 1);
     assert_eq!(policy_recovered.rtc_withdraw.len(), 0);
-    assert!(out_rx.try_recv().is_err(), "default RTC must not churn");
+    assert!(
+        out_rx.try_recv().map(delivered).is_err(),
+        "default RTC must not churn"
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -412,7 +422,7 @@ async fn send_initial_table_includes_rtc_routes() {
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
     assert!(
         update.rtc_announce.iter().any(|r| r.key() == key),
@@ -425,7 +435,7 @@ async fn send_initial_table_includes_rtc_routes() {
     assert_eq!(update.rtc_withdraw.len(), 0);
 
     // EoR pin: emitted for (IPv4, RtConstrain) with no GR state at all.
-    let eor = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, rtc_sendable());
 
     drop(tx);
@@ -443,7 +453,7 @@ async fn peer_up_with_rtc_family_originates_default_rtc_to_peer() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.rtc_announce.len(), 1);
     let default = &update.rtc_announce[0];
     assert!(default.nlri.is_default());
@@ -463,7 +473,7 @@ async fn peer_up_with_rtc_family_originates_default_rtc_to_peer() {
         "locally-originated default RTC NLRI must carry an (empty) AS_PATH"
     );
 
-    let eor = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, rtc_sendable());
 
     let stored = query_rtc_routes(&tx).await;
@@ -585,7 +595,7 @@ async fn default_rtc_retained_after_last_rtc_peer_drops_and_readvertised_on_retu
     // An RTC peer returns: the retained default is re-advertised in its
     // initial dump — no re-origination churn, the entry was never dropped.
     let mut return_rx = rtc_peer_up(&tx, peer, true, false).await;
-    let dump = return_rx.recv().await.unwrap();
+    let dump = return_rx.recv().await.map(delivered).unwrap();
     assert!(
         dump.rtc_announce.iter().any(|r| r.nlri.is_default()),
         "returning RTC peer must receive the retained default NLRI"
@@ -618,7 +628,7 @@ async fn peer_down_withdraws_rtc_routes_from_other_peers() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.rtc_announce.len(), 1);
 
     tx.send(RibUpdate::PeerDown {
@@ -628,7 +638,7 @@ async fn peer_down_withdraws_rtc_routes_from_other_peers() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.unwrap();
+    let withdraw = out_rx.recv().await.map(delivered).unwrap();
     assert!(withdraw.rtc_announce.is_empty());
     assert_eq!(withdraw.rtc_withdraw, vec![key]);
 
@@ -665,7 +675,7 @@ async fn rtc_gr_family_not_in_capability_is_withdrawn() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.rtc_announce.len(), 1);
 
     // GR entry with only unicast in the capability: SAFI 132 is not
@@ -683,7 +693,7 @@ async fn rtc_gr_family_not_in_capability_is_withdrawn() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.unwrap();
+    let withdraw = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         withdraw.rtc_withdraw,
         vec![key],
@@ -726,7 +736,7 @@ async fn rtc_gr_marks_stale_and_demotes_routes() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.rtc_announce.len(), 1);
 
     tx.send(RibUpdate::PeerGracefulRestart {
@@ -790,7 +800,7 @@ async fn rtc_gr_eor_clears_stale() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.rtc_announce.len(), 2);
 
     tx.send(RibUpdate::PeerGracefulRestart {
@@ -913,7 +923,7 @@ async fn rtc_gr_consecutive_restart_deletes_stale_routes() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.rtc_announce.len(), 1);
 
     let gr_entry = || RibUpdate::PeerGracefulRestart {
@@ -939,7 +949,7 @@ async fn rtc_gr_consecutive_restart_deletes_stale_routes() {
     // Skip any benign re-announce staged by the first GR entry; the
     // deletion itself must surface as a downstream withdraw.
     loop {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         if update.rtc_withdraw.is_empty() {
             continue;
         }
@@ -977,7 +987,7 @@ async fn route_refresh_rtc_re_advertises_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(
         update.rtc_announce.iter().any(|r| r.nlri.is_default()),
         "refresh replay must re-send the local default"
@@ -1115,7 +1125,7 @@ async fn vpn_advertised_after_matching_rtc_nlri_arrives_without_reset() {
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
-    let first = out_rx.recv().await.unwrap();
+    let first = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(first.vpn_announce.len(), 1);
     assert_eq!(first.vpn_announce[0].key(), key_a);
     assert_eq!(first.vpn_withdraw.len(), 0);
@@ -1123,7 +1133,7 @@ async fn vpn_advertised_after_matching_rtc_nlri_arrives_without_reset() {
     // Widening the membership announces ONLY the newly-covered route — the
     // already-advertised one is suppressed by the Adj-RIB-Out equality check.
     send_rtc_interest(&tx, target, &[200]).await;
-    let second = out_rx.recv().await.unwrap();
+    let second = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(second.vpn_announce.len(), 1);
     assert_eq!(second.vpn_announce[0].key(), key_b);
     assert_eq!(second.vpn_withdraw.len(), 0);
@@ -1226,7 +1236,7 @@ async fn default_rtc_nlri_matches_all_vpn_routes() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         update.vpn_announce.len(),
         2,
@@ -1285,7 +1295,7 @@ async fn rtc_prefix_match_gates_by_masked_bits() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     let announced_keys: HashSet<_> = update
         .vpn_announce
         .iter()
@@ -1327,7 +1337,7 @@ async fn rtc_filter_applies_to_both_vpnv4_and_vpnv6() {
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     let announced_keys: HashSet<_> = update
         .vpn_announce
         .iter()
@@ -1385,7 +1395,7 @@ async fn non_rtc_peer_reflection_unchanged() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
 
@@ -1418,7 +1428,7 @@ async fn route_with_any_matching_rt_passes() {
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
 
@@ -1464,9 +1474,9 @@ async fn membership_rebuilt_from_all_adjribin_paths_not_locrib_best() {
     })
     .await
     .unwrap();
-    let winner_vpn = winner_rx.recv().await.unwrap();
+    let winner_vpn = winner_rx.recv().await.map(delivered).unwrap();
     assert_eq!(winner_vpn.vpn_announce.len(), 1);
-    let reflected = loser_rx.recv().await.unwrap();
+    let reflected = loser_rx.recv().await.map(delivered).unwrap();
     assert_eq!(reflected.rtc_announce.len(), 1);
 
     // The loser advertises the SAME NLRI with a losing LOCAL_PREF: the
@@ -1480,7 +1490,7 @@ async fn membership_rebuilt_from_all_adjribin_paths_not_locrib_best() {
     })
     .await
     .unwrap();
-    let loser_vpn = loser_rx.recv().await.unwrap();
+    let loser_vpn = loser_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         loser_vpn.vpn_announce.len(),
         1,
@@ -1518,7 +1528,7 @@ async fn rtc_refresh_eorr_sweep_restages_vpn() {
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100, 200]).await;
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.vpn_announce.len(), 2);
 
     tx.send(RibUpdate::BeginRouteRefresh {
@@ -1541,7 +1551,7 @@ async fn rtc_refresh_eorr_sweep_restages_vpn() {
     .await
     .unwrap();
 
-    let swept = out_rx.recv().await.unwrap();
+    let swept = out_rx.recv().await.map(delivered).unwrap();
     assert!(swept.vpn_announce.is_empty());
     assert_eq!(
         swept.vpn_withdraw,
@@ -1578,7 +1588,7 @@ async fn gr_reestablish_without_rtc_in_capability_starts_strict() {
     let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
     send_rtc_interest(&tx, target, &[100]).await;
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.vpn_announce.len(), 1);
 
     // GR capability covers only VPN — the peer's RTC interest is NOT
@@ -1602,7 +1612,7 @@ async fn gr_reestablish_without_rtc_in_capability_starts_strict() {
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
-    let reannounced = out_rx.recv().await.unwrap();
+    let reannounced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(reannounced.vpn_announce.len(), 1);
     assert_eq!(reannounced.vpn_announce[0].key(), key);
 
@@ -1639,7 +1649,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
     let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
     send_rtc_interest(&tx, target, &[100, 200]).await;
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.vpn_announce.len(), 2);
 
     // GR capability covers both VPN and RTC: the peer's RT interest is
@@ -1660,7 +1670,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
     // Re-establish: VPN routes flow in the INITIAL dump, filtered by the
     // stale membership — before any RTC re-advertisement arrives.
     let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
-    let dump = out_rx.recv().await.unwrap();
+    let dump = out_rx.recv().await.map(delivered).unwrap();
     let dumped: Vec<_> = dump.vpn_announce.iter().map(VpnRibRoute::key).collect();
     assert!(
         dumped.contains(&key_a) && dumped.contains(&key_b),
@@ -1668,7 +1678,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
     );
     // The retained membership is already known, so the VPN End-of-RIB is
     // not held for the peer's RT membership End-of-RIB.
-    let eor = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, vpn_rtc_sendable());
 
     // The peer re-advertises interest in RT 100 only; RT 200 stays stale.
@@ -1685,7 +1695,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
     .unwrap();
 
     loop {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         if update.vpn_withdraw.is_empty() {
             continue;
         }
@@ -1727,7 +1737,7 @@ async fn initial_dump_to_rtc_peer_stages_no_vpn_then_flows_on_interest() {
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
 
@@ -1762,7 +1772,7 @@ async fn rtc_membership_unchanged_skips_restage() {
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
-    let first = out_rx.recv().await.unwrap();
+    let first = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(first.vpn_announce.len(), 1);
 
     // Duplicate announce: membership rebuild compares equal — no restage.
@@ -1849,6 +1859,7 @@ async fn next_update(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Outbou
     tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
         .await
         .expect("expected an outbound update within 2s")
+        .map(delivered)
         .expect("outbound channel open")
 }
 
@@ -2155,7 +2166,7 @@ async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release
     }
     sync(&tx, grouped).await;
     for out_rx in &mut rxs {
-        while let Ok(update) = out_rx.try_recv() {
+        while let Ok(update) = out_rx.try_recv().map(delivered) {
             assert!(
                 update.evpn_announce.is_empty() && !update.end_of_rib.contains(&evpn),
                 "EVPN must stay held while its selection is deferred"
@@ -2194,7 +2205,7 @@ async fn rib_barrier(tx: &mpsc::Sender<RibUpdate>) {
 }
 
 fn assert_no_outbound(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>, why: &str) {
-    if let Ok(update) = out_rx.try_recv() {
+    if let Ok(update) = out_rx.try_recv().map(delivered) {
         panic!(
             "{why}: unexpected outbound update (end_of_rib {:?}, {} VPN announced)",
             update.end_of_rib,
@@ -2243,10 +2254,14 @@ async fn rtc_peer_down_without_retained_rtc(
     send_rtc_interest(tx, target, &[100]).await;
     send_rtc_eor(tx, target).await;
     rib_barrier(tx).await;
-    let announced = out_rx.try_recv().expect("VPN routes for the new interest");
+    let announced = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("VPN routes for the new interest");
     assert_eq!(announced.vpn_announce.len(), 1);
     let released = out_rx
         .try_recv()
+        .map(delivered)
         .expect("RT membership End-of-RIB releases the held VPN End-of-RIB");
     assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
 
@@ -2297,9 +2312,9 @@ async fn gr_helper_peer_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
 
     stage_vpn_gr_context(&tx, target, false).await;
     let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
-    let dump = out_rx.recv().await.unwrap();
+    let dump = out_rx.recv().await.map(delivered).unwrap();
     assert!(dump.vpn_announce.is_empty());
-    let eor = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         eor.end_of_rib,
         rtc_sendable(),
@@ -2309,7 +2324,7 @@ async fn gr_helper_peer_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
     assert_no_outbound(&mut out_rx, "VPN End-of-RIB before any RT membership");
 
     send_rtc_interest(&tx, target, &[100]).await;
-    let reannounced = out_rx.recv().await.unwrap();
+    let reannounced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(reannounced.vpn_announce.len(), 1);
     assert_eq!(reannounced.vpn_announce[0].key(), key);
     assert_eq!(reannounced.end_of_rib, Vec::new());
@@ -2324,6 +2339,7 @@ async fn gr_helper_peer_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
     rib_barrier(&tx).await;
     let released = out_rx
         .try_recv()
+        .map(delivered)
         .expect("RT membership End-of-RIB releases the held VPN End-of-RIB");
     assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
     assert!(released.vpn_announce.is_empty());
@@ -2348,10 +2364,11 @@ async fn restarting_peer_without_retained_rtc_gets_vpn_eor_immediately() {
     stage_vpn_gr_context(&tx, target, true).await;
     let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     rib_barrier(&tx).await;
-    let dump = out_rx.try_recv().expect("initial dump");
+    let dump = out_rx.try_recv().map(delivered).expect("initial dump");
     assert!(dump.vpn_announce.is_empty());
     let eor = out_rx
         .try_recv()
+        .map(delivered)
         .expect("a restarting peer's End-of-RIB must not wait for its RT membership");
     assert_eq!(
         eor_set(&eor),
@@ -2360,7 +2377,7 @@ async fn restarting_peer_without_retained_rtc_gets_vpn_eor_immediately() {
     );
 
     send_rtc_interest(&tx, target, &[100]).await;
-    let reannounced = out_rx.recv().await.unwrap();
+    let reannounced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(reannounced.vpn_announce.len(), 1);
     assert_eq!(reannounced.vpn_announce[0].key(), key);
 
@@ -2383,9 +2400,9 @@ async fn rtc_eor_hold_releases_vpn_and_evpn_at_cap() {
     sendable.extend(VPN_FAMILIES);
     sendable.push((Afi::Ipv4, Safi::RtConstrain));
     let mut out_rx = families_peer_up(&tx, peer_v4(target), sendable).await;
-    let dump = out_rx.recv().await.unwrap();
+    let dump = out_rx.recv().await.map(delivered).unwrap();
     assert!(dump.rtc_announce.iter().any(|r| r.nlri.is_default()));
-    let eor = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         eor_set(&eor),
         [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::RtConstrain)]
@@ -2399,7 +2416,7 @@ async fn rtc_eor_hold_releases_vpn_and_evpn_at_cap() {
     assert_no_outbound(&mut out_rx, "held End-of-RIB released before the cap");
 
     tokio::time::advance(Duration::from_secs(1)).await;
-    let released = out_rx.recv().await.unwrap();
+    let released = out_rx.recv().await.map(delivered).unwrap();
     let mut expected: HashSet<_> = VPN_FAMILIES.into_iter().collect();
     expected.insert((Afi::L2Vpn, Safi::Evpn));
     assert_eq!(eor_set(&released), expected);
@@ -2461,7 +2478,7 @@ async fn rtc_eor_hold_restarts_with_replacement_session() {
     );
 
     tokio::time::advance(Duration::from_secs(1)).await;
-    let released = out_rx.recv().await.unwrap();
+    let released = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
 
     drop(tx);
@@ -2566,7 +2583,7 @@ async fn held_eor_under_sustained_ingress(
     tokio::time::advance(Duration::from_secs(60)).await;
     let mut released = None;
     for _ in 0..20_000 {
-        if let Ok(update) = out_rx.try_recv()
+        if let Ok(update) = out_rx.try_recv().map(delivered)
             && !update.end_of_rib.is_empty()
         {
             released = Some(update);
@@ -2623,6 +2640,7 @@ async fn stray_rtc_eorr_keeps_hold_and_window_eorr_releases_it() {
     rib_barrier(&tx).await;
     let released = out_rx
         .try_recv()
+        .map(delivered)
         .expect("an EoRR closing an RT-Constrain refresh window releases the hold");
     assert_eq!(eor_set(&released), VPN_FAMILIES.into_iter().collect());
 
@@ -2637,7 +2655,7 @@ async fn drain_outbound(
 ) -> Vec<OutboundRouteUpdate> {
     rib_barrier(tx).await;
     let mut updates = Vec::new();
-    while let Ok(update) = out_rx.try_recv() {
+    while let Ok(update) = out_rx.try_recv().map(delivered) {
         updates.push(update);
     }
     updates
@@ -2791,7 +2809,7 @@ async fn rtc_eor_cap_waits_for_pre_cap_route_batch() {
 
     let mut announced = 0;
     loop {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         announced += update.evpn_announce.len();
         if update.end_of_rib.contains(&evpn) {
             break;
@@ -2830,7 +2848,7 @@ async fn rtc_eor_hold_later_cap_waits_for_its_own_turn() {
         rx
     };
     let vpn_eor = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
-        std::iter::from_fn(|| rx.try_recv().ok()).any(|update| {
+        std::iter::from_fn(|| rx.try_recv().map(delivered).ok()).any(|update| {
             update
                 .end_of_rib
                 .iter()

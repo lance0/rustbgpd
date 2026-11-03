@@ -3475,3 +3475,75 @@ async fn abandoned_mixed_family_envelope_retires_one_slice_per_step() {
         "one step released more than a slice across families: {released:?}"
     );
 }
+
+/// An edit that mixes another family's rows into a grouped envelope.
+type Mix<'a> = Box<dyn Fn(&mut OutboundRouteUpdate) + 'a>;
+
+/// A grouped envelope that mixes one family's announcements with another
+/// family's withdrawals takes the ordinary per-session path: the shared
+/// encode is never elected. Unicast with VPN or EVPN withdrawals, VPN with
+/// unicast (own or shared) withdrawals, and EVPN likewise. Red with the
+/// eligibility test reduced to any of its conjuncts, or always eligible.
+#[tokio::test]
+async fn shared_group_encode_skips_mixed_family_envelopes() {
+    let source = Ipv4Addr::new(10, 47, 0, 1);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let unicast = Arc::new(vec![make_sourced_route(source, prefix, 64_601)]);
+    let vpn = make_vpn_rib_route(100);
+    let evpn = shared_evpn_route(1);
+    let unicast_key = (Prefix::V4(prefix), 0);
+    let cases: Vec<(&str, Mix<'_>)> = vec![
+        (
+            "unicast with a VPN withdrawal",
+            Box::new(|update| update.vpn_withdraw = vec![vpn.key()]),
+        ),
+        (
+            "unicast with an EVPN withdrawal",
+            Box::new(|update| update.evpn_withdraw = vec![evpn.key()]),
+        ),
+        (
+            "VPN with a unicast withdrawal",
+            Box::new(|update| {
+                update.announce = Arc::default();
+                update.next_hop_override = Arc::default();
+                update.vpn_announce = Arc::new(vec![vpn.clone()]);
+                update.withdraw = vec![unicast_key];
+            }),
+        ),
+        (
+            "VPN with a shared withdrawal",
+            Box::new(|update| {
+                update.announce = Arc::default();
+                update.next_hop_override = Arc::default();
+                update.vpn_announce = Arc::new(vec![vpn.clone()]);
+                update.shared_withdraw = Arc::new(vec![unicast_key]);
+            }),
+        ),
+        (
+            "EVPN with a unicast withdrawal",
+            Box::new(|update| {
+                update.announce = Arc::default();
+                update.next_hop_override = Arc::default();
+                update.evpn_announce = Arc::new(vec![evpn.clone()]);
+                update.withdraw = vec![unicast_key];
+            }),
+        ),
+        (
+            "EVPN with a shared withdrawal",
+            Box::new(|update| {
+                update.announce = Arc::default();
+                update.next_hop_override = Arc::default();
+                update.evpn_announce = Arc::new(vec![evpn.clone()]);
+                update.shared_withdraw = Arc::new(vec![unicast_key]);
+            }),
+        ),
+    ];
+    for (name, mix) in cases {
+        let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+        let (mut member, _wire) = shared_group_member(65001).await;
+        let mut update = shared_group_envelope(&member, &shared, source, &unicast);
+        mix(&mut update);
+        member.test_drain_outbound(update).await;
+        assert!(shared.cell.get().is_none(), "{name}: ordinary path");
+    }
+}

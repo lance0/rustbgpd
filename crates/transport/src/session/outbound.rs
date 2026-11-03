@@ -25,12 +25,18 @@ const MIN_SLICE_ROUTES: usize = 64;
 /// One envelope remains owned until its final marker is admitted. Slices
 /// reuse the exact export snapshot, without growing the bounded writer queue.
 pub(super) struct PendingOutbound {
-    pub(super) update: OutboundRouteUpdate,
     pub(super) shared: Option<(Arc<super::shared_group::ProgressiveGroupEncode>, usize)>,
     requests: Vec<(Afi, Safi)>,
     phase: usize,
     offset: usize,
     capacity_blocked: bool,
+    /// Set while the writer holds its whole byte budget: the completion
+    /// watermark at which the backlog is back under it. The cursor stays
+    /// where it is. A paused peer is not a failed one: with RFC 9687 send
+    /// hold enabled no admission deadline runs, since the writer's send hold
+    /// bounds the write in flight; with it disabled the admission deadline
+    /// does, re-armed by every completed write.
+    bytes_wait: Option<(tokio::sync::watch::Receiver<u64>, u64)>,
     /// Route budget for the next ordinary slice. It halves after a slice
     /// overruns [`SLICE_TIME_BUDGET`] and doubles back after a cheap one, so
     /// a slow encode yields sooner. A slice within budget keeps the
@@ -50,6 +56,10 @@ pub(super) struct PendingOutbound {
     /// The other heap-owning payloads, likewise moved out of `update` only
     /// once the envelope retires.
     retiring_rest: RetiringRest,
+    /// The envelope. Declared after the inventory moved out of it, so its
+    /// outbound credit charge and operation latch drop last, after every
+    /// moved route, on every destructor path.
+    pub(super) update: OutboundRouteUpdate,
     /// Spans every announce slice, so the envelope reports dropped IPv6
     /// next hops once, when its announce phase completes.
     dropped_ipv6_next_hops: DroppedIpv6NextHops,
@@ -89,6 +99,7 @@ impl RetiringRest {
             evpn_announce: _,
             vpn_announce: _,
             labeled_announce: _,
+            shared_withdraw,
             withdraw,
             end_of_rib,
             replay: _,
@@ -107,7 +118,11 @@ impl RetiringRest {
             request_refresh_all_negotiated: _,
             shared_group_encode: _,
             exempt_announce: _,
+            // Released when the original envelope drops, after its inventory.
+            credit: _,
+            latch: _,
         } = update;
+        freed_in_one_step(shared_withdraw.as_slice());
         freed_in_one_step(withdraw);
         freed_in_one_step(end_of_rib);
         freed_in_one_step(refresh_markers);
@@ -255,6 +270,7 @@ impl PendingOutbound {
             phase: 0,
             offset: 0,
             capacity_blocked: false,
+            bytes_wait: None,
             slice_routes: super::shared_group::PROGRESSIVE_SLICE_ROUTES,
             dropped_ipv6_next_hops: DroppedIpv6NextHops::default(),
             #[cfg(test)]
@@ -290,6 +306,7 @@ impl PendingOutbound {
         }
         self.shared = None;
         self.capacity_blocked = false;
+        self.bytes_wait = None;
         self.phase = OUTBOUND_PHASES.len();
         self.retire_step()
     }
@@ -313,6 +330,13 @@ impl PendingOutbound {
             self.charge_slice(cost);
         }
         self.retiring()
+    }
+
+    /// Whether admission waits for the writer to drain under its byte
+    /// budget.
+    #[cfg(test)]
+    pub(super) fn bytes_blocked(&self) -> bool {
+        self.bytes_wait.is_some()
     }
 
     /// Only a completed or abandoned envelope retires: before that, the
@@ -354,6 +378,11 @@ impl PendingOutbound {
             // waits for space; synchronous admission rechecks the full budget.
             let _ = writer.reserve().await;
         }
+        if let Some((completed, target)) = &self.bytes_wait {
+            // A writer that exits drops the sender, which ends the wait too.
+            let mut completed = completed.clone();
+            let _ = completed.wait_for(|done| *done >= *target).await;
+        }
     }
 
     fn finish_empty_phases(&mut self) -> bool {
@@ -385,7 +414,9 @@ impl PendingOutbound {
                     .iter()
                     .filter(|(_, _, kind)| *kind == RouteRefreshSubtype::EoRR)
                     .count(),
-                OutboundPhase::Withdraw => self.update.withdraw.len(),
+                OutboundPhase::Withdraw => {
+                    self.update.shared_withdraw.len() + self.update.withdraw.len()
+                }
                 OutboundPhase::Announce => self.update.announce.len(),
                 OutboundPhase::FlowspecWithdraw => self.update.flowspec_withdraw.len(),
                 OutboundPhase::EvpnWithdraw => self.update.evpn_withdraw.len(),
@@ -468,7 +499,12 @@ impl PendingOutbound {
                         .collect();
                     self.offset + slice.refresh_markers.len()
                 }
-                OutboundPhase::Withdraw => payload!(withdraw),
+                OutboundPhase::Withdraw => {
+                    let end = (self.offset + budget)
+                        .min(self.update.shared_withdraw.len() + self.update.withdraw.len());
+                    slice.withdraw = self.withdraw_rows(end);
+                    end
+                }
                 OutboundPhase::Announce => {
                     // Blackholing rows lead the envelope and go out in slices
                     // of their own, so no slice mixes them with ordinary rows
@@ -512,6 +548,23 @@ impl PendingOutbound {
             }
         }
         None
+    }
+
+    /// Unicast withdraw rows `offset..end`: the group's shared rows, then
+    /// this envelope's own.
+    fn withdraw_rows(&self, end: usize) -> Vec<(Prefix, u32)> {
+        let shared = &self.update.shared_withdraw;
+        let own = &self.update.withdraw;
+        let mut rows = Vec::with_capacity(end - self.offset);
+        if self.offset < shared.len() {
+            rows.extend_from_slice(&shared[self.offset..end.min(shared.len())]);
+        }
+        if end > shared.len() {
+            rows.extend_from_slice(
+                &own[self.offset.max(shared.len()) - shared.len()..end - shared.len()],
+            );
+        }
+        rows
     }
 
     /// Size the next ordinary slice from what this one cost.
@@ -744,6 +797,16 @@ impl PeerSession {
     }
 
     pub(super) fn expire_outbound_admission(&mut self) {
+        // A write that completed in the same turn as the deadline is
+        // progress the run loop has not seen yet: it re-arms the deadline
+        // rather than losing the race to it.
+        if let Some(progress) = &mut self.admission_progress
+            && progress.has_changed().unwrap_or(false)
+        {
+            progress.borrow_and_update();
+            self.note_write_progress(true);
+            return;
+        }
         self.outbound_admission_timer = None;
         if self
             .writer_bulk_tx
@@ -791,9 +854,13 @@ impl PeerSession {
         // Every valid payload entry contributes at most one UPDATE frame;
         // grouping can only reduce that count. Requests and terminal markers
         // consume their own exact frame budget in separate phases.
-        let budget = writer
-            .capacity()
-            .min(super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+        let budget = if self.writer_bytes_exhausted() {
+            0
+        } else {
+            writer
+                .capacity()
+                .min(super::shared_group::PROGRESSIVE_SLICE_ROUTES)
+        };
         let before = self.writer_bulk_admitted;
         let mut finished = false;
         pending.capacity_blocked = budget == 0;
@@ -808,6 +875,10 @@ impl PeerSession {
                 if self.wants_shared_chunk(&pending.update, &chunk) {
                     if available == 0 {
                         pending.capacity_blocked = true;
+                        break;
+                    }
+                    if self.writer_bytes_exhausted() {
+                        // Resumes from this chunk once the writer drains.
                         break;
                     }
                     if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
@@ -883,6 +954,7 @@ impl PeerSession {
         if self.writer_bulk_admitted != before {
             self.outbound_admission_timer = None;
         }
+        pending.bytes_wait = self.writer_bytes_wait();
         if !finished
             && self
                 .writer_bulk_tx
@@ -895,28 +967,32 @@ impl PeerSession {
                     .as_ref()
                     .is_some_and(|tx| tx.capacity() == 0);
             }
-            let blocked = pending.capacity_blocked;
+            let slots_full = self
+                .writer_bulk_tx
+                .as_ref()
+                .is_some_and(|tx| tx.capacity() == 0);
+            // The deadline bounds a wait for writer room during which no
+            // write completes: the run loop re-arms it on every completed
+            // write, so a slow peer that keeps reading is never torn down.
+            // A byte wait runs it only with RFC 9687 send hold disabled;
+            // otherwise a write is in flight and the writer's send hold
+            // bounds it. Filtering can advance a slice without admitting a
+            // frame, so the deadline belongs only to a continuous wait.
+            let deadline = if pending.bytes_wait.is_some() {
+                self.config.peer.send_hold_time == 0
+            } else {
+                pending.capacity_blocked && slots_full
+            };
             self.pending_outbound = Some(pending);
-            // Filtering can advance a slice without admitting a frame. The
-            // deadline belongs only to a continuous wait for writer capacity.
-            if !blocked {
+            if !deadline {
                 self.outbound_admission_timer = None;
-            }
-            if blocked
-                && self
-                    .writer_bulk_tx
-                    .as_ref()
-                    .is_some_and(|tx| tx.capacity() == 0)
-                && self.outbound_admission_timer.is_none()
-            {
-                let seconds = if self.config.peer.send_hold_time == 0 {
-                    rustbgpd_fsm::default_send_hold_time(self.config.peer.hold_time)
-                } else {
-                    self.config.peer.send_hold_time
-                };
-                self.outbound_admission_timer = Some(Box::pin(tokio::time::sleep(
-                    std::time::Duration::from_secs(u64::from(seconds)),
-                )));
+            } else if self.outbound_admission_timer.is_none() {
+                self.outbound_admission_timer =
+                    Some(Box::pin(tokio::time::sleep(self.admission_deadline())));
+                self.admission_progress = self.writer_completed.clone();
+                if let Some(progress) = &mut self.admission_progress {
+                    progress.borrow_and_update();
+                }
             }
         } else {
             // Finished, or the writer closed: either way only release remains.
@@ -924,6 +1000,46 @@ impl PeerSession {
             self.pending_outbound = pending.into_retiring();
         }
         self.sample_outbound_queue_depth();
+    }
+}
+
+impl PeerSession {
+    /// How long admission may wait for writer room with no completed write
+    /// before the session ends with Cease/Out-of-Resources: the send hold
+    /// time, or its default when send hold is disabled.
+    pub(super) fn admission_deadline(&self) -> Duration {
+        let seconds = if self.config.peer.send_hold_time == 0 {
+            rustbgpd_fsm::default_send_hold_time(self.config.peer.hold_time)
+        } else {
+            self.config.peer.send_hold_time
+        };
+        Duration::from_secs(u64::from(seconds))
+    }
+
+    /// A completed write is progress: re-arm a running admission deadline
+    /// from now. A writer that has gone ends the watch; its exit arm owns
+    /// the outcome.
+    pub(super) fn note_write_progress(&mut self, progressed: bool) {
+        if !progressed {
+            self.admission_progress = None;
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + self.admission_deadline();
+        if let Some(timer) = &mut self.outbound_admission_timer {
+            timer.as_mut().reset(deadline);
+        }
+    }
+
+    /// While the writer holds its whole byte budget, the completion
+    /// watermark that brings the backlog back under it.
+    fn writer_bytes_wait(&self) -> Option<(tokio::sync::watch::Receiver<u64>, u64)> {
+        let completed = self.writer_completed.as_ref()?;
+        self.writer_bytes_exhausted().then(|| {
+            (
+                completed.clone(),
+                self.writer_bulk_admitted - super::writer::WRITER_BYTE_BUDGET + 1,
+            )
+        })
     }
 }
 
@@ -944,6 +1060,7 @@ use std::collections::hash_map::Entry;
 
 fn has_route_payload(update: &OutboundRouteUpdate) -> bool {
     !update.announce.is_empty()
+        || !update.shared_withdraw.is_empty()
         || !update.withdraw.is_empty()
         || !update.flowspec_announce.is_empty()
         || !update.flowspec_withdraw.is_empty()
@@ -1325,7 +1442,7 @@ impl PeerSession {
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
         let mut v6_wire = None;
         let mut scoped_ipv4_without_extended_nexthop = 0usize;
-        for &(ref prefix, path_id) in &update.withdraw {
+        for &(ref prefix, path_id) in update.unicast_withdrawals() {
             if !self.is_family_negotiated(prefix) {
                 continue;
             }
@@ -3019,6 +3136,7 @@ mod tests {
             phase: ANNOUNCE_PHASE,
             offset: 0,
             capacity_blocked: false,
+            bytes_wait: None,
             slice_routes: 3,
             evpn_announce: Vec::new().into_iter(),
             vpn_announce: Vec::new().into_iter(),

@@ -315,6 +315,11 @@ enum Op {
     DrainAvailable,
     AdvanceRetry,
     Quiesce,
+    /// An IPv4 unicast ROUTE-REFRESH from the peer's session.
+    RouteRefresh {
+        peer: Ipv4Addr,
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1111,6 +1116,11 @@ async fn apply(oracle: &mut Oracle, op: &Op, force_ungrouped: bool) {
             oracle.quiesce().await;
         }
         Op::Quiesce => oracle.quiesce().await,
+        Op::RouteRefresh { peer, generation } => {
+            oracle
+                .route_refresh_generation(*peer, *generation, Afi::Ipv4, Safi::Unicast)
+                .await;
+        }
     }
 }
 
@@ -1866,7 +1876,57 @@ fn combined_saturation_regroup_replacement_schedule(seed: u64) -> Schedule {
     }
 }
 
-fn schedules(seed: u64) -> [Schedule; 7] {
+/// A ROUTE-REFRESH from a receiver that still holds the previous answer is
+/// owed, not a resync; once the receiver reads, the retry answers it, and
+/// the terminal health check fails on an answer never sent.
+fn refresh_behind_held_answer_schedule(seed: u64) -> Schedule {
+    let first = pfx(seed_octet(seed, 4), 4);
+    Schedule {
+        name: "refresh-behind-a-held-answer",
+        seed,
+        require_vpn_churn: false,
+        ops: vec![
+            Op::PeerUp {
+                peer: SOURCE,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix: first,
+                local_pref: 100,
+            },
+            Op::PeerUp {
+                peer: LEFT,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 2,
+                capacity: 2,
+                families: FamilySet::Unicast,
+            },
+            // The first answer stays queued; the second is owed behind it.
+            Op::RouteRefresh {
+                peer: RIGHT,
+                generation: 2,
+            },
+            Op::RouteRefresh {
+                peer: RIGHT,
+                generation: 2,
+            },
+            Op::DrainAvailable,
+            Op::AdvanceRetry,
+            Op::DrainAvailable,
+        ],
+    }
+}
+
+fn schedules(seed: u64) -> [Schedule; 8] {
     [
         saturation_schedule(seed),
         dirty_policy_schedule(seed),
@@ -1875,6 +1935,7 @@ fn schedules(seed: u64) -> [Schedule; 7] {
         orf_membership_schedule(seed),
         replacement_during_resync_schedule(seed),
         combined_saturation_regroup_replacement_schedule(seed),
+        refresh_behind_held_answer_schedule(seed),
     ]
 }
 

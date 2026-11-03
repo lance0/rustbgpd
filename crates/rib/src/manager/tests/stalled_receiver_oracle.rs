@@ -63,12 +63,12 @@
 //! shrunk by proptest and then by one-op deletion, and printed as a trace.
 //! `ORACLE_TRACE=1` prints each operation and delivered envelope.
 //!
-//! One open defect on main is tolerated only by its exact signature
-//! ([`KNOWN`]); it has an ignored regression test with its minimized trace.
-//! A tolerated defect excuses only its own observation: the case still runs
-//! every other property (a livelocked receiver alone skips P1 and P4).
-//! `ORACLE_STRICT=1` reports them as failures. A run of the default case
-//! count or more also fails when any [`Coverage`] counter stays at zero.
+//! An open defect may be tolerated only by its exact signature
+//! ([`KNOWN`], empty now), with an ignored regression test holding its
+//! minimized trace. A tolerated defect excuses only its own observation:
+//! the case still runs every other property. `ORACLE_STRICT=1` reports it as
+//! a failure. A run of the default case count or more also fails when any
+//! [`Coverage`] counter stays at zero.
 //!
 //! The actor's wall-clock poll budget is unbounded here, as in the EVPN
 //! recovery differential, so a loaded host cannot reslice a resync tick and
@@ -106,15 +106,11 @@ const TICK: Duration = Duration::from_millis(1010);
 const QUIESCE_ROUNDS: usize = 48;
 /// Consecutive quiet rounds that end quiescence.
 const QUIET_ROUNDS: usize = 3;
-/// Final rounds that must repeat one table for the known livelock.
-const REPEAT_ROUNDS: usize = 8;
-/// The signature of an open defect the default run tolerates;
-/// `ORACLE_STRICT=1` reports it.
-const KNOWN_REFRESH_RETRY_LIVELOCK: &str = "known: grouped refresh-retry livelock at one free slot";
 /// The default case count, below which coverage floors are not enforced.
 const DEFAULT_CASES: u32 = 256;
-/// Every tolerated signature.
-const KNOWN: [&str; 1] = [KNOWN_REFRESH_RETRY_LIVELOCK];
+/// Every tolerated open-defect signature; `ORACLE_STRICT=1` reports them.
+/// None is open now.
+const KNOWN: [&str; 0] = [];
 
 const V4: (u16, u8) = (Afi::Ipv4 as u16, Safi::Unicast as u8);
 const V6: (u16, u8) = (Afi::Ipv6 as u16, Safi::Unicast as u8);
@@ -735,12 +731,17 @@ struct Arm {
 }
 
 impl Arm {
-    fn spawn() -> Self {
+    fn spawn(arm: usize) -> Self {
         let (tx, rx) = mpsc::channel(512);
         let mut manager =
             RibManager::new(rx, dummy_query_rx(), None, Some(CLUSTER), BgpMetrics::new());
         // Every resync tick runs to completion, whatever the host load.
         manager.flush_poll_budget = Duration::MAX;
+        // A credit override applies to the subject; the reference keeps the
+        // default credit, which no case reaches.
+        if arm == REFERENCE {
+            manager.outbound_row_credit_override = None;
+        }
         Self {
             tx,
             handle: tokio::spawn(manager.run()),
@@ -774,6 +775,19 @@ impl Arm {
         response.await.expect("RIB actor alive");
     }
 
+    /// The refresh answers `peer` is owed, deferred behind a live
+    /// whole-table operation or a full channel (not a dirty resync).
+    async fn refresh_owed(&self, peer: usize) -> BTreeSet<(u16, u8)> {
+        let (reply, response) = oneshot::channel();
+        self.send(RibUpdate::TestQueryPeerOutboundOwed {
+            peer: peer_id(peer),
+            reply,
+        })
+        .await;
+        let owed = response.await.expect("RIB actor alive");
+        owed.refresh.into_iter().map(wire_family).collect()
+    }
+
     async fn dirty(&self, peer: usize) -> bool {
         let (reply, response) = oneshot::channel();
         self.send(RibUpdate::TestQueryPeerOutboundDirty {
@@ -786,7 +800,7 @@ impl Arm {
 
     fn rows(update: &OutboundRouteUpdate) -> usize {
         update.announce.len()
-            + update.withdraw.len()
+            + update.unicast_withdrawals().count()
             + update.evpn_announce.len()
             + update.evpn_withdraw.len()
     }
@@ -857,7 +871,7 @@ impl Arm {
                 .announce
                 .iter()
                 .map(|row| (row.0, row.1))
-                .chain(message.withdraw.iter().copied())
+                .chain(message.unicast_withdrawals().copied())
                 .map(|(prefix, path_id)| Key {
                     family: match prefix {
                         Prefix::V4(_) => V4,
@@ -903,8 +917,9 @@ struct Harness {
     peak_envelopes: [usize; PEERS],
     /// Subject queue depth after the previous operation.
     depths: [usize; PEERS],
-    /// Subject receivers in the known livelock, excused from P1 and P4.
-    livelocked: BTreeSet<usize>,
+    /// Subject refresh-answer debt after each operation: the families each
+    /// peer is owed an answer in.
+    refresh_owed: Vec<[BTreeSet<(u16, u8)>; PEERS]>,
     tolerated: BTreeSet<&'static str>,
     coverage: Coverage,
 }
@@ -913,7 +928,7 @@ impl Harness {
     async fn new(config: [PeerConfig; PEERS]) -> Result<Self, String> {
         let mut harness = Self {
             config,
-            arms: [Arm::spawn(), Arm::spawn()],
+            arms: [Arm::spawn(REFERENCE), Arm::spawn(SUBJECT)],
             session: [1; PEERS],
             restarting: [false; PEERS],
             op: 0,
@@ -923,7 +938,7 @@ impl Harness {
             carried: BTreeSet::new(),
             peak_envelopes: [0; PEERS],
             depths: [0; PEERS],
-            livelocked: BTreeSet::new(),
+            refresh_owed: Vec::new(),
             tolerated: BTreeSet::new(),
             coverage: Coverage::default(),
         };
@@ -1047,6 +1062,7 @@ impl Harness {
         );
         let depths = self.arms[SUBJECT].stamp(op);
         let mut dirty = [false; PEERS];
+        let mut refresh_owed: [BTreeSet<(u16, u8)>; PEERS] = Default::default();
         let was_dirty = self.dirty.last().copied().unwrap_or_default();
         for peer in 0..PEERS {
             self.peak_envelopes[peer] = self.peak_envelopes[peer].max(depths[peer]);
@@ -1063,9 +1079,11 @@ impl Harness {
             if dirty[peer] && !was_dirty[peer] {
                 self.coverage.dirty_episodes += 1;
             }
+            refresh_owed[peer] = self.arms[SUBJECT].refresh_owed(peer).await;
         }
         self.depths = depths.try_into().expect("one depth per peer");
         self.dirty.push(dirty);
+        self.refresh_owed.push(refresh_owed);
         Ok(())
     }
 
@@ -1280,7 +1298,6 @@ impl Harness {
     /// Drain and tick until every subject receiver is clean and quiet.
     async fn drain_until_quiet(&mut self) -> Result<(), String> {
         let mut quiet = 0;
-        let mut rounds: Vec<Vec<Vec<NormMsg>>> = Vec::new();
         for _ in 0..QUIESCE_ROUNDS {
             self.op += 1;
             let mut round = Vec::new();
@@ -1294,13 +1311,18 @@ impl Harness {
                 )?);
             }
             let delivered: usize = round.iter().map(Vec::len).sum();
-            rounds.push(round);
             self.tick().await;
             self.end_op().await?;
             if tracing_ops() {
                 eprintln!("op {}: drain round, dirty {:?}", self.op, self.dirty.last());
             }
             let clean = !self.dirty.last().unwrap().contains(&true)
+                && self
+                    .refresh_owed
+                    .last()
+                    .unwrap()
+                    .iter()
+                    .all(BTreeSet::is_empty)
                 && self.arms[SUBJECT].stamps.iter().all(VecDeque::is_empty);
             quiet = if clean && delivered == 0 {
                 quiet + 1
@@ -1312,50 +1334,26 @@ impl Harness {
             }
         }
         let dirty = *self.dirty.last().unwrap();
-        // Known defect: a grouped member with one free slot per tick spends
-        // it on a full-table resync, its owed ROUTE-REFRESH response is then
-        // refused and re-marks it dirty, and the next tick repeats the same
-        // table forever. Every dirty receiver is a one-slot grouped-shape
-        // member repeating one marker-free envelope per round, and every
-        // other receiver is silent.
-        let last = |peer: usize| -> Vec<&Vec<NormMsg>> {
-            rounds
-                .iter()
-                .rev()
-                .take(REPEAT_ROUNDS)
-                .map(|round| &round[peer])
-                .collect()
-        };
-        let livelocked = dirty.contains(&true)
-            && rounds.len() >= REPEAT_ROUNDS
-            && (0..PEERS).all(|peer| {
-                let last = last(peer);
-                if !dirty[peer] {
-                    return last.iter().all(|sent| sent.is_empty());
-                }
-                let config = self.config[peer];
-                config.capacity == 1
-                    && config.add_path == 0
-                    && !config.orf
-                    && last.iter().all(|sent| {
-                        sent.len() == 1
-                            && sent[0] == last[0][0]
-                            && sent[0].end_of_rib.is_empty()
-                            && sent[0].refresh_markers.is_empty()
-                            && !sent[0].announce.is_empty()
-                            && sent[0].withdraw.is_empty()
-                            && sent[0].evpn_withdraw.is_empty()
-                    })
-            });
-        if livelocked {
-            self.tolerated.insert(KNOWN_REFRESH_RETRY_LIVELOCK);
-            self.livelocked = (0..PEERS).filter(|&peer| dirty[peer]).collect();
-            return Ok(());
-        }
+        let refresh_owed = self.refresh_owed.last().unwrap();
         Err(format!(
             "liveness: subject not clean after {QUIESCE_ROUNDS} drain rounds (dirty \
-             {dirty:?})"
+             {dirty:?}, refresh answers owed {refresh_owed:?})"
         ))
+    }
+
+    /// The families of the ops in which `peer` owed a refresh answer, or
+    /// sent the answer it owed: from the deferral to the answer.
+    fn refresh_deferred(&self, peer: usize) -> BTreeMap<usize, BTreeSet<(u16, u8)>> {
+        (0..self.refresh_owed.len())
+            .map(|op| {
+                let mut families = self.refresh_owed[op][peer].clone();
+                if op > 0 {
+                    families.extend(self.refresh_owed[op - 1][peer].iter().copied());
+                }
+                (op, families)
+            })
+            .filter(|(_, families)| !families.is_empty())
+            .collect()
     }
 
     /// Ops in which `peer` was dirty or ran the resync that cleaned it.
@@ -1371,8 +1369,7 @@ impl Harness {
     )]
     fn check(&mut self) -> Result<(), String> {
         // RFC 7313 §4: every BoRR is closed by an EoRR once both arms are
-        // quiet. A livelocked receiver is held to this too: its refresh is
-        // never answered, so no BoRR of it may stay open.
+        // quiet.
         for (arm, side) in self.arms.iter().enumerate() {
             for (peer, wire) in side.wire.iter().enumerate() {
                 if let Some(family) = wire.refresh_stale.keys().next() {
@@ -1419,9 +1416,6 @@ impl Harness {
             }
         }
         for (peer, deferred) in deferred.iter().enumerate() {
-            if self.livelocked.contains(&peer) {
-                continue;
-            }
             let reference = &self.arms[REFERENCE].wire[peer];
             let subject = &self.arms[SUBJECT].wire[peer];
             // A prefix a graceful end carried in with different stale paths
@@ -1452,11 +1446,24 @@ impl Harness {
                     subject.held
                 ));
             }
-            let covered: BTreeSet<&(u64, Nlri)> = deferred
+            // A dirty peer's keys, and a refresh-owed peer's keys of the
+            // owed family, may skip the reference's transients between the
+            // deferral and the resync or answer that settles them.
+            let mut covered: BTreeSet<&(u64, Nlri)> = deferred
                 .iter()
                 .filter_map(|op| reference.touched.get(op))
                 .flatten()
                 .collect();
+            for (op, families) in self.refresh_deferred(peer) {
+                covered.extend(
+                    reference
+                        .touched
+                        .get(&op)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(_, (family, _))| families.contains(family)),
+                );
+            }
             let keys: BTreeSet<&(u64, Nlri)> = reference
                 .history
                 .keys()
@@ -1828,51 +1835,18 @@ fn stalled_receivers_converge_to_the_unbounded_reference() {
 /// the response is refused and owed. Each later tick, the dirty resync sends
 /// the member's whole table into the one free slot, the owed response
 /// (`retry_pending_refresh` straight after the resync commit) finds the
-/// channel full and marks the member dirty again, and the next tick sends
-/// the same table. The refresh never completes. Un-ignore with the fix.
+/// channel full and marked the member dirty again, and the next tick sent
+/// the same table, so the refresh never completed. A refused answer is now
+/// refresh-only debt, answered once the live operation drains.
 #[test]
-#[ignore = "open defect: grouped refresh-retry livelock at one free slot"]
 fn grouped_refresh_retry_converges_with_one_free_slot() {
     assert_clean(&livelock_config(), &livelock_ops());
-}
-
-/// The default run tolerates the open livelock only by its exact signature.
-#[test]
-fn known_refresh_retry_livelock_signature_matches_its_trace() {
-    assert_tolerates_only(
-        &livelock_config(),
-        &livelock_ops(),
-        KNOWN_REFRESH_RETRY_LIVELOCK,
-    );
-}
-
-/// The livelock tolerance skips only P1 and P4 for the livelocked receiver:
-/// a refresh it saw opened (`BoRR`) but never closed (`EoRR`) still fails P3.
-/// Red proof: skipping livelocked receivers in the unclosed-`BoRR` check
-/// passes this planted open window.
-#[test]
-fn livelocked_receiver_still_fails_an_unclosed_borr() {
-    let reason = run_seeded(livelock_config(), &livelock_ops(), |harness| {
-        assert!(harness.livelocked.contains(&0), "the livelock shape");
-        harness.arms[SUBJECT].wire[0]
-            .refresh_stale
-            .insert(V4, BTreeSet::new());
-    })
-    .err()
-    .expect("an open BoRR fails the case");
-    assert!(reason.contains("never closed by an EoRR"), "{reason}");
 }
 
 /// The case holds every property and tolerates nothing.
 fn assert_clean(config: &[PeerConfig; PEERS], ops: &[Op]) {
     let outcome = run(*config, ops).unwrap();
     assert!(outcome.tolerated.is_empty(), "{:?}", outcome.tolerated);
-}
-
-/// The case holds every other property and tolerates exactly `known`.
-fn assert_tolerates_only(config: &[PeerConfig; PEERS], ops: &[Op], known: &'static str) {
-    let outcome = run(*config, ops).unwrap();
-    assert_eq!(outcome.tolerated, BTreeSet::from([known]));
 }
 
 fn livelock_config() -> [PeerConfig; PEERS] {
@@ -1918,7 +1892,8 @@ fn livelock_ops() -> Vec<Op> {
 /// empty-inventory path in `distribute_changes`, which must still flush the
 /// pending `EoR` and retry the owed refresh, as the other clear sites do;
 /// otherwise the refresh is never answered and the IPv4 `EoR` is never sent
-/// (RFC 4724 §4).
+/// (RFC 4724 §4). A refused answer is also refresh-only debt, retried on the
+/// resync tick whatever the resync found.
 #[test]
 fn refused_gate_lifting_refresh_still_sends_the_initial_eor() {
     assert_clean(&lost_eor_config(), &lost_eor_ops());

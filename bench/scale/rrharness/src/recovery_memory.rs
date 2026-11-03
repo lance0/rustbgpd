@@ -413,7 +413,12 @@ impl Inventory {
             assert!(!value.is_stale && !value.is_llgr_stale);
             self.evpn_event(value.key(), true);
         }
-        for (prefix, path_id) in update.withdraw {
+        for (prefix, path_id) in update
+            .shared_withdraw
+            .iter()
+            .copied()
+            .chain(update.withdraw)
+        {
             assert_eq!(path_id, 0, "the fixture did not negotiate Add-Path");
             let (family, index) = prefix_index(prefix);
             self.event(family, index, false);
@@ -594,6 +599,7 @@ fn paused_snapshot(
 fn assert_empty_credit(update: &OutboundRouteUpdate) {
     assert!(
         update.announce.is_empty()
+            && update.shared_withdraw.is_empty()
             && update.withdraw.is_empty()
             && update.flowspec_announce.is_empty()
             && update.flowspec_withdraw.is_empty()

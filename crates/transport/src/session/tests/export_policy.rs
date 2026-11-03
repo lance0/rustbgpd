@@ -112,6 +112,8 @@ async fn accepted_export_policy_survives_rib_collision_promotion() {
 
     let mut loser = register_export_session(&session, 8, Some(next)).await;
     assert_eq!(next_export(&mut loser).await.announce.len(), 1);
+    // The losing session ends, closing its channel, before its PeerDown.
+    drop(loser);
     session
         .rib_tx
         .send(RibUpdate::PeerDown {

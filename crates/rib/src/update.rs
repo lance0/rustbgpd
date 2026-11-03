@@ -1136,6 +1136,10 @@ pub struct OutboundRouteUpdate {
     /// (transport only ever reads it). Retaining the vector's allocation
     /// also avoids copying its rows when the payload becomes shared.
     pub announce: Arc<Vec<Route>>,
+    /// Withdrawals an update-group fanout stages once for every member,
+    /// `Arc`-shared so a stalled member pins the group's vector rather than
+    /// its own copy. Sent in the unicast withdraw phase, before `withdraw`.
+    pub shared_withdraw: Arc<Vec<(Prefix, u32)>>,
     /// Withdrawn routes with their path IDs. For non-Add-Path peers,
     /// `path_id` is always 0.
     pub withdraw: Vec<(Prefix, u32)>,
@@ -1209,6 +1213,38 @@ pub struct OutboundRouteUpdate {
     /// ordinary row replace it ahead of the RTBH path's own announcement.
     /// `0` = no ordering requirement.
     pub exempt_announce: usize,
+    /// Private-family rows this envelope holds against its peer's outbound
+    /// credit, released when it drops. `None` for an uncharged envelope.
+    pub credit: Option<crate::outbound_credit::OutboundCharge>,
+    /// The whole-table operation this envelope belongs to; the operation is
+    /// live until its last envelope drops. `None` outside one.
+    pub latch: Option<Arc<crate::outbound_credit::OperationLatch>>,
+}
+
+impl OutboundRouteUpdate {
+    /// Every unicast withdrawal in wire order: the shared rows, then this
+    /// envelope's own.
+    pub fn unicast_withdrawals(&self) -> impl Iterator<Item = &(Prefix, u32)> {
+        self.shared_withdraw.iter().chain(&self.withdraw)
+    }
+}
+
+/// TEST ONLY: outbound work still owed to one peer
+/// ([`RibUpdate::TestQueryPeerOutboundOwed`]).
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutboundOwed {
+    /// A dirty or forced resync is owed.
+    pub resync: bool,
+    /// Refresh responses deferred behind a live whole-table operation or a
+    /// full channel.
+    pub refresh: Vec<(Afi, Safi)>,
+    /// End-of-RIB markers not yet sent.
+    pub end_of_rib: Vec<(Afi, Safi)>,
+    /// A whole-table operation is still queued or being sent.
+    pub live_operation: bool,
+    /// Private rows the peer's queued envelopes hold against its credit.
+    pub credit_rows: usize,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.
@@ -2737,6 +2773,12 @@ pub enum RibUpdate {
         /// Configured interface name.
         interface: Arc<str>,
     },
+    /// Daemon shutdown has begun. Sent once, on the primary lane, before the
+    /// shutdown drains stage their withdrawals: from then on an ordinary
+    /// envelope whose private rows withdraw (or move a key they withdraw)
+    /// needs channel capacity only, not outbound credit, so the withdrawals
+    /// reach the sessions ahead of their Cease.
+    BeginClose,
     /// Return a deleted neighbor's handle to the peer table, after the
     /// `PeerDeleted` that cleaned up its state. The peer manager sends it
     /// once the neighbor is gone for good (not across a reconfigure), so
@@ -3533,6 +3575,15 @@ pub enum RibUpdate {
         /// Whether the peer has a deferred outbound update.
         reply: oneshot::Sender<bool>,
     },
+    /// TEST ONLY: every kind of outbound work still owed to a peer, so a
+    /// liveness check sees debt that is not a dirty resync.
+    #[cfg(test)]
+    TestQueryPeerOutboundOwed {
+        /// The target peer.
+        peer: PeerId,
+        /// The owed work.
+        reply: oneshot::Sender<OutboundOwed>,
+    },
     /// TEST ONLY: evidence that the clean policy transition scales with plans
     /// and compatible wire cohorts rather than members.
     #[cfg(test)]
@@ -4265,6 +4316,7 @@ impl RibUpdate {
             Self::PeerUp { .. } => RibActorTurnKind::PeerUp,
             Self::PeerDown { .. } => RibActorTurnKind::PeerDown,
             Self::PeerDeleted { .. }
+            | Self::BeginClose
             | Self::RetireEorGraceInterface { .. }
             | Self::ReleasePeer { .. }
             | Self::RebindPeer { .. }
@@ -4386,6 +4438,8 @@ impl RibUpdate {
             Self::TestQueryOutboundHealth { .. } => RibActorTurnKind::Query,
             #[cfg(test)]
             Self::TestQueryPeerOutboundDirty { .. } => RibActorTurnKind::Query,
+            #[cfg(test)]
+            Self::TestQueryPeerOutboundOwed { .. } => RibActorTurnKind::Query,
             #[cfg(test)]
             Self::TestQueryPolicyTransitionStats { .. } => RibActorTurnKind::Query,
             #[cfg(test)]

@@ -1422,7 +1422,7 @@ async fn drain_unicast_initial_dump(
     loop {
         let update = outbound_rx.recv().await.expect("initial dump stays open");
         assert!(
-            update.withdraw.is_empty(),
+            update.unicast_withdrawals().next().is_none(),
             "an initial dump must not withdraw unicast routes"
         );
         announced.extend(update.announce.iter().cloned());
@@ -1523,7 +1523,7 @@ async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
             .iter()
             .any(|route| route.prefix == Prefix::V4(prefix))
     );
-    assert_eq!(initial.withdraw.len(), 0);
+    assert_eq!(initial.unicast_withdrawals().count(), 0);
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 31,
@@ -1542,7 +1542,11 @@ async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
     });
     while let Ok(update) = target_rx.try_recv() {
         assert!(
-            !update.withdraw.contains(&(Prefix::V4(prefix), 0)),
+            !update
+                .unicast_withdrawals()
+                .copied()
+                .collect::<Vec<_>>()
+                .contains(&(Prefix::V4(prefix), 0)),
             "GR entry must not withdraw the reflected route"
         );
     }
@@ -1550,7 +1554,11 @@ async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
     manager.sweep_gr_stale(source);
     while let Ok(update) = target_rx.try_recv() {
         assert!(
-            !update.withdraw.contains(&(Prefix::V4(prefix), 0)),
+            !update
+                .unicast_withdrawals()
+                .copied()
+                .collect::<Vec<_>>()
+                .contains(&(Prefix::V4(prefix), 0)),
             "LLGR promotion must not reclassify the retained client route as split-horizon"
         );
     }
@@ -3049,9 +3057,11 @@ async fn gr_eor_after_llgr_reconnect_resolves_mixed_paths() {
     );
     let updates: Vec<_> = std::iter::from_fn(|| out_rx.try_recv().ok()).collect();
     assert!(
-        updates
-            .iter()
-            .any(|update| update.withdraw.contains(&(lost, 0))),
+        updates.iter().any(|update| update
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(lost, 0))),
         "the downstream peer must withdraw the unrefreshed prefix"
     );
     drop(updates);

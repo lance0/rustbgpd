@@ -106,7 +106,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     let _source_rx = connect(&mut manager, SOURCE, 64, false, false);
     let mut observer_rx = connect(&mut manager, OBSERVER, 1, false, !grouped);
     assert_eq!(manager.grouped_member_of(observer).is_some(), grouped);
-    let initial = observer_rx.try_recv().unwrap();
+    let initial = observer_rx.try_recv().map(delivered).unwrap();
     assert_eq!(initial.end_of_rib, vec![FAMILY]);
     assert!(initial.announce.is_empty());
     let ordinary = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -124,6 +124,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     drain_route_chunks(&mut manager);
     let admitted = observer_rx
         .try_recv()
+        .map(delivered)
         .expect("ordinary row is admitted before any waiter reconnects");
     assert_eq!(admitted.announce.len(), 1);
     assert_eq!(admitted.announce[0].prefix, Prefix::V4(ordinary));
@@ -154,7 +155,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
         manager.loc_rib.get(&Prefix::V4(ordinary)).unwrap().peer,
         peer_v4(SOURCE)
     );
-    let first_admitted = observer_rx.try_recv().unwrap();
+    let first_admitted = observer_rx.try_recv().map(delivered).unwrap();
     assert_eq!(first_admitted.end_of_rib, [] as [(Afi, Safi); 0]);
     assert_eq!(first_admitted.announce.len(), 1);
     assert_eq!(first_admitted.announce[0].prefix, Prefix::V4(first));
@@ -163,7 +164,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     let mut recovered_second = false;
     let mut updates = 0;
-    while let Ok(update) = observer_rx.try_recv() {
+    while let Ok(update) = observer_rx.try_recv().map(delivered) {
         updates += 1;
         assert!(
             update.end_of_rib.is_empty(),
@@ -173,7 +174,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
             update.refresh_markers,
             [] as [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 0]
         );
-        for &(prefix, path_id) in &update.withdraw {
+        for &(prefix, path_id) in update.unicast_withdrawals() {
             assert_ne!(
                 prefix,
                 Prefix::V4(ordinary),
@@ -211,7 +212,8 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     assert!(
         empty_retry
             .iter()
-            .all(|update| update.announce.is_empty() && update.withdraw.is_empty()),
+            .all(|update| update.announce.is_empty()
+                && update.unicast_withdrawals().next().is_none()),
         "a caught-up partial recovery must park frozen work instead of replaying admitted RTBH"
     );
     assert!(manager.dirty_peers.contains(&observer));
@@ -314,9 +316,9 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
         safi: FAMILY.1,
     });
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    while let Ok(update) = observer_rx.try_recv() {
+    while let Ok(update) = observer_rx.try_recv().map(delivered) {
         assert_eq!(update.end_of_rib, [] as [(Afi, Safi); 0]);
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             assert!(wire.remove(key).is_some());
         }
         for route in update.announce.iter() {
@@ -421,9 +423,9 @@ fn apply_wire(
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
     wire: &mut std::collections::HashMap<(Prefix, u32), Route>,
 ) -> Vec<OutboundRouteUpdate> {
-    let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().map(delivered).ok()).collect();
     for update in &updates {
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             assert!(wire.remove(key).is_some(), "no unknown withdrawal");
         }
         for route in update.announce.iter() {
@@ -465,7 +467,7 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
                 rustbgpd_policy::PolicyChain::from_named(policy.policies),
                 mode,
             );
-            let _initial = rx.try_recv().unwrap();
+            let _initial = rx.try_recv().map(delivered).unwrap();
             assert_eq!(
                 manager.grouped_member_of(peer_v4(OBSERVER)).is_some(),
                 mode == 0
@@ -501,7 +503,8 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
             assert!(
                 suppressed
                     .iter()
-                    .all(|update| update.withdraw.is_empty() && update.announce.is_empty())
+                    .all(|update| update.unicast_withdrawals().next().is_none()
+                        && update.announce.is_empty())
             );
             assert_eq!(wire.values().next().unwrap().peer, original.peer);
             let first = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
@@ -542,7 +545,7 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
                 assert!(
                     removed
                         .iter()
-                        .flat_map(|update| &update.withdraw)
+                        .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
                         .any(|(key, _)| *key == Prefix::V4(prefix))
                 );
                 assert_eq!(wire.len(), 2);
@@ -590,7 +593,7 @@ fn policy_stripped_blackhole_removal_withdraws_original_rtbh_intent() {
             rustbgpd_policy::PolicyChain::from_named(policy.policies),
             0,
         );
-        let _initial = rx.try_recv().unwrap();
+        let _initial = rx.try_recv().map(delivered).unwrap();
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
         let mut wire = std::collections::HashMap::new();
         if dormant_reclassification {
@@ -611,7 +614,7 @@ fn policy_stripped_blackhole_removal_withdraws_original_rtbh_intent() {
         assert_eq!(
             updates
                 .iter()
-                .map(|update| update.withdraw.len())
+                .map(|update| update.unicast_withdrawals().count())
                 .sum::<usize>(),
             1
         );
@@ -649,7 +652,7 @@ fn final_encoder_refusal_keeps_frozen_ordinary_capacity_and_recovery_owned() {
         rustbgpd_policy::PolicyChain::from_named(policy.policies),
         1,
     );
-    let _initial = rx.try_recv().unwrap();
+    let _initial = rx.try_recv().map(delivered).unwrap();
     super::outbound_prefix_limits::prepare(
         &mut manager,
         1,
@@ -657,7 +660,7 @@ fn final_encoder_refusal_keeps_frozen_ordinary_capacity_and_recovery_owned() {
     )
     .unwrap();
     super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
-    while rx.try_recv().is_ok() {}
+    while rx.try_recv().map(delivered).is_ok() {}
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(SOURCE),
@@ -680,9 +683,13 @@ fn final_encoder_refusal_keeps_frozen_ordinary_capacity_and_recovery_owned() {
     encoder.set_profile(2, [key.clone()]);
     inject_aggregate(&mut manager, prefix, 99, true);
     let refused = apply_wire(&mut rx, &mut wire);
-    assert!(refused.iter().all(|update| update.withdraw.is_empty()
-        && update.announce.is_empty()
-        && update.end_of_rib.is_empty()));
+    assert!(
+        refused
+            .iter()
+            .all(|update| update.unicast_withdrawals().next().is_none()
+                && update.announce.is_empty()
+                && update.end_of_rib.is_empty())
+    );
     assert_eq!(wire.len(), 1);
     assert_eq!(wire.values().next().unwrap().peer, old.peer);
     assert!(
@@ -779,7 +786,7 @@ fn clean_group_to_private_preserves_original_local_source_provenance() {
             rustbgpd_policy::PolicyChain::from_named(policy.policies),
             0,
         );
-        let _initial = rx.try_recv().unwrap();
+        let _initial = rx.try_recv().map(delivered).unwrap();
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
         let original_id = if rtbh { 0 } else { 17 };
         inject_aggregate(&mut manager, prefix, original_id, rtbh);
@@ -839,7 +846,7 @@ fn ipv6_selection_hold_does_not_keep_ipv4_only_recovery_or_initial_eor_pending()
         });
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let mut rx = connect(&mut manager, OBSERVER, 1, false, false);
-    rx.try_recv().unwrap();
+    rx.try_recv().map(delivered).unwrap();
     let waiter = peer_v4(WAITER);
     let session_id = u64::from(WAITER.octets()[3]);
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
@@ -882,11 +889,11 @@ fn ipv6_selection_hold_does_not_keep_ipv4_only_recovery_or_initial_eor_pending()
     assert!(manager.selection_deferred(v6));
     let late_addr = Ipv4Addr::new(192, 0, 2, 84);
     let mut late = connect(&mut manager, late_addr, 1, false, false);
-    let data = late.try_recv().unwrap();
+    let data = late.try_recv().map(delivered).unwrap();
     assert_eq!(data.announce.len(), 2);
     assert_eq!(data.end_of_rib, [] as [(Afi, Safi); 0]);
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    let recovery = late.try_recv().unwrap();
+    let recovery = late.try_recv().map(delivered).unwrap();
     assert_eq!(recovery.end_of_rib, vec![FAMILY]);
     assert!(!manager.dirty_peers.contains(&peer_v4(late_addr)));
     assert!(manager.selection_deferred(v6));
@@ -898,14 +905,14 @@ fn replacement_channel_drops_old_frozen_source_and_count_state() {
     let observer = peer_v4(OBSERVER);
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let mut old = connect(&mut manager, OBSERVER, 1, false, false);
-    old.try_recv().unwrap();
+    old.try_recv().map(delivered).unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     inject_aggregate(&mut manager, prefix, 17, false);
-    old.try_recv().unwrap();
+    old.try_recv().map(delivered).unwrap();
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
     let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
     inject_host(&mut manager, host);
-    old.try_recv().unwrap();
+    old.try_recv().map(delivered).unwrap();
     assert_eq!(manager.actual_unicast_advertised_count(observer), 2);
     manager.handle_update(RibUpdate::PeerDown {
         peer: observer,
@@ -925,7 +932,7 @@ fn replacement_channel_drops_old_frozen_source_and_count_state() {
     });
     let (tx, mut fresh) = mpsc::channel(8);
     manager.handle_update(super::lifecycle::test_peer_up(observer, 182, tx));
-    let data = fresh.try_recv().unwrap();
+    let data = fresh.try_recv().map(delivered).unwrap();
     assert_eq!(
         data.announce
             .iter()
@@ -982,7 +989,7 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
         *sendable_families = vec![FAMILY, vpn_family];
     }
     manager.handle_update(up);
-    rx.try_recv().unwrap();
+    rx.try_recv().map(delivered).unwrap();
     let old_vpn = make_vpn_rib_route(SOURCE, 31, 100, 100);
     let key = old_vpn.key();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
@@ -992,10 +999,10 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
         withdrawn: vec![],
     });
     drain_route_chunks(&mut manager);
-    let old = rx.try_recv().unwrap();
+    let old = rx.try_recv().map(delivered).unwrap();
     assert_eq!(old.vpn_announce.len(), 1);
     assert_eq!(old.vpn_announce[0].key(), key);
-    while source_rx.try_recv().is_ok() {}
+    while source_rx.try_recv().map(delivered).is_ok() {}
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
         peer: peer_v4(WAITER),
         session_id: 83,
@@ -1022,11 +1029,11 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
     inject_host(&mut manager, first);
     inject_host(&mut manager, second);
     assert!(manager.dirty_peers.contains(&observer));
-    let first_update = rx.try_recv().unwrap();
+    let first_update = rx.try_recv().map(delivered).unwrap();
     assert_eq!(first_update.announce[0].prefix, Prefix::V4(first));
     assert!(first_update.vpn_announce.is_empty() && first_update.vpn_withdraw.is_empty());
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().map(delivered).ok()).collect();
     assert!(
         updates
             .iter()
@@ -1051,7 +1058,7 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
         withdrawn: vec![key.clone()],
     });
     drain_route_chunks(&mut manager);
-    let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().map(delivered).ok()).collect();
     assert!(
         updates
             .iter()
@@ -1063,14 +1070,14 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
         afi: FAMILY.0,
         safi: FAMILY.1,
     });
-    while rx.try_recv().is_ok() {}
+    while rx.try_recv().map(delivered).is_ok() {}
     manager.handle_update(RibUpdate::EndOfRib {
         peer: peer_v4(WAITER),
         session_id: 83,
         afi: vpn_family.0,
         safi: vpn_family.1,
     });
-    let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().map(delivered).ok()).collect();
     assert_eq!(
         updates
             .iter()
@@ -1079,9 +1086,9 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
             .count(),
         1
     );
-    while rx.try_recv().is_ok() {}
+    while rx.try_recv().map(delivered).is_ok() {}
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    while rx.try_recv().is_ok() {}
+    while rx.try_recv().map(delivered).is_ok() {}
     assert!(!manager.dirty_peers.contains(&observer));
     assert!(!manager.pending_group_admitted.contains_record(observer));
     assert_eq!(manager.actual_unicast_advertised_count(observer), 2);
@@ -1106,7 +1113,7 @@ fn held_add_path_prefix_keeps_capacity_until_its_last_actual_path_leaves() {
         *add_path_send_max = 2;
     }
     manager.handle_update(registration);
-    rx.try_recv().unwrap();
+    rx.try_recv().map(delivered).unwrap();
     super::outbound_prefix_limits::prepare(
         &mut manager,
         1,
@@ -1199,7 +1206,7 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
         *sendable_families = vec![FAMILY, v6];
     }
     manager.handle_update(up);
-    source_rx.try_recv().unwrap();
+    source_rx.try_recv().map(delivered).unwrap();
     let ordinary = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(SOURCE),
@@ -1242,7 +1249,7 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
         *sendable_families = vec![FAMILY, v6];
     }
     manager.handle_update(up);
-    assert!(rx.try_recv().is_err());
+    assert!(rx.try_recv().map(delivered).is_err());
     let mut wire = std::collections::HashMap::new();
     inject_host(
         &mut manager,
@@ -1324,7 +1331,7 @@ fn refused_partial_admission_proof_keeps_actual_inventory_and_counts_until_relea
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
     let mut rx = connect(&mut manager, OBSERVER, 1, false, false);
-    rx.try_recv().unwrap();
+    rx.try_recv().map(delivered).unwrap();
     let ordinary = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(SOURCE),
@@ -1441,7 +1448,7 @@ fn private_vpn_only_handoff_refuses_unproved_unicast_admission() {
     let _source = register(&mut manager, SOURCE, 64);
     let observer = peer_v4(OBSERVER);
     let mut rx = register(&mut manager, OBSERVER, 1);
-    rx.try_recv().unwrap();
+    rx.try_recv().map(delivered).unwrap();
     let route = make_vpn_rib_route(SOURCE, 31, 100, 100);
     let vpn_key = route.key();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
@@ -1451,7 +1458,7 @@ fn private_vpn_only_handoff_refuses_unproved_unicast_admission() {
         withdrawn: vec![],
     });
     drain_route_chunks(&mut manager);
-    assert_eq!(rx.try_recv().unwrap().vpn_announce.len(), 1);
+    assert_eq!(rx.try_recv().map(delivered).unwrap().vpn_announce.len(), 1);
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
         peer: peer_v4(WAITER),
         session_id: 83,
@@ -1491,7 +1498,7 @@ fn private_vpn_only_handoff_refuses_unproved_unicast_admission() {
         manager.initial_group_admitted_counts(observer).unwrap()[..4],
         [0, 0, 1, 0]
     );
-    let marker = rx.try_recv().unwrap();
+    let marker = rx.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, vec![FAMILY]);
     manager
         .pending_group_admitted
@@ -1568,7 +1575,7 @@ fn refused_private_handoff_withdraws_removed_old_unicast_and_vpn_at_release() {
     let _source = register(&mut manager, SOURCE, 64);
     let observer = peer_v4(OBSERVER);
     let mut rx = register(&mut manager, OBSERVER, 1);
-    rx.try_recv().unwrap();
+    rx.try_recv().map(delivered).unwrap();
     let old = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let mut wire = std::collections::HashMap::new();
     manager.handle_update(RibUpdate::RoutesReceived {
@@ -1593,7 +1600,10 @@ fn refused_private_handoff_withdraws_removed_old_unicast_and_vpn_at_release() {
         withdrawn: vec![],
     });
     drain_route_chunks(&mut manager);
-    assert_eq!(rx.try_recv().unwrap().vpn_announce[0].key(), old_vpn);
+    assert_eq!(
+        rx.try_recv().map(delivered).unwrap().vpn_announce[0].key(),
+        old_vpn
+    );
     let mut vpn_wire = HashSet::from([old_vpn.clone()]);
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
         peer: peer_v4(WAITER),
@@ -1798,7 +1808,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
     let _source = connect(&mut manager, SOURCE, 64, false);
     let observer = peer_v4(OBSERVER);
     let mut rx = connect(&mut manager, OBSERVER, 1, false);
-    rx.try_recv().unwrap();
+    rx.try_recv().map(delivered).unwrap();
     let limits = if ipv6 {
         (None, Some(3))
     } else {
@@ -1929,7 +1939,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
     assert_eq!(
         updates
             .iter()
-            .flat_map(|update| &update.withdraw)
+            .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
             .copied()
             .collect::<Vec<_>>(),
         [(first, 0)]
@@ -1969,9 +1979,9 @@ async fn assert_removed_rtbh_after_proof_refusal(
         safi: family.1,
     });
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    while let Ok(update) = rx.try_recv() {
+    while let Ok(update) = rx.try_recv().map(delivered) {
         assert_eq!(update.end_of_rib, []);
-        for key in update.withdraw {
+        for key in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
             assert!(
                 wire.remove(&key).is_some() || key == (first, 0),
                 "only known obsolete RTBH may receive a conservative repeated withdrawal"
@@ -2140,7 +2150,7 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
         up
     };
     manager.handle_update(registration(tx.clone()));
-    let initial = rx.try_recv().unwrap();
+    let initial = rx.try_recv().map(delivered).unwrap();
     assert_eq!(initial.end_of_rib, [family]);
     let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
     let ordinary = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -2234,11 +2244,12 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
         assert!(
             updates
                 .iter()
-                .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
+                .all(|update| update.unicast_withdrawals().next().is_none()
+                    && update.end_of_rib.is_empty())
         );
         assert_eq!(fresh_wire.len(), 1);
         assert_late_waiter_advertised_truth(&mut manager, observer, 1, "fresh channel while held");
-        assert!(rx.try_recv().is_err());
+        assert!(rx.try_recv().map(delivered).is_err());
         manager.handle_update(RibUpdate::EndOfRib {
             peer: peer_v4(WAITER),
             session_id: 83,
@@ -2278,7 +2289,8 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
         assert!(
             updates
                 .iter()
-                .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
+                .all(|update| update.unicast_withdrawals().next().is_none()
+                    && update.end_of_rib.is_empty())
         );
         assert_eq!(
             wire.len(),
@@ -2355,7 +2367,7 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
     drain_route_chunks(&mut manager);
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(updates.iter().all(|update| update.announce.is_empty()
-        && update.withdraw.is_empty()
+        && update.unicast_withdrawals().next().is_none()
         && update.end_of_rib.is_empty()));
     assert_late_waiter_advertised_truth(
         &mut manager,
@@ -2433,7 +2445,7 @@ async fn late_waiter_private_capture_services_readiness_before_completion() {
         *per_client_best = true;
     }
     manager.handle_update(up);
-    outbound_rx.try_recv().unwrap();
+    outbound_rx.try_recv().map(delivered).unwrap();
     let received = (0_u128..128)
         .map(|index| {
             let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24), SOURCE);
@@ -2582,7 +2594,7 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         up
     };
     manager.handle_update(registration(tx.clone()));
-    assert_eq!(rx.try_recv().unwrap().end_of_rib, [family]);
+    assert_eq!(rx.try_recv().map(delivered).unwrap().end_of_rib, [family]);
     super::outbound_prefix_limits::prepare(
         &mut manager,
         1,
@@ -2684,7 +2696,7 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
     inject(&mut manager, local_route(blocked, 29));
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(updates.iter().all(|update| update.announce.is_empty()
-        && update.withdraw.is_empty()
+        && update.unicast_withdrawals().next().is_none()
         && update.end_of_rib.is_empty()));
     assert_eq!(wire.len(), 3);
     assert_eq!(capacity(&manager), (2, Some(0)));
@@ -2777,11 +2789,9 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         "last-prefix withdrawal queues existing capacity recovery"
     );
     let updates = apply_wire(&mut rx, &mut wire);
-    assert!(
-        updates
-            .iter()
-            .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
-    );
+    assert!(updates.iter().all(
+        |update| update.unicast_withdrawals().next().is_none() && update.end_of_rib.is_empty()
+    ));
     assert_eq!(wire.len(), 2);
     assert_eq!(
         wire.keys().map(|key| key.0).collect::<HashSet<_>>(),
@@ -2928,7 +2938,7 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     assert!(manager.selection_deferred(FAMILY));
     let withdrawn: Vec<_> = updates
         .iter()
-        .flat_map(|update| &update.withdraw)
+        .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
         .copied()
         .collect();
     if add_path {
@@ -3225,7 +3235,11 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
     observer_rx.try_recv().expect("the earlier update");
 
     manager.resync_dirty_peers_bounded();
-    let flushed = observer_rx.try_recv().expect("the IPv6 End-of-RIB");
+    // The session sends it: the resync operation it belongs to drains.
+    let flushed = observer_rx
+        .try_recv()
+        .map(delivered)
+        .expect("the IPv6 End-of-RIB");
     assert_eq!(flushed.end_of_rib, vec![IPV6]);
     assert!(observer_rx.try_recv().is_err(), "IPv4 waits for the hold");
 

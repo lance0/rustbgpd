@@ -1465,7 +1465,7 @@ impl Harness {
                         .iter()
                         .map(|route| (route.prefix, route.path_id, Self::identity(route)))
                         .collect::<Vec<_>>(),
-                    update.withdraw,
+                    update.unicast_withdrawals().copied().collect::<Vec<_>>(),
                     update.end_of_rib,
                     update.refresh_markers
                 );
@@ -1475,7 +1475,7 @@ impl Harness {
             // whose prefix a fresh session would not advertise at all may
             // leave.
             if self.held
-                && update.withdraw.iter().any(|key| {
+                && update.unicast_withdrawals().any(|key| {
                     self.stale.contains(key)
                         && self
                             .wire
@@ -1484,7 +1484,7 @@ impl Harness {
                 })
             {
                 let expected = self.expected();
-                for key in &update.withdraw {
+                for key in update.unicast_withdrawals() {
                     let retained = self.stale.contains(key)
                         && self
                             .wire
@@ -1499,7 +1499,7 @@ impl Harness {
                     );
                 }
             }
-            for key in &update.withdraw {
+            for key in update.unicast_withdrawals() {
                 self.wire.remove(key);
                 self.stale.remove(key);
             }
@@ -3364,7 +3364,7 @@ fn received_blackhole_moves_between_peers_in_one_window() {
         "the window took the queued update"
     );
     while let Ok(update) = rx.try_recv() {
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             wire.remove(&key.1);
         }
         assert!(
@@ -3470,7 +3470,7 @@ fn otc_blocked_path_never_takes_the_departing_rtbh_key() {
     manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
     let mut announced = 0;
     while let Ok(update) = rx.try_recv() {
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             wire.remove(&key.1);
         }
         assert!(
