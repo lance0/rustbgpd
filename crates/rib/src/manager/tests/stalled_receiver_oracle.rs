@@ -1243,8 +1243,11 @@ impl Harness {
             }
             Op::Orf { peer, deny } => {
                 if self.config[peer].orf {
-                    // The push lifts a gate still holding the initial EoR.
-                    let held = !self.arms[SUBJECT].wire[peer].eor.contains(&V4);
+                    // The push lifts a gate still holding a GR peer's initial
+                    // IPv4 EoR. The reference is drained after every op, so a
+                    // missing EoR there is held, not merely queued.
+                    let held =
+                        self.config[peer].gr && !self.arms[REFERENCE].wire[peer].eor.contains(&V4);
                     self.coverage.orf_holds += usize::from(held);
                     let session_id = self.session[peer];
                     for arm in &mut self.arms {
@@ -1363,6 +1366,8 @@ impl Harness {
                             && sent[0].end_of_rib.is_empty()
                             && sent[0].refresh_markers.is_empty()
                             && !sent[0].announce.is_empty()
+                            && sent[0].withdraw.is_empty()
+                            && sent[0].evpn_withdraw.is_empty()
                     })
             });
         if livelocked {
@@ -1623,14 +1628,25 @@ struct Outcome {
     tolerated: BTreeSet<&'static str>,
 }
 
-/// [`run`], with each tolerated known defect turned into a failure when
-/// `strict`.
+/// [`run`], with a panic turned into a failure (so minimizing and the final
+/// rerun keep the trace) and each tolerated known defect turned into one
+/// when `strict`.
 fn evaluate(config: [PeerConfig; PEERS], ops: &[Op], strict: bool) -> Result<Outcome, String> {
-    let outcome = run(config, ops)?;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(config, ops)))
+        .unwrap_or_else(|panic| Err(format!("panic: {}", panic_message(&*panic))))?;
     if strict && let Some(known) = outcome.tolerated.first() {
         return Err(format!("{known} (ORACLE_STRICT)"));
     }
     Ok(outcome)
+}
+
+/// The panic's message.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(ToString::to_string))
+        .unwrap_or_default()
 }
 
 fn run(config: [PeerConfig; PEERS], ops: &[Op]) -> Result<Outcome, String> {
@@ -1732,7 +1748,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         2 => (peer(), family_strategy()).prop_map(|(peer, family)| Op::Refresh { peer, family }),
         1 => peer().prop_map(|peer| Op::GrRestart { peer }),
         1 => peer().prop_map(|peer| Op::SourceEor { peer }),
-        1 => (peer(), 0..16u8).prop_map(|(peer, deny)| Op::Orf { peer, deny }),
+        3 => (peer(), 0..16u8).prop_map(|(peer, deny)| Op::Orf { peer, deny }),
         1 => peer().prop_map(|peer| Op::Replay { peer }),
     ]
 }
