@@ -7492,6 +7492,32 @@ async fn run<T>(
     // handed to the 1.9a'' drain below, like a startup actor.
     let evpn_segment_handle = evpn_segment_runtime_control.close_for_shutdown();
 
+    // 1.9a-close Tell the RIB shutdown has begun, on the same FIFO lane the
+    // drains below use: every withdrawal they stage is then admitted
+    // against channel capacity alone, not the peer's outbound credit, so a
+    // receiver whose queue holds its whole credit still gets them ahead of
+    // its Cease.
+    // This orders state only: a withdrawal still needs room in its
+    // session's channel and reaches the wire only within the close budget.
+    let begin_close = shutdown_wait(None, &stop_waiting, async {
+        rib_tx.send(RibUpdate::BeginClose).await.is_ok()
+    })
+    .await;
+    match begin_close {
+        ShutdownWait::Completed(true) => {}
+        ShutdownWait::Completed(false) => {
+            warn!(
+                "RIB closed before the outbound close began; shutdown withdrawals may wait on credit"
+            );
+        }
+        _ => {
+            warn!(
+                reason = begin_close.abandoned().unwrap_or("unknown"),
+                "stopped waiting to begin the RIB outbound close; shutdown withdrawals may wait on credit"
+            );
+        }
+    }
+
     // 1.9a Drain the EVPN local-MAC originator first — BEFORE the
     // peer manager shutdown — so its Type 2 Withdraws ride the still-
     // open BGP sessions to peers. `RibUpdate::WithdrawEvpn` recomputes

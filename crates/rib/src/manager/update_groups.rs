@@ -3593,6 +3593,9 @@ impl RibManager {
             }
             let mut staged = self.stage_group_evpn_keys(gid, &keys);
             for peer in members {
+                if self.complete_feed_deferred(peer) {
+                    continue;
+                }
                 let clean = !self.dirty_peers.contains(&peer)
                     && !self.group_ribs[&gid].dirty_members.contains(&peer);
                 if let Some(feed) = self.prepare_complete_evpn_feed_before_deltas(

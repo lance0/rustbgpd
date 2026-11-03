@@ -185,7 +185,7 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     // Per-client-best client: same chain, receives the runner-up.
     let mitigated = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut mitigated_rx = client_peer_up(&tx, mitigated, Some(deny_tagged_chain()), true).await;
-    let dump = mitigated_rx.recv().await.unwrap();
+    let dump = mitigated_rx.recv().await.map(delivered).unwrap();
     assert_eq!(dump.announce.len(), 1, "exactly the filtered best");
     assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(dump.announce[0].path_id, 0, "single-best shape");
@@ -230,7 +230,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
         true,
     )
     .await;
-    let initial = out_rx.recv().await.unwrap();
+    let initial = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(initial.announce.len(), 1);
     assert_eq!(initial.announce[0].peer, peer_v4(SOURCE_A));
     assert_eq!(initial.announce[0].path_id, 0);
@@ -251,6 +251,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
 
     let replacement = out_rx
         .try_recv()
+        .map(delivered)
         .expect("runner-up replacement emitted after query synchronization");
     assert_eq!(replacement.announce.len(), 1);
     assert_eq!(replacement.announce[0].peer, peer_v4(SOURCE_B));
@@ -259,7 +260,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
         replacement.withdraw.is_empty(),
         "path-id 0 replacement is an implicit withdraw"
     );
-    assert!(out_rx.try_recv().is_err());
+    assert!(out_rx.try_recv().map(delivered).is_err());
 
     let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
@@ -279,6 +280,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
 
     let update = out_rx
         .try_recv()
+        .map(delivered)
         .expect("policy-added NO_ADVERTISE withdraws the per-client winner");
     assert!(update.announce.is_empty());
     assert_eq!(update.withdraw, vec![(Prefix::V4(prefix()), 0)]);
@@ -325,11 +327,14 @@ async fn source_member_of_best_gets_runner_up() {
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     sync(&tx).await;
     // Only candidate is A's own route: split horizon, nothing sent.
-    assert!(a_rx.try_recv().is_err(), "own route never echoes back");
+    assert!(
+        a_rx.try_recv().map(delivered).is_err(),
+        "own route never echoes back"
+    );
 
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
     sync(&tx).await;
-    let update = a_rx.recv().await.unwrap();
+    let update = a_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(update.announce[0].path_id, 0);
@@ -384,7 +389,7 @@ async fn grouped_source_member_explain_names_runner_up_substitution() {
     .await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
     sync(&tx).await;
-    let update = a_rx.recv().await.unwrap();
+    let update = a_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_B));
 
@@ -405,7 +410,7 @@ async fn grouped_source_member_explain_names_runner_up_substitution() {
     );
 
     // The non-source member's explain names the winner, also in sync.
-    let e_update = e_rx.recv().await.unwrap();
+    let e_update = e_rx.recv().await.map(delivered).unwrap();
     assert_eq!(e_update.announce[0].peer, peer_v4(SOURCE_A));
     let explain = query_explain_advertised_route(&tx, e, Prefix::V4(prefix())).await;
     assert_eq!(explain.route_peer, Some(peer_v4(SOURCE_A)));
@@ -436,7 +441,7 @@ async fn candidate_churn_produces_minimal_deltas() {
 
     let client = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut client_rx = client_peer_up(&tx, client, Some(deny_tagged_chain()), true).await;
-    let dump = client_rx.recv().await.unwrap();
+    let dump = client_rx.recv().await.map(delivered).unwrap();
     assert_eq!(dump.announce.len(), 1);
     assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
     drain_eor(&mut client_rx).await;
@@ -445,7 +450,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     announce_from(&tx, SOURCE_E, vec![third_route()]).await;
     sync(&tx).await;
     assert!(
-        client_rx.try_recv().is_err(),
+        client_rx.try_recv().map(delivered).is_err(),
         "unchanged filtered best must not re-announce"
     );
 
@@ -457,7 +462,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     announce_from(&tx, SOURCE_A, vec![retagged_best]).await;
     sync(&tx).await;
     assert!(
-        client_rx.try_recv().is_err(),
+        client_rx.try_recv().map(delivered).is_err(),
         "churn on the denied best must not leak to the client"
     );
 
@@ -477,7 +482,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     .await
     .unwrap();
     sync(&tx).await;
-    let update = client_rx.recv().await.unwrap();
+    let update = client_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
@@ -485,7 +490,10 @@ async fn candidate_churn_produces_minimal_deltas() {
         update.withdraw.is_empty(),
         "filtered-best flip must be an implicit replace, not withdraw+announce"
     );
-    assert!(client_rx.try_recv().is_err(), "exactly one update");
+    assert!(
+        client_rx.try_recv().map(delivered).is_err(),
+        "exactly one update"
+    );
 
     // (c) reload-with-unchanged-policy: replace the chain with
     // content-equal contents — the resync must be fully suppressed.
@@ -500,7 +508,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     reply_rx.await.unwrap().unwrap();
     sync(&tx).await;
     assert!(
-        client_rx.try_recv().is_err(),
+        client_rx.try_recv().map(delivered).is_err(),
         "no-op policy reload must produce zero wire churn"
     );
 
@@ -514,7 +522,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     .await
     .unwrap();
     reply_rx.await.unwrap().unwrap();
-    let update = client_rx.recv().await.unwrap();
+    let update = client_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
@@ -537,7 +545,7 @@ async fn route_refresh_replays_filtered_best() {
 
     let client = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut client_rx = client_peer_up(&tx, client, Some(deny_tagged_chain()), true).await;
-    let dump = client_rx.recv().await.unwrap();
+    let dump = client_rx.recv().await.map(delivered).unwrap();
     assert_eq!(dump.announce.len(), 1);
     drain_eor(&mut client_rx).await;
 
@@ -550,7 +558,7 @@ async fn route_refresh_replays_filtered_best() {
     })
     .await
     .unwrap();
-    let replay = client_rx.recv().await.unwrap();
+    let replay = client_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         replay.announce.len(),
         1,
@@ -603,7 +611,7 @@ async fn explain_names_runner_up_selection_with_term_labels() {
     let mitigated = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut mitigated_rx =
         client_peer_up(&tx, mitigated, Some(rpol_deny_tagged_chain()), true).await;
-    let dump = mitigated_rx.recv().await.unwrap();
+    let dump = mitigated_rx.recv().await.map(delivered).unwrap();
     assert_eq!(dump.announce.len(), 1, "live sends the runner-up");
     assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
 
@@ -747,12 +755,12 @@ async fn agrees_with_single_best_when_policy_permits_the_best() {
 
     let plain = peer_v4(Ipv4Addr::new(10, 0, 0, 6));
     let mut plain_rx = client_peer_up(&tx, plain, None, false).await;
-    let plain_dump = plain_rx.recv().await.unwrap();
+    let plain_dump = plain_rx.recv().await.map(delivered).unwrap();
     drain_eor(&mut plain_rx).await;
 
     let pcb = peer_v4(Ipv4Addr::new(10, 0, 0, 7));
     let mut pcb_rx = client_peer_up(&tx, pcb, None, true).await;
-    let pcb_dump = pcb_rx.recv().await.unwrap();
+    let pcb_dump = pcb_rx.recv().await.map(delivered).unwrap();
     drain_eor(&mut pcb_rx).await;
 
     assert_eq!(plain_dump.announce.len(), 1);

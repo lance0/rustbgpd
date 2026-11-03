@@ -772,6 +772,8 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
     session.negotiated = Some(Arc::new(negotiated));
     session.send_route_update(OutboundRouteUpdate {
+        credit: None,
+        latch: None,
         shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
@@ -831,6 +833,8 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
     assert!(!negotiated.peer_route_refresh);
     session.negotiated = Some(Arc::new(negotiated));
     session.send_route_update(OutboundRouteUpdate {
+        credit: None,
+        latch: None,
         shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,

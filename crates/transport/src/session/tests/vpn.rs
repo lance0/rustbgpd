@@ -20,6 +20,8 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
     let route = make_vpn_rib_route(4093);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        credit: None,
+        latch: None,
         shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
@@ -73,6 +75,8 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         "RD + MPLS label stack must round-trip verbatim"
     );
     session.send_route_update(OutboundRouteUpdate {
+        credit: None,
+        latch: None,
         shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
@@ -170,6 +174,8 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
         "announcement must carry the outbound path ID"
     );
     session.send_route_update(OutboundRouteUpdate {
+        credit: None,
+        latch: None,
         shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,

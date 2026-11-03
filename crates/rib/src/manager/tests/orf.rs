@@ -67,7 +67,11 @@ async fn collect_until_announced(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate
     let deadline = Duration::from_secs(5);
     let result = tokio::time::timeout(deadline, async {
         loop {
-            let u = out_rx.recv().await.expect("outbound channel open");
+            let u = out_rx
+                .recv()
+                .await
+                .map(delivered)
+                .expect("outbound channel open");
             if u.announce.iter().any(|route| route.prefix == prefix) {
                 break;
             }
@@ -142,7 +146,7 @@ async fn orf_setup() -> (
 
     // RFC 5291 §6 gate: the initial dump must advertise no routes for the
     // gated family — only the EoR marker.
-    let initial = out_rx.recv().await.unwrap();
+    let initial = out_rx.recv().await.map(delivered).unwrap();
     assert!(
         initial.announce.is_empty(),
         "gated family must not advertise routes initially, got {}",
@@ -819,7 +823,7 @@ async fn drain_until_eor(
             .expect("EoR-bearing update should arrive")
             .expect("outbound channel open");
         let done = update.end_of_rib.contains(&family);
-        updates.push(update);
+        updates.push(delivered(update));
         if done {
             return updates;
         }
@@ -956,7 +960,7 @@ async fn gr_restarter_deferred_eor_follows_plain_refresh_flood() {
     })
     .await
     .unwrap();
-    let subsequent = out_rx.recv().await.unwrap();
+    let subsequent = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         subsequent.refresh_markers,
         vec![
@@ -1013,9 +1017,16 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
     });
     assert!(manager.pending_eor[&peer].contains(&family));
     assert!(manager.dirty_peers.contains(&peer));
-    assert!(!out_rx.try_recv().unwrap().announce.is_empty());
+    assert!(
+        !out_rx
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .announce
+            .is_empty()
+    );
     manager.send_route_refresh_response(peer, family.0, family.1);
-    let refresh = out_rx.try_recv().unwrap();
+    let refresh = out_rx.try_recv().map(delivered).unwrap();
     assert!(!refresh.announce.is_empty());
     assert!(
         refresh.refresh_markers.is_empty(),
@@ -1026,13 +1037,13 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
         "dirty resync still owns the initial EoR"
     );
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    let resync = out_rx.try_recv().unwrap();
+    let resync = out_rx.try_recv().map(delivered).unwrap();
     assert_eq!(resync.refresh_markers.len(), 0);
     assert_eq!(resync.end_of_rib, vec![family]);
     assert!(!manager.pending_eor.contains_key(&peer));
     manager.send_route_refresh_response(peer, family.0, family.1);
     assert_eq!(
-        out_rx.try_recv().unwrap().refresh_markers,
+        out_rx.try_recv().map(delivered).unwrap().refresh_markers,
         vec![
             (family.0, family.1, RouteRefreshSubtype::BoRR),
             (family.0, family.1, RouteRefreshSubtype::EoRR),
@@ -1092,7 +1103,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     .await
     .unwrap();
     // First (non-GR) session: both families gated, immediate honest-empty EoR.
-    let initial = out_rx.recv().await.unwrap();
+    let initial = out_rx.recv().await.map(delivered).unwrap();
     assert!(initial.announce.is_empty());
     assert_ne!(initial.end_of_rib.len(), 0);
 
@@ -1465,7 +1476,7 @@ fn orf_capacity_rejects_oversized_first_group_without_lifting_gate() {
 #[test]
 fn orf_pending_entry_drops_after_last_route_refresh_lift() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
-    let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+    let (mut manager, mut out_rx) = dual_stack_orf_manager(peer);
     assert!(!manager.clean_policy_transition_peer_ready(peer));
 
     manager.handle_update(RibUpdate::RouteRefreshRequest {
@@ -1481,6 +1492,8 @@ fn orf_pending_entry_drops_after_last_route_refresh_lift() {
         "one family still gated keeps the entry"
     );
     assert!(!manager.clean_policy_transition_peer_ready(peer));
+    // The session sends the first answer before the second request.
+    while out_rx.try_recv().is_ok() {}
 
     manager.handle_update(RibUpdate::RouteRefreshRequest {
         queued: Arc::default(),

@@ -896,7 +896,7 @@ impl RibManager {
             refresh_markers,
             ..OutboundRouteUpdate::default()
         };
-        if sender.try_send(update).is_ok()
+        if crate::outbound_credit::send_marker(&sender, update).is_ok()
             && self.outbound_session_ids.get(&peer).copied() == session_id
             && self
                 .outbound_peers

@@ -5,13 +5,14 @@ use std::time::Instant;
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
-use super::distribution::OutboundCommitBatch;
+use super::distribution::{OutboundCommitBatch, OutboundCommitFailure};
 use super::helpers::{afi_safi_label, gauge_val, prefix_family};
 use super::peer_lifecycle::{GroupReplay, MAX_JOIN_COHORT, group_replay_rs_inert};
 use super::{PolicyFilteredRouteKey, RibManager, RibUpdate};
 use crate::ERR_REFRESH_TIMEOUT;
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
+use crate::outbound_credit::{OutboundOperation, send_marker};
 use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey};
 use crate::update::OutboundRouteUpdate;
 
@@ -470,11 +471,13 @@ impl RibManager {
                     for peer in peers {
                         let cohort = replay.has_routes_for(peer).then_some(&mut replay);
                         manager.send_route_refresh_response_with_readiness(
-                            peer, afi, safi, kind, cohort,
+                            peer, afi, safi, kind, cohort, None,
                         );
                     }
                 } else {
-                    manager.send_route_refresh_response_with_readiness(peer, afi, safi, kind, None);
+                    manager.send_route_refresh_response_with_readiness(
+                        peer, afi, safi, kind, None, None,
+                    );
                 }
             });
         });
@@ -767,38 +770,63 @@ impl RibManager {
                 "outbound replay unavailable while a family is gated or the operation expired",
             ));
         }
+        // The one acceptance point. The gates above, the session, the token,
+        // the export encoder and room for every family's envelope and the
+        // terminal are checked once, before anything is published; after it
+        // the families and terminal are published without another admission
+        // check or token re-check. A token that expires after acceptance
+        // only blocks the transport's certification of the terminal
+        // (`transport/src/session/replay.rs`), never half-publishes.
+        if !self.peer_export_encoders.contains_key(&peer) {
+            return Err(RibCommandError::internal(
+                "outbound replay could not admit a complete family",
+            ));
+        }
+        let mut operation = match self
+            .begin_outbound_operation(peer, families.len() + 1)
+            .and_then(|operation| {
+                if operation.reserved() == families.len() + 1 {
+                    Ok(operation)
+                } else {
+                    Err(OutboundCommitFailure::WriterUnavailable)
+                }
+            }) {
+            Ok(operation) => operation,
+            Err(failure) => {
+                let _ = self.outbound_commit_failed(peer, failure);
+                return Err(RibCommandError::internal(
+                    "outbound replay could not admit a complete family",
+                ));
+            }
+        };
         for &(afi, safi) in &families {
-            if !replay.is_valid()
-                || self.send_route_refresh_response_inner(
-                    peer,
-                    afi,
-                    safi,
-                    FamilyReplayKind::OperatorReplay,
-                ) != FamilyReplayOutcome::Committed
+            if self.send_route_refresh_response_in(
+                peer,
+                afi,
+                safi,
+                FamilyReplayKind::OperatorReplay,
+                Some(&mut operation),
+            ) != FamilyReplayOutcome::Committed
             {
                 return Err(RibCommandError::internal(
                     "outbound replay could not admit a complete family",
                 ));
             }
         }
-        let sender = self
-            .outbound_peers
-            .get(&peer)
-            .ok_or_else(|| RibCommandError::not_found("outbound session disappeared"))?;
-        sender
-            .try_send(OutboundRouteUpdate {
-                end_of_rib: families,
-                replay: Some(std::sync::Arc::clone(replay)),
-                ..OutboundRouteUpdate::default()
-            })
-            .map_err(|_| {
-                RibCommandError::internal("outbound replay terminal envelope could not be admitted")
-            })?;
+        let slot = operation.slot().ok_or_else(|| {
+            RibCommandError::internal("outbound replay terminal envelope could not be admitted")
+        })?;
+        slot.send(OutboundRouteUpdate {
+            end_of_rib: families,
+            replay: Some(std::sync::Arc::clone(replay)),
+            ..OutboundRouteUpdate::default()
+        });
         Ok(())
     }
 
     /// Re-advertise the Loc-RIB for a given family to a peer, followed by `EoR`.
-    /// Called when a peer sends ROUTE-REFRESH (RFC 2918).
+    /// Called when a peer sends ROUTE-REFRESH (RFC 2918); tests drive it directly.
+    #[cfg(test)]
     pub(super) fn send_route_refresh_response(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         let _ = self.send_route_refresh_response_inner(
             peer,
@@ -829,6 +857,20 @@ impl RibManager {
         safi: Safi,
         replay_kind: FamilyReplayKind,
     ) -> FamilyReplayOutcome {
+        self.send_route_refresh_response_in(peer, afi, safi, replay_kind, None)
+    }
+
+    /// [`Self::send_route_refresh_response_inner`] as part of `operation`
+    /// (an operator replay, or a refresh retried behind the resync that
+    /// owes it), or as its own whole-table operation when `None`.
+    pub(super) fn send_route_refresh_response_in(
+        &mut self,
+        peer: PeerId,
+        afi: Afi,
+        safi: Safi,
+        replay_kind: FamilyReplayKind,
+        operation: Option<&mut OutboundOperation>,
+    ) -> FamilyReplayOutcome {
         super::with_executor_handoff(|| {
             self.with_replacement_readiness(|manager| {
                 manager.send_route_refresh_response_with_readiness(
@@ -837,6 +879,7 @@ impl RibManager {
                     safi,
                     replay_kind,
                     None,
+                    operation,
                 )
             })
         })
@@ -853,6 +896,7 @@ impl RibManager {
         safi: Safi,
         replay_kind: FamilyReplayKind,
         cohort: Option<&mut GroupReplay>,
+        operation: Option<&mut OutboundOperation>,
     ) -> FamilyReplayOutcome {
         self.replacement_checkpoint(true);
         let family = (afi, safi);
@@ -930,6 +974,57 @@ impl RibManager {
                 return FamilyReplayOutcome::Failed;
             }
         }
+        // A refresh or replay response is one whole-table operation, with
+        // room for the initial End-of-RIB it may complete, admitted before
+        // anything (a complete EVPN feed included) is built for it. A
+        // selection release is the diff of a family whose ordinary changes
+        // were frozen: an ordinary envelope, admitted against credit.
+        let mut own_operation = None;
+        let latched =
+            operation.is_some() || !matches!(replay_kind, FamilyReplayKind::SelectionRelease);
+        let operation = match operation {
+            Some(operation) => Some(operation),
+            None if !latched => None,
+            None => match self.begin_outbound_operation(
+                peer,
+                1 + usize::from(
+                    deferred_eor
+                        || self
+                            .pending_eor
+                            .get(&peer)
+                            .is_some_and(|families| families.contains(&family)),
+                ),
+            ) {
+                Ok(operation) => Some(own_operation.insert(operation)),
+                Err(failure) => {
+                    let _ = self.outbound_commit_failed(peer, failure);
+                    None
+                }
+            },
+        };
+        let admitted = match operation {
+            None if !latched => Some((None, None)),
+            None => None,
+            Some(operation) => operation.slot().map(|slot| (Some(operation), Some(slot))),
+        };
+        let Some((operation, slot)) = admitted else {
+            match replay_kind {
+                FamilyReplayKind::PeerRefresh { .. } => {
+                    // Nothing was built and nothing is owed but this response:
+                    // the resync timer retries it once the peer's live
+                    // operation drains (`retry_deferred_refreshes`), without a
+                    // resync of its own that would take the room it needs.
+                    debug!(%peer, ?family, "route refresh response deferred: a whole-table update is still live or the channel is full");
+                    self.pending_refresh.entry(peer).or_default().insert(family);
+                }
+                FamilyReplayKind::PrefixLimitRecovery
+                | FamilyReplayKind::OperatorReplay
+                | FamilyReplayKind::SelectionRelease => {
+                    debug!(%peer, ?family, "outbound replay deferred: outbound credit or capacity unavailable");
+                }
+            }
+            return FamilyReplayOutcome::Failed;
+        };
         let orf_filter = self
             .peer_orf_filters
             .get(&peer)
@@ -2121,6 +2216,7 @@ impl RibManager {
                     labeled_withdraw,
                     rtc_announce,
                     rtc_withdraw,
+                    slot,
                     ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
                 },
                 group_prior,
@@ -2180,7 +2276,7 @@ impl RibManager {
             // The flood above completes an initial marker owed through either
             // selection deferral or the GR-specific ORF hold.
             if (initial_eor_owed || deferred_eor) && !self.dirty_peers.contains(&peer) {
-                self.flush_pending_eor(peer);
+                self.flush_pending_eor_in(peer, operation);
             }
             if family == (Afi::L2Vpn, Safi::Evpn) {
                 self.send_evpn_refresh_markers(peer);
@@ -2217,6 +2313,17 @@ impl RibManager {
     /// Called after a successful dirty-peer resync. If the send fails again,
     /// the peer is re-marked dirty for another attempt.
     pub(super) fn flush_pending_eor(&mut self, peer: PeerId) {
+        self.flush_pending_eor_in(peer, None);
+    }
+
+    /// [`Self::flush_pending_eor`] on a slot of `operation`, the whole-table
+    /// operation whose data the markers follow, so a marker it reserved
+    /// never escalates to a dirty resync.
+    pub(super) fn flush_pending_eor_in(
+        &mut self,
+        peer: PeerId,
+        operation: Option<&mut OutboundOperation>,
+    ) {
         let Some(families) = self.pending_eor.remove(&peer) else {
             return;
         };
@@ -2242,7 +2349,14 @@ impl RibManager {
             end_of_rib: ready.iter().copied().collect(),
             ..OutboundRouteUpdate::default()
         };
-        if tx.try_send(eor).is_err() {
+        let sent = match operation.and_then(OutboundOperation::slot) {
+            Some(slot) => {
+                slot.send(eor);
+                Ok(())
+            }
+            None => send_marker(&tx, eor),
+        };
+        if sent.is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
             self.metrics.record_outbound_eor_deferral(&peer.label());
             self.pending_eor.entry(peer).or_default().extend(ready);
@@ -2261,15 +2375,58 @@ impl RibManager {
 
     /// Retry any deferred enhanced route refresh responses for a peer.
     pub(super) fn retry_pending_refresh(&mut self, peer: PeerId) {
+        self.retry_pending_refresh_in(peer, None);
+    }
+
+    /// Retry deferred responses as part of `operation`, the resync that owed
+    /// them: they join its latch instead of waiting for it.
+    pub(super) fn retry_pending_refresh_in(
+        &mut self,
+        peer: PeerId,
+        mut operation: Option<&mut OutboundOperation>,
+    ) {
         self.replacement_checkpoint(true);
         let Some(families) = self.pending_refresh.remove(&peer) else {
             return;
         };
         for (afi, safi) in families {
             self.replacement_checkpoint(false);
-            self.send_route_refresh_response(peer, afi, safi);
+            let _ = self.send_route_refresh_response_in(
+                peer,
+                afi,
+                safi,
+                FamilyReplayKind::PeerRefresh {
+                    suppress_eor: false,
+                },
+                operation.as_deref_mut(),
+            );
             self.replacement_checkpoint(true);
         }
+    }
+
+    /// Retry the refresh responses of peers no resync owns once their live
+    /// whole-table operation has drained and their channel has room. A
+    /// response deferred behind a dirty resync rides that resync instead.
+    pub(super) fn retry_deferred_refreshes(&mut self) {
+        let peers: Vec<PeerId> = self.pending_refresh.keys().copied().collect();
+        for peer in peers {
+            self.replacement_checkpoint(false);
+            if self.outbound_channel_gone(peer) {
+                self.pending_refresh.remove(&peer);
+            } else if !self.dirty_peers.contains(&peer)
+                && !self.outbound_operation_live(peer)
+                && !self.outbound_channel_full(peer)
+            {
+                self.retry_pending_refresh(peer);
+            }
+        }
+    }
+
+    /// Whether a deferred refresh response waits for the resync timer.
+    pub(super) fn deferred_refresh_pending(&self) -> bool {
+        self.pending_refresh
+            .keys()
+            .any(|peer| !self.dirty_peers.contains(peer))
     }
 
     /// Finish an active inbound enhanced route refresh window for a peer/family.

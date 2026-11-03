@@ -207,7 +207,10 @@ fn register_peer_with_selection(
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
-    let eor = outbound_rx.try_recv().expect("registration end-of-rib");
+    let eor = outbound_rx
+        .try_recv()
+        .map(delivered)
+        .expect("registration end-of-rib");
     assert_eq!(eor.end_of_rib, sendable_families);
     outbound_rx
 }
@@ -256,7 +259,7 @@ fn withdraw(manager: &mut RibManager, source: PeerId, withdrawn: Vec<(Prefix, u3
 /// later withdrawn.
 fn wire_prefixes(outbound_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> HashSet<Prefix> {
     let mut advertised = HashSet::new();
-    while let Ok(update) = outbound_rx.try_recv() {
+    while let Ok(update) = outbound_rx.try_recv().map(delivered) {
         for route in update.announce.iter() {
             advertised.insert(route.prefix);
         }
@@ -1491,7 +1494,10 @@ fn ipv4_recovery_is_family_only_and_emits_no_refresh_or_eor_markers() {
         vec![Afi::Ipv6],
         "one turn must leave the sibling family queued"
     );
-    let replay = outbound_rx.try_recv().expect("IPv4 recovery is enqueued");
+    let replay = outbound_rx
+        .try_recv()
+        .map(delivered)
+        .expect("IPv4 recovery is enqueued");
     assert!(
         replay
             .announce
@@ -1505,7 +1511,7 @@ fn ipv4_recovery_is_family_only_and_emits_no_refresh_or_eor_markers() {
         replay.refresh_markers.is_empty(),
         "recovery is not a BoRR/EoRR exchange"
     );
-    assert!(outbound_rx.try_recv().is_err());
+    assert!(outbound_rx.try_recv().map(delivered).is_err());
     assert_eq!(
         manager
             .adj_ribs_out
@@ -1658,6 +1664,7 @@ fn backpressured_recovery_stays_internal_and_retries_transactionally() {
     assert_eq!(manager.outbound_limit_recovery_for(peer), vec![]);
     let replay = outbound_rx
         .try_recv()
+        .map(delivered)
         .expect("capacity permits the family replay");
     assert_eq!(replay.announce.len(), 2);
     assert_eq!(
@@ -1671,7 +1678,7 @@ fn backpressured_recovery_stays_internal_and_retries_transactionally() {
     assert_eq!(replay.end_of_rib.len(), 0);
     assert_eq!(replay.refresh_markers.len(), 0);
     assert!(
-        outbound_rx.try_recv().is_err(),
+        outbound_rx.try_recv().map(delivered).is_err(),
         "only one replay is enqueued"
     );
     assert_eq!(ipv4_row(&manager, peer).usage, 2);
@@ -1685,7 +1692,7 @@ fn backpressured_recovery_stays_internal_and_retries_transactionally() {
     assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
     assert!(!manager.resync_tick_pending());
     assert!(!manager.resync_dirty_peers_bounded());
-    assert!(outbound_rx.try_recv().is_err());
+    assert!(outbound_rx.try_recv().map(delivered).is_err());
     assert_eq!(
         manager.export_policy_counters[&peer]
             .snapshot()
@@ -1737,7 +1744,10 @@ fn orf_pending_recovery_waits_for_a_normal_peer_refresh() {
     assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 0);
 
     manager.send_route_refresh_response(peer, family.0, family.1);
-    let peer_refresh = outbound_rx.try_recv().expect("peer refresh is enqueued");
+    let peer_refresh = outbound_rx
+        .try_recv()
+        .map(delivered)
+        .expect("peer refresh is enqueued");
     assert_eq!(peer_refresh.end_of_rib, vec![family]);
     assert_eq!(
         peer_refresh.refresh_markers,
@@ -1758,6 +1768,7 @@ fn orf_pending_recovery_waits_for_a_normal_peer_refresh() {
     assert!(manager.drain_outbound_limit_recovery());
     let recovery = outbound_rx
         .try_recv()
+        .map(delivered)
         .expect("internal recovery is enqueued");
     assert_eq!(recovery.end_of_rib.len(), 0);
     assert_eq!(recovery.refresh_markers.len(), 0);
@@ -1786,6 +1797,7 @@ fn recovery_does_not_consume_or_flush_a_gr_deferred_eor() {
     assert!(manager.drain_outbound_limit_recovery());
     let recovery = outbound_rx
         .try_recv()
+        .map(delivered)
         .expect("internal recovery is enqueued");
     assert_eq!(recovery.end_of_rib.len(), 0);
     assert_eq!(recovery.refresh_markers.len(), 0);
@@ -2329,7 +2341,11 @@ async fn wire_prefixes_until(
 ) -> HashSet<Prefix> {
     let mut advertised = HashSet::new();
     while advertised.len() < want {
-        let update = outbound_rx.recv().await.expect("the session stays up");
+        let update = outbound_rx
+            .recv()
+            .await
+            .map(delivered)
+            .expect("the session stays up");
         for route in update.announce.iter() {
             advertised.insert(route.prefix);
         }

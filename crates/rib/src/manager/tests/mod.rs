@@ -1150,6 +1150,16 @@ fn vantage_at_node_a() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, A, X))
 }
 
+/// What a session does once it has sent an envelope: release its credit
+/// charge and operation latch. A test that keeps the payload to inspect it
+/// would otherwise model a session that never finishes sending, which holds
+/// back the peer's next whole-table operation.
+fn delivered(mut update: OutboundRouteUpdate) -> OutboundRouteUpdate {
+    update.credit = None;
+    update.latch = None;
+    update
+}
+
 /// Apply all queued `RoutesReceived` chunks (the channel-driven manager
 /// drains these from its run loop).
 fn drain_route_chunks(manager: &mut RibManager) {

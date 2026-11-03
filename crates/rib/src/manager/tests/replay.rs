@@ -54,7 +54,7 @@ fn receive_routes(manager: &mut RibManager, routes: Vec<Route>) {
 
 fn drain(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<OutboundRouteUpdate> {
     let mut updates = Vec::new();
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         updates.push(update);
     }
     updates
@@ -143,7 +143,7 @@ fn explicit_replay_preserves_private_grouped_and_add_path_inventory() {
                 .all(|update| update.refresh_markers.is_empty())
         );
         assert!(
-            other.try_recv().is_err(),
+            other.try_recv().map(delivered).is_err(),
             "replay must stay on the named peer"
         );
         assert_eq!(manager.grouped_member_of(peer), group);
@@ -186,7 +186,7 @@ fn explicit_replay_rejects_stale_session_and_orf_gate_without_output() {
     let (stale, _enrolled) = BmpReplay::new(Duration::from_secs(5));
     assert!(request(&mut manager, peer, 6, ipv4_sendable(), &stale).is_err());
     assert!(!stale.is_valid());
-    assert!(outbound.try_recv().is_err());
+    assert!(outbound.try_recv().map(delivered).is_err());
 
     manager
         .peer_orf_pending
@@ -197,7 +197,7 @@ fn explicit_replay_rejects_stale_session_and_orf_gate_without_output() {
     assert!(request(&mut manager, peer, 7, ipv4_sendable(), &gated).is_err());
     assert!(!gated.is_valid());
     assert!(manager.peer_orf_pending[&peer].contains(&(Afi::Ipv4, Safi::Unicast)));
-    assert!(outbound.try_recv().is_err());
+    assert!(outbound.try_recv().map(delivered).is_err());
     assert!(!manager.pending_refresh.contains_key(&peer));
 }
 
@@ -217,11 +217,11 @@ fn explicit_replay_rejects_selection_deferral_without_releasing_gate() {
         &ipv4_sendable(),
     );
     let mut outbound = register_peer(&mut manager, peer, ipv4_sendable(), false, 16);
-    assert!(outbound.try_recv().is_err());
+    assert!(outbound.try_recv().map(delivered).is_err());
     let (replay, _enrolled) = BmpReplay::new(Duration::from_secs(5));
     assert!(request(&mut manager, peer, 7, ipv4_sendable(), &replay).is_err());
     assert!(!replay.is_valid());
-    assert!(outbound.try_recv().is_err());
+    assert!(outbound.try_recv().map(delivered).is_err());
     assert!(!manager.pending_refresh.contains_key(&peer));
 }
 
@@ -234,14 +234,18 @@ fn explicit_replay_full_channel_cancels_without_terminal_or_refresh_retry() {
     let (replay, _enrolled) = BmpReplay::new(Duration::from_secs(5));
     assert!(request(&mut manager, peer, 7, ipv4_sendable(), &replay).is_err());
     assert!(!replay.is_valid());
-    let initial = outbound.try_recv().unwrap();
+    let initial = outbound.try_recv().map(delivered).unwrap();
     assert!(initial.replay.is_none());
-    assert!(outbound.try_recv().is_err());
+    assert!(outbound.try_recv().map(delivered).is_err());
     assert!(!manager.pending_refresh.contains_key(&peer));
 }
 
+/// T3: a replay is accepted as one operation. With room for the family but
+/// not its terminal, it is refused before anything is sent, so no family is
+/// half-published. Red proof: admitting each family on its own sends the
+/// route replay into the sole slot and then fails the terminal.
 #[test]
-fn explicit_replay_terminal_admission_failure_invalidates_admitted_routes() {
+fn explicit_replay_without_room_for_its_terminal_sends_nothing() {
     let mut manager = manager();
     let peer = PeerId::from_addr("10.0.0.1".parse().unwrap());
     let mut outbound = register_peer(&mut manager, peer, ipv4_sendable(), false, 1);
@@ -251,21 +255,17 @@ fn explicit_replay_terminal_admission_failure_invalidates_admitted_routes() {
         &mut manager,
         vec![make_route(prefix, Ipv4Addr::new(192, 0, 2, 1))],
     );
-    assert_eq!(outbound.try_recv().unwrap().announce.len(), 1);
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().announce.len(),
+        1
+    );
     let (replay, _enrolled) = BmpReplay::new(Duration::from_secs(5));
     assert!(request(&mut manager, peer, 7, ipv4_sendable(), &replay).is_err());
     assert!(!replay.is_valid());
-    let admitted = outbound
-        .try_recv()
-        .expect("route replay consumed the sole slot");
-    assert_eq!(admitted.announce.len(), 1);
-    assert_eq!(admitted.announce[0].prefix, Prefix::V4(prefix));
-    assert_eq!(admitted.end_of_rib.len(), 0);
-    assert_eq!(admitted.refresh_markers.len(), 0);
-    assert!(admitted.replay.is_none());
     assert!(
         outbound.try_recv().is_err(),
-        "failed terminal admission cannot imply completion"
+        "a refused replay publishes no family"
     );
     assert!(!manager.pending_refresh.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
 }

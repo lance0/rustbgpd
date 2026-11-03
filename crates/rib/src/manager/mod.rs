@@ -24,6 +24,7 @@ mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
 mod lease_expiry;
+mod outbound_credit;
 mod outbound_prefix_limits;
 mod peer_lifecycle;
 mod queries;
@@ -656,6 +657,22 @@ pub struct RibManager {
     /// coalesced family-scoped recovery intent for those limits (ADR-0113).
     outbound_limit_control: outbound_prefix_limits::OutboundLimitControl,
     outbound_peers: HashMap<PeerId, mpsc::Sender<OutboundRouteUpdate>>,
+    /// Outbound row credit and live whole-table operation of every peer
+    /// that has registered for outbound updates, kept across `PeerDown`,
+    /// collision supersede and re-registration: envelopes of an earlier
+    /// session still count against the same peer (`crate::outbound_credit`).
+    outbound_credit: HashMap<PeerId, outbound_credit::PeerCredit>,
+    /// Per-peer row credit at the current number of private peers.
+    outbound_row_credit: usize,
+    /// Fixed per-peer row credit for tests and bench builds.
+    outbound_row_credit_override: Option<usize>,
+    /// Daemon shutdown has begun (`RibUpdate::BeginClose`): an ordinary
+    /// envelope that withdraws needs channel capacity only.
+    outbound_closing: bool,
+    /// Entries into a private-family staging producer, so a test can prove
+    /// a peer without credit stages nothing.
+    #[cfg(test)]
+    outbound_stagings: HashMap<PeerId, usize>,
     /// Transport session identity recorded at `PeerUp` registration,
     /// keyed like `outbound_peers`. `handle_peer_down` /
     /// `handle_peer_graceful_restart` discard a teardown whose stamped id
@@ -2649,6 +2666,21 @@ impl RibManager {
     }
 }
 
+/// A fixed per-peer outbound row credit for the whole test suite
+/// (`RUSTBGPD_TEST_OUTBOUND_ROW_CREDIT`), so every RIB test, the oracles
+/// included, can run with refusals that the default credit never reaches.
+#[cfg(test)]
+fn test_outbound_row_credit() -> Option<usize> {
+    std::env::var("RUSTBGPD_TEST_OUTBOUND_ROW_CREDIT")
+        .ok()
+        .and_then(|rows| rows.parse().ok())
+}
+
+#[cfg(not(test))]
+const fn test_outbound_row_credit() -> Option<usize> {
+    None
+}
+
 impl RibManager {
     /// Create a new RIB manager with the given update channel and optional export policy.
     #[must_use]
@@ -2742,6 +2774,13 @@ impl RibManager {
             outbound_prefix_limits: HashMap::new(),
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
+            outbound_credit: HashMap::new(),
+            outbound_row_credit: test_outbound_row_credit()
+                .unwrap_or_else(|| crate::outbound_credit::row_credit_for(0)),
+            outbound_row_credit_override: test_outbound_row_credit(),
+            outbound_closing: false,
+            #[cfg(test)]
+            outbound_stagings: HashMap::new(),
             flush_poll_budget: initial_flush_poll_budget(),
             actor_suspended: Arc::default(),
             outbound_session_ids: HashMap::new(),
@@ -3999,6 +4038,7 @@ impl RibManager {
                 self.evpn_marker_retry_runnable(peer)
             })
             || self.outbound_limit_recovery_runnable()
+            || self.deferred_refresh_pending()
     }
 
     /// Run one bounded resync-timer tick. ADR-0113 recovery replays at most
@@ -4039,6 +4079,7 @@ impl RibManager {
         self.retry_pending_inbound_refresh_bounded();
         self.flush_helper_stale_exempt(&HashSet::new());
         self.retry_evpn_feed_markers_bounded();
+        self.retry_deferred_refreshes();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap
@@ -5138,6 +5179,22 @@ impl RibManager {
                 let _ = reply.send(self.dirty_peers.contains(&peer));
             }
             #[cfg(test)]
+            RibUpdate::TestQueryPeerOutboundOwed { peer, reply } => {
+                let sorted = |families: Option<&HashSet<(Afi, Safi)>>| {
+                    let mut families: Vec<_> = families.into_iter().flatten().copied().collect();
+                    families.sort_by_key(|&(afi, safi)| (afi as u16, safi as u8));
+                    families
+                };
+                let _ = reply.send(crate::update::OutboundOwed {
+                    resync: self.dirty_peers.contains(&peer)
+                        || self.force_outbound_peers.contains(&peer),
+                    refresh: sorted(self.pending_refresh.get(&peer)),
+                    end_of_rib: sorted(self.pending_eor.get(&peer)),
+                    live_operation: self.outbound_operation_live(peer),
+                    credit_rows: self.outbound_credit_rows(peer),
+                });
+            }
+            #[cfg(test)]
             RibUpdate::TestQueryPolicyTransitionStats { reply } => {
                 let stats = self.policy_transition_stats;
                 let _ = reply.send((
@@ -5462,6 +5519,7 @@ impl RibManager {
                     }
                 });
             }
+            RibUpdate::BeginClose => self.begin_outbound_close(),
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
             RibUpdate::WithdrawEvpn { key, reply } => {
                 self.handle_withdraw_evpn(key, reply);

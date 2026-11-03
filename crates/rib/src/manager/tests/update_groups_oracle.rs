@@ -1301,7 +1301,18 @@ pub(super) struct Oracle {
     /// route messages never share a distribution window (the reference
     /// side of the cross-message coalescing tests).
     sequential_queue: bool,
+    /// Receivers that model a healthy session: at every quiesce their queued
+    /// updates are taken off the channel and marked sent ([`delivered`]),
+    /// as a session sends what the RIB queues; a session that had not sent
+    /// a whole-table update would hold back the peer's next one. The
+    /// scenario still reads them in order (`unread`). Small channels stay
+    /// under the scenario's explicit control.
+    prompt: BTreeSet<PeerId>,
+    unread: BTreeMap<PeerId, std::collections::VecDeque<OutboundRouteUpdate>>,
 }
+
+/// Channels at least this large model a healthy, promptly draining session.
+const PROMPT_CAPACITY: usize = 64;
 
 /// Session features that disqualify a peer from shared single-best staging.
 /// The fault corpus varies these only at stamped `PeerUp` boundaries, matching
@@ -1347,6 +1358,8 @@ impl Oracle {
             handle,
             collected: Streams::new(),
             sequential_queue: false,
+            prompt: BTreeSet::new(),
+            unread: BTreeMap::new(),
         }
     }
 
@@ -1468,6 +1481,11 @@ impl Oracle {
         features: OraclePeerFeatures,
     ) {
         let (out_tx, out_rx) = mpsc::channel(capacity);
+        if capacity >= PROMPT_CAPACITY {
+            self.prompt.insert(peer_v4(peer));
+        } else {
+            self.prompt.remove(&peer_v4(peer));
+        }
         let add_path_send_families = if features.add_path_send_max > 0 {
             sendable_families
                 .iter()
@@ -1506,8 +1524,11 @@ impl Oracle {
         // receiver; drain the predecessor first so its messages stay in
         // the collected stream.
         let msgs = self.collected.entry(peer_v4(peer)).or_default();
+        for update in self.unread.remove(&peer_v4(peer)).into_iter().flatten() {
+            msgs.push(normalize(&update));
+        }
         if let Some(mut old_rx) = self.outs.insert(peer_v4(peer), out_rx) {
-            while let Ok(update) = old_rx.try_recv() {
+            while let Ok(update) = old_rx.try_recv().map(delivered) {
                 msgs.push(normalize(&update));
             }
         }
@@ -1735,7 +1756,10 @@ impl Oracle {
     fn drain_collected(&mut self) {
         for (peer, rx) in &mut self.outs {
             let msgs = self.collected.entry(*peer).or_default();
-            while let Ok(update) = rx.try_recv() {
+            for update in self.unread.remove(peer).into_iter().flatten() {
+                msgs.push(normalize(&update));
+            }
+            while let Ok(update) = rx.try_recv().map(delivered) {
                 msgs.push(normalize(&update));
             }
         }
@@ -1858,6 +1882,8 @@ impl Oracle {
     /// the primary channel. The reply is also an ordering barrier for all
     /// prior updates and their resulting outbound sends.
     pub(super) async fn outbound_convergence(&mut self) -> crate::update::OutboundConvergence {
+        // Healthy sessions have sent what was queued before the query.
+        self.quiesce().await;
         let (reply, response) = oneshot::channel();
         self.tx
             .send(RibUpdate::QueryOutboundConvergence { reply })
@@ -1884,6 +1910,14 @@ impl Oracle {
     /// happened by the time the reply arrives.
     pub(super) async fn quiesce(&mut self) {
         let _ = self.best_routes().await;
+        for (peer, rx) in &mut self.outs {
+            if self.prompt.contains(peer) {
+                let unread = self.unread.entry(*peer).or_default();
+                while let Ok(update) = rx.try_recv() {
+                    unread.push_back(delivered(update));
+                }
+            }
+        }
     }
 
     /// Quiesce, then require every peer to be outbound-clean, so a resync
@@ -1948,13 +1982,21 @@ impl Oracle {
     /// scenarios). The message stays in the collected stream so folded
     /// comparisons and the VPN invariant checker see the whole history.
     pub(super) async fn drain_one(&mut self, peer: Ipv4Addr) -> OutboundRouteUpdate {
-        let update = self
-            .outs
+        let unread = self
+            .unread
             .get_mut(&peer_v4(peer))
-            .expect("peer registered")
-            .recv()
-            .await
-            .expect("message pending");
+            .and_then(std::collections::VecDeque::pop_front);
+        let update = match unread {
+            Some(update) => update,
+            None => self
+                .outs
+                .get_mut(&peer_v4(peer))
+                .expect("peer registered")
+                .recv()
+                .await
+                .map(delivered)
+                .expect("message pending"),
+        };
         self.collected
             .entry(peer_v4(peer))
             .or_default()
@@ -2010,9 +2052,15 @@ impl Oracle {
     pub(super) async fn drain_peer_available(&mut self, peer: Ipv4Addr) -> Vec<NormMsg> {
         self.quiesce().await;
         let peer = peer_v4(peer);
+        let mut drained: Vec<NormMsg> = self
+            .unread
+            .remove(&peer)
+            .into_iter()
+            .flatten()
+            .map(|update| normalize(&update))
+            .collect();
         let rx = self.outs.get_mut(&peer).expect("peer registered");
-        let mut drained = Vec::new();
-        while let Ok(update) = rx.try_recv() {
+        while let Ok(update) = rx.try_recv().map(delivered) {
             drained.push(normalize(&update));
         }
         self.collected
@@ -5487,13 +5535,13 @@ async fn dirty_leaver_with_empty_view_leaves_no_extra_withdraw_entry() {
     o.peer_up(B, false, true, None, 64).await;
     // C's policy denies the only route, so its group table and advertised
     // view stay empty. Its capacity-1 channel is left holding the initial
-    // EoR, so the refresh response below cannot be sent: C goes dirty with
+    // EoR, so the forced resync below cannot be sent: C goes dirty with
     // nothing advertised and no group tombstones.
     o.peer_up(C, false, true, Some(deny_prefix_chain(pfx(1, 0))), 1)
         .await;
     o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
         .await;
-    o.route_refresh(C, Afi::Ipv4, Safi::Unicast).await;
+    o.refresh_outbound(C).await;
     let (dirty, _, _, _, _, extra_withdraw_peers) = o.terminal_health().await;
     assert_eq!(
         (dirty, extra_withdraw_peers),

@@ -571,7 +571,7 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
             ..ExactBatch::default()
         }
     ));
-    let accepted = rx.recv().await.unwrap();
+    let accepted = rx.recv().await.map(delivered).unwrap();
     assert_eq!(accepted.announce.len(), 1);
     assert_eq!(accepted.announce[0].prefix, route.prefix);
     assert_eq!(accepted.announce[0].peer, route.peer);
@@ -587,7 +587,7 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
             ..ExactBatch::default()
         }
     ));
-    let rejected = rx.recv().await.unwrap();
+    let rejected = rx.recv().await.map(delivered).unwrap();
     assert!(rejected.announce.is_empty());
     assert_eq!(
         rejected.unicast_withdrawals().copied().collect::<Vec<_>>(),
@@ -608,7 +608,7 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
             ..ExactBatch::default()
         }
     ));
-    let repeated = rx.recv().await.unwrap();
+    let repeated = rx.recv().await.map(delivered).unwrap();
     assert!(repeated.announce.is_empty());
     assert!(
         repeated.unicast_withdrawals().next().is_none(),
@@ -625,7 +625,7 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
             ..ExactBatch::default()
         }
     ));
-    let recovered = rx.recv().await.unwrap();
+    let recovered = rx.recv().await.map(delivered).unwrap();
     assert_eq!(recovered.announce.len(), 1);
     assert_eq!(recovered.announce[0].prefix, route.prefix);
     assert_eq!(recovered.announce[0].peer, route.peer);
@@ -655,7 +655,7 @@ fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
             ..ExactBatch::default()
         }
     ));
-    assert_eq!(rx.try_recv().unwrap().announce.len(), 1);
+    assert_eq!(rx.try_recv().map(delivered).unwrap().announce.len(), 1);
     let initial_probe_batches = encoder.probe_batch_count();
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_some());
 
@@ -678,7 +678,7 @@ fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
         None,
     ));
 
-    let withdrawn = rx.try_recv().unwrap();
+    let withdrawn = rx.try_recv().map(delivered).unwrap();
     let snapshot = withdrawn
         .exact_export_snapshot
         .as_ref()
@@ -700,7 +700,10 @@ fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
     assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, 1);
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_none());
     assert!(!manager.peer_unexportable.contains_key(&peer));
-    assert!(rx.try_recv().is_err(), "the commit enqueues exactly once");
+    assert!(
+        rx.try_recv().map(delivered).is_err(),
+        "the commit enqueues exactly once"
+    );
 }
 
 #[tokio::test]
@@ -757,7 +760,7 @@ async fn every_route_family_is_probed_before_commit() {
             }
         ));
 
-        let update = rx.recv().await.unwrap();
+        let update = rx.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
         assert_eq!(
             update.unicast_withdrawals().copied().collect::<Vec<_>>(),
@@ -838,7 +841,7 @@ async fn batched_probe_results_filter_the_matching_family_in_order() {
             ..ExactBatch::default()
         }
     ));
-    let update = rx.recv().await.unwrap();
+    let update = rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert!(update.flowspec_announce.is_empty());
     assert_eq!(update.evpn_announce.len(), 1);
@@ -869,7 +872,7 @@ fn route_bearing_commit_without_encoder_fails_closed() {
         }
     ));
     assert!(!manager.adj_ribs_out.contains_key(&peer));
-    assert!(rx.try_recv().is_err());
+    assert!(rx.try_recv().map(delivered).is_err());
 }
 
 #[test]
@@ -901,7 +904,7 @@ fn mismatched_unicast_payload_is_unrepresentable_and_nonretryable() {
     assert_eq!(encoder.probed().len(), 0);
     assert!(!manager.adj_ribs_out.contains_key(&peer));
     assert!(!manager.dirty_peers.contains(&peer));
-    assert!(rx.try_recv().is_err());
+    assert!(rx.try_recv().map(delivered).is_err());
 }
 
 #[tokio::test]
@@ -927,7 +930,7 @@ async fn malformed_batch_probe_cardinality_falls_back_to_scalar() {
             ..ExactBatch::default()
         }
     ));
-    assert_eq!(rx.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(rx.recv().await.map(delivered).unwrap().announce.len(), 1);
     assert_eq!(*probed.lock().unwrap(), vec![key]);
 }
 
@@ -1111,7 +1114,7 @@ async fn confirmed_ipv6_unlock_probes_restored_table_once() {
     .await
     .unwrap();
     response.await.unwrap().unwrap();
-    let update = outbound.recv().await.unwrap();
+    let update = outbound.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1, "restored route exported");
     assert_eq!(update.announce[0].prefix, Prefix::V6(v6));
     assert_eq!(encoder.probe_count(), 1, "one route, one encode probe");
@@ -1267,7 +1270,7 @@ fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
         HashSet::new(),
         &mut cache,
     ));
-    let source_update = source_rx.try_recv().unwrap();
+    let source_update = source_rx.try_recv().map(delivered).unwrap();
     assert_eq!(source_update.announce.len(), 1);
     assert_eq!(source_update.unicast_withdrawals().count(), 0);
     assert_eq!(source_encoder.probe_count(), 1);
@@ -1280,7 +1283,7 @@ fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
         HashSet::from([key.clone()]),
         &mut cache,
     ));
-    let limited_update = limited_rx.try_recv().unwrap();
+    let limited_update = limited_rx.try_recv().map(delivered).unwrap();
     assert!(limited_update.announce.is_empty());
     assert_eq!(
         limited_update
@@ -1336,7 +1339,7 @@ fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() 
             deltas: &deltas,
         }),
     ));
-    let update = rx.try_recv().unwrap();
+    let update = rx.try_recv().map(delivered).unwrap();
     assert!(Arc::ptr_eq(&update.announce, &announce));
     assert!(Arc::ptr_eq(&update.next_hop_override, &next_hop_override));
     let snapshot = update.exact_export_snapshot.unwrap();
@@ -1377,7 +1380,10 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
             ..ExactBatch::default()
         },
     ));
-    assert_eq!(limited_rx.try_recv().unwrap().announce.len(), 1);
+    assert_eq!(
+        limited_rx.try_recv().map(delivered).unwrap().announce.len(),
+        1
+    );
     manager
         .peer_export_encoders
         .insert(limited, limited_encoder.clone());
@@ -1431,7 +1437,10 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
         HashSet::new(),
         &mut cache,
     ));
-    assert_eq!(source_rx.try_recv().unwrap().announce.len(), 1);
+    assert_eq!(
+        source_rx.try_recv().map(delivered).unwrap().announce.len(),
+        1
+    );
     assert!(
         !manager.adj_ribs_out.contains_key(&limited),
         "the owed withdrawal must depend on the lazy group prior, not a private fallback"
@@ -1451,7 +1460,7 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
             }),
         )
     }));
-    let limited_update = limited_rx.try_recv().unwrap();
+    let limited_update = limited_rx.try_recv().map(delivered).unwrap();
     assert!(limited_update.announce.is_empty());
     assert_eq!(
         limited_update
@@ -1482,7 +1491,7 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
     manager.handle_update(super::update_groups_recovery::peer_up(
         member, outbound, None,
     ));
-    let delivered = receiver.try_recv().unwrap();
+    let delivered = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(delivered.announce.len(), 1);
     assert_eq!(
         (delivered.announce[0].prefix, delivered.announce[0].path_id),
@@ -1590,7 +1599,7 @@ fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
             deltas: &deltas,
         }),
     ));
-    assert_eq!(rx.try_recv().unwrap().announce.len(), 1);
+    assert_eq!(rx.try_recv().map(delivered).unwrap().announce.len(), 1);
     let overlay = &manager.peer_unexportable[&target];
     assert!(!overlay.contains(&route_key));
     assert!(overlay.contains(&unrelated_key));
@@ -1629,7 +1638,10 @@ async fn grouped_shared_unicast_probes_once_per_compatible_wire_profile() {
     .unwrap();
 
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
     assert_eq!(
         encoders
@@ -1675,8 +1687,26 @@ async fn grouped_shared_unicast_does_not_reuse_when_snapshot_refuses() {
     .await
     .unwrap();
 
-    assert_eq!(receiver_a.recv().await.unwrap().announce.len(), 1);
-    assert_eq!(receiver_b.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        receiver_a
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
+    assert_eq!(
+        receiver_b
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
     assert_eq!(
         encoder_a.probed().len() + encoder_b.probed().len(),
         2,
@@ -1718,8 +1748,26 @@ async fn grouped_shared_unicast_falls_back_on_wrong_reuse_cardinality() {
     .await
     .unwrap();
 
-    assert_eq!(receiver_a.recv().await.unwrap().announce.len(), 1);
-    assert_eq!(receiver_b.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        receiver_a
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
+    assert_eq!(
+        receiver_b
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
     assert_eq!(
         encoder_a.probe_count() + encoder_b.probe_count(),
         2,
@@ -1771,13 +1819,14 @@ async fn grouped_link_local_scope_change_withdraws_and_restores_with_fixed_profi
         assert_eq!(best[0].next_hop_scope, route.next_hop_scope);
         if step == 3 {
             assert!(matches!(
-                out_rx.try_recv(),
+                out_rx.try_recv().map(delivered),
                 Err(mpsc::error::TryRecvError::Empty)
             ));
             continue;
         }
         let update = out_rx
             .try_recv()
+            .map(delivered)
             .expect("scope change reaches outbound state");
         if ifindex == 7 {
             assert_eq!(update.announce.len(), 1);
@@ -1933,8 +1982,8 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     })
     .await
     .unwrap();
-    let classic_first = classic_rx.recv().await.unwrap();
-    let extended_first = extended_rx.recv().await.unwrap();
+    let classic_first = classic_rx.recv().await.map(delivered).unwrap();
+    let extended_first = extended_rx.recv().await.map(delivered).unwrap();
     assert!(classic_first.announce.is_empty());
     assert_eq!(extended_first.announce.len(), 1);
     assert_eq!(advertised_count(&tx, classic).await, 0);
@@ -1971,8 +2020,8 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     })
     .await
     .unwrap();
-    let classic_flip = classic_rx.recv().await.unwrap();
-    let extended_flip = extended_rx.recv().await.unwrap();
+    let classic_flip = classic_rx.recv().await.map(delivered).unwrap();
+    let extended_flip = extended_rx.recv().await.map(delivered).unwrap();
     assert!(classic_flip.announce.is_empty());
     assert_eq!(classic_flip.unicast_withdrawals().count(), 0);
     assert_eq!(extended_flip.announce.len(), 1);
@@ -2032,7 +2081,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
         .unwrap();
         let _ = advertised_count(&tx, classic).await;
     }
-    let extended_withdraw = extended_rx.recv().await.unwrap();
+    let extended_withdraw = extended_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         extended_withdraw
             .unicast_withdrawals()
@@ -2082,8 +2131,26 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     })
     .await
     .unwrap();
-    assert_eq!(target_rx.recv().await.unwrap().vpn_announce.len(), 1);
-    assert_eq!(sibling_rx.recv().await.unwrap().vpn_announce.len(), 1);
+    assert_eq!(
+        target_rx
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .vpn_announce
+            .len(),
+        1
+    );
+    assert_eq!(
+        sibling_rx
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .vpn_announce
+            .len(),
+        1
+    );
 
     // A GShut-style forced refresh changes the wire attributes. If the
     // refreshed route no longer fits, the grouped peer must withdraw the
@@ -2098,7 +2165,7 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     .await
     .unwrap();
     assert_eq!(result.await.unwrap(), Ok(()));
-    let rejected_refresh = target_rx.recv().await.unwrap();
+    let rejected_refresh = target_rx.recv().await.map(delivered).unwrap();
     assert!(rejected_refresh.vpn_announce.is_empty());
     assert_eq!(rejected_refresh.vpn_withdraw, vec![key.clone()]);
 
@@ -2113,7 +2180,10 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     })
     .await
     .unwrap();
-    assert_eq!(sibling_rx.recv().await.unwrap().vpn_withdraw, vec![key]);
+    assert_eq!(
+        sibling_rx.recv().await.map(delivered).unwrap().vpn_withdraw,
+        vec![key]
+    );
     let (reply, result) = oneshot::channel();
     tx.send(RibUpdate::TestQueryVpnAdvertised {
         peer: target,
@@ -2164,8 +2234,26 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     })
     .await
     .unwrap();
-    assert_eq!(target_rx.recv().await.unwrap().vpn_announce.len(), 1);
-    assert_eq!(sibling_rx.recv().await.unwrap().vpn_announce.len(), 1);
+    assert_eq!(
+        target_rx
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .vpn_announce
+            .len(),
+        1
+    );
+    assert_eq!(
+        sibling_rx
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .vpn_announce
+            .len(),
+        1
+    );
 
     // The transport's real snapshot tests pin the RFC 8950 rejection. Here
     // the same exact-precommit failure is applied to a changed route, without
@@ -2180,10 +2268,10 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     })
     .await
     .unwrap();
-    let rejected = target_rx.recv().await.unwrap();
+    let rejected = target_rx.recv().await.map(delivered).unwrap();
     assert!(rejected.vpn_announce.is_empty());
     assert_eq!(rejected.vpn_withdraw, vec![key.clone()]);
-    let accepted = sibling_rx.recv().await.unwrap();
+    let accepted = sibling_rx.recv().await.map(delivered).unwrap();
     assert_eq!(accepted.vpn_announce.len(), 1);
     assert!(accepted.vpn_announce[0].next_hop.is_ipv6());
     assert_eq!(accepted.vpn_withdraw.len(), 0);
@@ -2212,7 +2300,10 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     })
     .await
     .unwrap();
-    assert_eq!(sibling_rx.recv().await.unwrap().vpn_withdraw, vec![key]);
+    assert_eq!(
+        sibling_rx.recv().await.map(delivered).unwrap().vpn_withdraw,
+        vec![key]
+    );
     if let Ok(Some(update)) =
         tokio::time::timeout(Duration::from_millis(25), target_rx.recv()).await
     {
@@ -2326,7 +2417,12 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
         Some(&NextHopAction::Self_)
     );
     assert_eq!(
-        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        receiver
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .next_hop_override
+            .as_ref(),
         &[Some(NextHopAction::Self_)]
     );
     assert!(
@@ -2334,7 +2430,7 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
             .try_send_and_commit_outbound_update(target, batch(None))
             .is_ok()
     );
-    let rejected = receiver.try_recv().unwrap();
+    let rejected = receiver.try_recv().map(delivered).unwrap();
     assert!(rejected.announce.is_empty());
     assert_eq!(
         rejected.unicast_withdrawals().copied().collect::<Vec<_>>(),
@@ -2356,7 +2452,12 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
             .is_ok()
     );
     assert_eq!(
-        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        receiver
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .next_hop_override
+            .as_ref(),
         &[None]
     );
     assert!(
@@ -2365,7 +2466,12 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
             .is_ok()
     );
     assert_eq!(
-        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        receiver
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .next_hop_override
+            .as_ref(),
         &[Some(NextHopAction::Self_)]
     );
 }
@@ -2406,11 +2512,16 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
         Some(&NextHopAction::Self_)
     );
     assert_eq!(
-        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        receiver
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .next_hop_override
+            .as_ref(),
         &[Some(NextHopAction::Self_)]
     );
     assert!(
-        receiver.try_recv().is_err(),
+        receiver.try_recv().map(delivered).is_err(),
         "no empty envelope may be enqueued"
     );
     let mut replay = batch(None);
@@ -2422,7 +2533,12 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
         "explicit family replay must re-emit the current action even when its bytes are equal"
     );
     assert_eq!(
-        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        receiver
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .next_hop_override
+            .as_ref(),
         &[None]
     );
     assert_eq!(
@@ -2438,7 +2554,12 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
             .is_ok()
     );
     assert_eq!(
-        receiver.try_recv().unwrap().next_hop_override.as_ref(),
+        receiver
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .next_hop_override
+            .as_ref(),
         &[Some(NextHopAction::Self_)]
     );
     manager.force_outbound_peers.remove(&target);
@@ -2450,7 +2571,7 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
             .is_ok(),
         "failed comparison must still run final refusal probe"
     );
-    let rejected = receiver.try_recv().unwrap();
+    let rejected = receiver.try_recv().map(delivered).unwrap();
     assert!(rejected.announce.is_empty());
     assert_eq!(
         rejected.unicast_withdrawals().copied().collect::<Vec<_>>(),
@@ -2500,7 +2621,7 @@ fn rejected_private_vpn_payload_retires_at_each_checkpoint() {
             )
             .is_ok()
     );
-    let update = receiver.try_recv().unwrap();
+    let update = receiver.try_recv().map(delivered).unwrap();
     assert!(update.vpn_announce.is_empty() && update.vpn_withdraw.is_empty());
     let mut retired = retired.lock().unwrap().clone();
     retired.dedup();
@@ -2553,7 +2674,7 @@ fn rejected_private_evpn_payload_retires_at_each_checkpoint() {
             )
             .is_ok()
     );
-    let update = receiver.try_recv().unwrap();
+    let update = receiver.try_recv().map(delivered).unwrap();
     assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
     let mut retired = retired.lock().unwrap().clone();
     retired.dedup();

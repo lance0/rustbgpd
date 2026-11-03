@@ -1697,6 +1697,9 @@ impl RibManager {
         for peer in peers {
             self.replacement_checkpoint(false);
             if let Some(gid) = self.evpn_grouped_member_of(peer) {
+                if self.complete_feed_deferred(peer) {
+                    continue;
+                }
                 if let Some(feed) = self.prepare_complete_evpn_feed(peer, gid, None, false) {
                     feeds.insert(peer, feed);
                 } else {

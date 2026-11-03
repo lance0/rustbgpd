@@ -68,10 +68,10 @@ fn non_full_encoder_refusal_retains_the_owed_withdrawal_for_recovery() {
     let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 1).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
-    let initial = receiver.try_recv().unwrap();
+    let initial = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(initial.announce.len(), 1);
     assert_eq!(initial.announce[0].prefix, Prefix::V4(prefix(1)));
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     assert!(!manager.outbound_channel_full(member));
     let encoder = manager.peer_export_encoders.remove(&member).unwrap();
     source_update(&mut manager, &[], &[1]);
@@ -82,10 +82,10 @@ fn non_full_encoder_refusal_retains_the_owed_withdrawal_for_recovery() {
         Some(crate::manager::update_groups::RecoveryFallbackCause::MissingProof)
     );
     assert!(!manager.outbound_channel_full(member));
-    assert!(receiver.try_recv().is_err());
+    assert!(receiver.try_recv().map(delivered).is_err());
     manager.peer_export_encoders.insert(member, encoder);
     while manager.resync_dirty_peers_bounded() {}
-    let recovered = receiver.try_recv().unwrap();
+    let recovered = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(recovered.withdraw, vec![(Prefix::V4(prefix(1)), 0)]);
     assert!(!manager.dirty_peers.contains(&member));
     assert_eq!(manager.group_recovery_fallback(member), None);
@@ -110,7 +110,7 @@ fn missing_completed_proof_resync_counts_fallback_and_keeps_the_owed_withdrawal(
     }
     manager.handle_update(registration);
     let key = (Prefix::V4(prefix(1)), 0);
-    let delivered = receiver.try_recv().unwrap();
+    let delivered = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(delivered.announce.len(), 1);
     assert_eq!(
         (delivered.announce[0].prefix, delivered.announce[0].path_id),
@@ -203,7 +203,7 @@ fn reserve_refusal_without_a_durable_fallback_keeps_the_owed_withdrawal() {
         *is_ebgp = true;
     }
     manager.handle_update(registration);
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     assert!(manager.mark_outbound_dirty(member));
     let owed = (Prefix::V4(prefix(1)), 0);
     assert!(
@@ -232,7 +232,7 @@ fn reserve_refusal_without_a_durable_fallback_keeps_the_owed_withdrawal() {
         None,
     );
     assert!(manager.group_ribs[&gid].tombstones.contains(&owed));
-    assert!(receiver.try_recv().is_err());
+    assert!(receiver.try_recv().map(delivered).is_err());
 
     detach_fallback_record(&mut manager, member);
     manager
@@ -240,7 +240,7 @@ fn reserve_refusal_without_a_durable_fallback_keeps_the_owed_withdrawal() {
         .fail_next_allocation_for_test();
 
     while manager.resync_dirty_peers_bounded() {}
-    let recovered = receiver.try_recv().unwrap();
+    let recovered = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(recovered.withdraw, vec![owed]);
     assert_eq!(
         recovered
@@ -324,7 +324,7 @@ fn common_recovery_charge_is_truthful_at_startup_capture_and_release() {
     let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 2).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     manager.mark_outbound_dirty(member);
     assert_eq!(gauge(&manager, "bgp_update_group_recovery_entries"), 2.0);
     assert_eq!(
@@ -333,7 +333,7 @@ fn common_recovery_charge_is_truthful_at_startup_capture_and_release() {
     );
     assert!(gauge(&manager, "bgp_update_group_recovery_bytes") > header);
     while manager.resync_dirty_peers_bounded() {}
-    assert!(receiver.try_recv().is_ok());
+    assert!(receiver.try_recv().map(delivered).is_ok());
     assert_eq!(gauge(&manager, "bgp_update_group_recovery_entries"), 0.0);
     assert_eq!(gauge(&manager, "bgp_update_group_recovery_bytes"), header);
     assert!(gauge(&manager, "bgp_update_group_recovery_peak_bytes") > header);
@@ -370,10 +370,10 @@ fn proof_refused_initial_dump_settles_without_a_second_replay() {
         manager.handle_update(peer_up(member, outbound, None));
         let gid = manager.grouped_member_of(member).unwrap();
 
-        let initial = receiver.try_recv().unwrap();
+        let initial = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(initial.announce.len(), prefixes.len());
         assert!(initial.withdraw.is_empty() && initial.end_of_rib.is_empty());
-        let eor = receiver.try_recv().unwrap();
+        let eor = receiver.try_recv().map(delivered).unwrap();
         assert!(eor.announce.is_empty() && eor.withdraw.is_empty());
         assert_eq!(eor.end_of_rib, ipv4_sendable());
         assert_eq!(fallback_count(&manager, "peer_limit"), 1.0);
@@ -384,7 +384,7 @@ fn proof_refused_initial_dump_settles_without_a_second_replay() {
         assert_eq!(manager.pending_group_admitted.bytes(), healthy_bytes);
         assert!(!manager.resync_dirty_peers_bounded());
         assert!(
-            receiver.try_recv().is_err(),
+            receiver.try_recv().map(delivered).is_err(),
             "the completed dump must not replay"
         );
     }
@@ -410,8 +410,14 @@ fn proof_refused_refresh_settles_only_its_own_recovery_state() {
             sendable_families.push((Afi::Ipv6, Safi::Unicast));
         }
         manager.handle_update(registration);
-        assert_eq!(receiver.try_recv().unwrap().announce.len(), 2);
-        assert_eq!(receiver.try_recv().unwrap().end_of_rib.len(), 2);
+        assert_eq!(
+            receiver.try_recv().map(delivered).unwrap().announce.len(),
+            2
+        );
+        assert_eq!(
+            receiver.try_recv().map(delivered).unwrap().end_of_rib.len(),
+            2
+        );
         let gid = manager.grouped_member_of(member).unwrap();
         manager.pending_group_admitted = AdmittedRecovery::with_test_limits(0, 512 * 1024 * 1024);
         let healthy_bytes = manager.pending_group_admitted.bytes();
@@ -437,7 +443,7 @@ fn proof_refused_refresh_settles_only_its_own_recovery_state() {
             ),
             FamilyReplayOutcome::Committed
         );
-        let response = receiver.try_recv().unwrap();
+        let response = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(response.announce.len(), 1);
         assert_eq!(response.announce[0].prefix, Prefix::V4(prefix(2)));
         assert_eq!(response.withdraw, vec![(Prefix::V4(prefix(1)), 0)]);
@@ -464,7 +470,7 @@ fn proof_refused_refresh_settles_only_its_own_recovery_state() {
             assert!(!manager.resync_dirty_peers_bounded());
         }
         assert!(
-            receiver.try_recv().is_err(),
+            receiver.try_recv().map(delivered).is_err(),
             "the refresh must enqueue once"
         );
     }
@@ -481,13 +487,16 @@ fn proof_refused_initial_dump_still_retries_a_failed_eor() {
     manager.pending_group_admitted = AdmittedRecovery::with_test_limits(0, 512 * 1024 * 1024);
     let (outbound, mut receiver) = mpsc::channel(1);
     manager.handle_update(peer_up(member, outbound, None));
-    assert_eq!(receiver.try_recv().unwrap().announce.len(), 2);
+    assert_eq!(
+        receiver.try_recv().map(delivered).unwrap().announce.len(),
+        2
+    );
     assert!(manager.dirty_peers.contains(&member));
     assert!(manager.pending_eor[&member].contains(&(Afi::Ipv4, Safi::Unicast)));
     let mut delivered_eor = Vec::new();
     for _ in 0..4 {
         manager.resync_dirty_peers_bounded();
-        while let Ok(update) = receiver.try_recv() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
             delivered_eor.extend(update.end_of_rib);
         }
         if !manager.dirty_peers.contains(&member) {
@@ -508,7 +517,7 @@ fn common_recovery_cap_refusal_keeps_owed_withdrawals_without_reset() {
     let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 3).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     manager.pending_group_admitted =
         crate::manager::update_groups::admitted_recovery::AdmittedRecovery::with_test_limits(
             0,
@@ -522,7 +531,7 @@ fn common_recovery_cap_refusal_keeps_owed_withdrawals_without_reset() {
     );
     source_update(&mut manager, &[], &[1]);
     while manager.resync_dirty_peers_bounded() {}
-    let recovered = receiver.try_recv().unwrap();
+    let recovered = receiver.try_recv().map(delivered).unwrap();
     assert!(recovered.withdraw.contains(&(Prefix::V4(prefix(1)), 0)));
     assert!(manager.outbound_peers.contains_key(&member));
     assert!(!manager.dirty_peers.contains(&member));
@@ -544,7 +553,7 @@ fn common_recovery_fallback_does_not_invent_private_flowspec_delivery() {
         sendable_families.push((Afi::Ipv4, Safi::FlowSpec));
     }
     manager.handle_update(registration);
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     manager.pending_group_admitted =
         crate::manager::update_groups::admitted_recovery::AdmittedRecovery::with_test_limits(
             0,
@@ -575,7 +584,7 @@ fn common_recovery_fallback_does_not_invent_private_flowspec_delivery() {
             )
             .is_ok()
     );
-    let update = receiver.try_recv().unwrap();
+    let update = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert!(update.flowspec_announce.is_empty());
     assert_eq!(
@@ -640,9 +649,9 @@ fn a_failed_initial_dump_has_no_admitted_withdrawal_duties() {
             .is_empty()
     );
     source_update(&mut manager, &[], &[1]);
-    receiver.try_recv().unwrap();
+    receiver.try_recv().map(delivered).unwrap();
     while manager.resync_dirty_peers_bounded() {}
-    let eor = receiver.try_recv().unwrap();
+    let eor = receiver.try_recv().map(delivered).unwrap();
     assert!(eor.announce.is_empty());
     assert!(
         eor.withdraw.is_empty(),
@@ -660,7 +669,7 @@ fn a_clean_regroup_never_seeds_a_prefix_blocked_by_the_member_limit() {
     let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 2, 1).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
-    receiver.try_recv().unwrap();
+    receiver.try_recv().map(delivered).unwrap();
     manager
         .outbound_prefix_limits
         .entry(member)
@@ -669,7 +678,7 @@ fn a_clean_regroup_never_seeds_a_prefix_blocked_by_the_member_limit() {
         .unwrap()
         .limit = NonZeroU32::new(1);
     source_update(&mut manager, &[1, 2], &[]);
-    let update = receiver.try_recv().unwrap();
+    let update = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     let admitted = update.announce[0].prefix;
     assert_eq!(
@@ -697,11 +706,11 @@ fn a_batched_refusal_retains_source_keys_for_targeted_recovery() {
         let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 2, 1).into());
         let (outbound, mut receiver) = mpsc::channel(if probe_refusal { 16 } else { 1 });
         manager.handle_update(peer_up(member, outbound, Some(policy(3, 1))));
-        receiver.try_recv().unwrap();
+        receiver.try_recv().map(delivered).unwrap();
         let encoder = MockExactExportEncoder::accepting(1);
         manager.peer_export_encoders.insert(member, encoder.clone());
         source_update(&mut manager, &[1, 2, 3], &[]);
-        let initial = receiver.try_recv().unwrap();
+        let initial = receiver.try_recv().map(delivered).unwrap();
         let mut admitted: HashSet<_> = initial
             .announce
             .iter()
@@ -738,7 +747,7 @@ fn a_batched_refusal_retains_source_keys_for_targeted_recovery() {
             0
         );
         while manager.resync_dirty_peers_bounded() {}
-        while let Ok(update) = receiver.try_recv() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
             for key in update.withdraw {
                 assert!(
                     admitted.remove(&key),
@@ -772,9 +781,9 @@ fn budget_refused_batched_narrowing_keeps_current_withdrawal_duties() {
     let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 4).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, Some(policy(3, 1))));
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     source_update(&mut manager, &[1, 2, 3], &[]);
-    let initial = receiver.try_recv().unwrap();
+    let initial = receiver.try_recv().map(delivered).unwrap();
     assert!(
         initial
             .announce
@@ -806,7 +815,7 @@ fn budget_refused_batched_narrowing_keeps_current_withdrawal_duties() {
     assert!(manager.pending_group_admitted.get(&member).is_none());
     manager.peer_export_encoders.insert(member, encoder);
     while manager.resync_dirty_peers_bounded() {}
-    let recovered = receiver.try_recv().unwrap();
+    let recovered = receiver.try_recv().map(delivered).unwrap();
     assert!(recovered.withdraw.contains(&(Prefix::V4(prefix(1)), 0)));
     assert!(!manager.dirty_peers.contains(&member));
     assert!(manager.outbound_peers.contains_key(&member));
@@ -832,7 +841,7 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
         *is_ebgp = true;
     }
     manager.handle_update(registration);
-    receiver.try_recv().unwrap();
+    receiver.try_recv().map(delivered).unwrap();
     let encoder = MockExactExportEncoder::accepting(1);
     manager.peer_export_encoders.insert(member, encoder.clone());
     let inject = |manager: &mut RibManager, source, preference| {
@@ -850,11 +859,11 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
         while manager.process_next_route_chunk() {}
     };
     inject(&mut manager, source_b, 100);
-    let first = receiver.try_recv().unwrap();
+    let first = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(first.announce.len(), 1);
     assert_eq!(first.announce[0].peer, peer_v4(source_b));
     inject(&mut manager, source_a, 300);
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         assert_eq!(update.withdraw, Vec::<(Prefix, u32)>::new());
         assert!(
             update
@@ -872,7 +881,7 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
         inject(&mut manager, source_c, 400);
     }
     let mut withdrawals = Vec::new();
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         withdrawals.extend(update.withdraw);
         assert!(
             update
@@ -920,7 +929,7 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
         *is_ebgp = true;
     }
     manager.handle_update(registration);
-    receiver.try_recv().unwrap();
+    receiver.try_recv().map(delivered).unwrap();
     let source = Ipv4Addr::new(192, 0, 2, 1);
     let mut route = make_route(prefix(1), source);
     AttrSet::edit(&mut route.attributes, |attrs| {
@@ -938,7 +947,7 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
         validated_with: None,
     });
     while manager.process_next_route_chunk() {}
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         assert!(update.announce.is_empty());
         assert_eq!(update.withdraw, Vec::<(Prefix, u32)>::new());
     }
@@ -949,7 +958,7 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
         1
     );
     source_update(&mut manager, &[], &[1]);
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         assert!(update.announce.is_empty());
         assert!(
             update.withdraw.is_empty(),
@@ -965,15 +974,18 @@ fn a_same_session_table_replay_rejection_withdraws_the_actual_prior() {
     let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 2, 1).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
-    receiver.try_recv().unwrap();
+    receiver.try_recv().map(delivered).unwrap();
     let encoder = MockExactExportEncoder::accepting(1);
     manager.peer_export_encoders.insert(member, encoder.clone());
     source_update(&mut manager, &[1], &[]);
-    assert_eq!(receiver.try_recv().unwrap().announce.len(), 1);
+    assert_eq!(
+        receiver.try_recv().map(delivered).unwrap().announce.len(),
+        1
+    );
     encoder.set_profile(2, [ExactExportKey::Unicast(Prefix::V4(prefix(1)), 0)]);
     manager.send_initial_table(member);
     let mut withdrawals = Vec::new();
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         withdrawals.extend(update.withdraw);
         assert!(update.announce.is_empty());
     }
@@ -996,7 +1008,7 @@ fn grouped_capture_orders_real_old_values_and_recovers_exact_withdrawals() {
         let (outbound, mut receiver) = mpsc::channel(128);
         manager.handle_update(peer_up(PeerId::from_addr(peer), outbound, None));
         let mut admitted = HashSet::new();
-        while let Ok(update) = receiver.try_recv() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
             admitted.extend(update.announce.iter().map(|route| route.prefix));
         }
         assert_eq!(
@@ -1019,7 +1031,7 @@ fn grouped_capture_orders_real_old_values_and_recovers_exact_withdrawals() {
     while manager.resync_dirty_peers_bounded() {}
     for (peer, mut receiver) in peers.into_iter().zip(receivers) {
         let mut actual = Vec::new();
-        while let Ok(update) = receiver.try_recv() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
             actual.extend(update.withdraw);
         }
         assert_eq!(actual.len(), withdrawn.len());
@@ -1068,7 +1080,7 @@ fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
         *route_reflector_client = true;
     }
     manager.handle_update(registration);
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     let expected: HashSet<_> = if vpn {
         let routes: Vec<_> = (1..=128)
             .map(|n| make_vpn_rib_route(source, n, 100, 100))
@@ -1181,7 +1193,7 @@ fn initial_dump_creates_an_indexed_pool_before_eor_deferral() {
     let member = PeerId::from_addr(Ipv4Addr::new(10, 222, 4, 2).into());
     let (outbound, mut receiver) = mpsc::channel(1);
     manager.handle_update(peer_up(member, outbound, None));
-    let delivered = receiver.try_recv().unwrap();
+    let delivered = receiver.try_recv().map(delivered).unwrap();
     assert_eq!(delivered.announce.len(), 128);
     assert!(manager.dirty_peers.contains(&member));
     let group = &manager.group_ribs[&manager.grouped_member_of(member).unwrap()];
@@ -1219,9 +1231,12 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
     let member = Ipv4Addr::new(10, 222, 4, 3);
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(peer_v4(member), outbound, None));
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     source_update(&mut manager, &(1..=128).collect::<Vec<_>>(), &[]);
-    assert_eq!(receiver.try_recv().unwrap().announce.len(), 128);
+    assert_eq!(
+        receiver.try_recv().map(delivered).unwrap().announce.len(),
+        128
+    );
     // These staged own-source rows must never enter the actual admitted OLD set.
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(member),
@@ -1237,7 +1252,7 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
         validated_with: None,
     });
     while manager.process_next_route_chunk() {}
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         assert!(update.announce.is_empty());
     }
     let gid = manager.grouped_member_of(peer_v4(member)).unwrap();
@@ -1279,7 +1294,7 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
     source_update(&mut manager, &[], &[1]);
     while manager.resync_dirty_peers_bounded() {}
     let mut withdrawals = Vec::new();
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         withdrawals.extend(update.withdraw);
     }
     assert_eq!(withdrawals, vec![(Prefix::V4(prefix(1)), 0)]);
@@ -1312,8 +1327,8 @@ fn actual_full_old_slot_churn_stops_searching_but_keeps_every_admitted_key() {
     let (second_tx, mut second_rx) = mpsc::channel(1024);
     manager.handle_update(peer_up(first, first_tx, None));
     manager.handle_update(peer_up(second, second_tx, None));
-    while first_rx.try_recv().is_ok() {}
-    while second_rx.try_recv().is_ok() {}
+    while first_rx.try_recv().map(delivered).is_ok() {}
+    while second_rx.try_recv().map(delivered).is_ok() {}
     let inject = |manager: &mut RibManager,
                   announce: std::ops::Range<u32>,
                   withdraw: std::ops::Range<u32>| {
@@ -1336,11 +1351,11 @@ fn actual_full_old_slot_churn_stops_searching_but_keeps_every_admitted_key() {
     };
     inject(&mut manager, 0..COUNT, 0..0);
     let mut first_delivered = 0;
-    while let Ok(update) = first_rx.try_recv() {
+    while let Ok(update) = first_rx.try_recv().map(delivered) {
         first_delivered += update.announce.len();
     }
     let mut second_delivered = 0;
-    while let Ok(update) = second_rx.try_recv() {
+    while let Ok(update) = second_rx.try_recv().map(delivered) {
         second_delivered += update.announce.len();
     }
     assert_eq!(first_delivered, COUNT as usize);
@@ -1357,7 +1372,7 @@ fn actual_full_old_slot_churn_stops_searching_but_keeps_every_admitted_key() {
     assert!(manager.outbound_channel_full(first));
     inject(&mut manager, COUNT..2 * COUNT, 0..COUNT);
     let mut admitted = HashSet::new();
-    while let Ok(update) = second_rx.try_recv() {
+    while let Ok(update) = second_rx.try_recv().map(delivered) {
         admitted.extend(
             update
                 .announce

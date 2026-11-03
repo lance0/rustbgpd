@@ -1204,6 +1204,12 @@ impl RibManager {
                 }
                 continue;
             }
+            // Preflight: a peer without credit stages nothing (its resync
+            // covers this pass).
+            if self.outbound_preflight_refused(peer) {
+                continue;
+            }
+            self.note_outbound_staging(peer);
             // A peer bound to a vantage that resolved this pass takes the
             // per-vantage best; an unresolved vantage silently falls back
             // to the standard Loc-RIB best (same shape as unicast).

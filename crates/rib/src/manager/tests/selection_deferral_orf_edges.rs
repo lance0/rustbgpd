@@ -116,7 +116,7 @@ fn setup(
 
     if restarting {
         let mut previous_rx = connect(&mut manager, target, 31, false, &[], 64);
-        while previous_rx.try_recv().is_ok() {}
+        while previous_rx.try_recv().map(delivered).is_ok() {}
         manager.handle_update(RibUpdate::PeerGracefulRestart {
             peer: target,
             session_id: 31,
@@ -169,7 +169,7 @@ fn observe(
     eors: &mut HashMap<(Afi, Safi), usize>,
 ) -> usize {
     let mut updates = 0;
-    while let Ok(update) = receiver.try_recv() {
+    while let Ok(update) = receiver.try_recv().map(delivered) {
         updates += 1;
         assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
         for &(afi, safi, _) in &update.refresh_markers {
@@ -217,7 +217,7 @@ fn assert_completed(manager: &mut RibManager, receiver: &mut mpsc::Receiver<Outb
     assert!(!manager.dirty_peers.contains(&target));
     manager.flush_pending_eor(target);
     assert!(
-        receiver.try_recv().is_err(),
+        receiver.try_recv().map(delivered).is_err(),
         "initial markers are consumed once"
     );
 }
@@ -227,7 +227,7 @@ fn selection_release_does_not_flush_an_orf_held_initial_eor() {
     let (mut manager, _source_rx, mut target_rx) = setup(&[V4, V6], 64, true);
     let target = peer_v4(TARGET_ADDR);
     assert!(!manager.dirty_peers.contains(&target));
-    assert!(target_rx.try_recv().is_err());
+    assert!(target_rx.try_recv().map(delivered).is_err());
     assert!(manager.peer_orf_pending[&target].contains(&V4));
     let mut seen = BTreeSet::new();
     let mut eors = HashMap::new();
@@ -321,7 +321,7 @@ fn non_restarting_orf_peer_keeps_backpressured_honest_empty_initial_eor() {
     assert!(manager.pending_eor[&target].contains(&V6));
     assert!(!manager.gr_deferred_eor.contains_key(&target));
 
-    let initial = target_rx.try_recv().unwrap();
+    let initial = target_rx.try_recv().map(delivered).unwrap();
     assert_eq!(
         initial
             .announce
@@ -332,7 +332,7 @@ fn non_restarting_orf_peer_keeps_backpressured_honest_empty_initial_eor() {
     );
     assert_eq!(initial.end_of_rib, [] as [(Afi, Safi); 0]);
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    let completed = target_rx.try_recv().unwrap();
+    let completed = target_rx.try_recv().map(delivered).unwrap();
     assert_eq!(completed.announce.len(), 0);
     assert_eq!(completed.withdraw, [] as [(Prefix, u32); 0]);
     assert_eq!(completed.end_of_rib.len(), 2);
@@ -347,7 +347,7 @@ fn non_restarting_orf_peer_keeps_backpressured_honest_empty_initial_eor() {
     assert!(!manager.dirty_peers.contains(&target));
     manager.flush_pending_eor(target);
     assert!(
-        target_rx.try_recv().is_err(),
+        target_rx.try_recv().map(delivered).is_err(),
         "initial completion is sent once"
     );
 }
@@ -530,11 +530,11 @@ fn withheld_family_unlock_keeps_orf_initial_eor_held_during_selection_release() 
     assert!(manager.dirty_peers.contains(&target));
 
     // The actual IPv4 initial data and EoR filled both writer slots.
-    let initial = target_rx.try_recv().unwrap();
+    let initial = target_rx.try_recv().map(delivered).unwrap();
     assert_eq!(initial.announce.len(), 1);
     assert_eq!(initial.announce[0].prefix, ordinary_v4());
     assert_eq!(initial.end_of_rib, [] as [(Afi, Safi); 0]);
-    let completed_v4 = target_rx.try_recv().unwrap();
+    let completed_v4 = target_rx.try_recv().map(delivered).unwrap();
     assert_eq!(completed_v4.announce.len(), 0);
     assert_eq!(completed_v4.end_of_rib, [V4]);
     let mut seen = BTreeSet::from([ordinary_v4()]);
@@ -549,7 +549,7 @@ fn withheld_family_unlock_keeps_orf_initial_eor_held_during_selection_release() 
     assert!(!manager.selection_convergence_held(V6));
     assert!(manager.loc_rib.get(&ordinary_v6(0x100)).is_some());
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    while let Ok(update) = target_rx.try_recv() {
+    while let Ok(update) = target_rx.try_recv().map(delivered) {
         assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
         assert!(
             update
@@ -603,7 +603,7 @@ fn still_withheld_orf_family_keeps_fresh_empty_completion_on_selection_release()
         safi: V6.1,
     });
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    while let Ok(update) = target_rx.try_recv() {
+    while let Ok(update) = target_rx.try_recv().map(delivered) {
         assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
         for route in update.announce.iter() {
             assert_ne!(route.prefix, ordinary_v6(0x100));
@@ -620,7 +620,7 @@ fn still_withheld_orf_family_keeps_fresh_empty_completion_on_selection_release()
     assert!(!manager.gr_deferred_eor.contains_key(&target));
     assert!(!manager.dirty_peers.contains(&target));
     manager.flush_pending_eor(target);
-    assert!(target_rx.try_recv().is_err());
+    assert!(target_rx.try_recv().map(delivered).is_err());
 }
 
 #[tokio::test(start_paused = true)]
@@ -660,7 +660,7 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
             family: V6,
             add_path_send_limit: None,
         });
-        assert!(target_rx.try_recv().is_err());
+        assert!(target_rx.try_recv().map(delivered).is_err());
         if replay_complete {
             let (reply, mut response) = oneshot::channel();
             manager.handle_update(RibUpdate::MarkReplayComplete {
@@ -726,7 +726,7 @@ fn still_withheld_orf_family_completes_on_clean_selection_release() {
     });
     assert!(!manager.selection_convergence_held(V6));
     let mut released = Vec::new();
-    while let Ok(update) = target_rx.try_recv() {
+    while let Ok(update) = target_rx.try_recv().map(delivered) {
         assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
         assert_eq!(update.announce.len(), 0, "a withheld family sends no table");
         released.extend(update.end_of_rib.iter().copied());
@@ -750,7 +750,7 @@ fn pump(
     eors: &mut Vec<(Afi, Safi)>,
 ) {
     for _ in 0..16 {
-        while let Ok(update) = receiver.try_recv() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
             assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
             announced.extend(update.announce.iter().map(|route| route.prefix));
             eors.extend(update.end_of_rib.iter().copied());
@@ -790,7 +790,7 @@ fn withheld_orf_family_unlock_completion_ignores_writer_capacity() {
         // Unlock IPv6 while any backpressured PeerUp marker is still queued.
         let mut announced = Vec::new();
         let mut eors = Vec::new();
-        while let Ok(update) = target_rx.try_recv() {
+        while let Ok(update) = target_rx.try_recv().map(delivered) {
             announced.extend(update.announce.iter().map(|route| route.prefix));
             eors.extend(update.end_of_rib.iter().copied());
         }
@@ -907,7 +907,7 @@ fn unflagged_cap_does_not_defer_another_gated_family() {
         manager.orf_eor_hold.contains_key(&target),
         "IPv4's held marker armed the cap"
     );
-    let eors: Vec<_> = std::iter::from_fn(|| target_rx.try_recv().ok())
+    let eors: Vec<_> = std::iter::from_fn(|| target_rx.try_recv().map(delivered).ok())
         .flat_map(|update| update.end_of_rib)
         .collect();
     assert_eq!(

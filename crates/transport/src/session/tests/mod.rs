@@ -1224,6 +1224,8 @@ async fn export_policy_totals_survive_a_session_reset() {
 /// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.
 fn empty_outbound_update() -> OutboundRouteUpdate {
     OutboundRouteUpdate {
+        credit: None,
+        latch: None,
         shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,

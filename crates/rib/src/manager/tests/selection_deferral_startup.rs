@@ -192,7 +192,7 @@ fn connect(
 }
 
 fn drain(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<OutboundRouteUpdate> {
-    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    std::iter::from_fn(|| rx.try_recv().map(delivered).ok()).collect()
 }
 
 fn announced(update: &OutboundRouteUpdate) -> Vec<ExactExportKey> {
@@ -387,6 +387,13 @@ fn dormant_private_evpn_membership_change_is_reconciled_at_selection_release() {
     });
     let observer = Ipv4Addr::new(192, 0, 2, 5);
     let mut observer_rx = connect(&mut manager, observer, 15, &[EVPN, RTC], false, false);
+    // The session sends its initial dump before the peer's RT membership.
+    assert!(
+        drain(&mut observer_rx)
+            .iter()
+            .all(|update| !update.end_of_rib.contains(&EVPN)),
+        "the RT-Constrain hold keeps the EVPN End-of-RIB"
+    );
     let membership = make_rtc_rib_route(observer, 100, 100);
     let membership_key = membership.key();
     manager.handle_update(RibUpdate::RtcRoutesReceived {

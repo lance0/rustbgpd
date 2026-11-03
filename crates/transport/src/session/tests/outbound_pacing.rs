@@ -605,6 +605,36 @@ async fn outbound_pacing_session_down_paces_queued_inventory_release() {
     finish_queued_release(session, &inventory, released).await;
 }
 
+/// T11 (transport). A queued envelope's outbound credit charge is released
+/// when its paced retirement drops the envelope, after the inventory moved
+/// out of it: it is still held at an intermediate retirement step and zero
+/// once the release finishes. Red if the session dropped the charge on
+/// taking the envelope: the credit reads zero while routes remain.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_queued_credit_releases_after_its_inventory() {
+    let (mut session, _peer, commands, _rib_rx, _writer, mut envelope, inventory) =
+        queued_last_owner_session().await;
+    let credit = Arc::new(rustbgpd_rib::OutboundCredit::default());
+    envelope.credit = Some(rustbgpd_rib::OutboundCharge::new(&credit, 7));
+    session.outbound_tx.try_send(envelope).unwrap();
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    let mut released = Vec::new();
+    run_by_step(&mut session, &inventory, &mut released).await;
+    assert_eq!(credit.rows(), 7, "held while its inventory is queued");
+    drop(session);
+    let mut intermediate = 0;
+    for _ in 0..4 * QUEUED_ROUTES / QUEUE_SLICE {
+        if inventory.live() > 0 && inventory.live() < QUEUED_ROUTES {
+            assert_eq!(credit.rows(), 7, "held mid-retirement");
+            intermediate += 1;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(intermediate > 0, "the release was observed mid-way");
+    assert_eq!(inventory.live(), 0);
+    assert_eq!(credit.rows(), 0, "released once the envelope drops");
+}
+
 /// A session task can exit while Established, without the teardown that
 /// discards the queue (here every command sender is gone). The queue still
 /// drops with the session, so the exit hands it to the paced release too.
