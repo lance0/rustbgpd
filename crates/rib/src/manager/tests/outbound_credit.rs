@@ -1534,3 +1534,69 @@ fn a_resync_answers_its_owed_refresh_without_redirtying() {
         assert!(!manager.dirty_peers.contains(&peer));
     }
 }
+
+/// A whole-table operation deferred behind a live one runs within the
+/// backlog cadence once the live one's envelopes drop, not at the next
+/// one-second resync tick: a forced resync requested while the initial
+/// dump is still held arrives within 50 ms of the session sending the dump.
+/// Red without the latch's release wake: it waits for the full interval.
+#[tokio::test(start_paused = true)]
+async fn deferred_whole_table_work_runs_soon_after_the_latch_drops() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let handle = tokio::spawn(manager.run());
+    let up = |peer: PeerId, outbound_tx| RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 200),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    };
+    let (source_tx, _source_rx) = mpsc::channel(64);
+    tx.send(up(peer_v4(SOURCE), source_tx)).await.unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(SOURCE),
+        announced: (0..4).map(source_route).collect(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 17, 1));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(up(peer, out_tx)).await.unwrap();
+    let table = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.unwrap();
+    assert!(table.latch.is_some() && eor.end_of_rib.len() == 1);
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound { peer, reply })
+        .await
+        .unwrap();
+    let _ = response.await;
+    assert!(out_rx.try_recv().is_err(), "deferred behind the held dump");
+    drop((table, eor));
+    let resync = tokio::time::timeout(Duration::from_millis(50), out_rx.recv())
+        .await
+        .expect("the deferred resync runs at the backlog cadence")
+        .unwrap();
+    assert_eq!(resync.announce.len(), 4);
+    drop(tx);
+    let _ = handle.await;
+}

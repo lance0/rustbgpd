@@ -666,6 +666,9 @@ pub struct RibManager {
     outbound_row_credit: usize,
     /// Fixed per-peer row credit for tests and bench builds.
     outbound_row_credit_override: Option<usize>,
+    /// Notified whenever a whole-table operation's last envelope drops, so
+    /// the resync tick runs work deferred behind it at the backlog cadence.
+    outbound_latch_released: Arc<tokio::sync::Notify>,
     /// Daemon shutdown has begun (`RibUpdate::BeginClose`): an ordinary
     /// envelope that withdraws needs channel capacity only.
     outbound_closing: bool,
@@ -2779,6 +2782,7 @@ impl RibManager {
                 .unwrap_or_else(|| crate::outbound_credit::row_credit_for(0)),
             outbound_row_credit_override: test_outbound_row_credit(),
             outbound_closing: false,
+            outbound_latch_released: Arc::default(),
             #[cfg(test)]
             outbound_stagings: HashMap::new(),
             flush_poll_budget: initial_flush_poll_budget(),
@@ -6872,6 +6876,7 @@ impl RibManager {
         let resync_sleep = tokio::time::sleep(DIRTY_RESYNC_INTERVAL);
         tokio::pin!(resync_sleep);
         let mut resync_armed = false;
+        let latch_released = Arc::clone(&self.outbound_latch_released);
         let mut query_rx_open = true;
         let mut primary_run = PrimaryRunBudget::default();
         // Start of the primary work admitted since the last prestage slice.
@@ -7418,6 +7423,15 @@ impl RibManager {
                     () = selection_sleep.as_mut(), if has_selection_timer => {}
                     () = conditional_sleep.as_mut(), if has_conditional_timer => {}
                     () = registration_wait_sleep.as_mut(), if has_registration_wait_timer => {}
+                    () = latch_released.notified(), if resync_armed => {
+                        // A whole-table operation drained: work deferred
+                        // behind it runs at the backlog cadence, not at the
+                        // next full resync interval.
+                        let soon = tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL;
+                        if resync_sleep.deadline() > soon {
+                            resync_sleep.as_mut().reset(soon);
+                        }
+                    }
                 }
             } else {
                 // No timers needed — wait for a route update or query.

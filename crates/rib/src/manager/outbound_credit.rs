@@ -167,8 +167,9 @@ impl RibManager {
         if entry.latch.strong_count() != 0 {
             return Err(CREDIT_REFUSAL);
         }
-        let operation = OutboundOperation::reserve(sender, envelopes)
-            .ok_or(OutboundCommitFailure::WriterUnavailable)?;
+        let operation =
+            OutboundOperation::reserve(sender, envelopes, &self.outbound_latch_released)
+                .ok_or(OutboundCommitFailure::WriterUnavailable)?;
         entry.latch = Arc::downgrade(operation.latch());
         Ok(operation)
     }

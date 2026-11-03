@@ -112,9 +112,19 @@ impl Drop for OutboundCharge {
 }
 
 /// One whole-table operation for one peer. Every envelope of the operation
-/// holds a clone; the operation is live until the last one drops.
+/// holds a clone; the operation is live until the last one drops, and its
+/// drop wakes the RIB so work deferred behind it is retried at once rather
+/// than at the next resync tick.
 #[derive(Debug)]
-pub struct OperationLatch(());
+pub struct OperationLatch {
+    released: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for OperationLatch {
+    fn drop(&mut self) {
+        self.released.notify_one();
+    }
+}
 
 /// One reserved channel slot of a whole-table operation.
 pub(crate) struct OutboundSlot {
@@ -146,7 +156,11 @@ impl OutboundOperation {
     /// was reserved and a marker takes channel capacity alone when it is
     /// sent ([`Self::slot`]), as before; an operation that must be accepted
     /// whole checks [`Self::reserved`].
-    pub(crate) fn reserve(sender: &Sender<OutboundRouteUpdate>, envelopes: usize) -> Option<Self> {
+    pub(crate) fn reserve(
+        sender: &Sender<OutboundRouteUpdate>,
+        envelopes: usize,
+        released: &Arc<tokio::sync::Notify>,
+    ) -> Option<Self> {
         let mut permits = Vec::with_capacity(envelopes);
         while permits.len() < envelopes {
             match sender.clone().try_reserve_owned() {
@@ -159,7 +173,9 @@ impl OutboundOperation {
         }
         Some(Self {
             sender: sender.clone(),
-            latch: Arc::new(OperationLatch(())),
+            latch: Arc::new(OperationLatch {
+                released: Arc::clone(released),
+            }),
             permits,
         })
     }
