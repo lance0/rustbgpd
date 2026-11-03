@@ -1351,6 +1351,9 @@ struct OwedFamily {
     sendable: Vec<(Afi, Safi)>,
     family: (Afi, Safi),
     update: Box<dyn Fn(bool) -> RibUpdate>,
+    /// A route of a sibling family the receiver also holds, which the
+    /// family's answer must leave alone.
+    sibling: Option<RibUpdate>,
     key: String,
     view: fn(&OutboundRouteUpdate) -> (Vec<String>, Vec<String>),
 }
@@ -1370,10 +1373,36 @@ fn owed_families(source: Ipv4Addr) -> Vec<OwedFamily> {
     let vpn = make_vpn_rib_route(source, 31, 1031, 100);
     let labeled = make_labeled_rib_route(source, 32, 1032, 100);
     let rtc = make_rtc_rib_route(source, 33, 100);
+    let mut flowspec_v6 = flowspec.clone();
+    flowspec_v6.afi = Afi::Ipv6;
+    flowspec_v6.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+        rustbgpd_wire::FlowSpecPrefix::V6(rustbgpd_wire::Ipv6PrefixOffset {
+            prefix: Ipv6Prefix::new("2001:db8:70::".parse().unwrap(), 48),
+            offset: 0,
+        }),
+    )];
+    let mut bgpls_vpn = make_bgpls_route(source, 0x32, 100);
+    bgpls_vpn.family = BgpLsFamily::LinkStateVpn;
+    bgpls_vpn.nlri.route_distinguisher = Some([0, 0, 0xfd, 0xe8, 0, 0, 0, 1]);
+    let mut vpn_v6 = make_vpn_rib_route(source, 34, 1034, 100);
+    vpn_v6.nlri.prefix = VpnPrefix::v6("2001:db8:71::".parse().unwrap(), 48).unwrap();
+    let mut labeled_v6 = make_labeled_rib_route(source, 35, 1035, 100);
+    labeled_v6.nlri.prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:72::".parse().unwrap(), 48));
     vec![
         OwedFamily {
-            sendable: ipv4_flowspec_sendable(),
+            sendable: vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)],
             family: (Afi::Ipv4, Safi::FlowSpec),
+            sibling: Some(RibUpdate::RoutesReceived {
+                peer,
+                session_id: 0,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![flowspec_v6],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            }),
             key: format!("{:?}", flowspec.selection_key()),
             update: Box::new(move |announce| RibUpdate::RoutesReceived {
                 peer,
@@ -1407,8 +1436,14 @@ fn owed_families(source: Ipv4Addr) -> Vec<OwedFamily> {
             },
         },
         OwedFamily {
-            sendable: bgpls_sendable(),
+            sendable: vec![(Afi::BgpLs, Safi::BgpLs), (Afi::BgpLs, Safi::BgpLsVpn)],
             family: (Afi::BgpLs, Safi::BgpLs),
+            sibling: Some(RibUpdate::BgpLsRoutesReceived {
+                peer,
+                session_id: 0,
+                announced: vec![bgpls_vpn],
+                withdrawn: vec![],
+            }),
             key: format!("{:?}", bgpls.key()),
             update: Box::new(move |announce| RibUpdate::BgpLsRoutesReceived {
                 peer,
@@ -1428,8 +1463,14 @@ fn owed_families(source: Ipv4Addr) -> Vec<OwedFamily> {
             },
         },
         OwedFamily {
-            sendable: vpn_sendable(),
+            sendable: vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)],
             family: (Afi::Ipv4, Safi::MplsVpn),
+            sibling: Some(RibUpdate::VpnRoutesReceived {
+                peer,
+                session_id: 0,
+                announced: vec![vpn_v6],
+                withdrawn: vec![],
+            }),
             key: format!("{:?}", vpn.key()),
             update: Box::new(move |announce| RibUpdate::VpnRoutesReceived {
                 peer,
@@ -1445,8 +1486,17 @@ fn owed_families(source: Ipv4Addr) -> Vec<OwedFamily> {
             },
         },
         OwedFamily {
-            sendable: labeled_sendable(),
+            sendable: vec![
+                (Afi::Ipv4, Safi::LabeledUnicast),
+                (Afi::Ipv6, Safi::LabeledUnicast),
+            ],
             family: (Afi::Ipv4, Safi::LabeledUnicast),
+            sibling: Some(RibUpdate::LabeledRoutesReceived {
+                peer,
+                session_id: 0,
+                announced: vec![labeled_v6],
+                withdrawn: vec![],
+            }),
             key: format!("{:?}", labeled.key()),
             update: Box::new(move |announce| RibUpdate::LabeledRoutesReceived {
                 peer,
@@ -1477,6 +1527,7 @@ fn owed_families(source: Ipv4Addr) -> Vec<OwedFamily> {
         OwedFamily {
             sendable: rtc_sendable(),
             family: (Afi::Ipv4, Safi::RtConstrain),
+            sibling: None,
             key: format!("{:?}", rtc.key()),
             update: Box::new(move |announce| RibUpdate::RtcRoutesReceived {
                 peer,
@@ -1514,7 +1565,7 @@ fn owed_families(source: Ipv4Addr) -> Vec<OwedFamily> {
 )]
 fn refresh_answer_settles_owed_withdrawals_of_every_family() {
     let source = Ipv4Addr::new(192, 0, 2, 70);
-    for (grouped, case) in [false, true].into_iter().flat_map(|grouped| {
+    for (grouped, mut case) in [false, true].into_iter().flat_map(|grouped| {
         owed_families(source)
             .into_iter()
             .map(move |case| (grouped, case))
@@ -1527,11 +1578,13 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
             Some(Ipv4Addr::new(192, 0, 2, 254)),
             BgpMetrics::new(),
         );
+        manager.test_force_ungrouped = !grouped;
         let receiver = peer_v4(Ipv4Addr::new(192, 0, 2, 71));
         // `grouped` adds a sibling with the same configuration, so the
         // receiver shares an update group where its families allow one.
         let mut receivers = Vec::new();
-        for (address, capacity) in [(71, 1), (72, 64)]
+        let held_rows = 1 + usize::from(case.sibling.is_some());
+        for (address, capacity) in [(71, held_rows), (72, 64)]
             .into_iter()
             .take(1 + usize::from(grouped))
         {
@@ -1572,6 +1625,10 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
             (announced, withdrawn)
         };
 
+        if let Some(sibling) = case.sibling.take() {
+            manager.handle_update(sibling);
+            while manager.process_next_route_chunk() {}
+        }
         manager.handle_update((case.update)(true));
         while manager.process_next_route_chunk() {}
         assert!(
@@ -1591,18 +1648,21 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
         }
         let (announced, _) = views(&mut receiver_rx);
         assert_eq!(
-            announced,
-            vec![case.key.clone()],
-            "{:?} grouped={grouped}",
+            announced.len(),
+            held_rows,
+            "{:?} grouped={grouped}: {announced:?}",
             case.family
         );
+        assert!(announced.contains(&case.key), "{:?}", case.family);
 
-        manager.handle_update(RibUpdate::RouteRefreshRequest {
-            queued: Arc::default(),
-            peer: receiver,
-            session_id: 0,
-            afi: case.family.0,
-            safi: case.family.1,
+        let observed = owned_checkpoints(&mut manager, |manager| {
+            manager.handle_update(RibUpdate::RouteRefreshRequest {
+                queued: Arc::default(),
+                peer: receiver,
+                session_id: 0,
+                afi: case.family.0,
+                safi: case.family.1,
+            });
         });
         let (_, answer) = views(&mut receiver_rx);
         assert_eq!(
@@ -1618,6 +1678,19 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
             "{:?} grouped={grouped}: {resync:?}",
             case.family
         );
+        // The sweep services readiness on every row it scans, including the
+        // sibling family's rows it filters out.
+        let swept = observed
+            .iter()
+            .filter(|(stage, _)| *stage == "refresh_owed_sweep")
+            .count();
+        if case.family.1 != Safi::RtConstrain {
+            assert!(
+                swept >= held_rows,
+                "{:?} grouped={grouped}: {swept} sweep checkpoints",
+                case.family
+            );
+        }
         assert!(!manager.dirty_peers.contains(&receiver));
     }
 }
