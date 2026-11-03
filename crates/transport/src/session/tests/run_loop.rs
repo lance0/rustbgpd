@@ -1904,8 +1904,13 @@ async fn flush_keeps_the_held_reservation_place() {
     })
     .await;
     let other = session.rib_tx.clone();
-    let late = tokio::spawn(async move { other.send(placeholder_routes_received()).await });
-    tokio::task::yield_now().await;
+    let late_send = other.send(placeholder_routes_received());
+    let mut late = std::pin::pin!(late_send);
+    let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(late.as_mut().poll(cx))).await;
+    assert!(
+        polled.is_pending(),
+        "the later sender waits behind the reservation"
+    );
     let flush = tokio::spawn(async move {
         session.flush_rib_backlog().await;
         session
@@ -1914,14 +1919,14 @@ async fn flush_keeps_the_held_reservation_place() {
         rib_rx.recv().await,
         Some(RibUpdate::RoutesReceived { .. })
     ));
+    // Bounded: if the later sender took the freed slot, its unpolled send
+    // holds it and nothing more arrives.
+    let next = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv()).await;
     assert!(
-        matches!(
-            rib_rx.recv().await,
-            Some(RibUpdate::PeerDown { session_id: 7, .. })
-        ),
+        matches!(next, Ok(Some(RibUpdate::PeerDown { session_id: 7, .. }))),
         "the held message must keep its place ahead of the later sender"
     );
+    late.await.unwrap();
     assert!(rib_rx.recv().await.is_some());
-    late.await.unwrap().unwrap();
     assert!(flush.await.unwrap().rib_backlog.is_empty());
 }

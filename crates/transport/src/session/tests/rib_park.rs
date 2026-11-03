@@ -513,7 +513,7 @@ async fn rib_park_repeated_resets_keep_the_backlog_bounded() {
     let RibPark {
         mut session,
         commands,
-        rib_rx: _rib_rx,
+        mut rib_rx,
         mut server,
         ..
     } = rib_park().await;
@@ -565,6 +565,49 @@ async fn rib_park_repeated_resets_keep_the_backlog_bounded() {
         session.deferred_command,
         Some(PeerCommand::AdministrativeReset { .. })
     ));
+    // Every retained command still runs, in order, once the RIB drains: a
+    // Stop queued after the resets wins, and a later query sees it applied.
+    commands
+        .send(PeerCommand::Stop { reason: None })
+        .await
+        .unwrap();
+    let (reply, response) = oneshot::channel();
+    commands
+        .send(PeerCommand::QueryState { reply })
+        .await
+        .unwrap();
+    let state = {
+        let run = session.run();
+        let steps = async {
+            let mut response = std::pin::pin!(response);
+            let mut seen = Vec::new();
+            loop {
+                tokio::select! {
+                    update = rib_rx.recv() => seen.push(update.unwrap()),
+                    state = &mut response => {
+                        let first_down = seen
+                            .iter()
+                            .position(|update| matches!(update, RibUpdate::PeerDown { .. }))
+                            .expect("the reset's PeerDown is delivered");
+                        assert!(
+                            seen[..first_down]
+                                .iter()
+                                .any(|update| announced_v4(update) == [Prefix::V4(held())]),
+                            "the held UPDATE precedes the first PeerDown"
+                        );
+                        return state.unwrap();
+                    }
+                }
+            }
+        };
+        tokio::select! {
+            result = run => panic!("run() ended: {result:?}"),
+            state = steps => state,
+        }
+    };
+    assert_eq!(state.fsm_state, SessionState::Idle);
+    assert!(session.stop_requested, "the Stop after the resets applied");
+    assert!(session.reconnect_timer.is_none());
 }
 
 /// An operator shutdown while parked puts the Cease on the wire at once.
@@ -636,7 +679,7 @@ async fn rib_park_shutdown_sends_cease_then_delivers_in_order() {
 async fn rib_park_leaves_further_input_unread() {
     let RibPark {
         mut session,
-        commands,
+        commands: _commands,
         rib_rx: _rib_rx,
         mut server,
         ..
@@ -644,25 +687,14 @@ async fn rib_park_leaves_further_input_unread() {
     let later_pdu = encoded_announce(later());
     let unread_pdu = encoded_announce(unread());
     park_with_buffered(&mut session, &later_pdu).await;
+    // The socket is readable before the run loop is polled, and nothing else
+    // is ready: one poll lets a wrongly enabled read arm run, and a correct
+    // loop returns Pending without touching the socket.
+    peer_sends(&mut server, &mut session, &unread_pdu).await;
     {
-        let run = session.run();
-        let steps = async {
-            server.write_all(&unread_pdu).await.unwrap();
-            // Proving an absence: run-loop turns that each answer a state
-            // query. A readable socket arm would win about half of them.
-            for _ in 0..32 {
-                let (reply, response) = oneshot::channel();
-                commands
-                    .send(PeerCommand::QueryState { reply })
-                    .await
-                    .unwrap();
-                response.await.unwrap();
-            }
-        };
-        tokio::select! {
-            result = run => panic!("run() ended while parked: {result:?}"),
-            () = steps => {}
-        }
+        let mut run = std::pin::pin!(session.run());
+        let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+        assert!(polled.is_pending(), "a parked session must stay idle");
     }
     assert_eq!(
         &session.read_buf.buf[..],
@@ -822,4 +854,106 @@ async fn rib_park_continues_a_multi_slice_envelope() {
         }
     }
     assert_eq!(session.rib_backlog.len(), 1, "still parked throughout");
+}
+
+/// Deliver the fillers, then check the held UPDATE reaches the RIB before
+/// the teardown's `PeerDown`.
+async fn assert_held_then_peer_down(
+    session: &mut PeerSession,
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    fillers: usize,
+) {
+    assert!(
+        matches!(
+            session.rib_backlog.back(),
+            Some((RibUpdate::PeerDown { .. }, _))
+        ),
+        "the teardown's PeerDown waits behind the held UPDATE"
+    );
+    for _ in 0..fillers {
+        assert_eq!(announced_v4(&rib_rx.try_recv().unwrap()), []);
+    }
+    deliver_held_rib_messages(session).await;
+    assert_eq!(
+        announced_v4(&rib_rx.try_recv().unwrap()),
+        vec![Prefix::V4(held())]
+    );
+    assert!(matches!(
+        rib_rx.try_recv().unwrap(),
+        RibUpdate::PeerDown { .. }
+    ));
+}
+
+/// A writer that exits while the session is parked tears the session down
+/// before the RIB is released; its `PeerDown` follows the held UPDATE.
+/// Mutation-red: with the writer-exit arm unpolled while parked, the session
+/// stays Established on a dead writer.
+#[tokio::test(start_paused = true)]
+async fn rib_park_observes_writer_exit() {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        mut rib_rx,
+        server: _server,
+        fillers,
+        ..
+    } = parked(&[]).await;
+    session.timers.hold = None;
+    session.writer_join.as_ref().unwrap().abort();
+    {
+        let run = session.run();
+        let steps = tokio::time::sleep(Duration::from_secs(1));
+        tokio::select! {
+            result = run => panic!("run() ended while parked: {result:?}"),
+            () = steps => {}
+        }
+    }
+    assert_ne!(session.fsm.state(), SessionState::Established);
+    assert_held_then_peer_down(&mut session, &mut rib_rx, fillers).await;
+}
+
+/// An envelope that waits on a full writer while the session is parked hits
+/// the admission deadline: Cease/Out of Resources and a teardown before the
+/// RIB is released, then the `PeerDown` behind the held UPDATE.
+/// Mutation-red: with the admission timer unpolled while parked, the session
+/// stays Established behind its full writer.
+#[tokio::test(start_paused = true)]
+async fn rib_park_expires_writer_admission() {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        mut rib_rx,
+        server: _server,
+        outbound,
+        fillers,
+        ..
+    } = parked(&[]).await;
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    session.timers.hold = None;
+    // A writer queue that never frees a slot; the real writer stays up to
+    // carry the Cease and exit.
+    let (bulk, _held_frames) = mpsc::channel(1);
+    bulk.try_send(Bytes::from_static(b"held")).unwrap();
+    session.writer_bulk_tx = Some(bulk);
+    let mut route = make_route(100);
+    route.prefix = Prefix::V4(exported());
+    outbound
+        .try_send(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            announce: vec![route].into(),
+            ..OutboundRouteUpdate::default()
+        })
+        .unwrap();
+    {
+        let run = session.run();
+        // Past the 480 s admission deadline (RFC 9687's default send hold).
+        let steps = tokio::time::sleep(Duration::from_secs(500));
+        tokio::select! {
+            result = run => panic!("run() ended while parked: {result:?}"),
+            () = steps => {}
+        }
+    }
+    assert_eq!(cease_out_of_resources(&metrics, &peer), 1.0);
+    assert_ne!(session.fsm.state(), SessionState::Established);
+    assert_held_then_peer_down(&mut session, &mut rib_rx, fillers).await;
 }
