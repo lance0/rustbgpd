@@ -1131,3 +1131,35 @@ async fn held_borr_admitted_after_teardown_opens_no_window() {
     assert_eq!(session.refresh_accounting_window_count(), 0);
     assert!(session.refresh_accounting_timer.is_none());
 }
+
+/// Buffered-input processing while parked, as a hold expiry's pending-input
+/// path calls it, must not run refresh-window expiry: a timeout queued then
+/// would follow the held messages and could end a refresh that a held `BoRR`
+/// is about to replace. Expiry waits until the held messages are delivered.
+/// Mutation-red: dropping the backlog check at the top of
+/// `process_read_buffer` queues a `RouteRefreshTimeout` behind the held
+/// UPDATE.
+#[tokio::test(start_paused = true)]
+async fn parked_processing_runs_no_refresh_expiry() {
+    let (mut session, _cmd_tx, _rib_rx) = make_test_session_with_channels(65001, 65002, 1);
+    install_enhanced_refresh_session(&mut session, vec![(Afi::Ipv4, Safi::Unicast)], false);
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .unwrap();
+    let held = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let encoded =
+        rustbgpd_wire::encode_message(&Message::Update(ipv4_announce(held, 0, false))).unwrap();
+    session.read_buf.buf.extend_from_slice(&encoded);
+    session.process_read_buffer().await;
+    assert_eq!(session.rib_backlog.len(), 1, "the UPDATE must be held");
+    tokio::time::advance(rustbgpd_rib::ERR_REFRESH_TIMEOUT).await;
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.rib_backlog.len(),
+        1,
+        "no refresh timeout may be queued while parked"
+    );
+    assert!(session.refresh_accounting_has_window((Afi::Ipv4, Safi::Unicast)));
+}
