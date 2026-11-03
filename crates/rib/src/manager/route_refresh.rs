@@ -37,6 +37,28 @@ pub(super) enum FamilyReplayOutcome {
     Failed,
 }
 
+/// Append to `withdraw` every `held` key the answer neither announces nor
+/// already withdraws: the withdrawals a dirty peer still owes for the
+/// refreshed family.
+fn sweep_owed_withdrawals<K: Clone + Eq + std::hash::Hash>(
+    announced: impl Iterator<Item = K>,
+    withdraw: &mut Vec<K>,
+    held: impl Iterator<Item = K>,
+    checkpoint: &mut impl FnMut(bool),
+) {
+    let mut answered: HashSet<K> = announced
+        .chain(withdraw.iter().cloned())
+        .inspect(|_| checkpoint(false))
+        .collect();
+    for key in held {
+        checkpoint(false);
+        if answered.insert(key.clone()) {
+            withdraw.push(key);
+        }
+    }
+    super::retire_hash_set(&mut answered, &mut || checkpoint(false));
+}
+
 /// Remove one family from a per-peer family set, dropping the peer's entry
 /// when the set empties and never creating one. Readers such as
 /// `clean_policy_transition_peer_ready` check the key, so for these maps a
@@ -1847,6 +1869,98 @@ impl RibManager {
                 super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
             });
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+        }
+        // The other families are staged against the same empty view, so the
+        // same owed withdrawals of a dirty peer go inside this answer: its
+        // Adj-RIB-Out rows of the family that the answer does not cover, and
+        // a grouped VPN member's proof keys (RFC 7313 §4). An owned EVPN
+        // member's complete feed carries its own withdrawals.
+        if self.dirty_peers.contains(&peer) {
+            let rib_out = self.adj_ribs_out.get(&peer);
+            let checkpoint = &mut |force| {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+            };
+            if safi == Safi::FlowSpec {
+                sweep_owed_withdrawals(
+                    fs_announce.iter().map(FlowSpecRoute::selection_key),
+                    &mut fs_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_flowspec)
+                        .filter(|route| route.afi == afi)
+                        .map(FlowSpecRoute::selection_key),
+                    checkpoint,
+                );
+            } else if family == (Afi::L2Vpn, Safi::Evpn) && owned_evpn.is_none() {
+                sweep_owed_withdrawals(
+                    evpn_announce.iter().map(crate::route::EvpnRibRoute::key),
+                    &mut evpn_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_evpn)
+                        .map(crate::route::EvpnRibRoute::key),
+                    checkpoint,
+                );
+            } else if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
+                sweep_owed_withdrawals(
+                    bgpls_announce.iter().map(crate::route::BgpLsRibRoute::key),
+                    &mut bgpls_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_bgpls)
+                        .filter(|route| route.family == bgpls_family)
+                        .map(crate::route::BgpLsRibRoute::key),
+                    checkpoint,
+                );
+            } else if safi == Safi::MplsVpn {
+                let proof = self.pending_group_admitted.get(&peer);
+                sweep_owed_withdrawals(
+                    vpn_announce.iter().map(crate::route::VpnRibRoute::key),
+                    &mut vpn_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_vpn)
+                        .map(crate::route::VpnRibRoute::key)
+                        .chain(proof.into_iter().flat_map(|proof| {
+                            proof
+                                .iter_with_checkpoint(|force| {
+                                    super::replacement_readiness_checkpoint(
+                                        &self.replacement_readiness,
+                                        force,
+                                    );
+                                })
+                                .filter_map(|key| match key {
+                                    crate::update::ExactExportKey::Vpn(key) => Some(key),
+                                    _ => None,
+                                })
+                        }))
+                        .filter(|key| key.afi_safi() == family),
+                    checkpoint,
+                );
+            } else if safi == Safi::LabeledUnicast {
+                sweep_owed_withdrawals(
+                    labeled_announce
+                        .iter()
+                        .map(crate::route::LabeledRibRoute::key),
+                    &mut labeled_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_labeled)
+                        .filter(|route| route.afi_safi() == family)
+                        .map(crate::route::LabeledRibRoute::key),
+                    checkpoint,
+                );
+            } else if safi == Safi::RtConstrain {
+                sweep_owed_withdrawals(
+                    rtc_announce.iter().map(crate::route::RtcRibRoute::key),
+                    &mut rtc_withdraw,
+                    rib_out
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_rtc)
+                        .map(crate::route::RtcRibRoute::key),
+                    checkpoint,
+                );
+            }
         }
 
         crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
