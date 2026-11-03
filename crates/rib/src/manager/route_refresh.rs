@@ -1792,7 +1792,7 @@ impl RibManager {
             // settles them.
             let owes = self.dirty_peers.contains(&peer);
             let rib_out = self.adj_ribs_out.get(&peer);
-            if (orf_filter.is_some() && rib_out.is_some()) || owes {
+            if orf_filter.is_some() || owes {
                 let mut answered: HashSet<(Prefix, u32)> = HashSet::new();
                 if owes {
                     answered.extend(
