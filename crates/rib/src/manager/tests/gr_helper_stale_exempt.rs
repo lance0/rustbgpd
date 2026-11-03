@@ -1049,6 +1049,31 @@ fn spent_credit_keeps_the_carried_set_unwalked() {
     assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
 }
 
+/// A helper flush refused by a full writer keeps its set for the next
+/// tick: it is not a route drop. Red with the drop counted for anything but
+/// a credit refusal.
+#[test]
+fn a_full_writer_helper_flush_is_not_a_route_drop() {
+    let (mut manager, mut rib, (tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
+    let drops = |manager: &RibManager| -> f64 {
+        manager
+            .metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .filter(|family| family.name() == "bgp_outbound_route_drops_total")
+            .flat_map(|family| family.get_metric().to_vec())
+            .map(|metric| metric.get_counter().get_value())
+            .sum()
+    };
+    let before = drops(&manager);
+    let occupied = occupy(&tx);
+    withdraw_received(&mut manager, rtbh);
+    assert_eq!(drops(&manager), before, "a retried flush drops nothing");
+    drop(occupied);
+    assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
+}
+
 /// A settled key's last covering route goes while its receiver is dirty
 /// and not caught up, so the flush skips it. Red proof: without unsettling
 /// the skipped set, the recovered session never re-checks the key.

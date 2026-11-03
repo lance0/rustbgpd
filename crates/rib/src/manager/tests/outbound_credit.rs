@@ -1996,9 +1996,16 @@ fn a_dirty_peer_behind_its_resync_is_not_restaged_every_pass() {
         kept.extend(held(&mut rx));
         *round += 1;
     };
-    while manager.outbound_credit_rows(peer) < CREDIT {
+    for _ in 0..CREDIT {
+        if manager.outbound_credit_rows(peer) >= CREDIT {
+            break;
+        }
         pass(&mut manager, &mut kept, &mut round);
     }
+    assert!(
+        manager.outbound_credit_rows(peer) >= CREDIT,
+        "the credit fills"
+    );
     pass(&mut manager, &mut kept, &mut round);
     assert!(manager.dirty_peers.contains(&peer), "refused for credit");
     manager.resync_dirty_peers_bounded();
@@ -2287,4 +2294,500 @@ fn spent_credit_ignores_a_change_in_a_family_the_peer_lacks() {
         }
         drop(spent);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Row accounting, chunking and closing admission, pinned per family.
+// ---------------------------------------------------------------------------
+
+/// `n` copies of `item`.
+fn copies<T: Clone>(item: &T, n: usize) -> Vec<T> {
+    vec![item.clone(); n]
+}
+
+/// One route per family, to count rows with.
+struct FamilyRows {
+    unicast: Route,
+    flowspec: FlowSpecRoute,
+    bgpls: BgpLsRibRoute,
+    labeled: crate::route::LabeledRibRoute,
+    rtc: crate::route::RtcRibRoute,
+    vpn: VpnRibRoute,
+    evpn: EvpnRibRoute,
+}
+
+fn family_rows() -> FamilyRows {
+    FamilyRows {
+        unicast: source_route(0),
+        flowspec: crate::test_support::make_flowspec_route(SOURCE),
+        bgpls: make_bgpls_route(SOURCE, 1, 100),
+        labeled: make_labeled_rib_route(SOURCE, 1, 100, 100),
+        rtc: make_rtc_rib_route(SOURCE, 1, 100),
+        vpn: make_vpn_rib_route(SOURCE, 1, 100, 100),
+        evpn: evpn_route(1, 0),
+    }
+}
+
+/// An envelope carrying rows in every family, each count distinct, so a
+/// wrong operator or a dropped term changes the total.
+fn mixed_envelope(rows: &FamilyRows) -> OutboundRouteUpdate {
+    let key = (rows.unicast.prefix, 0);
+    OutboundRouteUpdate {
+        flowspec_announce: copies(&rows.flowspec, 1),
+        flowspec_withdraw: copies(&rows.flowspec.selection_key(), 2),
+        bgpls_announce: copies(&rows.bgpls, 3),
+        bgpls_withdraw: copies(&rows.bgpls.key(), 5),
+        labeled_announce: copies(&rows.labeled, 7),
+        labeled_withdraw: copies(&rows.labeled.key(), 11),
+        rtc_announce: copies(&rows.rtc, 13),
+        rtc_withdraw: copies(&rows.rtc.key(), 17),
+        otc_blocked: copies(&rows.unicast, 19),
+        announce: Arc::new(copies(&rows.unicast, 23)),
+        shared_withdraw: Arc::new(copies(&key, 29)),
+        withdraw: copies(&key, 31),
+        vpn_announce: Arc::new(copies(&rows.vpn, 37)),
+        vpn_withdraw: copies(&rows.vpn.key(), 41),
+        evpn_announce: Arc::new(copies(&rows.evpn, 43)),
+        evpn_withdraw: copies(&rows.evpn.key(), 47),
+        ..OutboundRouteUpdate::default()
+    }
+}
+
+/// An envelope's charge counts every row of its private families, OTC
+/// diagnostics included, and none of a family the peer holds in a group.
+/// Red with any `+` of the sum turned into `*` or `-`.
+#[test]
+fn an_envelope_is_charged_its_rows_in_each_private_family() {
+    use crate::outbound_credit::PrivateFamilies;
+    let update = mixed_envelope(&family_rows());
+    let always = 1 + 2 + 3 + 5 + 7 + 11 + 13 + 17 + 19;
+    let (unicast, vpn, evpn) = (23 + 29 + 31, 37 + 41, 43 + 47);
+    for (private, expected) in [
+        (PrivateFamilies::default(), always),
+        (
+            PrivateFamilies {
+                unicast: true,
+                vpn: false,
+                evpn: false,
+            },
+            always + unicast,
+        ),
+        (
+            PrivateFamilies {
+                unicast: false,
+                vpn: true,
+                evpn: false,
+            },
+            always + vpn,
+        ),
+        (
+            PrivateFamilies {
+                unicast: false,
+                vpn: false,
+                evpn: true,
+            },
+            always + evpn,
+        ),
+        (
+            PrivateFamilies {
+                unicast: true,
+                vpn: true,
+                evpn: true,
+            },
+            always + unicast + vpn + evpn,
+        ),
+    ] {
+        assert_eq!(private.rows(&update), expected, "{private:?}");
+    }
+}
+
+/// A batch with rows in every family, each count distinct.
+fn mixed_batch(rows: &FamilyRows) -> OutboundCommitBatch {
+    let key = (rows.unicast.prefix, 0);
+    OutboundCommitBatch {
+        flowspec_announce: copies(&rows.flowspec, 1),
+        flowspec_withdraw: copies(&rows.flowspec.selection_key(), 2),
+        bgpls_announce: copies(&rows.bgpls, 3),
+        bgpls_withdraw: copies(&rows.bgpls.key(), 5),
+        labeled_announce: copies(&rows.labeled, 7),
+        labeled_withdraw: copies(&rows.labeled.key(), 11),
+        rtc_announce: copies(&rows.rtc, 13),
+        rtc_withdraw: copies(&rows.rtc.key(), 17),
+        withdraw: copies(&key, 31),
+        vpn_announce: Arc::new(copies(&rows.vpn, 37)),
+        vpn_withdraw: copies(&rows.vpn.key(), 41),
+        evpn_announce: Arc::new(copies(&rows.evpn, 43)),
+        evpn_withdraw: copies(&rows.evpn.key(), 47),
+        ..OutboundCommitBatch::with_unicast(
+            Arc::new(copies(&rows.unicast, 23)),
+            Arc::new(vec![None; 23]),
+        )
+    }
+}
+
+/// The admission count of a batch: every private family's rows plus the
+/// peer's pending OTC diagnostics, and none of a family it holds in a group
+/// (unicast and owned EVPN here). Red with a `+` turned into `*`, a family
+/// test inverted, or a membership test widened to `||`.
+#[test]
+fn a_batch_counts_the_rows_of_the_families_the_peer_holds_privately() {
+    let rows = family_rows();
+    let always = 1 + 2 + 3 + 5 + 7 + 11 + 13 + 17;
+    let (unicast, vpn, evpn) = (23 + 31, 37 + 41, 43 + 47);
+    let manager = manager();
+    let private = peer_v4(Ipv4Addr::new(10, 0, 60, 1));
+    assert_eq!(
+        mixed_batch(&rows).private_rows(&manager, private),
+        always + unicast + vpn + evpn
+    );
+    // Pending OTC diagnostics of the peer are charged rows too.
+    let mut manager = manager;
+    manager
+        .pending_otc_blocked
+        .entry(private)
+        .or_default()
+        .insert((rows.unicast.prefix, 0), rows.unicast.clone());
+    assert_eq!(
+        mixed_batch(&rows).private_rows(&manager, private),
+        always + unicast + vpn + evpn + 1
+    );
+    // A grouped unicast member that owns its EVPN routes in the group.
+    let (manager, member, _gid, _output) = super::evpn_group_storage::fixture();
+    assert!(manager.grouped_member_of(member).is_some());
+    assert!(manager.evpn_grouped_member_of(member).is_some());
+    let vpn_private = manager.vpn_grouped_member_of(member).is_none();
+    assert_eq!(
+        mixed_batch(&rows).private_rows(&manager, member),
+        always + if vpn_private { vpn } else { 0 }
+    );
+}
+
+/// While closing, a private VPN or EVPN announcement that is not a move is
+/// not admitted on capacity alone; a move (the key withdrawn in the same
+/// envelope) is, and so is any announcement of a family held in a group.
+/// Red with either family's privacy test inverted.
+#[test]
+fn closing_admits_private_vpn_and_evpn_moves_only() {
+    use crate::outbound_credit::PrivateFamilies;
+    let rows = family_rows();
+    let vpn = PrivateFamilies {
+        unicast: false,
+        vpn: true,
+        evpn: false,
+    };
+    let evpn = PrivateFamilies {
+        unicast: false,
+        vpn: false,
+        evpn: true,
+    };
+    let vpn_announcement = OutboundCommitBatch {
+        vpn_announce: Arc::new(vec![rows.vpn.clone()]),
+        ..OutboundCommitBatch::default()
+    };
+    assert!(
+        !vpn_announcement.closing_admissible(vpn),
+        "a private VPN announcement"
+    );
+    assert!(
+        vpn_announcement.closing_admissible(evpn),
+        "VPN held in a group"
+    );
+    let vpn_move = OutboundCommitBatch {
+        vpn_announce: Arc::new(vec![rows.vpn.clone()]),
+        vpn_withdraw: vec![rows.vpn.key()],
+        ..OutboundCommitBatch::default()
+    };
+    assert!(vpn_move.closing_admissible(vpn), "a private VPN move");
+    let evpn_announcement = OutboundCommitBatch {
+        evpn_announce: Arc::new(vec![rows.evpn.clone()]),
+        ..OutboundCommitBatch::default()
+    };
+    assert!(
+        !evpn_announcement.closing_admissible(evpn),
+        "a private EVPN announcement"
+    );
+    assert!(
+        evpn_announcement.closing_admissible(vpn),
+        "EVPN held in a group"
+    );
+    let evpn_move = OutboundCommitBatch {
+        evpn_announce: Arc::new(vec![rows.evpn.clone()]),
+        evpn_withdraw: vec![rows.evpn.key()],
+        ..OutboundCommitBatch::default()
+    };
+    assert!(evpn_move.closing_admissible(evpn), "a private EVPN move");
+}
+
+/// An ordinary envelope is cut into pieces only above `CHUNK_ROWS` rows and
+/// only when it carries no marker, request, replay terminal, shared group
+/// payload, source exclusion or shared withdrawal, and its next-hop
+/// overrides align with its announcements. Red with any condition dropped
+/// or the boundary moved.
+#[test]
+fn only_a_plain_envelope_over_the_chunk_size_is_chunkable() {
+    use crate::outbound_credit::chunkable;
+    let routes = |n: u32| Arc::new((0..n).map(source_route).collect::<Vec<_>>());
+    let rows = u32::try_from(CHUNK_ROWS).unwrap();
+    let plain = |n: u32| OutboundRouteUpdate {
+        announce: routes(n),
+        ..OutboundRouteUpdate::default()
+    };
+    assert!(chunkable(&plain(rows + 1)), "one row over");
+    assert!(!chunkable(&plain(rows)), "exactly one chunk");
+    let aligned = OutboundRouteUpdate {
+        next_hop_override: Arc::new(vec![None; CHUNK_ROWS + 1]),
+        ..plain(rows + 1)
+    };
+    assert!(chunkable(&aligned), "aligned next-hop overrides");
+    let (replay, _enrolled) = rustbgpd_bmp::BmpReplay::new(Duration::from_secs(5));
+    let negatives: Vec<(&str, OutboundRouteUpdate)> = vec![
+        (
+            "End-of-RIB",
+            OutboundRouteUpdate {
+                end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+                ..plain(rows + 1)
+            },
+        ),
+        (
+            "refresh marker",
+            OutboundRouteUpdate {
+                refresh_markers: vec![(
+                    Afi::Ipv4,
+                    Safi::Unicast,
+                    rustbgpd_wire::RouteRefreshSubtype::BoRR,
+                )],
+                ..plain(rows + 1)
+            },
+        ),
+        (
+            "replay terminal",
+            OutboundRouteUpdate {
+                replay: Some(Arc::clone(&replay)),
+                ..plain(rows + 1)
+            },
+        ),
+        (
+            "refresh request",
+            OutboundRouteUpdate {
+                request_refresh_all_negotiated: true,
+                ..plain(rows + 1)
+            },
+        ),
+        (
+            "shared group encode",
+            OutboundRouteUpdate {
+                shared_group_encode: Some(Arc::default()),
+                ..plain(rows + 1)
+            },
+        ),
+        (
+            "source exclusion",
+            OutboundRouteUpdate {
+                announce_source_exclusion: Some(peer_v4(SOURCE)),
+                ..plain(rows + 1)
+            },
+        ),
+        (
+            "shared withdrawal",
+            OutboundRouteUpdate {
+                shared_withdraw: Arc::new(vec![(source_route(0).prefix, 0)]),
+                ..plain(rows + 1)
+            },
+        ),
+        (
+            "misaligned next-hop overrides",
+            OutboundRouteUpdate {
+                next_hop_override: Arc::new(vec![None]),
+                ..plain(rows + 1)
+            },
+        ),
+    ];
+    for (name, update) in negatives {
+        assert!(!chunkable(&update), "{name}");
+    }
+}
+
+/// Every chunk keeps the envelope's export snapshot, or the transport
+/// resets the session on a route-bearing chunk without one. Red with the
+/// snapshot dropped from the chunks.
+#[test]
+fn every_chunk_keeps_the_export_snapshot() {
+    let update = OutboundRouteUpdate {
+        announce: Arc::new((0..3_000).map(source_route).collect()),
+        exact_export_snapshot: Some(Arc::new(crate::manager::PermissiveTestExactExport)),
+        ..OutboundRouteUpdate::default()
+    };
+    let plan = chunk_plan(&update, CHUNK_ROWS);
+    let chunks = split_by_plan(update, &plan);
+    assert_eq!(chunks.len(), 3);
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.exact_export_snapshot.is_some())
+    );
+}
+
+/// Deleting a neighbor forgets the credit of every unregistered peer whose
+/// envelopes are all gone, and keeps a registered peer's and an
+/// unregistered peer's that still holds rows or a live operation; those go
+/// at a later deletion once idle. Red with the idle test inverted, either
+/// half of it dropped, the registration test narrowed, or no sweep at all.
+#[test]
+fn deleting_a_neighbor_forgets_only_idle_unregistered_credit() {
+    let mut manager = manager();
+    manager.test_force_ungrouped = true;
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
+    routes_received(&mut manager, vec![source_route(1)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    let addr = |octet| peer_v4(Ipv4Addr::new(10, 0, 61, octet));
+    let (idle, rows, latched, registered) = (addr(1), addr(2), addr(3), addr(4));
+    let mut outputs: Vec<_> = [idle, rows, latched, registered]
+        .into_iter()
+        .map(|peer| up(&mut manager, peer, ipv4_sendable(), 4096, 0))
+        .collect();
+    // The latched peer keeps its initial dump: a live operation, no rows.
+    let dump = held(&mut outputs[2]);
+    assert_eq!(latches(&dump).len(), 1);
+    for (index, output) in outputs.iter_mut().enumerate() {
+        if index != 2 {
+            send_all(output);
+        }
+    }
+    routes_received(&mut manager, vec![source_route(0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    let charged = held(&mut outputs[1]);
+    for index in [0, 2, 3] {
+        send_all(&mut outputs[index]);
+    }
+    assert!(manager.outbound_credit_rows(rows) > 0);
+    assert_eq!(
+        manager.outbound_credit_rows(latched),
+        0,
+        "an operation charges no rows"
+    );
+    for peer in [idle, rows, latched] {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer,
+            session_id: 0,
+        });
+    }
+    let deleted = addr(9);
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: deleted,
+        label: None,
+        keep_series: false,
+    });
+    let kept = |manager: &RibManager, peer| manager.outbound_credit.contains_key(&peer);
+    assert!(
+        !kept(&manager, idle),
+        "an idle unregistered peer is forgotten"
+    );
+    assert!(kept(&manager, rows), "live rows keep the entry");
+    assert!(kept(&manager, latched), "a live operation keeps the entry");
+    assert!(
+        kept(&manager, registered),
+        "a registered peer keeps its entry"
+    );
+    drop((dump, charged));
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: deleted,
+        label: None,
+        keep_series: false,
+    });
+    assert!(
+        !kept(&manager, rows) && !kept(&manager, latched),
+        "swept once idle"
+    );
+    assert!(kept(&manager, registered));
+}
+
+/// Deferred refresh answers rotate across peers: with a zero poll budget a
+/// tick answers one peer, and the next tick resumes after it even when that
+/// peer owes again. Red with the cursor ignored: the first peer is answered
+/// every tick and the others wait.
+#[test]
+fn deferred_refresh_retries_rotate_across_peers() {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let mut manager = manager();
+    manager.test_force_ungrouped = true;
+    manager.flush_poll_budget = Duration::ZERO;
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
+    routes_received(&mut manager, vec![source_route(0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    let peers: Vec<_> = (1..=3u8)
+        .map(|octet| peer_v4(Ipv4Addr::new(10, 0, 70, octet)))
+        .collect();
+    let mut outputs: Vec<_> = peers
+        .iter()
+        .map(|&peer| up(&mut manager, peer, ipv4_sendable(), 64, 0))
+        .collect();
+    let dumps: Vec<_> = outputs.iter_mut().map(held).collect();
+    for &peer in &peers {
+        refresh_request(&mut manager, peer, 0, family);
+    }
+    drop(dumps);
+    manager.resync_dirty_peers_bounded();
+    let first = held(&mut outputs[0]);
+    assert!(!first.is_empty(), "the first peer is answered first");
+    assert!(
+        outputs[1].is_empty() && outputs[2].is_empty(),
+        "one per tick"
+    );
+    // The first peer owes again behind its own answer, then reads it.
+    refresh_request(&mut manager, peers[0], 0, family);
+    drop(first);
+    manager.resync_dirty_peers_bounded();
+    assert!(
+        !send_all(&mut outputs[1]).is_empty(),
+        "the second peer is next"
+    );
+    assert!(outputs[0].is_empty(), "the first peer waits its turn");
+}
+
+/// The test-only owed query reports a resync for a dirty peer and for a
+/// forced one. Red with the two conditions joined by `&&`.
+#[test]
+fn the_owed_query_reports_a_dirty_or_forced_resync() {
+    let mut manager = manager();
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 71, 1));
+    let mut rx = up(&mut manager, peer, ipv4_sendable(), 64, 0);
+    send_all(&mut rx);
+    let owed = |manager: &mut RibManager| {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::TestQueryPeerOutboundOwed { peer, reply });
+        response.try_recv().unwrap()
+    };
+    assert!(!owed(&mut manager).resync);
+    manager.mark_outbound_dirty(peer);
+    assert!(owed(&mut manager).resync, "dirty");
+    manager.dirty_peers.remove(&peer);
+    manager.force_outbound_peers.insert(peer);
+    assert!(owed(&mut manager).resync, "forced");
+}
+
+/// A large pass is cut into chunks when the channel has room for exactly
+/// as many envelopes: the first chunk takes the ladder's permit and the
+/// rest reserve one each. Red with one permit too many reserved: the pass
+/// goes as one envelope.
+#[test]
+fn a_large_pass_is_chunked_into_exactly_the_room_it_needs() {
+    let mut manager = manager();
+    manager.test_force_ungrouped = true;
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 72, 1));
+    let mut rx = up(&mut manager, peer, ipv4_sendable(), 3, 0);
+    send_all(&mut rx);
+    routes_received(
+        &mut manager,
+        (0..3000).map(source_route).collect(),
+        vec![],
+        vec![],
+        vec![],
+    );
+    send_all(&mut source);
+    let sizes: Vec<_> = held(&mut rx)
+        .iter()
+        .map(|chunk| rows(std::slice::from_ref(chunk)))
+        .collect();
+    assert_eq!(sizes, vec![1024, 1024, 952]);
 }

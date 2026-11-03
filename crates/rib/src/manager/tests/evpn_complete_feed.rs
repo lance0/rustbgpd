@@ -436,6 +436,53 @@ fn owned_reregistration_behind_a_live_operation_defers_without_reset() {
     }
 }
 
+/// An owned member whose admitted routes are captured, with a complete
+/// feed sent through the commit ladder outside any operation; the feed
+/// envelope is returned unsent, as a stalled session would hold it.
+fn owned_member_with_a_queued_complete_feed() -> (
+    RibManager,
+    PeerId,
+    EvpnRibRoute,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    OutboundRouteUpdate,
+) {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    stage(&mut manager, gid, &route);
+    assert!(manager.capture_private_evpn_admitted(peer));
+    let mut feed = manager
+        .prepare_complete_evpn_feed(peer, gid, None, true)
+        .unwrap();
+    assert_eq!(feed.announce.len(), 1);
+    manager.pending_eor.insert(peer, HashSet::from([EVPN]));
+    feed.seal.required_markers = RibManager::evpn_admitted_marker_bits(&[EVPN], &[]);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce: feed.announce.into(),
+                    evpn_withdraw: feed.withdraw,
+                    evpn_complete_feed: Some(feed.seal),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    let queued = output.try_recv().unwrap();
+    (manager, peer, route, output, queued)
+}
+
+/// A complete feed sent outside an operation is its own whole-table
+/// operation: its envelope holds the latch. Red with every seal taken for
+/// a sparse renewal: the feed goes as an ordinary envelope.
+#[test]
+fn a_complete_feed_outside_an_operation_is_its_own_operation() {
+    let (manager, peer, _route, _output, queued) = owned_member_with_a_queued_complete_feed();
+    assert!(queued.latch.is_some(), "a whole-table operation");
+    assert!(manager.outbound_operation_live(peer));
+}
+
 #[test]
 fn owned_initial_postadmission_mismatch_keeps_enqueue_truth_but_holds_terminal() {
     let (mut manager, peer, gid, mut output) = fixture();

@@ -1220,7 +1220,6 @@ impl RibManager {
             }
             return true;
         }
-        self.note_outbound_staging(peer);
         false
     }
 
@@ -1239,6 +1238,7 @@ impl RibManager {
             if self.helper_stale_flush_refused(peer, changed) {
                 continue;
             }
+            self.note_outbound_staging(peer);
             // A route-bearing envelope carries the current session's export
             // snapshot, or the transport resets the session.
             let Some(encoder) = self.peer_export_encoders.get(&peer) else {

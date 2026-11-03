@@ -460,7 +460,7 @@ impl OutboundCommitBatch {
 
     /// Rows of this batch in families `peer` holds privately; the
     /// membership lookups run only for families the batch carries.
-    fn private_rows(&self, manager: &RibManager, peer: PeerId) -> usize {
+    pub(in crate::manager) fn private_rows(&self, manager: &RibManager, peer: PeerId) -> usize {
         let mut rows = self.flowspec_announce.len()
             + self.flowspec_withdraw.len()
             + self.bgpls_announce.len()
