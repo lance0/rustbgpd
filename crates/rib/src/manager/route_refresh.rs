@@ -2379,15 +2379,43 @@ impl RibManager {
     }
 
     /// Retry deferred responses as part of `operation`, the resync that owed
-    /// them: they join its latch instead of waiting for it.
+    /// them: they join its latch instead of waiting for it. Without one, every
+    /// owed family is answered in one whole-table operation, with room for
+    /// the End-of-RIB markers they complete; refused, the debt is kept.
     pub(super) fn retry_pending_refresh_in(
         &mut self,
         peer: PeerId,
-        mut operation: Option<&mut OutboundOperation>,
+        operation: Option<&mut OutboundOperation>,
     ) {
         self.replacement_checkpoint(true);
         let Some(families) = self.pending_refresh.remove(&peer) else {
             return;
+        };
+        let mut own_operation = None;
+        let mut operation = if let Some(operation) = operation {
+            Some(operation)
+        } else {
+            let markers = families
+                .iter()
+                .filter(|family| {
+                    self.gr_deferred_eor
+                        .get(&peer)
+                        .is_some_and(|owed| owed.contains(family))
+                        || self
+                            .pending_eor
+                            .get(&peer)
+                            .is_some_and(|owed| owed.contains(family))
+                })
+                .count();
+            match self.begin_outbound_operation(peer, families.len() + markers) {
+                Ok(operation) => Some(own_operation.insert(operation)),
+                Err(failure) => {
+                    let _ = self.outbound_commit_failed(peer, failure);
+                    debug!(%peer, ?families, "route refresh responses still deferred");
+                    self.pending_refresh.insert(peer, families);
+                    return;
+                }
+            }
         };
         for (afi, safi) in families {
             self.replacement_checkpoint(false);
@@ -2407,9 +2435,20 @@ impl RibManager {
     /// Retry the refresh responses of peers no resync owns once their live
     /// whole-table operation has drained and their channel has room. A
     /// response deferred behind a dirty resync rides that resync instead.
-    pub(super) fn retry_deferred_refreshes(&mut self) {
-        let peers: Vec<PeerId> = self.pending_refresh.keys().copied().collect();
-        for peer in peers {
+    ///
+    /// Round-robin from [`Self::deferred_refresh_cursor`] under the poll
+    /// budget that started at `poll_start`: after each peer answered, an
+    /// elapsed budget stops the slice and the remainder waits for the next
+    /// tick, so a release of many latches never stages every owed table in
+    /// one actor turn. Returns whether retryable work was left for it.
+    pub(super) fn retry_deferred_refreshes(&mut self, poll_start: std::time::Instant) -> bool {
+        let mut peers: Vec<PeerId> = self.pending_refresh.keys().copied().collect();
+        peers.sort_unstable();
+        if let Some(cursor) = self.deferred_refresh_cursor {
+            let after = peers.partition_point(|peer| *peer <= cursor);
+            peers.rotate_left(after);
+        }
+        for (index, peer) in peers.iter().copied().enumerate() {
             self.replacement_checkpoint(false);
             if self.outbound_channel_gone(peer) {
                 self.pending_refresh.remove(&peer);
@@ -2417,9 +2456,16 @@ impl RibManager {
                 && !self.outbound_operation_live(peer)
                 && !self.outbound_channel_full(peer)
             {
+                self.deferred_refresh_cursor = Some(peer);
                 self.retry_pending_refresh(peer);
+                if poll_start.elapsed() >= self.flush_poll_budget {
+                    return peers[index + 1..]
+                        .iter()
+                        .any(|peer| self.pending_refresh.contains_key(peer));
+                }
             }
         }
+        false
     }
 
     /// Whether a deferred refresh response waits for the resync timer.

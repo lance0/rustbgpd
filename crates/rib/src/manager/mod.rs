@@ -841,6 +841,9 @@ pub struct RibManager {
     /// Families with an outstanding enhanced route refresh response retry.
     /// Entries are never left empty: readers check the key.
     pending_refresh: HashMap<PeerId, HashSet<(Afi, Safi)>>,
+    /// The peer whose deferred refresh responses were retried last, where
+    /// the next budgeted retry slice resumes.
+    deferred_refresh_cursor: Option<PeerId>,
     /// Outbound registrations (initial table dumps) deferred behind queued
     /// actor work, completed one per run-loop iteration between drained
     /// mutation batches (LAN-475). Peer-keyed (deduplicated): the advance
@@ -2825,6 +2828,7 @@ impl RibManager {
             force_outbound_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             pending_refresh: HashMap::new(),
+            deferred_refresh_cursor: None,
             pending_initial_registrations: VecDeque::new(),
             registration_wait_sample_at: None,
             initial_dump_defer_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
@@ -4079,7 +4083,9 @@ impl RibManager {
         self.retry_pending_inbound_refresh_bounded();
         self.flush_helper_stale_exempt(&HashSet::new());
         self.retry_evpn_feed_markers_bounded();
-        self.retry_deferred_refreshes();
+        // Refresh-only retries and the dirty slices share one poll budget.
+        let poll_start = std::time::Instant::now();
+        let recovered = self.retry_deferred_refreshes(poll_start) || recovered;
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap
@@ -4095,7 +4101,6 @@ impl RibManager {
             debug!(%peer, "dropping dirty peer whose outbound channel closed");
             self.drop_gone_dirty_peer(peer);
         }
-        let poll_start = std::time::Instant::now();
         let mut attempted: HashSet<PeerId> = HashSet::new();
         loop {
             // One full-table member can consume the poll budget on its own.

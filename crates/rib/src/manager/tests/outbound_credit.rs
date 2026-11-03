@@ -674,6 +674,165 @@ fn dual_stack_replay_fixture(
     (manager, peer, rx)
 }
 
+/// Refresh debt in several families is answered in one whole-table
+/// operation once the live one drains, not one family per cycle. Red with a
+/// per-family operation: the first family's answer latches the peer and the
+/// second stays owed.
+#[test]
+fn owed_refreshes_in_several_families_answer_in_one_operation() {
+    let (mut manager, peer, mut rx) = dual_stack_replay_fixture(64);
+    let dump = held(&mut rx);
+    for family in dual_stack_sendable() {
+        refresh_request(&mut manager, peer, 0, family);
+    }
+    assert_eq!(
+        manager.pending_refresh[&peer].len(),
+        2,
+        "deferred behind the dump"
+    );
+    drop(dump);
+    manager.resync_dirty_peers_bounded();
+    let answers = held(&mut rx);
+    assert!(
+        !manager.pending_refresh.contains_key(&peer),
+        "both answered"
+    );
+    assert_eq!(latches(&answers).len(), 1, "in one operation");
+    let announced: usize = answers.iter().map(|update| update.announce.len()).sum();
+    assert_eq!(announced, 2, "each family's table");
+    assert!(!manager.dirty_peers.contains(&peer));
+}
+
+/// An IPv4 RR client registering with a running actor.
+fn actor_peer_up(peer: PeerId, outbound_tx: mpsc::Sender<OutboundRouteUpdate>) -> RibUpdate {
+    RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 200),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    }
+}
+
+/// Register the source with a running actor and announce four routes.
+async fn actor_source(tx: &mpsc::Sender<RibUpdate>) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (source_tx, source_rx) = mpsc::channel(64);
+    tx.send(actor_peer_up(peer_v4(SOURCE), source_tx))
+        .await
+        .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(SOURCE),
+        announced: (0..4).map(source_route).collect(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    source_rx
+}
+
+/// Refresh-only retries run under the poll budget: when many latches drop
+/// at once, each resync tick answers a bounded round-robin slice and the
+/// actor serves ordinary messages between slices, until every owed answer
+/// is sent. With a zero budget a tick answers one peer; an owed-state query
+/// sent after the first answer is served before the next one is staged.
+/// Red with an unbudgeted retry: the first tick answers every peer.
+#[tokio::test(start_paused = true)]
+async fn released_refresh_debt_is_answered_in_budgeted_slices() {
+    const PEERS: u8 = 6;
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    manager.flush_poll_budget = Duration::ZERO;
+    let handle = tokio::spawn(manager.run());
+    let _source_rx = actor_source(&tx).await;
+    let mut receivers = Vec::new();
+    let mut dumps = Vec::new();
+    for index in 0..PEERS {
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 20, index + 1));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(actor_peer_up(peer, out_tx)).await.unwrap();
+        dumps.push(out_rx.recv().await.unwrap());
+        dumps.push(out_rx.recv().await.unwrap());
+        tx.send(RibUpdate::RouteRefreshRequest {
+            peer,
+            session_id: 0,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            queued: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        })
+        .await
+        .unwrap();
+        receivers.push((peer, out_rx));
+    }
+    let owed = |peer| {
+        let tx = tx.clone();
+        async move {
+            let (reply, response) = oneshot::channel();
+            tx.send(RibUpdate::TestQueryPeerOutboundOwed { peer, reply })
+                .await
+                .unwrap();
+            response.await.unwrap()
+        }
+    };
+    for (peer, out_rx) in &mut receivers {
+        assert!(
+            !owed(*peer).await.refresh.is_empty(),
+            "{peer} owes its answer"
+        );
+        assert!(out_rx.try_recv().is_err());
+    }
+    // Every latch drops at once.
+    drop(dumps);
+    let answered = loop {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        if let Some(index) = receivers.iter().position(|(_, rx)| !rx.is_empty()) {
+            break index;
+        }
+    };
+    let waiting = |receivers: &[(PeerId, mpsc::Receiver<OutboundRouteUpdate>)]| {
+        receivers.iter().filter(|(_, rx)| rx.is_empty()).count()
+    };
+    assert_eq!(
+        waiting(&receivers),
+        usize::from(PEERS) - 1,
+        "one peer per slice"
+    );
+    let other = receivers[(answered + 1) % receivers.len()].0;
+    // An ordinary message, served before the next slice is staged.
+    assert_eq!(owed(other).await.refresh, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert_eq!(waiting(&receivers), usize::from(PEERS) - 1);
+    for (peer, out_rx) in &mut receivers {
+        let answer = tokio::time::timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("every owed answer is sent")
+            .unwrap();
+        assert_eq!(answer.announce.len(), 4, "{peer}");
+    }
+    for (peer, _) in &receivers {
+        let owed = owed(*peer).await;
+        assert!(owed.refresh.is_empty() && !owed.resync, "{peer}: {owed:?}");
+    }
+    drop(tx);
+    let _ = handle.await;
+}
+
 /// T3. A two-family operator replay is accepted whole or not at all. With
 /// room for less than both families and the terminal it is refused with
 /// nothing sent; behind a live whole-table operation likewise; with room,
@@ -1675,42 +1834,10 @@ async fn deferred_whole_table_work_runs_soon_after_the_latch_drops() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
-    let up = |peer: PeerId, outbound_tx| RibUpdate::PeerUp {
-        per_client_best: false,
-        interpret_rfc1997: true,
-        session_id: 0,
-        peer,
-        peer_asn: 65000,
-        peer_router_id: Ipv4Addr::new(10, 0, 0, 200),
-        outbound_tx,
-        export_policy: None,
-        sendable_families: ipv4_sendable(),
-        is_ebgp: false,
-        route_reflector_client: true,
-        orr_vantage: None,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
-        negotiated_orf_recv: Vec::new(),
-        negotiated_llgr_families: Vec::new(),
-    };
-    let (source_tx, _source_rx) = mpsc::channel(64);
-    tx.send(up(peer_v4(SOURCE), source_tx)).await.unwrap();
-    tx.send(RibUpdate::RoutesReceived {
-        session_id: 0,
-        peer: peer_v4(SOURCE),
-        announced: (0..4).map(source_route).collect(),
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
-        evpn_withdrawn: vec![],
-        validated_with: None,
-    })
-    .await
-    .unwrap();
+    let _source_rx = actor_source(&tx).await;
     let peer = peer_v4(Ipv4Addr::new(10, 0, 17, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
-    tx.send(up(peer, out_tx)).await.unwrap();
+    tx.send(actor_peer_up(peer, out_tx)).await.unwrap();
     let table = out_rx.recv().await.unwrap();
     let eor = out_rx.recv().await.unwrap();
     assert!(table.latch.is_some() && eor.end_of_rib.len() == 1);
