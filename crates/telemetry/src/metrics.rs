@@ -1688,8 +1688,9 @@ impl BgpMetrics {
         let inbound_rib_backpressure = IntCounterVec::new(
             Opts::new(
                 "bgp_inbound_rib_backpressure_total",
-                "Inbound route batches that found the RIB channel full and blocked: the session \
-                 task parks and TCP receive-window backpressure paces the sender (ADR-0078).",
+                "Park episodes started by an inbound route batch that found the RIB channel \
+                 full: the session holds it, stops reading its socket until the RIB admits it, \
+                 and TCP receive-window backpressure paces the sender (ADR-0078).",
             ),
             &["peer"],
         )
@@ -5557,8 +5558,9 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Record an inbound route batch that blocked on a full RIB channel
-    /// (ADR-0078: the session parks instead of dropping).
+    /// Record a park episode: an inbound route batch found the RIB channel
+    /// full and is held (ADR-0078: the session parks input instead of
+    /// dropping).
     pub fn record_inbound_rib_backpressure(&self, peer: &str) {
         self.0
             .inbound_rib_backpressure
