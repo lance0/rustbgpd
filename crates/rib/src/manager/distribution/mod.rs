@@ -3122,6 +3122,23 @@ impl RibManager {
 
     /// Count one failed outbound transaction under its own metric and return
     /// it, so no caller can attribute a refusal to a writer-channel drop.
+    /// Whether this unicast pass changes a prefix in a family `peer`
+    /// negotiated: the only pass whose credit refusal costs it a resync.
+    fn unicast_pass_reaches(
+        &self,
+        peer: PeerId,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+    ) -> bool {
+        self.peer_sendable_families
+            .get(&peer)
+            .is_some_and(|families| {
+                best_changed.iter().chain(all_affected).any(|prefix| {
+                    families.contains(&crate::manager::helpers::prefix_family(prefix))
+                })
+            })
+    }
+
     pub(in crate::manager) fn outbound_commit_failed(
         &self,
         peer: PeerId,
@@ -8965,6 +8982,7 @@ impl RibManager {
                         && !evpn_feeds.contains_key(&peer)
                         && self.outbound_credit_exhausted(peer)
                         && !self.outbound_operation_live(peer)
+                        && self.unicast_pass_reaches(peer, &best_changed, &all_affected)
                     {
                         self.refuse_outbound_for_credit(peer);
                         self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);

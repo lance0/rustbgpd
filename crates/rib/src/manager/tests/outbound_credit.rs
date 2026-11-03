@@ -2179,3 +2179,112 @@ async fn deferred_work_runs_soon_after_the_latch_drops_under_ingest() {
     drop(tx);
     let _ = handle.await;
 }
+
+/// A peer with spent credit is refused, and marked dirty, only by a pass
+/// that touches a family it negotiated: an IPv4-only peer stays clean
+/// through an IPv6-only change in unicast, `FlowSpec`, labeled unicast and
+/// VPN, and the per-family producers stage nothing for it. Red with the preflight ahead
+/// of the family check: the unrelated change schedules a resync.
+#[test]
+fn spent_credit_ignores_a_change_in_a_family_the_peer_lacks() {
+    let v6_flowspec = || {
+        let mut route = make_flowspec_route(SOURCE);
+        route.afi = Afi::Ipv6;
+        route
+    };
+    let v6_labeled = || {
+        let mut route = make_labeled_rib_route(SOURCE, 1, 100, 100);
+        route.nlri.prefix = Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 7, 0, 0, 0, 0, 0),
+            48,
+        ));
+        route
+    };
+    let source_id = peer_v4(SOURCE);
+    let cases: Vec<(&str, Safi, RibUpdate)> = vec![
+        (
+            "unicast",
+            Safi::Unicast,
+            RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: source_id,
+                announced: vec![v6_source_route(9)],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            },
+        ),
+        (
+            "flowspec",
+            Safi::FlowSpec,
+            RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: source_id,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![v6_flowspec()],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            },
+        ),
+        (
+            "labeled",
+            Safi::LabeledUnicast,
+            RibUpdate::LabeledRoutesReceived {
+                peer: source_id,
+                session_id: 0,
+                announced: vec![v6_labeled()],
+                withdrawn: vec![],
+            },
+        ),
+        (
+            "vpn",
+            Safi::MplsVpn,
+            RibUpdate::VpnRoutesReceived {
+                peer: source_id,
+                session_id: 0,
+                announced: vec![make_vpn6_rib_route_with_rts(SOURCE, 1, vec![])],
+                withdrawn: vec![],
+            },
+        ),
+    ];
+    for (name, safi, change) in cases {
+        let mut manager = manager().with_outbound_row_credit(4);
+        manager.test_force_ungrouped = true;
+        let mut source = up(
+            &mut manager,
+            source_id,
+            vec![(Afi::Ipv4, safi), (Afi::Ipv6, safi)],
+            4096,
+            0,
+        );
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 53, 1));
+        let mut rx = up(&mut manager, peer, vec![(Afi::Ipv4, safi)], 4096, 0);
+        send_all(&mut rx);
+        send_all(&mut source);
+        let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 4);
+        let stagings = manager.outbound_stagings(peer);
+        manager.handle_update(change);
+        drain_route_chunks(&mut manager);
+        assert!(send_all(&mut rx).is_empty(), "{name}: nothing for the peer");
+        assert!(
+            !manager.dirty_peers.contains(&peer),
+            "{name}: no resync owed"
+        );
+        // The unicast pass walks its changed prefixes for every peer and
+        // finds none the peer negotiated; the other producers skip it.
+        if safi != Safi::Unicast {
+            assert_eq!(
+                manager.outbound_stagings(peer),
+                stagings,
+                "{name}: nothing staged"
+            );
+        }
+        drop(spent);
+    }
+}
