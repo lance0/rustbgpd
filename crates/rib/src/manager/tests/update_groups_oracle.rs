@@ -305,6 +305,14 @@ pub(super) struct NormMsg {
     pub(super) recovery: Option<RecoveryBoundary>,
 }
 
+impl NormMsg {
+    /// Every unicast withdrawal, the group's shared rows included
+    /// (`normalize` folds them in), as on an envelope.
+    pub(super) fn unicast_withdrawals(&self) -> std::slice::Iter<'_, (Prefix, u32)> {
+        self.withdraw.iter()
+    }
+}
+
 pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
     // Model source exclusion before comparing RIB events. Attribute preparation
     // and encoded bytes are checked separately by the transport oracle.
@@ -666,7 +674,7 @@ fn trace(streams: &Streams) -> Trace {
                     );
                 }
             }
-            for (prefix, path_id) in &message.withdraw {
+            for (prefix, path_id) in message.unicast_withdrawals() {
                 record_event(
                     &mut result,
                     session,
@@ -1236,7 +1244,7 @@ pub(super) fn fold(streams: &Streams) -> FoldedState {
             if msg.session_start.is_some() {
                 table.clear();
             }
-            for (prefix, path_id) in &msg.withdraw {
+            for (prefix, path_id) in msg.unicast_withdrawals() {
                 assert!(
                     table.remove(&(*prefix, *path_id)).is_some(),
                     "spurious unicast withdrawal for {peer}: {prefix}, path {path_id}"
@@ -3958,7 +3966,10 @@ async fn oracle_dirty_missed_announce_then_withdraw_has_no_unknown_tombstone() {
         run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
     assert_route_parity(&grouped, &private);
     let c = &grouped[&peer_v4(C)];
-    assert!(c.iter().all(|message| message.withdraw.is_empty()));
+    assert!(
+        c.iter()
+            .all(|message| message.unicast_withdrawals().next().is_none())
+    );
     assert!(fold(&grouped)[&peer_v4(C)].contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
 }
 
@@ -4012,12 +4023,12 @@ async fn oracle_dirty_source_excluded_sibling_has_no_shared_tombstone_withdraw()
     assert!(
         grouped[&peer_v4(C)]
             .iter()
-            .all(|message| !message.withdraw.contains(&key))
+            .all(|message| !message.unicast_withdrawals().any(|row| row == &key))
     );
     assert_eq!(
         grouped[&peer_v4(D)]
             .iter()
-            .flat_map(|message| message.withdraw.iter())
+            .flat_map(|message| message.unicast_withdrawals())
             .filter(|withdraw| **withdraw == key)
             .count(),
         1
@@ -4368,9 +4379,10 @@ async fn oracle_source_flip_back_before_resync_keeps_route_without_spurious_with
     );
     // The retention guard must have dropped the staged extra withdraw:
     // no withdraw of p1 ever reaches C's wire.
-    let spurious = grouped[&peer_v4(C)]
-        .iter()
-        .any(|msg| msg.withdraw.contains(&(Prefix::V4(pfx(1, 0)), 0)));
+    let spurious = grouped[&peer_v4(C)].iter().any(|msg| {
+        msg.unicast_withdrawals()
+            .any(|row| row == &(Prefix::V4(pfx(1, 0)), 0))
+    });
     assert!(
         !spurious,
         "flip-back before resync must not put a spurious withdraw on the wire"
@@ -4612,7 +4624,9 @@ async fn oracle_clean_member_regroup_suppresses_unchanged_announces() {
         );
     }
     assert!(
-        c_msgs.iter().all(|msg| msg.withdraw.is_empty()),
+        c_msgs
+            .iter()
+            .all(|msg| msg.unicast_withdrawals().next().is_none()),
         "clean regroup with no verdict change must not withdraw anything"
     );
 }
@@ -5881,7 +5895,7 @@ async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .all(|msg| msg.withdraw.is_empty()),
+                .all(|msg| msg.unicast_withdrawals().next().is_none()),
             "promotion is an implicit replace at path_id 0 — never withdraw+announce"
         );
     }
@@ -5931,7 +5945,11 @@ async fn oracle_action_only_pcb_lane_change_and_promotion() {
             // separately carried action changes on B's exported candidate.
             o.routes(B, vec![candidate(!initially_self)], vec![]).await;
             let changed = o.drain_peer_available(A).await;
-            assert!(changed.iter().all(|msg| msg.withdraw.is_empty()));
+            assert!(
+                changed
+                    .iter()
+                    .all(|msg| msg.unicast_withdrawals().next().is_none())
+            );
             let changed: Vec<_> = changed.iter().flat_map(|msg| &msg.announce).collect();
             assert_eq!(
                 changed.len(),
@@ -5955,9 +5973,9 @@ async fn oracle_action_only_pcb_lane_change_and_promotion() {
             o.routes(A, vec![], vec![pfx(1, 0)]).await;
             let promotion = o.drain_peer_available(A).await;
             assert!(
-                promotion
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                promotion.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "promotion must not duplicate the already admitted action"
             );
 
@@ -6030,7 +6048,11 @@ async fn oracle_action_only_same_update_pcb_winner_promotion() {
             o.routes(B, vec![candidate(B, 200, !initially_self)], vec![])
                 .await;
             let replacement = o.drain_peer_available(A).await;
-            assert!(replacement.iter().all(|msg| msg.withdraw.is_empty()));
+            assert!(
+                replacement
+                    .iter()
+                    .all(|msg| msg.unicast_withdrawals().next().is_none())
+            );
             let replacement: Vec<_> = replacement.iter().flat_map(|msg| &msg.announce).collect();
             assert_eq!(
                 replacement.len(),
@@ -6137,7 +6159,8 @@ async fn oracle_action_only_equivalent_profile_pcb_prior_suppression() {
                     o.drain_peer_available(peer)
                         .await
                         .iter()
-                        .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                        .all(|msg| msg.announce.is_empty()
+                            && msg.unicast_withdrawals().next().is_none()),
                     "an equivalent winner action change must not reach {peer}"
                 );
             }
@@ -6157,10 +6180,9 @@ async fn oracle_action_only_equivalent_profile_pcb_prior_suppression() {
             o.routes(B, vec![candidate(pfx(2, 0), !initially_self)], vec![])
                 .await;
             assert!(
-                o.drain_peer_available(A)
-                    .await
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                o.drain_peer_available(A).await.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "an equivalent lane action change must not reach the winner's source"
             );
             runs.push(o.finish().await);
@@ -6246,7 +6268,7 @@ async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
             );
             let withdrawn: Vec<_> = messages
                 .iter()
-                .flat_map(|msg| msg.withdraw.iter())
+                .flat_map(|msg| msg.unicast_withdrawals())
                 .collect();
             assert_eq!(withdrawn, vec![&(Prefix::V4(pfx(2, 0)), 0)]);
         }
@@ -6422,7 +6444,7 @@ async fn oracle_pcb_new_winner_keeps_unchanged_runner_up_without_reannounce() {
         grouped
             .values()
             .flatten()
-            .all(|message| message.withdraw.is_empty())
+            .all(|message| message.unicast_withdrawals().next().is_none())
     );
 }
 
@@ -6498,7 +6520,7 @@ async fn oracle_pcb_lane_only_churn_reaches_only_the_best_source() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .all(|msg| msg.withdraw.is_empty()),
+                .all(|msg| msg.unicast_withdrawals().next().is_none()),
             "lane churn under a standing best must never reach a wire as a withdraw"
         );
     }
@@ -6590,7 +6612,7 @@ async fn oracle_pcb_route_refresh_replays_runner_up_substitution() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .all(|msg| msg.withdraw.is_empty()),
+                .all(|msg| msg.unicast_withdrawals().next().is_none()),
             "refresh replay must not withdraw anything"
         );
     }
@@ -7403,10 +7425,9 @@ async fn oracle_pcb_rs_control_equivalent_fallback_action_is_suppressed() {
             );
             o.routes(B, vec![fallback(!initially_self)], vec![]).await;
             assert!(
-                o.drain_peer_available(D)
-                    .await
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                o.drain_peer_available(D).await.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "force_ungrouped={force_ungrouped}: an equivalent fallback action change \
                  must not reach D"
             );
@@ -7534,10 +7555,9 @@ async fn oracle_pcb_rs_control_equivalent_fallback_action_with_winner_delta() {
                 .await;
             }
             assert!(
-                o.drain_peer_available(D)
-                    .await
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                o.drain_peer_available(D).await.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "promote={promote} force_ungrouped={force_ungrouped}: an equivalent \
                  action change must not reach D"
             );
@@ -7594,7 +7614,7 @@ async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .flat_map(|msg| msg.withdraw.iter())
+                .flat_map(|msg| msg.unicast_withdrawals())
                 .all(|(prefix, _)| *prefix != Prefix::V4(pfx(3, 0))),
             "{member} never held p3"
         );
@@ -7602,7 +7622,7 @@ async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
     assert!(
         grouped[&peer_v4(D)]
             .iter()
-            .flat_map(|msg| msg.withdraw.iter())
+            .flat_map(|msg| msg.unicast_withdrawals())
             .all(|(prefix, _)| *prefix != Prefix::V4(pfx(4, 0))),
         "D never held its own p4"
     );
@@ -7802,15 +7822,18 @@ async fn oracle_action_only_single_best_after_clean_regroup() {
                 !force_ungrouped
             );
             assert!(
-                o.drain_peer_available(C)
-                    .await
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                o.drain_peer_available(C).await.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "clean regroup must preserve the old action without replaying it"
             );
             o.routes(A, vec![candidate(!initially_self)], vec![]).await;
             let changed = o.drain_peer_available(C).await;
-            assert!(changed.iter().all(|msg| msg.withdraw.is_empty()));
+            assert!(
+                changed
+                    .iter()
+                    .all(|msg| msg.unicast_withdrawals().next().is_none())
+            );
             let changed: Vec<_> = changed.iter().flat_map(|msg| &msg.announce).collect();
             assert_eq!(changed.len(), 1);
             assert_eq!(
@@ -7905,7 +7928,11 @@ async fn oracle_action_only_refusal_regroup_and_replay() {
         assert_route_parity(&runs[0], &runs[1]);
         for stream in &runs {
             let messages = &stream[&peer_v4(C)];
-            assert!(messages.iter().all(|msg| msg.withdraw.is_empty()));
+            assert!(
+                messages
+                    .iter()
+                    .all(|msg| msg.unicast_withdrawals().next().is_none())
+            );
             let actions: Vec<_> = messages
                 .iter()
                 .flat_map(|msg| &msg.announce)

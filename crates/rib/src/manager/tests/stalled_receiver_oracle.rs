@@ -809,7 +809,7 @@ impl Arm {
 
     fn rows(update: &OutboundRouteUpdate) -> usize {
         update.announce.len()
-            + update.withdraw.len()
+            + update.unicast_withdrawals().count()
             + update.evpn_announce.len()
             + update.evpn_withdraw.len()
     }
@@ -880,7 +880,7 @@ impl Arm {
                 .announce
                 .iter()
                 .map(|row| (row.0, row.1))
-                .chain(message.withdraw.iter().copied())
+                .chain(message.unicast_withdrawals().copied())
                 .map(|(prefix, path_id)| Key {
                     family: match prefix {
                         Prefix::V4(_) => V4,
@@ -1366,7 +1366,7 @@ impl Harness {
                             && sent[0].end_of_rib.is_empty()
                             && sent[0].refresh_markers.is_empty()
                             && !sent[0].announce.is_empty()
-                            && sent[0].withdraw.is_empty()
+                            && sent[0].unicast_withdrawals().next().is_none()
                             && sent[0].evpn_withdraw.is_empty()
                     })
             });

@@ -263,7 +263,7 @@ fn wire_prefixes(outbound_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> HashS
         for route in update.announce.iter() {
             advertised.insert(route.prefix);
         }
-        for (prefix, _) in &update.withdraw {
+        for (prefix, _) in update.unicast_withdrawals() {
             advertised.remove(prefix);
         }
     }
@@ -2349,7 +2349,7 @@ async fn wire_prefixes_until(
         for route in update.announce.iter() {
             advertised.insert(route.prefix);
         }
-        for (prefix, _) in &update.withdraw {
+        for (prefix, _) in update.unicast_withdrawals() {
             advertised.remove(prefix);
         }
     }

@@ -139,11 +139,15 @@ async fn channel_full_marks_dirty_and_resyncs() {
     // was already successfully enqueued before the channel filled, so it
     // does not need to be re-announced unless it diverged.
     assert!(
-        resync.withdraw.contains(&(Prefix::V4(prefix1), 0)),
+        resync
+            .unicast_withdrawals()
+            .any(|row| row == &(Prefix::V4(prefix1), 0)),
         "resync should withdraw prefix1 (no longer in Loc-RIB)"
     );
     assert!(
-        !resync.withdraw.contains(&(Prefix::V4(prefix2), 0)),
+        !resync
+            .unicast_withdrawals()
+            .any(|row| row == &(Prefix::V4(prefix2), 0)),
         "resync should not withdraw prefix2"
     );
 
@@ -304,7 +308,7 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     // The resync should fire despite the intervening queries.
     let resync = out_rx.recv().await.unwrap();
     assert!(
-        !resync.announce.is_empty() || !resync.withdraw.is_empty(),
+        !resync.announce.is_empty() || resync.unicast_withdrawals().next().is_some(),
         "resync should produce updates despite query churn"
     );
 
@@ -458,7 +462,7 @@ async fn initial_dump_failure_resyncs_via_timer() {
         "resync should announce the route from Loc-RIB"
     );
     assert_eq!(resync.announce[0].prefix, Prefix::V4(prefix));
-    assert_eq!(resync.withdraw.len(), 0);
+    assert_eq!(resync.unicast_withdrawals().count(), 0);
     assert_eq!(resync.end_of_rib, ipv4_sendable());
 
     // AdjRibOut should now reflect Loc-RIB
@@ -863,7 +867,7 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
         "first post-failover update must be the initial dump EoR or the inbound \
          refresh request, got announce={} withdraw={}",
         dump.announce.len(),
-        dump.withdraw.len(),
+        dump.unicast_withdrawals().count(),
     );
 
     // FAILOVER, half 2 — inbound: W's Adj-RIB-In was cleared by the

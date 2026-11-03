@@ -105,7 +105,10 @@ fn non_gr_orf_refresh_completes_initial_eor_owed_through_selection_hold() {
             update.refresh_markers.is_empty(),
             "initial EoR is still owed"
         );
-        assert_eq!(update.withdraw, [] as [(rustbgpd_wire::Prefix, u32); 0]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            [] as [(rustbgpd_wire::Prefix, u32); 0]
+        );
         for route in update.announce.iter() {
             assert_eq!(eors, 0, "route data must precede the initial EoR");
             announced.push((route.prefix, route.peer));

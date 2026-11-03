@@ -195,7 +195,7 @@ fn refresh_of(manager: &mut RibManager, address: Ipv4Addr, session_id: u64) {
 fn apply(rx: &mut mpsc::Receiver<OutboundRouteUpdate>, rib: &mut PeerRib) -> Vec<&'static str> {
     let mut seen = Vec::new();
     while let Ok(update) = rx.try_recv().map(delivered) {
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             rib.remove(key);
         }
         for route in update.announce.iter() {

@@ -189,7 +189,7 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     assert_eq!(dump.announce.len(), 1, "exactly the filtered best");
     assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(dump.announce[0].path_id, 0, "single-best shape");
-    assert_eq!(dump.withdraw.len(), 0);
+    assert_eq!(dump.unicast_withdrawals().count(), 0);
     drain_eor(&mut mitigated_rx).await;
 
     // Adj-RIB-Out / ListAdvertisedRoutes present the same shape.
@@ -257,7 +257,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
     assert_eq!(replacement.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(replacement.announce[0].path_id, 0);
     assert!(
-        replacement.withdraw.is_empty(),
+        replacement.unicast_withdrawals().next().is_none(),
         "path-id 0 replacement is an implicit withdraw"
     );
     assert!(out_rx.try_recv().map(delivered).is_err());
@@ -283,7 +283,10 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
         .map(delivered)
         .expect("policy-added NO_ADVERTISE withdraws the per-client winner");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix()), 0)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix()), 0)]
+    );
     let response = collect_advertised_routes(&tx, target).await;
     assert!(response.is_empty());
 
@@ -338,7 +341,7 @@ async fn source_member_of_best_gets_runner_up() {
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(update.announce[0].path_id, 0);
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -487,7 +490,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
     assert!(
-        update.withdraw.is_empty(),
+        update.unicast_withdrawals().next().is_none(),
         "filtered-best flip must be an implicit replace, not withdraw+announce"
     );
     assert!(
@@ -526,7 +529,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].peer, peer_v4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -566,7 +569,7 @@ async fn route_refresh_replays_filtered_best() {
     );
     assert_eq!(replay.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(replay.announce[0].path_id, 0);
-    assert_eq!(replay.withdraw.len(), 0);
+    assert_eq!(replay.unicast_withdrawals().count(), 0);
 
     drop(tx);
     handle.await.unwrap();

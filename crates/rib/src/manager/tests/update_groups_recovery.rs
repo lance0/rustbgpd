@@ -86,7 +86,10 @@ fn non_full_encoder_refusal_retains_the_owed_withdrawal_for_recovery() {
     manager.peer_export_encoders.insert(member, encoder);
     while manager.resync_dirty_peers_bounded() {}
     let recovered = receiver.try_recv().map(delivered).unwrap();
-    assert_eq!(recovered.withdraw, vec![(Prefix::V4(prefix(1)), 0)]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix(1)), 0)]
+    );
     assert!(!manager.dirty_peers.contains(&member));
     assert_eq!(manager.group_recovery_fallback(member), None);
 }
@@ -160,7 +163,10 @@ fn missing_completed_proof_resync_counts_fallback_and_keeps_the_owed_withdrawal(
 
     while manager.resync_dirty_peers_bounded() {}
     let recovered = receiver.try_recv().unwrap();
-    assert_eq!(recovered.withdraw, vec![key]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![key]
+    );
     assert_eq!(fallback_count(&manager, "missing_proof"), 1.0);
     assert!(!manager.dirty_peers.contains(&member));
     assert_eq!(manager.group_recovery_fallback(member), None);
@@ -241,7 +247,10 @@ fn reserve_refusal_without_a_durable_fallback_keeps_the_owed_withdrawal() {
 
     while manager.resync_dirty_peers_bounded() {}
     let recovered = receiver.try_recv().map(delivered).unwrap();
-    assert_eq!(recovered.withdraw, vec![owed]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![owed]
+    );
     assert_eq!(
         recovered
             .announce
@@ -372,9 +381,9 @@ fn proof_refused_initial_dump_settles_without_a_second_replay() {
 
         let initial = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(initial.announce.len(), prefixes.len());
-        assert!(initial.withdraw.is_empty() && initial.end_of_rib.is_empty());
+        assert!(initial.unicast_withdrawals().next().is_none() && initial.end_of_rib.is_empty());
         let eor = receiver.try_recv().map(delivered).unwrap();
-        assert!(eor.announce.is_empty() && eor.withdraw.is_empty());
+        assert!(eor.announce.is_empty() && eor.unicast_withdrawals().next().is_none());
         assert_eq!(eor.end_of_rib, ipv4_sendable());
         assert_eq!(fallback_count(&manager, "peer_limit"), 1.0);
         assert!(!manager.dirty_peers.contains(&member));
@@ -446,7 +455,10 @@ fn proof_refused_refresh_settles_only_its_own_recovery_state() {
         let response = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(response.announce.len(), 1);
         assert_eq!(response.announce[0].prefix, Prefix::V4(prefix(2)));
-        assert_eq!(response.withdraw, vec![(Prefix::V4(prefix(1)), 0)]);
+        assert_eq!(
+            response.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(Prefix::V4(prefix(1)), 0)]
+        );
         assert_eq!(response.end_of_rib, ipv4_sendable());
         assert_eq!(
             response.refresh_markers,
@@ -532,7 +544,11 @@ fn common_recovery_cap_refusal_keeps_owed_withdrawals_without_reset() {
     source_update(&mut manager, &[], &[1]);
     while manager.resync_dirty_peers_bounded() {}
     let recovered = receiver.try_recv().map(delivered).unwrap();
-    assert!(recovered.withdraw.contains(&(Prefix::V4(prefix(1)), 0)));
+    assert!(
+        recovered
+            .unicast_withdrawals()
+            .any(|row| row == &(Prefix::V4(prefix(1)), 0))
+    );
     assert!(manager.outbound_peers.contains_key(&member));
     assert!(!manager.dirty_peers.contains(&member));
     assert_eq!(manager.group_recovery_fallback(member), None);
@@ -654,7 +670,7 @@ fn a_failed_initial_dump_has_no_admitted_withdrawal_duties() {
     let eor = receiver.try_recv().map(delivered).unwrap();
     assert!(eor.announce.is_empty());
     assert!(
-        eor.withdraw.is_empty(),
+        eor.unicast_withdrawals().next().is_none(),
         "the initial route was never admitted"
     );
     assert_eq!(eor.end_of_rib, ipv4_sendable());
@@ -748,7 +764,7 @@ fn a_batched_refusal_retains_source_keys_for_targeted_recovery() {
         );
         while manager.resync_dirty_peers_bounded() {}
         while let Ok(update) = receiver.try_recv().map(delivered) {
-            for key in update.withdraw {
+            for &key in update.unicast_withdrawals() {
                 assert!(
                     admitted.remove(&key),
                     "withdrawal lacks admitted source proof"
@@ -816,7 +832,11 @@ fn budget_refused_batched_narrowing_keeps_current_withdrawal_duties() {
     manager.peer_export_encoders.insert(member, encoder);
     while manager.resync_dirty_peers_bounded() {}
     let recovered = receiver.try_recv().map(delivered).unwrap();
-    assert!(recovered.withdraw.contains(&(Prefix::V4(prefix(1)), 0)));
+    assert!(
+        recovered
+            .unicast_withdrawals()
+            .any(|row| row == &(Prefix::V4(prefix(1)), 0))
+    );
     assert!(!manager.dirty_peers.contains(&member));
     assert!(manager.outbound_peers.contains_key(&member));
     assert_eq!(manager.group_recovery_fallback(member), None);
@@ -864,7 +884,10 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
     assert_eq!(first.announce[0].peer, peer_v4(source_b));
     inject(&mut manager, source_a, 300);
     while let Ok(update) = receiver.try_recv().map(delivered) {
-        assert_eq!(update.withdraw, Vec::<(Prefix, u32)>::new());
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            Vec::<(Prefix, u32)>::new()
+        );
         assert!(
             update
                 .announce
@@ -882,7 +905,7 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
     }
     let mut withdrawals = Vec::new();
     while let Ok(update) = receiver.try_recv().map(delivered) {
-        withdrawals.extend(update.withdraw);
+        withdrawals.extend(update.unicast_withdrawals().copied());
         assert!(
             update
                 .announce
@@ -949,7 +972,10 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
     while manager.process_next_route_chunk() {}
     while let Ok(update) = receiver.try_recv().map(delivered) {
         assert!(update.announce.is_empty());
-        assert_eq!(update.withdraw, Vec::<(Prefix, u32)>::new());
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            Vec::<(Prefix, u32)>::new()
+        );
     }
     assert_eq!(
         manager.group_ribs[&manager.grouped_member_of(member).unwrap()]
@@ -961,7 +987,7 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
     while let Ok(update) = receiver.try_recv().map(delivered) {
         assert!(update.announce.is_empty());
         assert!(
-            update.withdraw.is_empty(),
+            update.unicast_withdrawals().next().is_none(),
             "the staged OTC route was never admitted"
         );
     }
@@ -986,7 +1012,7 @@ fn a_same_session_table_replay_rejection_withdraws_the_actual_prior() {
     manager.send_initial_table(member);
     let mut withdrawals = Vec::new();
     while let Ok(update) = receiver.try_recv().map(delivered) {
-        withdrawals.extend(update.withdraw);
+        withdrawals.extend(update.unicast_withdrawals().copied());
         assert!(update.announce.is_empty());
     }
     assert_eq!(withdrawals, vec![(Prefix::V4(prefix(1)), 0)]);
@@ -1032,7 +1058,7 @@ fn grouped_capture_orders_real_old_values_and_recovers_exact_withdrawals() {
     for (peer, mut receiver) in peers.into_iter().zip(receivers) {
         let mut actual = Vec::new();
         while let Ok(update) = receiver.try_recv().map(delivered) {
-            actual.extend(update.withdraw);
+            actual.extend(update.unicast_withdrawals().copied());
         }
         assert_eq!(actual.len(), withdrawn.len());
         assert_eq!(
@@ -1156,9 +1182,8 @@ fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
     while let Ok(update) = receiver.try_recv() {
         withdrawals.extend(
             update
-                .withdraw
-                .into_iter()
-                .map(|(p, id)| ExactExportKey::Unicast(p, id)),
+                .unicast_withdrawals()
+                .map(|&(p, id)| ExactExportKey::Unicast(p, id)),
         );
         withdrawals.extend(update.vpn_withdraw.into_iter().map(ExactExportKey::Vpn));
     }
@@ -1295,7 +1320,7 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
     while manager.resync_dirty_peers_bounded() {}
     let mut withdrawals = Vec::new();
     while let Ok(update) = receiver.try_recv().map(delivered) {
-        withdrawals.extend(update.withdraw);
+        withdrawals.extend(update.unicast_withdrawals().copied());
     }
     assert_eq!(withdrawals, vec![(Prefix::V4(prefix(1)), 0)]);
     assert_eq!(

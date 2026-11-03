@@ -494,7 +494,7 @@ async fn labeled_routes_received_reflects_and_withdraws_to_eligible_peer() {
 
     let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
     assert_eq!(
@@ -1068,7 +1068,7 @@ async fn route_refresh_labeled_re_advertises_routes() {
 
     let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.labeled_announce[0].key(), key);
     assert_eq!(update.labeled_withdraw.len(), 0);

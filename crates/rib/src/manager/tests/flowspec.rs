@@ -51,7 +51,7 @@ async fn send_initial_table_includes_flowspec_routes() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.flowspec_announce.len(), 1);
     assert_eq!(update.flowspec_announce[0].rule, fs_rule);
     assert_eq!(update.flowspec_withdraw.len(), 0);
@@ -126,7 +126,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.flowspec_announce.len(), 1);
     assert_eq!(update.flowspec_announce[0].rule, fs_rule);
     assert_eq!(update.flowspec_withdraw.len(), 0);
@@ -202,7 +202,7 @@ async fn dirty_resync_retries_flowspec_updates() {
 
     let resync = out_rx.recv().await.unwrap();
     assert!(resync.announce.is_empty());
-    assert_eq!(resync.withdraw.len(), 0);
+    assert_eq!(resync.unicast_withdrawals().count(), 0);
     assert_eq!(resync.flowspec_announce.len(), 1);
     assert_eq!(resync.flowspec_announce[0].rule, fs_rule);
     assert_eq!(resync.flowspec_withdraw.len(), 0);
@@ -506,7 +506,7 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                 let mut announced = Vec::new();
                 while let Ok(update) = out_rx.try_recv() {
                     assert!(
-                        update.withdraw.is_empty(),
+                        update.unicast_withdrawals().next().is_none(),
                         "preserved unicast must not be withdrawn"
                     );
                     withdrawn.extend(update.flowspec_withdraw);

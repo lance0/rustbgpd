@@ -234,7 +234,7 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
     assert_eq!(replacement.announce.len(), 1);
     assert_eq!(replacement.announce[0].path_id, 1);
     assert_eq!(replacement.announce[0].next_hop, path_7.next_hop);
-    assert_eq!(replacement.withdraw.len(), 0);
+    assert_eq!(replacement.unicast_withdrawals().count(), 0);
     assert!(
         matches!(
             out_rx.try_recv().map(delivered),
@@ -264,7 +264,10 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
     assert_eq!(reranked.announce.len(), 1);
     assert_eq!(reranked.announce[0].path_id, 1);
     assert_eq!(reranked.announce[0].next_hop, path_9.next_hop);
-    assert_eq!(reranked.withdraw, vec![(Prefix::V4(prefix), 2)]);
+    assert_eq!(
+        reranked.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 2)]
+    );
     assert!(
         matches!(
             out_rx.try_recv().map(delivered),
@@ -372,7 +375,10 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
         .map(delivered)
         .expect("withdrawal emitted after query synchronization");
     assert!(update.announce.is_empty(), "the sibling keeps its path ID");
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 1)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 1)]
+    );
     assert!(
         out_rx.try_recv().map(delivered).is_err(),
         "one delta is sufficient"
@@ -412,7 +418,10 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
         .map(delivered)
         .expect("policy-added NO_ADVERTISE withdraws the remaining rank");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 2)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 2)]
+    );
     let response = collect_advertised_routes(&tx, target).await;
     assert!(response.is_empty());
 
@@ -702,7 +711,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     let update = out_rx.recv().await.map(delivered).unwrap();
     // Should have a withdrawal for the removed path
     assert!(
-        !update.withdraw.is_empty(),
+        update.unicast_withdrawals().next().is_some(),
         "removing a candidate should produce a withdrawal"
     );
 

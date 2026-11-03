@@ -317,7 +317,7 @@ async fn orf_immediate_withdraws_now_denied_prefix() {
             .await
             .expect("withdraw should arrive")
             .unwrap();
-        withdrawn.extend(u.withdraw.iter().map(|(p, _)| *p));
+        withdrawn.extend(u.unicast_withdrawals().map(|(p, _)| *p));
     }
     assert!(withdrawn.contains(&Prefix::V4(Ipv4Prefix::new(
         Ipv4Addr::new(192, 168, 0, 0),
@@ -432,7 +432,7 @@ async fn orf_defer_then_plain_refresh_withdraws_now_denied_prefix() {
             .await
             .expect("refresh response should arrive")
             .expect("outbound channel open");
-        withdrawn.extend(update.withdraw.iter().map(|(p, _)| *p));
+        withdrawn.extend(update.unicast_withdrawals().map(|(p, _)| *p));
     }
     assert!(
         withdrawn.contains(&denied),

@@ -27,11 +27,11 @@ fn apply(
     let mut markers = 0;
     while let Ok(update) = rx.try_recv() {
         assert!(
-            (update.withdraw.is_empty() && update.announce.is_empty())
+            (update.unicast_withdrawals().next().is_none() && update.announce.is_empty())
                 || update.exact_export_snapshot.is_some(),
             "the transport resets a session on a route-bearing envelope without its export snapshot"
         );
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             rib.remove(key);
         }
         for route in update.announce.iter() {
@@ -392,7 +392,7 @@ fn add_path_change_across_the_flap_keeps_the_live_rtbh() {
     for _ in 0..4 {
         manager.resync_dirty_peers_bounded();
         while let Ok(update) = new_rx.try_recv() {
-            for &(prefix, _) in &update.withdraw {
+            for &(prefix, _) in update.unicast_withdrawals() {
                 live.remove(&(prefix, 0));
             }
             for route in update.announce.iter() {
@@ -2034,7 +2034,10 @@ fn dormant_family_keys_retire_once_its_end_of_rib_is_sent() {
     let mut drain = |rib: &mut PeerRib| {
         let mut markers = 0;
         while let Ok(update) = new_rx.try_recv() {
-            assert!(!update.withdraw.contains(&key), "nothing is withdrawn");
+            assert!(
+                !update.unicast_withdrawals().any(|row| row == &key),
+                "nothing is withdrawn"
+            );
             for route in update.announce.iter() {
                 rib.insert((route.prefix, route.path_id), false);
             }
@@ -2244,7 +2247,10 @@ fn settled_carry_retires_its_family_once_its_end_of_rib_goes_out() {
     let mut markers = 0;
     for _ in 0..8 {
         while let Ok(update) = new_rx.try_recv() {
-            assert!(!update.withdraw.contains(&key), "nothing is withdrawn");
+            assert!(
+                !update.unicast_withdrawals().any(|row| row == &key),
+                "nothing is withdrawn"
+            );
             if update.end_of_rib.contains(&FAMILY) {
                 markers += 1;
                 rib.retain(|_, stale| !*stale);

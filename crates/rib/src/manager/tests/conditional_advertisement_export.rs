@@ -227,7 +227,7 @@ fn drain(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Wire {
                 .iter()
                 .map(|route| (route.prefix, route.path_id)),
         );
-        wire.withdrawn.extend(update.withdraw.iter().copied());
+        wire.withdrawn.extend(update.unicast_withdrawals().copied());
     }
     wire
 }
@@ -1309,7 +1309,10 @@ async fn run_loop_withdraws_after_the_settle_window() {
     let withdrawn_at = tokio::time::timeout(Duration::from_mins(1), async {
         loop {
             let update = out_rx.recv().await.map(delivered).unwrap();
-            if update.withdraw.contains(&(v4(controlled()), 0)) {
+            if update
+                .unicast_withdrawals()
+                .any(|row| row == &(v4(controlled()), 0))
+            {
                 break tokio::time::Instant::now();
             }
         }

@@ -171,7 +171,10 @@ fn observe(
     let mut updates = 0;
     while let Ok(update) = receiver.try_recv().map(delivered) {
         updates += 1;
-        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            [] as [(Prefix, u32); 0]
+        );
         for &(afi, safi, _) in &update.refresh_markers {
             assert!(
                 v4_open || (afi, safi) != V4,
@@ -334,7 +337,10 @@ fn non_restarting_orf_peer_keeps_backpressured_honest_empty_initial_eor() {
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     let completed = target_rx.try_recv().map(delivered).unwrap();
     assert_eq!(completed.announce.len(), 0);
-    assert_eq!(completed.withdraw, [] as [(Prefix, u32); 0]);
+    assert_eq!(
+        completed.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        [] as [(Prefix, u32); 0]
+    );
     assert_eq!(completed.end_of_rib.len(), 2);
     assert_eq!(
         completed.end_of_rib.into_iter().collect::<HashSet<_>>(),
@@ -550,7 +556,10 @@ fn withheld_family_unlock_keeps_orf_initial_eor_held_during_selection_release() 
     assert!(manager.loc_rib.get(&ordinary_v6(0x100)).is_some());
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     while let Ok(update) = target_rx.try_recv().map(delivered) {
-        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            [] as [(Prefix, u32); 0]
+        );
         assert!(
             update
                 .announce
@@ -604,7 +613,10 @@ fn still_withheld_orf_family_keeps_fresh_empty_completion_on_selection_release()
     });
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     while let Ok(update) = target_rx.try_recv().map(delivered) {
-        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            [] as [(Prefix, u32); 0]
+        );
         for route in update.announce.iter() {
             assert_ne!(route.prefix, ordinary_v6(0x100));
             seen.insert(route.prefix);
@@ -727,7 +739,10 @@ fn still_withheld_orf_family_completes_on_clean_selection_release() {
     assert!(!manager.selection_convergence_held(V6));
     let mut released = Vec::new();
     while let Ok(update) = target_rx.try_recv().map(delivered) {
-        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            [] as [(Prefix, u32); 0]
+        );
         assert_eq!(update.announce.len(), 0, "a withheld family sends no table");
         released.extend(update.end_of_rib.iter().copied());
     }
@@ -751,7 +766,10 @@ fn pump(
 ) {
     for _ in 0..16 {
         while let Ok(update) = receiver.try_recv().map(delivered) {
-            assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+            assert_eq!(
+                update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                [] as [(Prefix, u32); 0]
+            );
             announced.extend(update.announce.iter().map(|route| route.prefix));
             eors.extend(update.end_of_rib.iter().copied());
         }

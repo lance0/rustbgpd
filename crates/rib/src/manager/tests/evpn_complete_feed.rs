@@ -1371,7 +1371,7 @@ fn assert_dirty_owned_refresh_resync(common_delta: bool) {
 
     manager.resync_dirty_peers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
-    assert!(marker.announce.is_empty() && marker.withdraw.is_empty());
+    assert!(marker.announce.is_empty() && marker.unicast_withdrawals().next().is_none());
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
     assert_eq!(marker.end_of_rib, [EVPN]);
     assert_eq!(
@@ -1805,7 +1805,7 @@ fn review_mixed_family_marker_refusal_retries_every_ready_family_without_data() 
     manager.resync_dirty_peers_bounded();
     let mut markers = HashSet::new();
     while let Ok(update) = output.try_recv().map(delivered) {
-        assert!(update.announce.is_empty() && update.withdraw.is_empty());
+        assert!(update.announce.is_empty() && update.unicast_withdrawals().next().is_none());
         assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
         markers.extend(update.end_of_rib);
     }
@@ -1901,7 +1901,7 @@ fn review_ready_unicast_marker_does_not_wait_for_held_evpn() {
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [unicast]);
     assert!(marker.announce.is_empty() && marker.evpn_announce.is_empty());
-    assert!(marker.withdraw.is_empty() && marker.evpn_withdraw.is_empty());
+    assert!(marker.unicast_withdrawals().next().is_none() && marker.evpn_withdraw.is_empty());
     assert_eq!(manager.pending_eor[&peer], HashSet::from([EVPN]));
     assert!(manager.evpn_feed_is_current(peer));
     assert_eq!(manager.evpn_feed_receipt_count, 1);
@@ -1952,7 +1952,7 @@ fn review_refused_unicast_marker_preserves_held_evpn_coverage() {
     manager.resync_dirty_peers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [unicast]);
-    assert!(marker.announce.is_empty() && marker.withdraw.is_empty());
+    assert!(marker.announce.is_empty() && marker.unicast_withdrawals().next().is_none());
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
     assert!(output.try_recv().map(delivered).is_err());
     assert_eq!(manager.pending_eor[&peer], HashSet::from([EVPN]));
@@ -1964,7 +1964,7 @@ fn review_refused_unicast_marker_preserves_held_evpn_coverage() {
     manager.resync_dirty_peers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [EVPN]);
-    assert!(marker.announce.is_empty() && marker.withdraw.is_empty());
+    assert!(marker.announce.is_empty() && marker.unicast_withdrawals().next().is_none());
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
     assert!(output.try_recv().map(delivered).is_err());
     assert!(!manager.pending_eor.contains_key(&peer));
@@ -1990,7 +1990,7 @@ fn review_held_unicast_marker_outlives_retired_evpn_proof_without_route_replay()
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [EVPN]);
     assert!(marker.announce.is_empty() && marker.evpn_announce.is_empty());
-    assert!(marker.withdraw.is_empty() && marker.evpn_withdraw.is_empty());
+    assert!(marker.unicast_withdrawals().next().is_none() && marker.evpn_withdraw.is_empty());
     assert!(manager.evpn_recovery.is_dormant(handle));
     assert_eq!(manager.evpn_feed_receipt_count, 0);
     assert!(!manager.has_evpn_feed_completion(peer));
@@ -2003,7 +2003,7 @@ fn review_held_unicast_marker_outlives_retired_evpn_proof_without_route_replay()
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [unicast]);
     assert!(marker.announce.is_empty() && marker.evpn_announce.is_empty());
-    assert!(marker.withdraw.is_empty() && marker.evpn_withdraw.is_empty());
+    assert!(marker.unicast_withdrawals().next().is_none() && marker.evpn_withdraw.is_empty());
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
     assert!(!manager.pending_eor.contains_key(&peer));
     assert!(!manager.resync_tick_pending());
