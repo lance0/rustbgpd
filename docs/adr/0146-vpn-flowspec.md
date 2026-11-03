@@ -1,6 +1,6 @@
 # ADR-0146: IPv4 VPN FlowSpec origination (AFI 1 / SAFI 134)
 
-**Status:** Proposed (draft for decision; nothing below is implemented)
+**Status:** Accepted (2026-11-03); implementation follows the slices below.
 **Date:** 2026-11-03
 **Amends:** The "No VPN FlowSpec (SAFI 134)" decision in
 [ADR-0035](0035-flowspec.md), for local origination only. ADR-0035's other
@@ -45,9 +45,11 @@ not the default unicast table. §7 actions are the same as for SAFI 133.
   with its RTs removed
   ([`server.go`](https://github.com/osrg/gobgp/blob/v4.11.0/pkg/server/server.go),
   [`path.go`](https://github.com/osrg/gobgp/blob/v4.11.0/internal/pkg/table/path.go)).
-  Releases before v4.11.0 encode and decode the two-octet FlowSpec length
-  without the `0xf` nibble, so they cannot exchange rules of 240 octets or more.
-  v4.11.0 masks and sets it as §4.1 requires.
+  Releases before v4.11.0 get the two-octet FlowSpec length wrong. The
+  decoder does not mask the `0xf` nibble, and the encoder switches to the
+  two-octet form one octet early, then writes it over the payload. Rules whose
+  payload, including the RD, is 239 octets or more are therefore not exchanged
+  correctly. v4.11.0 masks and sets the length as §4.1 requires.
 - **IOS XR** enables `vpnv4 flowspec` under BGP. Each VRF has an `ipv4
   flowspec` address family whose import RTs select the rules it takes. `show
   bgp vpnv4 flowspec vrf <name>` and `show flowspec vrf <name>` verify the result
@@ -81,7 +83,7 @@ not the default unicast table. §7 actions are the same as for SAFI 133.
 | # | Decision | Change after v1 |
 |---|----------|-----------------|
 | 1 | Explicit wire scope in the API: `afi_safi` + RD identify the rule; RTs are attributes. No VRF objects in the daemon. | Costly |
-| 2 | Identity is `(family, RD, components)`. RD types 0, 1, 2 only; RTs use the existing RT grammar. An RT-only change is `REPLACED`; an RD change is a different rule. | Costly |
+| 2 | Identity is `(family, RD, components)`. RD types 0, 1, 2 only; RTs use the existing RT grammar. An RT-only change follows the existing upsert and guarded rules for the key; an RD change is a different rule. The RD scopes keys and revisions, not lease deadlines. | Costly |
 | 3 | Additive API: one new `AddressFamily` value plus `rd`/`route_targets` fields on the existing FlowSpec messages. `UNSPECIFIED` keeps meaning SAFI 133 only. Support is published as a release floor plus a read-only probe. | Costly |
 | 4 | Names: config `l3vpn_ipv4_flowspec`, rpol `vpnv4-flowspec`, metric family `l3vpn_ipv4_flowspec`, enum `ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC = 13`. | Costly |
 | 5 | Originate only. Received SAFI 134 is decoded, then discarded and counted: never stored, reflected or validated. No RT-Constrain gating. | Cheap (additive) |
@@ -121,8 +123,14 @@ admission* to `(rd, route_targets)`. It must never be stored as the key.
 
 **Identity.** The rule key is `(family, rd, components)`. Global SAFI 133
 keys have no RD; SAFI 134 keys always have one. The same components can
-exist in global scope and in any number of RDs at once, and each is
-added, replaced, leased, expired, fenced by revision and deleted on its own.
+exist in global scope and in any number of RDs at once. Each key is added,
+replaced, fenced by its own admission revision and deleted on its own.
+
+The RD isolates rule identity, not lease deadlines. Under ADR-0141, one owner
+holds one lease, and its deadline covers every key that owner holds across
+RDs and families. When one owner's lease expires, all of its keys are
+withdrawn in one batch, whatever their RDs. A controller that needs
+independent deadlines per VPN uses a separate owner per VPN.
 
 **RD.** RFC 4364 §4.2 Types 0, 1 and 2, in the text the API already
 accepts. The structured forms are `asn16:u32`, `a.b.c.d:u16` and `asn32:u16`,
@@ -149,6 +157,12 @@ so it re-injects with the same encoding. A typed RT that is repeated, or
 also supplied raw, returns `INVALID_ARGUMENT`, following ADR-0143's rule for
 typed and raw ambiguity.
 
+Read-back shows each RT twice: typed in `route_targets` and raw in
+`extended_communities`. A controller that re-injects a read-back row must use
+one form for the RTs: either the typed `route_targets` with those communities
+removed from the raw list, or the raw list with `route_targets` left empty.
+Copying both lists is a deliberate duplicate and fails validation.
+
 **RT versus redirect.** A scope RT (sub-type `0x02`) controls VRF import.
 The RFC 8955 §7.4 / RFC 7674 redirect-to-VRF action (types `0x80`–`0x82`,
 sub-type `0x08`) stays an action in `actions` and is never counted as a scope
@@ -157,9 +171,18 @@ the FlowSpec RT parser is shared with the redirect parser, not the EVPN one.
 
 **Changes.**
 
-- **RT-only change.** The same key with different RTs is the existing upsert
-  path: it returns `REPLACED` and sends one UPDATE whose attributes implicitly
-  replace the old ones. No stale duplicate is created and no withdrawal is sent.
+- **RT-only change, plain or leased.** The same key with different RTs is the
+  existing upsert path. A plain add, or a leased add by the owner that holds
+  the key, returns `REPLACED` and creates no stale duplicate. While export
+  policy still permits the rule toward a peer, that peer gets one UPDATE whose
+  attributes implicitly replace the old ones, with no withdrawal. An RT change
+  can also make the rule ineligible: an export policy can match on RTs, for
+  example. A peer that was sent the rule before but is no longer eligible gets
+  a withdrawal.
+- **RT-only change, guarded.** Guarded rules keep ADR-0144 §3. A changed
+  payload under the held revision is `REVISION_MISMATCH`, so the controller
+  deletes the old revision and adds the new RTs under a new revision. Between
+  those two steps, the rule is withdrawn.
 - **RD change.** A different RD is a different key. The controller adds the
   new identity and deletes the old one. The daemon does not infer a move, so a
   partial failure leaves two explicit keys rather than a hidden one.
@@ -204,8 +227,10 @@ leaves the RIB, the lease table and the wire unchanged:
   `route_targets`, and RTs stay in the raw `extended_communities` too.
   `route_targets` is populated only on VPN rows.
 - **Lease listing.** `ListLeasedKeys` orders FlowSpec keys by family, then RD,
-  then rule. It returns `rd` for VPN keys. VPN keys count against the
-  existing per-owner cap of 16,384 keys.
+  then rule. Its page cursor encodes the SAFI and the RD with the rule, so a
+  walk resumes at the exact scoped key. It returns `rd` for VPN keys. VPN keys
+  count against the existing per-owner cap of 16,384 keys and share the
+  owner's single lease.
 - **Export dispositions.** `ListFlowSpecExportDispositions` is keyed by
   `(afi_safi, rd, components)`. A peer that did not negotiate (1, 134) reads
   `WITHHELD` `family_not_negotiated`, the existing reason. So a missing
@@ -415,16 +440,29 @@ counts, tests included.
 - The config family label.
 - `docs/reference/operations.md`: the metric row.
 
-**Crate release.** `MpReachNlri` and `MpUnreachNlri` gain public fields, which
-breaks `rustbgpd-wire` 0.x. The crate gets a minor bump under the existing
-publish order (wire, then fsm).
+**Crate release.** `MpReachNlri` and `MpUnreachNlri` gain public fields,
+which is a breaking change for `rustbgpd-wire` 0.x. The published crates
+move together:
+
+- `rustbgpd-wire` 0.28;
+- `rustbgpd-fsm` 0.15;
+- `rustbgpd-rpki` 0.10.
+
+FSM and RPKI re-export wire types, so a wire compatibility-line move is a
+minor bump for each of them (see the
+[embedding guide](../reference/embedding.md#4-which-crate-to-publish-next-and-why)).
+They are published in the existing order: wire, then fsm, then rpki. Each
+crate's changelog, the README usage snippets, the embedding guide examples
+and the root pins follow the published-crate release procedure.
 
 **Tests:**
 
 - Golden vectors for RD Types 0, 1 and 2, plus a raw unknown RD type on
   decode.
-- One-octet and extended lengths, including a rule that crosses 240 octets
-  only because of the RD. The 4095 bound includes the RD.
+- One-octet and extended lengths at the RD-inclusive boundary. A 239-octet
+  payload uses the one-octet length `0xef`, and a 240-octet payload uses
+  `0xf0f0`. One case crosses 240 octets only because of the RD. The 4095 bound
+  includes the RD.
 - Malformed input: a length below 8; an RD with no components; truncated input;
   a length that overruns. A malformed second NLRI must not misframe the first.
 - Non-zero NH-Len rejected. An `MP_UNREACH` withdrawal, and End-of-RIB as an
@@ -458,11 +496,19 @@ what happened to it.
 **Tests:**
 
 - **Coexistence.** Identical components in global scope, RD A and RD B
-  coexist. Replace, delete, lease expiry and a guarded revision mismatch in one
-  scope never touch the others.
-- **Changes.** An RT-only replace emits one announcement and no withdrawal,
-  and the advertised view shows only the new RTs. An RD change leaves the old
-  key until it is deleted.
+  coexist. Replace, delete and a guarded revision mismatch on one key never
+  touch the others. Rules held by different owners in different RDs expire
+  independently. When a single owner's lease expires, all of that owner's
+  keys in every RD are withdrawn together, as ADR-0141 specifies.
+- **RT changes.**
+  - A plain or leased RT-only replace emits one announcement and no
+    withdrawal toward a peer that stays eligible, and the advertised view
+    shows only the new RTs.
+  - A replace that makes the rule ineligible under export policy withdraws
+    it from the peers that had it.
+  - A guarded RT change with the same revision is `REVISION_MISMATCH`. Delete
+    and re-add under a new revision succeeds.
+- **RD change.** An RD change leaves the old key until it is deleted.
 - **Negotiation.** A peer without (1, 134) receives nothing, and End-of-RIB is
   sent per negotiated family. No UPDATE mixes SAFI 133 and 134.
 - **Refresh and recovery.** ROUTE-REFRESH for (1, 134) replays VPN rules only.
@@ -511,7 +557,15 @@ what happened to it.
   - components over 4087 octets, and a type 13 component.
 - **Old clients.** `UNSPECIFIED` excludes VPN rows in every view. An old
   client's echoed VPN key without `rd` is refused.
-- **Guarded and leased.** Revisions and lease expiry are independent per RD.
+- **Re-injection.** Re-injecting a read-back row with its typed RTs, or with
+  only their raw equivalents, is `UNCHANGED`. Copying both forms is
+  `INVALID_ARGUMENT`. The API reference documents the rule.
+- **Guarded and leased.** Admission revisions are per scoped key. One owner's
+  lease spans its keys in every RD and family; separate owners give separate
+  deadlines.
+- **Lease pagination.** A `ListLeasedKeys` walk whose page boundary falls
+  between identical components in global scope, RD A and RD B resumes without
+  skipping or repeating a key. The cursor carries the SAFI and the RD.
 - **Export dispositions.** `family_not_negotiated` is reported per peer.
 - **Old daemons.** Each VPN path gets a non-OK reply with no state change
   against the previous release, using the existing rollback qualification
@@ -539,78 +593,117 @@ what happened to it.
 
 **Files:**
 
-- A containerlab leg with the pinned GoBGP image, upgraded to v4.11.0 or
-  later. Older pins keep every rule below 240 octets, and the extended length
-  is proven by the slice 1 golden vectors instead.
+- A containerlab leg pinned to GoBGP v4.11.0. Earlier releases get the
+  two-octet length wrong.
 - Its driver script.
 - A receipt under `docs/artifacts/interop/`.
 
-**Checks:**
+**GoBGP checks:**
 
 - The OPEN negotiates (1, 134).
 - GoBGP's `ipv4-l3vpn-flowspec` RIB shows RD `44407:40`, RT `44407:777` and
   the discard action.
-- Two RDs and a global rule coexist. An RT-only replace and isolated deletes
-  behave as specified.
-- A peer without the family receives nothing and reads `family_not_negotiated`.
-- After a daemon restart, re-injection restores the rules.
-- A packet capture shows AFI 1 / SAFI 134 with the expected RD and RT, and
-  no SAFI 133 leak of a VPN rule.
+- **Length boundary.** Rules with RD-inclusive payloads of 239 and 240
+  octets arrive intact, with the one-octet and two-octet lengths. Releases
+  before v4.11.0 mishandle both.
+- **Scope.** One VPN rule and a global rule with identical components
+  coexist. A second RD acts as a negative control: its rule and its deletion
+  never affect the first RD's rule.
+- **RT changes.** A plain RT-only replace arrives as one replacement. A
+  guarded RT change goes through delete and re-add under a new revision.
+- **Negotiation.** A peer without the family receives nothing and reads
+  `family_not_negotiated`.
+- **Restart.** After a daemon restart, re-injection restores the rules.
+- **Capture.** A packet capture shows AFI 1 / SAFI 134 with the expected RD
+  and RT, and no SAFI 133 leak of a VPN rule.
 
-**Router receipt.** A separate, optional receipt comes from a real router (IOS
-XR first) with the requesting operator. It must show the rule received in the
-VPN table, installed only in the intended VRF, and dropping or policing
-traffic, and that withdrawal restores traffic. A wrong-RT rule and an
-unrelated VRF are the negative controls. Support claims rise only to the
-level proven.
+**IOS XR receipt.** The router receipt uses IOS XR, the requesting
+operator's platform. The sequence is an ASR 9901 proof of concept, then ASR
+9906 edge routers, then later the Cisco 8000 series (8201).
+
+Each step runs on one VRF, with a second RD as the negative control. The
+receipt records the router model and software release. It must show, for each
+action:
+
+- the rule received in the VPN table;
+- the rule installed only in the intended VRF;
+- the effect on traffic;
+- withdrawal restoring traffic.
+
+The actions are:
+
+- discard (traffic-rate 0);
+- rate limiting in bytes and in packets;
+- DSCP marking;
+- redirect-to-VRF;
+- redirect-to-IP.
+
+There are three cases besides the actions:
+
+- **Negative controls.** A rule with the wrong RT, and an unrelated VRF.
+- **Source-only match.** A rule whose only component is a source prefix
+  (type 2), dropping traffic from remote addresses.
+- **Validation.** RFC 8955 §6 rule (a), unchanged by RFC 9117, makes a rule
+  without a destination prefix infeasible unless the receiver relaxes it by
+  explicit configuration. §8 applies the same validation to VPN routes. The
+  receipt records the XR validation setting for the controller session. It
+  shows the source-only rule installed under that setting, or records the
+  refusal. A refusal is the receiver's validation, not a rustbgpd defect.
+
+Support claims rise only to the level each step proves. Cisco 8000 import of
+SAFI 134 into a VRF, and its enforcement of each action, stay unverified until
+router output from that platform exists. Junos and other receivers are not
+targets of this slice.
 
 **Release placement.** Slices 1–5 are feature work for the current v1 window.
 Slice 6 and the v1 inventory amendment can follow. Until then the surface
 ships outside v1, as ADR-0144's methods did before their amendment.
 
-## Open questions for the requesting operator
+## Operator answers and remaining questions
 
-Each question has a default, used unless the answer changes it.
+The requesting operator answered the scoping questions:
 
-1. **Which router imports SAFI 134?** The sample's FRR peer cannot, because FRR
-   has no SAFI 134. If that peer is VRF-bound in GoBGP, it receives plain SAFI
-   133 with the RTs removed. rustbgpd can already do that by injecting a global
-   rule toward that peer. *Default:* the target is a PE that imports SAFI 134
-   (IOS XR 7.7.2 on ASR 9901 first, Junos second). Converting VPN rules for a
-   VRF-bound neighbor is out of scope.
-2. **How are rules injected today?** Manual `gobgp` CLI or a modified
-   controller, and the exact payload. *Default:* a controller calls
-   `AddFlowSpec` or the guarded variant directly; prefixd integration is
-   separate work.
-3. **Which actions are required?** *Default:* discard (traffic-rate 0) and
-   rate limiting are qualified. Marking, redirect-to-VRF and redirect-to-IP are
-   encoded but not qualified inside a VRF.
-4. **Is one VRF enough?** *Default:* the API supports any number of RDs;
-   qualification uses one VRF plus a second RD as a negative control.
-5. **Does the PE negotiate RT-Constrain with the controller?** *Default:* no
+| Question | Answer |
+|----------|--------|
+| Which router imports SAFI 134? | IOS XR only. The sequence is an ASR 9901 proof of concept, ASR 9906 edge routers, and later the Cisco 8000 series (8201). The FRR peer in the original sample cannot be the target, because FRR has no SAFI 134. |
+| How are rules injected? | A controller using the scoped API: `AddFlowSpec`, or its leased and guarded variants, with an explicit RD and RTs. |
+| Which actions? | All of them: discard, rate limiting in bytes and packets, marking, redirect-to-VRF and redirect-to-IP. A source-prefix-only match is required. |
+| How many VRFs? | One VRF, with one RD. Qualification adds a second RD as a negative control; the API itself has no RD limit. |
+
+These remain open, each with the default used until the answer changes it:
+
+1. **Does the PE negotiate RT-Constrain with the controller?** *Default:* no
    gating of SAFI 134 (decision 5).
-6. **Is Graceful Restart negotiated on the FlowSpec session?** *Default:*
+2. **Is Graceful Restart negotiated on the FlowSpec session?** *Default:*
    the neighbor's existing GR setting applies to the family. Disable it where
    a rule must not outlive the daemon (ADR-0144).
-7. **Must rustbgpd also receive or reflect VPN FlowSpec?** *Default:* no.
+3. **Must rustbgpd also receive or reflect VPN FlowSpec?** *Default:* no.
    Received rules are discarded and counted.
+4. **What is the XR FlowSpec validation setting for the controller session?**
+   *Default:* the receipt records the setting in use. The source-only case
+   shows whether that setting installs a rule without a destination prefix.
 
 ## Consequences
 
 **What changes:**
 
-- A controller can originate IPv4 VPN FlowSpec through the existing FlowSpec
-  RPCs, with the lease and guarded contracts applying per scope. The daemon
-  gains one optional field on the FlowSpec key and holds no VRF state.
-- Old clients and the inventoried global contract are unchanged, and an older
-  daemon refuses VPN requests before mutation.
-- Received VPN FlowSpec is deliberately not supported. It is decoded so
-  framing stays correct, and discarded and counted so the omission can be
-  seen. Adding receive, reflection or RT-Constrain gating later is additive.
-- `rustbgpd-wire` needs a minor release.
-- The new family label, rpol value and metric label join closed
-  vocabularies.
+- **Origination.** A controller can originate IPv4 VPN FlowSpec through the
+  existing FlowSpec RPCs, and the daemon holds no VRF state. Keys and
+  admission revisions are scoped by RD. Lease deadlines stay per owner across
+  RDs and families, and guarded rules keep the delete-then-re-add rule for any
+  payload change.
+- **Compatibility.** Old clients and the inventoried global contract are
+  unchanged. An older daemon refuses VPN requests before mutation.
+- **Receive.** Received VPN FlowSpec is deliberately not supported. It is
+  decoded so framing stays correct, then discarded and counted so the
+  omission can be seen. Adding receive, reflection or RT-Constrain gating
+  later is additive.
+- **Crate releases.** `rustbgpd-wire` 0.28, `rustbgpd-fsm` 0.15 and
+  `rustbgpd-rpki` 0.10 are released together.
+- **Vocabularies.** The new family label, rpol value and metric label join
+  closed vocabularies.
 
 **What is not claimed:** this adds no VRF import, IPv6 VPN FlowSpec, Linux
 dataplane enforcement, remote acceptance, installation or forwarding. Only the
-slice 6 router receipt can support a claim about a specific router.
+slice 6 router receipts can support a claim about a specific router, and only
+for the platform, release and action each one shows.
