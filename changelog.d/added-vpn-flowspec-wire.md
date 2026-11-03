@@ -6,10 +6,12 @@
   slice of [ADR-0146](../docs/adr/0146-vpn-flowspec.md) adds the wire codec
   and negotiation only: received VPN FlowSpec rules are decoded, then
   discarded before the Adj-RIB-In and counted in
-  `bgp_vpn_flowspec_nlri_discarded_total{peer}`. They are never stored,
-  reflected or validated, and the daemon never sends a ROUTE-REFRESH for the
-  family. Originating VPN FlowSpec rules needs later slices; IPv6 VPN
-  FlowSpec (AFI 2 / SAFI 134) stays unsupported.
+  `bgp_vpn_flowspec_nlri_discarded_total{peer}` once the UPDATE passes
+  validation. They are never stored, reflected or validated, and the daemon
+  never sends a ROUTE-REFRESH for the family, so an inbound soft reset of it
+  succeeds without the Route Refresh capability. Originating VPN FlowSpec
+  rules needs later slices; IPv6 VPN FlowSpec (AFI 2 / SAFI 134) stays
+  unsupported.
 - `rustbgpd-wire` 0.28.0 adds `Safi::FlowSpecVpn`, the `VpnFlowSpecRule`
   NLRI type with `decode_vpn_flowspec_nlri` and
   `try_encode_vpn_flowspec_nlri`, and the `vpn_flowspec_announced` and
