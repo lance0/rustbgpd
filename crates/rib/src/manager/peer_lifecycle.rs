@@ -3025,8 +3025,14 @@ impl RibManager {
         let metrics = self.metrics.clone();
 
         let owned_evpn = self.evpn_grouped_member_of(peer);
+        // An earlier session's whole-table operation still live (a flap or
+        // collision with its envelopes queued) defers this one: no owned
+        // feed is built, the dump is refused below with every initial
+        // marker owed, and the fresh recovery proof is kept for the resync.
+        // A missing producer is the invariant failure handled next.
+        let behind_live_operation = owned_evpn.is_some() && self.outbound_operation_live(peer);
         let owned_evpn_feed = owned_evpn
-            .filter(|_| !self.complete_feed_deferred(peer))
+            .filter(|_| !behind_live_operation)
             .and_then(|gid| self.prepare_complete_evpn_feed(peer, gid, None, false));
         let private_evpn_recovery = (owned_evpn.is_none()
             && self.has_private_evpn_handoff(peer)
@@ -3039,6 +3045,7 @@ impl RibManager {
             || self.has_private_evpn_handoff(peer)
             || self.evpn_recovery_reset_pending(peer);
         if (owned_evpn.is_some()
+            && !behind_live_operation
             && owned_evpn_feed.is_none()
             && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
             || (private_evpn_recovery.is_some() && private_evpn_feed.is_none())
@@ -3893,7 +3900,9 @@ impl RibManager {
         // The dump and its End-of-RIB are one whole-table operation; an
         // empty table sends the End-of-RIB as a marker alone.
         let mut operation = None;
-        let admitted = if has_outbound_diff {
+        let admitted = if behind_live_operation {
+            Err(super::outbound_credit::CREDIT_REFUSAL)
+        } else if has_outbound_diff {
             self.begin_outbound_operation(peer, 1 + usize::from(!eor_families.is_empty()))
                 .map(|admitted| operation.insert(admitted).slot())
         } else {

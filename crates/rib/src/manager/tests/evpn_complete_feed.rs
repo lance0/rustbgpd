@@ -324,6 +324,118 @@ fn owned_initial_missing_full_producer_cannot_emit_private_data_or_terminal() {
     }
 }
 
+fn reregister_owned(
+    manager: &mut RibManager,
+    peer: PeerId,
+    session_id: u64,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (outbound_tx, output) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(192, 0, 2, 30),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn), EVPN],
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    output
+}
+
+/// A live whole-table operation of an earlier session defers the owned
+/// member's initial dump on re-registration, after a flap and after a
+/// collision supersede alike: no recovery reset or exhaustion, at most one
+/// live operation, and once the old envelopes drop the current table and
+/// then the End-of-RIB. Red with the latch treated as a missing producer:
+/// the fresh recovery owner fails admission and requests a reset.
+#[test]
+fn owned_reregistration_behind_a_live_operation_defers_without_reset() {
+    for collision in [false, true] {
+        let (mut manager, peer, gid, mut output) = fixture();
+        let keeper = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
+        let (sender, mut keeper_output) = mpsc::channel(64);
+        register(&mut manager, keeper, sender);
+        while keeper_output.try_recv().is_ok() {}
+        assert_eq!(manager.evpn_grouped_member_of(keeper), Some(gid));
+        let route = received(100);
+        stage(&mut manager, gid, &route);
+        assert!(manager.capture_private_evpn_admitted(peer));
+        manager.send_initial_table(peer);
+        let old: Vec<_> = std::iter::from_fn(|| output.try_recv().ok()).collect();
+        assert!(
+            old.iter().any(|update| update.latch.is_some()),
+            "a live operation"
+        );
+        let resets = count_reset_attempts(&mut manager);
+        if !collision {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer,
+                session_id: 7,
+            });
+        }
+        let mut fresh = reregister_owned(&mut manager, peer, 8);
+        assert_eq!(
+            manager.evpn_grouped_member_of(peer),
+            Some(gid),
+            "{collision}"
+        );
+        let queued: Vec<_> = std::iter::from_fn(|| fresh.try_recv().ok()).collect();
+        assert!(
+            queued.iter().all(|update| update.evpn_announce.is_empty()),
+            "{collision}: deferred behind the old operation"
+        );
+        let live: HashSet<usize> = old
+            .iter()
+            .chain(&queued)
+            .filter_map(|update| {
+                update
+                    .latch
+                    .as_ref()
+                    .map(|latch| Arc::as_ptr(latch) as usize)
+            })
+            .collect();
+        assert!(
+            live.len() <= 1,
+            "{collision}: {} live operations",
+            live.len()
+        );
+        assert_eq!(resets.load(Ordering::SeqCst), 0, "{collision}: no reset");
+        assert!(!manager.evpn_recovery_reset_pending(peer), "{collision}");
+        assert!(
+            manager.pending_eor[&peer].contains(&EVPN),
+            "{collision}: EoR owed"
+        );
+        assert!(manager.dirty_peers.contains(&peer));
+        drop((old, queued));
+        let mut sent = Vec::new();
+        for _ in 0..4 {
+            manager.resync_dirty_peers_bounded();
+            sent.extend(std::iter::from_fn(|| fresh.try_recv().ok().map(delivered)));
+        }
+        let table = sent
+            .iter()
+            .position(|update| update.evpn_announce.iter().any(|r| r.key() == route.key()));
+        let eor = sent
+            .iter()
+            .position(|update| update.end_of_rib.contains(&EVPN));
+        assert!(
+            matches!((table, eor), (Some(table), Some(eor)) if table < eor),
+            "{collision}: table {table:?} then EoR {eor:?}"
+        );
+        assert_eq!(resets.load(Ordering::SeqCst), 0, "{collision}");
+        assert!(!manager.dirty_peers.contains(&peer), "{collision}");
+    }
+}
+
 #[test]
 fn owned_initial_postadmission_mismatch_keeps_enqueue_truth_but_holds_terminal() {
     let (mut manager, peer, gid, mut output) = fixture();
