@@ -2791,3 +2791,117 @@ fn a_large_pass_is_chunked_into_exactly_the_room_it_needs() {
         .collect();
     assert_eq!(sizes, vec![1024, 1024, 952]);
 }
+
+/// Two dual-stack peers whose IPv4 answers were released after the
+/// convergence End-of-RIB and deferred behind a live IPv6 answer each, so
+/// both owe an answer that carries no End-of-RIB. Returns the manager, the
+/// peers (in address order), their receivers and the live IPv6 answers.
+/// The receivers and the live IPv6 answers of each peer.
+type PeerChannels = (
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    Vec<Vec<OutboundRouteUpdate>>,
+);
+
+fn two_peers_owing_suppressed_answers() -> (RibManager, [PeerId; 2], PeerChannels) {
+    use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter};
+    let waiter = Ipv4Addr::new(192, 0, 2, 83);
+    let mut manager = manager_with_dormant_waiter();
+    let _waiter_rx = connect(&mut manager, waiter, 64, true, false);
+    let peers = [87, 88].map(|octet| peer_v4(Ipv4Addr::new(192, 0, 2, octet)));
+    let mut outputs: Vec<_> = peers
+        .iter()
+        .map(|&peer| up(&mut manager, peer, dual_stack_sendable(), 64, 0))
+        .collect();
+    let mut siblings = Vec::new();
+    for (index, &peer) in peers.iter().enumerate() {
+        send_all(&mut outputs[index]);
+        refresh_request(&mut manager, peer, 0, (Afi::Ipv6, Safi::Unicast));
+        siblings.push(held(&mut outputs[index]));
+        refresh_request(&mut manager, peer, 0, (Afi::Ipv4, Safi::Unicast));
+    }
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(waiter),
+        session_id: u64::from(waiter.octets()[3]),
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    for (index, &peer) in peers.iter().enumerate() {
+        let sent = send_all(&mut outputs[index]);
+        assert_eq!(
+            sent.iter()
+                .filter(|update| update.end_of_rib.contains(&(Afi::Ipv4, Safi::Unicast)))
+                .count(),
+            1,
+            "the convergence End-of-RIB"
+        );
+        assert!(
+            manager
+                .pending_refresh_suppress_eor
+                .contains(&(peer, (Afi::Ipv4, Safi::Unicast)))
+        );
+    }
+    (manager, peers, (outputs, siblings))
+}
+
+/// IPv4 End-of-RIB markers in `updates`.
+fn ipv4_eors(updates: &[OutboundRouteUpdate]) -> usize {
+    updates
+        .iter()
+        .filter(|update| update.end_of_rib.contains(&(Afi::Ipv4, Safi::Unicast)))
+        .count()
+}
+
+/// Clearing one peer's refresh state at its session's end drops only that
+/// peer's End-of-RIB suppression: the other peer's deferred answer still
+/// carries no End-of-RIB, and the cleared peer keeps no flag into its next
+/// session. Red with the retain inverted.
+#[test]
+fn a_session_end_clears_only_its_own_suppressed_answer() {
+    let (mut manager, [first, second], (mut outputs, siblings)) =
+        two_peers_owing_suppressed_answers();
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: first,
+        session_id: 0,
+    });
+    assert!(
+        !manager
+            .pending_refresh_suppress_eor
+            .iter()
+            .any(|(peer, _)| *peer == first),
+        "the ended session's flag is gone"
+    );
+    drop(siblings);
+    let mut sent = Vec::new();
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+        sent.extend(send_all(&mut outputs[1]));
+    }
+    assert!(!manager.pending_refresh.contains_key(&second), "answered");
+    assert_eq!(ipv4_eors(&sent), 0, "the answer carries no End-of-RIB");
+}
+
+/// A retry pass that drops a peer whose channel is gone drops only that
+/// peer's End-of-RIB suppression: a live peer answered in the same pass
+/// still sends no End-of-RIB. Red with the retain inverted.
+#[test]
+fn a_gone_channel_clears_only_its_own_suppressed_answer() {
+    let (mut manager, [first, second], (mut outputs, siblings)) =
+        two_peers_owing_suppressed_answers();
+    let gone = outputs.remove(0);
+    drop(gone);
+    drop(siblings);
+    let mut sent = Vec::new();
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+        sent.extend(send_all(&mut outputs[0]));
+    }
+    assert!(
+        !manager
+            .pending_refresh_suppress_eor
+            .iter()
+            .any(|(peer, _)| *peer == first),
+        "the gone peer's flag is dropped"
+    );
+    assert!(!manager.pending_refresh.contains_key(&second), "answered");
+    assert_eq!(ipv4_eors(&sent), 0, "the answer carries no End-of-RIB");
+}
