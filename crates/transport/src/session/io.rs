@@ -559,10 +559,13 @@ impl PeerSession {
             return;
         }
         self.pending_outbound_teardown_cause = Some(cause);
-        // RFC 8538 §3: the session now ends after a NOTIFICATION, so the
-        // peer's routes are retained only when Notification GR (the N bit)
-        // was negotiated. Only an Established session reaches the
-        // `SessionDown` that reads and clears this latch.
+        // The session now ends after a NOTIFICATION we sent: without the N
+        // bit the peer's routes are purged (RFC 4724 §4); with it they are
+        // retained unless it is a Hard Reset (RFC 8538 §4). The teardown
+        // completes through the writer-exit `TcpConnectionFails`, which
+        // emits the `SessionDown` that reads and clears this latch only
+        // from Established; set earlier, the latch would outlive this
+        // connection.
         if self.fsm.state() == SessionState::Established {
             self.notification_teardown = true;
         }
