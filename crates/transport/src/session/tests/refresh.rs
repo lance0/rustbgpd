@@ -1082,3 +1082,52 @@ async fn held_refresh_timeout_corrects_count_before_next_update() {
     assert_eq!(seen, ["borr", "routes", "timeout", "routes"]);
     assert_eq!(session.known_prefix_count(), 2, "{seen:?}");
 }
+
+/// A `BoRR` held when its connection goes down is still delivered, in order,
+/// but its local admission effect belongs to the torn-down connection: it
+/// must not recreate a refresh window on the disconnected session.
+/// Mutation-red: keeping the pending effect reopens a window and timer.
+#[tokio::test]
+async fn held_borr_admitted_after_teardown_opens_no_window() {
+    let (mut session, _cmd_tx, mut rib_rx) = make_test_session_with_channels(65001, 65002, 1);
+    install_enhanced_refresh_session(&mut session, vec![(Afi::Ipv4, Safi::Unicast)], false);
+    session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .unwrap();
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::BoRR,
+    );
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.rib_backlog.len(),
+        1,
+        "BoRR must wait for the full channel"
+    );
+    session.execute_actions(vec![Action::SessionDown]).await;
+    let task = tokio::spawn(async move {
+        deliver_held_rib_messages(&mut session).await;
+        session
+    });
+    assert!(matches!(
+        rib_rx.recv().await,
+        Some(RibUpdate::RoutesReceived { .. })
+    ));
+    assert!(matches!(
+        rib_rx.recv().await,
+        Some(RibUpdate::BeginRouteRefresh { .. })
+    ));
+    assert!(matches!(
+        rib_rx.recv().await,
+        Some(RibUpdate::PeerDown { .. })
+    ));
+    let session = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the held messages must be delivered")
+        .unwrap();
+    assert_eq!(session.refresh_accounting_window_count(), 0);
+    assert!(session.refresh_accounting_timer.is_none());
+}

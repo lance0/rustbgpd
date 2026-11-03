@@ -259,6 +259,11 @@ impl PeerSession {
     pub(super) fn clear_refresh_accounting(&mut self) {
         self.refresh_accounting.windows.clear();
         self.refresh_accounting_timer = None;
+        // Held markers of the torn-down connection still reach the RIB in
+        // order, but must not reopen or sweep this connection's windows.
+        for (_, then) in &mut self.rib_backlog {
+            *then = super::inbound::OnRibAdmission::Nothing;
+        }
     }
 
     fn arm_refresh_accounting_timer(&mut self) {
