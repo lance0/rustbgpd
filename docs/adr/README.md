@@ -170,6 +170,7 @@ event history was removed), is Superseded.
 | [0142](0142-interface-only-unnumbered-neighbors.md) | Interface-only unnumbered neighbors | Accepted | 2026-10-21 | Active |
 | [0143](0143-flowspec-direct-ip-actions.md) | Direct target-IP FlowSpec actions | Accepted | 2026-10-27 | Active |
 | [0144](0144-guarded-flowspec-mutations.md) | Guarded FlowSpec mutation contract | Accepted | 2026-10-30 | Active |
+| [0146](0146-vpn-flowspec.md) | IPv4 VPN FlowSpec origination (AFI 1 / SAFI 134) | Proposed (draft; not implemented) | 2026-11-03 | Unstated |
 
 ## Supporting records
 
@@ -183,13 +184,14 @@ ADR or from repository history.
 
 ## Lifecycle metadata gaps
 
-The four records below do not state one of the navigation lifecycles above.
+The five records below do not state one of the navigation lifecycles above.
 They remain **Unstated** rather than being inferred as Parked:
 
 - [ADR-0093](0093-evpn-vlan-macip-fdb-correlation.md)
 - [ADR-0123](0123-aspa-v27-mitigation-and-retention.md)
 - [ADR-0129](0129-prefix-sid-domain-boundary.md)
 - [ADR-0134](0134-reload-monitoring-and-validation-endpoints.md)
+- [ADR-0146](0146-vpn-flowspec.md)
 
 ## Template
 
