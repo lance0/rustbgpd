@@ -41,8 +41,12 @@ impl RibManager {
     }
 
     /// Ensure `peer` has a credit entry.
+    /// Its refusal series are exported from registration, at zero, so a
+    /// scrape tells a peer never refused from one never sampled.
     pub(super) fn register_outbound_credit(&mut self, peer: PeerId) {
         self.outbound_credit.entry(peer).or_default();
+        self.metrics
+            .initialize_outbound_commit_refusal_series(&peer.label());
     }
 
     /// The per-peer row credit at the current number of registered outbound

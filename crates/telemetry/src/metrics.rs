@@ -5625,6 +5625,16 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Export every refusal reason for `peer` at zero.
+    pub fn initialize_outbound_commit_refusal_series(&self, peer: &str) {
+        for reason in crate::reason_labels::OutboundCommitRefusal::ALL {
+            let _ = self
+                .0
+                .outbound_commit_refusals
+                .with_label_values(&[peer, reason.as_str()]);
+        }
+    }
+
     /// Record an outbound transaction refused before the peer writer.
     pub fn record_outbound_commit_refusal(
         &self,
