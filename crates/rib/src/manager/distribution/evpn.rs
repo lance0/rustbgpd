@@ -240,6 +240,8 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "EVPN staging mirrors unicast distribution context for policy parity"
     )]
+    /// Returns how many policy-modified results it discarded for
+    /// `NO_ADVERTISE`: interned sets no row holds, for the caller's GC.
     pub(in crate::manager) fn stage_evpn_routes_with_checkpoint(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
@@ -259,11 +261,12 @@ impl RibManager {
         force: bool,
         mut attr_intern: Option<&mut crate::attr_intern::AttrInternTable>,
         checkpoint: &mut impl FnMut(),
-    ) {
+    ) -> usize {
         let (target_peer, target_peer_asn, target_peer_group) = target.ctx_peer();
         // Routes that share a source attribute set and policy outcome share
         // one modified set, computed and interned once in this call.
         let mut memo = super::ExportMemo::default();
+        let mut discarded = 0_usize;
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let evpn_family = (Afi::L2Vpn, Safi::Evpn);
         let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
@@ -631,6 +634,7 @@ impl RibManager {
                     crate::update::ExportGateVerdict::Stop,
                     || "export policy produced NO_ADVERTISE".to_string(),
                 );
+                discarded += usize::from(!result.modifications.is_empty());
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
@@ -671,6 +675,7 @@ impl RibManager {
             checkpoint();
         }
         memo.retire_with(checkpoint);
+        discarded
     }
 
     /// Recompute Loc-RIB best path and distribute changes for EVPN routes.
@@ -993,7 +998,7 @@ impl RibManager {
 
         let mut evpn_announce = Vec::new();
         let mut evpn_withdraw = Vec::new();
-        Self::stage_evpn_routes_with_checkpoint(
+        let discarded = Self::stage_evpn_routes_with_checkpoint(
             &self.loc_rib,
             rib_out,
             &self.peer_is_rr_client,
@@ -1034,6 +1039,9 @@ impl RibManager {
             && self.mark_dirty_after_family_send_failure(peer, failure)
         {
             warn!(%peer, "outbound channel full — EVPN update deferred");
+        }
+        if discarded != 0 {
+            self.settle_export_attr_gc(discarded);
         }
     }
 }
