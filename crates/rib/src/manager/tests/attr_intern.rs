@@ -1311,14 +1311,66 @@ fn evpn_export_same_source_with_different_policy_outcomes_stays_distinct() {
     assert!(!imet.communities().contains(&EXPORT_COMMUNITY_B));
     assert!(smet.communities().contains(&EXPORT_COMMUNITY_B));
     assert!(!smet.communities().contains(&EXPORT_COMMUNITY_A));
-    assert!(Arc::ptr_eq(
-        &imet.attributes,
-        &fixture.exported(1, 0).attributes
-    ));
-    assert!(Arc::ptr_eq(
-        &smet.attributes,
-        &fixture.exported(2, 1).attributes
-    ));
+    assert_eq!(imet.attributes, fixture.exported(1, 0).attributes);
+    assert_eq!(smet.attributes, fixture.exported(2, 1).attributes);
+}
+
+#[test]
+fn evpn_export_single_use_reuses_an_already_shared_outcome() {
+    // A later chunk carries one route with the same source set: its outcome
+    // occurs once in each staging call but is already interned.
+    let mut fixture = evpn_export_fixture();
+    let shared = fixture.exported(0, 0);
+    let route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 300);
+    let key = route.key();
+    let source = fixture.source;
+    fixture
+        .manager
+        .process_evpn_announce_chunk(source, vec![route]);
+    let single = fixture.manager.adj_ribs_out[&fixture.receivers[1]]
+        .get_evpn(&key)
+        .expect("exported")
+        .clone();
+    assert!(Arc::ptr_eq(&single.attributes, &shared.attributes));
+}
+
+#[test]
+fn evpn_export_unique_policy_outcomes_stay_out_of_the_intern_table() {
+    // Each receiver's outcome for each route occurs once per staging call
+    // and nowhere else: interning them would grow the global table, and every
+    // sweep of it, by the receiver count for no sharing.
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let routes = [(100, 1), (200, 2)].map(|(tag, med)| {
+        let mut route = make_evpn_imet(source, tag);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);
+        route
+    });
+    let fixture = evpn_export_fixture_with(
+        [
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_B),
+            evpn_add_community_policy((65400 << 16) + 3000),
+        ],
+        routes,
+    );
+    assert_eq!(
+        fixture.manager.attr_intern.len(),
+        2,
+        "the inbound sets only"
+    );
+    for receiver in 0..3 {
+        for key in 0..2 {
+            let exported = fixture.exported(receiver, key);
+            assert_eq!(exported.communities().len(), 1);
+            assert!(
+                fixture
+                    .manager
+                    .attr_intern
+                    .get(&exported.attributes)
+                    .is_none()
+            );
+        }
+    }
 }
 
 #[test]
@@ -1485,12 +1537,17 @@ fn evpn_export_gauge_tracks_sets_interned_by_paced_continuations() {
     );
     fixture.drain_outbound();
     fixture.manager.flush_poll_budget = Duration::ZERO;
-    let mut route = make_evpn_imet(source, 300);
-    route.attributes = AttrSet::new(vec![PathAttribute::Med(7)]);
+    // Two routes share the new source set, so each receiver's outcome
+    // recurs and is interned.
+    let routes = [300, 301].map(|tag| {
+        let mut route = make_evpn_imet(source, tag);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(7)]);
+        route
+    });
     let peer = fixture.source;
     fixture
         .manager
-        .ingest_evpn_announce_chunk(peer, vec![route], true);
+        .ingest_evpn_announce_chunk(peer, Vec::from(routes), true);
     assert!(fixture.manager.pending_evpn_fanout.is_some());
     while fixture.manager.advance_evpn_fanout() {}
     // Two inbound sets, each with three outcomes.
