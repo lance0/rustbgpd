@@ -1325,6 +1325,18 @@ fn delivered(frames: Vec<Bytes>) -> Vec<Option<u32>> {
     seen
 }
 
+/// Whether the pending envelope's wait resolves within ten minutes of the
+/// paused clock.
+async fn envelope_wakes(session: &PeerSession) -> bool {
+    let pending = session.pending_outbound.as_ref().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(600),
+        pending.ready(session.writer_bulk_tx.as_ref()),
+    )
+    .await
+    .is_ok()
+}
+
 const BYTE_BUDGET: u64 = super::super::writer::WRITER_BYTE_BUDGET;
 
 /// A reader that stops draining holds the writer at its byte budget, not at
@@ -1395,19 +1407,19 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
         "paused stays paused"
     );
 
+    // Nothing wakes the envelope while the reader stays paused.
+    assert!(
+        !envelope_wakes(&session).await,
+        "a paused writer leaves the envelope waiting"
+    );
+
     // The reader resumes.
     let mut sink = vec![first];
     complete_all(&session, &mut frames, &completed, &mut sink);
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        session
-            .pending_outbound
-            .as_ref()
-            .unwrap()
-            .ready(session.writer_bulk_tx.as_ref()),
-    )
-    .await
-    .expect("a completed write wakes the waiting envelope");
+    assert!(
+        envelope_wakes(&session).await,
+        "a completed write wakes the waiting envelope"
+    );
     for _ in 0..1_000 {
         admit_until_blocked(&mut session);
         complete_all(&session, &mut frames, &completed, &mut sink);
@@ -1445,9 +1457,12 @@ async fn paused_writer_plateaus_at_byte_budget_and_resumes_in_order() {
 /// draining peer beside it.
 #[tokio::test(start_paused = true)]
 async fn draining_peer_beside_a_paused_one_is_not_held() {
+    // One registry, as in the daemon.
+    let metrics = BgpMetrics::new();
     let mut peers = Vec::new();
     for _ in 0..2 {
         let (mut session, commands, rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+        session.metrics = metrics.clone();
         let (client, server) = connected_stream_pair().await;
         session.test_install_stream(client);
         establish_test_session(&mut session, 65002).await;
@@ -1480,4 +1495,13 @@ async fn draining_peer_beside_a_paused_one_is_not_held() {
     assert!(paused.writer_bytes_held() >= BYTE_BUDGET);
     assert!(paused.outbound_admission_timer.is_none());
     assert!(draining.outbound_admission_timer.is_none());
+    // The hand writer does not publish its completions; sample both as the
+    // sessions and their writers would.
+    paused.sample_outbound_queue_depth();
+    draining.sample_outbound_queue_depth();
+    assert_eq!(
+        metrics.outbound_writer_bytes(),
+        i64::try_from(paused.writer_bytes_held()).unwrap(),
+        "the total is the paused peer's backlog"
+    );
 }
