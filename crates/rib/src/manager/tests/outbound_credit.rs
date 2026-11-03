@@ -1968,3 +1968,53 @@ fn an_empty_pass_behind_a_live_operation_does_not_redirty_the_peer() {
     assert!(!manager.dirty_peers.contains(&peer), "no second resync");
     drop((answer, spent));
 }
+
+/// A dirty private receiver whose resync is admitted behind its stalled
+/// envelopes keeps its live operation and its spent credit. Later passes
+/// must not stage its rows only to refuse them: the preflight bypass for a
+/// live operation is for clean peers. Five EVPN passes stage it once. Red
+/// with the bypass also covering dirty peers: every pass stages.
+#[test]
+fn a_dirty_peer_behind_its_resync_is_not_restaged_every_pass() {
+    const CREDIT: usize = 8;
+    let mut manager = manager().with_outbound_row_credit(CREDIT);
+    let mut source = up(&mut manager, peer_v4(SOURCE), evpn_sendable(), 4096, 0);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 50, 1));
+    let mut rx = up(&mut manager, peer, evpn_sendable(), 4096, 0);
+    send_all(&mut rx);
+    let mut kept = Vec::new();
+    let mut round = 0;
+    let mut pass = |manager: &mut RibManager, kept: &mut Vec<_>, round: &mut u32| {
+        routes_received(
+            manager,
+            vec![],
+            vec![],
+            (0..4).map(|key| evpn_route(key, *round)).collect(),
+            vec![],
+        );
+        send_all(&mut source);
+        kept.extend(held(&mut rx));
+        *round += 1;
+    };
+    while manager.outbound_credit_rows(peer) < CREDIT {
+        pass(&mut manager, &mut kept, &mut round);
+    }
+    pass(&mut manager, &mut kept, &mut round);
+    assert!(manager.dirty_peers.contains(&peer), "refused for credit");
+    manager.resync_dirty_peers_bounded();
+    assert!(
+        manager.outbound_operation_live(peer),
+        "the resync is queued"
+    );
+    let before = manager.outbound_stagings(peer);
+    for _ in 0..5 {
+        pass(&mut manager, &mut kept, &mut round);
+        assert!(manager.dirty_peers.contains(&peer));
+    }
+    assert!(
+        manager.outbound_stagings(peer) - before <= 1,
+        "{} stagings over five passes",
+        manager.outbound_stagings(peer) - before
+    );
+    drop(kept);
+}
