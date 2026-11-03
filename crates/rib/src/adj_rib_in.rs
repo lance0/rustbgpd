@@ -6692,12 +6692,21 @@ mod tests {
             (afi, safi)
         }
 
+        /// Indices of the families with an Adj-RIB-In table. Received VPN
+        /// `FlowSpec` (ADR-0146) is discarded before the Adj-RIB-In, so it has
+        /// none.
+        fn table_families() -> Vec<usize> {
+            (0..rustbgpd_wire::CONFIGURED_FAMILIES.len())
+                .filter(|&index| family_at(index).1 != Safi::FlowSpecVpn)
+                .collect()
+        }
+
         #[test]
         fn detached_retirement_visits_all_family_storage_and_owned_tags() {
             let peer = PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 1).into());
             let mut empty_visits = 0;
             AdjRibIn::new(peer).retire_with(&mut || empty_visits += 1);
-            for family in 0..rustbgpd_wire::CONFIGURED_FAMILIES.len() {
+            for family in table_families() {
                 let mut rib = AdjRibIn::new(peer);
                 for key in 0..16 {
                     insert_or_withdraw(&mut rib, family, key, Some((1, false)));
@@ -6767,7 +6776,7 @@ mod tests {
         }
 
         fn op() -> impl Strategy<Value = Op> {
-            let family = 0..rustbgpd_wire::CONFIGURED_FAMILIES.len();
+            let family = prop::sample::select(table_families());
             let flags = prop_oneof![6 => Just(0u8), 1 => Just(1), 1 => Just(2)];
             prop_oneof![
                 8 => (family.clone(), 0u8..4, flags, any::<bool>()).prop_map(

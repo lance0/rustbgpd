@@ -7,6 +7,11 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
+`rustbgpd-rpki` 0.10.0 is unpublished. It moves to wire `0.28.0`; verifier
+and RTR signatures are unchanged. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10
+together when exchanging public wire types. See the
+[wire changelog](../wire/CHANGELOG.md).
+
 `rustbgpd-rpki` 0.9.0 moves to wire `0.27.0`; verifier and RTR signatures
 are unchanged. Upgrade wire 0.27, FSM 0.14 and RPKI 0.9 together when
 exchanging public wire types. The
@@ -100,8 +105,8 @@ published wire crate, so depend on the wire version this release pairs with:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = "0.9.0"
-rustbgpd-wire = "0.27.0"
+rustbgpd-rpki = "0.10.0"
+rustbgpd-wire = "0.28.0"
 ```
 
 To build against a source checkout instead, take both crates from the same

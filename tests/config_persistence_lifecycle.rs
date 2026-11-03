@@ -240,6 +240,7 @@ fn mp_reach_v6(prefixes: &[Ipv6Prefix]) -> MpReachNlri {
         vpn_announced: Vec::new(),
         labeled_announced: Vec::new(),
         rtc_announced: Vec::new(),
+        vpn_flowspec_announced: vec![],
     }
 }
 
@@ -305,6 +306,7 @@ fn eor_markers() -> Vec<Message> {
         vpn_withdrawn: Vec::new(),
         labeled_withdrawn: Vec::new(),
         rtc_withdrawn: Vec::new(),
+        vpn_flowspec_withdrawn: vec![],
     }))];
     vec![
         Message::Update(UpdateMessage::build(

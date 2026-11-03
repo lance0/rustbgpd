@@ -79,7 +79,7 @@ async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
     negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
     install_test_negotiated_session(&mut session, negotiated);
     let body = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-    let mp = Prefix::V6(Ipv6Prefix::new("2001:db8:505::".parse().unwrap(), 64));
+    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:505::".parse().unwrap(), 64));
     let later = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
     let first_attrs = vec![
@@ -94,16 +94,14 @@ async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
             safi: Safi::Unicast,
             next_hop: "2001:db8::2".parse().unwrap(),
             link_local_next_hop: None,
-            announced: vec![NlriEntry {
-                path_id: 0,
-                prefix: mp,
-            }],
+            announced: vec![NlriEntry { path_id: 0, prefix }],
             flowspec_announced: vec![],
             evpn_announced: vec![],
             bgpls_announced: vec![],
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     session
@@ -131,7 +129,7 @@ async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
         *key == RetentionKey {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
-            prefix: mp,
+            prefix,
             path_id: 0,
         }
     }));

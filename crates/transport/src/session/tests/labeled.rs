@@ -257,6 +257,7 @@ async fn process_update_threads_labeled_add_path_ids_into_rib_keys() {
                 },
             ],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body);
@@ -293,6 +294,7 @@ async fn process_update_threads_labeled_add_path_ids_into_rib_keys() {
             },
         }],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     }))];
     let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body);
     session.process_update(update).await;
@@ -380,6 +382,7 @@ async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity()
                     })
                     .collect(),
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             }))
         };
         let unreach = |path_id| {
@@ -399,6 +402,7 @@ async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity()
                     },
                 }],
                 rtc_withdrawn: vec![],
+                vpn_flowspec_withdrawn: vec![],
             }))
         };
         let update = |attributes: Vec<PathAttribute>| {

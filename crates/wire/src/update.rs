@@ -605,6 +605,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let msg = UpdateMessage::build(
@@ -950,6 +951,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         }))];
         let error = UpdateMessage::try_build_from_attribute_iter(
             &[],

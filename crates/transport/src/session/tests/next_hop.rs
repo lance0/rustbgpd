@@ -28,6 +28,7 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -103,6 +104,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -153,6 +155,7 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -204,6 +207,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv4_mp_without_extended_nexthop()
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
@@ -990,6 +994,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv6_mp_and_withdraws_replacement(
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ]
     };
@@ -1105,6 +1110,7 @@ async fn strict_peer_ipv4_session_rejects_ipv6_mp_replacement() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     session
@@ -1188,6 +1194,7 @@ async fn strict_peer_next_hop_rejects_link_local_companion_pair() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     session
@@ -1461,6 +1468,7 @@ async fn received_link_local_companion_records_the_receiving_interface() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
@@ -1721,6 +1729,7 @@ async fn negotiated_link_local_receives_unicast_and_normalizes_legacy_pairs() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             };
             mp.link_local_next_hop = companion.map(|s| s.parse().unwrap());
             mp.announced.push(NlriEntry { path_id: 0, prefix });
@@ -1940,6 +1949,7 @@ async fn link_local_malformed_replacement_withdraws_negotiated_route() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             };
             let attrs = vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -3058,6 +3068,7 @@ async fn received_mpls_v6_link_local_companion_records_the_receiving_interface()
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             };
             if vpn {
                 mp.vpn_announced = vec![rustbgpd_wire::VpnNlriEntry {

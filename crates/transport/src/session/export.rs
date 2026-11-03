@@ -2174,6 +2174,7 @@ impl ReachNlri<'_> {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         match self {
             Self::Unicast(entries) => value.announced = entries.to_vec(),
@@ -2211,6 +2212,7 @@ impl UnreachNlri<'_> {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         };
         match self {
             Self::Unicast(entries) => value.withdrawn = entries.to_vec(),

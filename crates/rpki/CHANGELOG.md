@@ -3,6 +3,13 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.10.0 - Unreleased
+
+- Move to wire `0.28.0` for IPv4 VPN FlowSpec (`Safi::FlowSpecVpn` and the
+  new `MpReachNlri`/`MpUnreachNlri` fields). There is no independent verifier
+  or RTR change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These
+  crate versions are not published by this change.
+
 ## 0.9.0 - 2026-11-01
 
 - Move to wire `0.27.0` for the direct target-IP FlowSpec actions and typed,

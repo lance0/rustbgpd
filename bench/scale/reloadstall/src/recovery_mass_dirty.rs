@@ -221,6 +221,7 @@ fn announce(
         labeled_announced: Vec::new(),
         vpn_announced: Vec::new(),
         rtc_announced: Vec::new(),
+        vpn_flowspec_announced: vec![],
     };
     if shape.vpn {
         mp.vpn_announced = (start..end)
@@ -258,6 +259,7 @@ fn end_of_rib(shape: Shape, family: usize) -> Result<Message, String> {
             vpn_withdrawn: Vec::new(),
             labeled_withdrawn: Vec::new(),
             rtc_withdrawn: Vec::new(),
+            vpn_flowspec_withdrawn: vec![],
         }))]
     };
     UpdateMessage::try_build(&[], &[], &attributes, true, false, Ipv4UnicastMode::Body)
@@ -2016,6 +2018,7 @@ mod tests {
                     vpn_withdrawn: Vec::new(),
                     labeled_withdrawn: Vec::new(),
                     rtc_withdrawn: Vec::new(),
+                    vpn_flowspec_withdrawn: vec![],
                 }))];
                 let eor = Message::Update(
                     UpdateMessage::try_build(

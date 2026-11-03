@@ -195,7 +195,15 @@ impl PeerSession {
     /// again: the queued request reaches the peer after whatever prompted
     /// both, so at most one per family is queued. Only a live writer's claim
     /// counts: once the writer is gone the request fails as before.
+    ///
+    /// VPN `FlowSpec` (AFI 1 / SAFI 134) is never requested: received rules
+    /// are discarded (ADR-0146), so an inbound soft reset has nothing to
+    /// replay and succeeds without a message.
     pub(super) fn send_route_refresh(&mut self, afi: Afi, safi: Safi) -> Result<(), String> {
+        if (afi, safi) == (Afi::Ipv4, Safi::FlowSpecVpn) {
+            debug!(peer = %self.peer_label, ?afi, ?safi, "ROUTE-REFRESH not sent: received VPN FlowSpec is discarded");
+            return Ok(());
+        }
         let family = (afi as u16, safi as u8);
         let writer_open = self
             .writer_priority_tx

@@ -1635,9 +1635,12 @@ mod tests {
             );
             assert!(labels.insert(label), "{family:?} reuses label {label:?}");
         }
+        // ADR-0146: `l3vpn_ipv4_flowspec` is a configuration family before it
+        // has an `AddressFamily` value; the controller API adds one later.
         let canonical: std::collections::BTreeSet<_> = rustbgpd_wire::CONFIGURED_FAMILIES
             .iter()
             .map(|(label, _, _)| *label)
+            .filter(|label| *label != "l3vpn_ipv4_flowspec")
             .collect();
         assert_eq!(labels, canonical);
     }

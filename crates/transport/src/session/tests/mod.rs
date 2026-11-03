@@ -669,6 +669,7 @@ fn ipv6_announce(prefix: Ipv6Prefix, path_id: u32) -> UpdateMessage {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ],
         true,
@@ -848,6 +849,7 @@ fn smet_update(routes: Vec<EvpnRoute>) -> UpdateMessage {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         },
     )));
     UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body)
@@ -1649,6 +1651,7 @@ fn empty_nonunicast_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> rustbgpd_wi
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     }
 }
 
@@ -1663,6 +1666,7 @@ fn empty_nonunicast_unreach(afi: Afi, safi: Safi) -> rustbgpd_wire::MpUnreachNlr
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     }
 }
 
@@ -2257,6 +2261,7 @@ mod tcp_ao;
 mod tcp_mss;
 mod update_group_wire_parity;
 mod vpn;
+mod vpn_flowspec;
 
 mod recovery;
 mod replay;

@@ -785,6 +785,7 @@ struct BgpMetricsInner {
     as_path_loop_detected: IntCounterVec,
     rr_loop_detected: IntCounterVec,
     bgpls_nlri_discarded: IntCounterVec,
+    vpn_flowspec_nlri_discarded: IntCounterVec,
     path_attribute_discarded: IntCounterVec,
     evpn_nlri_discarded: IntCounterVec,
     evpn_nlri_discarded_by_type: IntCounterVec,
@@ -2284,6 +2285,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let vpn_flowspec_nlri_discarded = IntCounterVec::new(
+            Opts::new(
+                "bgp_vpn_flowspec_nlri_discarded_total",
+                "Total received VPN FlowSpec (AFI 1 / SAFI 134) NLRIs decoded and discarded; only local origination is supported",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
         let path_attribute_discarded = IntCounterVec::new(
             Opts::new(
                 "bgp_path_attribute_discarded_total",
@@ -3561,6 +3571,9 @@ impl BgpMetrics {
             .register(Box::new(bgpls_nlri_discarded.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(vpn_flowspec_nlri_discarded.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(path_attribute_discarded.clone()))
             .expect("metric not already registered");
         registry
@@ -3992,6 +4005,7 @@ impl BgpMetrics {
             as_path_loop_detected,
             rr_loop_detected,
             bgpls_nlri_discarded,
+            vpn_flowspec_nlri_discarded,
             path_attribute_discarded,
             evpn_nlri_discarded,
             evpn_nlri_discarded_by_type,
@@ -4358,6 +4372,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.as_path_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.0.rr_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.0.bgpls_nlri_discarded, peer);
+        Self::reap_peer_series_from_vec(&self.0.vpn_flowspec_nlri_discarded, peer);
         Self::reap_peer_series_from_vec(&self.0.path_attribute_discarded, peer);
         Self::reap_peer_series_from_vec(&self.0.evpn_nlri_discarded, peer);
         Self::reap_peer_series_from_vec(&self.0.evpn_nlri_discarded_by_type, peer);
@@ -5775,7 +5790,8 @@ impl BgpMetrics {
             | "l3vpn_ipv6_unicast"
             | "ipv4_labeled_unicast"
             | "ipv6_labeled_unicast"
-            | "rtc" => family,
+            | "rtc"
+            | "l3vpn_ipv4_flowspec" => family,
             _ => "unknown",
         }
     }
@@ -6097,6 +6113,15 @@ impl BgpMetrics {
     pub fn record_bgpls_nlri_discarded(&self, peer: &str, count: u64) {
         self.0
             .bgpls_nlri_discarded
+            .with_label_values(&[peer])
+            .inc_by(count);
+    }
+
+    /// Record received VPN `FlowSpec` (AFI 1 / SAFI 134) NLRIs, announced or
+    /// withdrawn, that were decoded and discarded before the Adj-RIB-In.
+    pub fn record_vpn_flowspec_nlri_discarded(&self, peer: &str, count: u64) {
+        self.0
+            .vpn_flowspec_nlri_discarded
             .with_label_values(&[peer])
             .inc_by(count);
     }
@@ -10613,6 +10638,7 @@ mod tests {
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);
         m.record_bgpls_nlri_discarded(peer, 2);
+        m.record_vpn_flowspec_nlri_discarded(peer, 1);
         m.record_path_attribute_discarded(peer, 4, 1);
         m.record_evpn_nlri_discarded_by_type(peer, 0, 1);
         m.record_evpn_nlri_discarded_by_type(peer, 255, 2);
@@ -10674,10 +10700,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 84 peer-labeled series; state transitions, EVPN discard types
+        // 85 peer-labeled series; state transitions, EVPN discard types
         // and dynamic-neighbor retentions hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 84);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 85);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -10687,7 +10713,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 84);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 85);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -11070,7 +11096,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 71] = [
+    const PEER_LABELED_FAMILIES: [&str; 72] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -11140,6 +11166,7 @@ mod tests {
         "bgp_unnumbered_ra_conflicts_total",
         "bgp_update_malformed_causes_total",
         "bgp_update_malformed_total",
+        "bgp_vpn_flowspec_nlri_discarded_total",
         "bmp_source_drops_total",
         "bmp_stream_diverged",
     ];

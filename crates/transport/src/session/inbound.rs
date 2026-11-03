@@ -376,7 +376,7 @@ pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdra
         announced += count;
         add_family(log_family_label(mp.afi, mp.safi), count);
         // FlowSpec carries no next hop (NH-Len 0).
-        if mp.safi != Safi::FlowSpec {
+        if !matches!(mp.safi, Safi::FlowSpec | Safi::FlowSpecVpn) {
             next_hops.push(mp.next_hop.to_string());
             link_local_next_hop = link_local_next_hop.or(mp.link_local_next_hop);
         }
@@ -1966,6 +1966,35 @@ impl PeerSession {
                 &self.peer_label,
                 u64::from(parsed.bgpls_nlri_discarded),
             );
+        }
+        // ADR-0146: received VPN FlowSpec (AFI 1 / SAFI 134) is decoded so
+        // framing and malformed input are exact, then discarded before the
+        // Adj-RIB-In: no later stage reads its NLRI vectors.
+        if self
+            .negotiated_families()
+            .contains(&(Afi::Ipv4, Safi::FlowSpecVpn))
+        {
+            let discarded: usize = parsed
+                .attributes
+                .iter()
+                .map(|attr| match attr {
+                    PathAttribute::MpReachNlri(mp) => mp.vpn_flowspec_announced.len(),
+                    PathAttribute::MpUnreachNlri(mp) => mp.vpn_flowspec_withdrawn.len(),
+                    _ => 0,
+                })
+                .sum();
+            if discarded > 0 {
+                debug!(
+                    peer = %self.peer_label,
+                    family = "l3vpn_ipv4_flowspec",
+                    discarded,
+                    "discarded received VPN FlowSpec NLRIs; only local origination is supported"
+                );
+                self.metrics.record_vpn_flowspec_nlri_discarded(
+                    &self.peer_label,
+                    u64::try_from(discarded).unwrap_or(u64::MAX),
+                );
+            }
         }
         // 2. Semantic validation. Two distinct MP_REACH_NLRI facts feed
         // two different consumers and must not be conflated: the

@@ -188,8 +188,8 @@ pub struct MpReachNlri {
     /// RFC 8950 allows IPv4 unicast NLRI to use an IPv6 next hop in
     /// `MP_REACH_NLRI`, so this field may be IPv6 even when `afi == Ipv4`.
     ///
-    /// For `FlowSpec` (SAFI 133), next-hop length is 0 and this field is
-    /// unused (defaults to `0.0.0.0`).
+    /// For `FlowSpec` (SAFI 133 and 134), next-hop length is 0 and this
+    /// field is unused (defaults to `0.0.0.0`).
     pub next_hop: IpAddr,
     /// Optional IPv6 link-local next-hop carried alongside the global
     /// address per RFC 4760 §3 / RFC 2545 §3. Populated only when the
@@ -214,6 +214,9 @@ pub struct MpReachNlri {
     pub labeled_announced: Vec<crate::labeled::LabeledNlriEntry>,
     /// RT-Constrain NLRI entries (RFC 4684). Populated only for SAFI 132.
     pub rtc_announced: Vec<crate::rtc::RtcNlri>,
+    /// VPN `FlowSpec` NLRI rules (RFC 8955 §8). Populated only for AFI 1 /
+    /// SAFI 134.
+    pub vpn_flowspec_announced: Vec<crate::flowspec::VpnFlowSpecRule>,
 }
 /// RFC 4760 `MP_UNREACH_NLRI` attribute (type 15).
 ///
@@ -243,11 +246,15 @@ pub struct MpUnreachNlri {
     pub labeled_withdrawn: Vec<crate::labeled::LabeledNlriEntry>,
     /// RT-Constrain NLRI entries withdrawn (RFC 4684). Populated only for SAFI 132.
     pub rtc_withdrawn: Vec<crate::rtc::RtcNlri>,
+    /// VPN `FlowSpec` NLRI rules withdrawn (RFC 8955 §8). Populated only for
+    /// AFI 1 / SAFI 134.
+    pub vpn_flowspec_withdrawn: Vec<crate::flowspec::VpnFlowSpecRule>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MpNlriFamily {
     Unicast,
     FlowSpec,
+    VpnFlowSpec,
     Evpn,
     BgpLs,
     Vpn,
@@ -262,6 +269,8 @@ fn classify_mp_nlri_family(
     match (afi, safi) {
         (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => Ok(MpNlriFamily::Unicast),
         (Afi::Ipv4 | Afi::Ipv6, Safi::FlowSpec) => Ok(MpNlriFamily::FlowSpec),
+        // RFC 8955 §8 defines AFI 1 only; (Ipv6, FlowSpecVpn) stays rejected.
+        (Afi::Ipv4, Safi::FlowSpecVpn) => Ok(MpNlriFamily::VpnFlowSpec),
         (Afi::L2Vpn, Safi::Evpn) => Ok(MpNlriFamily::Evpn),
         (Afi::BgpLs, Safi::BgpLs | Safi::BgpLsVpn) => Ok(MpNlriFamily::BgpLs),
         (Afi::Ipv4 | Afi::Ipv6, Safi::MplsVpn) => Ok(MpNlriFamily::Vpn),
@@ -281,7 +290,7 @@ fn classify_mp_nlri_family(
             | Safi::MplsVpn
             | Safi::LabeledUnicast,
         )
-        | (Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain) => {
+        | (Afi::Ipv6 | Afi::L2Vpn | Afi::BgpLs, Safi::RtConstrain | Safi::FlowSpecVpn) => {
             Err(unsupported_mp_nlri_family(attribute, afi, safi))
         }
     }
@@ -290,7 +299,7 @@ fn unsupported_mp_nlri_family(attribute: &'static str, afi: Afi, safi: Safi) -> 
     DecodeError::MalformedField {
         message_type: "UPDATE",
         detail: format!(
-            "{attribute} unsupported AFI/SAFI {}/{}; supported families are IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, L2VPN EVPN, BGP-LS/BGP-LS VPN, VPNv4/VPNv6, IPv4/IPv6 labeled-unicast, and IPv4 RT-Constrain",
+            "{attribute} unsupported AFI/SAFI {}/{}; supported families are IPv4/IPv6 unicast, IPv4/IPv6 FlowSpec, L2VPN EVPN, BGP-LS/BGP-LS VPN, VPNv4/VPNv6, IPv4/IPv6 labeled-unicast, IPv4 RT-Constrain, and IPv4 VPN FlowSpec",
             afi as u16, safi as u8
         ),
     }
@@ -2334,7 +2343,7 @@ fn decode_mp_reach_nlri(
     // FlowSpec (SAFI 133): NH length is 0 — no next-hop for filter rules
     let mut link_local_next_hop: Option<Ipv6Addr> = None;
     let next_hop = match family {
-        MpNlriFamily::FlowSpec => {
+        MpNlriFamily::FlowSpec | MpNlriFamily::VpnFlowSpec => {
             if nh_len != 0 {
                 return Err(DecodeError::MalformedField {
                     message_type: "UPDATE",
@@ -2444,6 +2453,24 @@ fn decode_mp_reach_nlri(
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
+        })));
+    }
+    if family == MpNlriFamily::VpnFlowSpec {
+        let rules = crate::flowspec::decode_vpn_flowspec_nlri(nlri_bytes, afi)?;
+        return Ok(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+            afi,
+            safi,
+            next_hop,
+            link_local_next_hop,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+            vpn_flowspec_announced: rules,
         })));
     }
     // EVPN (AFI 25 / SAFI 70): NLRI is typed EVPN routes, not prefixes
@@ -2465,6 +2492,7 @@ fn decode_mp_reach_nlri(
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
     }
     if family == MpNlriFamily::BgpLs {
@@ -2495,6 +2523,7 @@ fn decode_mp_reach_nlri(
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
     }
     if family == MpNlriFamily::Vpn {
@@ -2523,6 +2552,7 @@ fn decode_mp_reach_nlri(
             labeled_announced: vec![],
             vpn_announced: routes,
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
     }
     if family == MpNlriFamily::Labeled {
@@ -2551,6 +2581,7 @@ fn decode_mp_reach_nlri(
             vpn_announced: vec![],
             labeled_announced: routes,
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
     }
     if family == MpNlriFamily::Rtc {
@@ -2577,6 +2608,7 @@ fn decode_mp_reach_nlri(
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: routes,
+            vpn_flowspec_announced: vec![],
         })));
     }
     let add_path = add_path_families.contains(&(afi, safi));
@@ -2619,6 +2651,7 @@ fn decode_mp_reach_nlri(
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     })))
 }
 /// Decode `MP_UNREACH_NLRI` (type 15) attribute value.
@@ -2667,6 +2700,22 @@ fn decode_mp_unreach_nlri(
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
+        })));
+    }
+    if family == MpNlriFamily::VpnFlowSpec {
+        let rules = crate::flowspec::decode_vpn_flowspec_nlri(withdrawn_bytes, afi)?;
+        return Ok(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
+            afi,
+            safi,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
+            labeled_withdrawn: vec![],
+            vpn_withdrawn: vec![],
+            rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: rules,
         })));
     }
     // EVPN (AFI 25 / SAFI 70): withdrawn is typed EVPN routes, not prefixes
@@ -2686,6 +2735,7 @@ fn decode_mp_unreach_nlri(
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         })));
     }
     if family == MpNlriFamily::BgpLs {
@@ -2744,6 +2794,7 @@ fn decode_mp_unreach_nlri(
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     })))
 }
 /// Decode the BGP-LS / BGP-LS VPN `MP_UNREACH_NLRI` branch (RFC 9552).
@@ -2778,6 +2829,7 @@ fn decode_bgpls_mp_unreach(
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     })))
 }
 /// Decode the VPNv4/VPNv6 `MP_UNREACH_NLRI` branch (SAFI 128).
@@ -2814,6 +2866,7 @@ fn decode_vpn_mp_unreach(
         labeled_withdrawn: vec![],
         vpn_withdrawn: routes,
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     })))
 }
 /// Decode the IPv4/IPv6 labeled-unicast `MP_UNREACH_NLRI` branch (SAFI 4).
@@ -2850,6 +2903,7 @@ fn decode_labeled_mp_unreach(
         vpn_withdrawn: vec![],
         labeled_withdrawn: routes,
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     })))
 }
 /// Decode the RT-Constrain `MP_UNREACH_NLRI` branch (RFC 4684, SAFI 132).
@@ -2879,6 +2933,7 @@ fn decode_rtc_mp_unreach(
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: routes,
+        vpn_flowspec_withdrawn: vec![],
     })))
 }
 /// Decode `AS_PATH` segments from the attribute value bytes.
@@ -3513,6 +3568,12 @@ fn encode_mp_reach_nlri(
         crate::flowspec::try_encode_flowspec_nlri(&mp.flowspec_announced, buf, mp.afi)?;
         return Ok(());
     }
+    if mp.safi == Safi::FlowSpecVpn {
+        buf.push(0); // NH-Len = 0
+        buf.push(0); // Reserved
+        crate::flowspec::try_encode_vpn_flowspec_nlri(&mp.vpn_flowspec_announced, buf, mp.afi)?;
+        return Ok(());
+    }
     // EVPN: next-hop is the VTEP loopback IP (4 or 16 bytes), then EVPN NLRI
     if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn {
         match mp.next_hop {
@@ -3644,6 +3705,10 @@ fn encode_mp_unreach_nlri(
     // FlowSpec: encode FlowSpec NLRI rules
     if mp.safi == Safi::FlowSpec {
         crate::flowspec::try_encode_flowspec_nlri(&mp.flowspec_withdrawn, buf, mp.afi)?;
+        return Ok(());
+    }
+    if mp.safi == Safi::FlowSpecVpn {
+        crate::flowspec::try_encode_vpn_flowspec_nlri(&mp.vpn_flowspec_withdrawn, buf, mp.afi)?;
         return Ok(());
     }
     // EVPN: encode EVPN NLRI routes
@@ -3905,6 +3970,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp));
         let mut buf = Vec::new();
@@ -3950,6 +4016,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4039,6 +4106,7 @@ mod tests {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(Box::new(mp));
         let mut buf = Vec::new();
@@ -4077,6 +4145,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4105,6 +4174,7 @@ mod tests {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4135,6 +4205,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         }));
         let mut buf = Vec::new();
         encode_path_attributes(&[attr], &mut buf, true, false).unwrap();
@@ -4239,6 +4310,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![vpn_entry(0, route.clone())],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4278,6 +4350,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![vpn_entry(0, route.clone())],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4314,6 +4387,7 @@ mod tests {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![vpn_entry(0, route.clone())],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4374,6 +4448,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![vpn_entry(1, vpnv4_nlri(100)), vpn_entry(2, vpnv4_nlri(200))],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4398,6 +4473,7 @@ mod tests {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![vpn_entry(7, route)],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4463,6 +4539,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![vpn_entry(0, route)],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4492,6 +4569,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![crate::rtc::RtcNlri::DEFAULT, rtc_nlri_96()],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4519,6 +4597,7 @@ mod tests {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![rtc_nlri_96()],
+            vpn_flowspec_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -4540,6 +4619,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![rtc_nlri_96()],
+            vpn_flowspec_announced: vec![],
         }));
         let mut buf = Vec::new();
         encode_path_attributes(&[attr], &mut buf, true, false).unwrap();
@@ -5566,6 +5646,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(Box::new(mp.clone()))];
         let mut buf = Vec::new();
@@ -5591,6 +5672,7 @@ mod tests {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         };
         let attrs = vec![PathAttribute::MpUnreachNlri(Box::new(mp.clone()))];
         let mut buf = Vec::new();
@@ -5613,6 +5695,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         }));
         let mut buf = vec![0xaa, 0xbb];
         let err =
@@ -5639,6 +5722,7 @@ mod tests {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         }));
         let mut buf = vec![0xaa, 0xbb];
         let err =
@@ -5672,6 +5756,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(Box::new(mp.clone()))];
         let mut buf = Vec::new();
@@ -5698,6 +5783,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(Box::new(mp.clone()))];
         let mut buf = Vec::new();
@@ -5720,6 +5806,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         }));
         assert_eq!(attr.type_code(), 14);
         // RFC 4760 §3: MP_REACH_NLRI is optional non-transitive
@@ -5738,6 +5825,7 @@ mod tests {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         }));
         assert_eq!(attr.type_code(), 15);
         assert_eq!(attr.flags(), attr_flags::OPTIONAL);
@@ -5804,6 +5892,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(Box::new(mp.clone()))];
         let mut buf = Vec::new();
@@ -5965,6 +6054,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(Box::new(mp.clone()))];
         let mut buf = Vec::new();
@@ -6009,6 +6099,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -6458,6 +6549,7 @@ mod tests {
             vpn_announced: vec![],
             labeled_announced: vec![labeled_entry(0, nlri.clone())],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -6494,6 +6586,7 @@ mod tests {
             vpn_announced: vec![],
             labeled_announced: vec![labeled_entry(0, nlri.clone())],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -6534,6 +6627,7 @@ mod tests {
             vpn_withdrawn: vec![],
             labeled_withdrawn: vec![labeled_entry(0, nlri.clone())],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -6567,6 +6661,7 @@ mod tests {
                 labeled_entry(2, labeled_nlri(200)),
             ],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         let attr = PathAttribute::MpReachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
@@ -6590,6 +6685,7 @@ mod tests {
             vpn_withdrawn: vec![],
             labeled_withdrawn: vec![labeled_entry(7, nlri)],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         };
         let attr = PathAttribute::MpUnreachNlri(Box::new(mp.clone()));
         let mut buf = Vec::new();
