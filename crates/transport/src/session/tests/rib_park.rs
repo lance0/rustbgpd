@@ -115,6 +115,19 @@ async fn until_parked(metrics: &BgpMetrics, peer: &str) {
     panic!("the session never parked on the full RIB channel");
 }
 
+/// Hold `held` for the full RIB channel with `behind` buffered after it,
+/// seeded into the read buffer so no short socket read can split them.
+async fn park_with_buffered(session: &mut PeerSession, behind: &[u8]) {
+    session
+        .read_buf
+        .buf
+        .extend_from_slice(&encoded_announce(held()));
+    session.read_buf.buf.extend_from_slice(behind);
+    session.process_read_buffer().await;
+    assert_eq!(session.rib_backlog.len(), 1, "`held` must be held");
+    assert_eq!(&session.read_buf.buf[..], behind, "`behind` stays buffered");
+}
+
 /// The next frame other than the handshake's OPEN and KEEPALIVEs, within a
 /// real-time bound.
 async fn next_frame_after_handshake(server: &mut TcpStream) -> Option<Message> {
@@ -488,25 +501,28 @@ async fn rib_park_shutdown_sends_cease_then_delivers_in_order() {
 async fn rib_park_leaves_further_input_unread() {
     let RibPark {
         mut session,
-        commands: _commands,
+        commands,
         rib_rx: _rib_rx,
         mut server,
         ..
     } = rib_park().await;
-    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
     let later_pdu = encoded_announce(later());
     let unread_pdu = encoded_announce(unread());
+    park_with_buffered(&mut session, &later_pdu).await;
     {
         let run = session.run();
         let steps = async {
-            let mut both = encoded_announce(held());
-            both.extend_from_slice(&later_pdu);
-            server.write_all(&both).await.unwrap();
-            until_parked(&metrics, &peer).await;
             server.write_all(&unread_pdu).await.unwrap();
-            // Proving an absence: give a session that wrongly reads its
-            // socket ample time to do so.
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            // Proving an absence: run-loop turns that each answer a state
+            // query. A readable socket arm would win about half of them.
+            for _ in 0..32 {
+                let (reply, response) = oneshot::channel();
+                commands
+                    .send(PeerCommand::QueryState { reply })
+                    .await
+                    .unwrap();
+                response.await.unwrap();
+            }
         };
         tokio::select! {
             result = run => panic!("run() ended while parked: {result:?}"),
@@ -543,17 +559,13 @@ async fn rib_park_delivers_the_held_update_first() {
         mut session,
         commands: _commands,
         mut rib_rx,
-        mut server,
+        server: _server,
         fillers,
         ..
     } = rib_park().await;
-    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    park_with_buffered(&mut session, &encoded_announce(later())).await;
     let run = session.run();
     let steps = async {
-        let mut both = encoded_announce(held());
-        both.extend_from_slice(&encoded_announce(later()));
-        server.write_all(&both).await.unwrap();
-        until_parked(&metrics, &peer).await;
         for _ in 0..fillers {
             assert_eq!(announced_v4(&rib_rx.recv().await.unwrap()), []);
         }
@@ -604,4 +616,75 @@ async fn rib_park_runs_a_deferred_shutdown() {
         result = run => panic!("run() ended: {result:?}"),
         () = steps => {}
     }
+}
+
+/// While parked, an envelope larger than the writer queue still reaches the
+/// writer in full: the pending-envelope arm resumes it each time the writer
+/// frees a slot.
+/// Mutation-red: not polling that continuation while parked leaves the rest
+/// of the envelope, and its End-of-RIB, unsent until the RIB drains.
+#[tokio::test]
+async fn rib_park_continues_a_multi_slice_envelope() {
+    const ROUTES: u32 = 200;
+    let RibPark {
+        mut session,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        server: _server,
+        outbound,
+        ..
+    } = rib_park().await;
+    // A one-slot writer queue the test drains by hand.
+    session.writer_join.take().unwrap().abort();
+    let (bulk, mut frames) = mpsc::channel(1);
+    session.writer_bulk_tx = Some(bulk);
+    park_with_buffered(&mut session, &[]).await;
+    // A distinct MED per route: one frame each.
+    let routes: Vec<Route> = (0..ROUTES)
+        .map(|index| {
+            let mut route = make_route(100);
+            route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32));
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Med(index));
+            });
+            route
+        })
+        .collect();
+    outbound
+        .try_send(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            announce: routes.into(),
+            end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+            ..OutboundRouteUpdate::default()
+        })
+        .unwrap();
+    {
+        let run = session.run();
+        let steps = async {
+            let mut announced = 0;
+            loop {
+                let mut frame = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+                    .await
+                    .expect("a parked session must keep feeding its writer")
+                    .unwrap();
+                let Message::Update(update) =
+                    rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN)
+                        .unwrap()
+                else {
+                    panic!("expected UPDATE frames");
+                };
+                let parsed = update.parse(true, false, &[]).unwrap();
+                if parsed.announced.is_empty() && parsed.withdrawn.is_empty() {
+                    break;
+                }
+                announced += parsed.announced.len();
+            }
+            assert_eq!(announced, ROUTES as usize, "every route before End-of-RIB");
+        };
+        tokio::select! {
+            result = run => panic!("run() ended while parked: {result:?}"),
+            () = steps => {}
+        }
+    }
+    assert_eq!(session.rib_backlog.len(), 1, "still parked throughout");
 }
