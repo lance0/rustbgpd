@@ -1170,7 +1170,10 @@ fn deferred_unicast_commit_accepts_local_updates_and_rejects_mixed_sources() {
         .try_send_and_commit_outbound_update(target, withdrawal)
         .unwrap();
     let update = outbound_rx.try_recv().unwrap();
-    assert_eq!(update.withdraw, vec![(local.prefix, 0)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(local.prefix, 0)]
+    );
     assert!(update.announce.is_empty());
 
     let mut marker = OutboundCommitBatch::with_unicast(Vec::new().into(), Vec::new().into());
@@ -2363,7 +2366,7 @@ fn collision_failback_overflow_receipt(
             !update.end_of_rib.contains(&FAMILY),
             "staging must not declare convergence"
         );
-        withdrawn.extend(update.withdraw.iter().map(|(prefix, _)| *prefix));
+        withdrawn.extend(update.unicast_withdrawals().map(|(prefix, _)| *prefix));
     }
     assert_eq!(withdrawn, HashSet::from([prefix_a, prefix_b]));
 

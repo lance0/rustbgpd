@@ -1136,6 +1136,10 @@ pub struct OutboundRouteUpdate {
     /// (transport only ever reads it). Retaining the vector's allocation
     /// also avoids copying its rows when the payload becomes shared.
     pub announce: Arc<Vec<Route>>,
+    /// Withdrawals an update-group fanout stages once for every member,
+    /// `Arc`-shared so a stalled member pins the group's vector rather than
+    /// its own copy. Sent in the unicast withdraw phase, before `withdraw`.
+    pub shared_withdraw: Arc<Vec<(Prefix, u32)>>,
     /// Withdrawn routes with their path IDs. For non-Add-Path peers,
     /// `path_id` is always 0.
     pub withdraw: Vec<(Prefix, u32)>,
@@ -1209,6 +1213,14 @@ pub struct OutboundRouteUpdate {
     /// ordinary row replace it ahead of the RTBH path's own announcement.
     /// `0` = no ordering requirement.
     pub exempt_announce: usize,
+}
+
+impl OutboundRouteUpdate {
+    /// Every unicast withdrawal in wire order: the shared rows, then this
+    /// envelope's own.
+    pub fn unicast_withdrawals(&self) -> impl Iterator<Item = &(Prefix, u32)> {
+        self.shared_withdraw.iter().chain(&self.withdraw)
+    }
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.

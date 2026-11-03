@@ -93,7 +93,7 @@ fn apply_unicast_updates(
     state: &mut HashMap<(Prefix, u32), Route>,
 ) {
     while let Ok(update) = rx.try_recv() {
-        for withdrawn in update.withdraw {
+        for withdrawn in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
             state.remove(&withdrawn);
         }
         for route in update.announce.iter() {
@@ -173,7 +173,10 @@ async fn partial_communities_enforce_no_export_and_no_advertise() {
             .try_recv()
             .expect("Partial well-known community withdraws prior route");
         assert!(withdrawn.announce.is_empty());
-        assert_eq!(withdrawn.withdraw, vec![(Prefix::V4(prefix), 0)]);
+        assert_eq!(
+            withdrawn.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(Prefix::V4(prefix), 0)]
+        );
     }
 
     drop(tx);
@@ -428,7 +431,7 @@ async fn receive_dual_stack_dump(
         for route in update.announce.iter() {
             state.insert((route.prefix, route.path_id), route.clone());
         }
-        for withdrawn in update.withdraw {
+        for withdrawn in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
             state.remove(&withdrawn);
         }
         eor.extend(update.end_of_rib);
@@ -727,7 +730,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         HashSet::from([Prefix::V4(kept_prefix), Prefix::V6(v6)])
     );
     assert!(refreshed.vpn_announce.is_empty());
-    assert_eq!(refreshed.withdraw.len(), 0);
+    assert_eq!(refreshed.unicast_withdrawals().count(), 0);
 
     let (_, sibling_rx) = receivers
         .iter_mut()
@@ -834,7 +837,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     for (_, out_rx) in &mut receivers {
         let update = out_rx.try_recv().expect("plain route announced after sync");
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
     }
 
     tx.send(RibUpdate::RoutesReceived {
@@ -859,7 +862,10 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
             update.announce.is_empty(),
             "{peer} must not receive the route"
         );
-        assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(Prefix::V4(prefix), 0)]
+        );
 
         let response = collect_advertised_routes(&tx, PeerId::from_addr(*peer)).await;
         assert!(response.is_empty());
@@ -931,7 +937,11 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
                 update.announce.is_empty(),
                 "policy-added NO_ADVERTISE must not be announced to {peer}"
             );
-            saw_withdraw |= update.withdraw.contains(&(Prefix::V4(prefix), 0));
+            saw_withdraw |= update
+                .unicast_withdrawals()
+                .copied()
+                .collect::<Vec<_>>()
+                .contains(&(Prefix::V4(prefix), 0));
         }
         assert!(saw_withdraw, "policy replacement must withdraw from {peer}");
 
@@ -1036,7 +1046,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     for (_, out_rx) in &mut receivers {
         let update = out_rx.recv().await.unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert!(update.otc_blocked.is_empty());
     }
 
@@ -1057,7 +1067,10 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     for (_, out_rx) in &mut receivers {
         let update = out_rx.recv().await.unwrap();
         assert!(update.announce.is_empty());
-        assert_eq!(update.withdraw, vec![(Prefix::V4(advertised_prefix), 0)]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(Prefix::V4(advertised_prefix), 0)]
+        );
         assert_eq!(update.otc_blocked.len(), 1);
         assert_eq!(update.otc_blocked[0].prefix, Prefix::V4(advertised_prefix));
         assert!(
@@ -1089,7 +1102,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     for (peer, out_rx) in &mut receivers {
         let update = out_rx.recv().await.unwrap();
         assert!(update.announce.is_empty());
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert_eq!(update.otc_blocked.len(), 1);
         assert!(
             update.otc_blocked[0]
@@ -1175,7 +1188,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     for (_, out_rx) in &mut receivers {
         let update = out_rx.recv().await.unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert!(
             update.otc_blocked.is_empty(),
             "a permitted replacement must clear the prior OTC denial residue"
@@ -1464,7 +1477,7 @@ fn assert_one_dual_stack_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
         .try_recv()
         .expect("effective limit change triggers one resync");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(
         update.end_of_rib,
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
@@ -2578,7 +2591,7 @@ async fn peer_up_triggers_initial_table_dump() {
     let update = out_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -3058,7 +3071,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
 
     // Withdraw should be sent to iBGP target
     let update = out_rx.recv().await.unwrap();
-    assert_eq!(update.withdraw.len(), 1);
+    assert_eq!(update.unicast_withdrawals().count(), 1);
 
     // iBGP source announces the same prefix
     let ibgp_source = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
@@ -3437,8 +3450,11 @@ async fn withdraw_injected_removes_and_distributes() {
 
     // Should receive withdrawal
     let update = out_rx.recv().await.unwrap();
-    assert_eq!(update.withdraw.len(), 1);
-    assert_eq!(update.withdraw[0], (Prefix::V4(prefix), 0));
+    assert_eq!(update.unicast_withdrawals().count(), 1);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>()[0],
+        (Prefix::V4(prefix), 0)
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -3521,7 +3537,7 @@ async fn distribute_changes_filters_unsendable_families() {
     let update = out_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     // Adj-RIB-Out should only contain IPv4
     let advertised = collect_advertised_routes(&tx, target).await;
@@ -3608,7 +3624,7 @@ async fn send_initial_table_filters_unsendable_families() {
     let update = out_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     // Adj-RIB-Out should only contain IPv4
     let advertised = collect_advertised_routes(&tx, target).await;
@@ -4286,7 +4302,7 @@ async fn link_local_next_hop_scope_change_is_re_advertised() {
         assert_eq!(update.announce[0].prefix, route.prefix);
         assert_eq!(update.announce[0].next_hop, route.next_hop);
         assert_eq!(update.announce[0].next_hop_scope, route.next_hop_scope);
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
     }
     drop(tx);
     handle.await.unwrap();

@@ -173,7 +173,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
             update.refresh_markers,
             [] as [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 0]
         );
-        for &(prefix, path_id) in &update.withdraw {
+        for &(prefix, path_id) in update.unicast_withdrawals() {
             assert_ne!(
                 prefix,
                 Prefix::V4(ordinary),
@@ -211,7 +211,8 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     assert!(
         empty_retry
             .iter()
-            .all(|update| update.announce.is_empty() && update.withdraw.is_empty()),
+            .all(|update| update.announce.is_empty()
+                && update.unicast_withdrawals().next().is_none()),
         "a caught-up partial recovery must park frozen work instead of replaying admitted RTBH"
     );
     assert!(manager.dirty_peers.contains(&observer));
@@ -316,7 +317,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     while let Ok(update) = observer_rx.try_recv() {
         assert_eq!(update.end_of_rib, [] as [(Afi, Safi); 0]);
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             assert!(wire.remove(key).is_some());
         }
         for route in update.announce.iter() {
@@ -423,7 +424,7 @@ fn apply_wire(
 ) -> Vec<OutboundRouteUpdate> {
     let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     for update in &updates {
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             assert!(wire.remove(key).is_some(), "no unknown withdrawal");
         }
         for route in update.announce.iter() {
@@ -501,7 +502,8 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
             assert!(
                 suppressed
                     .iter()
-                    .all(|update| update.withdraw.is_empty() && update.announce.is_empty())
+                    .all(|update| update.unicast_withdrawals().next().is_none()
+                        && update.announce.is_empty())
             );
             assert_eq!(wire.values().next().unwrap().peer, original.peer);
             let first = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
@@ -542,7 +544,7 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
                 assert!(
                     removed
                         .iter()
-                        .flat_map(|update| &update.withdraw)
+                        .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
                         .any(|(key, _)| *key == Prefix::V4(prefix))
                 );
                 assert_eq!(wire.len(), 2);
@@ -611,7 +613,7 @@ fn policy_stripped_blackhole_removal_withdraws_original_rtbh_intent() {
         assert_eq!(
             updates
                 .iter()
-                .map(|update| update.withdraw.len())
+                .map(|update| update.unicast_withdrawals().count())
                 .sum::<usize>(),
             1
         );
@@ -680,9 +682,13 @@ fn final_encoder_refusal_keeps_frozen_ordinary_capacity_and_recovery_owned() {
     encoder.set_profile(2, [key.clone()]);
     inject_aggregate(&mut manager, prefix, 99, true);
     let refused = apply_wire(&mut rx, &mut wire);
-    assert!(refused.iter().all(|update| update.withdraw.is_empty()
-        && update.announce.is_empty()
-        && update.end_of_rib.is_empty()));
+    assert!(
+        refused
+            .iter()
+            .all(|update| update.unicast_withdrawals().next().is_none()
+                && update.announce.is_empty()
+                && update.end_of_rib.is_empty())
+    );
     assert_eq!(wire.len(), 1);
     assert_eq!(wire.values().next().unwrap().peer, old.peer);
     assert!(
@@ -1929,7 +1935,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
     assert_eq!(
         updates
             .iter()
-            .flat_map(|update| &update.withdraw)
+            .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
             .copied()
             .collect::<Vec<_>>(),
         [(first, 0)]
@@ -1971,7 +1977,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     while let Ok(update) = rx.try_recv() {
         assert_eq!(update.end_of_rib, []);
-        for key in update.withdraw {
+        for key in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
             assert!(
                 wire.remove(&key).is_some() || key == (first, 0),
                 "only known obsolete RTBH may receive a conservative repeated withdrawal"
@@ -2234,7 +2240,8 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
         assert!(
             updates
                 .iter()
-                .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
+                .all(|update| update.unicast_withdrawals().next().is_none()
+                    && update.end_of_rib.is_empty())
         );
         assert_eq!(fresh_wire.len(), 1);
         assert_late_waiter_advertised_truth(&mut manager, observer, 1, "fresh channel while held");
@@ -2278,7 +2285,8 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
         assert!(
             updates
                 .iter()
-                .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
+                .all(|update| update.unicast_withdrawals().next().is_none()
+                    && update.end_of_rib.is_empty())
         );
         assert_eq!(
             wire.len(),
@@ -2355,7 +2363,7 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
     drain_route_chunks(&mut manager);
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(updates.iter().all(|update| update.announce.is_empty()
-        && update.withdraw.is_empty()
+        && update.unicast_withdrawals().next().is_none()
         && update.end_of_rib.is_empty()));
     assert_late_waiter_advertised_truth(
         &mut manager,
@@ -2684,7 +2692,7 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
     inject(&mut manager, local_route(blocked, 29));
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(updates.iter().all(|update| update.announce.is_empty()
-        && update.withdraw.is_empty()
+        && update.unicast_withdrawals().next().is_none()
         && update.end_of_rib.is_empty()));
     assert_eq!(wire.len(), 3);
     assert_eq!(capacity(&manager), (2, Some(0)));
@@ -2777,11 +2785,9 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         "last-prefix withdrawal queues existing capacity recovery"
     );
     let updates = apply_wire(&mut rx, &mut wire);
-    assert!(
-        updates
-            .iter()
-            .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
-    );
+    assert!(updates.iter().all(
+        |update| update.unicast_withdrawals().next().is_none() && update.end_of_rib.is_empty()
+    ));
     assert_eq!(wire.len(), 2);
     assert_eq!(
         wire.keys().map(|key| key.0).collect::<HashSet<_>>(),
@@ -2928,7 +2934,7 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     assert!(manager.selection_deferred(FAMILY));
     let withdrawn: Vec<_> = updates
         .iter()
-        .flat_map(|update| &update.withdraw)
+        .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
         .copied()
         .collect();
     if add_path {

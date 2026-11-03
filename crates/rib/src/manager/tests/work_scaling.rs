@@ -187,7 +187,7 @@ fn drain(receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>]) -> (usize, usize
     for rx in receivers {
         while let Ok(update) = rx.try_recv() {
             announced += update.announce.len();
-            withdrawn += update.withdraw.len();
+            withdrawn += update.unicast_withdrawals().count();
         }
     }
     (announced, withdrawn)
@@ -497,7 +497,7 @@ fn destination_prestage_churn(size: usize, prepare: bool) -> Work {
     );
     for rx in &mut receivers {
         let update = rx.try_recv().unwrap();
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert_eq!(update.announce.len(), size);
         assert_eq!(
             update
@@ -555,7 +555,7 @@ fn destination_prestage_churn(size: usize, prepare: bool) -> Work {
         assert_eq!(committed - after, routes);
         for rx in &mut receivers {
             let update = rx.try_recv().unwrap();
-            assert_eq!(update.withdraw.len(), 0);
+            assert_eq!(update.unicast_withdrawals().count(), 0);
             assert_eq!(update.announce.len(), routes);
             assert_eq!(
                 update
@@ -798,7 +798,10 @@ fn deferred_unicast_received_replay(size: usize) -> Work {
     for receiver in &mut receivers {
         let mut announcements = Vec::new();
         while let Ok(update) = receiver.try_recv() {
-            assert_eq!(update.withdraw, Vec::new());
+            assert_eq!(
+                update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                Vec::new()
+            );
             assert_eq!(update.end_of_rib, Vec::new());
             announcements.extend(update.announce.iter().cloned());
         }
@@ -878,7 +881,10 @@ fn deferred_unicast_local_replay(size: usize) -> Work {
     }));
     let mut announcements = Vec::new();
     while let Ok(update) = receivers[0].try_recv() {
-        assert_eq!(update.withdraw, Vec::new());
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            Vec::new()
+        );
         assert_eq!(update.end_of_rib, Vec::new());
         announcements.extend(update.announce.iter().cloned());
     }
@@ -983,7 +989,10 @@ fn deferred_unicast_sibling_initial_replay(size: usize) -> Work {
     );
     let mut paths = BTreeSet::new();
     while let Ok(update) = receiver.as_mut().unwrap().try_recv() {
-        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            [] as [(Prefix, u32); 0]
+        );
         assert_eq!(update.end_of_rib, [] as [(Afi, Safi); 0]);
         for route in update.announce.iter() {
             assert_eq!(route.prefix, Prefix::V4(prefix));
@@ -1054,7 +1063,7 @@ fn deferred_initial_admission_local_replay(size: usize) -> Work {
         .collect();
     let mut before = BTreeSet::new();
     while let Ok(update) = observer_rx.try_recv() {
-        assert!(update.withdraw.is_empty() && update.end_of_rib.is_empty());
+        assert!(update.unicast_withdrawals().next().is_none() && update.end_of_rib.is_empty());
         assert_eq!(
             update.refresh_markers,
             [] as [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 0]
@@ -1136,7 +1145,7 @@ fn deferred_initial_admission_local_replay(size: usize) -> Work {
     ] {
         let mut actual = BTreeSet::new();
         while let Ok(update) = receiver.try_recv() {
-            assert!(update.withdraw.is_empty() && update.end_of_rib.is_empty());
+            assert!(update.unicast_withdrawals().next().is_none() && update.end_of_rib.is_empty());
             assert_eq!(
                 update.refresh_markers,
                 [] as [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 0]
@@ -1220,7 +1229,10 @@ fn post_miss_drain(
         .map(|(rx, wire)| {
             let mut markers = 0;
             while let Ok(update) = rx.try_recv() {
-                assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+                assert_eq!(
+                    update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                    [] as [(Prefix, u32); 0]
+                );
                 assert_eq!(
                     update.refresh_markers,
                     [] as [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 0]
@@ -1996,7 +2008,7 @@ fn late_private_arm(size: usize) -> Work {
             while let Ok(update) = rx.try_recv() {
                 assert!(allow_marker || update.end_of_rib.is_empty());
                 assert!(update.end_of_rib.iter().all(|marker| *marker == family));
-                for key in update.withdraw {
+                for key in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
                     assert!(wire.remove(&key).is_some());
                 }
                 for route in update.announce.iter() {
@@ -2117,8 +2129,8 @@ fn add_path_rtbh_demotion(size: usize) -> Work {
                  wire: &mut BTreeMap<u32, bool>| {
         let mut withdrawn = 0;
         while let Ok(update) = receiver.try_recv() {
-            withdrawn += update.withdraw.len();
-            for key in &update.withdraw {
+            withdrawn += update.unicast_withdrawals().count();
+            for key in update.unicast_withdrawals() {
                 wire.remove(&key.1);
             }
             for route in update.announce.iter() {
@@ -2220,8 +2232,8 @@ fn held_bulk_promotion(size: usize) -> Work {
                  wire: &mut BTreeMap<u32, bool>| {
         let mut withdrawn = 0;
         while let Ok(update) = receiver.try_recv() {
-            withdrawn += update.withdraw.len();
-            for key in &update.withdraw {
+            withdrawn += update.unicast_withdrawals().count();
+            for key in update.unicast_withdrawals() {
                 wire.remove(&key.1);
             }
             for route in update.announce.iter() {

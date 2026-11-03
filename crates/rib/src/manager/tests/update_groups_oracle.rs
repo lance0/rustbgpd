@@ -327,7 +327,7 @@ pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
     // `Prefix`/`Afi`/`Safi` don't implement `Ord` — sort textually
     // (comparison stability is all that matters here).
     announce.sort_by_key(|entry| (entry.0.to_string(), entry.1));
-    let mut withdraw = update.withdraw.clone();
+    let mut withdraw = update.unicast_withdrawals().copied().collect::<Vec<_>>();
     withdraw.sort_by_key(|(prefix, path_id)| (prefix.to_string(), *path_id));
     let mut end_of_rib = update.end_of_rib.clone();
     end_of_rib.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
@@ -3969,7 +3969,7 @@ async fn oracle_dirty_source_excluded_sibling_has_no_shared_tombstone_withdraw()
     assert_eq!(
         grouped[&peer_v4(D)]
             .iter()
-            .flat_map(|message| &message.withdraw)
+            .flat_map(|message| message.withdraw.iter())
             .filter(|withdraw| **withdraw == key)
             .count(),
         1
@@ -6196,7 +6196,10 @@ async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
                 ],
                 "the admitted key keeps its equivalent action without a replay"
             );
-            let withdrawn: Vec<_> = messages.iter().flat_map(|msg| &msg.withdraw).collect();
+            let withdrawn: Vec<_> = messages
+                .iter()
+                .flat_map(|msg| msg.withdraw.iter())
+                .collect();
             assert_eq!(withdrawn, vec![&(Prefix::V4(pfx(2, 0)), 0)]);
         }
     }
@@ -7543,7 +7546,7 @@ async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .flat_map(|msg| &msg.withdraw)
+                .flat_map(|msg| msg.withdraw.iter())
                 .all(|(prefix, _)| *prefix != Prefix::V4(pfx(3, 0))),
             "{member} never held p3"
         );
@@ -7551,7 +7554,7 @@ async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
     assert!(
         grouped[&peer_v4(D)]
             .iter()
-            .flat_map(|msg| &msg.withdraw)
+            .flat_map(|msg| msg.withdraw.iter())
             .all(|(prefix, _)| *prefix != Prefix::V4(pfx(4, 0))),
         "D never held its own p4"
     );

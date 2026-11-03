@@ -1314,7 +1314,12 @@ async fn llgr_stale_suppressed_toward_ebgp_peer_without_llgr() {
                 .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)),
             "LLGR-stale route must not be announced to a non-LLGR eBGP peer"
         );
-        if update.withdraw.contains(&(Prefix::V4(prefix), 0)) {
+        if update
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(Prefix::V4(prefix), 0))
+        {
             withdrawn = true;
         }
     }
@@ -1356,7 +1361,11 @@ async fn llgr_stale_unchanged_toward_llgr_capable_peer() {
     let mut reannounced = false;
     while let Ok(update) = out_rx.try_recv() {
         assert!(
-            !update.withdraw.contains(&(Prefix::V4(prefix), 0)),
+            !update
+                .unicast_withdrawals()
+                .copied()
+                .collect::<Vec<_>>()
+                .contains(&(Prefix::V4(prefix), 0)),
             "LLGR-stale route must not be withdrawn from an LLGR-capable peer"
         );
         if update.announce.iter().any(|route| {
@@ -1401,7 +1410,11 @@ async fn llgr_stale_to_ibgp_peer_without_llgr_still_advertised_with_community() 
     let mut reannounced = false;
     while let Ok(update) = out_rx.try_recv() {
         assert!(
-            !update.withdraw.contains(&(Prefix::V4(prefix), 0)),
+            !update
+                .unicast_withdrawals()
+                .copied()
+                .collect::<Vec<_>>()
+                .contains(&(Prefix::V4(prefix), 0)),
             "the §4.6 exception permits advertising to a non-LLGR iBGP peer"
         );
         if update.announce.iter().any(|route| {
@@ -1472,7 +1485,7 @@ async fn fresh_routes_unaffected_by_peer_llgr_capability() {
                 .communities()
                 .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
         );
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
     }
 
     drop(tx);

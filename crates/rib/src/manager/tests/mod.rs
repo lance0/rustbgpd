@@ -445,7 +445,7 @@ fn ipv4_flowspec_sendable() -> Vec<(Afi, Safi)> {
 async fn drain_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
     let eor = out_rx.recv().await.unwrap();
     assert!(eor.announce.is_empty());
-    assert_eq!(eor.withdraw.len(), 0);
+    assert_eq!(eor.unicast_withdrawals().count(), 0);
     assert_ne!(eor.end_of_rib.len(), 0);
 }
 
@@ -1562,6 +1562,7 @@ mod orf;
 mod orf_helper_initial_eor;
 mod orr;
 mod outbound_commit_accounting;
+mod outbound_credit;
 mod outbound_limit_install;
 mod outbound_prefix_limits;
 mod outbound_resync_state;

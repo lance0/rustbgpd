@@ -1968,7 +1968,11 @@ fn assert_deferred_unicast_replay(
     multiple: bool,
 ) {
     assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
-    assert!(updates.iter().all(|update| update.withdraw.is_empty()));
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.unicast_withdrawals().next().is_none())
+    );
     let announced: BTreeSet<_> = updates
         .iter()
         .flat_map(|update| update.announce.iter())
@@ -2178,7 +2182,7 @@ fn injected_unicast_is_exported_during_selection_deferral() {
                 .collect();
             let withdrawn: Vec<_> = updates
                 .iter()
-                .flat_map(|update| update.withdraw.iter().copied())
+                .flat_map(|update| update.unicast_withdrawals().copied())
                 .collect();
             if matches!(mode, DeferredUnicastMode::AddPath) {
                 // During the hold path 23 keeps its key: only the removed
@@ -2404,7 +2408,7 @@ fn unicast_deferral_exempts_only_local_rtbh_candidates() {
             assert_eq!(
                 updates
                     .iter()
-                    .map(|update| update.withdraw.len())
+                    .map(|update| update.unicast_withdrawals().count())
                     .sum::<usize>(),
                 4
             );
@@ -2861,7 +2865,7 @@ fn injected_unicast_replaces_frozen_received_selection_without_fallback() {
         assert_eq!(
             withdrawn
                 .iter()
-                .flat_map(|update| update.withdraw.iter().map(|(prefix, _)| *prefix))
+                .flat_map(|update| update.unicast_withdrawals().map(|(prefix, _)| *prefix))
                 .collect::<Vec<_>>(),
             vec![hosts[0]],
             "{mode:?}: last-local removal must not fall back to the frozen source"
@@ -2904,7 +2908,7 @@ async fn injected_unicast_delete_and_expiry_withdraw_during_selection_deferral()
         assert_eq!(
             updates
                 .iter()
-                .flat_map(|update| update.withdraw.iter().copied())
+                .flat_map(|update| update.unicast_withdrawals().copied())
                 .collect::<Vec<_>>(),
             vec![(
                 hosts[0],
@@ -2928,7 +2932,7 @@ async fn injected_unicast_delete_and_expiry_withdraw_during_selection_deferral()
         assert_eq!(
             updates
                 .iter()
-                .flat_map(|update| update.withdraw.iter().copied())
+                .flat_map(|update| update.unicast_withdrawals().copied())
                 .collect::<Vec<_>>(),
             vec![(
                 hosts[1],
@@ -3660,7 +3664,7 @@ fn frozen_ordinary_injection_reads_back_committed_during_selection_deferral() {
         assert!(
             deferred_unicast_drain(&mut observer_rx)
                 .iter()
-                .all(|update| update.withdraw.is_empty()),
+                .all(|update| update.unicast_withdrawals().next().is_none()),
             "{mode:?}: arming the hold keeps the admitted row"
         );
         let late = PeerId::from_addr(v4(5));
@@ -3806,7 +3810,8 @@ fn frozen_ordinary_injection_reads_back_committed_during_selection_deferral() {
         assert!(
             deferred_unicast_drain(&mut observer_rx)
                 .iter()
-                .all(|update| update.announce.is_empty() && update.withdraw.is_empty()),
+                .all(|update| update.announce.is_empty()
+                    && update.unicast_withdrawals().next().is_none()),
             "{mode:?}: the hold keeps the wire unchanged"
         );
     }
@@ -3845,7 +3850,7 @@ fn late_session_gets_only_the_rtbh_path_beside_a_frozen_ordinary_path() {
         assert!(
             deferred_unicast_drain(&mut observer_rx)
                 .iter()
-                .all(|update| update.withdraw.is_empty()),
+                .all(|update| update.unicast_withdrawals().next().is_none()),
             "{mode:?}: the observer keeps its admitted row on the wire"
         );
         let late = PeerId::from_addr(v4(5));
@@ -4091,7 +4096,7 @@ fn exempt_admitted_row_awaiting_withdrawal_is_not_reported_frozen() {
         manager.distribute_changes(&HashSet::new(), &HashSet::new());
         let withdrawn: Vec<_> = deferred_unicast_drain(&mut rx)
             .iter()
-            .flat_map(|update| update.withdraw.clone())
+            .flat_map(|update| update.unicast_withdrawals().copied().collect::<Vec<_>>())
             .collect();
         assert!(manager.selection_deferred(prefix_family(&prefix)));
         assert_eq!(
@@ -4122,7 +4127,7 @@ fn hold_start_keeps_add_path_keys_of_frozen_and_exempt_rows() {
     inject(&mut manager, deferred_unicast_local(prefix, 17, 50));
     let mut wire = BTreeMap::new();
     for update in deferred_unicast_drain(&mut rx) {
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             wire.remove(key);
         }
         for route in update.announce.iter() {
@@ -4139,7 +4144,7 @@ fn hold_start_keeps_add_path_keys_of_frozen_and_exempt_rows() {
     assert!(manager.selection_deferred(prefix_family(&prefix)));
     for update in deferred_unicast_drain(&mut rx) {
         // The transport sends the withdraw phase before the announce phase.
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             wire.remove(key);
         }
         assert!(
@@ -4185,7 +4190,7 @@ fn hold_explain_best_path_reports_kept_add_path_keys() {
     inject(&mut manager, deferred_unicast_local(prefix, 19, 40));
     let mut wire = BTreeMap::new();
     for update in deferred_unicast_drain(&mut rx) {
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             wire.remove(key);
         }
         for route in update.announce.iter() {
@@ -4198,7 +4203,7 @@ fn hold_explain_best_path_reports_kept_add_path_keys() {
     let _waiter_rx = connect_restart_waiter(&mut manager);
     assert!(manager.selection_deferred(prefix_family(&prefix)));
     for update in deferred_unicast_drain(&mut rx) {
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             wire.remove(key);
         }
         for route in update.announce.iter() {

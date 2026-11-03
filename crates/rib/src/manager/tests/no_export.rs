@@ -207,7 +207,10 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
             .try_recv()
             .expect("tagged replacement must withdraw from the honor peer");
         assert!(update.announce.is_empty());
-        assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(Prefix::V4(prefix), 0)]
+        );
         let explain = query_explain_advertised_route(&tx, honor, Prefix::V4(prefix)).await;
         assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
         let stop = explain
@@ -231,7 +234,7 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
                 .try_recv()
                 .expect("tagged replacement re-announced to non-suppressed peers");
             assert_eq!(update.announce.len(), 1, "{peer}");
-            assert!(update.withdraw.is_empty(), "{peer}");
+            assert!(update.unicast_withdrawals().next().is_none(), "{peer}");
             let response = collect_advertised_routes(&tx, peer).await;
             assert_eq!(response.len(), 1, "{peer}");
         }
@@ -312,7 +315,10 @@ async fn policy_added_no_export_is_delivered_and_policy_removed_does_not_bypass(
         .try_recv()
         .expect("source NO_EXPORT withdraws despite the removal policy");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 0)]
+    );
     let explain = query_explain_advertised_route(&tx, remover, Prefix::V4(prefix)).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
     let stop = explain
@@ -721,7 +727,10 @@ async fn received_llgr_stale_no_export_form_suppressed_despite_llgr_eligibility(
         .try_recv()
         .expect("§4.6-form route withdrawn despite LLGR eligibility");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 0)]
+    );
     let explain = query_explain_advertised_route(&tx, peer, Prefix::V4(prefix)).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
     let stop = explain

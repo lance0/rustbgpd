@@ -601,7 +601,7 @@ fn exact_update_semantic(update: &OutboundRouteUpdate) -> ExactUpdateSemantic {
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
             Option::<IpAddr>::None,
             announce,
-            update.withdraw,
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
             update.end_of_rib,
             update.refresh_markers,
             next_hop_override,
@@ -1000,7 +1000,7 @@ fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
     assert_eq!(update.announce[0].peer, own_route.peer);
     assert_eq!(update.announce[1].prefix, other_route.prefix);
     assert_eq!(update.announce[1].peer, other_route.peer);
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert!(
         update.shared_group_encode.is_none(),
         "a member-specific exact fallback cannot retain shared encoded bytes"
@@ -1363,7 +1363,7 @@ fn withheld_family_gets_an_empty_eor_after_the_initial_dump() {
         .collect();
     assert_eq!(announced, vec![Prefix::V4(v4)], "no IPv6 NLRI");
     let last = updates.last().expect("initial dump sent");
-    assert!(last.announce.is_empty() && last.withdraw.is_empty());
+    assert!(last.announce.is_empty() && last.unicast_withdrawals().next().is_none());
     assert_eq!(
         last.end_of_rib,
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
@@ -1533,7 +1533,11 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
         vec![Prefix::V6(v6)],
         "only the new family is sent"
     );
-    assert!(updates.iter().all(|u| u.withdraw.is_empty()));
+    assert!(
+        updates
+            .iter()
+            .all(|u| u.unicast_withdrawals().next().is_none())
+    );
     let eor: Vec<_> = updates.iter().flat_map(|u| u.end_of_rib.clone()).collect();
     assert_eq!(eor, vec![ipv6], "one EoR, for the new family only");
     let last = updates.last().expect("updates sent");
@@ -1621,7 +1625,11 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
         .flat_map(|u| u.announce.iter().map(|r| r.prefix))
         .collect();
     assert_eq!(announced, vec![Prefix::V6(v6)]);
-    assert!(updates.iter().all(|u| u.withdraw.is_empty()));
+    assert!(
+        updates
+            .iter()
+            .all(|u| u.unicast_withdrawals().next().is_none())
+    );
     let eor: Vec<_> = updates.iter().flat_map(|u| u.end_of_rib.clone()).collect();
     assert_eq!(eor, vec![ipv6]);
     assert_eq!(updates.last().unwrap().end_of_rib, vec![ipv6]);
@@ -2238,7 +2246,10 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
                         .all(|route| route.peer != peer_v4(peer))
                 );
                 assert_eq!(update.announce.len(), if limited { 1 } else { 2 });
-                assert_eq!(update.withdraw, []);
+                assert_eq!(
+                    update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                    []
+                );
                 assert_eq!(update.end_of_rib, []);
                 assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
                 assert!(outbound.try_recv().is_err());
@@ -2442,7 +2453,7 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     let mut shared_cells = Vec::new();
     for receiver in &mut receivers {
         let update = receiver.recv().await.unwrap();
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         if let Some(cell) = &update.shared_group_encode {
             shared_cells.push(Arc::clone(cell));
         }
@@ -3535,7 +3546,11 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
     );
     let healed = dirty_receiver.recv().await.unwrap();
     assert!(
-        healed.withdraw.contains(&(Prefix::V4(first_prefix), 0)),
+        healed
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(Prefix::V4(first_prefix), 0)),
         "the pre-reply drain must emit the unrelated withdrawal residue"
     );
     assert!(
@@ -4480,10 +4495,13 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
 
     let accepted = receivers[0].recv().await.unwrap();
     assert_eq!(accepted.announce.len(), 1);
-    assert_eq!(accepted.withdraw.len(), 0);
+    assert_eq!(accepted.unicast_withdrawals().count(), 0);
     let rejected = receivers[1].recv().await.unwrap();
     assert!(rejected.announce.is_empty());
-    assert_eq!(rejected.withdraw, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(
+        rejected.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 0)]
+    );
 
     let (stats_reply, stats_response) = oneshot::channel();
     tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
@@ -5294,8 +5312,7 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     let resync = out_rx.recv().await.unwrap();
     assert!(
         resync
-            .withdraw
-            .iter()
+            .unicast_withdrawals()
             .any(|(prefix, _)| *prefix == Prefix::V4(p1)),
         "resync must (over-)withdraw the tombstoned prefix"
     );
@@ -5419,7 +5436,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
         .try_recv()
         .expect("the per-peer resync must emit the residue withdraw");
     assert_eq!(
-        resync.withdraw,
+        resync.unicast_withdrawals().copied().collect::<Vec<_>>(),
         vec![(Prefix::V4(p1), 0)],
         "the per-peer resync must withdraw only the admitted tombstoned prefix"
     );
@@ -7271,7 +7288,9 @@ fn full_channel_manager(
     let live_withdraw = live_rx.try_recv().unwrap();
     assert!(
         live_withdraw
-            .withdraw
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
             .contains(&(full_channel_prefix(0), 0))
     );
     (manager, stuck, live, stuck_rx, live_rx)
@@ -7315,7 +7334,11 @@ fn dirty_member_with_full_channel_defers_resync(ungrouped: bool) {
     let resync = stuck_rx.try_recv().expect("one resync envelope");
     assert!(stuck_rx.try_recv().is_err(), "exactly one resync envelope");
     assert!(
-        resync.withdraw.contains(&(full_channel_prefix(0), 0)),
+        resync
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(full_channel_prefix(0), 0)),
         "the resync withdraws the prefix withdrawn while the channel was full"
     );
     assert!(
@@ -7388,7 +7411,11 @@ fn force_resync_with_full_channel_defers_until_drained(ungrouped: bool) {
     let replay = stuck_rx.try_recv().expect("one forced replay after drain");
     assert!(stuck_rx.try_recv().is_err(), "exactly one replay envelope");
     assert!(
-        replay.withdraw.contains(&(full_channel_prefix(0), 0)),
+        replay
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(full_channel_prefix(0), 0)),
         "missed withdrawal is retained"
     );
     assert!(
@@ -7877,7 +7904,7 @@ fn distribution_skips_closed_receivers_before_peer_down() {
                 session_id: 0,
             });
             let update = healthy_rx.try_recv().unwrap();
-            assert_eq!(update.withdraw.len(), 4);
+            assert_eq!(update.unicast_withdrawals().count(), 4);
             assert_eq!(
                 manager.outbound_peers.len(),
                 1_001,
@@ -8199,7 +8226,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     let mut shared_cells = Vec::new();
     for receiver in &mut receivers {
         let update = receiver.recv().await.unwrap();
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert_eq!(update.announce.len(), 3, "all three routes changed chains");
         assert!(
             update
@@ -9049,7 +9076,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     for (member, out_rx) in members.iter().zip(receivers.iter_mut()) {
         let table = folded.entry(*member).or_default();
         while let Ok(update) = out_rx.try_recv() {
-            for (prefix, _) in &update.withdraw {
+            for (prefix, _) in update.unicast_withdrawals() {
                 table.remove(prefix);
             }
             for route in update.announce.iter() {
@@ -9131,7 +9158,10 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
         let idx = members.iter().position(|m| *m == member).unwrap();
         let mut replayed = HashMap::new();
         while let Ok(update) = receivers[idx].try_recv() {
-            assert!(update.withdraw.is_empty(), "refresh replay never withdraws");
+            assert!(
+                update.unicast_withdrawals().next().is_none(),
+                "refresh replay never withdraws"
+            );
             for route in update.announce.iter() {
                 replayed.insert(route.prefix, route.peer);
             }
@@ -9721,12 +9751,18 @@ async fn queued_refresh_probe_failure_invalidates_only_its_member_and_recovers()
         for index in [0, 2] {
             assert!(responses[index].shared_group_encode.is_some());
             assert_eq!(responses[index].announce.len(), 2);
-            assert_eq!(responses[index].withdraw, Vec::new());
+            assert_eq!(
+                responses[index]
+                    .unicast_withdrawals()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                Vec::new()
+            );
         }
         let affected = &responses[1];
         assert_eq!(affected.announce.len(), if phase == 2 { 2 } else { 1 });
         assert_eq!(
-            affected.withdraw,
+            affected.unicast_withdrawals().copied().collect::<Vec<_>>(),
             if phase == 0 {
                 vec![(delivered.prefix, delivered.path_id)]
             } else {
@@ -10234,7 +10270,10 @@ async fn ingest_cold_capture_services_readiness_and_fences_other_lanes() {
     }
     manager.resync_dirty_peers_bounded();
     let recovered = stuck_rx.try_recv().unwrap();
-    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(full_channel_prefix(0), 0)]
+    );
     let announced: HashSet<_> = recovered
         .announce
         .iter()
@@ -10463,7 +10502,10 @@ async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
     .map(full_channel_prefix)
     .collect();
     assert_eq!(announced, expected);
-    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(full_channel_prefix(0), 0)]
+    );
     assert_eq!(ordinary.await.unwrap(), 8);
     let (reply, health) = oneshot::channel();
     tx.send(RibUpdate::TestQueryOutboundHealth { reply })
@@ -10692,7 +10734,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
         ]) {
             *total += count;
         }
-        assert!(update.withdraw.is_empty() && update.vpn_withdraw.is_empty());
+        assert!(update.unicast_withdrawals().next().is_none() && update.vpn_withdraw.is_empty());
     }
     assert_eq!(initial[0], 9);
     assert_eq!(initial[4], 2);
@@ -10799,7 +10841,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
     let mut withdrawn = [0; 6];
     while let Ok(update) = output.try_recv() {
         for (total, count) in withdrawn.iter_mut().zip([
-            update.withdraw.len(),
+            update.unicast_withdrawals().count(),
             update.flowspec_withdraw.len(),
             update.evpn_withdraw.len(),
             update.bgpls_withdraw.len(),
@@ -11063,7 +11105,7 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
             (128, 0, 0)
         }
     );
-    assert!(initial.withdraw.is_empty() && initial.vpn_withdraw.is_empty());
+    assert!(initial.unicast_withdrawals().next().is_none() && initial.vpn_withdraw.is_empty());
     let admitted_keys: HashSet<_> = initial
         .announce
         .iter()
@@ -11273,18 +11315,21 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
     if departing == source_peer {
         let withdrawn = output.try_recv().unwrap();
         assert_eq!(
-            (withdrawn.withdraw.len(), withdrawn.vpn_withdraw.len()),
+            (
+                withdrawn.unicast_withdrawals().count(),
+                withdrawn.vpn_withdraw.len()
+            ),
             if vpn { (0, 128) } else { (128, 0) }
         );
         assert!(withdrawn.announce.is_empty() && withdrawn.vpn_announce.is_empty());
         let withdrawn_keys: HashSet<_> = withdrawn
-            .withdraw
-            .iter()
+            .unicast_withdrawals()
             .map(|&(prefix, path_id)| crate::update::ExactExportKey::Unicast(prefix, path_id))
             .chain(
                 withdrawn
                     .vpn_withdraw
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(crate::update::ExactExportKey::Vpn),
             )
             .collect();
@@ -11770,7 +11815,10 @@ async fn evpn_refusal_prior_retirement_readiness(
     while manager.process_next_route_chunk() {}
     let initial = output.try_recv().unwrap();
     assert_eq!(initial.announce.len(), routes.len());
-    assert_eq!(initial.withdraw, []);
+    assert_eq!(
+        initial.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        []
+    );
     assert_eq!(manager.group_ribs[&gid].table.len(), routes.len());
     assert!(!manager.dirty_peers.contains(&peer));
     let empty_credit = manager.pending_group_admitted.bytes();
@@ -12003,7 +12051,10 @@ fn unicast_cleanup_fixture(grouped: bool) -> UnicastCleanupFixture {
     let mut delivered = Vec::new();
     let mut flowspec = Vec::new();
     while let Ok(initial) = output.try_recv() {
-        assert_eq!(initial.withdraw, []);
+        assert_eq!(
+            initial.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            []
+        );
         assert_eq!(initial.flowspec_withdraw, []);
         delivered.extend(
             initial
@@ -12213,7 +12264,10 @@ async fn admitted_prior_retain_services_readiness() {
     .await;
     let recovered = output.try_recv().unwrap();
     assert_eq!(recovered.announce.len(), 127);
-    assert_eq!(recovered.withdraw, vec![(routes[0].prefix, 0)]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(routes[0].prefix, 0)]
+    );
     assert_eq!(recovered.flowspec_withdraw, vec![flowspec]);
     assert!(recovered.flowspec_announce.is_empty());
     assert_eq!(recovered.end_of_rib, []);
@@ -12289,10 +12343,13 @@ async fn common_candidate_retirement_services_readiness() {
         let recovered = output.try_recv().unwrap();
         assert!(recovered.announce.is_empty());
         assert_eq!(
-            recovered.withdraw.iter().copied().collect::<HashSet<_>>(),
+            recovered
+                .unicast_withdrawals()
+                .copied()
+                .collect::<HashSet<_>>(),
             routes.iter().map(|route| (route.prefix, 0)).collect()
         );
-        assert_eq!(recovered.withdraw.len(), 128);
+        assert_eq!(recovered.unicast_withdrawals().count(), 128);
         assert_eq!(recovered.end_of_rib, []);
         assert!(output.try_recv().is_err());
         assert_eq!(manager.adj_ribs_out[&peer].len(), 0);
@@ -12350,7 +12407,10 @@ async fn capacity_filtered_candidate_retirement_services_readiness() {
     assert_eq!(result, Ok(()));
     let update = output.try_recv().unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, []);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        []
+    );
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
     assert!(output.try_recv().is_err());
     assert_eq!(manager.adj_ribs_out[&peer].len(), 128);
@@ -12472,7 +12532,10 @@ async fn evpn_refused_arc_retirement(
     while manager.process_next_route_chunk() {}
     let initial = output.try_recv().unwrap();
     assert_eq!(initial.announce.len(), 128);
-    assert_eq!(initial.withdraw, []);
+    assert_eq!(
+        initial.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        []
+    );
     assert!(!manager.dirty_peers.contains(&peer));
     let empty_credit = manager.pending_group_admitted.bytes();
     assert!(manager.capture_group_admitted_keys(peer));
@@ -12720,7 +12783,10 @@ async fn ingest_dirty_replay_readiness(ungrouped: bool) {
     .map(full_channel_prefix)
     .collect();
     assert_eq!(announced, expected);
-    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(full_channel_prefix(0), 0)]
+    );
     assert_eq!(recovered.end_of_rib, vec![family]);
     assert!(!manager.pending_eor.contains_key(&stuck));
     assert!(!manager.dirty_peers.contains(&stuck));
@@ -12929,7 +12995,10 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
     for rx in &mut outbound[..ages.len()] {
         let update = rx.try_recv().unwrap();
         assert_eq!(update.announce.len(), 3);
-        assert_eq!(update.withdraw, vec![(full_channel_prefix(0), 0)]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(full_channel_prefix(0), 0)]
+        );
         assert_eq!(update.end_of_rib, ipv4_sendable());
     }
     assert!(manager.dirty_peers.is_empty());
@@ -13060,7 +13129,10 @@ fn dirty_resync_tick_withholds_forced_siblings_with_free_channels() {
     for receiver in &mut outbound {
         while let Ok(update) = receiver.try_recv() {
             assert_eq!(update.announce.len(), 1);
-            assert_eq!(update.withdraw, []);
+            assert_eq!(
+                update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                []
+            );
         }
     }
     assert!(manager.dirty_peers.is_empty());
@@ -13078,7 +13150,10 @@ fn dirty_resync_tick_preserves_unrelated_force_only_replay() {
     for receiver in &mut outbound {
         let update = receiver.try_recv().unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw, []);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            []
+        );
         assert!(receiver.try_recv().is_err());
     }
     assert!(manager.force_outbound_peers.is_empty());
@@ -13198,7 +13273,10 @@ async fn dirty_resync_timer_member_ages(ages: &[Duration]) {
         releases[member].send(()).unwrap();
         let recovered = outbound[member].recv().await.unwrap();
         assert_eq!(recovered.announce.len(), 2);
-        assert_eq!(recovered.withdraw, vec![(removed, 0)]);
+        assert_eq!(
+            recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(removed, 0)]
+        );
         if index + 1 == ages.len() {
             queued_reads.push(ordinary);
         } else {
@@ -15899,7 +15977,7 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
             5,
             "marker-style change re-announces every slot"
         );
-        assert_eq!(shared.withdraw.len(), 0);
+        assert_eq!(shared.unicast_withdrawals().count(), 0);
         assert!(
             shared
                 .announce
@@ -15923,7 +16001,7 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
                 supplement.announce[0].peer, winner,
                 "the lane substitutes the runner-up"
             );
-            assert_eq!(supplement.withdraw.len(), 0);
+            assert_eq!(supplement.unicast_withdrawals().count(), 0);
         }
         assert!(
             receiver.try_recv().is_err(),
@@ -16016,7 +16094,7 @@ fn batched_authoritative_apply_announces_only_changed_slots() {
         );
         assert_eq!(shared.announce[0].prefix, Prefix::V4(shared_prefix));
         assert_eq!(shared.announce_source_exclusion, Some(member));
-        assert_eq!(shared.withdraw.len(), 0);
+        assert_eq!(shared.unicast_withdrawals().count(), 0);
         if member == winner {
             let supplement = receiver.try_recv().unwrap();
             assert_eq!(supplement.announce.len(), 1);
@@ -16224,7 +16302,7 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
         ));
         let mut restored = HashMap::new();
         for update in updates {
-            for (prefix, _) in update.withdraw {
+            for (prefix, _) in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
                 restored.remove(&prefix);
             }
             for route in update.announce.iter() {
@@ -16367,7 +16445,13 @@ fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
                 .try_recv()
                 .expect("the existing debt still gets its retry");
             assert!(retry.shared_group_encode.is_none());
-            assert!(retry.withdraw.contains(&(withdrawn, 0)));
+            assert!(
+                retry
+                    .unicast_withdrawals()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .contains(&(withdrawn, 0))
+            );
             assert!(fleet.receivers[3].try_recv().is_err());
             assert!(fleet.manager.group_ribs[&destination].tombstones.is_empty());
         }
@@ -16474,7 +16558,8 @@ fn batched_authoritative_occupied_dataset_transition_keeps_fallback() {
         for peer in &fleet.members {
             assert_eq!(fleet.manager.grouped_advertised_count(*peer), Some(0));
         }
-        assert!(fleet.receivers[3].try_recv().unwrap().withdraw.len() >= 4);
+        let withdrawn = fleet.receivers[3].try_recv().unwrap();
+        assert!(withdrawn.unicast_withdrawals().count() >= 4);
     }
 }
 
@@ -16534,7 +16619,11 @@ fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
         "lagging mover cannot consume only the shared delta"
     );
     assert!(
-        retry.withdraw.contains(&(withdrawn, 0)),
+        retry
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(withdrawn, 0)),
         "missed source-group withdrawal must survive the move"
     );
     assert!(
@@ -17177,8 +17266,7 @@ fn envelope_summary(update: &OutboundRouteUpdate) -> String {
         .collect();
     announce.sort();
     let mut withdraw: Vec<String> = update
-        .withdraw
-        .iter()
+        .unicast_withdrawals()
         .map(|(prefix, path_id)| format!("{prefix}#{path_id}"))
         .collect();
     withdraw.sort();

@@ -589,7 +589,10 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
     ));
     let rejected = rx.recv().await.unwrap();
     assert!(rejected.announce.is_empty());
-    assert_eq!(rejected.withdraw, vec![(route.prefix, 0)]);
+    assert_eq!(
+        rejected.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(route.prefix, 0)]
+    );
     assert_eq!(rejected.exact_export_snapshot.unwrap().generation(), 12);
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_none());
     assert_eq!(
@@ -607,7 +610,10 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
     ));
     let repeated = rx.recv().await.unwrap();
     assert!(repeated.announce.is_empty());
-    assert!(repeated.withdraw.is_empty(), "repeated rejection is quiet");
+    assert!(
+        repeated.unicast_withdrawals().next().is_none(),
+        "repeated rejection is quiet"
+    );
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_none());
 
     encoder.set_profile(13, []);
@@ -623,7 +629,7 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
     assert_eq!(recovered.announce.len(), 1);
     assert_eq!(recovered.announce[0].prefix, route.prefix);
     assert_eq!(recovered.announce[0].peer, route.peer);
-    assert_eq!(recovered.withdraw.len(), 0);
+    assert_eq!(recovered.unicast_withdrawals().count(), 0);
     assert_eq!(recovered.exact_export_snapshot.unwrap().generation(), 13);
     assert!(!manager.peer_unexportable.contains_key(&peer));
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_some());
@@ -679,7 +685,10 @@ fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
         .expect("post-OTC withdrawal retains the concrete snapshot");
     assert_eq!((snapshot.owner_id(), snapshot.generation()), (1, 61));
     assert!(withdrawn.announce.is_empty());
-    assert_eq!(withdrawn.withdraw, vec![(route.prefix, route.path_id)]);
+    assert_eq!(
+        withdrawn.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(route.prefix, route.path_id)]
+    );
     assert_eq!(
         encoder.probe_batch_count(),
         initial_probe_batches,
@@ -750,7 +759,10 @@ async fn every_route_family_is_probed_before_commit() {
 
         let update = rx.recv().await.unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw, vec![withdrawal]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![withdrawal]
+        );
         assert_eq!(update.flowspec_announce.len(), 1);
         assert_eq!(update.evpn_announce.len(), 1);
         assert_eq!(update.bgpls_announce.len(), 1);
@@ -777,7 +789,7 @@ async fn every_route_family_is_probed_before_commit() {
             "{:?}",
             (
                 &update.announce,
-                &update.withdraw,
+                update.unicast_withdrawals().collect::<Vec<_>>(),
                 &update.next_hop_override,
                 &update.flowspec_announce,
                 &update.evpn_announce,
@@ -1257,7 +1269,7 @@ fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
     ));
     let source_update = source_rx.try_recv().unwrap();
     assert_eq!(source_update.announce.len(), 1);
-    assert_eq!(source_update.withdraw.len(), 0);
+    assert_eq!(source_update.unicast_withdrawals().count(), 0);
     assert_eq!(source_encoder.probe_count(), 1);
 
     assert!(commit_shared_unicast_with_cache(
@@ -1270,7 +1282,13 @@ fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
     ));
     let limited_update = limited_rx.try_recv().unwrap();
     assert!(limited_update.announce.is_empty());
-    assert_eq!(limited_update.withdraw, vec![route_identity]);
+    assert_eq!(
+        limited_update
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![route_identity]
+    );
     assert!(manager.peer_unexportable[&limited].contains(&key));
     assert_eq!(
         limited_encoder.probe_count(),
@@ -1435,7 +1453,13 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
     }));
     let limited_update = limited_rx.try_recv().unwrap();
     assert!(limited_update.announce.is_empty());
-    assert_eq!(limited_update.withdraw, vec![route_identity]);
+    assert_eq!(
+        limited_update
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![route_identity]
+    );
     assert!(manager.peer_unexportable[&limited].contains(&key));
     assert!(prior_visits.load(Ordering::Relaxed) > 0);
     assert_eq!(source_encoder.probe_count(), 1);
@@ -1510,7 +1534,10 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
             .is_ok()
     }));
     let withdrawn = receiver.try_recv().unwrap();
-    assert_eq!(withdrawn.withdraw, vec![key]);
+    assert_eq!(
+        withdrawn.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![key]
+    );
     assert!(withdrawn.announce.is_empty());
     assert_eq!(prior_visits.load(Ordering::Relaxed), 0);
     assert!(receiver.try_recv().is_err());
@@ -1755,11 +1782,14 @@ async fn grouped_link_local_scope_change_withdraws_and_restores_with_fixed_profi
         if ifindex == 7 {
             assert_eq!(update.announce.len(), 1);
             assert_eq!(update.announce[0].next_hop_scope, route.next_hop_scope);
-            assert_eq!(update.withdraw.len(), 0);
+            assert_eq!(update.unicast_withdrawals().count(), 0);
             assert_eq!(advertised_count(&tx, target).await, 1);
         } else {
             assert!(update.announce.is_empty());
-            assert_eq!(update.withdraw, vec![(route.prefix, route.path_id)]);
+            assert_eq!(
+                update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                vec![(route.prefix, route.path_id)]
+            );
             assert_eq!(advertised_count(&tx, target).await, 0);
         }
         assert_eq!(encoder.snapshot().generation(), 1);
@@ -1843,11 +1873,14 @@ async fn grouped_refresh_probe_failure_withdraws_once_and_recovers_like_private(
             );
             if phase == 0 {
                 assert_eq!(
-                    refresh.withdraw,
+                    refresh.unicast_withdrawals().copied().collect::<Vec<_>>(),
                     vec![(delivered.prefix, delivered.path_id)]
                 );
             } else {
-                assert_eq!(refresh.withdraw, Vec::new());
+                assert_eq!(
+                    refresh.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                    Vec::new()
+                );
             }
             let expected = if phase == 2 { 2 } else { 0 };
             assert_eq!(refresh.announce.len(), expected);
@@ -1941,7 +1974,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     let classic_flip = classic_rx.recv().await.unwrap();
     let extended_flip = extended_rx.recv().await.unwrap();
     assert!(classic_flip.announce.is_empty());
-    assert_eq!(classic_flip.withdraw.len(), 0);
+    assert_eq!(classic_flip.unicast_withdrawals().count(), 0);
     assert_eq!(extended_flip.announce.len(), 1);
     assert_eq!(extended_flip.announce[0].peer, peer_v4(source_b));
     assert_eq!(advertised_count(&tx, classic).await, 0);
@@ -2000,12 +2033,18 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
         let _ = advertised_count(&tx, classic).await;
     }
     let extended_withdraw = extended_rx.recv().await.unwrap();
-    assert_eq!(extended_withdraw.withdraw, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(
+        extended_withdraw
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 0)]
+    );
     if let Ok(Some(classic_update)) =
         tokio::time::timeout(Duration::from_millis(25), classic_rx.recv()).await
     {
         assert!(
-            classic_update.withdraw.is_empty(),
+            classic_update.unicast_withdrawals().next().is_none(),
             "a route rejected before commit must never receive a duplicate withdrawal"
         );
     }
@@ -2297,7 +2336,10 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
     );
     let rejected = receiver.try_recv().unwrap();
     assert!(rejected.announce.is_empty());
-    assert_eq!(rejected.withdraw, vec![(route.prefix, route.path_id)]);
+    assert_eq!(
+        rejected.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(route.prefix, route.path_id)]
+    );
     assert_eq!(
         manager.adj_ribs_out[&target].next_hop_override(&route.prefix, route.path_id),
         None
@@ -2410,7 +2452,10 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
     );
     let rejected = receiver.try_recv().unwrap();
     assert!(rejected.announce.is_empty());
-    assert_eq!(rejected.withdraw, vec![(route.prefix, route.path_id)]);
+    assert_eq!(
+        rejected.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(route.prefix, route.path_id)]
+    );
 }
 
 #[test]

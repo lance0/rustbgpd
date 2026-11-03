@@ -298,7 +298,7 @@ impl Harness {
             let drained = Arc::clone(&self.drained);
             tokio::spawn(async move {
                 while let Some(update) = orx.recv().await {
-                    let n = update.announce.len() + update.withdraw.len();
+                    let n = update.announce.len() + update.unicast_withdrawals().count();
                     if n > 0 {
                         drained.fetch_add(n as u64, Ordering::Relaxed);
                     }

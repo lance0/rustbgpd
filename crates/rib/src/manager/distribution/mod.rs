@@ -284,6 +284,9 @@ pub(in crate::manager) struct OutboundCommitBatch {
     /// commit probes with it rather than a fresh one.
     pub(in crate::manager) exact_export_snapshot:
         Option<Arc<dyn crate::update::ExactExportSnapshot>>,
+    /// The group's shared withdrawals when `withdraw` begins with a copy of
+    /// them; the enqueued envelope carries this `Arc` instead of the copy.
+    pub(in crate::manager) shared_withdraw: Option<Arc<Vec<(Prefix, u32)>>>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
     pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -396,6 +399,7 @@ impl OutboundCommitBatch {
         super::retire_vec(&mut self.rtc_announce, checkpoint);
         super::retire_vec(&mut self.rtc_withdraw, checkpoint);
         drop(self.shared_group_encode.take());
+        drop(self.shared_withdraw.take());
         checkpoint();
     }
 
@@ -3781,6 +3785,7 @@ impl RibManager {
             mut shared_group_encode,
             // Taken above for this commit's probes.
             exact_export_snapshot: _,
+            shared_withdraw,
             mut withdraw,
             end_of_rib,
             refresh_markers,
@@ -5443,12 +5448,28 @@ impl RibManager {
         } else {
             0
         };
+        // The ladder works on the member's full copy; once it still begins
+        // with the group's shared rows, queue the shared `Arc` instead, so a
+        // stalled member pins the group's vector, not its own.
+        let shared_withdraw = match shared_withdraw {
+            Some(shared) if !shared.is_empty() && withdraw.starts_with(&shared) => {
+                withdraw.drain(..shared.len());
+                if withdraw.is_empty() {
+                    withdraw = Vec::new();
+                } else {
+                    withdraw.shrink_to_fit();
+                }
+                shared
+            }
+            _ => Arc::default(),
+        };
         enqueue_outbound_update(
             permit,
             OutboundRouteUpdate {
                 exact_export_snapshot,
                 announce_source_exclusion,
                 announce,
+                shared_withdraw,
                 withdraw,
                 end_of_rib,
                 replay: None,
@@ -8599,6 +8620,9 @@ impl RibManager {
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
         let mut shared_group_encodes: HashMap<usize, Arc<crate::update::SharedGroupEncode>> =
             HashMap::new();
+        // One shared withdrawal vector per group per pass (see
+        // `OutboundCommitBatch::shared_withdraw`).
+        let mut shared_withdraws: HashMap<usize, Arc<Vec<(Prefix, u32)>>> = HashMap::new();
         // LAN-474 emit-time filter: whether a group's pass carries any
         // control-tagged announce delta, memoized per (group, rs_asn) —
         // one delta scan per group per pass, not per member. Untagged
@@ -9408,6 +9432,7 @@ impl RibManager {
                     let mut unicast_otc_prechecked = false;
                     let mut announce_source_exclusion = None;
                     let mut shared_group_encode = None;
+                    let mut shared_withdraw = None;
                     let mut fs_announce = Vec::new();
                     let mut fs_withdraw = Vec::new();
                     let mut evpn_announce = Vec::new();
@@ -9552,7 +9577,12 @@ impl RibManager {
                                             Arc::new(crate::update::SharedGroupEncode::default())
                                         }),
                                     ));
-                                    unicast.withdraw.extend_from_slice(&stage.shared_withdraw);
+                                    let shared =
+                                        Arc::clone(shared_withdraws.entry(gid).or_insert_with(
+                                            || Arc::new(stage.shared_withdraw.clone()),
+                                        ));
+                                    unicast.withdraw.extend_from_slice(&shared);
+                                    shared_withdraw = Some(shared);
                                 } else {
                                     #[cfg(feature = "bench-internals")]
                                     {
@@ -10443,6 +10473,7 @@ impl RibManager {
                                     announce_source_exclusion,
                                     shared_group_encode,
                                     exact_export_snapshot: unicast.exact_export_snapshot,
+                                    shared_withdraw,
                                     withdraw: unicast.withdraw,
                                     end_of_rib: pending_eor.clone(),
                                     flowspec_announce: fs_announce,
