@@ -585,6 +585,11 @@ async fn rib_park_repeated_resets_keep_the_backlog_bounded() {
                 tokio::select! {
                     update = rib_rx.recv() => seen.push(update.unwrap()),
                     state = &mut response => {
+                        // The reply can win the select while admitted
+                        // messages still wait in the channel.
+                        while let Ok(update) = rib_rx.try_recv() {
+                            seen.push(update);
+                        }
                         let first_down = seen
                             .iter()
                             .position(|update| matches!(update, RibUpdate::PeerDown { .. }))
