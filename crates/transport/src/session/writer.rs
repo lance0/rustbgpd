@@ -193,6 +193,7 @@ pub(super) const WRITER_BYTE_BUDGET: u64 =
 #[derive(Debug)]
 pub(super) struct WriterBytes {
     admitted: AtomicU64,
+    completed: AtomicU64,
     published: AtomicU64,
     gauges: OutboundWriterBytesGauges,
 }
@@ -229,6 +230,7 @@ impl WriterBytes {
     pub(super) fn new(gauges: OutboundWriterBytesGauges) -> Self {
         Self {
             admitted: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
             published: AtomicU64::new(0),
             gauges,
         }
@@ -239,12 +241,18 @@ impl WriterBytes {
         self.admitted.store(admitted, Ordering::Release);
     }
 
-    /// Publish the backlog given the completion watermark. The backlog is
-    /// read again on every retry, so a publication that loses a race to a
-    /// newer admission records that admission too, not its stale reading.
-    pub(super) fn publish(&self, completed: u64) {
+    /// Record the writer's completion watermark.
+    pub(super) fn completed(&self, completed: u64) {
+        self.completed.store(completed, Ordering::Release);
+    }
+
+    /// Publish the backlog. Both watermarks are read again on every retry,
+    /// so a publication that loses a race records the newest admission and
+    /// completion, not its own stale reading of either.
+    pub(super) fn publish(&self) {
         let mut previous = self.published.load(Ordering::Acquire);
         let held = loop {
+            let completed = self.completed.load(Ordering::Acquire);
             let held = self
                 .admitted
                 .load(Ordering::Acquire)
@@ -695,7 +703,8 @@ impl WriterTask {
                 WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
             })?;
         self.completed_tx.send_replace(next);
-        self.bytes.publish(next);
+        self.bytes.completed(next);
+        self.bytes.publish();
         Ok(())
     }
 
@@ -1185,10 +1194,14 @@ mod tests {
                 &BEFORE_GAUGES
             };
             let inner = Arc::clone(&bytes);
-            inside(point, move || inner.publish(7));
-            bytes.publish(5);
+            inside(point, move || {
+                inner.completed(7);
+                inner.publish();
+            });
+            bytes.completed(5);
+            bytes.publish();
             let recorded = i64::try_from(bytes.published.load(Ordering::Acquire)).unwrap();
-            assert_eq!(recorded, if before_record { 5 } else { 3 });
+            assert_eq!(recorded, 3, "the newest completion wins");
             assert_eq!(metrics.peer_outbound_writer_bytes("p"), recorded);
             assert_eq!(metrics.outbound_writer_bytes(), recorded);
         }
@@ -1204,13 +1217,15 @@ mod tests {
         let metrics = BgpMetrics::new();
         let bytes = writer_bytes(&metrics);
         bytes.admitted(15);
-        bytes.publish(10);
+        bytes.completed(10);
+        bytes.publish();
+        bytes.completed(15);
         let session = Arc::clone(&bytes);
         inside(&BEFORE_RECORD, move || {
             session.admitted(25);
-            session.publish(15);
+            session.publish();
         });
-        bytes.publish(15);
+        bytes.publish();
         assert_eq!(bytes.published.load(Ordering::Acquire), 10);
         assert_eq!(metrics.peer_outbound_writer_bytes("p"), 10);
         assert_eq!(metrics.outbound_writer_bytes(), 10);
@@ -1224,10 +1239,12 @@ mod tests {
         let metrics = BgpMetrics::new();
         let bytes = writer_bytes(&metrics);
         bytes.admitted(10);
-        bytes.publish(4);
+        bytes.completed(4);
+        bytes.publish();
         assert_eq!(metrics.outbound_writer_bytes(), 6);
         bytes.retire();
-        bytes.publish(0);
+        bytes.admitted(20);
+        bytes.publish();
         assert_eq!(metrics.peer_outbound_writer_bytes("p"), 0);
         assert_eq!(metrics.outbound_writer_bytes(), 0);
     }
@@ -1241,13 +1258,14 @@ mod tests {
         let metrics = BgpMetrics::new();
         let bytes = writer_bytes(&metrics);
         bytes.admitted(10);
-        bytes.publish(4);
+        bytes.completed(4);
+        bytes.publish();
         metrics.reap_peer_series("p");
         bytes.retire();
         assert_eq!(metrics.outbound_writer_bytes(), 0);
         let readded = writer_bytes(&metrics);
         readded.admitted(3);
-        readded.publish(0);
+        readded.publish();
         assert_eq!(metrics.peer_outbound_writer_bytes("p"), 3);
     }
 
@@ -1269,7 +1287,7 @@ mod tests {
         let handle = spawn(write, 8, metrics.clone(), "bytes-peer".into(), None);
         // The session admitted two frames and published them.
         handle.bytes.admitted(6);
-        handle.bytes.publish(0);
+        handle.bytes.publish();
         assert_eq!(metrics.outbound_writer_bytes(), 6);
         handle
             .bulk_tx

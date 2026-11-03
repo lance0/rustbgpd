@@ -1317,6 +1317,9 @@ fn complete_all(
         sink.push(frame);
     }
     completed.send_replace(session.writer_bulk_admitted);
+    if let Some(bytes) = &session.writer_bytes {
+        bytes.completed(session.writer_bulk_admitted);
+    }
 }
 
 /// The peer's view of `frames`: each announced route's index, in order,

@@ -364,8 +364,8 @@ impl PeerSession {
                 i64::try_from(depth).unwrap_or(i64::MAX),
             );
         }
-        if let (Some(bytes), Some(completed)) = (&self.writer_bytes, &self.writer_completed) {
-            bytes.publish(*completed.borrow());
+        if let Some(bytes) = &self.writer_bytes {
+            bytes.publish();
         }
         self.evaluate_slow_peer();
     }
