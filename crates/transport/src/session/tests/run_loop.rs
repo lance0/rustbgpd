@@ -1203,15 +1203,15 @@ async fn shutdown_with_a_draining_peer_resolves_without_waiting_on_a_timer() {
     assert_eq!(&cease[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
 }
 
-/// ADR-0078 rule 1: a full RIB channel parks the session task instead of
-/// dropping the batch — the routes arrive once the channel drains, and
-/// the saturation counter records the blocked send.
+/// ADR-0078 rule 1: a full RIB channel holds the batch and parks the
+/// session's input instead of dropping the batch — the routes arrive once the
+/// channel drains, and the saturation counter records the blocked send.
 #[tokio::test]
 async fn full_rib_channel_parks_session_and_never_drops_routes() {
     let (mut session, mut rib_rx, metrics) = backpressure_test_session(1);
     let negotiated = negotiated_session(65002, false);
     session.negotiated = Some(Arc::new(negotiated));
-    // Fill the capacity-1 channel so the delivery must block.
+    // Fill the capacity-1 channel so the delivery must wait.
     session
         .rib_tx
         .try_send(placeholder_routes_received())
@@ -1221,23 +1221,29 @@ async fn full_rib_channel_parks_session_and_never_drops_routes() {
         .buf
         .extend_from_slice(&sample_update_message());
     let peer_label = session.peer_label.clone();
-    let process = session.process_read_buffer();
-    tokio::pin!(process);
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.rib_backlog.len(),
+        1,
+        "the batch must be held for the full RIB channel, not dropped"
+    );
+    let deliver = deliver_held_rib_messages(&mut session);
+    tokio::pin!(deliver);
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut process)
+        tokio::time::timeout(Duration::from_millis(100), &mut deliver)
             .await
             .is_err(),
-        "processing must park on the full RIB channel, not drop the batch"
+        "delivery must wait for the full RIB channel"
     );
-    // Drain the pre-fill; the parked delivery completes.
+    // Drain the pre-fill; the held delivery completes.
     let placeholder = rib_rx.recv().await.expect("pre-filled update");
     assert!(matches!(
         placeholder,
         RibUpdate::RoutesReceived { peer, .. } if peer == PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)))
     ));
-    tokio::time::timeout(Duration::from_secs(5), &mut process)
+    tokio::time::timeout(Duration::from_secs(5), &mut deliver)
         .await
-        .expect("processing must complete once the RIB drains");
+        .expect("delivery must complete once the RIB drains");
     match rib_rx.recv().await.expect("delivered batch") {
         RibUpdate::RoutesReceived { announced, .. } => {
             assert_eq!(announced.len(), 1);
@@ -1870,4 +1876,57 @@ async fn slow_peer_detection_disabled_by_zero_duration() {
     assert!(!session.slow_peer);
     assert!(session.slow_peer_backlog_since.is_none());
     assert!(session.slow_peer_timer.is_none());
+}
+
+/// A closing session's flush delivers the held head through its queued
+/// reservation, ahead of a sender that started waiting after it, so the
+/// shutdown deadline is not spent re-queueing at the back.
+/// Mutation-red: dropping the reservation before the blocking sends lets
+/// the later sender's message overtake the held one.
+#[tokio::test]
+async fn flush_keeps_the_held_reservation_place() {
+    let (mut session, mut rib_rx, _metrics) = backpressure_test_session(1);
+    session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .unwrap();
+    session
+        .send_to_rib(RibUpdate::PeerDown {
+            peer: PeerId::from_addr(session.peer_ip),
+            session_id: 7,
+        })
+        .unwrap();
+    assert_eq!(session.rib_backlog.len(), 1);
+    // Queue the reservation once, as a run-loop turn does.
+    std::future::poll_fn(|cx| {
+        let _ = session.rib_reserve.as_mut().unwrap().poll_reserve(cx);
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let other = session.rib_tx.clone();
+    let late_send = other.send(placeholder_routes_received());
+    let mut late = std::pin::pin!(late_send);
+    let polled = std::future::poll_fn(|cx| std::task::Poll::Ready(late.as_mut().poll(cx))).await;
+    assert!(
+        polled.is_pending(),
+        "the later sender waits behind the reservation"
+    );
+    let flush = tokio::spawn(async move {
+        session.flush_rib_backlog().await;
+        session
+    });
+    assert!(matches!(
+        rib_rx.recv().await,
+        Some(RibUpdate::RoutesReceived { .. })
+    ));
+    // Bounded: if the later sender took the freed slot, its unpolled send
+    // holds it and nothing more arrives.
+    let next = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv()).await;
+    assert!(
+        matches!(next, Ok(Some(RibUpdate::PeerDown { session_id: 7, .. }))),
+        "the held message must keep its place ahead of the later sender"
+    );
+    late.await.unwrap();
+    assert!(rib_rx.recv().await.is_some());
+    assert!(flush.await.unwrap().rib_backlog.is_empty());
 }

@@ -1864,6 +1864,14 @@ fn placeholder_routes_received() -> RibUpdate {
         validated_with: None,
     }
 }
+/// Drive the held RIB-bound messages as the run loop does: each admission
+/// waits for channel capacity, and the parked peer input then resumes.
+async fn deliver_held_rib_messages(session: &mut PeerSession) {
+    while session.rib_reserve.is_some() {
+        let reserved = super::inbound::poll_rib_reserve(&mut session.rib_reserve).await;
+        session.advance_rib_backlog(reserved).await;
+    }
+}
 
 // ===========================================================================
 // Shared-group encode invariant regressions: per-source chunk integrity,
@@ -2243,6 +2251,7 @@ mod refresh;
 mod refresh_protocol;
 mod reject_retention;
 mod rfc7606;
+mod rib_park;
 mod rpki_aspa;
 mod rtc_bgpls;
 mod run_loop;

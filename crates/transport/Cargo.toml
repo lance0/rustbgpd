@@ -21,6 +21,7 @@ rustbgpd-telemetry.workspace = true
 rustbgpd-bmp.workspace = true
 bytes.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 prometheus.workspace = true

@@ -2384,7 +2384,10 @@ What to do when it fires:
    continues serving timers, input, and operator snapshots. If no writer
    capacity becomes available before the resource-admission deadline, the
    session sends `Cease/Out of Resources` (`6/8`). Admission progress resets
-   this deadline. Its interval is the configured nonzero `send_hold_time`,
+   this deadline. The same Cease closes a session whose inbound RIB
+   admission stays blocked for about three hold times since its last
+   processed message, logged as `RIB admission stalled past local budget`
+   (ADR-0078). Its interval is the configured nonzero `send_hold_time`,
    or `max(480, 2 × hold_time)` seconds when `send_hold_time = 0`; disabling
    the RFC timer does not disable the resource bound.
 
@@ -4267,8 +4270,10 @@ the advertised-state diff uses the same member admission filter as
 This capacity gate covers IPv4/IPv6 unicast only.
 
 Neighbor `last_error` and session notification history retain the bounded local
-cause of that defense-in-depth teardown, outbound queue saturation, and TCP
-reader/writer failures. These diagnostics deliberately exclude raw operating-
+cause of that defense-in-depth teardown, outbound queue saturation, a RIB
+admission stall past the session's local budget (`RIB admission stalled past
+local budget`; see [ADR-0078](../adr/0078-inbound-rib-backpressure.md)), and
+TCP reader/writer failures. These diagnostics deliberately exclude raw operating-
 system errors, task panic payloads, routes, attributes, policy data, and
 shutdown communication text. A locally sent Cease/8 retains the category while
 its canonical BGP description and wire payload remain unchanged.

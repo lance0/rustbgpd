@@ -17,7 +17,7 @@ mod writer;
 
 pub use io::{connect_authenticated, preflight_authenticated_dial};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::ControlFlow;
 use std::pin::Pin;
@@ -221,6 +221,15 @@ impl ConnectFailureEpisode {
     }
 }
 
+/// Hold expiries that waits for RIB admission may defer since the last peer
+/// PDU processed (ADR-0078 amendment). A session whose RIB admission stays
+/// blocked for about three hold times since then is closed with
+/// Cease/Out of Resources, as a local overload.
+const MAX_PARKED_HOLD_RENEWALS: u8 = 2;
+/// Bytes one parked hold expiry may read from the socket looking for new
+/// input.
+const PARKED_HOLD_PROBE: usize = 4096;
+
 /// Runtime for a single BGP peer session.
 ///
 /// Owns the FSM, TCP stream, timers, and read buffer. Runs as a single
@@ -303,6 +312,18 @@ pub(crate) struct PeerSession {
     /// commands stay queued until this one runs after the envelope finishes.
     deferred_command: Option<PeerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    /// RIB-bound messages held in emission order while the RIB channel is
+    /// full (ADR-0078). Non-empty means parked: later messages queue behind
+    /// these, and no further peer input is read or processed, so the kernel
+    /// receive window paces the peer. The run loop keeps servicing outbound,
+    /// timers and terminal commands meanwhile.
+    rib_backlog: VecDeque<(RibUpdate, inbound::OnRibAdmission)>,
+    /// Reservation for the head of `rib_backlog`. It keeps its place in the
+    /// channel's FIFO of waiting senders across run-loop turns.
+    rib_reserve: Option<tokio_util::sync::PollSender<RibUpdate>>,
+    /// Hold renewals spent while RIB-bound messages are held, since the
+    /// last peer PDU processed.
+    parked_hold_renewals: u8,
     /// Canonical `peer` metric/log label from
     /// [`TransportConfig::peer_label`]: the neighbor address, scoped to its
     /// interface for a link-local neighbor (`interface:<name>` for an
@@ -2286,6 +2307,9 @@ impl PeerSession {
             commands,
             deferred_command: None,
             rib_tx,
+            rib_backlog: VecDeque::new(),
+            rib_reserve: None,
+            parked_hold_renewals: 0,
             peer_label,
             peer_ip,
             link_local_next_hop_scope,
@@ -2827,6 +2851,16 @@ impl PeerSession {
         self.run_loop().await
     }
 
+    /// A terminal close runs while RIB-bound messages are held. An
+    /// administrative reset also restarts the session, so it runs then only
+    /// when it closes an Established one: repeated resets would otherwise
+    /// append a `PeerDown` each while the RIB stays full.
+    fn closes_while_rib_parked(&self, command: &PeerCommand) -> bool {
+        command.runs_while_rib_parked()
+            && (!matches!(command, PeerCommand::AdministrativeReset { .. })
+                || self.fsm.state() == SessionState::Established)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the run loop keeps every select! arm and its state wiring in one place"
@@ -2834,10 +2868,19 @@ impl PeerSession {
     async fn run_loop(&mut self) -> Result<(), TransportError> {
         loop {
             self.run_due_link_check().await;
-            if let Some(command) = self.deferred_command.take()
+            // A deferred command waits behind held RIB-bound messages like
+            // the peer input it may follow, unless it is a close that must
+            // not wait. It is the oldest command, so FIFO order holds.
+            if (self.rib_backlog.is_empty()
+                || self
+                    .deferred_command
+                    .as_ref()
+                    .is_some_and(|command| self.closes_while_rib_parked(command)))
+                && let Some(command) = self.deferred_command.take()
                 && self.handle_command(command).await == ControlFlow::Break(())
             {
                 self.join_closed_writer().await;
+                self.flush_rib_backlog().await;
                 return Ok(());
             }
             // Gate the TCP read arm closed while the FSM is still in `Idle`.
@@ -2864,9 +2907,14 @@ impl PeerSession {
             //
             // A candidate waiting for its collision verdict leaves the peer's
             // KEEPALIVE unread: processing it would reach Established.
+            //
+            // Held RIB-bound messages park input too (ADR-0078): the socket
+            // stays unread so the kernel receive window paces the peer.
+            let rib_parked = !self.rib_backlog.is_empty();
             let read_active = self.read_half.is_some()
                 && self.fsm.state() != SessionState::Idle
-                && !self.collision_verdict_pending();
+                && !self.collision_verdict_pending()
+                && !rib_parked;
 
             let replay_waiting = self
                 .pending_replay
@@ -2875,7 +2923,8 @@ impl PeerSession {
             let receive_outbound = self.fsm.state() == SessionState::Established
                 && !replay_waiting
                 && self.pending_outbound.is_none();
-            let revalidating = self.revalidation_pending();
+            let revalidating = self.revalidation_pending() && !rib_parked;
+            let receive_command = self.deferred_command.is_none();
             // Destructure to split borrows for tokio::select!
             let Self {
                 read_half,
@@ -2895,6 +2944,7 @@ impl PeerSession {
                 pending_outbound,
                 writer_bulk_tx,
                 outbound_admission_timer,
+                rib_reserve,
                 ..
             } = self;
 
@@ -2909,8 +2959,9 @@ impl PeerSession {
                     self.handle_tcp_read_result(result).await;
                 }
 
-                // External command
-                cmd = commands.recv() => {
+                // External command. A deferred one keeps its successors
+                // queued behind it.
+                cmd = commands.recv(), if receive_command => {
                     let Some(cmd) = cmd else {
                         // All senders dropped — shut down. A close already
                         // under way (for example after a stop) still gets
@@ -2919,12 +2970,24 @@ impl PeerSession {
                         if self.writer_priority_tx.is_none() {
                             self.join_closed_writer().await;
                         }
+                        self.flush_rib_backlog().await;
                         return Ok(());
                     };
-                    if self.handle_command(cmd).await == ControlFlow::Break(()) {
+                    if rib_parked && !self.closes_while_rib_parked(&cmd) {
+                        // Answer snapshots; defer the rest until the held
+                        // messages are delivered, as before the park.
+                        self.handle_read_during_wait(cmd);
+                    } else if self.handle_command(cmd).await == ControlFlow::Break(()) {
                         self.join_closed_writer().await;
+                        self.flush_rib_backlog().await;
                         return Ok(());
                     }
+                }
+
+                // Deliver held RIB-bound messages as the channel frees, then
+                // resume the peer input parked behind them.
+                reserved = inbound::poll_rib_reserve(rib_reserve), if rib_reserve.is_some() => {
+                    self.advance_rib_backlog(reserved).await;
                 }
 
                 () = async {
@@ -2958,7 +3021,10 @@ impl PeerSession {
                 // `execute_actions`; `timers.keepalive` is never armed.
 
                 // Deferred reconnect after unexpected Idle
-                () = poll_timer(reconnect_timer) => {
+                // A reconnect waits while RIB-bound messages are held: the
+                // previous teardown must reach the RIB first, and a
+                // reconnect cycle while parked would only queue more.
+                () = poll_timer(reconnect_timer), if !rib_parked => {
                     self.reconnect_timer = None;
                     debug!(peer = %self.peer_label, "reconnect timer fired");
                     self.drive_fsm(Event::ManualStart).await;
@@ -2981,10 +3047,13 @@ impl PeerSession {
                 // RFC 7313 refresh-accounting timeout. The RIB owns its own
                 // matching stale-route timer; this session-local arm keeps the
                 // transport's max-prefix mirror exact even when the peer goes
-                // quiet after omitting routes from a refresh replay.
-                () = poll_timer(refresh_accounting_timer) => {
+                // quiet after omitting routes from a refresh replay. Like the
+                // check before each buffered PDU, it waits while input is
+                // parked, so a BoRR still held cannot be timed out by the
+                // window it replaces.
+                () = poll_timer(refresh_accounting_timer), if !rib_parked => {
                     self.refresh_accounting_timer = None;
-                    let _ = self.expire_refresh_accounting_windows().await;
+                    let _ = self.expire_refresh_accounting_windows();
                 }
 
                 // Slow-peer detector re-check (LAN-470): armed only
