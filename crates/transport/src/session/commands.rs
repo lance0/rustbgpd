@@ -167,6 +167,13 @@ fn tcp_ao_deletion_survivors(
     Ok(survivors)
 }
 
+/// Whether the daemon ever asks a peer to refresh `family`. Received VPN
+/// `FlowSpec` (AFI 1 / SAFI 134) is discarded (ADR-0146), so a refresh of it
+/// would replay rules that are thrown away.
+pub(super) fn requests_route_refresh(family: (Afi, Safi)) -> bool {
+    family != (Afi::Ipv4, Safi::FlowSpecVpn)
+}
+
 fn sorted_family_limits<T>(
     limits: impl Iterator<Item = ((Afi, Safi), T)>,
 ) -> Vec<((Afi, Safi), T)> {
@@ -196,11 +203,11 @@ impl PeerSession {
     /// both, so at most one per family is queued. Only a live writer's claim
     /// counts: once the writer is gone the request fails as before.
     ///
-    /// VPN `FlowSpec` (AFI 1 / SAFI 134) is never requested: received rules
-    /// are discarded (ADR-0146), so an inbound soft reset has nothing to
-    /// replay and succeeds without a message.
+    /// A family [`requests_route_refresh`] excludes is never requested: an
+    /// inbound soft reset has nothing to replay and succeeds without a
+    /// message.
     pub(super) fn send_route_refresh(&mut self, afi: Afi, safi: Safi) -> Result<(), String> {
-        if (afi, safi) == (Afi::Ipv4, Safi::FlowSpecVpn) {
+        if !requests_route_refresh((afi, safi)) {
             debug!(peer = %self.peer_label, ?afi, ?safi, "ROUTE-REFRESH not sent: received VPN FlowSpec is discarded");
             return Ok(());
         }
@@ -1586,10 +1593,12 @@ impl PeerSession {
                     let _ = reply.send(Err(PeerCommandError::NotEstablished));
                     return ControlFlow::Continue(());
                 }
-                if !self
-                    .negotiated
-                    .as_ref()
-                    .is_some_and(|n| n.peer_route_refresh)
+                // A family that is never requested needs no capability.
+                if requests_route_refresh((afi, safi))
+                    && !self
+                        .negotiated
+                        .as_ref()
+                        .is_some_and(|n| n.peer_route_refresh)
                 {
                     let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
                     return ControlFlow::Continue(());
