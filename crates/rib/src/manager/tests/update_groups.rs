@@ -7349,6 +7349,159 @@ fn ungrouped_dirty_peer_with_full_channel_defers_resync_until_drained() {
     dirty_member_with_full_channel_defers_resync(true);
 }
 
+/// Applies queued updates as an RFC 7313 receiver does: `BoRR` marks every
+/// held route stale, announcements refresh them, and `EoRR` purges what is
+/// still stale. A withdrawal must name a route the receiver holds.
+fn apply_enhanced_refresh(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    held: &mut BTreeMap<(Prefix, u32), bool>,
+) {
+    use rustbgpd_wire::RouteRefreshSubtype;
+    while let Ok(update) = rx.try_recv() {
+        let marker = |subtype| {
+            update
+                .refresh_markers
+                .iter()
+                .any(|&(_, _, kind)| kind == subtype)
+        };
+        if marker(RouteRefreshSubtype::BoRR) {
+            for stale in held.values_mut() {
+                *stale = true;
+            }
+        }
+        for key in &update.withdraw {
+            assert!(
+                held.remove(key).is_some(),
+                "withdrawal of {key:?}, which the receiver does not hold"
+            );
+        }
+        for route in update.announce.iter() {
+            held.insert((route.prefix, route.path_id), false);
+        }
+        if marker(RouteRefreshSubtype::EoRR) {
+            held.retain(|_, stale| !*stale);
+        }
+    }
+}
+
+/// Two members on the transport's outbound channel capacity hold a route.
+/// One stops reading while the source announces until its channel is full;
+/// the route's withdrawal is then refused, so the member goes dirty owing it.
+/// The member drains and sends a ROUTE-REFRESH before the resync tick: the
+/// answer (`BoRR`, the current table, `EoRR`) settles the owed withdrawal,
+/// and the resync must not withdraw the route again. Red proof: without the
+/// answer's owed withdrawals the grouped member's `EoRR` purges the route
+/// and the resync then withdraws a route the receiver no longer holds.
+fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool) {
+    const SESSION_CHANNEL: usize = 4096;
+    let prefix = |index: u32| {
+        Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::from(u32::from(Ipv4Addr::new(198, 18, 0, 0)) + index),
+            32,
+        ))
+    };
+    let pass = |manager: &mut RibManager, announced: Option<u32>, withdrawn: Option<u32>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(FULL_CHANNEL_SOURCE),
+            announced: announced
+                .map(|index| {
+                    let Prefix::V4(prefix) = prefix(index) else {
+                        unreachable!()
+                    };
+                    make_route(prefix, FULL_CHANNEL_SOURCE)
+                })
+                .into_iter()
+                .collect(),
+            withdrawn: withdrawn
+                .map(|index| (prefix(index), 0))
+                .into_iter()
+                .collect(),
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = ungrouped;
+    let stuck = peer_v4(Ipv4Addr::new(10, 44, 0, 1));
+    let live = peer_v4(Ipv4Addr::new(10, 44, 0, 2));
+    let mut receivers = Vec::new();
+    for peer in [stuck, live] {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(SESSION_CHANNEL);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        receivers.push(outbound_rx);
+    }
+    let mut live_rx = receivers.pop().unwrap();
+    let mut stuck_rx = receivers.pop().unwrap();
+    assert_eq!(manager.grouped_member_of(stuck).is_none(), ungrouped);
+    let mut held = BTreeMap::new();
+    pass(&mut manager, Some(0), None);
+    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    assert!(held.contains_key(&(prefix(0), 0)));
+    for index in 1..=u32::try_from(SESSION_CHANNEL).unwrap() {
+        pass(&mut manager, Some(index), None);
+        while live_rx.try_recv().is_ok() {}
+    }
+    assert!(manager.outbound_channel_full(stuck));
+    assert!(!manager.dirty_peers.contains(&stuck));
+    pass(&mut manager, None, Some(0));
+    assert!(
+        manager.dirty_peers.contains(&stuck),
+        "the refused withdrawal"
+    );
+
+    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        peer: stuck,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    assert!(!held.contains_key(&(prefix(0), 0)));
+    manager.resync_dirty_peers_bounded();
+    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    assert!(!manager.dirty_peers.contains(&stuck));
+    let expected: BTreeSet<_> = (1..=u32::try_from(SESSION_CHANNEL).unwrap())
+        .map(|index| (prefix(index), 0))
+        .collect();
+    assert_eq!(held.keys().copied().collect::<BTreeSet<_>>(), expected);
+}
+
+#[test]
+fn grouped_refresh_answer_settles_the_owed_withdrawal() {
+    refresh_answer_settles_the_owed_withdrawal(false);
+}
+
+#[test]
+fn ungrouped_refresh_answer_settles_the_owed_withdrawal() {
+    refresh_answer_settles_the_owed_withdrawal(true);
+}
+
 /// A forced peer that is already dirty still records later missed passes,
 /// but does not rebuild its whole table while the receiver is full. Once
 /// the receiver drains, force re-announces an unchanged advertised prefix.

@@ -1532,6 +1532,36 @@ impl RibManager {
                         unicast.announce.push(route);
                     }
                 }
+                // A dirty member's admitted proof names the routes it may still
+                // hold; those it no longer retains are owed withdrawals. Send
+                // them inside this answer: its EoRR purges them otherwise, and
+                // the resync would then withdraw a route the peer no longer
+                // holds (RFC 7313 §4).
+                if self.dirty_peers.contains(&peer)
+                    && !self.selection_deferred(family)
+                    && let Some(admitted) = self.pending_group_admitted.get(&peer)
+                {
+                    let rs_control = rs_control_asn.zip(target_peer_asn);
+                    unicast.withdraw.extend(
+                        admitted
+                            .iter_with_checkpoint(|force| {
+                                super::replacement_readiness_checkpoint(
+                                    &self.replacement_readiness,
+                                    force,
+                                );
+                            })
+                            .filter_map(|key| match key {
+                                crate::update::ExactExportKey::Unicast(prefix, path_id)
+                                    if prefix_family(&prefix) == family
+                                        && !group
+                                            .member_retains(peer, &prefix, path_id, rs_control) =>
+                                {
+                                    Some((prefix, path_id))
+                                }
+                                _ => None,
+                            }),
+                    );
+                }
                 let filtered = group
                     .policy_filtered_for_member_with_checkpoint(peer, &all_prefixes, &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
@@ -1751,19 +1781,47 @@ impl RibManager {
             // re-advertised for ROUTE-REFRESH. That empty view cannot discover
             // routes that were advertised before a deferred ORF update and are
             // now denied by the installed filter, so withdraw those explicitly
-            // from the real Adj-RIB-Out.
-            if let (Some(filter), Some(rib_out)) =
-                (orf_filter.as_ref(), self.adj_ribs_out.get(&peer))
+            // from the real Adj-RIB-Out. Nor can it discover a withdrawal a
+            // dirty peer still owes: send that inside this answer too, since
+            // its EoRR purges the route and a later resync would withdraw a
+            // route the peer no longer holds (RFC 7313 §4).
+            let owes = self.dirty_peers.contains(&peer) && !self.selection_deferred(family);
+            if (orf_filter.is_some() || owes)
+                && let Some(rib_out) = self.adj_ribs_out.get(&peer)
             {
+                let mut answered: HashSet<(Prefix, u32)> = HashSet::new();
+                if owes {
+                    answered.extend(
+                        unicast
+                            .announce
+                            .iter()
+                            .map(|route| (route.prefix, route.path_id))
+                            .chain(unicast.withdraw.iter().copied())
+                            .inspect(|_| {
+                                super::replacement_readiness_checkpoint(
+                                    &self.replacement_readiness,
+                                    false,
+                                );
+                            }),
+                    );
+                }
                 for route in rib_out
                     .iter()
                     .inspect(|_| {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     })
-                    .filter(|r| prefix_family(&r.prefix) == family && !filter.permits(&r.prefix))
+                    .filter(|r| prefix_family(&r.prefix) == family)
                 {
-                    unicast.withdraw.push((route.prefix, route.path_id));
+                    let denied = orf_filter
+                        .as_ref()
+                        .is_some_and(|filter| !filter.permits(&route.prefix));
+                    if denied || (owes && answered.insert((route.prefix, route.path_id))) {
+                        unicast.withdraw.push((route.prefix, route.path_id));
+                    }
                 }
+                super::retire_hash_set(&mut answered, &mut || {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                });
             }
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
             #[cfg(feature = "bench-internals")]
