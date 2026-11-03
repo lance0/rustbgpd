@@ -192,6 +192,34 @@ async fn vpn_flowspec_end_of_rib_is_accepted_and_not_counted() {
 }
 
 #[tokio::test]
+async fn an_update_without_vpn_flowspec_creates_no_discard_series() {
+    let (mut session, _rib_rx) = session_with(vec![
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv4, Safi::FlowSpecVpn),
+    ]);
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            }],
+            &[],
+            &[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            ],
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    assert_eq!(discarded(&session), Vec::new());
+}
+
+#[tokio::test]
 async fn unnegotiated_vpn_flowspec_is_ignored_without_counting() {
     let (mut session, mut rib_rx) = session_with(vec![(Afi::Ipv4, Safi::Unicast)]);
 
