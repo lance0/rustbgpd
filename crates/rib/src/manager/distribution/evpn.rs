@@ -257,7 +257,10 @@ impl RibManager {
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
-        attr_intern: Option<&mut crate::attr_intern::AttrInternTable>,
+        export_interning: Option<(
+            &mut crate::attr_intern::AttrInternTable,
+            &mut super::ExportAdmission,
+        )>,
         checkpoint: &mut impl FnMut(),
     ) {
         let (target_peer, target_peer_asn, target_peer_group) = target.ctx_peer();
@@ -671,21 +674,30 @@ impl RibManager {
             evpn_announce.push(modified);
             checkpoint();
         }
-        if let Some(table) = attr_intern {
-            Self::share_recurring_export_attrs(evpn_announce, &produced, table, checkpoint);
+        if let Some((table, admission)) = export_interning {
+            let admission = target_peer.map(|receiver| (admission, receiver));
+            Self::share_recurring_export_attrs(
+                evpn_announce,
+                &produced,
+                table,
+                admission,
+                checkpoint,
+            );
         }
         memo.retire_with(checkpoint);
     }
 
     /// Intern the policy outcomes `produced` routes carry that recur in this
-    /// call, or that the table already holds, so receivers and routes with an
-    /// equal outcome share one allocation. A unique outcome stays a plain
-    /// allocation: interning every receiver's distinct set would multiply the
-    /// global table, and every sweep of it, by the receiver count.
+    /// call, that the table already holds, or that `admission` has seen from
+    /// another receiver, so receivers and routes with an equal outcome share
+    /// one allocation. A receiver-unique outcome stays a plain allocation:
+    /// interning every receiver's distinct set would multiply the global
+    /// table, and every sweep of it, by the receiver count.
     fn share_recurring_export_attrs(
         routes: &mut [crate::route::EvpnRibRoute],
         produced: &[usize],
         table: &mut crate::attr_intern::AttrInternTable,
+        mut admission: Option<(&mut super::ExportAdmission, std::net::IpAddr)>,
         checkpoint: &mut impl FnMut(),
     ) {
         // The memo gives each (source, outcome) one allocation per call, so
@@ -708,8 +720,13 @@ impl RibManager {
                     let mut canonical = std::sync::Arc::clone(attrs);
                     table.intern(&mut canonical);
                     Some(canonical)
+                } else if let Some(canonical) = table.get(attrs) {
+                    Some(canonical)
                 } else {
-                    table.get(attrs)
+                    let (admission, receiver) = admission.as_mut()?;
+                    let mut first = admission.observe(attrs, *receiver)?;
+                    table.intern(&mut first);
+                    Some(first)
                 }
             });
             if let Some(canonical) = canonical {
@@ -1062,7 +1079,7 @@ impl RibManager {
             &mut evpn_announce,
             &mut evpn_withdraw,
             false, // EVPN delta path — equality check is correct
-            Some(&mut self.attr_intern),
+            Some((&mut self.attr_intern, &mut self.export_admission)),
             checkpoint,
         );
         crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
@@ -1357,7 +1374,7 @@ impl RibManager {
                 &mut announce,
                 &mut withdraw,
                 true, // Obtain the candidate even when policy hides an input change.
-                Some(&mut self.attr_intern),
+                Some((&mut self.attr_intern, &mut self.export_admission)),
                 &mut checkpoint,
             );
             if let Some((label, rustbgpd_policy::PolicyAction::Deny, source)) =

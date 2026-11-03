@@ -616,6 +616,9 @@ pub struct RibManager {
     /// route. Unicast UPDATE chunks amortize collection by displaced count
     /// and deadline; explicit teardown sweeps remain immediate.
     attr_intern: crate::attr_intern::AttrInternTable,
+    /// Bounded admission of single-use EVPN export outcomes into
+    /// `attr_intern` once a second receiver produces an equal one.
+    export_admission: distribution::ExportAdmission,
     /// Unicast replacements/removals since the last full attribute sweep.
     attr_intern_gc_displaced: usize,
     attr_intern_gc_deadline: Option<tokio::time::Instant>,
@@ -2768,6 +2771,7 @@ impl RibManager {
         Self {
             ribs: HashMap::new(),
             attr_intern: crate::attr_intern::AttrInternTable::new(),
+            export_admission: distribution::ExportAdmission::default(),
             attr_intern_gc_displaced: 0,
             attr_intern_gc_deadline: None,
             unicast_prefix_peers: UnicastPrefixPeers::default(),

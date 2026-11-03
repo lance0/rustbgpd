@@ -149,6 +149,65 @@ impl ExportMemo {
     }
 }
 
+/// Fixed slot count of [`ExportAdmission`]: a bounded memory, not a cache
+/// whose misses cost correctness.
+const ADMISSION_SLOTS: usize = 4096;
+
+/// Cross-call admission into the global intern table for policy outcomes
+/// that each staging call produces once (single-route EVPN UPDATEs). It
+/// remembers, per fingerprint slot, the receiver that last produced an
+/// uninterned outcome and a weak handle to it. A different receiver
+/// producing an equal outcome promotes the first allocation into the table,
+/// so both rows share it. The same receiver producing it again (a refresh or
+/// repeated processing) never promotes: receiver-unique outcomes stay out of
+/// the table. A slot collision or fingerprint collision only overwrites the
+/// slot; promotion always requires full attribute equality.
+#[derive(Default)]
+pub(in crate::manager) struct ExportAdmission {
+    slots: Vec<Option<(u64, std::net::IpAddr, std::sync::Weak<AttrSet>)>>,
+}
+
+impl ExportAdmission {
+    /// The first receiver's equal allocation when `receiver` is the second
+    /// distinct receiver to produce `attrs`; otherwise record this sighting.
+    pub(in crate::manager) fn observe(
+        &mut self,
+        attrs: &Arc<AttrSet>,
+        receiver: std::net::IpAddr,
+    ) -> Option<Arc<AttrSet>> {
+        use std::hash::BuildHasher;
+        let fingerprint = crate::fast_hash::FastState::default().hash_one(&**attrs);
+        self.observe_fingerprint(fingerprint, attrs, receiver)
+    }
+
+    fn observe_fingerprint(
+        &mut self,
+        fingerprint: u64,
+        attrs: &Arc<AttrSet>,
+        receiver: std::net::IpAddr,
+    ) -> Option<Arc<AttrSet>> {
+        if self.slots.is_empty() {
+            self.slots.resize(ADMISSION_SLOTS, None);
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the remainder is below ADMISSION_SLOTS"
+        )]
+        let slot = &mut self.slots[(fingerprint % ADMISSION_SLOTS as u64) as usize];
+        if let Some((seen, first_receiver, first)) = slot
+            && *seen == fingerprint
+            && *first_receiver != receiver
+            && let Some(first) = first.upgrade()
+            && *first == **attrs
+        {
+            *slot = None;
+            return Some(first);
+        }
+        *slot = Some((fingerprint, receiver, Arc::downgrade(attrs)));
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::PeerId;
@@ -350,5 +409,55 @@ mod tests {
 
         let no_aspath = route(AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]));
         assert_eq!(&*memo.aspath_str(&no_aspath), "");
+    }
+
+    fn receiver(host: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, host))
+    }
+
+    #[test]
+    fn admission_promotes_only_a_second_distinct_receiver() {
+        let mut admission = ExportAdmission::default();
+        let first = AttrSet::new(attrs(1));
+        assert!(admission.observe(&first, receiver(1)).is_none());
+        // The same receiver again, as a refresh would: no promotion.
+        let again = AttrSet::new(attrs(1));
+        assert!(admission.observe(&again, receiver(1)).is_none());
+        let second = AttrSet::new(attrs(1));
+        let promoted = admission
+            .observe(&second, receiver(2))
+            .expect("a second receiver promotes");
+        assert!(Arc::ptr_eq(&promoted, &again));
+    }
+
+    #[test]
+    fn admission_never_promotes_on_a_fingerprint_collision() {
+        let mut admission = ExportAdmission::default();
+        let first = AttrSet::new(attrs(1));
+        let other = AttrSet::new(attrs(2));
+        assert!(
+            admission
+                .observe_fingerprint(7, &first, receiver(1))
+                .is_none()
+        );
+        assert!(
+            admission
+                .observe_fingerprint(7, &other, receiver(2))
+                .is_none(),
+            "an equal fingerprint is not equal attributes"
+        );
+    }
+
+    #[test]
+    fn admission_ignores_a_dropped_first_outcome() {
+        let mut admission = ExportAdmission::default();
+        let first = AttrSet::new(attrs(1));
+        assert!(admission.observe(&first, receiver(1)).is_none());
+        drop(first);
+        assert!(
+            admission
+                .observe(&AttrSet::new(attrs(1)), receiver(2))
+                .is_none()
+        );
     }
 }

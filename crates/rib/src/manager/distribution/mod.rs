@@ -55,7 +55,7 @@ mod rtc;
 mod unicast;
 mod vpn;
 
-pub(in crate::manager) use export_memo::ExportMemo;
+pub(in crate::manager) use export_memo::{ExportAdmission, ExportMemo};
 pub(in crate::manager) use unicast::{
     AddPathKeys, blackholing, exact_exportable, lease_rejection, multipath_candidate_suppressed,
 };
@@ -10308,7 +10308,7 @@ impl RibManager {
                             &mut evpn_announce,
                             &mut evpn_withdraw,
                             is_force,
-                            Some(&mut self.attr_intern),
+                            Some((&mut self.attr_intern, &mut self.export_admission)),
                             &mut || checkpoint(),
                         );
                         if let Some(handle) = private_evpn_recovery
