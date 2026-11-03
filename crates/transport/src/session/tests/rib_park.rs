@@ -427,3 +427,38 @@ async fn rib_park_delivers_the_held_update_first() {
         () = steps => {}
     }
 }
+
+/// A Shutdown that an owned wait (the shared-group encode's command poll)
+/// moved into `deferred_command` while the session is parked runs at once,
+/// like one taken by the command arm.
+/// Mutation-red: running deferred commands only once the backlog is empty
+/// keeps the Cease waiting for the RIB.
+#[tokio::test]
+async fn rib_park_runs_a_deferred_shutdown() {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        mut server,
+        ..
+    } = rib_park().await;
+    session
+        .read_buf
+        .buf
+        .extend_from_slice(&encoded_announce(held()));
+    session.process_read_buffer().await;
+    assert_eq!(session.rib_backlog.len(), 1, "the UPDATE must be held");
+    session.deferred_command = Some(PeerCommand::Shutdown);
+    let run = session.run();
+    let steps = async {
+        let frame = next_frame_after_handshake(&mut server).await;
+        let Some(Message::Notification(cease)) = frame else {
+            panic!("a deferred Shutdown must still run while parked, got {frame:?}");
+        };
+        assert_eq!(cease.code, NotificationCode::Cease);
+    };
+    tokio::select! {
+        result = run => panic!("run() ended: {result:?}"),
+        () = steps => {}
+    }
+}

@@ -2846,8 +2846,13 @@ impl PeerSession {
         loop {
             self.run_due_link_check().await;
             // A deferred command waits behind held RIB-bound messages like
-            // the peer input it may follow.
-            if self.rib_backlog.is_empty()
+            // the peer input it may follow, unless it is a close that must
+            // not wait. It is the oldest command, so FIFO order holds.
+            if (self.rib_backlog.is_empty()
+                || self
+                    .deferred_command
+                    .as_ref()
+                    .is_some_and(PeerCommand::runs_while_rib_parked))
                 && let Some(command) = self.deferred_command.take()
                 && self.handle_command(command).await == ControlFlow::Break(())
             {
