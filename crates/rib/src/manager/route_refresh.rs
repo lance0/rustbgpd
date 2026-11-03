@@ -1887,6 +1887,13 @@ impl RibManager {
                     rib_out
                         .into_iter()
                         .flat_map(AdjRibOut::iter_flowspec)
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint_at(
+                                &self.replacement_readiness,
+                                "refresh_owed_sweep",
+                                false,
+                            );
+                        })
                         .filter(|route| route.afi == afi)
                         .map(FlowSpecRoute::selection_key),
                     checkpoint,
@@ -1908,6 +1915,13 @@ impl RibManager {
                     rib_out
                         .into_iter()
                         .flat_map(AdjRibOut::iter_bgpls)
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint_at(
+                                &self.replacement_readiness,
+                                "refresh_owed_sweep",
+                                false,
+                            );
+                        })
                         .filter(|route| route.family == bgpls_family)
                         .map(crate::route::BgpLsRibRoute::key),
                     checkpoint,
@@ -1934,6 +1948,13 @@ impl RibManager {
                                     _ => None,
                                 })
                         }))
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint_at(
+                                &self.replacement_readiness,
+                                "refresh_owed_sweep",
+                                false,
+                            );
+                        })
                         .filter(|key| key.afi_safi() == family),
                     checkpoint,
                 );
@@ -1946,6 +1967,13 @@ impl RibManager {
                     rib_out
                         .into_iter()
                         .flat_map(AdjRibOut::iter_labeled)
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint_at(
+                                &self.replacement_readiness,
+                                "refresh_owed_sweep",
+                                false,
+                            );
+                        })
                         .filter(|route| route.afi_safi() == family)
                         .map(crate::route::LabeledRibRoute::key),
                     checkpoint,
