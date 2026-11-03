@@ -1861,11 +1861,23 @@ impl Oracle {
     /// RFC 2918 ROUTE-REFRESH from the peer: the grouped path replays
     /// the group table, the per-peer path re-runs full staging.
     async fn route_refresh(&mut self, peer: Ipv4Addr, afi: Afi, safi: Safi) {
+        self.route_refresh_generation(peer, SESSION, afi, safi)
+            .await;
+    }
+
+    /// [`Self::route_refresh`] from session `session_id`.
+    pub(super) async fn route_refresh_generation(
+        &mut self,
+        peer: Ipv4Addr,
+        session_id: u64,
+        afi: Afi,
+        safi: Safi,
+    ) {
         self.tx
             .send(RibUpdate::RouteRefreshRequest {
                 queued: Arc::default(),
                 peer: peer_v4(peer),
-                session_id: SESSION,
+                session_id,
                 afi,
                 safi,
             })
