@@ -1591,6 +1591,7 @@ mod selection_deferral_startup;
 mod selection_deferral_startup_gate_edges;
 mod session_export_policy;
 mod slice_timing;
+mod stalled_receiver_oracle;
 mod timer_cutoffs;
 mod unicast;
 mod unicast_prefix_peers;
