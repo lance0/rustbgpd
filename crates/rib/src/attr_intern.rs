@@ -68,6 +68,14 @@ impl AttrInternTable {
         }
     }
 
+    /// The interned allocation equal to `attrs`, without inserting it.
+    #[must_use]
+    pub fn get(&self, attrs: &Arc<AttrSet>) -> Option<Arc<AttrSet>> {
+        self.set
+            .get_key_value(attrs)
+            .map(|(existing, ())| Arc::clone(existing))
+    }
+
     /// Drop entries whose only remaining reference is the table itself
     /// (`strong_count == 1`): no route in any RIB, Loc-RIB clone, or
     /// in-flight export still uses them.

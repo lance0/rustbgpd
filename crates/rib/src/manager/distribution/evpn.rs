@@ -240,8 +240,6 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "EVPN staging mirrors unicast distribution context for policy parity"
     )]
-    /// Returns how many policy-modified results it discarded for
-    /// `NO_ADVERTISE`: interned sets no row holds, for the caller's GC.
     pub(in crate::manager) fn stage_evpn_routes_with_checkpoint(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
@@ -259,14 +257,15 @@ impl RibManager {
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
-        mut attr_intern: Option<&mut crate::attr_intern::AttrInternTable>,
+        attr_intern: Option<&mut crate::attr_intern::AttrInternTable>,
         checkpoint: &mut impl FnMut(),
-    ) -> usize {
+    ) {
         let (target_peer, target_peer_asn, target_peer_group) = target.ctx_peer();
         // Routes that share a source attribute set and policy outcome share
-        // one modified set, computed and interned once in this call.
+        // one modified set, computed once in this call; `produced` indexes
+        // the announced routes carrying one.
         let mut memo = super::ExportMemo::default();
-        let mut discarded = 0_usize;
+        let mut produced = Vec::new();
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let evpn_family = (Afi::L2Vpn, Safi::Evpn);
         let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
@@ -613,11 +612,7 @@ impl RibManager {
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
                 checkpoint();
-                let (attrs, nh) = memo.apply_attrs(
-                    &best.attributes,
-                    &result.modifications,
-                    attr_intern.as_deref_mut(),
-                );
+                let (attrs, nh) = memo.apply_attrs(&best.attributes, &result.modifications);
                 checkpoint();
                 modified.attributes = attrs;
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
@@ -634,7 +629,6 @@ impl RibManager {
                     crate::update::ExportGateVerdict::Stop,
                     || "export policy produced NO_ADVERTISE".to_string(),
                 );
-                discarded += usize::from(!result.modifications.is_empty());
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
@@ -671,11 +665,57 @@ impl RibManager {
                 continue;
             }
             checkpoint();
+            if !result.modifications.is_empty() {
+                produced.push(evpn_announce.len());
+            }
             evpn_announce.push(modified);
             checkpoint();
         }
+        if let Some(table) = attr_intern {
+            Self::share_recurring_export_attrs(evpn_announce, &produced, table, checkpoint);
+        }
         memo.retire_with(checkpoint);
-        discarded
+    }
+
+    /// Intern the policy outcomes `produced` routes carry that recur in this
+    /// call, or that the table already holds, so receivers and routes with an
+    /// equal outcome share one allocation. A unique outcome stays a plain
+    /// allocation: interning every receiver's distinct set would multiply the
+    /// global table, and every sweep of it, by the receiver count.
+    fn share_recurring_export_attrs(
+        routes: &mut [crate::route::EvpnRibRoute],
+        produced: &[usize],
+        table: &mut crate::attr_intern::AttrInternTable,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        // The memo gives each (source, outcome) one allocation per call, so
+        // its pointer counts the outcome's uses here.
+        let mut uses = crate::fast_hash::FastMap::<usize, usize>::default();
+        for &index in produced {
+            checkpoint();
+            *uses
+                .entry(std::sync::Arc::as_ptr(&routes[index].attributes) as usize)
+                .or_default() += 1;
+        }
+        let mut shared =
+            crate::fast_hash::FastMap::<usize, Option<std::sync::Arc<AttrSet>>>::default();
+        for &index in produced {
+            checkpoint();
+            let attrs = &mut routes[index].attributes;
+            let key = std::sync::Arc::as_ptr(attrs) as usize;
+            let canonical = shared.entry(key).or_insert_with(|| {
+                if uses[&key] > 1 {
+                    let mut canonical = std::sync::Arc::clone(attrs);
+                    table.intern(&mut canonical);
+                    Some(canonical)
+                } else {
+                    table.get(attrs)
+                }
+            });
+            if let Some(canonical) = canonical {
+                *attrs = std::sync::Arc::clone(canonical);
+            }
+        }
     }
 
     /// Recompute Loc-RIB best path and distribute changes for EVPN routes.
@@ -998,7 +1038,7 @@ impl RibManager {
 
         let mut evpn_announce = Vec::new();
         let mut evpn_withdraw = Vec::new();
-        let discarded = Self::stage_evpn_routes_with_checkpoint(
+        Self::stage_evpn_routes_with_checkpoint(
             &self.loc_rib,
             rib_out,
             &self.peer_is_rr_client,
@@ -1039,9 +1079,6 @@ impl RibManager {
             && self.mark_dirty_after_family_send_failure(peer, failure)
         {
             warn!(%peer, "outbound channel full — EVPN update deferred");
-        }
-        if discarded != 0 {
-            self.settle_export_attr_gc(discarded);
         }
     }
 }
