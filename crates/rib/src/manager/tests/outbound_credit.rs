@@ -2960,17 +2960,19 @@ fn received(peer: PeerId, announced: Vec<Route>, evpn_announced: Vec<EvpnRibRout
 /// a healthy peer keeps receiving every later batch, and later input and
 /// End-of-RIB from another source are still applied, in order. `evpn` runs
 /// the batches through the private EVPN path; `credit` caps every peer's
-/// row credit, so the held peer's is spent. Red with any wait on the held
-/// peer in the actor, such as reserving a slot on every peer's channel
-/// before each turn.
-async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>) {
+/// row credit, so the other source, which never reads its own channel,
+/// spends its credit and is refused while the rest goes on. Red with any
+/// wait on a stalled peer in the actor, such as reserving a slot on every
+/// peer's channel before each turn.
+async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>) -> BgpMetrics {
     let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(
         rx,
         dummy_query_rx(),
         None,
         Some(Ipv4Addr::new(10, 0, 0, 100)),
-        BgpMetrics::new(),
+        metrics.clone(),
     );
     if let Some(credit) = credit {
         manager = manager.with_outbound_row_credit(credit);
@@ -3057,6 +3059,21 @@ async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>)
     );
     drop(tx);
     let _ = handle.await;
+    metrics
+}
+
+/// The other source of [`assert_held_peer_never_holds_the_rib`] reads none
+/// of its updates, so with a small credit it is refused.
+fn assert_other_source_refused(metrics: &BgpMetrics) {
+    let refused = counter_metric_value(
+        metrics,
+        "bgp_outbound_commit_refusals_total",
+        &[
+            ("peer", &peer_v4(Ipv4Addr::new(10, 0, 0, 2)).label()),
+            ("reason", "outbound_credit"),
+        ],
+    );
+    assert!(refused > 0.0, "the other source's credit was spent");
 }
 
 #[tokio::test(start_paused = true)]
@@ -3066,11 +3083,11 @@ async fn a_peer_held_by_its_writer_never_holds_the_rib_or_a_healthy_peer() {
 
 #[tokio::test(start_paused = true)]
 async fn a_held_peer_with_spent_credit_never_holds_the_rib() {
-    assert_held_peer_never_holds_the_rib(false, Some(4)).await;
+    assert_other_source_refused(&assert_held_peer_never_holds_the_rib(false, Some(4)).await);
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_held_private_evpn_peer_never_holds_the_rib() {
     assert_held_peer_never_holds_the_rib(true, None).await;
-    assert_held_peer_never_holds_the_rib(true, Some(4)).await;
+    assert_other_source_refused(&assert_held_peer_never_holds_the_rib(true, Some(4)).await);
 }
