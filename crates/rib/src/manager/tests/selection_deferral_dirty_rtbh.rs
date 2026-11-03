@@ -3196,3 +3196,65 @@ fn rs_member_fallback_rtbh_removal_is_withdrawn_in_the_hold() {
         );
     }
 }
+
+/// A dual-stack receiver's initial End-of-RIB markers are refused by a full
+/// channel, so it is dirty owing both; then our IPv4 selection hold arms. Its
+/// resync finds an empty export view while the hold still holds its IPv4
+/// state: the IPv6 marker owes nothing to the hold and goes out now, the
+/// IPv4 marker waits for the release. Red proof: without the held-peer
+/// flush on the empty-view exit, the IPv6 End-of-RIB waits for the release.
+#[test]
+fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
+    const IPV6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+    let observer = peer_v4(OBSERVER);
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![FAMILY],
+            }],
+        });
+    let (outbound_tx, mut observer_rx) = mpsc::channel(1);
+    outbound_tx
+        .try_send(OutboundRouteUpdate::default())
+        .expect("the session's earlier update fills the channel");
+    let mut up = super::lifecycle::test_peer_up(observer, 82, outbound_tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    {
+        *sendable_families = vec![FAMILY, IPV6];
+    }
+    manager.handle_update(up);
+    assert!(manager.dirty_peers.contains(&observer));
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_convergence_held(FAMILY));
+    assert!(manager.selection_resync_held(observer));
+    observer_rx.try_recv().expect("the earlier update");
+
+    manager.resync_dirty_peers_bounded();
+    // The session sends it: the resync operation it belongs to drains.
+    let flushed = observer_rx
+        .try_recv()
+        .map(delivered)
+        .expect("the IPv6 End-of-RIB");
+    assert_eq!(flushed.end_of_rib, vec![IPV6]);
+    assert!(observer_rx.try_recv().is_err(), "IPv4 waits for the hold");
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: u64::from(WAITER.octets()[3]),
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    assert!(!manager.selection_convergence_held(FAMILY));
+    manager.resync_dirty_peers_bounded();
+    let mut released = Vec::new();
+    while let Ok(update) = observer_rx.try_recv() {
+        released.extend(update.end_of_rib);
+    }
+    assert_eq!(released, vec![FAMILY]);
+    assert!(!manager.dirty_peers.contains(&observer));
+}
