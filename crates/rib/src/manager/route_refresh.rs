@@ -2046,9 +2046,12 @@ impl RibManager {
                 .and_then(|gid| self.group_ribs.get(&gid))
                 .is_some_and(|group| !group.per_client_best);
         let mut group_prior = crate::fast_hash::FastSet::default();
+        // An admitted proof replaces the unicast prior at every commit read
+        // (a refused proof falls back conservatively), so skip the clone.
         if !defer_grouped_refresh_prior
             && !matches!(replay_kind, FamilyReplayKind::SelectionRelease)
             && member_of.is_some()
+            && !self.pending_group_admitted.contains_key(&peer)
             && let Some(routes) = self.grouped_advertised_routes(peer)
         {
             group_prior.extend(routes.into_iter().map(|route| {
