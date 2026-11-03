@@ -87,6 +87,7 @@
 //! starts only once the kernel send buffer stops accepting bytes.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -139,6 +140,83 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// send-hold deadline and the teardown linger bound roughly the same
 /// wire time as before, while amortizing the syscall + flush cost.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
+
+/// Encoded bulk bytes one session may have handed its writer and not yet
+/// seen written: admitted minus completed, the watermarks the session and
+/// the writer already keep. At or above it the session takes no further
+/// outbound work (no slice, shared chunk, marker or RIB envelope); its
+/// pending envelope keeps its cursor and resumes when a completed write
+/// brings the backlog back under the budget. It is never a teardown: a
+/// peer that stops reading altogether is still ended only by the RFC 9687
+/// send hold timer, in the writer.
+///
+/// Derivation. The kernel socket buffer, not this queue, covers the path's
+/// bandwidth-delay product: `write_all` returns once bytes are in the socket
+/// buffer. All this queue must do for a healthy peer is have the next full
+/// coalesced write ready when the current one completes, so the writer
+/// never issues a short write while the session is still being scheduled
+/// to refill it. That is one batch in flight plus one batch ready, each at
+/// most [`MAX_BATCH_BYTES`] plus the one frame a batch may overshoot by (an
+/// RFC 8654 extended message): 2 × (256 KiB + 65,535 B) = 655,358 B. A
+/// larger budget adds memory per paused peer and no throughput.
+///
+/// Separate allowance, not counted against the budget:
+/// - the admission step that crosses it: admission is checked before each
+///   step, so the backlog can exceed the budget by one step, at most
+///   `PROGRESSIVE_SLICE_ROUTES` (2,048) frames;
+/// - coalescing: the writer copies a batch into one buffer whose growth can
+///   leave up to one more batch of unused capacity while it is in flight;
+/// - allocation: the writer channel's fixed slot storage
+///   (`OUTBOUND_BUFFER` slots) and the allocator's rounding of each frame.
+///
+/// Before this budget only the writer's frame count bounded the backlog:
+/// 4,096 frames, about 7 MiB a peer at 1.8 KB a frame.
+pub(super) const WRITER_BYTE_BUDGET: u64 =
+    2 * (MAX_BATCH_BYTES as u64 + rustbgpd_wire::constants::EXTENDED_MAX_MESSAGE_LEN as u64);
+
+/// The bytes admitted to one writer, shared by the session that admits them
+/// and the writer that completes them, so either can publish the backlog:
+/// the session as it grows, the writer as it drains.
+#[derive(Debug, Default)]
+pub(super) struct WriterBytes {
+    admitted: AtomicU64,
+    published: AtomicU64,
+}
+
+impl WriterBytes {
+    /// Record the session's admission watermark.
+    pub(super) fn admitted(&self, admitted: u64) {
+        self.admitted.store(admitted, Ordering::Release);
+    }
+
+    /// Publish the backlog given the completion watermark. The swap keeps
+    /// the all-session total equal to the sum of each writer's last
+    /// published value whichever side publishes.
+    pub(super) fn publish(&self, completed: u64, metrics: &BgpMetrics, peer: &str) {
+        let held = self
+            .admitted
+            .load(Ordering::Acquire)
+            .saturating_sub(completed);
+        self.set(held, metrics, peer);
+    }
+
+    /// The writer is gone, and its queue with it.
+    pub(super) fn retire(&self, metrics: &BgpMetrics, peer: &str) {
+        self.set(0, metrics, peer);
+    }
+
+    fn set(&self, held: u64, metrics: &BgpMetrics, peer: &str) {
+        let previous = self.published.swap(held, Ordering::AcqRel);
+        if previous != held {
+            let gauge = |bytes: u64| i64::try_from(bytes).unwrap_or(i64::MAX);
+            metrics.set_peer_outbound_writer_bytes(
+                peer,
+                gauge(held),
+                gauge(held).saturating_sub(gauge(previous)),
+            );
+        }
+    }
+}
 
 /// How long a closing writer may spend flushing queued bulk frames ahead of
 /// its NOTIFICATION before it discards the rest. The peer manager gives a
@@ -241,6 +319,8 @@ pub(super) struct WriterHandle {
     pub(super) bulk_tx: mpsc::Sender<Bytes>,
     /// Successful FIFO bulk-write byte watermark, excluding priority traffic.
     pub(super) completed: watch::Receiver<u64>,
+    /// The backlog the session and this writer publish together.
+    pub(super) bytes: Arc<WriterBytes>,
     /// Unbounded channel — `OPEN`, `KEEPALIVE`, `NOTIFICATION`, normal
     /// `ROUTE-REFRESH` requests, collision `Cease`. Unbounded is safe
     /// because the connection queues one OPEN, one KEEPALIVE reply, one
@@ -330,6 +410,7 @@ pub(super) fn spawn(
 ) -> WriterHandle {
     let (bulk_tx, bulk_rx) = mpsc::channel::<Bytes>(bulk_buffer);
     let (completed_tx, completed) = watch::channel(0);
+    let bytes = Arc::new(WriterBytes::default());
     // Unbounded so the session never waits on its own writer, and bounded by
     // state: one writer per connection queues its OPEN, the KEEPALIVE
     // answering the peer's OPEN, at most one normal ROUTE-REFRESH request
@@ -344,6 +425,7 @@ pub(super) fn spawn(
         write_half,
         bulk_rx,
         completed_tx,
+        bytes: Arc::clone(&bytes),
         priority_rx,
         refresh_pending: refresh_pending.clone(),
         keepalive_rx,
@@ -359,6 +441,7 @@ pub(super) fn spawn(
     WriterHandle {
         bulk_tx,
         completed,
+        bytes,
         priority_tx,
         refresh_pending,
         keepalive_tx,
@@ -375,6 +458,7 @@ struct WriterTask {
     write_half: OwnedWriteHalf,
     bulk_rx: mpsc::Receiver<Bytes>,
     completed_tx: watch::Sender<u64>,
+    bytes: Arc<WriterBytes>,
     priority_rx: mpsc::UnboundedReceiver<Bytes>,
     refresh_pending: RefreshPending,
     keepalive_rx: watch::Receiver<Option<Duration>>,
@@ -396,6 +480,7 @@ impl Drop for WriterTask {
     fn drop(&mut self) {
         self.metrics
             .set_peer_outbound_queue_depth(&self.peer_label, 0);
+        self.bytes.retire(&self.metrics, &self.peer_label);
     }
 }
 
@@ -541,6 +626,7 @@ impl WriterTask {
                 WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
             })?;
         self.completed_tx.send_replace(next);
+        self.bytes.publish(next, &self.metrics, &self.peer_label);
         Ok(())
     }
 

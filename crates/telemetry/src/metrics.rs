@@ -662,6 +662,8 @@ struct BgpMetricsInner {
 
     // ── Outbound queue (per-peer writer back-pressure) ─────────────
     peer_outbound_queue_depth: IntGaugeVec,
+    peer_outbound_writer_bytes: IntGaugeVec,
+    outbound_writer_bytes: IntGauge,
     peer_slow: IntGaugeVec,
     bmp_stream_diverged: IntGaugeVec,
     rejected_routes_retained: IntGaugeVec,
@@ -729,6 +731,8 @@ struct BgpMetricsInner {
     rib_outbound_registration_failover: IntCounterVec,
     rib_dirty_resync: IntCounterVec,
     rib_outbound_dirty_peers: IntGauge,
+    rib_outbound_credit_rows: IntGauge,
+    rib_outbound_operations_live: IntGauge,
     rib_outbound_dirty_oldest_seconds: IntGauge,
     rib_outbound_registration_pending_peers: IntGauge,
     rib_outbound_registration_pending_oldest_seconds: IntGauge,
@@ -1296,6 +1300,23 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let peer_outbound_writer_bytes = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_outbound_writer_bytes",
+                "Encoded UPDATE and marker bytes a peer's session has handed its \
+                 outbound writer that have not yet been written to the socket. The \
+                 session stops taking outbound work from the RIB while this is at its \
+                 per-peer budget, and resumes as the peer reads.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+        let outbound_writer_bytes = IntGauge::new(
+            "bgp_outbound_writer_bytes",
+            "Sum of bgp_peer_outbound_writer_bytes over every session.",
+        )
+        .expect("valid metric definition");
+
         let peer_slow = IntGaugeVec::new(
             Opts::new(
                 "bgp_peer_slow",
@@ -1825,6 +1846,20 @@ impl BgpMetrics {
             "Age in whole seconds of the oldest current dirty-peer episode (0 when no \
              peer is dirty), sampled once per RIB manager loop iteration. An episode \
              starts when a peer becomes dirty and ends when its resync completes.",
+        )
+        .expect("valid metric definition");
+        let rib_outbound_credit_rows = IntGauge::new(
+            "bgp_rib_outbound_credit_rows",
+            "Private-family rows held by ordinary outbound envelopes queued for or \
+             being sent by sessions, all peers: the row credit in use. Sampled once \
+             per RIB manager loop iteration.",
+        )
+        .expect("valid metric definition");
+        let rib_outbound_operations_live = IntGauge::new(
+            "bgp_rib_outbound_operations_live",
+            "Whole-table outbound operations (initial dump, refresh, resync, complete \
+             EVPN feed, replay) whose envelopes are still queued or being sent, all \
+             peers; at most one per peer. Sampled once per RIB manager loop iteration.",
         )
         .expect("valid metric definition");
         let rib_outbound_registration_pending_peers = IntGauge::new(
@@ -3244,6 +3279,12 @@ impl BgpMetrics {
             .register(Box::new(peer_outbound_queue_depth.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(peer_outbound_writer_bytes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(outbound_writer_bytes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(peer_slow.clone()))
             .expect("metric not already registered");
         registry
@@ -3401,6 +3442,12 @@ impl BgpMetrics {
             .expect("metric not already registered");
         registry
             .register(Box::new(rib_outbound_dirty_peers.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_outbound_credit_rows.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_outbound_operations_live.clone()))
             .expect("metric not already registered");
         registry
             .register(Box::new(rib_outbound_dirty_oldest_seconds.clone()))
@@ -3885,6 +3932,8 @@ impl BgpMetrics {
             messages_sent,
             messages_received,
             peer_outbound_queue_depth,
+            peer_outbound_writer_bytes,
+            outbound_writer_bytes,
             peer_slow,
             bmp_stream_diverged,
             rejected_routes_retained,
@@ -3940,6 +3989,8 @@ impl BgpMetrics {
             rib_outbound_registration_failover,
             rib_dirty_resync,
             rib_outbound_dirty_peers,
+            rib_outbound_credit_rows,
+            rib_outbound_operations_live,
             rib_outbound_dirty_oldest_seconds,
             rib_outbound_registration_pending_peers,
             rib_outbound_registration_pending_oldest_seconds,
@@ -4335,6 +4386,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.messages_sent, peer);
         Self::reap_peer_series_from_vec(&self.0.messages_received, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_outbound_queue_depth, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_outbound_writer_bytes, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_slow, peer);
         Self::reap_peer_series_from_vec(&self.0.bmp_stream_diverged, peer);
         Self::reap_peer_series_from_vec(&self.0.rejected_routes_retained, peer);
@@ -4949,6 +5001,32 @@ impl BgpMetrics {
             .peer_outbound_queue_depth
             .with_label_values(&[peer])
             .set(depth);
+    }
+
+    /// Set the encoded bytes a peer's writer holds to `held`, and move the
+    /// all-session total by `delta`, the change since this peer's previous
+    /// value. Sampled at the same points as the queue depth.
+    pub fn set_peer_outbound_writer_bytes(&self, peer: &str, held: i64, delta: i64) {
+        self.0
+            .peer_outbound_writer_bytes
+            .with_label_values(&[peer])
+            .set(held);
+        self.0.outbound_writer_bytes.add(delta);
+    }
+
+    /// Read a peer's writer-bytes gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn peer_outbound_writer_bytes(&self, peer: &str) -> i64 {
+        self.0
+            .peer_outbound_writer_bytes
+            .with_label_values(&[peer])
+            .get()
+    }
+
+    /// Read the all-session writer-bytes total. Test/diagnostic helper.
+    #[must_use]
+    pub fn outbound_writer_bytes(&self) -> i64 {
+        self.0.outbound_writer_bytes.get()
     }
 
     /// Read a peer's outbound-queue-depth gauge. Test/diagnostic helper.
@@ -5893,6 +5971,24 @@ impl BgpMetrics {
             .readiness_probe_failures
             .with_label_values(&[reason.as_str()])
             .inc();
+    }
+
+    /// Set the sampled row credit in use and live whole-table operations.
+    pub fn set_rib_outbound_credit(&self, rows: i64, operations: i64) {
+        self.0.rib_outbound_credit_rows.set(rows);
+        self.0.rib_outbound_operations_live.set(operations);
+    }
+
+    /// Read the row-credit-in-use gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn rib_outbound_credit_rows(&self) -> i64 {
+        self.0.rib_outbound_credit_rows.get()
+    }
+
+    /// Read the live whole-table operation gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn rib_outbound_operations_live(&self) -> i64 {
+        self.0.rib_outbound_operations_live.get()
     }
 
     /// Set the sampled number of peers awaiting dirty outbound resync.
@@ -10574,6 +10670,7 @@ mod tests {
         m.set_rib_prefixes(peer, "ipv4_unicast", 42);
         m.set_adj_rib_out_prefixes(peer, "ipv4_unicast", 7);
         m.set_peer_outbound_queue_depth(peer, 3);
+        m.set_peer_outbound_writer_bytes(peer, 3, 3);
         m.set_peer_slow(peer, true);
         m.set_bmp_stream_diverged(peer, true);
         m.set_rejected_routes_retained(peer, 4);
@@ -11070,7 +11167,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 71] = [
+    const PEER_LABELED_FAMILIES: [&str; 72] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -11111,6 +11208,7 @@ mod tests {
         "bgp_peer_admin_enabled",
         "bgp_peer_info",
         "bgp_peer_outbound_queue_depth",
+        "bgp_peer_outbound_writer_bytes",
         "bgp_peer_session_established",
         "bgp_peer_session_state",
         "bgp_peer_slow",

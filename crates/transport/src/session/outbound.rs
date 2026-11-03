@@ -30,6 +30,11 @@ pub(super) struct PendingOutbound {
     phase: usize,
     offset: usize,
     capacity_blocked: bool,
+    /// Set while the writer holds its whole byte budget: the completion
+    /// watermark at which the backlog is back under it. The cursor stays
+    /// where it is; no deadline runs, since a paused peer is not a failed
+    /// one (the writer's send hold timer still bounds a stuck write).
+    bytes_wait: Option<(tokio::sync::watch::Receiver<u64>, u64)>,
     /// Route budget for the next ordinary slice. It halves after a slice
     /// overruns [`SLICE_TIME_BUDGET`] and doubles back after a cheap one, so
     /// a slow encode yields sooner. A slice within budget keeps the
@@ -263,6 +268,7 @@ impl PendingOutbound {
             phase: 0,
             offset: 0,
             capacity_blocked: false,
+            bytes_wait: None,
             slice_routes: super::shared_group::PROGRESSIVE_SLICE_ROUTES,
             dropped_ipv6_next_hops: DroppedIpv6NextHops::default(),
             #[cfg(test)]
@@ -298,6 +304,7 @@ impl PendingOutbound {
         }
         self.shared = None;
         self.capacity_blocked = false;
+        self.bytes_wait = None;
         self.phase = OUTBOUND_PHASES.len();
         self.retire_step()
     }
@@ -361,6 +368,11 @@ impl PendingOutbound {
             // The session is the sole bulk producer. The temporary permit only
             // waits for space; synchronous admission rechecks the full budget.
             let _ = writer.reserve().await;
+        }
+        if let Some((completed, target)) = &self.bytes_wait {
+            // A writer that exits drops the sender, which ends the wait too.
+            let mut completed = completed.clone();
+            let _ = completed.wait_for(|done| *done >= *target).await;
         }
     }
 
@@ -823,9 +835,13 @@ impl PeerSession {
         // Every valid payload entry contributes at most one UPDATE frame;
         // grouping can only reduce that count. Requests and terminal markers
         // consume their own exact frame budget in separate phases.
-        let budget = writer
-            .capacity()
-            .min(super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+        let budget = if self.writer_bytes_exhausted() {
+            0
+        } else {
+            writer
+                .capacity()
+                .min(super::shared_group::PROGRESSIVE_SLICE_ROUTES)
+        };
         let before = self.writer_bulk_admitted;
         let mut finished = false;
         pending.capacity_blocked = budget == 0;
@@ -840,6 +856,10 @@ impl PeerSession {
                 if self.wants_shared_chunk(&pending.update, &chunk) {
                     if available == 0 {
                         pending.capacity_blocked = true;
+                        break;
+                    }
+                    if self.writer_bytes_exhausted() {
+                        // Resumes from this chunk once the writer drains.
                         break;
                     }
                     if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
@@ -915,6 +935,7 @@ impl PeerSession {
         if self.writer_bulk_admitted != before {
             self.outbound_admission_timer = None;
         }
+        pending.bytes_wait = self.writer_bytes_wait();
         if !finished
             && self
                 .writer_bulk_tx
@@ -956,6 +977,20 @@ impl PeerSession {
             self.pending_outbound = pending.into_retiring();
         }
         self.sample_outbound_queue_depth();
+    }
+}
+
+impl PeerSession {
+    /// While the writer holds its whole byte budget, the completion
+    /// watermark that brings the backlog back under it.
+    fn writer_bytes_wait(&self) -> Option<(tokio::sync::watch::Receiver<u64>, u64)> {
+        let completed = self.writer_completed.as_ref()?;
+        self.writer_bytes_exhausted().then(|| {
+            (
+                completed.clone(),
+                self.writer_bulk_admitted - super::writer::WRITER_BYTE_BUDGET + 1,
+            )
+        })
     }
 }
 
@@ -3052,6 +3087,7 @@ mod tests {
             phase: ANNOUNCE_PHASE,
             offset: 0,
             capacity_blocked: false,
+            bytes_wait: None,
             slice_routes: 3,
             evpn_announce: Vec::new().into_iter(),
             vpn_announce: Vec::new().into_iter(),

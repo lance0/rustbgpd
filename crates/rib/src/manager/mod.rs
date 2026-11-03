@@ -3968,6 +3968,7 @@ impl RibManager {
         self.metrics.set_rib_outbound_dirty_oldest_seconds(
             i64::try_from(convergence.oldest_pending_secs).unwrap_or(i64::MAX),
         );
+        self.sample_outbound_credit_gauges();
     }
 
     /// Publish the registration-wait gauges at most once per second, and only

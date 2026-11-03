@@ -274,6 +274,8 @@ pub(crate) struct PeerSession {
     writer_bulk_tx: Option<mpsc::Sender<Bytes>>,
     writer_completed: Option<watch::Receiver<u64>>,
     writer_bulk_admitted: u64,
+    /// The writer backlog this session publishes as it admits.
+    writer_bytes: Option<Arc<writer::WriterBytes>>,
     pending_replay: Option<replay::PendingReplay>,
     pending_outbound: Option<outbound::PendingOutbound>,
     outbound_admission_timer: Option<Pin<Box<Sleep>>>,
@@ -2251,6 +2253,7 @@ impl PeerSession {
             read_half,
             writer_bulk_tx,
             writer_completed,
+            writer_bytes,
             writer_priority_tx,
             writer_refresh_pending,
             writer_keepalive_tx,
@@ -2271,6 +2274,7 @@ impl PeerSession {
                     Some(read_half),
                     Some(writer_handle.bulk_tx),
                     Some(writer_handle.completed),
+                    Some(writer_handle.bytes),
                     Some(writer_handle.priority_tx),
                     Some(writer_handle.refresh_pending),
                     Some(writer_handle.keepalive_tx),
@@ -2279,7 +2283,7 @@ impl PeerSession {
                     Some(writer_handle.join),
                 )
             }
-            None => (None, None, None, None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None, None, None, None),
         };
         let connection = read_half
             .as_ref()
@@ -2290,6 +2294,7 @@ impl PeerSession {
             read_half,
             writer_bulk_tx,
             writer_completed,
+            writer_bytes,
             writer_priority_tx,
             writer_refresh_pending,
             writer_keepalive_tx,
@@ -3100,6 +3105,7 @@ impl PeerSession {
                             self.writer_bulk_admitted = 0;
                             self.replay_eor_suppressed = false;
                             self.writer_completed = Some(handle.completed);
+                            self.writer_bytes = Some(handle.bytes);
                             self.writer_bulk_tx = Some(handle.bulk_tx);
                             self.writer_priority_tx = Some(handle.priority_tx);
                             self.writer_refresh_pending = Some(handle.refresh_pending);
@@ -3168,6 +3174,7 @@ impl PeerSession {
         self.writer_bulk_admitted = 0;
         self.replay_eor_suppressed = false;
         self.writer_completed = Some(handle.completed);
+        self.writer_bytes = Some(handle.bytes);
         self.writer_bulk_tx = Some(handle.bulk_tx);
         self.writer_priority_tx = Some(handle.priority_tx);
         self.writer_refresh_pending = Some(handle.refresh_pending);

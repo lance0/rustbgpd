@@ -230,6 +230,21 @@ impl PeerSession {
         tx.send(encoded).map_err(|_| TransportError::WriterClosed)
     }
 
+    /// Encoded bulk bytes admitted to the writer and not yet written.
+    pub(super) fn writer_bytes_held(&self) -> u64 {
+        self.writer_completed.as_ref().map_or(0, |completed| {
+            self.writer_bulk_admitted
+                .saturating_sub(*completed.borrow())
+        })
+    }
+
+    /// Whether the writer holds its whole byte budget
+    /// ([`super::writer::WRITER_BYTE_BUDGET`]), so no further outbound
+    /// work is admitted until a completed write frees some.
+    pub(super) fn writer_bytes_exhausted(&self) -> bool {
+        self.writer_bytes_held() >= super::writer::WRITER_BYTE_BUDGET
+    }
+
     /// Encode `msg` and enqueue it on the writer's **bulk** channel
     /// (`UPDATE`, `RouteRefresh` `BoRR`/`EoRR` markers, `EoR` markers). Returns
     /// `OutboundChannelFull` when the writer hasn't drained the bounded
@@ -303,6 +318,9 @@ impl PeerSession {
         match tx.try_send(encoded) {
             Ok(()) => {
                 self.writer_bulk_admitted = admitted;
+                if let Some(bytes) = &self.writer_bytes {
+                    bytes.admitted(admitted);
+                }
                 if let Some(update_pdu) = bmp_rib_out_pdu {
                     // Peer identity stays the REMOTE peer's; only the
                     // direction flips (O=1), and L=1 marks post-policy.
@@ -345,6 +363,9 @@ impl PeerSession {
                 &self.peer_label,
                 i64::try_from(depth).unwrap_or(i64::MAX),
             );
+        }
+        if let (Some(bytes), Some(completed)) = (&self.writer_bytes, &self.writer_completed) {
+            bytes.publish(*completed.borrow(), &self.metrics, &self.peer_label);
         }
         self.evaluate_slow_peer();
     }
@@ -616,6 +637,9 @@ impl PeerSession {
         self.retire_pending_outbound();
         self.outbound_admission_timer = None;
         self.writer_completed = None;
+        if let Some(bytes) = self.writer_bytes.take() {
+            bytes.retire(&self.metrics, &self.peer_label);
+        }
         if let Some(task) = self.connect_task.take() {
             task.abort();
         }
@@ -675,6 +699,9 @@ impl PeerSession {
         self.retire_pending_outbound();
         self.outbound_admission_timer = None;
         self.writer_completed = None;
+        if let Some(bytes) = self.writer_bytes.take() {
+            bytes.retire(&self.metrics, &self.peer_label);
+        }
         debug!(peer = %self.peer_label, "TCP disconnected");
         if let Some(task) = self.connect_task.take() {
             task.abort();
