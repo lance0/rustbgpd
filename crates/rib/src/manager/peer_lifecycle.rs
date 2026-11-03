@@ -1205,11 +1205,13 @@ impl RibManager {
     }
 
     /// Credit preflight for a helper flush toward `peer`: spent ordinary
-    /// credit would refuse the withdrawals, so walk nothing and keep the
-    /// whole set, re-checked once credit is back, without marking the peer
-    /// dirty. While closing, withdrawals need capacity alone.
+    /// credit would refuse the withdrawals, so count the refusal, walk
+    /// nothing and keep the whole set, re-checked once credit is back,
+    /// without marking the peer dirty. While closing, withdrawals need
+    /// capacity alone.
     fn helper_stale_flush_refused(&mut self, peer: PeerId, changed: &HashSet<Prefix>) -> bool {
         if self.outbound_credit_exhausted(peer) {
+            self.refuse_outbound_for_credit(peer);
             if let Some(carried) = self.helper_stale_exempt.get_mut(&peer)
                 && carried.settled
                 && touches_changed(&carried.keys, changed)

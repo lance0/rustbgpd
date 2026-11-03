@@ -997,8 +997,10 @@ fn full_writer_unsettles_a_withdrawable_carried_key() {
 /// The GR-helper producer's credit preflight (T5's eighth arm): with the
 /// receiver's ordinary credit spent, a withdrawable carried key is walked
 /// by no flush and the whole set is kept, the receiver not marked dirty;
-/// once the credit drains the timer withdraws it. Red without the
-/// preflight: each flush builds the candidates before the send is refused.
+/// once the credit drains the timer withdraws it. The refusal is counted as
+/// an `outbound_credit` commit refusal. Red without the preflight: each
+/// flush builds the candidates before the send is refused; red without the
+/// count: the refusal is invisible.
 #[test]
 fn spent_credit_keeps_the_carried_set_unwalked() {
     let (mut manager, mut rib, (_tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
@@ -1008,6 +1010,24 @@ fn spent_credit_keeps_the_carried_set_unwalked() {
         manager.outbound_row_credit(),
     );
     let stagings = manager.outbound_stagings(observer);
+    let refusals = |manager: &RibManager| -> f64 {
+        manager
+            .metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .filter(|family| family.name() == "bgp_outbound_commit_refusals_total")
+            .flat_map(|family| family.get_metric().to_vec())
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == "outbound_credit")
+            })
+            .map(|metric| metric.get_counter().get_value())
+            .sum()
+    };
+    let refused = refusals(&manager);
     withdraw_received(&mut manager, rtbh);
     for _ in 0..3 {
         manager.resync_dirty_peers_bounded();
@@ -1017,6 +1037,7 @@ fn spent_credit_keeps_the_carried_set_unwalked() {
         stagings,
         "nothing walked"
     );
+    assert!(refusals(&manager) > refused, "the refused flush is counted");
     assert!(!manager.dirty_peers.contains(&observer));
     assert!(
         manager.helper_stale_exempt[&observer]
