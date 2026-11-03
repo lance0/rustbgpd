@@ -481,7 +481,7 @@ async fn max_prefix_capacity_metrics_follow_eorr_and_timeout_reconciliation() {
     while rib_rx.try_recv().is_ok() {}
     session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
     tokio::time::advance(rustbgpd_rib::ERR_REFRESH_TIMEOUT).await;
-    session.expire_refresh_accounting_windows().await.unwrap();
+    session.expire_refresh_accounting_windows().unwrap();
     assert!(matches!(
         rib_rx.try_recv(),
         Ok(RibUpdate::RouteRefreshTimeout {

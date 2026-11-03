@@ -120,3 +120,36 @@ decoupled from processing.**
 - Outbound (RIB→session) delivery is unchanged: that direction already
   has the `dirty_peers` resync contract and a slow *peer* must not be
   able to stall the RIB.
+
+## Amendments
+
+### 2026-11-03 — A parked session keeps servicing outbound, timers and closes
+
+Rule 1 parked the whole session task on `send().await`. While it was
+parked, the task also stopped draining its RIB→session outbound queue and
+admitting frames to its writer, left its hold timer and writer-exit arms
+unpolled, and did not act on operator commands. Under a saturated RIB every
+session parks at once, so every per-peer outbound queue fills to its bound
+and a closing session's Cease waits for the RIB.
+
+The blocking send is replaced by a per-session FIFO of held RIB-bound
+messages. A message that finds the channel full is held, and every later
+RIB-bound message from that session queues behind it; the run loop delivers
+the FIFO in order through a channel reservation that keeps its place among
+waiting senders. While anything is held, the session reads nothing more
+from its socket and processes no further buffered PDU, so rule 1's TCP
+backpressure and the per-session order the RIB sees are unchanged.
+
+Meanwhile the run loop keeps draining outbound into the writer under the
+existing writer admission, enforces the hold timer (rule 3's pending-input
+re-arm still applies), observes writer exit, including RFC 9687 send-hold
+expiry, answers state snapshots, and runs Shutdown, Stop, administrative
+reset, purge reset and BFD down at once. Other commands, any command
+queued behind one of them, and the refresh-accounting timer wait until the
+held messages are delivered, as before. Refresh-accounting state that rule 4 ties to channel acceptance
+(BoRR, EoRR, refresh timeout) changes when the held message is admitted.
+The session task delivers everything held before it returns.
+
+Two sends still wait for channel admission inside their handler: an ORF
+update, whose RIB reply the session awaits, and the messages an
+export-policy or runtime-config command acknowledges to the peer manager.

@@ -146,8 +146,7 @@ impl PeerSession {
             };
             let (reply, rx) = oneshot::channel();
             if self
-                .rib_tx
-                .send(RibUpdate::PeerOrfUpdate {
+                .send_to_rib_admitted(RibUpdate::PeerOrfUpdate {
                     peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     afi,
@@ -437,7 +436,8 @@ impl PeerSession {
             session_id: self.session_identity.id,
             slow: self.slow_peer,
         };
-        if self.rib_tx.try_send(update).is_ok() {
+        // Never overtake held messages; the re-check timer retries.
+        if self.rib_backlog.is_empty() && self.rib_tx.try_send(update).is_ok() {
             self.slow_peer_isolation_sent = self.slow_peer;
         }
     }
@@ -705,11 +705,7 @@ impl PeerSession {
     /// a request for the same family that the RIB has not started yet. That
     /// replay reads the Loc-RIB when it starts, so it answers this request
     /// too (RFC 2918 re-advertisement; with RFC 7313 one BoRR/EoRR bracket).
-    async fn queue_route_refresh_request(
-        &mut self,
-        afi: rustbgpd_wire::Afi,
-        safi: rustbgpd_wire::Safi,
-    ) {
+    fn queue_route_refresh_request(&mut self, afi: rustbgpd_wire::Afi, safi: rustbgpd_wire::Safi) {
         let queued =
             std::sync::Arc::clone(self.route_refresh_queued.entry((afi, safi)).or_default());
         if queued.swap(true, std::sync::atomic::Ordering::AcqRel) {
@@ -721,15 +717,13 @@ impl PeerSession {
             return;
         }
         if self
-            .rib_tx
-            .send(RibUpdate::RouteRefreshRequest {
+            .send_to_rib(RibUpdate::RouteRefreshRequest {
                 peer: self.rib_peer(),
                 session_id: self.session_identity.id,
                 afi,
                 safi,
                 queued: std::sync::Arc::clone(&queued),
             })
-            .await
             .is_err()
         {
             queued.store(false, std::sync::atomic::Ordering::Release);
@@ -748,15 +742,16 @@ impl PeerSession {
     pub(super) async fn process_read_buffer(&mut self) {
         loop {
             // The OPEN just processed may have parked a collision candidate;
-            // input behind it waits for the verdict.
-            if self.collision_verdict_pending() {
+            // input behind it waits for the verdict. Input behind a message
+            // held for the RIB waits until the run loop delivers it.
+            if self.collision_verdict_pending() || !self.rib_backlog.is_empty() {
                 return;
             }
             // Reconcile a due refresh window before *each* buffered PDU, not
             // merely once per socket read. One read can contain several UPDATEs
             // and the first may park on RIB backpressure until after the shared
             // deadline; the next one must see the corrected max-prefix count.
-            if self.expire_refresh_accounting_windows().await.is_err() {
+            if self.expire_refresh_accounting_windows().is_err() {
                 return;
             }
             let raw_pdu = match self.read_buf.try_frame() {
@@ -980,7 +975,7 @@ impl PeerSession {
                                     let handled_orf =
                                         self.process_inbound_orf(afi, safi, &rr).await;
                                     if !handled_orf {
-                                        self.queue_route_refresh_request(afi, safi).await;
+                                        self.queue_route_refresh_request(afi, safi);
                                     }
                                 }
                                 RouteRefreshSubtype::BoRR => {
@@ -1011,14 +1006,22 @@ impl PeerSession {
                                             "ignoring BoRR before End-of-RIB from Graceful Restart peer"
                                         );
                                     } else if self
-                                        .rib_tx
-                                        .send(RibUpdate::BeginRouteRefresh {
-                                            peer: self.rib_peer(),
-                                            session_id: self.session_identity.id,
-                                            afi,
-                                            safi,
-                                        })
-                                        .await
+                                        .send_to_rib_then(
+                                            RibUpdate::BeginRouteRefresh {
+                                                peer: self.rib_peer(),
+                                                session_id: self.session_identity.id,
+                                                afi,
+                                                safi,
+                                            },
+                                            // The channel acceptance orders the RIB's
+                                            // snapshot ahead of all later UPDATEs from
+                                            // this session. Only then mirror that
+                                            // window in transport-owned max-prefix
+                                            // state.
+                                            super::inbound::OnRibAdmission::BeginRefreshAccounting(
+                                                afi, safi,
+                                            ),
+                                        )
                                         .is_err()
                                     {
                                         warn!(
@@ -1026,11 +1029,6 @@ impl PeerSession {
                                             "RIB manager unavailable — BeginRouteRefresh dropped"
                                         );
                                     } else {
-                                        // The channel acceptance orders the RIB's
-                                        // snapshot ahead of all later UPDATEs from
-                                        // this session. Only now mirror that window
-                                        // in transport-owned max-prefix state.
-                                        self.begin_refresh_accounting(afi, safi);
                                         info!(
                                             peer = %self.peer_label,
                                             ?afi, ?safi,
@@ -1050,14 +1048,18 @@ impl PeerSession {
                                             "ignoring EoRR from peer without Enhanced Route Refresh"
                                         );
                                     } else if self
-                                        .rib_tx
-                                        .send(RibUpdate::EndRouteRefresh {
-                                            peer: self.rib_peer(),
-                                            session_id: self.session_identity.id,
-                                            afi,
-                                            safi,
-                                        })
-                                        .await
+                                        .send_to_rib_then(
+                                            RibUpdate::EndRouteRefresh {
+                                                peer: self.rib_peer(),
+                                                session_id: self.session_identity.id,
+                                                afi,
+                                                safi,
+                                            },
+                                            // Sweep only what the RIB sweeps.
+                                            super::inbound::OnRibAdmission::EndRefreshAccounting(
+                                                afi, safi,
+                                            ),
+                                        )
                                         .is_err()
                                     {
                                         warn!(
@@ -1065,10 +1067,6 @@ impl PeerSession {
                                             "RIB manager unavailable — EndRouteRefresh dropped"
                                         );
                                     } else {
-                                        // Consume before sweeping so a re-entrant
-                                        // observation can never see an active
-                                        // window whose stale identities are gone.
-                                        self.end_refresh_accounting(afi, safi);
                                         info!(
                                             peer = %self.peer_label,
                                             ?afi, ?safi,

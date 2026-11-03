@@ -363,7 +363,7 @@ impl PeerSession {
         if !snapshot.valid {
             return;
         }
-        self.purge_retained_if_link_down(&snapshot).await;
+        self.purge_retained_if_link_down(&snapshot);
         if self.read_half.is_none() {
             return;
         }
@@ -432,7 +432,7 @@ impl PeerSession {
     /// An earlier TCP connection failed first and its routes are held under
     /// GR/LLGR: if that connection's interface is down now, purge them rather
     /// than wait for retention to expire.
-    async fn purge_retained_if_link_down(&mut self, snapshot: &crate::link::LinkSnapshot) {
+    fn purge_retained_if_link_down(&mut self, snapshot: &crate::link::LinkSnapshot) {
         let Some(mut retained) = self.gr_retained_connection.get() else {
             return;
         };
@@ -462,13 +462,10 @@ impl PeerSession {
         );
         self.gr_retained_connection.set(None);
         self.last_error = down.teardown_cause();
-        let _ = self
-            .rib_tx
-            .send(RibUpdate::PeerDown {
-                peer: self.rib_peer(),
-                session_id: retained.session_id,
-            })
-            .await;
+        let _ = self.send_to_rib(RibUpdate::PeerDown {
+            peer: self.rib_peer(),
+            session_id: retained.session_id,
+        });
     }
 
     /// Handle a hold-timer expiry observed by the select loop.
@@ -1128,74 +1125,59 @@ impl PeerSession {
                     // Stage the session-bound RFC 9234 role before `PeerUp`:
                     // `PeerUp` synchronously builds the initial Adj-RIB-Out,
                     // whose OTC gate must see the role from its first route.
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::SetPeerExportContext {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            local_role: self.config.peer.local_role,
-                        })
-                        .await;
+                    let _ = self.send_to_rib(RibUpdate::SetPeerExportContext {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        local_role: self.config.peer.local_role,
+                    });
 
                     // Stage RFC 7947 §2.3.2 control-community context before
                     // `PeerUp` for the same reason: the initial Adj-RIB-Out
                     // build must already honor the member's steering
                     // communities. The RS-side local ASN is what the control
                     // communities' administrator field is matched against.
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::SetPeerRsControl {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            rs_control_asn: self
-                                .config
-                                .rs_control_communities
-                                .then_some(self.config.peer.local_asn),
-                        })
-                        .await;
+                    let _ = self.send_to_rib(RibUpdate::SetPeerRsControl {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        rs_control_asn: self
+                            .config
+                            .rs_control_communities
+                            .then_some(self.config.peer.local_asn),
+                    });
 
                     // Fence the exact encoder to this transport generation
                     // before `PeerUp` synchronously builds the initial
                     // Adj-RIB-Out. Every resulting envelope must carry a
                     // snapshot captured from this owner.
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::SetPeerExportEncoder {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            encoder: self.export_encoder.clone(),
-                        })
-                        .await;
+                    let _ = self.send_to_rib(RibUpdate::SetPeerExportEncoder {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        encoder: self.export_encoder.clone(),
+                    });
 
                     // Hand over the neighbor's export-policy totals before
                     // `PeerUp` builds the initial Adj-RIB-Out, so every export
                     // evaluation for this session counts toward the neighbor.
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::SetPeerExportPolicyCounters {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            counters: self.config.neighbor_counters.export_policy().clone(),
-                        })
-                        .await;
+                    let _ = self.send_to_rib(RibUpdate::SetPeerExportPolicyCounters {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        counters: self.config.neighbor_counters.export_policy().clone(),
+                    });
 
                     // Stage immutable RFC 4724 OPEN context before `PeerUp`.
                     // The restarting-speaker selection gate consumes only the
                     // matching session, so a collision loser cannot satisfy or
                     // reclassify the winner's frozen EoR waiter.
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::SetPeerGracefulRestartContext {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            peer_restart_state,
-                            peer_gr_helper,
-                            peer_gr_families,
-                            peer_enhanced_refresh,
-                            peer_llgr_families,
-                            local_llgr_stale_time: self.config.llgr_stale_time,
-                        })
-                        .await;
+                    let _ = self.send_to_rib(RibUpdate::SetPeerGracefulRestartContext {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        peer_restart_state,
+                        peer_gr_helper,
+                        peer_gr_families,
+                        peer_enhanced_refresh,
+                        peer_llgr_families,
+                        local_llgr_stale_time: self.config.llgr_stale_time,
+                    });
 
                     // Stage the peer-group policy context before `PeerUp`
                     // for the same reason as the contexts above: `PeerUp`
@@ -1208,91 +1190,76 @@ impl PeerSession {
                     // it (ADR-0113); arriving late would leave a
                     // group-inheriting peer — every accepted dynamic child —
                     // flooding its initial feed unbounded.
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::SetPeerPolicyContext {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            peer_group: self.config.peer_group.clone(),
-                        })
-                        .await;
+                    let _ = self.send_to_rib(RibUpdate::SetPeerPolicyContext {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        peer_group: self.config.peer_group.clone(),
+                    });
 
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::SetPeerSourceContext {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            context: std::sync::Arc::new(rustbgpd_rib::update::PeerSourceContext {
-                                dampening_admission: self.config.dampening_admission.clone(),
-                                peer_interface: self.config.peer_interface.clone(),
-                                accepted_dynamic_range: self.config.accepted_dynamic_range.clone(),
-                                route_server_client: self.config.route_server_client,
-                                exact_export_families: self.config.peer.effective_families(),
-                            }),
-                        })
-                        .await;
+                    let _ = self.send_to_rib(RibUpdate::SetPeerSourceContext {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        context: std::sync::Arc::new(rustbgpd_rib::update::PeerSourceContext {
+                            dampening_admission: self.config.dampening_admission.clone(),
+                            peer_interface: self.config.peer_interface.clone(),
+                            accepted_dynamic_range: self.config.accepted_dynamic_range.clone(),
+                            route_server_client: self.config.route_server_client,
+                            exact_export_families: self.config.peer.effective_families(),
+                        }),
+                    });
 
                     // Negotiated families this session will not export
                     // still get an empty EoR with the initial dump (RFC 4724
                     // §4.1), so stage them before `PeerUp` builds it.
                     if !withheld_families.is_empty() {
-                        let _ = self
-                            .rib_tx
-                            .send(RibUpdate::SetPeerWithheldFamilies {
-                                peer: self.rib_peer(),
-                                session_id: self.session_identity.id,
-                                families: withheld_families,
-                            })
-                            .await;
+                        let _ = self.send_to_rib(RibUpdate::SetPeerWithheldFamilies {
+                            peer: self.rib_peer(),
+                            session_id: self.session_identity.id,
+                            families: withheld_families,
+                        });
                     }
 
                     // Register with RIB manager for outbound updates
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::PeerUp {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            peer_asn,
-                            peer_router_id: self
-                                .negotiated
-                                .as_ref()
-                                .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
-                            outbound_tx: self.outbound_tx.clone(),
-                            export_policy: self.export_policy.clone(),
-                            sendable_families,
-                            is_ebgp,
-                            route_reflector_client: self.config.route_reflector_client,
-                            orr_vantage: self.config.orr_vantage,
-                            per_client_best: self.config.per_client_best,
-                            interpret_rfc1997: self.config.interpret_rfc1997,
-                            add_path_send_families,
-                            add_path_send_max,
-                            negotiated_orf_recv: self
-                                .negotiated
-                                .as_ref()
-                                .map(|n| n.negotiated_orf_recv.clone())
-                                .unwrap_or_default(),
-                            negotiated_llgr_families: self
-                                .negotiated
-                                .as_ref()
-                                .filter(|n| n.peer_llgr_capable)
-                                .map(|n| {
-                                    n.peer_llgr_families
-                                        .iter()
-                                        .map(|f| (f.afi, f.safi))
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                        })
-                        .await;
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::PeerAddPathLimits {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                            limits: add_path_send_limits,
-                        })
-                        .await;
+                    let _ = self.send_to_rib(RibUpdate::PeerUp {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        peer_asn,
+                        peer_router_id: self
+                            .negotiated
+                            .as_ref()
+                            .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                        outbound_tx: self.outbound_tx.clone(),
+                        export_policy: self.export_policy.clone(),
+                        sendable_families,
+                        is_ebgp,
+                        route_reflector_client: self.config.route_reflector_client,
+                        orr_vantage: self.config.orr_vantage,
+                        per_client_best: self.config.per_client_best,
+                        interpret_rfc1997: self.config.interpret_rfc1997,
+                        add_path_send_families,
+                        add_path_send_max,
+                        negotiated_orf_recv: self
+                            .negotiated
+                            .as_ref()
+                            .map(|n| n.negotiated_orf_recv.clone())
+                            .unwrap_or_default(),
+                        negotiated_llgr_families: self
+                            .negotiated
+                            .as_ref()
+                            .filter(|n| n.peer_llgr_capable)
+                            .map(|n| {
+                                n.peer_llgr_families
+                                    .iter()
+                                    .map(|f| (f.afi, f.safi))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    });
+                    let _ = self.send_to_rib(RibUpdate::PeerAddPathLimits {
+                        peer: self.rib_peer(),
+                        session_id: self.session_identity.id,
+                        limits: add_path_send_limits,
+                    });
                 }
                 Action::StaleTimerIgnored { state, timer } => {
                     let timer_label = match timer {
@@ -1531,7 +1498,7 @@ impl PeerSession {
                         peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                     });
-                    let _ = self.rib_tx.send(rib_msg).await;
+                    let _ = self.send_to_rib(rib_msg);
                 }
                 // `fsm::Action` is `#[non_exhaustive]`. A future action variant
                 // this executor doesn't yet understand is treated as a no-op

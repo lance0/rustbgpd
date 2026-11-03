@@ -1681,6 +1681,7 @@ impl PeerSession {
             PeerCommand::UpdateExportPolicy { policy, reply } => {
                 // Queue the accepting session's replay state before acknowledging
                 // the command. The peer manager still owns the outbound commit.
+                self.flush_rib_backlog().await;
                 let Ok(permit) = self.rib_tx.reserve().await else {
                     let _ = reply.send(Err(PeerCommandError::CommandFailed(
                         "RIB channel closed while updating export policy".to_string(),
@@ -1794,8 +1795,7 @@ impl PeerSession {
                         "local_ipv6_nexthop now provides an IPv6 next hop: exporting IPv6 unicast"
                     );
                     let queued = self
-                        .rib_tx
-                        .send(RibUpdate::PeerFamilySendable {
+                        .send_to_rib_admitted(RibUpdate::PeerFamilySendable {
                             peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             family,
@@ -1935,14 +1935,14 @@ impl PeerSession {
             }
             PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
                 let _ = reply.send(true);
-                self.collision_dump().await
+                self.collision_dump()
             }
-            PeerCommand::CollisionDump => self.collision_dump().await,
+            PeerCommand::CollisionDump => self.collision_dump(),
         }
     }
 
     /// Send Cease/7 (Connection Collision Resolution) and tear down.
-    async fn collision_dump(&mut self) -> ControlFlow<()> {
+    fn collision_dump(&mut self) -> ControlFlow<()> {
         self.stop_requested = true;
         self.reconnect_timer = None;
         // Send Cease/7 NOTIFICATION
@@ -1966,13 +1966,10 @@ impl PeerSession {
         // Clean up RIB if Established
         if self.fsm.state() == SessionState::Established {
             self.session_telemetry_metric_lease.record_down();
-            let _ = self
-                .rib_tx
-                .send(RibUpdate::PeerDown {
-                    peer: self.rib_peer(),
-                    session_id: self.session_identity.id,
-                })
-                .await;
+            let _ = self.send_to_rib(RibUpdate::PeerDown {
+                peer: self.rib_peer(),
+                session_id: self.session_identity.id,
+            });
         }
         self.close_tcp();
         self.timers.stop_all();

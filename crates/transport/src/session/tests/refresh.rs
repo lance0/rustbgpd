@@ -336,7 +336,7 @@ async fn closed_rib_timeout_preserves_refresh_window_and_live_count() {
     session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
 
     tokio::time::advance(rustbgpd_rib::ERR_REFRESH_TIMEOUT).await;
-    assert_eq!(session.expire_refresh_accounting_windows().await, Err(()));
+    assert_eq!(session.expire_refresh_accounting_windows(), Err(()));
     assert!(session.refresh_accounting_has_window((Afi::Ipv4, Safi::Unicast)));
     assert_eq!(session.known_prefix_count(), 1);
     assert!(
@@ -370,7 +370,7 @@ async fn staggered_refresh_timeouts_sweep_only_due_family_and_rearm() {
             .unwrap(),
     )
     .await;
-    session.expire_refresh_accounting_windows().await.unwrap();
+    session.expire_refresh_accounting_windows().unwrap();
     assert!(matches!(
         rib_rx.try_recv(),
         Ok(RibUpdate::RouteRefreshTimeout {
@@ -386,7 +386,7 @@ async fn staggered_refresh_timeouts_sweep_only_due_family_and_rearm() {
     assert!(session.refresh_accounting_timer.is_some());
 
     tokio::time::advance(Duration::from_secs(1)).await;
-    session.expire_refresh_accounting_windows().await.unwrap();
+    session.expire_refresh_accounting_windows().unwrap();
     assert!(matches!(
         rib_rx.try_recv(),
         Ok(RibUpdate::RouteRefreshTimeout {
@@ -457,12 +457,13 @@ async fn refresh_timeout_precedes_next_buffered_update_after_rib_backpressure() 
     }
     let task = tokio::spawn(async move {
         session.process_read_buffer().await;
+        deliver_held_rib_messages(&mut session).await;
         session
     });
     tokio::task::yield_now().await;
     assert!(
         !task.is_finished(),
-        "the first UPDATE must park on the full RIB channel"
+        "the first UPDATE must be held for the full RIB channel"
     );
 
     tokio::time::advance(rustbgpd_rib::ERR_REFRESH_TIMEOUT).await;
@@ -514,14 +515,12 @@ async fn full_rib_channel_delays_marker_accounting_mutation_until_acceptance() {
         Safi::Unicast,
         RouteRefreshSubtype::BoRR,
     );
-    {
-        let process = session.process_read_buffer();
-        tokio::pin!(process);
-        tokio::select! {
-            () = tokio::task::yield_now() => {}
-            () = &mut process => panic!("BoRR unexpectedly crossed a full RIB channel"),
-        }
-    }
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.rib_backlog.len(),
+        1,
+        "BoRR must wait for the full channel"
+    );
     assert_eq!(
         session.refresh_accounting_window_count(),
         0,
@@ -529,19 +528,13 @@ async fn full_rib_channel_delays_marker_accounting_mutation_until_acceptance() {
     );
     assert!(matches!(
         rib_rx.recv().await,
-        Some(RibUpdate::BeginRouteRefresh { .. })
+        Some(RibUpdate::BeginRouteRefresh { afi: Afi::Ipv6, .. })
     ));
-    buffer_route_refresh(
-        &mut session,
-        Afi::Ipv4,
-        Safi::Unicast,
-        RouteRefreshSubtype::BoRR,
-    );
-    session.process_read_buffer().await;
+    deliver_held_rib_messages(&mut session).await;
     assert!(session.refresh_accounting_has_window((Afi::Ipv4, Safi::Unicast)));
     assert!(matches!(
         rib_rx.recv().await,
-        Some(RibUpdate::BeginRouteRefresh { .. })
+        Some(RibUpdate::BeginRouteRefresh { afi: Afi::Ipv4, .. })
     ));
 
     session
@@ -559,14 +552,12 @@ async fn full_rib_channel_delays_marker_accounting_mutation_until_acceptance() {
         Safi::Unicast,
         RouteRefreshSubtype::EoRR,
     );
-    {
-        let process = session.process_read_buffer();
-        tokio::pin!(process);
-        tokio::select! {
-            () = tokio::task::yield_now() => {}
-            () = &mut process => panic!("EoRR unexpectedly crossed a full RIB channel"),
-        }
-    }
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.rib_backlog.len(),
+        1,
+        "EoRR must wait for the full channel"
+    );
     assert!(session.refresh_accounting_has_window((Afi::Ipv4, Safi::Unicast)));
     assert_eq!(
         session.known_prefix_count(),
@@ -577,19 +568,73 @@ async fn full_rib_channel_delays_marker_accounting_mutation_until_acceptance() {
         rib_rx.recv().await,
         Some(RibUpdate::BeginRouteRefresh { .. })
     ));
-    buffer_route_refresh(
-        &mut session,
-        Afi::Ipv4,
-        Safi::Unicast,
-        RouteRefreshSubtype::EoRR,
-    );
-    session.process_read_buffer().await;
+    deliver_held_rib_messages(&mut session).await;
     assert_eq!(session.refresh_accounting_window_count(), 0);
     assert_eq!(session.known_prefix_count(), 0);
     assert!(matches!(
         rib_rx.recv().await,
         Some(RibUpdate::EndRouteRefresh { .. })
     ));
+}
+
+/// A `BoRR` held behind a full RIB channel replaces the family's open window
+/// once admitted. The old window's deadline passing meanwhile must not time
+/// the new refresh out: the refresh-accounting timer waits while input is
+/// parked, as the check before each buffered PDU always has.
+/// Mutation-red: polling that timer while parked queues a
+/// `RouteRefreshTimeout` behind the held `BoRR`, ending the new refresh at once.
+#[tokio::test(start_paused = true)]
+async fn held_borr_is_not_timed_out_by_the_window_it_replaces() {
+    let (mut session, _cmd_tx, mut rib_rx) = make_test_session_with_channels(65001, 65002, 1);
+    install_enhanced_refresh_session(&mut session, vec![(Afi::Ipv4, Safi::Unicast)], false);
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .unwrap();
+    tokio::time::advance(
+        rustbgpd_rib::ERR_REFRESH_TIMEOUT
+            .checked_sub(Duration::from_secs(1))
+            .unwrap(),
+    )
+    .await;
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::BoRR,
+    );
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.rib_backlog.len(),
+        1,
+        "BoRR must wait for the full channel"
+    );
+    {
+        let run = session.run();
+        let steps = async {
+            // The old window's deadline passes while the BoRR is held.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert!(matches!(
+                rib_rx.recv().await,
+                Some(RibUpdate::RoutesReceived { .. })
+            ));
+            assert!(matches!(
+                rib_rx.recv().await,
+                Some(RibUpdate::BeginRouteRefresh { .. })
+            ));
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(
+                rib_rx.try_recv().is_err(),
+                "the replaced window must not time the new refresh out"
+            );
+        };
+        tokio::select! {
+            result = run => panic!("run() ended: {result:?}"),
+            () = steps => {}
+        }
+    }
+    assert!(session.refresh_accounting_has_window((Afi::Ipv4, Safi::Unicast)));
 }
 
 #[tokio::test]

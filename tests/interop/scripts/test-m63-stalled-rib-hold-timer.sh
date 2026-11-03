@@ -22,24 +22,21 @@
 #    form: a failed exec reads as unknown, never a verdict).
 #    rustbgpd's own gRPC view is polled with a short client timeout:
 #    GetNeighborState round-trips both the session task (bounded
-#    100 ms, reported as stale=true when parked) and the RIB query
-#    channel (drained only between stalled batches, so the RPC
-#    itself can block ~one stall interval) — a timeout or a
-#    stale=true reading is an unknown (and corroborates the park),
+#    100 ms, reported as stale=true if missed; a parked session still
+#    answers it) and the RIB query channel (drained only between
+#    stalled batches, so the RPC itself can block ~one stall
+#    interval) — a timeout or a stale=true reading is an unknown,
 #    but a fresh reading must be Established.
 # 4. bgp_inbound_rib_backpressure_total{peer} > 0 — the channel
 #    really filled and the block-never-drop path ran (strict).
 # 5. bgp_hold_timer_rearmed_pending_input_total{peer} is logged,
-#    informationally only — in THIS scenario it is expected to stay
-#    0: the FSM restarts the hold timer when each parked delivery
-#    completes (Event::UpdateReceived fires after the blocking RIB
-#    send returns), so the select loop never observes an expired
-#    deadline even though every park exceeds the hold time. The
-#    pending-input re-arm path guards expiries that race genuinely
-#    unprocessed input and stays covered by the transport unit
-#    tests. Survival itself (FRR's hold timer fed by the
-#    writer-owned cadence while we are parked) + backpressure +
-#    never-drop + zero flaps are M63's deterministic receipts.
+#    informationally only. The hold timer keeps running while the
+#    session is parked, and every park exceeds the hold time, so it
+#    expires while FRR's unread input is pending and re-arms: the
+#    counter is normally > 0 here. Survival itself (FRR's hold timer
+#    fed by the writer-owned cadence, ours re-armed by the pending
+#    input while we are parked) + backpressure + never-drop + zero
+#    flaps are M63's deterministic receipts.
 # 6. After the flood drains, rustbgpd's RIB holds EXACTLY the 4000
 #    injected routes — the ADR-0078 never-drop receipt.
 # 7. Zero session flaps over the whole run: rustbgpd flap_count == 0
@@ -246,10 +243,9 @@ while [ $(($(date +%s) - window_start)) -lt "$SURVIVAL_WINDOW_SECS" ]; do
     fi
 
     # rustbgpd side — a timed-out RPC (RIB query channel blocked
-    # behind a stalled batch) and a stale=true reading (parked
-    # session task missed the bounded QueryState deadline) are both
-    # expected unknowns that corroborate the park; only a fresh
-    # reading carries a verdict.
+    # behind a stalled batch) and a stale=true reading (session task
+    # missed the bounded QueryState deadline) are both unknowns;
+    # only a fresh reading carries a verdict.
     if rb_json=$(grpc_neighbor_state_quick) && [ -n "$rb_json" ]; then
         rb_stale_flag=$(printf '%s\n' "$rb_json" | jq -r '.stale // false')
         rb_state=$(printf '%s\n' "$rb_json" | jq -r '.state // empty')
@@ -282,9 +278,9 @@ else
     dump_state_on_failure
 fi
 if [ "$rb_parked" -gt 0 ]; then
-    ok "rustbgpd QueryState read as parked ${rb_parked} time(s) (stale or RPC deadline) — the session task really parked on the RIB channel"
+    log "rustbgpd state read as unknown ${rb_parked} time(s) (stale or RPC deadline)"
 else
-    log "NOTE: no parked QueryState readings observed (parking not caught at this grain)"
+    log "NOTE: no unknown rustbgpd state readings (a parked session answers QueryState)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -340,14 +336,11 @@ else
     dump_state_on_failure
 fi
 
-# Informational only (see header): in this scenario the counter is
-# expected to be 0 — every park ends with the UPDATE's normal hold
-# reset (Event::UpdateReceived fires after the blocking send
-# returns), so the select loop never sees an expired deadline. The
-# pending-input re-arm path is pinned by transport unit tests; what
-# M63 pins is that the parks themselves never expire either side.
+# Informational only (see header): parks outlast the hold time, so
+# the hold timer re-arms on FRR's pending input. What M63 pins is
+# that the parks themselves never expire either side.
 rearmed=$(prom_labeled_sum "bgp_hold_timer_rearmed_pending_input_total")
-log "bgp_hold_timer_rearmed_pending_input_total=${rearmed} (informational — expected 0 in this shape; see script header)"
+log "bgp_hold_timer_rearmed_pending_input_total=${rearmed} (informational; see script header)"
 
 # ---------------------------------------------------------------------------
 # Phase 6 — zero flaps end to end, both views

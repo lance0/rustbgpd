@@ -854,6 +854,20 @@ impl PeerCommand {
         }
     }
 
+    /// Session closes that must not wait for a full RIB channel to drain: a
+    /// parked session still sends their NOTIFICATION and closes TCP at once.
+    /// Their RIB-bound messages queue behind the held ones, in order.
+    pub(crate) fn runs_while_rib_parked(&self) -> bool {
+        matches!(
+            self,
+            Self::Shutdown
+                | Self::Stop { .. }
+                | Self::AdministrativeReset { .. }
+                | Self::PurgeReset
+                | Self::BfdDown
+        )
+    }
+
     /// Wake shared-output consumers when their deferred snapshot is abandoned.
     /// Commands outside the snapshot allowlist remain owned until execution.
     pub(crate) async fn read_canceled(&mut self) {
