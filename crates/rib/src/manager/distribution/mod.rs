@@ -10301,6 +10301,7 @@ impl RibManager {
                             &mut evpn_announce,
                             &mut evpn_withdraw,
                             is_force,
+                            Some(&mut self.attr_intern),
                             &mut || checkpoint(),
                         );
                         if let Some(handle) = private_evpn_recovery

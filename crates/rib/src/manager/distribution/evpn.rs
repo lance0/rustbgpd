@@ -229,6 +229,7 @@ impl RibManager {
             evpn_announce,
             evpn_withdraw,
             force,
+            None,
             &mut || {},
         );
     }
@@ -256,9 +257,13 @@ impl RibManager {
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
+        mut attr_intern: Option<&mut crate::attr_intern::AttrInternTable>,
         checkpoint: &mut impl FnMut(),
     ) {
         let (target_peer, target_peer_asn, target_peer_group) = target.ctx_peer();
+        // Routes that share a source attribute set and policy outcome share
+        // one modified set, computed and interned once in this call.
+        let mut memo = super::ExportMemo::default();
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let evpn_family = (Afi::L2Vpn, Safi::Evpn);
         let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
@@ -601,13 +606,17 @@ impl RibManager {
 
             // Apply export modifications (community add/remove, RT add/remove,
             // next-hop). Skip the deep attribute clone when nothing changes.
+            // Interning the result lets every receiver's row share it.
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
                 checkpoint();
-                let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
-                    rustbgpd_policy::apply_modifications(attrs, &result.modifications)
-                });
+                let (attrs, nh) = memo.apply_attrs(
+                    &best.attributes,
+                    &result.modifications,
+                    attr_intern.as_deref_mut(),
+                );
                 checkpoint();
+                modified.attributes = attrs;
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
@@ -661,6 +670,7 @@ impl RibManager {
             evpn_announce.push(modified);
             checkpoint();
         }
+        memo.retire_with(checkpoint);
     }
 
     /// Recompute Loc-RIB best path and distribute changes for EVPN routes.
@@ -1007,6 +1017,7 @@ impl RibManager {
             &mut evpn_announce,
             &mut evpn_withdraw,
             false, // EVPN delta path — equality check is correct
+            Some(&mut self.attr_intern),
             checkpoint,
         );
         crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
@@ -1301,6 +1312,7 @@ impl RibManager {
                 &mut announce,
                 &mut withdraw,
                 true, // Obtain the candidate even when policy hides an input change.
+                Some(&mut self.attr_intern),
                 &mut checkpoint,
             );
             if let Some((label, rustbgpd_policy::PolicyAction::Deny, source)) =

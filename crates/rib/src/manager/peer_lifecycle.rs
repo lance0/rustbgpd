@@ -3540,6 +3540,7 @@ impl RibManager {
                 &mut evpn_announce,
                 &mut evpn_withdraw,
                 false, // initial dump — equality check is correct
+                Some(&mut self.attr_intern),
                 &mut checkpoint,
             );
             if let Some(handle) = private_evpn_recovery

@@ -1,4 +1,4 @@
-//! Pass-scoped memo for the unicast export tail.
+//! Pass-scoped memo for the unicast export tail and EVPN export staging.
 //!
 //! A policy-modified export fanout used to deep-clone the route's
 //! `Arc<AttrSet>` once per (route, peer) — 76% of live heap in
@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, RouteModifications};
 
+use crate::attr_intern::AttrInternTable;
 use crate::attr_set::AttrSet;
 use crate::fast_hash::ShardedMap;
 use crate::route::Route;
@@ -119,24 +120,38 @@ impl ExportMemo {
         if mods.is_empty() {
             return (modified, None);
         }
-        let entry = self.entry(&route.attributes);
-        let (attrs, nh) =
-            if let Some((_, attrs, nh)) = entry.modified.iter().find(|(m, _, _)| m == mods) {
-                (Arc::clone(attrs), nh.clone())
-            } else {
-                let mut new_attrs = route.attributes.to_vec();
-                let nh = rustbgpd_policy::apply_modifications(&mut new_attrs, mods);
-                let attrs = AttrSet::new(new_attrs);
-                entry
-                    .modified
-                    .push((mods.clone(), Arc::clone(&attrs), nh.clone()));
-                (attrs, nh)
-            };
+        let (attrs, nh) = self.apply_attrs(&route.attributes, mods, None);
         modified.attributes = attrs;
         if let Some(NextHopAction::Specific(addr)) = &nh {
             modified.next_hop = *addr;
         }
         (modified, nh)
+    }
+
+    /// `source` with non-empty `mods` applied, computed once per
+    /// (source allocation, modifications) in this memo. With `intern`, a
+    /// newly computed set is interned before it is memoized, so every hit
+    /// returns the canonical allocation without hashing again.
+    pub(in crate::manager) fn apply_attrs(
+        &mut self,
+        source: &Arc<AttrSet>,
+        mods: &RouteModifications,
+        intern: Option<&mut AttrInternTable>,
+    ) -> (Arc<AttrSet>, Option<NextHopAction>) {
+        let entry = self.entry(source);
+        if let Some((_, attrs, nh)) = entry.modified.iter().find(|(m, _, _)| m == mods) {
+            return (Arc::clone(attrs), nh.clone());
+        }
+        let mut new_attrs = source.to_vec();
+        let nh = rustbgpd_policy::apply_modifications(&mut new_attrs, mods);
+        let mut attrs = AttrSet::new(new_attrs);
+        if let Some(table) = intern {
+            table.intern(&mut attrs);
+        }
+        entry
+            .modified
+            .push((mods.clone(), Arc::clone(&attrs), nh.clone()));
+        (attrs, nh)
     }
 }
 
