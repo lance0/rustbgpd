@@ -63,11 +63,10 @@
 //! shrunk by proptest and then by one-op deletion, and printed as a trace.
 //! `ORACLE_TRACE=1` prints each operation and delivered envelope.
 //!
-//! Three open defects on main are tolerated only by their exact signature
-//! ([`KNOWN`]); each has an ignored regression test with its minimized trace.
+//! One open defect on main is tolerated only by its exact signature
+//! ([`KNOWN`]); it has an ignored regression test with its minimized trace.
 //! A tolerated defect excuses only its own observation: the case still runs
-//! every other property (a livelocked receiver alone skips P1 and P4).
-//! `ORACLE_STRICT=1` reports them as failures. A run of the default case
+//! every other property. `ORACLE_STRICT=1` reports it as a failure. A run of the default case
 //! count or more also fails when any [`Coverage`] counter stays at zero.
 //!
 //! The actor's wall-clock poll budget is unbounded here, as in the EVPN
@@ -106,26 +105,15 @@ const TICK: Duration = Duration::from_millis(1010);
 const QUIESCE_ROUNDS: usize = 48;
 /// Consecutive quiet rounds that end quiescence.
 const QUIET_ROUNDS: usize = 3;
-/// Final rounds that must repeat one table for the known livelock.
-const REPEAT_ROUNDS: usize = 8;
 /// The signature of an open defect the default run tolerates;
-/// `ORACLE_STRICT=1` reports it.
-const KNOWN_REFRESH_RETRY_LIVELOCK: &str = "known: grouped refresh-retry livelock at one free slot";
-/// The second open defect: an empty-view dirty resync drops an owed refresh
-/// answer, and with it a GR peer's ORF-gated initial `EoR`.
-const KNOWN_EMPTY_RESYNC_DROPS_REFRESH: &str =
-    "known: empty-view resync drops an owed refresh and its initial EoR";
-/// The third: a resync withdraws a route the peer's `EoRR` already purged.
+/// `ORACLE_STRICT=1` reports it: a resync withdraws a route the peer's
+/// `EoRR` already purged.
 const KNOWN_WITHDRAWAL_AFTER_EORR_PURGE: &str =
     "known: resync withdraws a route an EoRR already purged";
 /// The default case count, below which coverage floors are not enforced.
 const DEFAULT_CASES: u32 = 256;
 /// Every tolerated signature.
-const KNOWN: [&str; 3] = [
-    KNOWN_REFRESH_RETRY_LIVELOCK,
-    KNOWN_EMPTY_RESYNC_DROPS_REFRESH,
-    KNOWN_WITHDRAWAL_AFTER_EORR_PURGE,
-];
+const KNOWN: [&str; 1] = [KNOWN_WITHDRAWAL_AFTER_EORR_PURGE];
 
 const V4: (u16, u8) = (Afi::Ipv4 as u16, Safi::Unicast as u8);
 const V6: (u16, u8) = (Afi::Ipv6 as u16, Safi::Unicast as u8);
@@ -797,6 +785,19 @@ impl Arm {
         response.await.expect("RIB actor alive");
     }
 
+    /// The refresh answers `peer` is owed, deferred behind a live
+    /// whole-table operation or a full channel (not a dirty resync).
+    async fn refresh_owed(&self, peer: usize) -> BTreeSet<(u16, u8)> {
+        let (reply, response) = oneshot::channel();
+        self.send(RibUpdate::TestQueryPeerOutboundOwed {
+            peer: peer_id(peer),
+            reply,
+        })
+        .await;
+        let owed = response.await.expect("RIB actor alive");
+        owed.refresh.into_iter().map(wire_family).collect()
+    }
+
     async fn dirty(&self, peer: usize) -> bool {
         let (reply, response) = oneshot::channel();
         self.send(RibUpdate::TestQueryPeerOutboundDirty {
@@ -926,8 +927,9 @@ struct Harness {
     peak_envelopes: [usize; PEERS],
     /// Subject queue depth after the previous operation.
     depths: [usize; PEERS],
-    /// Subject receivers in the known livelock, excused from P1 and P4.
-    livelocked: BTreeSet<usize>,
+    /// Subject refresh-answer debt after each operation: the families each
+    /// peer is owed an answer in.
+    refresh_owed: Vec<[BTreeSet<(u16, u8)>; PEERS]>,
     tolerated: BTreeSet<&'static str>,
     coverage: Coverage,
 }
@@ -946,7 +948,7 @@ impl Harness {
             carried: BTreeSet::new(),
             peak_envelopes: [0; PEERS],
             depths: [0; PEERS],
-            livelocked: BTreeSet::new(),
+            refresh_owed: Vec::new(),
             tolerated: BTreeSet::new(),
             coverage: Coverage::default(),
         };
@@ -1070,6 +1072,7 @@ impl Harness {
         );
         let depths = self.arms[SUBJECT].stamp(op);
         let mut dirty = [false; PEERS];
+        let mut refresh_owed: [BTreeSet<(u16, u8)>; PEERS] = Default::default();
         let was_dirty = self.dirty.last().copied().unwrap_or_default();
         for peer in 0..PEERS {
             self.peak_envelopes[peer] = self.peak_envelopes[peer].max(depths[peer]);
@@ -1086,9 +1089,11 @@ impl Harness {
             if dirty[peer] && !was_dirty[peer] {
                 self.coverage.dirty_episodes += 1;
             }
+            refresh_owed[peer] = self.arms[SUBJECT].refresh_owed(peer).await;
         }
         self.depths = depths.try_into().expect("one depth per peer");
         self.dirty.push(dirty);
+        self.refresh_owed.push(refresh_owed);
         Ok(())
     }
 
@@ -1303,7 +1308,6 @@ impl Harness {
     /// Drain and tick until every subject receiver is clean and quiet.
     async fn drain_until_quiet(&mut self) -> Result<(), String> {
         let mut quiet = 0;
-        let mut rounds: Vec<Vec<Vec<NormMsg>>> = Vec::new();
         for _ in 0..QUIESCE_ROUNDS {
             self.op += 1;
             let mut round = Vec::new();
@@ -1317,13 +1321,18 @@ impl Harness {
                 )?);
             }
             let delivered: usize = round.iter().map(Vec::len).sum();
-            rounds.push(round);
             self.tick().await;
             self.end_op().await?;
             if tracing_ops() {
                 eprintln!("op {}: drain round, dirty {:?}", self.op, self.dirty.last());
             }
             let clean = !self.dirty.last().unwrap().contains(&true)
+                && self
+                    .refresh_owed
+                    .last()
+                    .unwrap()
+                    .iter()
+                    .all(BTreeSet::is_empty)
                 && self.arms[SUBJECT].stamps.iter().all(VecDeque::is_empty);
             quiet = if clean && delivered == 0 {
                 quiet + 1
@@ -1335,50 +1344,26 @@ impl Harness {
             }
         }
         let dirty = *self.dirty.last().unwrap();
-        // Known defect: a grouped member with one free slot per tick spends
-        // it on a full-table resync, its owed ROUTE-REFRESH response is then
-        // refused and re-marks it dirty, and the next tick repeats the same
-        // table forever. Every dirty receiver is a one-slot grouped-shape
-        // member repeating one marker-free envelope per round, and every
-        // other receiver is silent.
-        let last = |peer: usize| -> Vec<&Vec<NormMsg>> {
-            rounds
-                .iter()
-                .rev()
-                .take(REPEAT_ROUNDS)
-                .map(|round| &round[peer])
-                .collect()
-        };
-        let livelocked = dirty.contains(&true)
-            && rounds.len() >= REPEAT_ROUNDS
-            && (0..PEERS).all(|peer| {
-                let last = last(peer);
-                if !dirty[peer] {
-                    return last.iter().all(|sent| sent.is_empty());
-                }
-                let config = self.config[peer];
-                config.capacity == 1
-                    && config.add_path == 0
-                    && !config.orf
-                    && last.iter().all(|sent| {
-                        sent.len() == 1
-                            && sent[0] == last[0][0]
-                            && sent[0].end_of_rib.is_empty()
-                            && sent[0].refresh_markers.is_empty()
-                            && !sent[0].announce.is_empty()
-                            && sent[0].unicast_withdrawals().next().is_none()
-                            && sent[0].evpn_withdraw.is_empty()
-                    })
-            });
-        if livelocked {
-            self.tolerated.insert(KNOWN_REFRESH_RETRY_LIVELOCK);
-            self.livelocked = (0..PEERS).filter(|&peer| dirty[peer]).collect();
-            return Ok(());
-        }
+        let refresh_owed = self.refresh_owed.last().unwrap();
         Err(format!(
             "liveness: subject not clean after {QUIESCE_ROUNDS} drain rounds (dirty \
-             {dirty:?})"
+             {dirty:?}, refresh answers owed {refresh_owed:?})"
         ))
+    }
+
+    /// The families of the ops in which `peer` owed a refresh answer, or
+    /// sent the answer it owed: from the deferral to the answer.
+    fn refresh_deferred(&self, peer: usize) -> BTreeMap<usize, BTreeSet<(u16, u8)>> {
+        (0..self.refresh_owed.len())
+            .map(|op| {
+                let mut families = self.refresh_owed[op][peer].clone();
+                if op > 0 {
+                    families.extend(self.refresh_owed[op - 1][peer].iter().copied());
+                }
+                (op, families)
+            })
+            .filter(|(_, families)| !families.is_empty())
+            .collect()
     }
 
     /// Ops in which `peer` was dirty or ran the resync that cleaned it.
@@ -1397,9 +1382,6 @@ impl Harness {
         // quiet.
         for (arm, side) in self.arms.iter().enumerate() {
             for (peer, wire) in side.wire.iter().enumerate() {
-                if arm == SUBJECT && self.livelocked.contains(&peer) {
-                    continue;
-                }
                 if let Some(family) = wire.refresh_stale.keys().next() {
                     return Err(format!(
                         "P3: {} peer {peer} BoRR for {family:?} never closed by an EoRR",
@@ -1444,9 +1426,6 @@ impl Harness {
             }
         }
         for (peer, deferred) in deferred.iter().enumerate() {
-            if self.livelocked.contains(&peer) {
-                continue;
-            }
             let reference = &self.arms[REFERENCE].wire[peer];
             let subject = &self.arms[SUBJECT].wire[peer];
             // A prefix a graceful end carried in with different stale paths
@@ -1465,17 +1444,7 @@ impl Harness {
             let routes_match = reference.session == subject.session
                 && settled(path_sets(&reference.held, None))
                     == settled(path_sets(&subject.held, None));
-            // Known defect: the subject lacks exactly the ORF-gated IPv4
-            // initial EoR of a GR + ORF peer.
-            let config = self.config[peer];
-            let lost_gated_eor = routes_match
-                && config.gr
-                && config.orf
-                && subject.eor.is_subset(&reference.eor)
-                && reference.eor.difference(&subject.eor).eq([V4].iter());
-            if lost_gated_eor {
-                self.tolerated.insert(KNOWN_EMPTY_RESYNC_DROPS_REFRESH);
-            } else if !routes_match || reference.eor != subject.eor {
+            if !routes_match || reference.eor != subject.eor {
                 return Err(format!(
                     "P1: peer {peer} final wire differs\n reference (session {}, EoR \
                      {:?}): {:?}\n subject (session {}, EoR {:?}): {:?}",
@@ -1487,11 +1456,24 @@ impl Harness {
                     subject.held
                 ));
             }
-            let covered: BTreeSet<&(u64, Nlri)> = deferred
+            // A dirty peer's keys, and a refresh-owed peer's keys of the
+            // owed family, may skip the reference's transients between the
+            // deferral and the resync or answer that settles them.
+            let mut covered: BTreeSet<&(u64, Nlri)> = deferred
                 .iter()
                 .filter_map(|op| reference.touched.get(op))
                 .flatten()
                 .collect();
+            for (op, families) in self.refresh_deferred(peer) {
+                covered.extend(
+                    reference
+                        .touched
+                        .get(&op)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(_, (family, _))| families.contains(family)),
+                );
+            }
             let keys: BTreeSet<&(u64, Nlri)> = reference
                 .history
                 .keys()
@@ -1852,22 +1834,12 @@ fn stalled_receivers_converge_to_the_unbounded_reference() {
 /// the response is refused and owed. Each later tick, the dirty resync sends
 /// the member's whole table into the one free slot, the owed response
 /// (`retry_pending_refresh` straight after the resync commit) finds the
-/// channel full and marks the member dirty again, and the next tick sends
-/// the same table. The refresh never completes. Un-ignore with the fix.
+/// channel full and marked the member dirty again, and the next tick sent
+/// the same table, so the refresh never completed. A refused answer is now
+/// refresh-only debt, answered once the live operation drains.
 #[test]
-#[ignore = "open defect: grouped refresh-retry livelock at one free slot"]
 fn grouped_refresh_retry_converges_with_one_free_slot() {
     assert_clean(&livelock_config(), &livelock_ops());
-}
-
-/// The default run tolerates the open livelock only by its exact signature.
-#[test]
-fn known_refresh_retry_livelock_signature_matches_its_trace() {
-    assert_tolerates_only(
-        &livelock_config(),
-        &livelock_ops(),
-        KNOWN_REFRESH_RETRY_LIVELOCK,
-    );
 }
 
 /// The case holds every property and tolerates nothing.
@@ -1925,20 +1897,11 @@ fn livelock_ops() -> Vec<Op> {
 /// empty-inventory path in `distribute_changes`, which clears the dirty
 /// mark without `flush_pending_eor` or `retry_pending_refresh` (the two
 /// other clear sites call both). The refresh is never answered and the
-/// IPv4 `EoR` is never sent (RFC 4724 §4). Un-ignore with the fix.
+/// IPv4 `EoR` was never sent (RFC 4724 §4). A refused answer is now
+/// refresh-only debt, retried on the resync tick whatever the resync found.
 #[test]
-#[ignore = "open defect: empty-view resync drops an owed refresh and its initial EoR"]
 fn refused_gate_lifting_refresh_still_sends_the_initial_eor() {
     assert_clean(&lost_eor_config(), &lost_eor_ops());
-}
-
-#[test]
-fn known_empty_resync_signature_matches_its_trace() {
-    assert_tolerates_only(
-        &lost_eor_config(),
-        &lost_eor_ops(),
-        KNOWN_EMPTY_RESYNC_DROPS_REFRESH,
-    );
 }
 
 fn lost_eor_config() -> [PeerConfig; PEERS] {

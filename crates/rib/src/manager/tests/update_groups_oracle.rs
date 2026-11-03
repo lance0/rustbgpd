@@ -1950,6 +1950,26 @@ impl Oracle {
                 "{peer} is still outbound-dirty after its resync"
             );
         }
+        self.assert_no_refresh_owed().await;
+    }
+
+    /// No peer is owed a refresh answer: refused answers are refresh-only
+    /// debt, which no dirty-state check sees.
+    pub(super) async fn assert_no_refresh_owed(&mut self) {
+        let peers: Vec<PeerId> = self.outs.keys().copied().collect();
+        for peer in peers {
+            let (reply, owed) = oneshot::channel();
+            self.tx
+                .send(RibUpdate::TestQueryPeerOutboundOwed { peer, reply })
+                .await
+                .unwrap();
+            let owed = owed.await.unwrap();
+            assert!(
+                owed.refresh.is_empty(),
+                "{peer} is still owed refresh answers for {:?}",
+                owed.refresh
+            );
+        }
     }
 
     /// Advance past the selection-deferral deadline and return once the
@@ -2090,6 +2110,7 @@ impl Oracle {
     /// checker — the returned streams are the complete emission history.
     pub(super) async fn terminal_health(&mut self) -> (usize, usize, usize, usize, usize, usize) {
         self.quiesce().await;
+        self.assert_no_refresh_owed().await;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::TestQueryOutboundHealth { reply: reply_tx })
@@ -3352,9 +3373,17 @@ async fn run_vpn_swap_case(
         oracle
             .drain_before_recovery(C, RecoveryPath::QueueDeferral)
             .await;
+        // The prompt receivers send what the re-evaluation queued before
+        // the tick that resyncs any peer it left dirty.
+        oracle.quiesce().await;
         tokio::time::advance(Duration::from_secs(2)).await;
         oracle.quiesce().await;
         oracle.end_recovery(C).await;
+    } else {
+        // A small row credit can leave a peer dirty for its resync tick.
+        oracle.quiesce().await;
+        tokio::time::advance(Duration::from_millis(1300)).await;
+        oracle.quiesce().await;
     }
     let streams = oracle.finish().await;
     (fold(&streams), fold_vpn_paths(&streams), evals)
@@ -3511,7 +3540,7 @@ async fn check_vpn_swap_cases(mode: VpnSwapMode) {
 /// full pass produces, which is in turn the state of a run that started
 /// with the new contents. Accept/reject flips, attribute changes and
 /// non-best candidates all count.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dataset_swap_bounded_vpn_reevaluation_matches_full_pass() {
     for (ungrouped, add_path) in [(false, false), (true, false), (true, true)] {
         check_vpn_swap_cases(VpnSwapMode {
@@ -3544,7 +3573,7 @@ async fn dataset_swap_bounded_vpn_reevaluation_matches_full_pass_with_dirty_memb
 
 /// RT-Constrain receivers are outside the bounded path: every swap takes
 /// the full pass and stays exact.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dataset_swap_with_rtc_receivers_uses_full_pass() {
     for ungrouped in [false, true] {
         check_vpn_swap_cases(VpnSwapMode {
@@ -8049,5 +8078,40 @@ async fn oracle_strip_many_communities_export_parity() {
                 .contains(&PathAttribute::Communities(communities(99))),
             "a 99-community route keeps its communities"
         );
+    }
+}
+
+/// The oracle's liveness checks see refresh-only debt: a ROUTE-REFRESH
+/// from a receiver still holding its initial dump is owed, not a dirty
+/// resync. Once the receiver reads, the resync tick answers it and both
+/// `settle` and `terminal_health` pass. Red with that debt never retried:
+/// each reports the owed answer.
+#[tokio::test(start_paused = true)]
+async fn oracle_liveness_sees_an_owed_refresh_answer() {
+    for settle in [true, false] {
+        let mut oracle = Oracle::spawn(true, Some(Ipv4Addr::new(192, 0, 2, 1)));
+        oracle.peer_up(A, false, true, None, 64).await;
+        oracle
+            .routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        oracle.peer_up(C, false, true, None, 2).await;
+        oracle.route_refresh(C, Afi::Ipv4, Safi::Unicast).await;
+        assert!(
+            !oracle.peer_outbound_dirty(C).await,
+            "the answer is owed, not a resync"
+        );
+        let table = oracle.drain_one(C).await;
+        assert_eq!(table.announce.len(), 1);
+        let eor = oracle.drain_one(C).await;
+        assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+        tokio::time::advance(Duration::from_millis(1100)).await;
+        if settle {
+            oracle.settle().await;
+        } else {
+            assert_eq!(oracle.terminal_health().await, (0, 0, 0, 0, 0, 0));
+        }
+        let answer = oracle.drain_one(C).await;
+        assert_eq!(answer.announce.len(), 1, "the owed answer");
+        drop(oracle.finish().await);
     }
 }
