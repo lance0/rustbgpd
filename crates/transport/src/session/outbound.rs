@@ -330,6 +330,13 @@ impl PendingOutbound {
         self.retiring()
     }
 
+    /// Whether admission waits for the writer to drain under its byte
+    /// budget.
+    #[cfg(test)]
+    pub(super) fn bytes_blocked(&self) -> bool {
+        self.bytes_wait.is_some()
+    }
+
     /// Only a completed or abandoned envelope retires: before that, the
     /// moved private iterators still hold routes to send.
     pub(super) fn retiring(&self) -> bool {
