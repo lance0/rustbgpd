@@ -614,7 +614,8 @@ writer queue cannot admit pending output before its resource deadline, or a
 committed outbound update cannot be sent exactly
 (a missing, incompatible, or foreign export snapshot, or structurally
 unsendable output). It also sends it when the session's inbound RIB
-admission stays blocked past its local budget, about three hold times
+admission stays blocked past its local budget, about three hold times since
+its last processed peer message
 ([ADR-0078](../adr/0078-inbound-rib-backpressure.md)): a deliberate local
 overload close, not a hold-timer expiry. The session is torn down; the
 maximum-prefix limit uses Cease subcode 1 instead. There is no fallback to

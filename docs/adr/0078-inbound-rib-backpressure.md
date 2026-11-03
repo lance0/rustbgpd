@@ -168,27 +168,39 @@ local effects are dropped with that connection's windows.
 Being parked no longer suspends hold expiry indefinitely. While input is
 deliberately left unprocessed, it cannot prove the peer's liveness, so the
 deferral is bounded as a local-overload policy rather than inferred. The
-held batch restarts the hold timer when it is held, at the start of the
-wait. Within one wait, which lasts until the backlog has fully drained and
-normal processing resumes:
+budget counts deferrals since the last peer message processed; a wait that
+our own message starts (a revalidation chunk, a refresh timeout) does not
+restore it. A held batch restarts the hold timer when it is held.
 
-- the first hold expiry is deferred for the wait itself, even when only
-  part of a frame is buffered;
-- the second is deferred only for newly read bytes, from one probe of at
-  most 4 KiB. A socket read cannot tell fresh arrivals from data that was
-  already queued; that leniency is acceptable only because both the
-  renewals and the bytes they may read are bounded;
-- the third closes the session with Cease/Out of Resources (RFC 4486
-  subcode 8), logged as RIB admission stalled past the local budget.
+- The first hold expiry is deferred for the wait itself, even when only
+  part of a frame is buffered.
+- The second is deferred only for newly read bytes, from one probe of at
+  most 4 KiB, or for a read buffer already full of unprocessed input. A
+  socket read cannot tell fresh arrivals from data that was already
+  queued; that leniency is acceptable only because both the renewals and
+  the bytes they may read are bounded.
+- The third closes the session with Cease/Out of Resources (RFC 4486
+  subcode 8), logged as RIB admission stalled past the local budget. Under
+  RFC 8538 this is a NOTIFICATION teardown: a graceful-restart peer keeps
+  its routes only when Notification GR was negotiated.
 
-A session whose RIB admission stays blocked for about three hold times is
-therefore closed deliberately, as a local overload, not because the peer's
-messages went missing. Probes never take the unprocessed read buffer past
-two maximum-size messages (8 KiB, or 128 KiB with RFC 8654), whatever the
-number of waits, so ending and restarting waits cannot grow it. The rule 3
+A session whose RIB admission stays blocked for about three hold times
+since the last processed peer message is therefore closed deliberately, as
+a local overload, not because the peer's messages went missing. Probes
+never take the unprocessed read buffer past two maximum-size messages
+(8 KiB, or 128 KiB with RFC 8654), whatever the number of waits. The rule 3
 pending-input re-arm still applies outside a wait. A frame larger than our
 receive window (possible with RFC 8654) cannot complete while the socket is
 unread; the first deferral covers one hold time of that, not more.
+
+Operational risk: the threshold scales with the hold time. With short hold
+times (3 to 9 s), a session whose RIB admission stays blocked for about
+three hold times, 9 to 27 s, during heavy but progressing convergence is
+closed with Cease/8, and its re-establishment re-floods its routes into the
+same saturated RIB. `bgp_notifications_sent_total{code="6",subcode="8"}`
+counts these closes; `bgp_hold_timer_rearmed_pending_input_total` counts
+the deferrals before them, and `bgp_inbound_rib_backpressure_total` the
+waits.
 
 These waits remain inside their handlers, as existing exceptions to the
 servicing above; the whole session waits on channel admission:
