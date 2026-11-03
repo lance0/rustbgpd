@@ -1014,3 +1014,71 @@ async fn session_down_forgets_a_queued_route_refresh() {
     session.process_read_buffer().await;
     assert_eq!(drain_refresh_requests(&mut rib_rx).len(), 1);
 }
+
+fn refresh_boundary_kind(update: &RibUpdate) -> &'static str {
+    match update {
+        RibUpdate::RoutesReceived { .. } => "routes",
+        RibUpdate::RouteRefreshTimeout { .. } => "timeout",
+        RibUpdate::BeginRouteRefresh { .. } => "borr",
+        RibUpdate::PeerDown { .. } => "peer_down",
+        _ => "other",
+    }
+}
+
+/// A refresh timeout held behind a full RIB channel must sweep the window
+/// before the next buffered UPDATE is judged, as the blocking send did: with
+/// `max_prefixes = 2`, one stale and two new prefixes fit only after the
+/// sweep.
+/// Mutation-red: decoding the next PDU while the timeout is still held
+/// counts the stale prefix too and tears the session down (Cease/1).
+#[tokio::test(start_paused = true)]
+async fn held_refresh_timeout_corrects_count_before_next_update() {
+    let (mut session, _cmd_tx, mut rib_rx) = make_test_session_with_channels(65001, 65002, 1);
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    session.config.max_prefixes = Some(2);
+    let stale = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let first = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    session.remember_known_path(Prefix::V4(stale), 0);
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    session
+        .rib_tx
+        .try_send(RibUpdate::BeginRouteRefresh {
+            peer: PeerId::from_addr(session.peer_ip),
+            session_id: session.session_identity.id,
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        })
+        .unwrap();
+    for update in [
+        ipv4_announce(first, 0, false),
+        ipv4_announce(second, 0, false),
+    ] {
+        let encoded = rustbgpd_wire::encode_message(&Message::Update(update)).unwrap();
+        session.read_buf.buf.extend_from_slice(&encoded);
+    }
+    let task = tokio::spawn(async move {
+        session.process_read_buffer().await;
+        deliver_held_rib_messages(&mut session).await;
+        session
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(rustbgpd_rib::ERR_REFRESH_TIMEOUT).await;
+    let mut seen = Vec::new();
+    while !task.is_finished() {
+        tokio::select! {
+            Some(update) = rib_rx.recv() => seen.push(refresh_boundary_kind(&update)),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    while let Ok(update) = rib_rx.try_recv() {
+        seen.push(refresh_boundary_kind(&update));
+    }
+    let session = task.await.unwrap();
+    assert!(
+        !session.stop_requested,
+        "max-prefix judged the next UPDATE before the held timeout's sweep: {seen:?}"
+    );
+    assert_eq!(seen, ["borr", "routes", "timeout", "routes"]);
+    assert_eq!(session.known_prefix_count(), 2, "{seen:?}");
+}

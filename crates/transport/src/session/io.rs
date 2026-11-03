@@ -754,6 +754,11 @@ impl PeerSession {
             if self.expire_refresh_accounting_windows().is_err() {
                 return;
             }
+            // A timeout held behind a full channel sweeps its window only
+            // once admitted; the next PDU waits for that correction.
+            if !self.rib_backlog.is_empty() {
+                return;
+            }
             let raw_pdu = match self.read_buf.try_frame() {
                 Ok(Some(raw)) => raw,
                 Ok(None) => break,
