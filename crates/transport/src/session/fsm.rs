@@ -515,9 +515,6 @@ impl PeerSession {
                     renewals = self.parked_hold_renewals,
                     "RIB admission stalled past local budget; sending Cease/Out-of-Resources and tearing down"
                 );
-                // RFC 8538: this teardown follows a NOTIFICATION, so routes
-                // are retained only when Notification GR was negotiated.
-                self.notification_teardown = true;
                 self.trigger_outbound_out_of_resources_teardown(
                     crate::handle::SessionFailureCause::RibAdmissionStalled,
                 );

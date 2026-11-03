@@ -1,8 +1,8 @@
 use super::{
     BmpEvent, Bytes, ConnectFailureEpisode, ConnectFailureSource, Event, Message, NotificationCode,
     OwnedReadHalf, PeerDownReason, PeerSession, RibUpdate, RouteRefreshSubtype,
-    SessionNotificationDirection, TcpStream, TransportError, cease_subcode, debug, error, info,
-    warn,
+    SessionNotificationDirection, SessionState, TcpStream, TransportError, cease_subcode, debug,
+    error, info, warn,
 };
 use crate::config::TransportConfig;
 use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfEntries, OrfMatch, OrfType};
@@ -559,6 +559,13 @@ impl PeerSession {
             return;
         }
         self.pending_outbound_teardown_cause = Some(cause);
+        // RFC 8538 §3: the session now ends after a NOTIFICATION, so the
+        // peer's routes are retained only when Notification GR (the N bit)
+        // was negotiated. Only an Established session reaches the
+        // `SessionDown` that reads and clears this latch.
+        if self.fsm.state() == SessionState::Established {
+            self.notification_teardown = true;
+        }
         self.session_telemetry_metric_lease.latch_down_reason(
             rustbgpd_telemetry::reason_labels::SessionDownReason::LocalNotification,
         );

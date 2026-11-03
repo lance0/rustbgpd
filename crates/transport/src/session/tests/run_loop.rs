@@ -255,6 +255,128 @@ fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
     assert!(!after_expiry.contains("SessionFailureCause::OutboundSaturation"));
 }
 
+/// A local Cease/8 caller class, by the session input that raises it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalCease8 {
+    /// The writer admission deadline expires.
+    AdmissionExpiry,
+    /// A route-bearing envelope arrives without its export snapshot.
+    ExportSnapshot,
+    /// A single route cannot fit the negotiated message size.
+    UnsendableOutput,
+}
+
+/// Drive one local Cease/8 teardown of an Established graceful-restart
+/// session through writer exit; return the RIB message its `SessionDown`
+/// queued.
+async fn local_cease8_end(caller: LocalCease8, notification_gr: bool) -> RibUpdate {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.config.peer.graceful_restart = true;
+    let mut negotiated = (*session.negotiated.clone().unwrap()).clone();
+    negotiated.peer_gr_capable = true;
+    negotiated.peer_notification_gr = notification_gr;
+    negotiated.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+    }];
+    session.negotiated = Some(Arc::new(negotiated));
+    let cause = match caller {
+        LocalCease8::AdmissionExpiry => {
+            session.expire_outbound_admission();
+            crate::handle::SessionFailureCause::OutboundSaturation
+        }
+        LocalCease8::ExportSnapshot => {
+            let mut update = empty_outbound_update();
+            update.announce = vec![make_route(100)].into();
+            update.next_hop_override = vec![None].into();
+            session.send_route_update(update);
+            crate::handle::SessionFailureCause::ExportSnapshotMissing
+        }
+        LocalCease8::UnsendableOutput => {
+            let mut route = make_route(100);
+            let mut attributes = route.attributes.to_vec();
+            attributes.push(PathAttribute::Communities((0..1_100).collect()));
+            route.attributes = AttrSet::new(attributes);
+            let mut update = empty_outbound_update();
+            update.exact_export_snapshot = Some(session.publish_export_profile());
+            update.announce = vec![route].into();
+            update.next_hop_override = vec![None].into();
+            session.send_route_update(update);
+            crate::handle::SessionFailureCause::PostCommitInvariant
+        }
+    };
+    assert_eq!(
+        session.pending_outbound_teardown_cause,
+        Some(cause),
+        "{caller:?}: the Cease/8 path fired"
+    );
+    let join = session.writer_join.take().expect("writer join");
+    let exit = join.await;
+    session.handle_writer_exit(exit).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle, "{caller:?}");
+    assert!(
+        !session.notification_teardown,
+        "SessionDown clears the latch"
+    );
+    loop {
+        let update = rib_rx.try_recv().expect("a teardown message");
+        if matches!(
+            update,
+            RibUpdate::PeerDown { .. } | RibUpdate::PeerGracefulRestart { .. }
+        ) {
+            return update;
+        }
+    }
+}
+
+/// RFC 8538 §3: every local Cease/8 is a NOTIFICATION, so a graceful-restart
+/// peer without the N bit has its routes purged (`PeerDown`); with the N bit
+/// the routes stay on the graceful-restart path. The RIB-stall class is
+/// pinned in `rib_park.rs`.
+/// Mutation-red: without the latch in the shared Cease/8 teardown, every
+/// N-bit-less case queues `PeerGracefulRestart`.
+#[tokio::test]
+async fn local_cease8_purges_without_notification_gr_for_every_caller() {
+    let mut retained = Vec::new();
+    let mut expected = Vec::new();
+    for caller in [
+        LocalCease8::AdmissionExpiry,
+        LocalCease8::ExportSnapshot,
+        LocalCease8::UnsendableOutput,
+    ] {
+        for notification_gr in [false, true] {
+            let end = local_cease8_end(caller, notification_gr).await;
+            retained.push((
+                caller,
+                notification_gr,
+                matches!(end, RibUpdate::PeerGracefulRestart { .. }),
+            ));
+            expected.push((caller, notification_gr, notification_gr));
+        }
+    }
+    // Compared whole, so a failure names every caller class that regressed.
+    assert_eq!(retained, expected);
+}
+
+/// Before Established no `SessionDown` follows to consume the latch, so a
+/// Cease/8 there must not leave it set for the next session.
+/// Mutation-red: latching regardless of state leaves it set here.
+#[tokio::test]
+async fn local_cease8_before_established_leaves_no_latch() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.trigger_outbound_out_of_resources_teardown(
+        crate::handle::SessionFailureCause::OutboundSaturation,
+    );
+    assert!(session.pending_outbound_teardown_cause.is_some());
+    assert!(!session.notification_teardown);
+}
+
 /// ADR-0051: when the writer's bulk channel saturates, the session must
 /// emit a `Cease` / `Out of Resources` (RFC 4486 §4 subcode 8)
 /// NOTIFICATION on the priority channel and tear the session down,
