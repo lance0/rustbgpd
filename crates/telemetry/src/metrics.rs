@@ -1700,7 +1700,8 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_hold_timer_rearmed_pending_input_total",
                 "Hold-timer expiries converted to re-arms because unprocessed peer input was \
-                 pending — the local daemon was the bottleneck, not the peer (ADR-0078).",
+                 pending, or deferred within the bounded budget of a wait for RIB admission — \
+                 the local daemon was the bottleneck, not the peer (ADR-0078).",
             ),
             &["peer"],
         )
