@@ -7206,6 +7206,15 @@ impl RibManager {
                 self.gc_attr_intern_on_timer();
                 continue;
             }
+            // A whole-table operation that drained while route chunks or
+            // deferred registrations kept the loop off its select below
+            // pulls the tick forward here, between work units.
+            if resync_armed && std::pin::pin!(latch_released.notified()).enable() {
+                let soon = now + DIRTY_RESYNC_BACKLOG_INTERVAL;
+                if resync_sleep.deadline() > soon {
+                    resync_sleep.as_mut().reset(soon);
+                }
+            }
             if resync_armed && resync_sleep.deadline() <= now {
                 debug!(
                     count = self.dirty_peers.len(),

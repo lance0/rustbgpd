@@ -2123,3 +2123,59 @@ fn a_deferred_answer_after_the_convergence_eor_sends_no_second_eor() {
         .count();
     assert_eq!(eors, 1, "one IPv4 End-of-RIB");
 }
+
+/// The latch-release wake also reaches the resync timer while a long route
+/// batch keeps the actor busy: work deferred behind a drained operation
+/// runs between route chunks within tens of milliseconds, not after the
+/// batch. Red with the wake consumed only where the actor waits: the
+/// deferred resync waits for the whole batch.
+#[tokio::test(start_paused = true)]
+async fn deferred_work_runs_soon_after_the_latch_drops_under_ingest() {
+    const BATCH: u32 = 100 * 1024;
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let handle = tokio::spawn(manager.run());
+    let _source_rx = actor_source(&tx).await;
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 52, 1));
+    let (out_tx, mut out_rx) = mpsc::channel(1 << 16);
+    tx.send(actor_peer_up(peer, out_tx)).await.unwrap();
+    let dump = (out_rx.recv().await.unwrap(), out_rx.recv().await.unwrap());
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound { peer, reply })
+        .await
+        .unwrap();
+    let _ = response.await;
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(SOURCE),
+        announced: (100..100 + BATCH).map(source_route).collect(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    // The batch is admitted; its chunks run one per actor turn.
+    tokio::task::yield_now().await;
+    drop(dump);
+    let started = tokio::time::Instant::now();
+    loop {
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+        if !out_rx.is_empty() {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "never resynced");
+    }
+    assert!(
+        started.elapsed() <= Duration::from_millis(60),
+        "the deferred resync ran {:?} after the release",
+        started.elapsed()
+    );
+    drop(tx);
+    let _ = handle.await;
+}
