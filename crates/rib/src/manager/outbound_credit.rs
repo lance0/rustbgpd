@@ -87,8 +87,13 @@ impl RibManager {
     /// Preflight for a per-peer private-family producer: when `peer`'s
     /// credit is exhausted, count the refusal, mark the peer dirty as a
     /// refused send would, and return true so the caller stages nothing.
+    ///
+    /// Not while a whole-table operation of the peer is live: it covers the
+    /// peer's table, so the producer stages and the send is refused only
+    /// for rows it actually holds. An empty diff then costs no second
+    /// resync behind the first.
     pub(super) fn outbound_preflight_refused(&mut self, peer: PeerId) -> bool {
-        if !self.outbound_credit_exhausted(peer) {
+        if !self.outbound_credit_exhausted(peer) || self.outbound_operation_live(peer) {
             return false;
         }
         self.refuse_outbound_for_credit(peer);

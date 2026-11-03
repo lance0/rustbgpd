@@ -1918,3 +1918,53 @@ async fn deferred_whole_table_work_runs_soon_after_the_latch_drops() {
     drop(tx);
     let _ = handle.await;
 }
+
+/// A pass that changes nothing for a peer does not re-dirty it for spent
+/// credit while the whole-table operation that already covers it is live:
+/// the producer stages, finds no rows for the peer, and admits nothing,
+/// instead of a second resync behind the first. Here the peer's refresh
+/// answer is queued and a route from the peer itself, never sent back to
+/// it, makes the pass. Red with the preflight refusing on credit alone: the
+/// peer is dirty after a pass it had nothing to receive from.
+#[test]
+fn an_empty_pass_behind_a_live_operation_does_not_redirty_the_peer() {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let mut manager = manager();
+    manager.test_force_ungrouped = true;
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
+    routes_received(&mut manager, vec![source_route(0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 21, 1));
+    let mut rx = up(&mut manager, peer, ipv4_sendable(), 4096, 0);
+    send_all(&mut rx);
+    refresh_request(&mut manager, peer, 0, family);
+    let answer = held(&mut rx);
+    assert_eq!(latches(&answer).len(), 1, "the answer is live");
+    let spent = crate::OutboundCharge::new(
+        &manager.outbound_credit_handle(peer),
+        manager.outbound_row_credit(),
+    );
+    let mut own = source_route(7);
+    own.peer = peer;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![own],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    assert!(
+        send_all(&mut source)
+            .iter()
+            .any(|update| !update.announce.is_empty()),
+        "the pass ran"
+    );
+    assert!(send_all(&mut rx).is_empty(), "nothing for the peer itself");
+    assert!(!manager.dirty_peers.contains(&peer), "no second resync");
+    drop((answer, spent));
+}

@@ -8957,11 +8957,14 @@ impl RibManager {
                     }
                     // Preflight: a private peer whose queued envelopes hold its
                     // whole credit would be refused after staging; stage nothing
-                    // and leave it to the resync, as a refused send would.
+                    // and leave it to the resync, as a refused send would. A live
+                    // whole-table operation already covers the peer's table, so
+                    // then the ladder decides by the rows the pass holds.
                     if resync_operation.is_none()
                         && member_of.is_none()
                         && !evpn_feeds.contains_key(&peer)
                         && self.outbound_credit_exhausted(peer)
+                        && !self.outbound_operation_live(peer)
                     {
                         self.refuse_outbound_for_credit(peer);
                         self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
