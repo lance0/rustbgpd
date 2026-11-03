@@ -229,6 +229,7 @@ impl RibManager {
             evpn_announce,
             evpn_withdraw,
             force,
+            None,
             &mut || {},
         );
     }
@@ -256,9 +257,18 @@ impl RibManager {
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
+        export_interning: Option<(
+            &mut crate::attr_intern::AttrInternTable,
+            &mut super::ExportAdmission,
+        )>,
         checkpoint: &mut impl FnMut(),
     ) {
         let (target_peer, target_peer_asn, target_peer_group) = target.ctx_peer();
+        // Routes that share a source attribute set and policy outcome share
+        // one modified set, computed once in this call; `produced` indexes
+        // the announced routes carrying one.
+        let mut memo = super::ExportMemo::default();
+        let mut produced = Vec::new();
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let evpn_family = (Afi::L2Vpn, Safi::Evpn);
         let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
@@ -601,13 +611,13 @@ impl RibManager {
 
             // Apply export modifications (community add/remove, RT add/remove,
             // next-hop). Skip the deep attribute clone when nothing changes.
+            // Interning the result lets every receiver's row share it.
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
                 checkpoint();
-                let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
-                    rustbgpd_policy::apply_modifications(attrs, &result.modifications)
-                });
+                let (attrs, nh) = memo.apply_attrs(&best.attributes, &result.modifications);
                 checkpoint();
+                modified.attributes = attrs;
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
@@ -658,8 +668,70 @@ impl RibManager {
                 continue;
             }
             checkpoint();
+            if !result.modifications.is_empty() {
+                produced.push(evpn_announce.len());
+            }
             evpn_announce.push(modified);
             checkpoint();
+        }
+        if let Some((table, admission)) = export_interning {
+            let admission = target_peer.map(|receiver| (admission, receiver));
+            Self::share_recurring_export_attrs(
+                evpn_announce,
+                &produced,
+                table,
+                admission,
+                checkpoint,
+            );
+        }
+        memo.retire_with(checkpoint);
+    }
+
+    /// Intern the policy outcomes `produced` routes carry that recur in this
+    /// call, that the table already holds, or that `admission` has seen from
+    /// another receiver, so receivers and routes with an equal outcome share
+    /// one allocation. A receiver-unique outcome stays a plain allocation:
+    /// interning every receiver's distinct set would multiply the global
+    /// table, and every sweep of it, by the receiver count.
+    fn share_recurring_export_attrs(
+        routes: &mut [crate::route::EvpnRibRoute],
+        produced: &[usize],
+        table: &mut crate::attr_intern::AttrInternTable,
+        mut admission: Option<(&mut super::ExportAdmission, std::net::IpAddr)>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        // The memo gives each (source, outcome) one allocation per call, so
+        // its pointer counts the outcome's uses here.
+        let mut uses = crate::fast_hash::FastMap::<usize, usize>::default();
+        for &index in produced {
+            checkpoint();
+            *uses
+                .entry(std::sync::Arc::as_ptr(&routes[index].attributes) as usize)
+                .or_default() += 1;
+        }
+        let mut shared =
+            crate::fast_hash::FastMap::<usize, Option<std::sync::Arc<AttrSet>>>::default();
+        for &index in produced {
+            checkpoint();
+            let attrs = &mut routes[index].attributes;
+            let key = std::sync::Arc::as_ptr(attrs) as usize;
+            let canonical = shared.entry(key).or_insert_with(|| {
+                if uses[&key] > 1 {
+                    let mut canonical = std::sync::Arc::clone(attrs);
+                    table.intern(&mut canonical);
+                    Some(canonical)
+                } else if let Some(canonical) = table.get(attrs) {
+                    Some(canonical)
+                } else {
+                    let (admission, receiver) = admission.as_mut()?;
+                    let mut first = admission.observe(attrs, *receiver)?;
+                    table.intern(&mut first);
+                    Some(first)
+                }
+            });
+            if let Some(canonical) = canonical {
+                *attrs = std::sync::Arc::clone(canonical);
+            }
         }
     }
 
@@ -1007,6 +1079,7 @@ impl RibManager {
             &mut evpn_announce,
             &mut evpn_withdraw,
             false, // EVPN delta path — equality check is correct
+            Some((&mut self.attr_intern, &mut self.export_admission)),
             checkpoint,
         );
         crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
@@ -1301,6 +1374,7 @@ impl RibManager {
                 &mut announce,
                 &mut withdraw,
                 true, // Obtain the candidate even when policy hides an input change.
+                Some((&mut self.attr_intern, &mut self.export_admission)),
                 &mut checkpoint,
             );
             if let Some((label, rustbgpd_policy::PolicyAction::Deny, source)) =

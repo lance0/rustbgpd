@@ -15,9 +15,10 @@
 //!
 //! Reclaim is the `Arc::strong_count` sweep the per-peer tables already
 //! used: an entry whose only reference is the table itself is dropped by
-//! [`AttrInternTable::gc`]. Large-table unicast UPDATE chunks amortize sweeps
-//! with a displaced-route limit and an actor deadline; explicit teardown,
-//! injection, other-family, GR/LLGR and refresh seams retain immediate sweeps.
+//! [`AttrInternTable::gc`]. Large-table unicast UPDATE chunks and EVPN export
+//! commits amortize sweeps with a displaced-route limit and an actor deadline;
+//! explicit teardown, injection, other-family, GR/LLGR and refresh seams retain
+//! immediate sweeps.
 //! `Arc`'s reference count *is* the refcount; there is no separate bookkeeping
 //! to drift out of sync.
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
@@ -65,6 +66,14 @@ impl AttrInternTable {
         } else {
             self.set.insert(Arc::clone(attrs), ());
         }
+    }
+
+    /// The interned allocation equal to `attrs`, without inserting it.
+    #[must_use]
+    pub fn get(&self, attrs: &Arc<AttrSet>) -> Option<Arc<AttrSet>> {
+        self.set
+            .get_key_value(attrs)
+            .map(|(existing, ())| Arc::clone(existing))
     }
 
     /// Drop entries whose only remaining reference is the table itself

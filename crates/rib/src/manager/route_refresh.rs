@@ -1310,6 +1310,7 @@ impl RibManager {
                     &mut evpn_announce,
                     &mut evpn_withdraw,
                     false, // route refresh re-emits via empty refresh_view
+                    Some((&mut self.attr_intern, &mut self.export_admission)),
                     &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     },

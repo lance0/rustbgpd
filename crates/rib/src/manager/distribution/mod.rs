@@ -55,7 +55,7 @@ mod rtc;
 mod unicast;
 mod vpn;
 
-pub(in crate::manager) use export_memo::ExportMemo;
+pub(in crate::manager) use export_memo::{ExportAdmission, ExportMemo};
 pub(in crate::manager) use unicast::{
     AddPathKeys, blackholing, exact_exportable, lease_rejection, multipath_candidate_suppressed,
 };
@@ -5224,6 +5224,9 @@ impl RibManager {
         let flowspec_changed = !flowspec_announce.is_empty() || !flowspec_withdraw.is_empty();
         let evpn_changed = !evpn_announce.is_empty() || !evpn_withdraw.is_empty();
         let evpn_group_owned = self.evpn_grouped_member_of(peer).is_some();
+        // Rows this commit replaces or removes; their interned export sets
+        // may now be held only by the intern table.
+        let mut evpn_displaced = 0_usize;
         let evpn_admitted_count =
             staged_evpn_count.unwrap_or_else(|| self.evpn_admitted_count(peer));
         let bgpls_changed = !bgpls_announce.is_empty() || !bgpls_withdraw.is_empty();
@@ -5379,11 +5382,12 @@ impl RibManager {
             }
             for route in evpn_announce.iter().filter(|_| !evpn_group_owned) {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
+                evpn_displaced += usize::from(rib_out.get_evpn(&route.key()).is_some());
                 rib_out.insert_evpn(route.clone());
             }
             for key in evpn_withdraw.iter().filter(|_| !evpn_group_owned) {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
-                rib_out.remove_evpn(key);
+                evpn_displaced += usize::from(rib_out.remove_evpn(key));
             }
             for route in &bgpls_announce {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
@@ -5504,6 +5508,9 @@ impl RibManager {
                     "rtc",
                     gauge_val(rib_out.rtc_len()),
                 );
+            }
+            if evpn_changed {
+                self.settle_export_attr_gc(evpn_displaced);
             }
         }
         #[cfg(feature = "bench-internals")]
@@ -10301,6 +10308,7 @@ impl RibManager {
                             &mut evpn_announce,
                             &mut evpn_withdraw,
                             is_force,
+                            Some((&mut self.attr_intern, &mut self.export_admission)),
                             &mut || checkpoint(),
                         );
                         if let Some(handle) = private_evpn_recovery
