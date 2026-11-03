@@ -10781,10 +10781,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 84 peer-labeled series; state transitions, EVPN discard types
+        // 85 peer-labeled series; state transitions, EVPN discard types
         // and dynamic-neighbor retentions hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 84);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 85);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -10794,7 +10794,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 84);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 85);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge

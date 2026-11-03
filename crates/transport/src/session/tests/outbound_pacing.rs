@@ -491,6 +491,9 @@ async fn queued_last_owner_session() -> (
     let (bulk, writer) = mpsc::channel(1);
     bulk.try_send(Bytes::from_static(b"held")).unwrap();
     session.writer_bulk_tx = Some(bulk);
+    // The stand-in writer reports no completed writes, so only its one-slot
+    // frame queue paces admission here, not the byte budget.
+    session.writer_completed = None;
     session
         .handle_outbound_route_update(pacing_update(&session, pacing_routes(5_000, true)))
         .await;
