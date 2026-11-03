@@ -1629,20 +1629,24 @@ fn evpn_export_repeated_processing_does_not_promote_receiver_unique_outcomes() {
         Vec::new(),
     );
     let source = fixture.source;
-    let key = trickle_route(300).key();
-    for cycle in 0..4 {
+    let keys: Vec<_> = (300..304).map(|tag| trickle_route(tag).key()).collect();
+    for cycle in 0..3 {
+        // One route per chunk while the earlier rows stay live: each receiver
+        // produces its own outcome again and again.
+        for tag in 300..304 {
+            fixture
+                .manager
+                .process_evpn_announce_chunk(source, vec![trickle_route(tag)]);
+            fixture.drain_outbound();
+            assert_eq!(
+                fixture.manager.attr_intern.len(),
+                1,
+                "cycle {cycle}, route {tag}: the inbound set only"
+            );
+        }
         fixture
             .manager
-            .process_evpn_announce_chunk(source, vec![trickle_route(300)]);
-        fixture.drain_outbound();
-        assert_eq!(
-            fixture.manager.attr_intern.len(),
-            1,
-            "cycle {cycle}: the inbound set only"
-        );
-        fixture
-            .manager
-            .process_evpn_withdraw_chunk(source, vec![key]);
+            .process_evpn_withdraw_chunk(source, keys.clone());
         fixture.drain_outbound();
     }
 }
