@@ -155,7 +155,7 @@ pub(super) fn vpn_rtc_sendable() -> Vec<(Afi, Safi)> {
     ]
 }
 
-fn permit_all_with(modifications: RouteModifications) -> PolicyChain {
+pub(super) fn permit_all_with(modifications: RouteModifications) -> PolicyChain {
     PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: None,
