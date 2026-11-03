@@ -1536,9 +1536,10 @@ impl RibManager {
                 // hold; those it no longer retains are owed withdrawals. Send
                 // them inside this answer: its EoRR purges them otherwise, and
                 // the resync would then withdraw a route the peer no longer
-                // holds (RFC 7313 §4).
+                // holds (RFC 7313 §4). Operator replay, prefix-limit recovery
+                // and selection release share this body and settle the same
+                // withdrawals (a held family never reaches here).
                 if self.dirty_peers.contains(&peer)
-                    && !self.selection_deferred(family)
                     && let Some(admitted) = self.pending_group_admitted.get(&peer)
                 {
                     let rs_control = rs_control_asn.zip(target_peer_asn);
@@ -1784,11 +1785,14 @@ impl RibManager {
             // from the real Adj-RIB-Out. Nor can it discover a withdrawal a
             // dirty peer still owes: send that inside this answer too, since
             // its EoRR purges the route and a later resync would withdraw a
-            // route the peer no longer holds (RFC 7313 §4).
-            let owes = self.dirty_peers.contains(&peer) && !self.selection_deferred(family);
-            if (orf_filter.is_some() || owes)
-                && let Some(rib_out) = self.adj_ribs_out.get(&peer)
-            {
+            // route the peer no longer holds (RFC 7313 §4). The owed keys are
+            // its Adj-RIB-Out rows and, for a dirty member that left its group,
+            // the admitted proof it kept (its Adj-RIB-Out was never seeded).
+            // As in the grouped arm, every replay kind sharing this body
+            // settles them.
+            let owes = self.dirty_peers.contains(&peer);
+            let rib_out = self.adj_ribs_out.get(&peer);
+            if (orf_filter.is_some() && rib_out.is_some()) || owes {
                 let mut answered: HashSet<(Prefix, u32)> = HashSet::new();
                 if owes {
                     answered.extend(
@@ -1806,7 +1810,8 @@ impl RibManager {
                     );
                 }
                 for route in rib_out
-                    .iter()
+                    .into_iter()
+                    .flat_map(AdjRibOut::iter)
                     .inspect(|_| {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     })
@@ -1817,6 +1822,18 @@ impl RibManager {
                         .is_some_and(|filter| !filter.permits(&route.prefix));
                     if denied || (owes && answered.insert((route.prefix, route.path_id))) {
                         unicast.withdraw.push((route.prefix, route.path_id));
+                    }
+                }
+                if owes && let Some(admitted) = self.pending_group_admitted.get(&peer) {
+                    for key in admitted.iter_with_checkpoint(|force| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+                    }) {
+                        if let crate::update::ExactExportKey::Unicast(prefix, path_id) = key
+                            && prefix_family(&prefix) == family
+                            && answered.insert((prefix, path_id))
+                        {
+                            unicast.withdraw.push((prefix, path_id));
+                        }
                     }
                 }
                 super::retire_hash_set(&mut answered, &mut || {

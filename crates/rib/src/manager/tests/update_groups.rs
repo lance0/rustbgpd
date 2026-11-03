@@ -7392,7 +7392,14 @@ fn apply_enhanced_refresh(
 /// and the resync must not withdraw the route again. Red proof: without the
 /// answer's owed withdrawals the grouped member's `EoRR` purges the route
 /// and the resync then withdraws a route the receiver no longer holds.
-fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool) {
+/// `leave`: the dirty member's export policy turns peer-context dependent
+/// first, so it leaves its group still owing, with its admitted proof and no
+/// seeded Adj-RIB-Out.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript fills a real session channel, then refreshes and resyncs"
+)]
+fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
     const SESSION_CHANNEL: usize = 4096;
     let prefix = |index: u32| {
         Prefix::V4(Ipv4Prefix::new(
@@ -7472,6 +7479,20 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool) {
         manager.dirty_peers.contains(&stuck),
         "the refused withdrawal"
     );
+    if leave {
+        assert!(manager.pending_group_admitted.contains_key(&stuck));
+        manager
+            .replace_peer_export_policy_synchronously(stuck, Some(peer_context_chain()))
+            .unwrap();
+        assert!(manager.grouped_member_of(stuck).is_none(), "left dirty");
+        assert!(manager.dirty_peers.contains(&stuck));
+        assert!(
+            manager
+                .adj_ribs_out
+                .get(&stuck)
+                .is_none_or(AdjRibOut::is_empty)
+        );
+    }
 
     apply_enhanced_refresh(&mut stuck_rx, &mut held);
     manager.handle_update(RibUpdate::RouteRefreshRequest {
@@ -7494,12 +7515,19 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool) {
 
 #[test]
 fn grouped_refresh_answer_settles_the_owed_withdrawal() {
-    refresh_answer_settles_the_owed_withdrawal(false);
+    refresh_answer_settles_the_owed_withdrawal(false, false);
 }
 
 #[test]
 fn ungrouped_refresh_answer_settles_the_owed_withdrawal() {
-    refresh_answer_settles_the_owed_withdrawal(true);
+    refresh_answer_settles_the_owed_withdrawal(true, false);
+}
+
+/// Red proof: without the proof sweep in the per-peer arm, the leaver's
+/// `EoRR` purges the route and its resync withdraws it again.
+#[test]
+fn group_leaver_refresh_answer_settles_the_owed_withdrawal() {
+    refresh_answer_settles_the_owed_withdrawal(false, true);
 }
 
 /// A forced peer that is already dirty still records later missed passes,
