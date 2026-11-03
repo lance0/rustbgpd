@@ -353,6 +353,72 @@ async fn rib_park_fresh_input_renews_hold() {
     );
 }
 
+/// Repeated administrative resets while parked: the first closes the
+/// Established session at once; its reconnect, and every later reset, wait
+/// for the held messages, so the backlog stays at the held UPDATE plus one
+/// `PeerDown` however many resets arrive.
+/// Mutation-red: running a reset that has no Established session to close
+/// restarts the session and appends a `PeerDown` per reset pair; polling the
+/// reconnect timer while parked starts a new connection.
+#[tokio::test(start_paused = true)]
+async fn rib_park_repeated_resets_keep_the_backlog_bounded() {
+    let RibPark {
+        mut session,
+        commands,
+        rib_rx: _rib_rx,
+        mut server,
+        ..
+    } = rib_park().await;
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    let ceases = || {
+        counter(
+            &metrics,
+            "bgp_notifications_sent_total",
+            &[("peer", &peer), ("code", "6")],
+        )
+    };
+    {
+        let run = session.run();
+        let steps = async {
+            server.write_all(&encoded_announce(held())).await.unwrap();
+            until_parked(&metrics, &peer).await;
+            commands
+                .send(PeerCommand::AdministrativeReset { reason: None })
+                .await
+                .unwrap();
+            for _ in 0..1_000_000 {
+                if ceases() >= 1.0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(ceases(), 1.0, "the first reset must close at once");
+            for _ in 0..4 {
+                commands
+                    .send(PeerCommand::AdministrativeReset { reason: None })
+                    .await
+                    .unwrap();
+            }
+            // Well past any reconnect delay.
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        };
+        tokio::select! {
+            result = run => panic!("run() ended while parked: {result:?}"),
+            () = steps => {}
+        }
+    }
+    assert_eq!(
+        session.rib_backlog.len(),
+        2,
+        "the held UPDATE and one PeerDown, whatever the reset count"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(matches!(
+        session.deferred_command,
+        Some(PeerCommand::AdministrativeReset { .. })
+    ));
+}
+
 /// An operator shutdown while parked puts the Cease on the wire at once.
 /// The RIB then sees the held UPDATE before the session's `PeerDown`, and
 /// `run()` returns only after both were admitted.

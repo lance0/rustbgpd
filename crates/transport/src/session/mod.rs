@@ -2848,6 +2848,16 @@ impl PeerSession {
         self.run_loop().await
     }
 
+    /// A terminal close runs while RIB-bound messages are held. An
+    /// administrative reset also restarts the session, so it runs then only
+    /// when it closes an Established one: repeated resets would otherwise
+    /// append a `PeerDown` each while the RIB stays full.
+    fn closes_while_rib_parked(&self, command: &PeerCommand) -> bool {
+        command.runs_while_rib_parked()
+            && (!matches!(command, PeerCommand::AdministrativeReset { .. })
+                || self.fsm.state() == SessionState::Established)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the run loop keeps every select! arm and its state wiring in one place"
@@ -2862,7 +2872,7 @@ impl PeerSession {
                 || self
                     .deferred_command
                     .as_ref()
-                    .is_some_and(PeerCommand::runs_while_rib_parked))
+                    .is_some_and(|command| self.closes_while_rib_parked(command)))
                 && let Some(command) = self.deferred_command.take()
                 && self.handle_command(command).await == ControlFlow::Break(())
             {
@@ -2960,7 +2970,7 @@ impl PeerSession {
                         self.flush_rib_backlog().await;
                         return Ok(());
                     };
-                    if rib_parked && !cmd.runs_while_rib_parked() {
+                    if rib_parked && !self.closes_while_rib_parked(&cmd) {
                         // Answer snapshots; defer the rest until the held
                         // messages are delivered, as before the park.
                         self.handle_read_during_wait(cmd);
@@ -3008,7 +3018,10 @@ impl PeerSession {
                 // `execute_actions`; `timers.keepalive` is never armed.
 
                 // Deferred reconnect after unexpected Idle
-                () = poll_timer(reconnect_timer) => {
+                // A reconnect waits while RIB-bound messages are held: the
+                // previous teardown must reach the RIB first, and a
+                // reconnect cycle while parked would only queue more.
+                () = poll_timer(reconnect_timer), if !rib_parked => {
                     self.reconnect_timer = None;
                     debug!(peer = %self.peer_label, "reconnect timer fired");
                     self.drive_fsm(Event::ManualStart).await;
