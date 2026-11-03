@@ -797,6 +797,16 @@ impl PeerSession {
     }
 
     pub(super) fn expire_outbound_admission(&mut self) {
+        // A write that completed in the same turn as the deadline is
+        // progress the run loop has not seen yet: it re-arms the deadline
+        // rather than losing the race to it.
+        if let Some(progress) = &mut self.admission_progress
+            && progress.has_changed().unwrap_or(false)
+        {
+            progress.borrow_and_update();
+            self.note_write_progress(true);
+            return;
+        }
         self.outbound_admission_timer = None;
         if self
             .writer_bulk_tx
