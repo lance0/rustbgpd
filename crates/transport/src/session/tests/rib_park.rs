@@ -192,18 +192,29 @@ async fn rib_park_drains_outbound_to_the_wire() {
     }
 }
 
-/// KEEPALIVEs are writer-owned (ADR-0078) and keep flowing while parked. A
-/// peer that then sends nothing for the negotiated 90 s hold time is expired
-/// while the session is still parked: none of its input is pending.
-/// Mutation-red: with the hold arm unpolled while parked, no Hold Timer
-/// Expired NOTIFICATION is sent until the RIB drains.
+fn cease_out_of_resources(metrics: &BgpMetrics, peer: &str) -> f64 {
+    counter(
+        metrics,
+        "bgp_notifications_sent_total",
+        &[("peer", peer), ("code", "6"), ("subcode", "8")],
+    )
+}
+
+/// KEEPALIVEs are writer-owned (ADR-0078) and keep flowing while parked.
+/// With nothing more from the peer, the first hold expiry is deferred for
+/// the wait itself and the second closes the session as a local overload:
+/// Cease/Out of Resources, not Hold Timer Expired. Its `PeerDown` then
+/// follows the held UPDATE.
+/// Mutation-red: with the hold arm unpolled while parked nothing expires;
+/// with an unbounded renewal budget no Cease is sent.
 #[tokio::test(start_paused = true)]
-async fn rib_park_keeps_keepalives_and_expires_a_silent_peer() {
+async fn rib_park_exhausted_stall_budget_sends_cease_then_peer_down() {
     let RibPark {
         mut session,
         commands: _commands,
-        rib_rx: _rib_rx,
+        mut rib_rx,
         mut server,
+        fillers,
         ..
     } = rib_park().await;
     let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
@@ -212,6 +223,13 @@ async fn rib_park_keeps_keepalives_and_expires_a_silent_peer() {
             &metrics,
             "bgp_messages_sent_total",
             &[("peer", &peer), ("type", "keepalive")],
+        )
+    };
+    let rearmed = || {
+        counter(
+            &metrics,
+            "bgp_hold_timer_rearmed_pending_input_total",
+            &[("peer", &peer)],
         )
     };
     let hold_expiries = || {
@@ -223,89 +241,79 @@ async fn rib_park_keeps_keepalives_and_expires_a_silent_peer() {
     };
     let established = tokio::time::Instant::now();
     let before = keepalives();
-    let run = session.run();
-    let steps = async {
-        server.write_all(&encoded_announce(held())).await.unwrap();
-        until_parked(&metrics, &peer).await;
-        tokio::time::sleep_until(established + Duration::from_secs(89)).await;
-        assert_eq!(
-            keepalives() - before,
-            2.0,
-            "writer KEEPALIVEs at 30 s and 60 s"
-        );
-        assert_eq!(hold_expiries(), 0.0, "the hold time has not elapsed yet");
-        tokio::time::sleep_until(established + Duration::from_secs(91)).await;
-        assert_eq!(
-            hold_expiries(),
-            1.0,
-            "a parked session must still expire a silent peer"
-        );
-    };
-    tokio::select! {
-        result = run => panic!("run() ended while parked: {result:?}"),
-        () = steps => {}
+    {
+        let run = session.run();
+        let steps = async {
+            server.write_all(&encoded_announce(held())).await.unwrap();
+            until_parked(&metrics, &peer).await;
+            tokio::time::sleep_until(established + Duration::from_secs(89)).await;
+            assert_eq!(
+                keepalives() - before,
+                2.0,
+                "writer KEEPALIVEs at 30 s and 60 s"
+            );
+            assert_eq!(rearmed(), 0.0, "the hold time has not elapsed yet");
+            tokio::time::sleep_until(established + Duration::from_secs(91)).await;
+            assert_eq!(rearmed(), 1.0, "the first expiry is deferred for the wait");
+            assert_eq!(cease_out_of_resources(&metrics, &peer), 0.0);
+            tokio::time::sleep_until(established + Duration::from_secs(182)).await;
+            assert_eq!(
+                cease_out_of_resources(&metrics, &peer),
+                1.0,
+                "an exhausted stall budget closes with Cease/Out of Resources"
+            );
+            assert_eq!(hold_expiries(), 0.0, "not Hold Timer Expired");
+        };
+        tokio::select! {
+            result = run => panic!("run() ended while parked: {result:?}"),
+            () = steps => {}
+        }
     }
+    assert_ne!(session.fsm.state(), SessionState::Established);
+    assert!(
+        matches!(
+            session.rib_backlog.back(),
+            Some((RibUpdate::PeerDown { .. }, _))
+        ),
+        "the teardown's PeerDown waits behind the held UPDATE"
+    );
+    for _ in 0..fillers {
+        assert_eq!(announced_v4(&rib_rx.try_recv().unwrap()), []);
+    }
+    deliver_held_rib_messages(&mut session).await;
+    assert_eq!(
+        announced_v4(&rib_rx.try_recv().unwrap()),
+        vec![Prefix::V4(held())]
+    );
+    assert!(matches!(
+        rib_rx.try_recv().unwrap(),
+        RibUpdate::PeerDown { .. }
+    ));
 }
 
-/// Hold-time counters of a parked session whose read buffer holds `pending`
-/// behind the held UPDATE, sampled at each of `checkpoints` (seconds after
-/// the park). `fresh_at` writes one more KEEPALIVE to the socket then.
-async fn hold_while_parked(
-    pending: &[u8],
-    fresh_at: Option<u64>,
-    checkpoints: &[u64],
-) -> Vec<(f64, f64)> {
-    let RibPark {
-        mut session,
-        commands: _commands,
-        rib_rx: _rib_rx,
-        mut server,
-        ..
-    } = rib_park().await;
-    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
-    let sample = || {
-        (
-            counter(
-                &metrics,
-                "bgp_hold_timer_rearmed_pending_input_total",
-                &[("peer", &peer)],
-            ),
-            counter(
-                &metrics,
-                "bgp_notifications_sent_total",
-                &[("peer", &peer), ("code", "4")],
-            ),
-        )
-    };
-    let parked = tokio::time::Instant::now();
-    let run = session.run();
-    let steps = async {
-        // One write: `pending` lands in the read buffer behind `held`.
-        let mut input = encoded_announce(held());
-        input.extend_from_slice(pending);
-        server.write_all(&input).await.unwrap();
-        until_parked(&metrics, &peer).await;
-        let mut samples = Vec::new();
-        let mut fresh_at = fresh_at;
-        for &at in checkpoints {
-            if let Some(fresh) = fresh_at.filter(|&fresh| fresh < at) {
-                tokio::time::sleep_until(parked + Duration::from_secs(fresh)).await;
-                let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive).unwrap();
-                server.write_all(&keepalive).await.unwrap();
-                // Loopback delivery, not task ordering: let the kernel queue
-                // the bytes before the paused clock moves on.
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                fresh_at = None;
-            }
-            tokio::time::sleep_until(parked + Duration::from_secs(at)).await;
-            samples.push(sample());
-        }
-        samples
-    };
-    tokio::select! {
-        result = run => panic!("run() ended while parked: {result:?}"),
-        samples = steps => samples,
-    }
+/// A parked session (`held`, with `behind` buffered) whose hold expiries a
+/// test drives directly.
+async fn parked(behind: &[u8]) -> RibPark {
+    let mut park = rib_park().await;
+    park_with_buffered(&mut park.session, behind).await;
+    park
+}
+
+/// One hold expiry as the run loop observes it. True when the session
+/// survives it.
+async fn hold_expiry(session: &mut PeerSession) -> bool {
+    session.timers.hold = None;
+    session.handle_hold_timer_expiry().await;
+    session.read_half.is_some()
+}
+
+/// The peer writes `bytes`; returns once the session's socket holds at
+/// least one unread byte (a peek, so the session still reads it).
+async fn peer_sends(server: &mut TcpStream, session: &mut PeerSession, bytes: &[u8]) {
+    server.write_all(bytes).await.unwrap();
+    let mut peek = [0_u8; 1];
+    let read_half = session.read_half.as_mut().unwrap();
+    assert_eq!(read_half.peek(&mut peek).await.unwrap(), 1);
 }
 
 fn keepalive_pdu() -> Vec<u8> {
@@ -314,56 +322,183 @@ fn keepalive_pdu() -> Vec<u8> {
         .to_vec()
 }
 
-/// RFC 4271 section 6.5 while parked: a complete frame waiting behind the
-/// held UPDATE proves the peer alive once (ADR-0078 rule 3), so the first
-/// hold expiry re-arms. With no input received since, the next one expires:
-/// the same unprocessed frame is not fresh evidence.
-/// Mutation-red: re-arming on any pending frame renews hold indefinitely.
-#[tokio::test(start_paused = true)]
-async fn rib_park_grants_pending_input_one_hold_grace() {
-    let samples = hold_while_parked(&keepalive_pdu(), None, &[100, 190]).await;
-    assert_eq!(samples[0], (1.0, 0.0), "one grace at 90 s");
-    assert_eq!(samples[1], (1.0, 1.0), "expired at 180 s without new input");
+/// A one-byte trickle buys no more than the stall budget: two deferred
+/// expiries, then Cease/Out of Resources by the third hold time.
+/// Mutation-red: an unbounded budget keeps the session up on garbage.
+#[tokio::test]
+async fn rib_park_one_byte_trickle_closes_by_the_third_hold_time() {
+    let RibPark {
+        mut session,
+        mut server,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        ..
+    } = parked(&[]).await;
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    assert!(hold_expiry(&mut session).await, "the wait itself earns one");
+    peer_sends(&mut server, &mut session, &[0]).await;
+    assert!(hold_expiry(&mut session).await, "newly read bytes earn one");
+    peer_sends(&mut server, &mut session, &[0]).await;
+    assert!(!hold_expiry(&mut session).await, "the budget is spent");
+    assert_eq!(cease_out_of_resources(&metrics, &peer), 1.0);
 }
 
-/// A buffered NOTIFICATION or malformed complete frame, which the parked
-/// session cannot process yet, earns the same single grace and no more.
-#[tokio::test(start_paused = true)]
-async fn rib_park_unprocessable_pending_frames_get_one_grace() {
-    let notification =
-        rustbgpd_wire::encode_message(&Message::Notification(NotificationMessage::new(
-            NotificationCode::Cease,
-            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
-            Bytes::new(),
-        )))
-        .unwrap()
-        .to_vec();
-    // A complete 19-byte frame with a broken marker.
-    let mut malformed = keepalive_pdu();
-    malformed[..16].fill(0);
-    for pending in [notification, malformed] {
-        let samples = hold_while_parked(&pending, None, &[100, 190]).await;
-        assert_eq!(samples, [(1.0, 0.0), (1.0, 1.0)]);
+/// Bytes already queued in the socket before silence cannot be told from
+/// fresh ones, so they may buy a renewal, but no more than the budget, and
+/// each costs at most one probe of buffer.
+/// Mutation-red: an unbounded budget renews once per probe of the reservoir.
+#[tokio::test]
+async fn rib_park_old_socket_reservoir_closes_by_the_third_hold_time() {
+    let RibPark {
+        mut session,
+        mut server,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        ..
+    } = parked(&[]).await;
+    let reservoir = keepalive_pdu().repeat(2_000);
+    assert!(reservoir.len() >= 32 * 1024);
+    peer_sends(&mut server, &mut session, &reservoir).await;
+    assert!(hold_expiry(&mut session).await);
+    assert!(hold_expiry(&mut session).await);
+    assert!(
+        !hold_expiry(&mut session).await,
+        "the reservoir buys no more"
+    );
+    assert!(
+        session.read_buf.buf.len() <= 4096,
+        "one probe read: {} bytes",
+        session.read_buf.buf.len()
+    );
+}
+
+/// Waits that end and restart cannot grow the read buffer past two
+/// maximum-size messages: each re-park resets the renewal budget, but the
+/// probe only refills up to the cap, whatever the number of waits.
+/// Mutation-red: probing past the cap appends another 4 KiB each cycle.
+#[tokio::test]
+async fn rib_park_repeated_waits_keep_the_read_buffer_capped() {
+    let later_pdu = encoded_announce(later());
+    let RibPark {
+        mut session,
+        mut server,
+        commands: _commands,
+        mut rib_rx,
+        ..
+    } = parked(&later_pdu).await;
+    // Without RFC 8654 frames the cap is two 4096-byte messages.
+    session
+        .read_buf
+        .set_max_message_len(rustbgpd_wire::MAX_MESSAGE_LEN);
+    let cap = 2 * usize::from(rustbgpd_wire::MAX_MESSAGE_LEN);
+    peer_sends(&mut server, &mut session, &later_pdu.repeat(2_000)).await;
+    let mut peak = 0;
+    for _ in 0..16 {
+        assert!(hold_expiry(&mut session).await);
+        assert!(hold_expiry(&mut session).await, "each wait reads new bytes");
+        peak = peak.max(session.read_buf.buf.len());
+        assert!(
+            session.read_buf.buf.len() <= cap,
+            "read buffer {} bytes past the {cap}-byte cap",
+            session.read_buf.buf.len()
+        );
+        // Admit only the held UPDATE: the wait ends and the next buffered
+        // UPDATE parks again at once, starting a new wait.
+        rib_rx.try_recv().unwrap();
+        let reserved = inbound::poll_rib_reserve(&mut session.rib_reserve).await;
+        session.advance_rib_backlog(reserved).await;
+        assert_eq!(session.rib_backlog.len(), 1, "parked again");
     }
+    assert_eq!(peak, cap, "the probes reached the cap");
 }
 
-/// Input received after a grace renews hold again; once it stops, the next
-/// expiry tears the session down.
-/// Mutation-red: granting only one grace per park expires a peer that keeps
-/// sending.
-#[tokio::test(start_paused = true)]
-async fn rib_park_fresh_input_renews_hold() {
-    let samples = hold_while_parked(&keepalive_pdu(), Some(120), &[200, 280]).await;
-    assert_eq!(
-        samples[0],
-        (2.0, 0.0),
-        "re-armed at 90 s and, on fresh input, at 180 s"
+/// The first deferral belongs to the wait itself: a peer whose next frame is
+/// a partial extended message (its tail held back by our closed receive
+/// window) is not expired at the first deadline.
+/// Mutation-red: requiring a complete frame or newly read bytes for the
+/// first renewal expires it.
+#[tokio::test]
+async fn rib_park_partial_extended_frame_gets_its_first_deadline() {
+    let mut header = vec![0xff_u8; 16];
+    header.extend_from_slice(&6_000_u16.to_be_bytes());
+    header.push(2);
+    header.extend_from_slice(&[0; 11]);
+    let RibPark {
+        mut session,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        server: _server,
+        ..
+    } = rib_park().await;
+    session
+        .read_buf
+        .set_max_message_len(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN);
+    park_with_buffered(&mut session, &header).await;
+    assert!(!session.read_buf.has_complete_frame());
+    assert!(
+        hold_expiry(&mut session).await,
+        "the first deadline is deferred"
     );
-    assert_eq!(
-        samples[1],
-        (2.0, 1.0),
-        "expired at 270 s once input stopped"
-    );
+}
+
+/// A wait that ends in time leaves the session up and resets its budget;
+/// admitting only the head of a longer backlog does not. The next wait then
+/// gets its full allowance again.
+/// Mutation-red: keeping the count across waits expires the next wait at its
+/// first deadline; resetting it whenever the head is admitted grants more
+/// than the budget within one wait.
+#[tokio::test]
+async fn rib_park_budget_resets_only_when_the_wait_ends() {
+    let RibPark {
+        mut session,
+        mut server,
+        commands: _commands,
+        mut rib_rx,
+        ..
+    } = parked(&[]).await;
+    session.send_to_rib(placeholder_routes_received()).unwrap();
+    assert_eq!(session.rib_backlog.len(), 2);
+    assert!(hold_expiry(&mut session).await);
+    rib_rx.try_recv().unwrap();
+    let reserved = inbound::poll_rib_reserve(&mut session.rib_reserve).await;
+    session.advance_rib_backlog(reserved).await;
+    assert_eq!(session.rib_backlog.len(), 1, "only the head was admitted");
+    assert_eq!(session.parked_hold_renewals, 1, "the wait goes on");
+    while rib_rx.try_recv().is_ok() {}
+    deliver_held_rib_messages(&mut session).await;
+    assert!(session.rib_backlog.is_empty());
+    assert_eq!(session.parked_hold_renewals, 0, "the wait ended");
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    while session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .is_ok()
+    {}
+    park_with_buffered(&mut session, &[]).await;
+    assert!(hold_expiry(&mut session).await, "a full allowance again");
+    peer_sends(&mut server, &mut session, &[0]).await;
+    assert!(hold_expiry(&mut session).await);
+}
+
+/// The M63 shape: a park outlasts the 9 s hold time once, with the peer's
+/// KEEPALIVEs queued, and the RIB drains before the next deadline. The
+/// session survives on its first deferral and starts the next wait afresh.
+#[tokio::test]
+async fn rib_park_m63_shape_survives_one_long_park() {
+    let RibPark {
+        mut session,
+        mut server,
+        commands: _commands,
+        mut rib_rx,
+        ..
+    } = parked(&[]).await;
+    peer_sends(&mut server, &mut session, &keepalive_pdu()).await;
+    assert!(hold_expiry(&mut session).await);
+    while rib_rx.try_recv().is_ok() {}
+    deliver_held_rib_messages(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert!(session.timers.hold.is_some(), "hold re-armed");
+    assert_eq!(session.parked_hold_renewals, 0);
 }
 
 /// Repeated administrative resets while parked: the first closes the

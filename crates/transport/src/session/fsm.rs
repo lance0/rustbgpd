@@ -1,8 +1,9 @@
 use super::{
-    Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, IpAddr, Ipv4Addr, Message,
-    NotificationCode, PeerDownReason, PeerSession, RibUpdate, Safi, SessionDownReason,
-    SessionLifecycleNotification, SessionNotification, SessionNotificationDirection, SessionState,
-    cease_subcode, debug, info, mpsc, warn,
+    Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, IpAddr, Ipv4Addr,
+    MAX_PARKED_HOLD_RENEWALS, Message, NotificationCode, PARKED_HOLD_PROBE, PeerDownReason,
+    PeerSession, RibUpdate, Safi, SessionDownReason, SessionLifecycleNotification,
+    SessionNotification, SessionNotificationDirection, SessionState, cease_subcode, debug, info,
+    mpsc, warn,
 };
 use rustbgpd_rib::update::ExactExportErrorCode;
 use rustbgpd_telemetry::reason_labels::ExactExportReason;
@@ -490,13 +491,36 @@ impl PeerSession {
     /// equivalent rule likewise counts parsed packets. Only a peer with
     /// no complete frame outstanding expires.
     ///
-    /// Input that processing cannot consume yet (held behind RIB-bound
-    /// messages, or behind a collision verdict) renews hold once. Another
-    /// renewal needs bytes received since that grace: the same unprocessed
-    /// frame is not fresh evidence, and re-arming on it every period would
-    /// hold a session open for as long as the RIB stays full (RFC 4271
-    /// §6.5).
+    /// While RIB-bound messages are held, input is deliberately left
+    /// unprocessed, so liveness cannot be proven from it; see
+    /// [`Self::renew_parked_hold`] for the bounded policy used then.
     pub(super) async fn handle_hold_timer_expiry(&mut self) {
+        if !self.rib_backlog.is_empty() {
+            if self.renew_parked_hold() {
+                self.metrics
+                    .record_hold_timer_rearmed_pending_input(&self.peer_label);
+                debug!(
+                    peer = %self.peer_label,
+                    renewals = self.parked_hold_renewals,
+                    "hold timer expired while input waits for the RIB; re-arming instead"
+                );
+                if self.timers.hold.is_none()
+                    && let Some(secs) = self.timers.last_hold_secs
+                {
+                    self.timers.start(rustbgpd_fsm::TimerType::Hold, secs);
+                }
+            } else {
+                warn!(
+                    peer = %self.peer_label,
+                    renewals = self.parked_hold_renewals,
+                    "RIB admission stalled past local budget; sending Cease/Out-of-Resources and tearing down"
+                );
+                self.trigger_outbound_out_of_resources_teardown(
+                    crate::handle::SessionFailureCause::RibAdmissionStalled,
+                );
+            }
+            return;
+        }
         if self.take_pending_input() {
             self.process_read_buffer().await;
             // Processing may have torn the session down (the pending
@@ -511,14 +535,6 @@ impl PeerSession {
                     peer = %self.peer_label,
                     "session torn down while processing pending input; skipping hold re-arm"
                 );
-                return;
-            }
-            if self.read_buf.has_complete_frame() && !self.take_hold_grace() {
-                debug!(
-                    peer = %self.peer_label,
-                    "hold timer expired; no peer input received since the last pending-input grace"
-                );
-                self.drive_fsm(Event::HoldTimerExpires).await;
                 return;
             }
             self.metrics
@@ -537,6 +553,60 @@ impl PeerSession {
         self.drive_fsm(Event::HoldTimerExpires).await;
     }
 
+    /// Local-overload policy for a hold expiry while RIB-bound messages are
+    /// held. Input is deliberately left unprocessed then, so it proves
+    /// nothing about the peer's liveness; renewals are bounded instead:
+    ///
+    /// - the first renewal in a wait is granted for the wait itself, even
+    ///   when only part of a frame is buffered;
+    /// - each later one needs newly read bytes from one bounded probe. A
+    ///   socket read cannot tell fresh arrivals from data already queued,
+    ///   which is acceptable only because both the renewals and the bytes
+    ///   are bounded;
+    /// - after [`MAX_PARKED_HOLD_RENEWALS`], the caller closes the session
+    ///   with Cease/Out of Resources.
+    ///
+    /// Probes stop once the read buffer holds two maximum-size messages,
+    /// whatever the wait, so repeated waits cannot grow it. The count
+    /// resets only when the wait ends: the backlog has fully drained.
+    fn renew_parked_hold(&mut self) -> bool {
+        match self.parked_hold_renewals {
+            0 => {}
+            spent if spent < MAX_PARKED_HOLD_RENEWALS => {
+                if self.probe_parked_input() == 0 {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        self.parked_hold_renewals += 1;
+        true
+    }
+
+    /// Read at most one [`PARKED_HOLD_PROBE`] from the socket into the read
+    /// buffer, without taking it past two maximum-size messages. Returns the
+    /// bytes read.
+    fn probe_parked_input(&mut self) -> usize {
+        let cap = 2 * usize::from(self.read_buf.max_message_len());
+        let room = cap
+            .saturating_sub(self.read_buf.buf.len())
+            .min(PARKED_HOLD_PROBE);
+        if room == 0 {
+            return 0;
+        }
+        let mut probe = [0u8; PARKED_HOLD_PROBE];
+        let read = match self
+            .read_half
+            .as_ref()
+            .map(|half| half.try_read(&mut probe[..room]))
+        {
+            Some(Ok(n)) => n,
+            _ => 0,
+        };
+        self.read_buf.buf.extend_from_slice(&probe[..read]);
+        read
+    }
+
     /// True when at least one complete BGP frame is pending: in the
     /// read buffer, or completed by bytes readable from the socket
     /// right now (pulled into the buffer non-blockingly so the caller
@@ -548,27 +618,6 @@ impl PeerSession {
     /// processable: the parser resolves it as a NOTIFICATION once
     /// processing resumes). A partial frame is NOT liveness — see
     /// [`Self::handle_hold_timer_expiry`].
-    /// Grant one hold renewal for input that cannot be processed yet, if
-    /// any bytes arrived since the previous grant. When none were counted,
-    /// one bounded socket read looks for new input first.
-    fn take_hold_grace(&mut self) -> bool {
-        if self.hold_grace_mark == Some(self.input_bytes_received) {
-            let mut tmp = [0u8; 4096];
-            if let Some(read_half) = self.read_half.as_ref()
-                && let Ok(n) = read_half.try_read(&mut tmp)
-                && n > 0
-            {
-                self.read_buf.buf.extend_from_slice(&tmp[..n]);
-                self.input_bytes_received += n as u64;
-            }
-        }
-        if self.hold_grace_mark == Some(self.input_bytes_received) {
-            return false;
-        }
-        self.hold_grace_mark = Some(self.input_bytes_received);
-        true
-    }
-
     fn take_pending_input(&mut self) -> bool {
         if self.read_buf.has_complete_frame() {
             return true;
@@ -587,7 +636,6 @@ impl PeerSession {
             match read_half.try_read(&mut tmp) {
                 Ok(n) if n > 0 => {
                     self.read_buf.buf.extend_from_slice(&tmp[..n]);
-                    self.input_bytes_received += n as u64;
                     if self.read_buf.has_complete_frame() {
                         return true;
                     }

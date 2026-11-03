@@ -32,6 +32,11 @@ impl ReadBuffer {
         self.max_message_len = len;
     }
 
+    /// The maximum message length frames are checked against.
+    pub(crate) fn max_message_len(&self) -> u16 {
+        self.max_message_len
+    }
+
     /// Try to extract and decode one complete BGP message from the buffer.
     ///
     /// Returns `Ok(None)` if the buffer doesn't yet contain a complete

@@ -221,6 +221,15 @@ impl ConnectFailureEpisode {
     }
 }
 
+/// Hold expiries one wait for RIB admission may defer (ADR-0078
+/// amendment). A session whose RIB admission stays blocked for about three
+/// hold times is then closed with Cease/Out of Resources, as a local
+/// overload.
+const MAX_PARKED_HOLD_RENEWALS: u8 = 2;
+/// Bytes one parked hold expiry may read from the socket looking for new
+/// input.
+const PARKED_HOLD_PROBE: usize = 4096;
+
 /// Runtime for a single BGP peer session.
 ///
 /// Owns the FSM, TCP stream, timers, and read buffer. Runs as a single
@@ -312,11 +321,9 @@ pub(crate) struct PeerSession {
     /// Reservation for the head of `rib_backlog`. It keeps its place in the
     /// channel's FIFO of waiting senders across run-loop turns.
     rib_reserve: Option<tokio_util::sync::PollSender<RibUpdate>>,
-    /// Bytes read from peer sockets over this session's life. With
-    /// `hold_grace_mark` it tells new input from input already granted a
-    /// hold renewal while it could not be processed.
-    input_bytes_received: u64,
-    hold_grace_mark: Option<u64>,
+    /// Hold renewals spent in the current wait for RIB admission, which
+    /// lasts from `rib_backlog` becoming non-empty until it fully drains.
+    parked_hold_renewals: u8,
     /// Canonical `peer` metric/log label from
     /// [`TransportConfig::peer_label`]: the neighbor address, scoped to its
     /// interface for a link-local neighbor (`interface:<name>` for an
@@ -2302,8 +2309,7 @@ impl PeerSession {
             rib_tx,
             rib_backlog: VecDeque::new(),
             rib_reserve: None,
-            input_bytes_received: 0,
-            hold_grace_mark: None,
+            parked_hold_renewals: 0,
             peer_label,
             peer_ip,
             link_local_next_hop_scope,
@@ -2811,10 +2817,7 @@ impl PeerSession {
                 self.handle_tcp_disconnect();
                 self.drive_fsm(Event::TcpConnectionFails).await;
             }
-            Ok(n) => {
-                self.input_bytes_received += n as u64;
-                self.process_read_buffer().await;
-            }
+            Ok(_n) => self.process_read_buffer().await,
             Err(e) => {
                 let cause = crate::handle::SessionFailureCause::ReaderIo(e.kind());
                 debug!(peer = %self.peer_label, cause = %cause, "TCP read error");
