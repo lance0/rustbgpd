@@ -1130,7 +1130,22 @@ impl PeerSession {
     /// Deliver every held message, waiting for channel capacity: before the
     /// session task ends, and before an admission-ordered send.
     pub(super) async fn flush_rib_backlog(&mut self) {
-        // An abandoned reservation would hold capacity these sends wait for.
+        // The head goes through the queued reservation, keeping its place
+        // among waiting senders. Cancel-safe: the reservation and the
+        // backlog stay as they were until the wait completes.
+        if let Some(reserve) = self.rib_reserve.as_mut() {
+            let reserved = std::future::poll_fn(|cx| reserve.poll_reserve(cx))
+                .await
+                .is_ok();
+            if let Some((update, then)) = self.rib_backlog.pop_front() {
+                if reserved && reserve.send_item(update).is_ok() {
+                    self.on_rib_admission(then);
+                } else {
+                    self.drop_rib_backlog();
+                }
+            }
+        }
+        // An unused reservation would hold capacity the sends below wait for.
         self.rib_reserve = None;
         while let Some((update, then)) = self.rib_backlog.pop_front() {
             if self.rib_tx.send(update).await.is_ok() {

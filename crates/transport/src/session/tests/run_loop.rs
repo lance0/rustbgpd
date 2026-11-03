@@ -1877,3 +1877,51 @@ async fn slow_peer_detection_disabled_by_zero_duration() {
     assert!(session.slow_peer_backlog_since.is_none());
     assert!(session.slow_peer_timer.is_none());
 }
+
+/// A closing session's flush delivers the held head through its queued
+/// reservation, ahead of a sender that started waiting after it, so the
+/// shutdown deadline is not spent re-queueing at the back.
+/// Mutation-red: dropping the reservation before the blocking sends lets
+/// the later sender's message overtake the held one.
+#[tokio::test]
+async fn flush_keeps_the_held_reservation_place() {
+    let (mut session, mut rib_rx, _metrics) = backpressure_test_session(1);
+    session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .unwrap();
+    session
+        .send_to_rib(RibUpdate::PeerDown {
+            peer: PeerId::from_addr(session.peer_ip),
+            session_id: 7,
+        })
+        .unwrap();
+    assert_eq!(session.rib_backlog.len(), 1);
+    // Queue the reservation once, as a run-loop turn does.
+    std::future::poll_fn(|cx| {
+        let _ = session.rib_reserve.as_mut().unwrap().poll_reserve(cx);
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let other = session.rib_tx.clone();
+    let late = tokio::spawn(async move { other.send(placeholder_routes_received()).await });
+    tokio::task::yield_now().await;
+    let flush = tokio::spawn(async move {
+        session.flush_rib_backlog().await;
+        session
+    });
+    assert!(matches!(
+        rib_rx.recv().await,
+        Some(RibUpdate::RoutesReceived { .. })
+    ));
+    assert!(
+        matches!(
+            rib_rx.recv().await,
+            Some(RibUpdate::PeerDown { session_id: 7, .. })
+        ),
+        "the held message must keep its place ahead of the later sender"
+    );
+    assert!(rib_rx.recv().await.is_some());
+    late.await.unwrap().unwrap();
+    assert!(flush.await.unwrap().rib_backlog.is_empty());
+}
