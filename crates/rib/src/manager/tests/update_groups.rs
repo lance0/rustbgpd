@@ -7530,6 +7530,109 @@ fn group_leaver_refresh_answer_settles_the_owed_withdrawal() {
     refresh_answer_settles_the_owed_withdrawal(false, true);
 }
 
+/// A dirty dual-stack member's proof admits IPv4 and IPv6 keys it may hold:
+/// one IPv4 and one IPv6 route it is owed withdrawals for, and IPv4 routes it
+/// still retains. Its IPv4 refresh answer withdraws only the owed IPv4 key;
+/// the IPv6 withdrawal is left to the resync. Red proof: dropping either half
+/// of the grouped sweep's guard (the family or the retention check)
+/// withdraws other keys in the answer.
+#[test]
+fn grouped_refresh_answer_withdraws_only_the_family_keys_the_member_left() {
+    let ipv4 = |third: u8| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, third, 0), 24));
+    let ipv6 = Prefix::V6(Ipv6Prefix::new("2001:db8:c::".parse().unwrap(), 48));
+    let route = |prefix: Prefix| {
+        let mut route = make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 0, 0), 24),
+            FULL_CHANNEL_SOURCE,
+        );
+        route.prefix = prefix;
+        route
+    };
+    let pass = |manager: &mut RibManager, announced: Vec<Prefix>, withdrawn: Vec<Prefix>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(FULL_CHANNEL_SOURCE),
+            announced: announced.into_iter().map(route).collect(),
+            withdrawn: withdrawn.into_iter().map(|prefix| (prefix, 0)).collect(),
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let stuck = peer_v4(Ipv4Addr::new(10, 45, 0, 1));
+    let live = peer_v4(Ipv4Addr::new(10, 45, 0, 2));
+    let mut receivers = Vec::new();
+    for (peer, capacity) in [(stuck, FULL_CHANNEL_CAPACITY), (live, 64)] {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(capacity);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: dual_stack_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        receivers.push(outbound_rx);
+    }
+    let mut live_rx = receivers.pop().unwrap();
+    let mut stuck_rx = receivers.pop().unwrap();
+    assert!(manager.grouped_member_of(stuck).is_some());
+    pass(&mut manager, vec![ipv4(1), ipv4(2), ipv6], vec![]);
+    while stuck_rx.try_recv().is_ok() {}
+    for third in 10..10 + u8::try_from(FULL_CHANNEL_CAPACITY).unwrap() {
+        pass(&mut manager, vec![ipv4(third)], vec![]);
+    }
+    while live_rx.try_recv().is_ok() {}
+    assert!(manager.outbound_channel_full(stuck));
+    pass(&mut manager, vec![], vec![ipv4(1), ipv6]);
+    assert!(manager.dirty_peers.contains(&stuck));
+    let proof = manager.pending_group_admitted.get(&stuck).expect("a proof");
+    assert!(proof.contains(&ExactExportKey::Unicast(ipv6, 0)));
+    assert!(proof.contains(&ExactExportKey::Unicast(ipv4(2), 0)));
+    while stuck_rx.try_recv().is_ok() {}
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        peer: stuck,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    let mut withdrawn = Vec::new();
+    let mut announced = BTreeSet::new();
+    while let Ok(update) = stuck_rx.try_recv() {
+        withdrawn.extend(update.withdraw.iter().copied());
+        announced.extend(update.announce.iter().map(|route| route.prefix));
+    }
+    assert_eq!(withdrawn, vec![(ipv4(1), 0)]);
+    assert!(
+        announced.contains(&ipv4(2)),
+        "the retained route is replayed"
+    );
+    manager.resync_dirty_peers_bounded();
+    let mut resync_withdrawn = Vec::new();
+    while let Ok(update) = stuck_rx.try_recv() {
+        resync_withdrawn.extend(update.withdraw.iter().copied());
+    }
+    assert_eq!(resync_withdrawn, vec![(ipv6, 0)]);
+}
+
 /// A forced peer that is already dirty still records later missed passes,
 /// but does not rebuild its whole table while the receiver is full. Once
 /// the receiver drains, force re-announces an unchanged advertised prefix.
