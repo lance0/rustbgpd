@@ -3250,6 +3250,11 @@ impl BgpMetrics {
         registry
             .register(Box::new(rib_loc_prefixes.clone()))
             .expect("metric not already registered");
+        // VPN FlowSpec (ADR-0146) has no Loc-RIB storage yet, so no RIB path
+        // publishes the series; materialize its zero so the family is visible.
+        rib_loc_prefixes
+            .with_label_values(&["l3vpn_ipv4_flowspec"])
+            .set(0);
         registry
             .register(Box::new(peer_outbound_queue_depth.clone()))
             .expect("metric not already registered");
@@ -10092,6 +10097,29 @@ mod tests {
                 .with_label_values(&["10.0.0.1"])
                 .get();
         assert_eq!(val, 5);
+    }
+
+    #[test]
+    fn loc_rib_vpn_flowspec_series_starts_at_zero() {
+        let m = BgpMetrics::new();
+        let family = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_rib_loc_prefixes")
+            .expect("bgp_rib_loc_prefixes is gathered");
+        let vpn: Vec<_> = family
+            .get_metric()
+            .iter()
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.value() == "l3vpn_ipv4_flowspec")
+            })
+            .map(|metric| metric.get_gauge().get_value())
+            .collect();
+        assert_eq!(vpn, [0.0]);
     }
 
     #[test]
