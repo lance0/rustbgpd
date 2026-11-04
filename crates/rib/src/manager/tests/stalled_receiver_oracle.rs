@@ -452,6 +452,35 @@ struct Wire {
 }
 
 impl Wire {
+    /// Replay a discarded queue without changing the receiver's real state.
+    fn discard_shadow(&self) -> Self {
+        Self {
+            session: self.session,
+            enhanced: self.enhanced,
+            held: self.held.clone(),
+            gr_stale: self.gr_stale.clone(),
+            refresh_stale: self.refresh_stale.clone(),
+            eor: self.eor.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Markers can remove stale keys without carrying an explicit withdrawal.
+    fn discarded_changes(
+        &mut self,
+        peer: usize,
+        op: usize,
+        message: NormMsg,
+        replay: bool,
+    ) -> BTreeSet<Nlri> {
+        self.apply(SUBJECT, peer, op, message, replay, None)
+            .expect("discarded envelopes do not validate delivery");
+        std::mem::take(&mut self.history)
+            .into_keys()
+            .map(|(_, prefix)| prefix)
+            .collect()
+    }
+
     fn record(&mut self, key: &Key, value: Option<Value>) {
         let prefix = nlri(key);
         if !self.before.contains_key(&prefix) {
@@ -511,7 +540,7 @@ impl Wire {
         }
     }
 
-    /// Replay one envelope produced during `op` onto the wire.
+    /// Replay one envelope; absent barriers mean a discarded shadow, not delivery.
     #[expect(
         clippy::too_many_lines,
         reason = "one pass mirrors the transport's phase order"
@@ -523,8 +552,9 @@ impl Wire {
         op: usize,
         message: NormMsg,
         replay: bool,
-        barriers: &mut Vec<Barrier>,
+        mut barriers: Option<&mut Vec<Barrier>>,
     ) -> Result<(), String> {
+        let delivered = barriers.is_some();
         let NormMsg {
             announce,
             withdraw,
@@ -543,7 +573,8 @@ impl Wire {
         };
         // `transport/src/session/replay.rs` sends only the markers of an
         // envelope that carries a replay token.
-        if replay
+        if delivered
+            && replay
             && !(announce.is_empty()
                 && withdraw.is_empty()
                 && evpn_announce.is_empty()
@@ -573,7 +604,7 @@ impl Wire {
             .filter(|(_, _, kind)| *kind == RouteRefreshSubtype::BoRR)
         {
             let family = wire_family((*afi, *safi));
-            if !self.eor.contains(&family) {
+            if delivered && !self.eor.contains(&family) {
                 return Err(where_(&format!(
                     "P3: BoRR for {family:?} before the session's initial EoR"
                 )));
@@ -634,7 +665,7 @@ impl Wire {
             )
         }));
         for key in &withdrawn {
-            if !self.held.contains_key(key) {
+            if delivered && !self.held.contains_key(key) {
                 return Err(where_(&format!(
                     "P2: withdrawal of {key:?}, which the receiver does not hold"
                 )));
@@ -654,15 +685,17 @@ impl Wire {
         }
         let mut barrier = |wire: &mut Self, family, kind| {
             wire.commit(op);
-            barriers.push(Barrier {
-                arm,
-                peer,
-                session: wire.session,
-                family,
-                op,
-                kind,
-                state: path_sets(&wire.held, Some(family)),
-            });
+            if let Some(barriers) = &mut barriers {
+                barriers.push(Barrier {
+                    arm,
+                    peer,
+                    session: wire.session,
+                    family,
+                    op,
+                    kind,
+                    state: path_sets(&wire.held, Some(family)),
+                });
+            }
         };
         for (afi, safi, _) in refresh_markers
             .iter()
@@ -670,7 +703,10 @@ impl Wire {
         {
             let family = wire_family((*afi, *safi));
             let Some(stale) = self.refresh_stale.remove(&family) else {
-                return Err(where_(&format!("P3: EoRR for {family:?} without a BoRR")));
+                if delivered {
+                    return Err(where_(&format!("P3: EoRR for {family:?} without a BoRR")));
+                }
+                continue;
             };
             self.purge(stale);
             barrier(self, family, "EoRR");
@@ -837,7 +873,7 @@ impl Arm {
                 produced,
                 message.clone(),
                 update.replay.is_some(),
-                barriers,
+                Some(&mut *barriers),
             )?;
             delivered.push(message);
         }
@@ -863,6 +899,7 @@ impl Arm {
             return;
         };
         let wire = &mut self.wire[peer];
+        let mut shadow = wire.discard_shadow();
         while let Ok(update) = rx.try_recv() {
             let produced = self.stamps[peer].pop_front().expect("stamped");
             self.retention[peer].push((produced, op, Self::rows(&update)));
@@ -894,6 +931,10 @@ impl Arm {
                 );
             for key in prefixes {
                 wire.lost.insert((wire.session, nlri(&key)));
+            }
+            for prefix in shadow.discarded_changes(peer, produced, message, update.replay.is_some())
+            {
+                wire.lost.insert((wire.session, prefix));
             }
         }
     }
@@ -1965,4 +2006,177 @@ fn purge_ops() -> Vec<Op> {
             family: Fam::V6,
         },
     ]
+}
+
+/// A flap may discard the marker that would purge a GR-retained route.
+#[test]
+fn discarded_orf_eor_can_end_a_gr_session() {
+    let mut config = livelock_config();
+    config[2] = PeerConfig {
+        capacity: 2,
+        gr: true,
+        orf: true,
+        ..config[2]
+    };
+    assert_clean(
+        &config,
+        &[
+            Op::Announce {
+                src: 0,
+                family: Fam::V4,
+                index: 2,
+                variant: 0,
+            },
+            Op::Orf { peer: 2, deny: 8 },
+            Op::Drain { peer: 2, k: None },
+            Op::GrRestart { peer: 2 },
+            Op::Orf { peer: 2, deny: 4 },
+            Op::Flap { peer: 2 },
+        ],
+    );
+}
+
+fn stale_marker_wire(enhanced: bool) -> (Wire, [Key; 3]) {
+    let keys = [
+        Key {
+            family: V4,
+            nlri: v4_prefix(0).to_string(),
+            path_id: 0,
+        },
+        Key {
+            family: V4,
+            nlri: v4_prefix(1).to_string(),
+            path_id: 0,
+        },
+        Key {
+            family: V6,
+            nlri: v6_prefix(0).to_string(),
+            path_id: 0,
+        },
+    ];
+    let wire = Wire {
+        session: 2,
+        enhanced,
+        held: keys
+            .iter()
+            .cloned()
+            .map(|key| (key, "old".into()))
+            .collect(),
+        gr_stale: keys.iter().cloned().collect(),
+        eor: BTreeSet::from([V4, V6]),
+        ..Wire::default()
+    };
+    (wire, keys)
+}
+
+#[test]
+fn discarded_marker_shadow_follows_queue_order() {
+    let (wire, [a, b, v6]) = stale_marker_wire(true);
+    let held = wire.held.clone();
+    let mut shadow = wire.discard_shadow();
+    let refreshed = NormMsg {
+        refresh_markers: vec![(Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR)],
+        announce: vec![(
+            Prefix::V4(v4_prefix(0)),
+            0,
+            IpAddr::V4(peer_addr(0)),
+            peer_id(0),
+            vec![],
+            None,
+        )],
+        ..NormMsg::default()
+    };
+    assert_eq!(
+        shadow.discarded_changes(2, 3, refreshed, false),
+        BTreeSet::from([nlri(&a)])
+    );
+    let end = NormMsg {
+        refresh_markers: vec![(Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR)],
+        ..NormMsg::default()
+    };
+    assert_eq!(
+        shadow.discarded_changes(2, 5, end, false),
+        BTreeSet::from([nlri(&b)])
+    );
+    let v4_eor = NormMsg {
+        end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+        ..NormMsg::default()
+    };
+    assert!(shadow.discarded_changes(2, 6, v4_eor, false).is_empty());
+    let v6_eor = NormMsg {
+        end_of_rib: vec![(Afi::Ipv6, Safi::Unicast)],
+        ..NormMsg::default()
+    };
+    assert_eq!(
+        shadow.discarded_changes(2, 7, v6_eor, true),
+        BTreeSet::from([nlri(&v6)])
+    );
+    assert_eq!(shadow.held.keys().collect::<Vec<_>>(), vec![&a]);
+    assert_eq!(wire.held, held, "discard cannot deliver shadow changes");
+    assert_eq!(wire.gr_stale.len(), 3);
+    assert!(wire.history.is_empty());
+}
+
+#[test]
+fn discarded_marker_shadow_uses_delivery_filters() {
+    for enhanced in [false, true] {
+        let (mut delivered, [a, b, _]) = stale_marker_wire(enhanced);
+        delivered.refresh_stale.insert(V4, BTreeSet::new());
+        let mut shadow = delivered.discard_shadow();
+        let message = NormMsg {
+            end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+            refresh_markers: vec![(Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR)],
+            ..NormMsg::default()
+        };
+        let changed = shadow.discarded_changes(2, 5, message.clone(), false);
+        let expected = if enhanced {
+            BTreeSet::new()
+        } else {
+            BTreeSet::from([nlri(&a), nlri(&b)])
+        };
+        assert_eq!(changed, expected);
+        delivered
+            .apply(SUBJECT, 2, 5, message, false, Some(&mut Vec::new()))
+            .unwrap();
+        assert_eq!(shadow.held, delivered.held);
+        assert_eq!(shadow.gr_stale, delivered.gr_stale);
+        assert_eq!(shadow.refresh_stale, delivered.refresh_stale);
+    }
+}
+
+#[test]
+fn discarded_marker_shadow_checks_only_delivered_envelopes() {
+    let cases = [
+        (
+            "P2:",
+            NormMsg {
+                withdraw: vec![(Prefix::V4(v4_prefix(2)), 0)],
+                ..NormMsg::default()
+            },
+        ),
+        (
+            "P3:",
+            NormMsg {
+                refresh_markers: vec![(Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR)],
+                ..NormMsg::default()
+            },
+        ),
+        (
+            "P3:",
+            NormMsg {
+                refresh_markers: vec![(Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR)],
+                ..NormMsg::default()
+            },
+        ),
+    ];
+    for (property, message) in cases {
+        let (mut delivered, _) = stale_marker_wire(true);
+        delivered.eor.clear();
+        let mut shadow = delivered.discard_shadow();
+        let error = delivered
+            .apply(SUBJECT, 2, 5, message.clone(), false, Some(&mut Vec::new()))
+            .unwrap_err();
+        assert!(error.starts_with(property), "{error}");
+        assert!(shadow.discarded_changes(2, 5, message, false).is_empty());
+    }
 }
