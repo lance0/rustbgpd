@@ -123,7 +123,7 @@ pub use update::{
     ReceivedFlowSpecRoute, RibCommandError, RibReadinessError, RibReadinessQuery, RibRowFilter,
     RibRowsPage, RibSummaryQuery, RibUpdate, RoutePage, RoutePageError, RoutePageVersion,
     RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RpkiValidationCounts,
-    RtcRouteQueryKey, SelectionDeferralPeerFamilyState, SharedGroupEncode,
+    RtcRouteQueryKey, SelectionDeferralPeerFamilyState, SharedGroupEncode, SharedWithdrawals,
     UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupComparisonDifference,
     UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict, UpdateGroupFamilyImpact,
     UpdateGroupFingerprint, UpdateGroupImpactPlan, UpdateGroupImpactRollup,

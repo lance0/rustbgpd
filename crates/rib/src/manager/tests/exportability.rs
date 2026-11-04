@@ -1524,7 +1524,9 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
             .try_send_and_commit_outbound_update_with_group_prior(
                 member,
                 OutboundCommitBatch {
-                    shared_withdraw: Some(Arc::clone(&stage.shared_withdraw)),
+                    shared_withdraw: Some(crate::SharedWithdrawals::from_shared(
+                        &stage.shared_withdraw,
+                    )),
                     ..OutboundCommitBatch::with_unicast(
                         Arc::clone(&stage.shared_announce),
                         Arc::clone(&stage.shared_nh),
@@ -1549,7 +1551,7 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
     );
     assert!(withdrawn.announce.is_empty());
     assert!(Arc::ptr_eq(
-        &withdrawn.shared_withdraw,
+        withdrawn.shared_withdraw.as_shared().unwrap(),
         &stage.shared_withdraw
     ));
     assert_eq!(withdrawn.withdraw.capacity(), 0);
@@ -1644,7 +1646,9 @@ fn shared_withdrawal_filter_is_member_local() {
                 .try_send_and_commit_outbound_update_with_group_prior(
                     member,
                     OutboundCommitBatch {
-                        shared_withdraw: Some(Arc::clone(&stage.shared_withdraw)),
+                        shared_withdraw: Some(crate::SharedWithdrawals::from_shared(
+                            &stage.shared_withdraw
+                        )),
                         ..OutboundCommitBatch::default()
                     },
                     prior.iter().cloned().collect(),
@@ -1659,7 +1663,10 @@ fn shared_withdrawal_filter_is_member_local() {
         clean.unicast_withdrawals().copied().collect::<Vec<_>>(),
         staged
     );
-    assert!(Arc::ptr_eq(&clean.shared_withdraw, &stage.shared_withdraw));
+    assert!(Arc::ptr_eq(
+        clean.shared_withdraw.as_shared().unwrap(),
+        &stage.shared_withdraw
+    ));
     assert_eq!(clean.withdraw.capacity(), 0);
     assert_eq!(
         filtered.unicast_withdrawals().copied().collect::<Vec<_>>(),
@@ -1723,7 +1730,9 @@ fn shared_withdrawal_keeps_an_exact_rejection_suffix() {
             .try_send_and_commit_outbound_update_with_group_prior(
                 member,
                 OutboundCommitBatch {
-                    shared_withdraw: Some(Arc::clone(&stage.shared_withdraw)),
+                    shared_withdraw: Some(crate::SharedWithdrawals::from_shared(
+                        &stage.shared_withdraw
+                    )),
                     ..OutboundCommitBatch::with_unicast(
                         Arc::clone(&stage.shared_announce),
                         Arc::clone(&stage.shared_nh)
@@ -1742,7 +1751,10 @@ fn shared_withdrawal_keeps_an_exact_rejection_suffix() {
         update.unicast_withdrawals().copied().collect::<Vec<_>>(),
         keys
     );
-    assert!(Arc::ptr_eq(&update.shared_withdraw, &stage.shared_withdraw));
+    assert!(Arc::ptr_eq(
+        update.shared_withdraw.as_shared().unwrap(),
+        &stage.shared_withdraw
+    ));
     assert_eq!(update.withdraw, vec![keys[1]]);
     assert_eq!(
         update.withdraw.capacity(),

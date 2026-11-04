@@ -3516,7 +3516,7 @@ async fn shared_group_encode_skips_mixed_family_envelopes() {
                 update.announce = Arc::default();
                 update.next_hop_override = Arc::default();
                 update.vpn_announce = Arc::new(vec![vpn.clone()]);
-                update.shared_withdraw = Arc::new(vec![unicast_key]);
+                update.shared_withdraw = Arc::new(vec![unicast_key]).into();
             }),
         ),
         (
@@ -3534,7 +3534,7 @@ async fn shared_group_encode_skips_mixed_family_envelopes() {
                 update.announce = Arc::default();
                 update.next_hop_override = Arc::default();
                 update.evpn_announce = Arc::new(vec![evpn.clone()]);
-                update.shared_withdraw = Arc::new(vec![unicast_key]);
+                update.shared_withdraw = Arc::new(vec![unicast_key]).into();
             }),
         ),
     ];

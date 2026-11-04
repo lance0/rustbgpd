@@ -40,7 +40,7 @@ use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
     ExportGateVerdict, NeighborPolicyStats, OutboundRouteUpdate, PeerExportPolicyReplacement,
-    PeerExportPolicyRestoreReceipt, RibCommandError, RibUpdate,
+    PeerExportPolicyRestoreReceipt, RibCommandError, RibUpdate, SharedWithdrawals,
 };
 
 mod bgpls;
@@ -286,7 +286,7 @@ pub(in crate::manager) struct OutboundCommitBatch {
         Option<Arc<dyn crate::update::ExactExportSnapshot>>,
     /// The group's shared withdrawals, used instead of `withdraw` until a
     /// member-specific gate changes them.
-    pub(in crate::manager) shared_withdraw: Option<Arc<Vec<(Prefix, u32)>>>,
+    pub(in crate::manager) shared_withdraw: Option<SharedWithdrawals>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
     pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -411,9 +411,7 @@ pub(in crate::manager) fn sort_evpn_announcements(
 impl OutboundCommitBatch {
     fn unicast_withdrawals(&self) -> &[(Prefix, u32)] {
         debug_assert!(self.shared_withdraw.is_none() || self.withdraw.is_empty());
-        self.shared_withdraw
-            .as_deref()
-            .map_or(self.withdraw.as_slice(), Vec::as_slice)
+        self.shared_withdraw.as_deref().unwrap_or(&self.withdraw)
     }
 
     pub(in crate::manager) fn retire_with(
@@ -4018,7 +4016,7 @@ impl RibManager {
         let mut withdraw = match shared_withdraw.as_deref() {
             Some(shared) => {
                 debug_assert_eq!(withdraw, []);
-                Cow::Borrowed(shared.as_slice())
+                Cow::Borrowed(shared)
             }
             None => Cow::Owned(withdraw),
         };
@@ -5697,7 +5695,7 @@ impl RibManager {
                         }
                         shared
                     }
-                    _ => Arc::default(),
+                    _ => SharedWithdrawals::default(),
                 };
                 (shared, withdraw)
             }
@@ -9887,7 +9885,9 @@ impl RibManager {
                                     announce_source_exclusion =
                                         shared_with_source_exclusion.then_some(peer);
                                     shared_group_encode = Some(Arc::clone(&stage.shared_encode));
-                                    shared_withdraw = Some(Arc::clone(&stage.shared_withdraw));
+                                    shared_withdraw = Some(SharedWithdrawals::from_shared(
+                                        &stage.shared_withdraw,
+                                    ));
                                 } else {
                                     #[cfg(feature = "bench-internals")]
                                     {
