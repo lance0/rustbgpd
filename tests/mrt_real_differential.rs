@@ -177,6 +177,7 @@ fn mp_add_path_unicast_control() {
         vpn_announced: Vec::new(),
         labeled_announced: Vec::new(),
         rtc_announced: Vec::new(),
+        vpn_flowspec_announced: vec![],
     })));
     let update = UpdateMessage::build(&[], &[], &attributes, true, true, Ipv4UnicastMode::Body);
     let mut bytes = BytesMut::new();

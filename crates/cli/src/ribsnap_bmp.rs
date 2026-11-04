@@ -948,6 +948,7 @@ fn mp_unreach_nlri_count(mp: &MpUnreachNlri) -> usize {
         + mp.vpn_withdrawn.len()
         + mp.labeled_withdrawn.len()
         + mp.rtc_withdrawn.len()
+        + mp.vpn_flowspec_withdrawn.len()
 }
 
 /// Fold one decoded path attribute into the shared `SnapRoute` template.

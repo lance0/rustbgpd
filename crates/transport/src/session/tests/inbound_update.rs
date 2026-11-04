@@ -252,6 +252,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -674,6 +675,7 @@ async fn ebgp_local_pref_is_ignored_for_ipv6_mp_reach() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
@@ -796,6 +798,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     // Build with Add-Path enabled and MP encoding

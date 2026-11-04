@@ -186,6 +186,7 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: nlris,
+            vpn_flowspec_announced: vec![],
         }))
     };
     let unreach = |nlris: Vec<RtcNlri>| {
@@ -199,6 +200,7 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: nlris,
+            vpn_flowspec_withdrawn: vec![],
         }))
     };
     let update = |mut attributes: Vec<PathAttribute>, reach_attr, unreach_attr| {
@@ -390,6 +392,7 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             }))
         };
         let unreach = |nlris: Vec<BgpLsNlri>| {
@@ -403,6 +406,7 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
                 labeled_withdrawn: vec![],
                 vpn_withdrawn: vec![],
                 rtc_withdrawn: vec![],
+                vpn_flowspec_withdrawn: vec![],
             }))
         };
         let update = |mut attributes: Vec<PathAttribute>, reach_attr, unreach_attr| {

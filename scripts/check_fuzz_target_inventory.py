@@ -141,6 +141,8 @@ EXPECTED_WIRE_SEED_PATHS = (
     "crates/wire/fuzz/seeds/decode_evpn/smet_v6_sg",
     "crates/wire/fuzz/seeds/decode_evpn/smet_wildcard_v6_origin",
     "crates/wire/fuzz/seeds/decode_flowspec/ipv4_tcp_80",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd0_dst_udp",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd2_extended_len",
     "crates/wire/fuzz/seeds/decode_labeled/announce_two_labels",
     "crates/wire/fuzz/seeds/decode_labeled/announce_v4",
     "crates/wire/fuzz/seeds/decode_labeled/withdraw_compat_v4",
@@ -192,6 +194,10 @@ EXPECTED_SEEDS: dict[str, bytes] = {
     "crates/wire/fuzz/seeds/decode_flowspec/ipv4_tcp_80": bytes.fromhex(
         "0b01180a0000038106058150"
     ),
+    # The type-0 RD golden vector in tests/flowspec_vpn.rs (SAFI 134).
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd0_dst_udp": bytes.fromhex(
+        "110000ad7700000028" "0120cb00710a038111"
+    ),
     # Canonical production KEEPALIVE encoding from keepalive.rs/message.rs.
     "crates/wire/fuzz/seeds/decode_message/keepalive": bytes.fromhex(
         "ffffffffffffffffffffffffffffffff001304"
@@ -223,6 +229,8 @@ EXPECTED_SEED_SHA256 = {
     "crates/wire/fuzz/seeds/decode_evpn/smet_v6_sg": "e209070a69839f76894e831f21d321ed0ed3f142ed5395281258828b20af1b24",
     "crates/wire/fuzz/seeds/decode_evpn/smet_wildcard_v6_origin": "23e89e400c65ede6052152a62bf31fa5160e9354002951916d6153b896113cd4",
     "crates/wire/fuzz/seeds/decode_flowspec/ipv4_tcp_80": "1cd834ffac49aca73ad096cdd34621e6678e05b7c16803db98a3002929629495",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd0_dst_udp": "1487a5bd2ccab6295dfefcf03a3386043661d124baae3457b61ba6692370a658",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd2_extended_len": "810882dd143a29accde0f239ef5e310f0de128614aeb316c003e20d01ac126a6",
     "crates/wire/fuzz/seeds/decode_labeled/announce_two_labels": "e798f0a78d309eb0bf8d92c71a629c7cf48c3dc8b8a05903fd5d481449ebdb5c",
     "crates/wire/fuzz/seeds/decode_labeled/announce_v4": "9c83a82a45560c32507bedd06f86a80eb745b4de18186b79e13c827c2e930474",
     "crates/wire/fuzz/seeds/decode_labeled/withdraw_compat_v4": "0e452a4cd801a768a575a49f269bf370a442e6c7e5aa731f69f87cd590d6dc84",

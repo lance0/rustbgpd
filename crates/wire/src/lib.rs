@@ -289,7 +289,7 @@ pub use validate::{
 // Re-export FlowSpec types
 pub use flowspec::{
     BitmaskMatch, FlowSpecAction, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
-    Ipv6PrefixOffset, NumericMatch,
+    Ipv6PrefixOffset, NumericMatch, VpnFlowSpecRule,
 };
 
 // Re-export EVPN types

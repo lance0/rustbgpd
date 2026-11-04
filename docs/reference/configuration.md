@@ -1909,6 +1909,15 @@ the peer via MP-BGP capabilities. Supported values:
   RTC interest receives nothing, with RFC-faithful 96-bit prefix matching.
   EVPN routes are filtered by their Route Targets (RFC 7432 §7.10), and
   Type 4 Ethernet Segment routes by their ES-Import RT (§7.6).
+- `"l3vpn_ipv4_flowspec"` — IPv4 VPN FlowSpec (AFI 1, SAFI 134, RFC 8955
+  §8), for originating FlowSpec rules into a PE's VRFs. This release
+  negotiates the family only: received rules are decoded, then discarded and
+  counted in `bgp_vpn_flowspec_nlri_discarded_total`, and are never stored,
+  reflected or validated. The family needs no per-family `max_prefixes` key
+  and is never refreshed. Rule origination follows in a later release
+  ([ADR-0146](../adr/0146-vpn-flowspec.md)). An export policy that matches
+  `route.family == ipv4-flowspec` matches SAFI 133 only, never these VPN
+  rules. IPv6 VPN FlowSpec (AFI 2, SAFI 134) is not supported.
 
 **Defaults:** If `families` is omitted, the default depends on the neighbor
 address type:
@@ -6171,7 +6180,7 @@ quoting it:
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
 | `min_hold_time` must be 3..=65535 and no greater than a non-zero effective `hold_time` | `invalid min_hold_time` |
 | `send_hold_time` must be 0 (disabled) or greater than the effective `hold_time` (RFC 9687 §4.4) | `invalid send_hold_time` |
-| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, `"linkstate_vpn"`, `"l3vpn_ipv4_unicast"`, `"l3vpn_ipv6_unicast"`, `"ipv4_labeled_unicast"`, `"ipv6_labeled_unicast"`, or `"rtc"` | `unknown address family` |
+| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, `"linkstate_vpn"`, `"l3vpn_ipv4_unicast"`, `"l3vpn_ipv6_unicast"`, `"ipv4_labeled_unicast"`, `"ipv6_labeled_unicast"`, `"rtc"`, or `"l3vpn_ipv4_flowspec"` | `unknown address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time <value> exceeds 4095 (12-bit max)` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_peer_restart_time_max` must be > 0 | `gr_peer_restart_time_max must be > 0` |

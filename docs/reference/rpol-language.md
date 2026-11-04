@@ -141,6 +141,10 @@ has a known type and every operator a fixed signature.
 | IP address | address literals | `route.next-hop`, `peer.address` |
 | string | string literals | regexes, `peer.group` |
 
+`ipv4-flowspec` and `ipv6-flowspec` match global FlowSpec (SAFI 133) only.
+They never match IPv4 VPN FlowSpec (`l3vpn_ipv4_flowspec`, SAFI 134), so a
+policy that denies `ipv4-flowspec` does not deny VPN FlowSpec rules.
+
 ## Sets
 
 ```rpol

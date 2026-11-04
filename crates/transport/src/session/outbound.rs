@@ -619,7 +619,13 @@ impl PeerSession {
             if let Some(negotiated) = &self.negotiated
                 && negotiated.peer_route_refresh
             {
-                requests.clone_from(&negotiated.negotiated_families);
+                requests.extend(
+                    negotiated
+                        .negotiated_families
+                        .iter()
+                        .copied()
+                        .filter(|&family| super::commands::requests_route_refresh(family)),
+                );
             } else {
                 warn!(peer = %self.peer_label, "ROUTE-REFRESH request skipped: peer lacks the capability");
             }
@@ -1382,7 +1388,11 @@ impl PeerSession {
                 _ => None,
             };
             if let Some(negotiated) = negotiated {
-                for &(afi, safi) in &negotiated.negotiated_families {
+                for &(afi, safi) in negotiated
+                    .negotiated_families
+                    .iter()
+                    .filter(|&&family| super::commands::requests_route_refresh(family))
+                {
                     let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
                     if let Err(e) = self.enqueue_bulk(&msg) {
                         warn!(

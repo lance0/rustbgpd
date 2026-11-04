@@ -300,6 +300,7 @@ async fn mrt_dump_of_a_received_ipv6_route_keeps_mp_reach_next_hop() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
@@ -362,6 +363,7 @@ fn empty_mp_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> MpReachNlri {
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     }
 }
 

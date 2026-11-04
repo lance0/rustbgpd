@@ -168,6 +168,7 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     })));
     session
         .process_update(UpdateMessage::build(
@@ -204,6 +205,7 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     })));
     replacement_attrs.push(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
         afi: Afi::Ipv6,
@@ -215,6 +217,7 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     })));
     session
         .process_update(UpdateMessage::build(

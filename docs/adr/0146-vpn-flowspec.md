@@ -343,9 +343,11 @@ belongs with reflection, where RT-Constrain does its work.
 - **Add-Path.** Never advertised for (1, 134); the existing family filter
   already omits FlowSpec, and a test pins it.
 - **GR and LLGR.** (1, 134) is treated like (1, 133) in capability
-  construction. It is not guaranteed, as for all FlowSpec. ADR-0144's residual
-  risk applies: a peer with GR or LLGR for the family keeps a rule after the
-  daemon crashes, until its stale timers run out.
+  construction from slice 2, which adds the family's stale-retention
+  lifecycle; slice 1 leaves it out of the GR and LLGR families, because it
+  stores nothing to retain. It is not guaranteed, as for all FlowSpec.
+  ADR-0144's residual risk applies: a peer with GR or LLGR for the family
+  keeps a rule after the daemon crashes, until its stale timers run out.
 - **Export policy.** Ordinary export policy, `NO_ADVERTISE`/`NO_EXPORT`, and
   ignoring `set_next_hop` all apply unchanged. Export policy can strip a
   rule's RTs; the documentation names that as the operator's choice, not

@@ -1114,6 +1114,7 @@ async fn evpn_srv6_prefix_sid_value_survives_receive_and_export() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     receiver
@@ -1206,6 +1207,7 @@ async fn vpn_srv6_prefix_sid_value_survives_receive_and_export() {
                 nlri: route.nlri.clone(),
             }],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
         receiver
             .process_update(UpdateMessage::build(

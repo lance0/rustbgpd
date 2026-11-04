@@ -60,6 +60,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
         PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi: Afi::L2Vpn,
@@ -71,6 +72,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -582,6 +584,7 @@ async fn rr_loop_detected_update_synthesizes_rtc_withdrawals() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![announced_nlri],
+            vpn_flowspec_announced: vec![],
         })),
         PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi: Afi::Ipv4,
@@ -593,6 +596,7 @@ async fn rr_loop_detected_update_synthesizes_rtc_withdrawals() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![withdrawn_nlri],
+            vpn_flowspec_withdrawn: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -683,6 +687,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
         PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi: Afi::L2Vpn,
@@ -694,6 +699,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -875,6 +881,7 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         }))
     };
     let base_attrs = || {
@@ -935,6 +942,7 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     })));
     session
         .process_update(UpdateMessage::build(

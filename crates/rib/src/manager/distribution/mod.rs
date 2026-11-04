@@ -1778,6 +1778,7 @@ fn family_label(family: (Afi, Safi)) -> String {
     let safi = match family.1 {
         Safi::Unicast => "unicast",
         Safi::FlowSpec => "flowspec",
+        Safi::FlowSpecVpn => "flowspec_vpn",
         Safi::Multicast => "multicast",
         Safi::LabeledUnicast => "labeled_unicast",
         Safi::Evpn => "evpn",

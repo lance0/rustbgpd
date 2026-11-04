@@ -68,6 +68,7 @@ fn rich_ipv6_mp_iterator_build_matches_legacy_oracle() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         },
     )));
     let expected = rustbgpd_wire::UpdateMessage::try_build(
