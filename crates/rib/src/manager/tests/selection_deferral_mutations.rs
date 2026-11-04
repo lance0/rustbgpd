@@ -193,11 +193,9 @@ fn removing_blackhole_from_same_key(prefix: Prefix, leased: bool) {
     let (outcome, generation) = inject(&mut manager, tagged, leased);
     assert_eq!(outcome, InjectOutcome::Created);
     let updates = drain(&mut existing_rx);
-    assert!(
-        updates
-            .iter()
-            .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
-    );
+    assert!(updates.iter().all(
+        |update| update.unicast_withdrawals().next().is_none() && update.end_of_rib.is_empty()
+    ));
     assert_eq!(
         updates
             .iter()
@@ -285,7 +283,7 @@ fn removing_blackhole_from_same_key(prefix: Prefix, leased: bool) {
     assert_eq!(
         replacement_updates
             .iter()
-            .flat_map(|update| update.withdraw.iter())
+            .flat_map(crate::update::OutboundRouteUpdate::unicast_withdrawals)
             .copied()
             .collect::<Vec<_>>(),
         vec![(prefix, 0)],
@@ -327,7 +325,10 @@ fn removing_blackhole_from_same_key(prefix: Prefix, leased: bool) {
         let mut announced = Vec::new();
         let mut markers = 0;
         for update in updates {
-            assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+            assert_eq!(
+                update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                [] as [(Prefix, u32); 0]
+            );
             for route in update.announce.iter() {
                 assert!(!terminal, "fallback data must precede its EoR");
                 announced.push((

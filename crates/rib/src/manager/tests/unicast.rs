@@ -92,8 +92,8 @@ fn apply_unicast_updates(
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
     state: &mut HashMap<(Prefix, u32), Route>,
 ) {
-    while let Ok(update) = rx.try_recv() {
-        for withdrawn in update.withdraw {
+    while let Ok(update) = rx.try_recv().map(delivered) {
+        for withdrawn in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
             state.remove(&withdrawn);
         }
         for route in update.announce.iter() {
@@ -152,7 +152,10 @@ async fn partial_communities_enforce_no_export_and_no_advertise() {
         .await
         .unwrap();
         let _ = query_best_routes(&tx).await;
-        let announced = out_rx.try_recv().expect("plain route is announced");
+        let announced = out_rx
+            .try_recv()
+            .map(delivered)
+            .expect("plain route is announced");
         assert_eq!(announced.announce.len(), 1);
 
         tx.send(RibUpdate::RoutesReceived {
@@ -171,9 +174,13 @@ async fn partial_communities_enforce_no_export_and_no_advertise() {
         let _ = query_best_routes(&tx).await;
         let withdrawn = out_rx
             .try_recv()
+            .map(delivered)
             .expect("Partial well-known community withdraws prior route");
         assert!(withdrawn.announce.is_empty());
-        assert_eq!(withdrawn.withdraw, vec![(Prefix::V4(prefix), 0)]);
+        assert_eq!(
+            withdrawn.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(Prefix::V4(prefix), 0)]
+        );
     }
 
     drop(tx);
@@ -344,7 +351,10 @@ async fn partial_community_attributes_survive_policy_update_group_and_wire_encod
     .await
     .unwrap();
     let _ = query_best_routes(&tx).await;
-    let update = out_rx.try_recv().expect("route is exported after policy");
+    let update = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("route is exported after policy");
     let advertised = update.announce.first().expect("one route announced");
     assert_partial_community_export(
         advertised,
@@ -428,7 +438,7 @@ async fn receive_dual_stack_dump(
         for route in update.announce.iter() {
             state.insert((route.prefix, route.path_id), route.clone());
         }
-        for withdrawn in update.withdraw {
+        for withdrawn in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
             state.remove(&withdrawn);
         }
         eor.extend(update.end_of_rib);
@@ -470,7 +480,10 @@ async fn deferred_registration_stages_current_session_paths_limit() {
     let initial = receive_dual_stack_dump(&mut out_rx).await;
     assert_eq!(path_count(&initial, Prefix::V4(v4)), 1);
     assert_eq!(path_count(&initial, Prefix::V6(v6)), 2);
-    assert!(out_rx.try_recv().is_err(), "the first dump must run once");
+    assert!(
+        out_rx.try_recv().map(delivered).is_err(),
+        "the first dump must run once"
+    );
     drop(tx);
     handle.await.unwrap();
 }
@@ -512,7 +525,7 @@ async fn deferred_registration_rejects_superseded_session_paths_limit() {
     assert_eq!(path_count(&initial, Prefix::V4(v4)), 1);
     assert_eq!(path_count(&initial, Prefix::V6(v6)), 1);
     assert!(
-        old_rx.try_recv().is_err(),
+        old_rx.try_recv().map(delivered).is_err(),
         "superseded session emitted a dump"
     );
 
@@ -698,7 +711,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     .unwrap();
     let _ = query_best_routes(&tx).await;
     for (_, out_rx) in &mut receivers {
-        while out_rx.try_recv().is_ok() {}
+        while out_rx.try_recv().map(delivered).is_ok() {}
     }
 
     let (reply, result) = oneshot::channel();
@@ -727,14 +740,14 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
         HashSet::from([Prefix::V4(kept_prefix), Prefix::V6(v6)])
     );
     assert!(refreshed.vpn_announce.is_empty());
-    assert_eq!(refreshed.withdraw.len(), 0);
+    assert_eq!(refreshed.unicast_withdrawals().count(), 0);
 
     let (_, sibling_rx) = receivers
         .iter_mut()
         .find(|(peer, _)| *peer == sibling)
         .unwrap();
     assert!(
-        sibling_rx.try_recv().is_err(),
+        sibling_rx.try_recv().map(delivered).is_err(),
         "a one-peer refresh must not emit to a sibling"
     );
 
@@ -832,9 +845,12 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     .unwrap();
     let _ = query_best_routes(&tx).await;
     for (_, out_rx) in &mut receivers {
-        let update = out_rx.try_recv().expect("plain route announced after sync");
+        let update = out_rx
+            .try_recv()
+            .map(delivered)
+            .expect("plain route announced after sync");
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
     }
 
     tx.send(RibUpdate::RoutesReceived {
@@ -854,12 +870,16 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     for (peer, out_rx) in &mut receivers {
         let update = out_rx
             .try_recv()
+            .map(delivered)
             .expect("NO_ADVERTISE replacement withdrawn after sync");
         assert!(
             update.announce.is_empty(),
             "{peer} must not receive the route"
         );
-        assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(Prefix::V4(prefix), 0)]
+        );
 
         let response = collect_advertised_routes(&tx, PeerId::from_addr(*peer)).await;
         assert!(response.is_empty());
@@ -907,6 +927,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     for (_, out_rx) in &mut receivers {
         let update = out_rx
             .try_recv()
+            .map(delivered)
             .expect("plain replacement announced after query synchronization");
         assert_eq!(update.announce.len(), 1);
     }
@@ -926,12 +947,16 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
 
     for (peer, out_rx) in &mut receivers {
         let mut saw_withdraw = false;
-        while let Ok(update) = out_rx.try_recv() {
+        while let Ok(update) = out_rx.try_recv().map(delivered) {
             assert!(
                 update.announce.is_empty(),
                 "policy-added NO_ADVERTISE must not be announced to {peer}"
             );
-            saw_withdraw |= update.withdraw.contains(&(Prefix::V4(prefix), 0));
+            saw_withdraw |= update
+                .unicast_withdrawals()
+                .copied()
+                .collect::<Vec<_>>()
+                .contains(&(Prefix::V4(prefix), 0));
         }
         assert!(saw_withdraw, "policy replacement must withdraw from {peer}");
 
@@ -1034,9 +1059,9 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (_, out_rx) in &mut receivers {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert!(update.otc_blocked.is_empty());
     }
 
@@ -1055,9 +1080,12 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (_, out_rx) in &mut receivers {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         assert!(update.announce.is_empty());
-        assert_eq!(update.withdraw, vec![(Prefix::V4(advertised_prefix), 0)]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(Prefix::V4(advertised_prefix), 0)]
+        );
         assert_eq!(update.otc_blocked.len(), 1);
         assert_eq!(update.otc_blocked[0].prefix, Prefix::V4(advertised_prefix));
         assert!(
@@ -1087,9 +1115,9 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (peer, out_rx) in &mut receivers {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         assert!(update.announce.is_empty());
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert_eq!(update.otc_blocked.len(), 1);
         assert!(
             update.otc_blocked[0]
@@ -1126,7 +1154,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     let _ = query_best_routes(&tx).await;
     let mut resyncs = 0;
     for (_, out_rx) in &mut receivers {
-        while let Ok(update) = out_rx.try_recv() {
+        while let Ok(update) = out_rx.try_recv().map(delivered) {
             resyncs += 1;
             assert!(
                 update.otc_blocked.is_empty(),
@@ -1150,7 +1178,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         .unwrap();
     }
     for (_, out_rx) in &mut receivers {
-        let refresh = out_rx.recv().await.unwrap();
+        let refresh = out_rx.recv().await.map(delivered).unwrap();
         assert_eq!(refresh.refresh_markers.len(), 2);
         assert!(
             refresh.otc_blocked.is_empty(),
@@ -1173,9 +1201,9 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (_, out_rx) in &mut receivers {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert!(
             update.otc_blocked.is_empty(),
             "a permitted replacement must clear the prior OTC denial residue"
@@ -1200,7 +1228,16 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     .await
     .unwrap();
     for (_, out_rx) in &mut receivers {
-        assert_eq!(out_rx.recv().await.unwrap().otc_blocked.len(), 1);
+        assert_eq!(
+            out_rx
+                .recv()
+                .await
+                .map(delivered)
+                .unwrap()
+                .otc_blocked
+                .len(),
+            1
+        );
     }
 
     tx.send(RibUpdate::PeerDown {
@@ -1237,7 +1274,16 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     })
     .await
     .unwrap();
-    assert_eq!(rejoined_rx.recv().await.unwrap().otc_blocked.len(), 2);
+    assert_eq!(
+        rejoined_rx
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .otc_blocked
+            .len(),
+        2
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -1314,7 +1360,7 @@ async fn assert_otc_backpressure_dedup(per_client_best: bool) {
     }
     drain_eor(&mut out_rx).await;
     tokio::time::advance(Duration::from_secs(2)).await;
-    let recovered = out_rx.recv().await.unwrap();
+    let recovered = out_rx.recv().await.map(delivered).unwrap();
     assert!(recovered.announce.is_empty());
     assert_eq!(recovered.otc_blocked.len(), 1);
     let (reply, result) = oneshot::channel();
@@ -1326,7 +1372,7 @@ async fn assert_otc_backpressure_dedup(per_client_best: bool) {
     .unwrap();
     assert_eq!(result.await.unwrap(), Ok(()));
     let _ = query_best_routes(&tx).await;
-    while let Ok(update) = out_rx.try_recv() {
+    while let Ok(update) = out_rx.try_recv().map(delivered) {
         assert!(
             update.otc_blocked.is_empty(),
             "force retry repeated an unchanged OTC edge"
@@ -1426,7 +1472,7 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
     tokio::time::advance(Duration::from_secs(2)).await;
     tokio::task::yield_now().await;
     assert!(
-        out_rx.try_recv().is_err(),
+        out_rx.try_recv().map(delivered).is_err(),
         "empty dirty resync leaked an obsolete OTC diagnostic"
     );
 
@@ -1447,7 +1493,7 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
     })
     .await
     .unwrap();
-    let recovered = out_rx.recv().await.unwrap();
+    let recovered = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(recovered.announce.len(), 1);
     assert_eq!(recovered.announce[0].prefix, permitted.prefix);
     assert!(
@@ -1462,15 +1508,19 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
 fn assert_one_dual_stack_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
     let update = out_rx
         .try_recv()
+        .map(delivered)
         .expect("effective limit change triggers one resync");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(
         update.end_of_rib,
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
     );
     assert!(
-        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        matches!(
+            out_rx.try_recv().map(delivered),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
         "effective limit change must trigger exactly one resync"
     );
 }
@@ -1516,7 +1566,7 @@ fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
     });
     assert!(!manager.peer_add_path_send_limits.contains_key(&peer));
     assert!(matches!(
-        out_rx.try_recv(),
+        out_rx.try_recv().map(delivered),
         Err(mpsc::error::TryRecvError::Empty)
     ));
 
@@ -1533,7 +1583,7 @@ fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 8);
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 8);
     assert!(matches!(
-        out_rx.try_recv(),
+        out_rx.try_recv().map(delivered),
         Err(mpsc::error::TryRecvError::Empty)
     ));
 
@@ -1553,7 +1603,7 @@ fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 8);
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 8);
     assert!(matches!(
-        out_rx.try_recv(),
+        out_rx.try_recv().map(delivered),
         Err(mpsc::error::TryRecvError::Empty)
     ));
 
@@ -1580,7 +1630,7 @@ fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
         ],
     });
     assert!(matches!(
-        out_rx.try_recv(),
+        out_rx.try_recv().map(delivered),
         Err(mpsc::error::TryRecvError::Empty)
     ));
 
@@ -1661,7 +1711,10 @@ fn paths_limit_ignores_entries_outside_negotiated_send_families() {
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v4), 8);
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 0);
     assert!(
-        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        matches!(
+            out_rx.try_recv().map(delivered),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
         "rejecting an inert foreign-family limit must not replay the table"
     );
 }
@@ -1735,7 +1788,7 @@ fn paths_limit_survives_collision_failback() {
     assert_eq!(manager.add_path_send_max_for_prefix(peer, &v6), 5);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "one end-to-end dual-stack scenario covers initial dump, churn, withdrawal, and refresh replay"
@@ -1826,6 +1879,15 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
     let _ = sync_rx.await.unwrap();
     let mut wire = HashMap::new();
     apply_unicast_updates(&mut out_rx, &mut wire);
+    // The limits' resync waits for the initial dump to be sent, then runs
+    // on the resync tick (paused time: each sleep advances the clock).
+    for _ in 0..40 {
+        if wire.keys().filter(|(p, _)| *p == Prefix::V6(v6)).count() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        apply_unicast_updates(&mut out_rx, &mut wire);
+    }
     assert_eq!(wire.keys().filter(|(p, _)| *p == Prefix::V4(v4)).count(), 1);
     assert_eq!(wire.keys().filter(|(p, _)| *p == Prefix::V6(v6)).count(), 2);
     let initial = wire.clone();
@@ -2575,10 +2637,10 @@ async fn peer_up_triggers_initial_table_dump() {
     .unwrap();
 
     // Should receive initial table dump
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     drop(tx);
     handle.await.unwrap();
@@ -2630,7 +2692,7 @@ async fn route_change_distributes_to_peer() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
@@ -2686,7 +2748,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
     assert_eq!(update.announce[0].path_id, 0);
@@ -2752,7 +2814,7 @@ async fn split_horizon_prevents_echo() {
     let _ = reply_rx.await;
 
     // Channel should be empty (no outbound update sent)
-    assert!(out_rx.try_recv().is_err());
+    assert!(out_rx.try_recv().map(delivered).is_err());
 
     drop(tx);
     handle.await.unwrap();
@@ -2872,7 +2934,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
     drain_eor(&mut out_rx).await;
 
     // iBGP-learned route should NOT be sent to iBGP peer
-    assert!(out_rx.try_recv().is_err());
+    assert!(out_rx.try_recv().map(delivered).is_err());
 
     drop(tx);
     handle.await.unwrap();
@@ -2926,7 +2988,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
     .unwrap();
 
     // Initial dump includes the route (iBGP→eBGP is allowed)
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
@@ -2985,7 +3047,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
     .unwrap();
 
     // Initial dump includes the route (eBGP→iBGP is allowed)
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
@@ -3045,7 +3107,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
 
     // Now the eBGP source goes down, replaced by iBGP source
@@ -3057,8 +3119,8 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     .unwrap();
 
     // Withdraw should be sent to iBGP target
-    let update = out_rx.recv().await.unwrap();
-    assert_eq!(update.withdraw.len(), 1);
+    let update = out_rx.recv().await.map(delivered).unwrap();
+    assert_eq!(update.unicast_withdrawals().count(), 1);
 
     // iBGP source announces the same prefix
     let ibgp_source = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
@@ -3087,7 +3149,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     let _ = reply_rx.await;
 
     // iBGP-learned route should NOT be sent to iBGP peer
-    assert!(out_rx.try_recv().is_err());
+    assert!(out_rx.try_recv().map(delivered).is_err());
 
     drop(tx);
     handle.await.unwrap();
@@ -3154,7 +3216,7 @@ async fn local_route_sent_to_ibgp_peer() {
     let _ = reply_rx.await;
 
     // Local route SHOULD be sent to iBGP peer (unlike iBGP-learned routes)
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
@@ -3222,7 +3284,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
     .unwrap();
 
     // Initial dump should include the local route
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
@@ -3352,7 +3414,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
     assert_eq!(best[0].prefix, Prefix::V4(prefix));
 
     // Should have been distributed
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
 
     drop(tx);
@@ -3419,7 +3481,7 @@ async fn withdraw_injected_removes_and_distributes() {
     let _ = reply_rx.await;
 
     // Consume the inject announcement
-    let _ = out_rx.recv().await;
+    let _ = out_rx.recv().await.map(delivered);
 
     // Now withdraw
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -3436,9 +3498,12 @@ async fn withdraw_injected_removes_and_distributes() {
     assert!(reply_rx.await.unwrap().is_ok());
 
     // Should receive withdrawal
-    let update = out_rx.recv().await.unwrap();
-    assert_eq!(update.withdraw.len(), 1);
-    assert_eq!(update.withdraw[0], (Prefix::V4(prefix), 0));
+    let update = out_rx.recv().await.map(delivered).unwrap();
+    assert_eq!(update.unicast_withdrawals().count(), 1);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>()[0],
+        (Prefix::V4(prefix), 0)
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -3518,10 +3583,10 @@ async fn distribute_changes_filters_unsendable_families() {
     .unwrap();
 
     // Should only receive IPv4 route
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     // Adj-RIB-Out should only contain IPv4
     let advertised = collect_advertised_routes(&tx, target).await;
@@ -3605,10 +3670,10 @@ async fn send_initial_table_filters_unsendable_families() {
     .unwrap();
 
     // Initial table dump should only contain IPv4
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     // Adj-RIB-Out should only contain IPv4
     let advertised = collect_advertised_routes(&tx, target).await;
@@ -3691,7 +3756,7 @@ async fn dual_stack_peer_receives_both_families() {
     .unwrap();
 
     // Should receive both routes in initial dump
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 2);
 
     drop(tx);
@@ -3799,13 +3864,13 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     .unwrap();
 
     // Both targets should receive the reflected route
-    let client_update = client_rx.recv().await.unwrap();
+    let client_update = client_rx.recv().await.map(delivered).unwrap();
     assert!(
         !client_update.announce.is_empty(),
         "client should receive reflected route"
     );
 
-    let nonclient_update = nonclient_rx.recv().await.unwrap();
+    let nonclient_update = nonclient_rx.recv().await.map(delivered).unwrap();
     assert!(
         !nonclient_update.announce.is_empty(),
         "non-client should receive route reflected from client"
@@ -3915,7 +3980,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     .unwrap();
 
     // Client should get the route
-    let update_c = client_rx.recv().await.unwrap();
+    let update_c = client_rx.recv().await.map(delivered).unwrap();
     assert!(
         !update_c.announce.is_empty(),
         "client should receive non-client route"
@@ -3924,7 +3989,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     // Non-client should NOT get the route (suppressed by RR)
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
-        nonclient_rx.try_recv().is_err(),
+        nonclient_rx.try_recv().map(delivered).is_err(),
         "non-client should not receive non-client route"
     );
 
@@ -3986,7 +4051,7 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
 
     // iBGP route should be suppressed (standard split-horizon)
     assert!(
-        out_rx.try_recv().is_err(),
+        out_rx.try_recv().map(delivered).is_err(),
         "iBGP route should be suppressed without RR"
     );
 
@@ -4045,7 +4110,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(
         !update.announce.is_empty(),
         "eBGP route should reach iBGP non-client"
@@ -4117,7 +4182,7 @@ async fn rr_local_route_to_all_ibgp() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(
         !update.announce.is_empty(),
         "local route should reach iBGP non-client via RR"
@@ -4179,7 +4244,10 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     .await
     .unwrap();
     let _ = query_best_routes(&tx).await;
-    let announced = out_rx.try_recv().expect("initial route is announced");
+    let announced = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("initial route is announced");
     assert_eq!(announced.announce.len(), 1);
     assert_eq!(
         announced.announce[0].link_local_next_hop,
@@ -4203,6 +4271,7 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     let _ = query_best_routes(&tx).await;
     let re_advertised = out_rx
         .try_recv()
+        .map(delivered)
         .expect("link-local-only next-hop change is re-advertised");
     assert_eq!(re_advertised.announce.len(), 1);
     assert_eq!(re_advertised.announce[0].prefix, Prefix::V6(prefix));
@@ -4276,17 +4345,20 @@ async fn link_local_next_hop_scope_change_is_re_advertised() {
         assert_eq!(best[0].next_hop_scope, route.next_hop_scope);
         if step == 4 {
             assert!(matches!(
-                out_rx.try_recv(),
+                out_rx.try_recv().map(delivered),
                 Err(mpsc::error::TryRecvError::Empty)
             ));
             continue;
         }
-        let update = out_rx.try_recv().expect("scope change is re-advertised");
+        let update = out_rx
+            .try_recv()
+            .map(delivered)
+            .expect("scope change is re-advertised");
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.announce[0].prefix, route.prefix);
         assert_eq!(update.announce[0].next_hop, route.next_hop);
         assert_eq!(update.announce[0].next_hop_scope, route.next_hop_scope);
-        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.unicast_withdrawals().count(), 0);
     }
     drop(tx);
     handle.await.unwrap();
@@ -4351,7 +4423,7 @@ async fn otc_tagged_unicast_is_advertised_toward_customer_and_route_server_clien
         })
         .await
         .unwrap();
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         assert!(update.otc_blocked.is_empty(), "role {role:?}");
         assert_eq!(update.announce.len(), 1, "role {role:?}");
         assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
@@ -4420,6 +4492,10 @@ async fn withdraw_local_unicast(
 /// `Replaced` although nothing moves on the wire. A missing withdrawal is
 /// `NotFound` unless `allow_missing` is set.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript walks every local inject outcome against the Adj-RIB-In"
+)]
 async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
     use crate::update::InjectOutcome;
 
@@ -4456,7 +4532,10 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
         inject_local_unicast(&tx, self_hop, vec![1]).await,
         InjectOutcome::Created
     );
-    let update = out_rx.try_recv().expect("created route announces");
+    let update = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("created route announces");
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].next_hop, self_hop);
 
@@ -4465,14 +4544,20 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
         InjectOutcome::Unchanged
     );
     let _ = query_best_routes(&tx).await;
-    assert!(out_rx.try_recv().is_err(), "identical re-add stays silent");
+    assert!(
+        out_rx.try_recv().map(delivered).is_err(),
+        "identical re-add stays silent"
+    );
 
     for (next_hop, communities) in [(self_hop, vec![2]), (specific, vec![2])] {
         assert_eq!(
             inject_local_unicast(&tx, next_hop, communities).await,
             InjectOutcome::Replaced
         );
-        let update = out_rx.try_recv().expect("replacement re-announces");
+        let update = out_rx
+            .try_recv()
+            .map(delivered)
+            .expect("replacement re-announces");
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.announce[0].next_hop, next_hop);
     }
@@ -4500,7 +4585,10 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
     let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
     assert_eq!(best[0].peer, peer_v4(source));
-    let update = out_rx.try_recv().expect("received route takes over");
+    let update = out_rx
+        .try_recv()
+        .map(delivered)
+        .expect("received route takes over");
     assert_eq!(update.announce[0].peer, peer_v4(source));
 
     assert_eq!(
@@ -4513,7 +4601,7 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
     );
     let _ = query_best_routes(&tx).await;
     assert!(
-        out_rx.try_recv().is_err(),
+        out_rx.try_recv().map(delivered).is_err(),
         "masked replacement stays silent"
     );
 
@@ -4648,7 +4736,7 @@ async fn unchanged_reinjection_keeps_rpki_state_and_selection() {
         best[0].validation_state,
         rustbgpd_wire::RpkiValidation::Valid
     );
-    while out_rx.try_recv().is_ok() {}
+    while out_rx.try_recv().map(delivered).is_ok() {}
     let stored_at = query_received_routes(&tx, LOCAL_PEER).await[0].received_at;
 
     // The retry carries a later receipt stamp; the stored route keeps its own.
@@ -4670,7 +4758,7 @@ async fn unchanged_reinjection_keeps_rpki_state_and_selection() {
         rustbgpd_wire::RpkiValidation::Valid
     );
     assert!(
-        out_rx.try_recv().is_err(),
+        out_rx.try_recv().map(delivered).is_err(),
         "no UPDATE or withdraw on a retry"
     );
 

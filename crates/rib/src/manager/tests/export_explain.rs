@@ -2054,13 +2054,13 @@ fn add_path_commit_probes_with_the_planning_snapshot() {
     let mut passes = 0;
     while let Ok(update) = outbound.try_recv() {
         passes += 1;
-        for (_, path_id) in &update.withdraw {
+        for (_, path_id) in update.unicast_withdrawals() {
             wire.remove(path_id);
         }
         assert!(
             !wire.is_empty(),
             "the withdraw phase left the prefix without a blackhole: withdraw {:?}",
-            update.withdraw
+            update.unicast_withdrawals().collect::<Vec<_>>()
         );
         for route in update.announce.iter() {
             wire.insert(route.path_id, route.local_pref());

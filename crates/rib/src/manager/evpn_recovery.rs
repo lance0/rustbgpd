@@ -47,6 +47,14 @@ pub(in crate::manager) struct EvpnFeedSeal {
     sparse_keys: Option<std::sync::Arc<[EvpnRouteKey]>>,
 }
 
+impl EvpnFeedSeal {
+    /// Whether this renews a current complete feed from one delta's staged
+    /// keys rather than carrying a complete feed.
+    pub(in crate::manager) fn is_sparse_renewal(&self) -> bool {
+        self.sparse_keys.is_some()
+    }
+}
+
 /// A sparse clean diff, consumed once in the operation that moved membership.
 pub(in crate::manager) struct EvpnCompleteFeed {
     pub(in crate::manager) seal: EvpnFeedSeal,
@@ -896,7 +904,7 @@ impl RibManager {
             refresh_markers,
             ..OutboundRouteUpdate::default()
         };
-        if sender.try_send(update).is_ok()
+        if crate::outbound_credit::send_marker(&sender, update).is_ok()
             && self.outbound_session_ids.get(&peer).copied() == session_id
             && self
                 .outbound_peers

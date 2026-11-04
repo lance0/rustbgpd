@@ -446,11 +446,11 @@ impl RibManager {
             request_refresh_all_negotiated: true,
             ..OutboundRouteUpdate::default()
         };
-        match record.outbound_tx.try_send(update) {
+        match crate::outbound_credit::send_marker(&record.outbound_tx, update) {
             Ok(()) => {
                 self.pending_inbound_refresh.remove(&peer);
             }
-            Err(TrySendError::Full(_)) => {
+            Err(TrySendError::Full(())) => {
                 self.pending_inbound_refresh.insert(peer, session_id);
                 warn!(
                     %peer,
@@ -459,7 +459,7 @@ impl RibManager {
                      ROUTE-REFRESH request to the bounded resync timer"
                 );
             }
-            Err(TrySendError::Closed(_)) => {
+            Err(TrySendError::Closed(())) => {
                 self.pending_inbound_refresh.remove(&peer);
                 warn!(
                     %peer,
@@ -523,7 +523,7 @@ impl RibManager {
                 request_refresh_all_negotiated: true,
                 ..OutboundRouteUpdate::default()
             };
-            match sender.try_send(update) {
+            match crate::outbound_credit::send_marker(&sender, update) {
                 Ok(()) => {
                     self.pending_inbound_refresh.remove(&peer);
                     debug!(
@@ -532,8 +532,8 @@ impl RibManager {
                         "delivered deferred collision-failback inbound ROUTE-REFRESH request"
                     );
                 }
-                Err(TrySendError::Full(_)) => {}
-                Err(TrySendError::Closed(_)) => {
+                Err(TrySendError::Full(())) => {}
+                Err(TrySendError::Closed(())) => {
                     self.pending_inbound_refresh.remove(&peer);
                     warn!(
                         %peer,
@@ -864,6 +864,7 @@ impl RibManager {
         keep_series: bool,
     ) {
         self.peer_down_teardown(peer);
+        self.forget_idle_outbound_credit();
         // An interface-only neighbor's retired endpoint keeps its handle
         // (`keep_series`): a rebind to a new endpoint forgets the carry,
         // and a return to the same endpoint is the same speaker's. A
@@ -1163,6 +1164,65 @@ impl RibManager {
         }
     }
 
+    /// Send a GR helper's stale-exempt withdrawals as an ordinary private
+    /// envelope, chunked like a pass. Returns `false` when a full writer or
+    /// spent credit refused it; it never marks the peer dirty. A closed
+    /// channel counts as sent: the session is ending.
+    fn send_helper_stale_withdrawals(&mut self, peer: PeerId, update: OutboundRouteUpdate) -> bool {
+        let sender = self.outbound_peers[&peer].clone();
+        let admitted = self
+            .admit_ordinary_credit(peer, || true)
+            .and_then(|credit| match sender.try_reserve() {
+                Ok(permit) => Ok(Some((permit, credit))),
+                Err(TrySendError::Full(())) => {
+                    Err(super::distribution::OutboundCommitFailure::WriterUnavailable)
+                }
+                Err(TrySendError::Closed(())) => Ok(None),
+            });
+        match admitted {
+            Ok(Some((permit, Some(credit)))) => {
+                super::distribution::enqueue_charged_outbound_update(
+                    &sender,
+                    permit,
+                    update,
+                    &credit,
+                    self.private_families(peer),
+                );
+                true
+            }
+            Ok(Some((permit, None))) => {
+                permit.send(update);
+                true
+            }
+            Ok(None) => true,
+            Err(failure) => {
+                if failure == super::outbound_credit::CREDIT_REFUSAL {
+                    let _ = self.outbound_commit_failed(peer, failure);
+                }
+                false
+            }
+        }
+    }
+
+    /// Credit preflight for a helper flush toward `peer`: spent ordinary
+    /// credit would refuse the withdrawals, so count the refusal, walk
+    /// nothing and keep the whole set, re-checked once credit is back,
+    /// without marking the peer dirty. While closing, withdrawals need
+    /// capacity alone.
+    fn helper_stale_flush_refused(&mut self, peer: PeerId, changed: &HashSet<Prefix>) -> bool {
+        if self.outbound_credit_exhausted(peer) {
+            self.refuse_outbound_for_credit(peer);
+            if let Some(carried) = self.helper_stale_exempt.get_mut(&peer)
+                && carried.settled
+                && touches_changed(&carried.keys, changed)
+            {
+                carried.settled = false;
+            }
+            return true;
+        }
+        false
+    }
+
     /// Withdraw the carried stale exempt keys a caught-up session does not
     /// advertise while our End-of-RIB for their family is held. Its live
     /// exempt rows are already on the wire, so no prefix loses its last
@@ -1175,6 +1235,10 @@ impl RibManager {
         }
         self.retire_helper_stale_exempt();
         for peer in self.helper_stale_exempt_ready(changed) {
+            if self.helper_stale_flush_refused(peer, changed) {
+                continue;
+            }
+            self.note_outbound_staging(peer);
             // A route-bearing envelope carries the current session's export
             // snapshot, or the transport resets the session.
             let Some(encoder) = self.peer_export_encoders.get(&peer) else {
@@ -1255,14 +1319,9 @@ impl RibManager {
                 withdraw: withdraw.into_iter().collect(),
                 ..OutboundRouteUpdate::default()
             };
-            // A full writer keeps the whole set for the next tick, which
-            // re-walks it.
-            if !update.withdraw.is_empty()
-                && matches!(
-                    self.outbound_peers[&peer].try_send(update),
-                    Err(TrySendError::Full(_))
-                )
-            {
+            // A full writer or exhausted credit keeps the whole set for the
+            // next tick, which re-walks it.
+            if !update.withdraw.is_empty() && !self.send_helper_stale_withdrawals(peer, update) {
                 if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
                     carried.settled = false;
                 }
@@ -2377,6 +2436,7 @@ impl RibManager {
         }
         self.initialize_outbound_registration_gauges(peer);
         self.outbound_peers.insert(peer, outbound_tx);
+        self.register_outbound_credit(peer);
         self.outbound_session_ids.insert(peer, session_id);
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
@@ -2988,8 +3048,15 @@ impl RibManager {
         let metrics = self.metrics.clone();
 
         let owned_evpn = self.evpn_grouped_member_of(peer);
-        let owned_evpn_feed =
-            owned_evpn.and_then(|gid| self.prepare_complete_evpn_feed(peer, gid, None, false));
+        // An earlier session's whole-table operation still live (a flap or
+        // collision with its envelopes queued) defers this one: no owned
+        // feed is built, the dump is refused below with every initial
+        // marker owed, and the fresh recovery proof is kept for the resync.
+        // A missing producer is the invariant failure handled next.
+        let behind_live_operation = owned_evpn.is_some() && self.outbound_operation_live(peer);
+        let owned_evpn_feed = owned_evpn
+            .filter(|_| !behind_live_operation)
+            .and_then(|gid| self.prepare_complete_evpn_feed(peer, gid, None, false));
         let private_evpn_recovery = (owned_evpn.is_none()
             && self.has_private_evpn_handoff(peer)
             && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
@@ -3001,6 +3068,7 @@ impl RibManager {
             || self.has_private_evpn_handoff(peer)
             || self.evpn_recovery_reset_pending(peer);
         if (owned_evpn.is_some()
+            && !behind_live_operation
             && owned_evpn_feed.is_none()
             && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
             || (private_evpn_recovery.is_some() && private_evpn_feed.is_none())
@@ -3852,44 +3920,72 @@ impl RibManager {
                     Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
             }
         }
-        let sent = if has_outbound_diff {
-            self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
-                peer,
-                OutboundCommitBatch {
-                    local_sources: unicast.local_sources,
-                    force_unicast_replay: true,
-                    unicast_otc_prechecked,
-                    announce_source_exclusion,
-                    shared_group_encode,
-                    exact_export_snapshot: unicast.exact_export_snapshot,
-                    withdraw: unicast.withdraw,
-                    flowspec_announce: fs_announce,
-                    flowspec_withdraw: fs_withdraw,
-                    evpn_announce: evpn_announce.into(),
-                    evpn_withdraw,
-                    evpn_complete_feed,
-                    bgpls_announce,
-                    bgpls_withdraw,
-                    vpn_announce: vpn_announce.into(),
-                    vpn_withdraw,
-                    labeled_announce,
-                    labeled_withdraw,
-                    rtc_announce,
-                    rtc_withdraw,
-                    ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
-                },
-                crate::fast_hash::FastSet::default(),
-                shared_unicast_precommit,
-                member_of.is_none().then_some(&otc_prefixes),
-                None,
-                None,
-            )
+        // The dump and its End-of-RIB are one whole-table operation; an
+        // empty table sends the End-of-RIB as a marker alone.
+        let mut operation = None;
+        let admitted = if behind_live_operation {
+            Err(super::outbound_credit::CREDIT_REFUSAL)
+        } else if has_outbound_diff {
+            self.begin_outbound_operation(peer, 1 + usize::from(!eor_families.is_empty()))
+                .map(|admitted| operation.insert(admitted).slot())
         } else {
-            Ok(())
+            Ok(None)
+        };
+        let batch = has_outbound_diff.then(|| OutboundCommitBatch {
+            local_sources: unicast.local_sources,
+            force_unicast_replay: true,
+            unicast_otc_prechecked,
+            announce_source_exclusion,
+            shared_group_encode,
+            exact_export_snapshot: unicast.exact_export_snapshot,
+            withdraw: unicast.withdraw,
+            flowspec_announce: fs_announce,
+            flowspec_withdraw: fs_withdraw,
+            evpn_announce: evpn_announce.into(),
+            evpn_withdraw,
+            evpn_complete_feed,
+            bgpls_announce,
+            bgpls_withdraw,
+            vpn_announce: vpn_announce.into(),
+            vpn_withdraw,
+            labeled_announce,
+            labeled_withdraw,
+            rtc_announce,
+            rtc_withdraw,
+            ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
+        });
+        let sent = match (admitted, batch) {
+            (Err(failure), batch) => {
+                // A refused dump's staged table retires at checkpoints, as a
+                // refused send's does.
+                if let Some(mut batch) = batch {
+                    batch.retire_with(
+                        &mut checkpoint,
+                        #[cfg(test)]
+                        None,
+                    );
+                }
+                self.outbound_commit_failed(peer, failure)
+            }
+            (Ok(slot), Some(batch)) => self
+                .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+                    peer,
+                    OutboundCommitBatch { slot, ..batch },
+                    crate::fast_hash::FastSet::default(),
+                    shared_unicast_precommit,
+                    member_of.is_none().then_some(&otc_prefixes),
+                    None,
+                    None,
+                ),
+            (Ok(_), None) => Ok(()),
         };
         export_memo.retire_with(&mut checkpoint);
         if let Err(failure) = sent {
-            warn!(%peer, reason = failure.as_str(), "initial dump not sent — marking dirty");
+            if failure == super::outbound_credit::CREDIT_REFUSAL {
+                debug!(%peer, reason = failure.as_str(), "initial dump deferred behind a live whole-table update — marking dirty");
+            } else {
+                warn!(%peer, reason = failure.as_str(), "initial dump not sent — marking dirty");
+            }
             for f in &eor_families {
                 self.pending_eor.entry(peer).or_default().insert(*f);
             }
@@ -3934,7 +4030,17 @@ impl RibManager {
                 end_of_rib: eor_families.clone(),
                 ..OutboundRouteUpdate::default()
             };
-            if tx.try_send(eor).is_err() {
+            let sent = match operation
+                .as_mut()
+                .and_then(crate::outbound_credit::OutboundOperation::slot)
+            {
+                Some(slot) => {
+                    slot.send(eor);
+                    Ok(())
+                }
+                None => crate::outbound_credit::send_marker(&tx, eor),
+            };
+            if sent.is_err() {
                 warn!(%peer, "outbound channel full — `EoR` deferred");
                 self.metrics.record_outbound_eor_deferral(&peer.label());
                 for f in &eor_families {

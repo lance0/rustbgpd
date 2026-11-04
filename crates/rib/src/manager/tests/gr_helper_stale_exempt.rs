@@ -27,11 +27,11 @@ fn apply(
     let mut markers = 0;
     while let Ok(update) = rx.try_recv() {
         assert!(
-            (update.withdraw.is_empty() && update.announce.is_empty())
+            (update.unicast_withdrawals().next().is_none() && update.announce.is_empty())
                 || update.exact_export_snapshot.is_some(),
             "the transport resets a session on a route-bearing envelope without its export snapshot"
         );
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             rib.remove(key);
         }
         for route in update.announce.iter() {
@@ -392,7 +392,7 @@ fn add_path_change_across_the_flap_keeps_the_live_rtbh() {
     for _ in 0..4 {
         manager.resync_dirty_peers_bounded();
         while let Ok(update) = new_rx.try_recv() {
-            for &(prefix, _) in &update.withdraw {
+            for &(prefix, _) in update.unicast_withdrawals() {
                 live.remove(&(prefix, 0));
             }
             for route in update.announce.iter() {
@@ -990,6 +990,86 @@ fn full_writer_unsettles_a_withdrawable_carried_key() {
     let (mut manager, mut rib, (tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
     let occupied = occupy(&tx);
     withdraw_received(&mut manager, rtbh);
+    drop(occupied);
+    assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
+}
+
+/// The GR-helper producer's credit preflight (T5's eighth arm): with the
+/// receiver's ordinary credit spent, a withdrawable carried key is walked
+/// by no flush and the whole set is kept, the receiver not marked dirty;
+/// once the credit drains the timer withdraws it. The refusal is counted as
+/// an `outbound_credit` commit refusal. Red without the preflight: each
+/// flush builds the candidates before the send is refused; red without the
+/// count: the refusal is invisible.
+#[test]
+fn spent_credit_keeps_the_carried_set_unwalked() {
+    let (mut manager, mut rib, (_tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
+    let observer = peer_v4(OBSERVER);
+    let charge = crate::OutboundCharge::new(
+        &manager.outbound_credit_handle(observer),
+        manager.outbound_row_credit(),
+    );
+    let stagings = manager.outbound_stagings(observer);
+    let refusals = |manager: &RibManager| -> f64 {
+        manager
+            .metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .filter(|family| family.name() == "bgp_outbound_commit_refusals_total")
+            .flat_map(|family| family.get_metric().to_vec())
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == "outbound_credit")
+            })
+            .map(|metric| metric.get_counter().get_value())
+            .sum()
+    };
+    let refused = refusals(&manager);
+    withdraw_received(&mut manager, rtbh);
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert_eq!(
+        manager.outbound_stagings(observer),
+        stagings,
+        "nothing walked"
+    );
+    assert!(refusals(&manager) > refused, "the refused flush is counted");
+    assert!(!manager.dirty_peers.contains(&observer));
+    assert!(
+        manager.helper_stale_exempt[&observer]
+            .keys
+            .contains(&(Prefix::V4(rtbh), 0)),
+        "the whole set is kept"
+    );
+    drop(charge);
+    assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
+}
+
+/// A helper flush refused by a full writer keeps its set for the next
+/// tick: it is not a route drop. Red with the drop counted for anything but
+/// a credit refusal.
+#[test]
+fn a_full_writer_helper_flush_is_not_a_route_drop() {
+    let (mut manager, mut rib, (tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
+    let drops = |manager: &RibManager| -> f64 {
+        manager
+            .metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .filter(|family| family.name() == "bgp_outbound_route_drops_total")
+            .flat_map(|family| family.get_metric().to_vec())
+            .map(|metric| metric.get_counter().get_value())
+            .sum()
+    };
+    let before = drops(&manager);
+    let occupied = occupy(&tx);
+    withdraw_received(&mut manager, rtbh);
+    assert_eq!(drops(&manager), before, "a retried flush drops nothing");
     drop(occupied);
     assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
 }
@@ -2000,7 +2080,10 @@ fn dormant_family_keys_retire_once_its_end_of_rib_is_sent() {
     let mut drain = |rib: &mut PeerRib| {
         let mut markers = 0;
         while let Ok(update) = new_rx.try_recv() {
-            assert!(!update.withdraw.contains(&key), "nothing is withdrawn");
+            assert!(
+                update.unicast_withdrawals().next().is_none(),
+                "nothing is withdrawn"
+            );
             for route in update.announce.iter() {
                 rib.insert((route.prefix, route.path_id), false);
             }
@@ -2210,7 +2293,10 @@ fn settled_carry_retires_its_family_once_its_end_of_rib_goes_out() {
     let mut markers = 0;
     for _ in 0..8 {
         while let Ok(update) = new_rx.try_recv() {
-            assert!(!update.withdraw.contains(&key), "nothing is withdrawn");
+            assert!(
+                update.unicast_withdrawals().next().is_none(),
+                "nothing is withdrawn"
+            );
             if update.end_of_rib.contains(&FAMILY) {
                 markers += 1;
                 rib.retain(|_, stale| !*stale);

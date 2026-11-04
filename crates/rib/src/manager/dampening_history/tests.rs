@@ -405,7 +405,9 @@ async fn full_source_budget_preserves_withdrawals_and_blocks_reachable_input_onc
     assert!(manager.loc_rib.get(&prefix(2)).is_none());
     let mut withdrawal_seen = false;
     while let Ok(update) = downstream.try_recv() {
-        withdrawal_seen |= update.withdraw.contains(&(prefix(2), 0));
+        withdrawal_seen |= update
+            .unicast_withdrawals()
+            .any(|key| *key == (prefix(2), 0));
         assert!(
             !update
                 .announce

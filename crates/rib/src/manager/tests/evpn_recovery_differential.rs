@@ -59,7 +59,7 @@ impl Run {
             let peer = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, suffix).into());
             let (sender, mut output) = mpsc::channel(8);
             register(&mut manager, peer, sender);
-            while output.try_recv().is_ok() {}
+            while output.try_recv().map(delivered).is_ok() {}
             receivers.push(Receiver {
                 peer,
                 output,
@@ -101,7 +101,7 @@ impl Run {
 
     fn drain(&mut self) {
         for receiver in &mut self.receivers {
-            while let Ok(update) = receiver.output.try_recv() {
+            while let Ok(update) = receiver.output.try_recv().map(delivered) {
                 // Withdrawals precede announcements within one update.
                 for key in update.evpn_withdraw {
                     if receiver.routes.remove(&key).is_none() {

@@ -68,7 +68,7 @@ fn install_fixture(
         for route in update.announce.iter() {
             wire.insert(route.prefix);
         }
-        for (prefix, _) in update.withdraw {
+        for &(prefix, _) in update.unicast_withdrawals() {
             wire.remove(&prefix);
         }
     }

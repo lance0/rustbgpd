@@ -111,7 +111,7 @@ async fn multipath_send_advertises_multiple_routes() {
     .unwrap();
 
     // Initial dump should contain both routes
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         update.announce.len(),
         2,
@@ -185,7 +185,7 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
     .await
     .unwrap();
 
-    let initial = out_rx.recv().await.unwrap();
+    let initial = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(initial.announce.len(), 2);
     assert_eq!(
         initial
@@ -234,9 +234,12 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
     assert_eq!(replacement.announce.len(), 1);
     assert_eq!(replacement.announce[0].path_id, 1);
     assert_eq!(replacement.announce[0].next_hop, path_7.next_hop);
-    assert_eq!(replacement.withdraw.len(), 0);
+    assert_eq!(replacement.unicast_withdrawals().count(), 0);
     assert!(
-        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        matches!(
+            out_rx.try_recv().map(delivered),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
         "replacement must produce one exact outbound update"
     );
 
@@ -261,9 +264,15 @@ async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
     assert_eq!(reranked.announce.len(), 1);
     assert_eq!(reranked.announce[0].path_id, 1);
     assert_eq!(reranked.announce[0].next_hop, path_9.next_hop);
-    assert_eq!(reranked.withdraw, vec![(Prefix::V4(prefix), 2)]);
+    assert_eq!(
+        reranked.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 2)]
+    );
     assert!(
-        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        matches!(
+            out_rx.try_recv().map(delivered),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
         "withdrawal must produce one exact rerank update"
     );
 
@@ -331,7 +340,7 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
     })
     .await
     .unwrap();
-    let initial = out_rx.recv().await.unwrap();
+    let initial = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(initial.announce.len(), 2);
     assert_eq!(
         initial
@@ -363,10 +372,17 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
 
     let update = out_rx
         .try_recv()
+        .map(delivered)
         .expect("withdrawal emitted after query synchronization");
     assert!(update.announce.is_empty(), "the sibling keeps its path ID");
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 1)]);
-    assert!(out_rx.try_recv().is_err(), "one delta is sufficient");
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 1)]
+    );
+    assert!(
+        out_rx.try_recv().map(delivered).is_err(),
+        "one delta is sufficient"
+    );
 
     let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
@@ -399,9 +415,13 @@ async fn no_advertise_candidate_is_withdrawn_and_its_add_path_sibling_keeps_its_
 
     let update = out_rx
         .try_recv()
+        .map(delivered)
         .expect("policy-added NO_ADVERTISE withdraws the remaining rank");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 2)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 2)]
+    );
     let response = collect_advertised_routes(&tx, target).await;
     assert!(response.is_empty());
 
@@ -494,7 +514,7 @@ async fn multipath_send_respects_send_max() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         update.announce.len(),
         2,
@@ -580,7 +600,7 @@ async fn multipath_send_split_horizon() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         update.announce.len(),
         1,
@@ -649,7 +669,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -670,7 +690,7 @@ async fn multipath_withdrawal_on_candidate_removal() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     // Should now have an announcement for the second path
     assert!(!update.announce.is_empty());
 
@@ -688,10 +708,10 @@ async fn multipath_withdrawal_on_candidate_removal() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     // Should have a withdrawal for the removed path
     assert!(
-        !update.withdraw.is_empty(),
+        update.unicast_withdrawals().next().is_some(),
         "removing a candidate should produce a withdrawal"
     );
 
@@ -771,7 +791,7 @@ async fn single_best_peer_unaffected_by_multipath_config() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         update.announce.len(),
         1,
@@ -875,7 +895,7 @@ async fn multipath_peer_down_cleans_up_state() {
     .await
     .unwrap();
 
-    let update = reconnect_rx.recv().await.unwrap();
+    let update = reconnect_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].path_id, 0);
 
@@ -937,7 +957,7 @@ async fn multipath_send_incremental_route_addition() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1, "first route announced");
     assert_eq!(update.announce[0].path_id, 1);
 
@@ -960,7 +980,7 @@ async fn multipath_send_incremental_route_addition() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     // The new route should be announced (path_id 2)
     let new_announcements: Vec<_> = update
         .announce
@@ -1073,11 +1093,11 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     .unwrap();
 
     // Multi-path target gets 2 routes
-    let multi_update = multi_rx.recv().await.unwrap();
+    let multi_update = multi_rx.recv().await.map(delivered).unwrap();
     assert_eq!(multi_update.announce.len(), 2);
 
     // Single-best target gets 1 route
-    let single_update = single_rx.recv().await.unwrap();
+    let single_update = single_rx.recv().await.map(delivered).unwrap();
     assert_eq!(single_update.announce.len(), 1);
     assert_eq!(single_update.announce[0].path_id, 0);
 
@@ -1170,7 +1190,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         update.announce.len(),
         2,
@@ -1263,7 +1283,7 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     let v4_routes: Vec<_> = update
         .announce
         .iter()
@@ -1365,7 +1385,7 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     let v4_routes: Vec<_> = update
         .announce
         .iter()
@@ -1470,7 +1490,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     })
     .await
     .unwrap();
-    let _ = out_rx.recv().await.unwrap();
+    let _ = out_rx.recv().await.map(delivered).unwrap();
     drain_eor(&mut out_rx).await;
 
     tx.send(RibUpdate::RouteRefreshRequest {
@@ -1482,7 +1502,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     let v4_routes: Vec<_> = update
         .announce
         .iter()
@@ -1503,7 +1523,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     })
     .await
     .unwrap();
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     let v6_routes: Vec<_> = update
         .announce
         .iter()
@@ -1588,7 +1608,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1, "send_max=1 sends only one route");
     assert_eq!(
         update.announce[0].path_id, 1,
@@ -1732,7 +1752,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
 
     // No outbound updates should have been sent (all denied)
     assert!(
-        out_rx.try_recv().is_err(),
+        out_rx.try_recv().map(delivered).is_err(),
         "all candidates denied by export policy — nothing sent"
     );
     let history = query_route_event_history(&tx, Some(target), Some(Afi::Ipv4), None, 10).await;

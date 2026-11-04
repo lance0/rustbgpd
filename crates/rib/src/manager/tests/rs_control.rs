@@ -197,7 +197,10 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
         .try_recv()
         .expect("tagged replacement must withdraw from the steered-away client");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 0)]
+    );
     let explain = query_explain_advertised_route(&tx, client_a, Prefix::V4(prefix)).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
     let stop = explain
@@ -289,7 +292,7 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
             .collect::<Vec<_>>(),
         vec![Prefix::V4(plain_prefix)]
     );
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
 
     // B: both routes, the tagged one scrubbed (unrelated kept).
     let update = b_rx.try_recv().expect("other enabled client gets both");
@@ -644,7 +647,7 @@ async fn grouped_matches_ungrouped_for_stripped_suppression_tag() {
                         .iter()
                         .map(|route| (route.prefix, route.large_communities().to_vec())),
                 );
-                withdrawn.extend(update.withdraw.iter().copied());
+                withdrawn.extend(update.unicast_withdrawals().copied());
             }
             streams.push((announced, withdrawn));
         }
@@ -698,7 +701,7 @@ fn rs_member_up(
 fn drain_withdrawn(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> BTreeSet<Prefix> {
     let mut withdrawn = BTreeSet::new();
     while let Ok(update) = out_rx.try_recv() {
-        withdrawn.extend(update.withdraw.iter().map(|(prefix, _)| *prefix));
+        withdrawn.extend(update.unicast_withdrawals().map(|(prefix, _)| *prefix));
     }
     withdrawn
 }

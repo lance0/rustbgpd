@@ -24,6 +24,7 @@ mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
 mod lease_expiry;
+mod outbound_credit;
 mod outbound_prefix_limits;
 mod peer_lifecycle;
 mod queries;
@@ -601,10 +602,10 @@ enum FullPassPath {
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
 /// No `Arc<RwLock>` — all state is owned by this task.
 #[cfg_attr(
-    all(test, feature = "bench-internals"),
+    test,
     expect(
         clippy::struct_excessive_bools,
-        reason = "independent fixture switches coexist with the production event-ID exhaustion flag"
+        reason = "independent test fixture switches coexist with the production event-ID exhaustion and outbound-close flags"
     )
 )]
 pub struct RibManager {
@@ -656,6 +657,23 @@ pub struct RibManager {
     /// coalesced family-scoped recovery intent for those limits (ADR-0113).
     outbound_limit_control: outbound_prefix_limits::OutboundLimitControl,
     outbound_peers: HashMap<PeerId, mpsc::Sender<OutboundRouteUpdate>>,
+    /// Outbound row credit and live whole-table operation of every peer
+    /// that has registered for outbound updates, kept across `PeerDown`,
+    /// collision supersede and re-registration: envelopes of an earlier
+    /// session still count against the same peer (`crate::outbound_credit`).
+    outbound_credit: HashMap<PeerId, outbound_credit::PeerCredit>,
+    /// Fixed per-peer row credit for tests and bench builds.
+    outbound_row_credit_override: Option<usize>,
+    /// Notified whenever a whole-table operation's last envelope drops, so
+    /// the resync tick runs work deferred behind it at the backlog cadence.
+    outbound_latch_released: Arc<tokio::sync::Notify>,
+    /// Daemon shutdown has begun (`RibUpdate::BeginClose`): an ordinary
+    /// envelope that withdraws needs channel capacity only.
+    outbound_closing: bool,
+    /// Entries into a private-family staging producer, so a test can prove
+    /// a peer without credit stages nothing.
+    #[cfg(test)]
+    outbound_stagings: HashMap<PeerId, usize>,
     /// Transport session identity recorded at `PeerUp` registration,
     /// keyed like `outbound_peers`. `handle_peer_down` /
     /// `handle_peer_graceful_restart` discard a teardown whose stamped id
@@ -823,6 +841,12 @@ pub struct RibManager {
     /// Families with an outstanding enhanced route refresh response retry.
     /// Entries are never left empty: readers check the key.
     pending_refresh: HashMap<PeerId, HashSet<(Afi, Safi)>>,
+    /// The deferred answers of `pending_refresh` whose convergence End-of-RIB
+    /// was already queued, so the answer carries none of its own.
+    pending_refresh_suppress_eor: HashSet<(PeerId, (Afi, Safi))>,
+    /// The peer whose deferred refresh responses were retried last, where
+    /// the next budgeted retry slice resumes.
+    deferred_refresh_cursor: Option<PeerId>,
     /// Outbound registrations (initial table dumps) deferred behind queued
     /// actor work, completed one per run-loop iteration between drained
     /// mutation batches (LAN-475). Peer-keyed (deduplicated): the advance
@@ -2649,6 +2673,16 @@ impl RibManager {
     }
 }
 
+/// A fixed per-peer outbound row credit for the whole test suite
+/// (`RUSTBGPD_TEST_OUTBOUND_ROW_CREDIT`), so every RIB test, the oracles
+/// included, can run with refusals that the default credit never reaches.
+#[cfg(test)]
+fn test_outbound_row_credit() -> Option<usize> {
+    std::env::var("RUSTBGPD_TEST_OUTBOUND_ROW_CREDIT")
+        .ok()
+        .and_then(|rows| rows.parse().ok())
+}
+
 impl RibManager {
     /// Create a new RIB manager with the given update channel and optional export policy.
     #[must_use]
@@ -2742,6 +2776,19 @@ impl RibManager {
             outbound_prefix_limits: HashMap::new(),
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
+            outbound_credit: HashMap::new(),
+            // A test-only override; production sizes the credit itself.
+            outbound_row_credit_override: {
+                #[cfg(test)]
+                let rows = test_outbound_row_credit();
+                #[cfg(not(test))]
+                let rows = None;
+                rows
+            },
+            outbound_closing: false,
+            outbound_latch_released: Arc::default(),
+            #[cfg(test)]
+            outbound_stagings: HashMap::new(),
             flush_poll_budget: initial_flush_poll_budget(),
             actor_suspended: Arc::default(),
             outbound_session_ids: HashMap::new(),
@@ -2786,6 +2833,8 @@ impl RibManager {
             force_outbound_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             pending_refresh: HashMap::new(),
+            pending_refresh_suppress_eor: HashSet::new(),
+            deferred_refresh_cursor: None,
             pending_initial_registrations: VecDeque::new(),
             registration_wait_sample_at: None,
             initial_dump_defer_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
@@ -3634,6 +3683,8 @@ impl RibManager {
     /// Clear all enhanced route refresh state for a peer.
     fn clear_peer_refresh_state(&mut self, peer: PeerId) {
         self.pending_refresh.remove(&peer);
+        self.pending_refresh_suppress_eor
+            .retain(|(owed, _)| *owed != peer);
         self.refresh_in_progress.remove(&peer);
         self.refresh_stale_routes.remove(&peer);
         self.refresh_stale_flowspec.remove(&peer);
@@ -3999,6 +4050,7 @@ impl RibManager {
                 self.evpn_marker_retry_runnable(peer)
             })
             || self.outbound_limit_recovery_runnable()
+            || self.deferred_refresh_pending()
     }
 
     /// Run one bounded resync-timer tick. ADR-0113 recovery replays at most
@@ -4039,6 +4091,9 @@ impl RibManager {
         self.retry_pending_inbound_refresh_bounded();
         self.flush_helper_stale_exempt(&HashSet::new());
         self.retry_evpn_feed_markers_bounded();
+        // Refresh-only retries and the dirty slices share one poll budget.
+        let poll_start = std::time::Instant::now();
+        let recovered = self.retry_deferred_refreshes(poll_start) || recovered;
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap
@@ -4054,7 +4109,6 @@ impl RibManager {
             debug!(%peer, "dropping dirty peer whose outbound channel closed");
             self.drop_gone_dirty_peer(peer);
         }
-        let poll_start = std::time::Instant::now();
         let mut attempted: HashSet<PeerId> = HashSet::new();
         loop {
             // One full-table member can consume the poll budget on its own.
@@ -5138,6 +5192,22 @@ impl RibManager {
                 let _ = reply.send(self.dirty_peers.contains(&peer));
             }
             #[cfg(test)]
+            RibUpdate::TestQueryPeerOutboundOwed { peer, reply } => {
+                let sorted = |families: Option<&HashSet<(Afi, Safi)>>| {
+                    let mut families: Vec<_> = families.into_iter().flatten().copied().collect();
+                    families.sort_by_key(|&(afi, safi)| (afi as u16, safi as u8));
+                    families
+                };
+                let _ = reply.send(crate::update::OutboundOwed {
+                    resync: self.dirty_peers.contains(&peer)
+                        || self.force_outbound_peers.contains(&peer),
+                    refresh: sorted(self.pending_refresh.get(&peer)),
+                    end_of_rib: sorted(self.pending_eor.get(&peer)),
+                    live_operation: self.outbound_operation_live(peer),
+                    credit_rows: self.outbound_credit_rows(peer),
+                });
+            }
+            #[cfg(test)]
             RibUpdate::TestQueryPolicyTransitionStats { reply } => {
                 let stats = self.policy_transition_stats;
                 let _ = reply.send((
@@ -5462,6 +5532,7 @@ impl RibManager {
                     }
                 });
             }
+            RibUpdate::BeginClose => self.begin_outbound_close(),
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
             RibUpdate::WithdrawEvpn { key, reply } => {
                 self.handle_withdraw_evpn(key, reply);
@@ -6814,6 +6885,7 @@ impl RibManager {
         let resync_sleep = tokio::time::sleep(DIRTY_RESYNC_INTERVAL);
         tokio::pin!(resync_sleep);
         let mut resync_armed = false;
+        let latch_released = Arc::clone(&self.outbound_latch_released);
         let mut query_rx_open = true;
         let mut primary_run = PrimaryRunBudget::default();
         // Start of the primary work admitted since the last prestage slice.
@@ -7136,6 +7208,15 @@ impl RibManager {
                 self.gc_attr_intern_on_timer();
                 continue;
             }
+            // A whole-table operation that drained while route chunks or
+            // deferred registrations kept the loop off its select below
+            // pulls the tick forward here, between work units.
+            if resync_armed && std::pin::pin!(latch_released.notified()).enable() {
+                let soon = now + DIRTY_RESYNC_BACKLOG_INTERVAL;
+                if resync_sleep.deadline() > soon {
+                    resync_sleep.as_mut().reset(soon);
+                }
+            }
             if resync_armed && resync_sleep.deadline() <= now {
                 debug!(
                     count = self.dirty_peers.len(),
@@ -7360,6 +7441,15 @@ impl RibManager {
                     () = selection_sleep.as_mut(), if has_selection_timer => {}
                     () = conditional_sleep.as_mut(), if has_conditional_timer => {}
                     () = registration_wait_sleep.as_mut(), if has_registration_wait_timer => {}
+                    () = latch_released.notified(), if resync_armed => {
+                        // A whole-table operation drained: work deferred
+                        // behind it runs at the backlog cadence, not at the
+                        // next full resync interval.
+                        let soon = tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL;
+                        if resync_sleep.deadline() > soon {
+                            resync_sleep.as_mut().reset(soon);
+                        }
+                    }
                 }
             } else {
                 // No timers needed — wait for a route update or query.

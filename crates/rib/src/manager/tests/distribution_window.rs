@@ -87,7 +87,7 @@ where
 fn route_messages(streams: &Streams, member: Ipv4Addr) -> Vec<&NormMsg> {
     streams[&peer_v4(member)]
         .iter()
-        .filter(|msg| !msg.announce.is_empty() || !msg.withdraw.is_empty())
+        .filter(|msg| !msg.announce.is_empty() || msg.unicast_withdrawals().next().is_some())
         .collect()
 }
 
@@ -145,7 +145,10 @@ async fn queued_announce_withdraw_announce_distributes_final_state_once() {
     for member in [B, C] {
         let messages = route_messages(&queued, member);
         assert_eq!(messages.len(), 1, "one window, one message to {member}");
-        assert!(messages[0].withdraw.is_empty(), "no transient withdrawal");
+        assert!(
+            messages[0].unicast_withdrawals().next().is_none(),
+            "no transient withdrawal"
+        );
         assert_eq!(
             announced(messages[0]),
             BTreeSet::from([Prefix::V4(pfx(1, 0)), Prefix::V4(pfx(2, 0))])
@@ -280,7 +283,7 @@ async fn barrier_update_settles_window_before_it_applies() {
         let messages = o.drain_peer_available(C).await;
         let routed = messages
             .iter()
-            .filter(|msg| !msg.announce.is_empty() || !msg.withdraw.is_empty())
+            .filter(|msg| !msg.announce.is_empty() || msg.unicast_withdrawals().next().is_some())
             .collect::<Vec<_>>();
         assert_eq!(
             announced(routed[0]),
@@ -297,8 +300,7 @@ async fn barrier_update_settles_window_before_it_applies() {
             assert_eq!(routed.len(), 3, "{label}: announce, withdraw, announce");
             assert_eq!(
                 routed[1]
-                    .withdraw
-                    .iter()
+                    .unicast_withdrawals()
                     .map(|w| w.0)
                     .collect::<BTreeSet<_>>(),
                 BTreeSet::from([Prefix::V4(pfx(1, 0)), Prefix::V4(pfx(2, 0))])
@@ -381,7 +383,7 @@ fn member_up(peer: PeerId, session_id: u64) -> (RibUpdate, mpsc::Receiver<Outbou
 fn route_envelopes(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<OutboundRouteUpdate> {
     let mut envelopes = Vec::new();
     while let Ok(update) = rx.try_recv() {
-        if !update.announce.is_empty() || !update.withdraw.is_empty() {
+        if !update.announce.is_empty() || update.unicast_withdrawals().next().is_some() {
             envelopes.push(update);
         }
     }
@@ -470,13 +472,19 @@ async fn exact_export_rejection_retires_after_window_distribution() {
     let to_target = route_envelopes(&mut receivers[0]);
     assert_eq!(to_target.len(), 1, "one window, one envelope");
     assert!(
-        to_target[0].withdraw.is_empty(),
+        to_target[0].unicast_withdrawals().next().is_none(),
         "no withdrawal for a route the target never received"
     );
     assert_eq!(to_target[0].announce[0].prefix, Prefix::V4(q));
     let to_other = route_envelopes(&mut receivers[1]);
     assert_eq!(to_other.len(), 1);
-    assert_eq!(to_other[0].withdraw, vec![(Prefix::V4(p), 0)]);
+    assert_eq!(
+        to_other[0]
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![(Prefix::V4(p), 0)]
+    );
     assert!(!manager.peer_unexportable.contains_key(&target));
 
     // Announce, withdraw and re-announce the rejected route in one window:
@@ -768,7 +776,13 @@ async fn dirty_resync_settles_an_open_window_first() {
     assert!(route_envelopes(&mut receivers[0]).is_empty());
     let settled = route_envelopes(&mut receivers[1]);
     assert_eq!(settled.len(), 1);
-    assert_eq!(settled[0].withdraw, vec![(Prefix::V4(p), 0)]);
+    assert_eq!(
+        settled[0]
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![(Prefix::V4(p), 0)]
+    );
 
     // The admitted message continues as a new window.
     drain_primary(&mut manager);

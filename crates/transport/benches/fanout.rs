@@ -547,7 +547,7 @@ fn drain_fanout_envelopes(
             .try_recv()
             .expect("every fanout member must receive one route-bearing envelope");
         assert_eq!(update.announce.len(), CHANGED);
-        assert!(update.withdraw.is_empty());
+        assert!(update.unicast_withdrawals().next().is_none());
         assert_unicast_only_envelope(&update);
         assert_real_transport_snapshot(&update);
         let actual_inventory = update
@@ -810,7 +810,7 @@ fn drain_per_client_best_resync_envelopes(
         assert_unicast_only_envelope(&update);
         assert_real_transport_snapshot(&update);
         assert!(update.announce_source_exclusion.is_none());
-        assert!(update.withdraw.is_empty());
+        assert!(update.unicast_withdrawals().next().is_none());
         assert_eq!(update.announce.len(), update.next_hop_override.len());
         assert!(update.next_hop_override.iter().all(Option::is_none));
         for route in update.announce.iter() {
@@ -1006,7 +1006,7 @@ fn drain_one_route_bearing_envelope_per_peer(
             .try_recv()
             .expect("each changed-route pass enqueues one envelope per peer");
         assert_eq!(update.announce.len(), CHANGED);
-        assert!(update.withdraw.is_empty());
+        assert!(update.unicast_withdrawals().next().is_none());
         assert_unicast_only_envelope(&update);
         assert!(
             update.exact_export_snapshot.is_some(),
@@ -1050,7 +1050,7 @@ fn drain_grouped_withdrawal_setup(
             actual, *expected_inventory,
             "setup must advertise the fixed withdrawal inventory"
         );
-        assert!(update.withdraw.is_empty());
+        assert!(update.unicast_withdrawals().next().is_none());
         assert_unicast_only_envelope(&update);
         assert_real_transport_snapshot(&update);
         assert!(
@@ -1236,11 +1236,14 @@ fn drain_grouped_withdrawals(
         assert!(update.announce.is_empty());
         assert!(update.next_hop_override.is_empty());
         assert_eq!(
-            update.withdraw.len(),
+            update.unicast_withdrawals().count(),
             expected_inventory.len(),
             "withdrawal envelope must contain every route exactly once"
         );
-        let actual = update.withdraw.iter().copied().collect::<HashSet<_>>();
+        let actual = update
+            .unicast_withdrawals()
+            .copied()
+            .collect::<HashSet<_>>();
         assert_eq!(
             actual, *expected_inventory,
             "withdrawal envelope must match the pre-advertised inventory"
@@ -1401,12 +1404,15 @@ fn drain_grouped_policy_denials(
         );
         assert!(update.next_hop_override.is_empty());
         assert_eq!(
-            update.withdraw.iter().copied().collect::<HashSet<_>>(),
+            update
+                .unicast_withdrawals()
+                .copied()
+                .collect::<HashSet<_>>(),
             *expected_inventory,
             "the withdrawal must exactly retire the MED-50 setup inventory"
         );
         assert_eq!(
-            update.withdraw.len(),
+            update.unicast_withdrawals().count(),
             expected_inventory.len(),
             "the policy withdrawal must not contain duplicate identities"
         );
@@ -1689,7 +1695,7 @@ fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: 
         "the initial envelope must contain exactly the deterministic seed inventory"
     );
     assert!(initial.announce_source_exclusion.is_none());
-    assert!(initial.withdraw.is_empty());
+    assert!(initial.unicast_withdrawals().next().is_none());
     assert!(initial.end_of_rib.is_empty());
     assert!(initial.refresh_markers.is_empty());
     assert!(initial.flowspec_announce.is_empty());
@@ -1723,7 +1729,7 @@ fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: 
     assert!(eor.exact_export_snapshot.is_none());
     assert!(eor.announce_source_exclusion.is_none());
     assert!(eor.announce.is_empty());
-    assert!(eor.withdraw.is_empty());
+    assert!(eor.unicast_withdrawals().next().is_none());
     assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
     assert!(eor.refresh_markers.is_empty());
     assert!(eor.next_hop_override.is_empty());
@@ -2023,7 +2029,7 @@ fn add_path_prefix() -> Prefix {
 
 fn assert_add_path_eor(update: &OutboundRouteUpdate) {
     assert!(update.announce.is_empty());
-    assert!(update.withdraw.is_empty());
+    assert!(update.unicast_withdrawals().next().is_none());
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
     assert!(update.refresh_markers.is_empty());
     assert!(update.next_hop_override.is_empty());
@@ -2057,7 +2063,7 @@ fn assert_add_path_envelope(
         expected_count,
         "policy must run before the Add-Path cap"
     );
-    assert!(update.withdraw.is_empty());
+    assert!(update.unicast_withdrawals().next().is_none());
     assert_unicast_only_envelope(update);
     let expected_path_ids = (1..=send_max).collect::<Vec<_>>();
     assert_eq!(
@@ -2617,7 +2623,7 @@ fn fold_queued_envelopes(
         while let Ok(update) = receiver.try_recv() {
             envelopes += 1;
             assert_unicast_only_envelope(&update);
-            for (prefix, _) in &update.withdraw {
+            for (prefix, _) in update.unicast_withdrawals() {
                 advertised.remove(prefix);
             }
             for route in update.announce.iter() {
@@ -2920,7 +2926,7 @@ fn bench_grouped_dirty_resync(c: &mut Criterion) {
                 for receiver in &mut receivers {
                     let response = receiver.try_recv().expect("resync response");
                     assert_eq!(response.announce.len(), routes);
-                    assert!(response.withdraw.is_empty());
+                    assert!(response.unicast_withdrawals().next().is_none());
                     assert!(receiver.try_recv().is_err());
                 }
             }

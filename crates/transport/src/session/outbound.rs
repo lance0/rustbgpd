@@ -25,7 +25,6 @@ const MIN_SLICE_ROUTES: usize = 64;
 /// One envelope remains owned until its final marker is admitted. Slices
 /// reuse the exact export snapshot, without growing the bounded writer queue.
 pub(super) struct PendingOutbound {
-    pub(super) update: OutboundRouteUpdate,
     pub(super) shared: Option<(Arc<super::shared_group::ProgressiveGroupEncode>, usize)>,
     requests: Vec<(Afi, Safi)>,
     phase: usize,
@@ -50,6 +49,10 @@ pub(super) struct PendingOutbound {
     /// The other heap-owning payloads, likewise moved out of `update` only
     /// once the envelope retires.
     retiring_rest: RetiringRest,
+    /// The envelope. Declared after the inventory moved out of it, so its
+    /// outbound credit charge and operation latch drop last, after every
+    /// moved route, on every destructor path.
+    pub(super) update: OutboundRouteUpdate,
     /// Spans every announce slice, so the envelope reports dropped IPv6
     /// next hops once, when its announce phase completes.
     dropped_ipv6_next_hops: DroppedIpv6NextHops,
@@ -89,6 +92,7 @@ impl RetiringRest {
             evpn_announce: _,
             vpn_announce: _,
             labeled_announce: _,
+            shared_withdraw,
             withdraw,
             end_of_rib,
             replay: _,
@@ -107,7 +111,11 @@ impl RetiringRest {
             request_refresh_all_negotiated: _,
             shared_group_encode: _,
             exempt_announce: _,
+            // Released when the original envelope drops, after its inventory.
+            credit: _,
+            latch: _,
         } = update;
+        freed_in_one_step(shared_withdraw.as_slice());
         freed_in_one_step(withdraw);
         freed_in_one_step(end_of_rib);
         freed_in_one_step(refresh_markers);
@@ -385,7 +393,9 @@ impl PendingOutbound {
                     .iter()
                     .filter(|(_, _, kind)| *kind == RouteRefreshSubtype::EoRR)
                     .count(),
-                OutboundPhase::Withdraw => self.update.withdraw.len(),
+                OutboundPhase::Withdraw => {
+                    self.update.shared_withdraw.len() + self.update.withdraw.len()
+                }
                 OutboundPhase::Announce => self.update.announce.len(),
                 OutboundPhase::FlowspecWithdraw => self.update.flowspec_withdraw.len(),
                 OutboundPhase::EvpnWithdraw => self.update.evpn_withdraw.len(),
@@ -468,7 +478,12 @@ impl PendingOutbound {
                         .collect();
                     self.offset + slice.refresh_markers.len()
                 }
-                OutboundPhase::Withdraw => payload!(withdraw),
+                OutboundPhase::Withdraw => {
+                    let end = (self.offset + budget)
+                        .min(self.update.shared_withdraw.len() + self.update.withdraw.len());
+                    slice.withdraw = self.withdraw_rows(end);
+                    end
+                }
                 OutboundPhase::Announce => {
                     // Blackholing rows lead the envelope and go out in slices
                     // of their own, so no slice mixes them with ordinary rows
@@ -512,6 +527,23 @@ impl PendingOutbound {
             }
         }
         None
+    }
+
+    /// Unicast withdraw rows `offset..end`: the group's shared rows, then
+    /// this envelope's own.
+    fn withdraw_rows(&self, end: usize) -> Vec<(Prefix, u32)> {
+        let shared = &self.update.shared_withdraw;
+        let own = &self.update.withdraw;
+        let mut rows = Vec::with_capacity(end - self.offset);
+        if self.offset < shared.len() {
+            rows.extend_from_slice(&shared[self.offset..end.min(shared.len())]);
+        }
+        if end > shared.len() {
+            rows.extend_from_slice(
+                &own[self.offset.max(shared.len()) - shared.len()..end - shared.len()],
+            );
+        }
+        rows
     }
 
     /// Size the next ordinary slice from what this one cost.
@@ -944,6 +976,7 @@ use std::collections::hash_map::Entry;
 
 fn has_route_payload(update: &OutboundRouteUpdate) -> bool {
     !update.announce.is_empty()
+        || !update.shared_withdraw.is_empty()
         || !update.withdraw.is_empty()
         || !update.flowspec_announce.is_empty()
         || !update.flowspec_withdraw.is_empty()
@@ -1325,7 +1358,7 @@ impl PeerSession {
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
         let mut v6_wire = None;
         let mut scoped_ipv4_without_extended_nexthop = 0usize;
-        for &(ref prefix, path_id) in &update.withdraw {
+        for &(ref prefix, path_id) in update.unicast_withdrawals() {
             if !self.is_family_negotiated(prefix) {
                 continue;
             }

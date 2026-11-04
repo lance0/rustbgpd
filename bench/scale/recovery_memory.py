@@ -276,6 +276,20 @@ MEMBER_FULL_PASS_BUILDER = "pub fn with_member_full_pass("
 
 
 PEER_ID_EXPORT = "pub use peer_id::PeerId;"
+# Outbound envelopes that carry a group's shared withdrawals beside their own.
+SHARED_WITHDRAW_FIELD = "    pub shared_withdraw: "
+HARNESS_SHARED_WITHDRAW_ROWS = (
+    "        for (prefix, path_id) in update\n"
+    "            .shared_withdraw\n"
+    "            .iter()\n"
+    "            .copied()\n"
+    "            .chain(update.withdraw)\n"
+    "        {\n"
+)
+CONTROL_WITHDRAW_ROWS = "        for (prefix, path_id) in update.withdraw {\n"
+HARNESS_SHARED_WITHDRAW_EMPTY = "            && update.shared_withdraw.is_empty()\n"
+HARNESS_DRAINED_WITHDRAWALS = "update.unicast_withdrawals().count()"
+CONTROL_DRAINED_WITHDRAWALS = "update.withdraw.len()"
 PEER_ID_IMPORT = re.compile(r"^[ \t]*use rustbgpd_rib::PeerId;\n", re.M)
 PEER_ID_FROM_ADDR = "PeerId::from_addr("
 PEER_ID_ADDR = "peer.addr()"
@@ -317,7 +331,9 @@ def derive_control_api(tree: Path) -> None:
     per-member resync is the only full pass it has. A control whose RIB
     predates `PeerId` keys peers by address, so the harness's
     `PeerId::from_addr`/`addr` conversions become identities there. Every role
-    therefore still runs the same operation.
+    therefore still runs the same operation. A control whose outbound
+    envelope predates shared group withdrawals carries every withdrawal in
+    its own vector, so the harness reads only that vector there.
     """
     update = (tree / "crates/rib/src/update.rs").read_text(encoding="utf-8")
     require(update.count(REEVALUATE_VARIANT) == 1, "unexpected export re-evaluation request")
@@ -334,16 +350,23 @@ def derive_control_api(tree: Path) -> None:
         require(text.count("swaps:") == text.count(HARNESS_SWAPS),
                 "a historical control cannot drop non-default dataset swaps")
         text = text.replace(HARNESS_SWAPS, "")
-    changes = [(harness, text)]
+    entrypoint = tree / "bench/scale/rrharness/src/main.rs"
+    main = entrypoint.read_text(encoding="utf-8")
+    if SHARED_WITHDRAW_FIELD not in update:
+        require(text.count("shared_withdraw") == text.count(HARNESS_SHARED_WITHDRAW_ROWS)
+                + text.count(HARNESS_SHARED_WITHDRAW_EMPTY)
+                and "unicast_withdrawals" not in text
+                and main.count("unicast_withdrawals") == main.count(HARNESS_DRAINED_WITHDRAWALS)
+                and "shared_withdraw" not in main,
+                "unexpected shared withdrawal use in the harness")
+        text = (text.replace(HARNESS_SHARED_WITHDRAW_ROWS, CONTROL_WITHDRAW_ROWS)
+                .replace(HARNESS_SHARED_WITHDRAW_EMPTY, ""))
+        main = main.replace(HARNESS_DRAINED_WITHDRAWALS, CONTROL_DRAINED_WITHDRAWALS)
+    changes = [(harness, text), (entrypoint, main)]
     lib = (tree / "crates/rib/src/lib.rs").read_text(encoding="utf-8")
     if PEER_ID_EXPORT not in lib:
         require("PeerId" not in lib, "unexpected PeerId export in the control")
-        entrypoint = tree / "bench/scale/rrharness/src/main.rs"
-        changes = [
-            (path, unwrap_peer_ids(source))
-            for path, source in ((harness, text),
-                                 (entrypoint, entrypoint.read_text(encoding="utf-8")))
-        ]
+        changes = [(path, unwrap_peer_ids(source)) for path, source in changes]
     # Validate every file before changing any.
     for path, source in changes:
         path.write_text(source, encoding="utf-8")

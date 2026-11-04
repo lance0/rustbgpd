@@ -595,7 +595,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
 
     let initial = out_rx.recv().await.unwrap();
     assert_eq!(initial.announce.len(), 1);
-    assert_eq!(initial.withdraw.len(), 0);
+    assert_eq!(initial.unicast_withdrawals().count(), 0);
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
@@ -609,7 +609,10 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
 
     let update = out_rx.recv().await.unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![(Prefix::V4(denied_prefix), 0)]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(denied_prefix), 0)]
+    );
 
     // The target is scoped, so an unscoped peer filter would not match it.
     let history = query_route_event_history(

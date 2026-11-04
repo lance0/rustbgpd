@@ -605,6 +605,62 @@ async fn outbound_pacing_session_down_paces_queued_inventory_release() {
     finish_queued_release(session, &inventory, released).await;
 }
 
+/// T11 (transport), with a real operation latch. A queued envelope's latch
+/// and credit charge stay held while its inventory is queued, active and
+/// retiring, and both are released once it finishes: after its completion
+/// and after a shutdown abort. Red if the session dropped either guard on
+/// taking the envelope: the latch or the credit reads released while routes
+/// remain.
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_queued_latch_and_credit_release_after_completion_and_abort() {
+    for abort in [false, true] {
+        let (mut session, _peer, commands, _rib_rx, mut writer, mut envelope, inventory) =
+            queued_last_owner_session().await;
+        let credit = Arc::new(rustbgpd_rib::OutboundCredit::default());
+        envelope.credit = Some(rustbgpd_rib::OutboundCharge::new(&credit, 7));
+        let latch = Arc::new(rustbgpd_rib::OperationLatch::new(Arc::default()));
+        let weak = Arc::downgrade(&latch);
+        envelope.latch = Some(latch);
+        session.outbound_tx.try_send(envelope).unwrap();
+        let held = || weak.strong_count() == 1 && credit.rows() == 7;
+        let mut intermediate = 0;
+        if abort {
+            commands.send(PeerCommand::Shutdown).await.unwrap();
+            let mut released = Vec::new();
+            run_by_step(&mut session, &inventory, &mut released).await;
+            assert!(held(), "held while its inventory is queued");
+            drop(session);
+            for _ in 0..4 * QUEUED_ROUTES / QUEUE_SLICE {
+                if inventory.live() > 0 && inventory.live() < QUEUED_ROUTES {
+                    assert!(held(), "held mid-retirement");
+                    intermediate += 1;
+                }
+                tokio::task::yield_now().await;
+            }
+        } else {
+            let mut run = std::pin::pin!(session.run());
+            for _ in 0..1_000_000 {
+                if inventory.live() == 0 && weak.strong_count() == 0 {
+                    break;
+                }
+                let polled =
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+                assert!(polled.is_pending(), "the session stays up");
+                while writer.try_recv().is_ok() {}
+                if inventory.live() > 0 && inventory.live() < QUEUED_ROUTES {
+                    assert!(held(), "held while its inventory is active");
+                    intermediate += 1;
+                }
+                tokio::time::advance(std::time::Duration::from_millis(1)).await;
+            }
+        }
+        assert!(intermediate > 0, "abort {abort}: observed mid-way");
+        assert_eq!(inventory.live(), 0, "abort {abort}");
+        assert_eq!(weak.strong_count(), 0, "abort {abort}: latch released");
+        assert_eq!(credit.rows(), 0, "abort {abort}: credit released");
+    }
+}
+
 /// A session task can exit while Established, without the teardown that
 /// discards the queue (here every command sender is gone). The queue still
 /// drops with the session, so the exit hands it to the paced release too.

@@ -339,9 +339,12 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
             negotiated_llgr_families: vec![],
         });
         if selection_release {
-            assert!(outbound_rx.try_recv().is_err());
+            assert!(outbound_rx.try_recv().map(delivered).is_err());
         } else {
-            assert_eq!(outbound_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+            assert_eq!(
+                outbound_rx.try_recv().map(delivered).unwrap().end_of_rib,
+                ipv4_sendable()
+            );
         }
         receivers.push(outbound_rx);
     }
@@ -408,7 +411,10 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
         "ordinary queries must remain fenced during the ingest fanout"
     );
     for receiver in &mut receivers {
-        assert_eq!(receiver.try_recv().unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.try_recv().map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 }
 
@@ -601,7 +607,7 @@ fn exact_update_semantic(update: &OutboundRouteUpdate) -> ExactUpdateSemantic {
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
             Option::<IpAddr>::None,
             announce,
-            update.withdraw,
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
             update.end_of_rib,
             update.refresh_markers,
             next_hop_override,
@@ -659,7 +665,7 @@ fn register_direct_exact_peer(
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
-    let eor = outbound_rx.try_recv().unwrap();
+    let eor = outbound_rx.try_recv().map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, ipv4_sendable());
     outbound_rx
 }
@@ -813,7 +819,10 @@ fn distribution_clones_metrics_once_per_pass() {
         let host = u8::try_from(index + 1).expect("four peers fit in an IPv4 host octet");
         let peer = peer_v4(Ipv4Addr::new(10, 63, 2, host));
         let mut receiver = register_direct_peer(&mut manager, peer);
-        assert_eq!(receiver.try_recv().unwrap().end_of_rib, ipv4_sendable());
+        assert_eq!(
+            receiver.try_recv().map(delivered).unwrap().end_of_rib,
+            ipv4_sendable()
+        );
         assert!(manager.grouped_member_of(peer).is_some());
         outbound.push(receiver);
     }
@@ -828,11 +837,11 @@ fn distribution_clones_metrics_once_per_pass() {
     assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, PEERS);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, PEERS);
     for receiver in &mut outbound {
-        let update = receiver.try_recv().unwrap();
+        let update = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
         assert!(matches!(
-            receiver.try_recv(),
+            receiver.try_recv().map(delivered),
             Err(mpsc::error::TryRecvError::Empty)
         ));
     }
@@ -891,12 +900,12 @@ fn grouped_source_exceptions_share_payload_and_exact_proof() {
     for (member, receiver) in peers.iter().zip(&mut receivers) {
         if *member == peers[0] {
             assert!(
-                receiver.try_recv().is_err(),
+                receiver.try_recv().map(delivered).is_err(),
                 "an all-own-source payload remains a no-op for its source"
             );
             continue;
         }
-        let update = receiver.try_recv().unwrap();
+        let update = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(update.announce.len(), ROUTES);
         assert_eq!(update.announce_source_exclusion, None);
         assert_eq!(
@@ -910,7 +919,7 @@ fn grouped_source_exceptions_share_payload_and_exact_proof() {
         );
         announces.push(update.announce.clone());
         encode_cells.push(update.shared_group_encode.clone().unwrap());
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver.try_recv().map(delivered).is_err());
     }
     assert!(
         announces
@@ -993,14 +1002,14 @@ fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
             )
             .is_ok()
     );
-    let update = outbound.try_recv().unwrap();
+    let update = outbound.try_recv().map(delivered).unwrap();
     assert_eq!(update.announce_source_exclusion, Some(peer));
     assert_eq!(update.announce.len(), 2);
     assert_eq!(update.announce[0].prefix, own_route.prefix);
     assert_eq!(update.announce[0].peer, own_route.peer);
     assert_eq!(update.announce[1].prefix, other_route.prefix);
     assert_eq!(update.announce[1].peer, other_route.peer);
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert!(
         update.shared_group_encode.is_none(),
         "a member-specific exact fallback cannot retain shared encoded bytes"
@@ -1026,7 +1035,10 @@ fn distribution_skips_pristine_otc_prefix_visits() {
         let host = u8::try_from(index + 1).expect("four peers fit in an IPv4 host octet");
         let peer = peer_v4(Ipv4Addr::new(10, 63, 2, host));
         let mut receiver = register_direct_peer(&mut manager, peer);
-        assert_eq!(receiver.try_recv().unwrap().end_of_rib, ipv4_sendable());
+        assert_eq!(
+            receiver.try_recv().map(delivered).unwrap().end_of_rib,
+            ipv4_sendable()
+        );
         assert!(manager.grouped_member_of(peer).is_some());
         outbound.push(receiver);
     }
@@ -1058,7 +1070,7 @@ fn distribution_skips_pristine_otc_prefix_visits() {
     assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, PEERS);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, PEERS);
     for receiver in &mut outbound {
-        let update = receiver.try_recv().unwrap();
+        let update = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(update.announce.len(), CHANGED);
         assert_eq!(
             update
@@ -1073,7 +1085,7 @@ fn distribution_skips_pristine_otc_prefix_visits() {
                 .collect::<HashSet<_>>()
         );
         assert!(matches!(
-            receiver.try_recv(),
+            receiver.try_recv().map(delivered),
             Err(mpsc::error::TryRecvError::Empty)
         ));
     }
@@ -1102,7 +1114,10 @@ fn clean_grouped_fanout_without_actions_skips_action_suppression_scan() {
             let host = u8::try_from(host).expect("four peers fit in an IPv4 host octet");
             let peer = peer_v4(Ipv4Addr::new(10, 63, 4, host));
             let mut receiver = register_direct_peer_with_policy(&mut manager, peer, policy.clone());
-            assert_eq!(receiver.try_recv().unwrap().end_of_rib, ipv4_sendable());
+            assert_eq!(
+                receiver.try_recv().map(delivered).unwrap().end_of_rib,
+                ipv4_sendable()
+            );
             assert!(manager.grouped_member_of(peer).is_some());
             outbound.push(receiver);
         }
@@ -1112,8 +1127,14 @@ fn clean_grouped_fanout_without_actions_skips_action_suppression_scan() {
         let before = scans();
         distribute_direct_routes(&mut manager, source, (64..128).map(prefix));
         for receiver in &mut outbound {
-            assert_eq!(receiver.try_recv().unwrap().announce.len(), 64);
-            assert_eq!(receiver.try_recv().unwrap().announce.len(), 64);
+            assert_eq!(
+                receiver.try_recv().map(delivered).unwrap().announce.len(),
+                64
+            );
+            assert_eq!(
+                receiver.try_recv().map(delivered).unwrap().announce.len(),
+                64
+            );
         }
         // Load-bearing proof: removing the O(1) gate in
         // `suppress_equivalent_unicast_actions` makes the action-free group
@@ -1171,13 +1192,16 @@ fn grouped_peer_private_unicast_stays_unallocated_during_distribution() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 1));
     let mut outbound = register_direct_peer(&mut manager, peer);
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
     assert!(manager.grouped_member_of(peer).is_some());
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 1), prefix);
 
-    let update = outbound.try_recv().unwrap();
+    let update = outbound.try_recv().map(delivered).unwrap();
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
     assert_eq!(manager.grouped_advertised_routes(peer).unwrap().len(), 1);
@@ -1198,10 +1222,13 @@ fn grouped_late_join_private_unicast_stays_unallocated_during_initial_dump() {
 
     let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 2));
     let mut outbound = register_direct_peer(&mut manager, peer);
-    let dump = outbound.try_recv().unwrap();
+    let dump = outbound.try_recv().map(delivered).unwrap();
     assert_eq!(dump.announce.len(), 1);
     assert_eq!(dump.announce[0].prefix, Prefix::V4(prefix));
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
     assert!(manager.grouped_member_of(peer).is_some());
     assert_eq!(manager.grouped_advertised_routes(peer).unwrap().len(), 1);
     let private = manager
@@ -1222,7 +1249,10 @@ fn grouped_join_replay_reserves_only_retained_entries() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 5));
     let mut outbound = register_direct_peer(&mut manager, peer);
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
 
     // Every route but the first carries the RFC 7947 target-specific
     // "do not announce to PEER" community, so route-server control keeps
@@ -1283,7 +1313,7 @@ fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
     let mut outbound =
         register_direct_peer_with_families(&mut manager, peer, ipv4_flowspec_sendable());
     assert_eq!(
-        outbound.try_recv().unwrap().end_of_rib,
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
         ipv4_flowspec_sendable()
     );
     assert!(manager.grouped_member_of(peer).is_some());
@@ -1291,7 +1321,7 @@ fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
     let (reply_tx, _reply_rx) = oneshot::channel();
     manager.handle_inject_flowspec(make_flowspec_route(Ipv4Addr::new(192, 0, 2, 4)), reply_tx);
 
-    let update = outbound.try_recv().unwrap();
+    let update = outbound.try_recv().map(delivered).unwrap();
     assert_eq!(update.flowspec_announce.len(), 1);
     let private = manager
         .adj_ribs_out
@@ -1356,14 +1386,14 @@ fn withheld_family_gets_an_empty_eor_after_the_initial_dump() {
 
     let peer = peer_v4(Ipv4Addr::new(10, 63, 3, 1));
     let mut outbound = register_withheld_v6_peer(&mut manager, peer);
-    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().map(delivered).ok()).collect();
     let announced: Vec<_> = updates
         .iter()
         .flat_map(|u| u.announce.iter().map(|r| r.prefix))
         .collect();
     assert_eq!(announced, vec![Prefix::V4(v4)], "no IPv6 NLRI");
     let last = updates.last().expect("initial dump sent");
-    assert!(last.announce.is_empty() && last.withdraw.is_empty());
+    assert!(last.announce.is_empty() && last.unicast_withdrawals().next().is_none());
     assert_eq!(
         last.end_of_rib,
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
@@ -1386,7 +1416,7 @@ fn withheld_family_eor_is_deferred_for_an_orf_gated_restarter() {
         .peer_orf_pending
         .insert(peer, std::iter::once(ipv6).collect());
     let mut outbound = register_withheld_v6_peer(&mut manager, peer);
-    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok())
+    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().map(delivered).ok())
         .flat_map(|u| u.end_of_rib)
         .collect();
     assert_eq!(eor, ipv4_sendable());
@@ -1406,7 +1436,7 @@ fn withheld_family_unlock_after_its_eor_still_exports_the_table() {
     let peer = peer_v4(Ipv4Addr::new(10, 63, 3, 3));
     let mut outbound = register_withheld_v6_peer(&mut manager, peer);
     let ipv6 = (Afi::Ipv6, Safi::Unicast);
-    let initial: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
+    let initial: Vec<_> = std::iter::from_fn(|| outbound.try_recv().map(delivered).ok()).collect();
     assert!(initial.iter().any(|u| u.end_of_rib.contains(&ipv6)));
 
     manager.handle_update(RibUpdate::PeerFamilySendable {
@@ -1417,7 +1447,7 @@ fn withheld_family_unlock_after_its_eor_still_exports_the_table() {
     });
     while manager.process_next_route_chunk() {}
 
-    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().map(delivered).ok()).collect();
     let announced: Vec<_> = updates
         .iter()
         .flat_map(|u| u.announce.iter().map(|r| r.prefix))
@@ -1463,7 +1493,7 @@ fn deferred_ipv6_unlock_confirmation_keeps_next_registration_sendable() {
     ));
     manager.advance_pending_initial_registration();
     assert!(
-        std::iter::from_fn(|| outbound.try_recv().ok()).any(|update| update
+        std::iter::from_fn(|| outbound.try_recv().map(delivered).ok()).any(|update| update
             .announce
             .iter()
             .any(|route| route.prefix == Prefix::V6(v6)))
@@ -1483,7 +1513,10 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
     let mut outbound = register_direct_peer(&mut manager, peer);
     let mut other_outbound = register_direct_peer(&mut manager, other);
     for rx in [&mut outbound, &mut other_outbound] {
-        assert_eq!(rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+        assert_eq!(
+            rx.try_recv().map(delivered).unwrap().end_of_rib,
+            ipv4_sendable()
+        );
     }
     let old_gid = manager.grouped_member_of(peer).expect("grouped");
     assert_eq!(manager.grouped_member_of(other), Some(old_gid));
@@ -1506,10 +1539,10 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
     });
     while manager.process_next_route_chunk() {}
     for rx in [&mut outbound, &mut other_outbound] {
-        let update = rx.try_recv().unwrap();
+        let update = rx.try_recv().map(delivered).unwrap();
         let prefixes: Vec<_> = update.announce.iter().map(|r| r.prefix).collect();
         assert_eq!(prefixes, vec![Prefix::V4(v4)], "IPv6 is withheld");
-        assert!(rx.try_recv().is_err());
+        assert!(rx.try_recv().map(delivered).is_err());
     }
 
     let ipv6 = (Afi::Ipv6, Safi::Unicast);
@@ -1523,7 +1556,7 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
         while manager.process_next_route_chunk() {}
     }
 
-    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().map(delivered).ok()).collect();
     let announced: Vec<_> = updates
         .iter()
         .flat_map(|u| u.announce.iter().map(|r| r.prefix))
@@ -1533,7 +1566,11 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
         vec![Prefix::V6(v6)],
         "only the new family is sent"
     );
-    assert!(updates.iter().all(|u| u.withdraw.is_empty()));
+    assert!(
+        updates
+            .iter()
+            .all(|u| u.unicast_withdrawals().next().is_none())
+    );
     let eor: Vec<_> = updates.iter().flat_map(|u| u.end_of_rib.clone()).collect();
     assert_eq!(eor, vec![ipv6], "one EoR, for the new family only");
     let last = updates.last().expect("updates sent");
@@ -1545,7 +1582,10 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
     let new_gid = manager.grouped_member_of(peer).expect("regrouped");
     assert_ne!(new_gid, old_gid);
     assert_eq!(manager.grouped_member_of(other), Some(old_gid));
-    assert!(other_outbound.try_recv().is_err(), "co-member untouched");
+    assert!(
+        other_outbound.try_recv().map(delivered).is_err(),
+        "co-member untouched"
+    );
 }
 
 /// Unlocking a family can move the peer into an update group that already
@@ -1563,11 +1603,14 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
     let mut peer_rx = register_direct_peer(&mut manager, peer);
     let mut v4_rx = register_direct_peer(&mut manager, v4_only);
     assert_eq!(
-        dual_rx.try_recv().unwrap().end_of_rib,
+        dual_rx.try_recv().map(delivered).unwrap().end_of_rib,
         dual_stack_sendable()
     );
     for rx in [&mut peer_rx, &mut v4_rx] {
-        assert_eq!(rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+        assert_eq!(
+            rx.try_recv().map(delivered).unwrap().end_of_rib,
+            ipv4_sendable()
+        );
     }
     let dual_gid = manager.grouped_member_of(dual).expect("grouped");
     let v4_gid = manager.grouped_member_of(peer).expect("grouped");
@@ -1590,7 +1633,7 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
         validated_with: None,
     });
     while manager.process_next_route_chunk() {}
-    let mut dual_prefixes: Vec<_> = std::iter::from_fn(|| dual_rx.try_recv().ok())
+    let mut dual_prefixes: Vec<_> = std::iter::from_fn(|| dual_rx.try_recv().map(delivered).ok())
         .flat_map(|u| u.announce.iter().map(|r| r.prefix).collect::<Vec<_>>())
         .collect();
     dual_prefixes.sort_unstable();
@@ -1598,7 +1641,7 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
     expected.sort_unstable();
     assert_eq!(dual_prefixes, expected);
     for rx in [&mut peer_rx, &mut v4_rx] {
-        let prefixes: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        let prefixes: Vec<_> = std::iter::from_fn(|| rx.try_recv().map(delivered).ok())
             .flat_map(|u| u.announce.iter().map(|r| r.prefix).collect::<Vec<_>>())
             .collect();
         assert_eq!(prefixes, vec![Prefix::V4(v4)]);
@@ -1615,18 +1658,28 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
 
     assert_eq!(manager.grouped_member_of(peer), Some(dual_gid), "joined");
     assert_eq!(manager.grouped_member_of(v4_only), Some(v4_gid));
-    let updates: Vec<_> = std::iter::from_fn(|| peer_rx.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| peer_rx.try_recv().map(delivered).ok()).collect();
     let announced: Vec<_> = updates
         .iter()
         .flat_map(|u| u.announce.iter().map(|r| r.prefix))
         .collect();
     assert_eq!(announced, vec![Prefix::V6(v6)]);
-    assert!(updates.iter().all(|u| u.withdraw.is_empty()));
+    assert!(
+        updates
+            .iter()
+            .all(|u| u.unicast_withdrawals().next().is_none())
+    );
     let eor: Vec<_> = updates.iter().flat_map(|u| u.end_of_rib.clone()).collect();
     assert_eq!(eor, vec![ipv6]);
     assert_eq!(updates.last().unwrap().end_of_rib, vec![ipv6]);
-    assert!(dual_rx.try_recv().is_err(), "existing member untouched");
-    assert!(v4_rx.try_recv().is_err(), "old group member untouched");
+    assert!(
+        dual_rx.try_recv().map(delivered).is_err(),
+        "existing member untouched"
+    );
+    assert!(
+        v4_rx.try_recv().map(delivered).is_err(),
+        "old group member untouched"
+    );
 }
 
 /// A GR restarter whose unlocked family is still ORF-gated gets no `EoR`
@@ -1637,7 +1690,10 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_restarter() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 8));
     let mut outbound = register_direct_peer(&mut manager, peer);
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
     let ipv6 = (Afi::Ipv6, Safi::Unicast);
     manager.gr_peers.insert(peer, HashSet::new());
     manager
@@ -1652,7 +1708,7 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_restarter() {
     });
     while manager.process_next_route_chunk() {}
 
-    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok())
+    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().map(delivered).ok())
         .flat_map(|u| u.end_of_rib)
         .collect();
     assert_eq!(eor, vec![], "no EoR ahead of the gated flood");
@@ -1667,7 +1723,10 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_stale_holder() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 10));
     let mut outbound = register_direct_peer(&mut manager, peer);
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
     let ipv6 = (Afi::Ipv6, Safi::Unicast);
     manager.peer_may_hold_stale.insert(peer);
     manager
@@ -1682,7 +1741,7 @@ fn family_made_sendable_defers_eor_for_an_orf_gated_stale_holder() {
     });
     while manager.process_next_route_chunk() {}
 
-    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok())
+    let eor: Vec<_> = std::iter::from_fn(|| outbound.try_recv().map(delivered).ok())
         .flat_map(|u| u.end_of_rib)
         .collect();
     assert_eq!(eor, vec![], "no EoR ahead of the gated flood");
@@ -1701,9 +1760,15 @@ fn family_unlock_from_a_superseded_session_survives_failback() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 9));
     let mut a_rx = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 1);
-    assert_eq!(a_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        a_rx.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
     let mut b_rx = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 2);
-    assert_eq!(b_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        b_rx.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
 
     let source = Ipv4Addr::new(192, 0, 2, 13);
     let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -1736,8 +1801,8 @@ fn family_unlock_from_a_superseded_session_survives_failback() {
         ipv4_sendable(),
         "B's installed registration is untouched"
     );
-    while b_rx.try_recv().is_ok() {}
-    while a_rx.try_recv().is_ok() {}
+    while b_rx.try_recv().map(delivered).is_ok() {}
+    while a_rx.try_recv().map(delivered).is_ok() {}
 
     manager.handle_update(RibUpdate::PeerDown {
         peer,
@@ -1746,7 +1811,7 @@ fn family_unlock_from_a_superseded_session_survives_failback() {
     while manager.process_next_route_chunk() {}
 
     assert!(manager.peer_sendable_families[&peer].contains(&ipv6));
-    let updates: Vec<_> = std::iter::from_fn(|| a_rx.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| a_rx.try_recv().map(delivered).ok()).collect();
     let announced: Vec<_> = updates
         .iter()
         .flat_map(|u| u.announce.iter().map(|r| r.prefix))
@@ -1783,7 +1848,10 @@ fn stale_family_sendable_is_discarded_and_counted() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 7));
     let mut outbound = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 2);
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
 
     manager.handle_update(RibUpdate::PeerFamilySendable {
         peer,
@@ -1794,7 +1862,7 @@ fn stale_family_sendable_is_discarded_and_counted() {
     while manager.process_next_route_chunk() {}
 
     assert_eq!(manager.peer_sendable_families[&peer], ipv4_sendable());
-    assert!(outbound.try_recv().is_err());
+    assert!(outbound.try_recv().map(delivered).is_err());
     let stale = metrics
         .registry()
         .gather()
@@ -1822,7 +1890,10 @@ fn family_made_sendable_mid_session_installs_its_add_path_limit() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 3));
     let mut outbound = register_direct_peer(&mut manager, peer);
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
     assert!(manager.grouped_member_of(peer).is_some());
 
     let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 0), 48);
@@ -1845,7 +1916,10 @@ fn family_made_sendable_mid_session_installs_its_add_path_limit() {
         });
         while manager.process_next_route_chunk() {}
     }
-    assert!(outbound.try_recv().is_err(), "IPv6 is withheld");
+    assert!(
+        outbound.try_recv().map(delivered).is_err(),
+        "IPv6 is withheld"
+    );
 
     manager.handle_update(RibUpdate::PeerFamilySendable {
         peer,
@@ -1859,7 +1933,7 @@ fn family_made_sendable_mid_session_installs_its_add_path_limit() {
         manager.grouped_member_of(peer).is_none(),
         "Add-Path send is private"
     );
-    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
+    let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().map(delivered).ok()).collect();
     let mut paths: Vec<_> = updates
         .iter()
         .flat_map(|u| u.announce.iter().map(|r| (r.prefix, r.path_id)))
@@ -1880,10 +1954,16 @@ fn grouped_peer_slow_round_trip_releases_private_unicast_without_wire_delta() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 4));
     let mut outbound = register_direct_peer(&mut manager, peer);
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
     distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 5), prefix);
-    assert_eq!(outbound.try_recv().unwrap().announce.len(), 1);
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().announce.len(),
+        1
+    );
 
     manager.handle_update(RibUpdate::PeerSlowState {
         peer,
@@ -1901,7 +1981,7 @@ fn grouped_peer_slow_round_trip_releases_private_unicast_without_wire_delta() {
     assert!(private.bench_route_capacity() > 0);
     assert!(private.get(&Prefix::V4(prefix), 0).is_some());
     assert!(matches!(
-        outbound.try_recv(),
+        outbound.try_recv().map(delivered),
         Err(mpsc::error::TryRecvError::Empty)
     ));
 
@@ -1925,7 +2005,7 @@ fn grouped_peer_slow_round_trip_releases_private_unicast_without_wire_delta() {
             assert_eq!(private.bench_route_capacity(), 0);
         }
         assert!(matches!(
-            outbound.try_recv(),
+            outbound.try_recv().map(delivered),
             Err(mpsc::error::TryRecvError::Empty)
         ));
     }
@@ -1937,7 +2017,10 @@ fn grouped_peer_slow_round_trip_releases_private_vpn_without_wire_delta() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 5));
     let mut outbound = register_direct_peer_with_families(&mut manager, peer, vpn_sendable());
-    assert_eq!(outbound.try_recv().unwrap().end_of_rib, vpn_sendable());
+    assert_eq!(
+        outbound.try_recv().map(delivered).unwrap().end_of_rib,
+        vpn_sendable()
+    );
     let mut route = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 7), 31, 100, 100);
     route.origin_type = crate::route::RouteOrigin::Ebgp;
     let route_key = route.key();
@@ -1948,7 +2031,7 @@ fn grouped_peer_slow_round_trip_releases_private_vpn_without_wire_delta() {
         withdrawn: vec![],
     });
     while manager.process_next_route_chunk() {}
-    let announced = outbound.try_recv().unwrap();
+    let announced = outbound.try_recv().map(delivered).unwrap();
     assert_eq!(announced.vpn_announce.len(), 1);
     assert_eq!(announced.vpn_announce[0].key(), route_key);
     assert!(crate::manager::helpers::vpn_routes_equal(
@@ -1988,7 +2071,7 @@ fn grouped_peer_slow_round_trip_releases_private_vpn_without_wire_delta() {
     let capacities = private.bench_vpn_capacities();
     assert!(capacities.0 > 0 && capacities.1 > 0);
     assert!(matches!(
-        outbound.try_recv(),
+        outbound.try_recv().map(delivered),
         Err(mpsc::error::TryRecvError::Empty)
     ));
 
@@ -2016,7 +2099,7 @@ fn grouped_peer_slow_round_trip_releases_private_vpn_without_wire_delta() {
     assert_eq!(private.vpn_len(), 0);
     assert_eq!(private.bench_vpn_capacities(), (0, 0));
     assert!(matches!(
-        outbound.try_recv(),
+        outbound.try_recv().map(delivered),
         Err(mpsc::error::TryRecvError::Empty)
     ));
 }
@@ -2043,7 +2126,7 @@ fn drive_exact_precommit_step(
     while manager.process_next_route_chunk() {}
     let updates = receivers
         .each_mut()
-        .map(|receiver| exact_update_semantic(&receiver.try_recv().unwrap()));
+        .map(|receiver| exact_update_semantic(&receiver.try_recv().map(delivered).unwrap()));
     let rejected = &manager.peer_unexportable;
     let overlays = peers.map(|peer| rejected.get(&peer).cloned().unwrap_or_default());
     let advertised = peers.map(|peer| {
@@ -2229,7 +2312,7 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
                     manager.grouped_member_of(peer_v4(peer)).is_none(),
                     ungrouped
                 );
-                let mut update = outbound.try_recv().unwrap();
+                let mut update = outbound.try_recv().map(delivered).unwrap();
                 Arc::make_mut(&mut update.announce).sort_by_key(|route| route.prefix);
                 assert!(
                     update
@@ -2238,10 +2321,16 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
                         .all(|route| route.peer != peer_v4(peer))
                 );
                 assert_eq!(update.announce.len(), if limited { 1 } else { 2 });
-                assert_eq!(update.withdraw, []);
+                assert_eq!(
+                    update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                    []
+                );
                 assert_eq!(update.end_of_rib, []);
-                assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
-                assert!(outbound.try_recv().is_err());
+                assert_eq!(
+                    outbound.try_recv().map(delivered).unwrap().end_of_rib,
+                    ipv4_sendable()
+                );
+                assert!(outbound.try_recv().map(delivered).is_err());
                 assert_eq!(probes.load(Ordering::Relaxed), 2);
                 let expected_rejected = if limited {
                     HashSet::from([rejected_key.clone()])
@@ -2398,7 +2487,7 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     .await
     .unwrap();
     for (index, receiver) in receivers.iter_mut().enumerate() {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(
             update.announce_source_exclusion,
             (!force_ungrouped).then_some(peers[index])
@@ -2441,8 +2530,8 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     let mut folded = Vec::new();
     let mut shared_cells = Vec::new();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
-        assert_eq!(update.withdraw.len(), 0);
+        let update = receiver.recv().await.map(delivered).unwrap();
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         if let Some(cell) = &update.shared_group_encode {
             shared_cells.push(Arc::clone(cell));
         }
@@ -2854,9 +2943,9 @@ async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
     .await
     .unwrap();
 
-    let u1 = rx1.recv().await.unwrap();
-    let u2 = rx2.recv().await.unwrap();
-    let u4 = rx4.recv().await.unwrap();
+    let u1 = rx1.recv().await.map(delivered).unwrap();
+    let u2 = rx2.recv().await.map(delivered).unwrap();
+    let u4 = rx4.recv().await.map(delivered).unwrap();
     assert_eq!(u1.announce.len(), 1);
     assert_eq!(u1.announce[0].prefix, Prefix::V4(prefix));
     assert_eq!(u1.announce[0].attributes, u2.announce[0].attributes);
@@ -3073,7 +3162,15 @@ fn regroup_destination_absent_after_owned_refusal() {
         .entry(route.peer)
         .or_insert_with(|| AdjRibIn::new(route.peer));
     manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
-    assert_eq!(output.try_recv().unwrap().evpn_announce.len(), 1);
+    assert_eq!(
+        output
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .evpn_announce
+            .len(),
+        1
+    );
     assert!(manager.capture_shared_evpn_admitted(peer));
     let handle = manager.evpn_recovery_handle(peer).unwrap();
     assert_eq!(
@@ -3111,7 +3208,7 @@ fn regroup_destination_absent_after_owned_refusal() {
         !manager.group_ribs.contains_key(&destination),
         "an owned precommit refusal must not leave a memberless destination table"
     );
-    assert!(output.try_recv().is_err());
+    assert!(output.try_recv().map(delivered).is_err());
 }
 
 #[tokio::test]
@@ -3186,7 +3283,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        let initial = receiver.recv().await.unwrap();
+        let initial = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(initial.announce.len(), ROUTE_COUNT);
     }
     probes.store(0, Ordering::Relaxed);
@@ -3225,7 +3322,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
 
     let mut updates = Vec::new();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), ROUTE_COUNT);
         updates.push(update);
     }
@@ -3302,7 +3399,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.announce[0].prefix, Prefix::V4(later_prefix));
     }
@@ -3385,7 +3482,7 @@ async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
     assert!(
         receivers
             .iter_mut()
-            .all(|receiver| receiver.try_recv().is_err())
+            .all(|receiver| receiver.try_recv().map(delivered).is_err())
     );
     assert_eq!(
         query_uncommitted_policy_transition_groups(&tx).await,
@@ -3493,10 +3590,10 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]) > 0.0,
         "withdrawal residue must exist before the clean cohort commit"
     );
-    let initially_delivered = dirty_receiver.recv().await.unwrap();
+    let initially_delivered = dirty_receiver.recv().await.map(delivered).unwrap();
     assert_eq!(initially_delivered.announce.len(), 1);
     for receiver in &mut cohort_receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
 
     let (reply, response) = oneshot::channel();
@@ -3533,9 +3630,13 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         0.0,
         "residue after pre-reply dirty drain",
     );
-    let healed = dirty_receiver.recv().await.unwrap();
+    let healed = dirty_receiver.recv().await.map(delivered).unwrap();
     assert!(
-        healed.withdraw.contains(&(Prefix::V4(first_prefix), 0)),
+        healed
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(Prefix::V4(first_prefix), 0)),
         "the pre-reply drain must emit the unrelated withdrawal residue"
     );
     assert!(
@@ -3622,9 +3723,21 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     .await
     .unwrap();
     for receiver in &mut moving_receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
-    assert_eq!(destination_receiver.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        destination_receiver
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
 
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicies {
@@ -3644,9 +3757,12 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)
     );
     for receiver in &mut moving_receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
-    assert!(destination_receiver.try_recv().is_err());
+    assert!(destination_receiver.try_recv().map(delivered).is_err());
 
     for peer in moving.into_iter().chain([destination_member]) {
         assert_eq!(query_update_group(&tx, peer).await, "group:1");
@@ -3672,9 +3788,21 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     .await
     .unwrap();
     for receiver in &mut moving_receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
-    assert_eq!(destination_receiver.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        destination_receiver
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
     for peer in moving.into_iter().chain([destination_member]) {
         assert_eq!(
             query_first_export_term_hits(&tx, &roster, peer).await,
@@ -3758,7 +3886,10 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), ROUTE_COUNT);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            ROUTE_COUNT
+        );
     }
 
     let replacements = peers
@@ -3858,7 +3989,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     assert!(
         receivers
             .iter_mut()
-            .all(|receiver| receiver.try_recv().is_err())
+            .all(|receiver| receiver.try_recv().map(delivered).is_err())
     );
     assert!(matches!(
         response.try_recv(),
@@ -3913,7 +4044,10 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
         Ok(ROUTE_COUNT)
     );
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), ROUTE_COUNT);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            ROUTE_COUNT
+        );
     }
     for reply in general_replies {
         assert_eq!(reply.await.unwrap(), ROUTE_COUNT);
@@ -4108,7 +4242,7 @@ async fn abandoned_authoritative_replacement_batch_is_skipped() {
     );
     assert!(
         matches!(
-            outbound_rx.try_recv(),
+            outbound_rx.try_recv().map(delivered),
             Err(mpsc::error::TryRecvError::Empty)
         ),
         "abandoned batch must not reach the wire"
@@ -4318,7 +4452,10 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     let (reply, dropped_response) = oneshot::channel();
@@ -4347,7 +4484,7 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
     drop(query_tx);
 
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
         assert!(update.announce[0].attributes.iter().any(|attribute| {
             matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_2002))
@@ -4422,7 +4559,10 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
     probes.store(0, Ordering::Relaxed);
     reuses.store(0, Ordering::Relaxed);
@@ -4448,7 +4588,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     assert!(
         receivers
             .iter_mut()
-            .all(|receiver| receiver.try_recv().is_err())
+            .all(|receiver| receiver.try_recv().map(delivered).is_err())
     );
     for &peer in &peers {
         assert_eq!(query_update_group(&tx, peer).await, "group:0");
@@ -4478,12 +4618,15 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     );
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
-    let accepted = receivers[0].recv().await.unwrap();
+    let accepted = receivers[0].recv().await.map(delivered).unwrap();
     assert_eq!(accepted.announce.len(), 1);
-    assert_eq!(accepted.withdraw.len(), 0);
-    let rejected = receivers[1].recv().await.unwrap();
+    assert_eq!(accepted.unicast_withdrawals().count(), 0);
+    let rejected = receivers[1].recv().await.map(delivered).unwrap();
     assert!(rejected.announce.is_empty());
-    assert_eq!(rejected.withdraw, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(
+        rejected.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(Prefix::V4(prefix), 0)]
+    );
 
     let (stats_reply, stats_response) = oneshot::channel();
     tx.send(RibUpdate::TestQueryPolicyTransitionStats { reply: stats_reply })
@@ -4520,7 +4663,16 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     })
     .await
     .unwrap();
-    assert_eq!(receivers[0].recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        receivers[0]
+            .recv()
+            .await
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
     for &peer in &peers {
         assert_eq!(
             query_first_export_term_hits(&tx, &roster, peer).await,
@@ -4551,7 +4703,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
         .await;
     for receiver in &mut receivers {
         let mut rollback_updates = 0;
-        while receiver.try_recv().is_ok() {
+        while receiver.try_recv().map(delivered).is_ok() {
             rollback_updates += 1;
         }
         assert!(
@@ -4588,7 +4740,10 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
     for peer in peers {
         assert_eq!(
@@ -4655,7 +4810,10 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     let (reply, response) = oneshot::channel();
@@ -4679,7 +4837,7 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
         assert!(update.announce[0].attributes.iter().any(|attribute| {
             matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
@@ -4802,7 +4960,10 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), ROUTE_COUNT);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            ROUTE_COUNT
+        );
     }
 
     let (reply, response) = oneshot::channel();
@@ -4826,7 +4987,7 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
 
     let mut updates = Vec::new();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), ROUTE_COUNT);
         updates.push(update);
     }
@@ -4936,10 +5097,18 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
     .unwrap();
     let _ = query_best_routes(&tx).await;
     assert!(
-        receivers[0].try_recv().is_err(),
+        receivers[0].try_recv().map(delivered).is_err(),
         "the source-denied member must not receive the route initially"
     );
-    assert_eq!(receivers[1].try_recv().unwrap().announce.len(), 1);
+    assert_eq!(
+        receivers[1]
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
 
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicies {
@@ -4962,7 +5131,7 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
     );
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
-    while let Ok(update) = receivers[0].try_recv() {
+    while let Ok(update) = receivers[0].try_recv().map(delivered) {
         assert!(
             !update
                 .announce
@@ -4972,7 +5141,7 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
         );
     }
     let mut b_routes = Vec::new();
-    while let Ok(update) = receivers[1].try_recv() {
+    while let Ok(update) = receivers[1].try_recv().map(delivered) {
         b_routes.extend(update.announce.iter().cloned());
     }
     let reannounced = b_routes
@@ -5051,7 +5220,7 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
     })
     .await
     .unwrap();
-    let first_old = receivers[0].recv().await.unwrap();
+    let first_old = receivers[0].recv().await.map(delivered).unwrap();
     assert_eq!(first_old.announce.len(), 1);
     // Leave the second member's old-policy announcement queued so only its
     // writer is saturated when the cohort command arrives.
@@ -5076,11 +5245,11 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
     );
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 
-    let first_new = receivers[0].recv().await.unwrap();
+    let first_new = receivers[0].recv().await.map(delivered).unwrap();
     assert!(first_new.announce[0].attributes.iter().any(|attribute| {
         matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
     }));
-    let second_old = receivers[1].recv().await.unwrap();
+    let second_old = receivers[1].recv().await.map(delivered).unwrap();
     assert!(second_old.announce[0].attributes.iter().any(|attribute| {
         matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0001))
     }));
@@ -5101,12 +5270,12 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
 
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
-    let second_new = receivers[1].recv().await.unwrap();
+    let second_new = receivers[1].recv().await.map(delivered).unwrap();
     assert!(second_new.announce[0].attributes.iter().any(|attribute| {
         matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
     }));
     assert!(
-        receivers[0].try_recv().is_err(),
+        receivers[0].try_recv().map(delivered).is_err(),
         "the accepted member must not be replayed"
     );
 
@@ -5172,7 +5341,10 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     let (reply, response) = oneshot::channel();
@@ -5195,7 +5367,7 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
     );
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert!(update.announce[0].attributes.iter().any(|attribute| {
             matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_0002))
         }));
@@ -5288,14 +5460,13 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     );
 
     // Free the channel and let the resync timer clear the residue.
-    let jammed = out_rx.recv().await.unwrap();
+    let jammed = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
-    let resync = out_rx.recv().await.unwrap();
+    let resync = out_rx.recv().await.map(delivered).unwrap();
     assert!(
         resync
-            .withdraw
-            .iter()
+            .unicast_withdrawals()
             .any(|(prefix, _)| *prefix == Prefix::V4(p1)),
         "resync must (over-)withdraw the tombstoned prefix"
     );
@@ -5410,16 +5581,17 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     );
 
     // Free the channel and let the resync timer drain the residue.
-    let jammed = out_rx.recv().await.unwrap();
+    let jammed = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(jammed.announce.len(), 1, "p1 was delivered before the jam");
     assert_eq!(jammed.announce[0].prefix, Prefix::V4(p1));
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
     await_dirty_resync(&tx, peer).await;
     let resync = out_rx
         .try_recv()
+        .map(delivered)
         .expect("the per-peer resync must emit the residue withdraw");
     assert_eq!(
-        resync.withdraw,
+        resync.unicast_withdrawals().copied().collect::<Vec<_>>(),
         vec![(Prefix::V4(p1), 0)],
         "the per-peer resync must withdraw only the admitted tombstoned prefix"
     );
@@ -5499,7 +5671,10 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
     )
     .await;
-    assert_eq!(out_rx.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        out_rx.recv().await.map(delivered).unwrap().announce.len(),
+        1
+    );
     assert_eq!(hits_for(&tx, &roster, peer).await, (1, 0));
 
     // Content-equal reinstall (fresh instance, zeroed counters — the
@@ -5520,7 +5695,10 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24),
     )
     .await;
-    assert_eq!(out_rx.recv().await.unwrap().announce.len(), 1);
+    assert_eq!(
+        out_rx.recv().await.map(delivered).unwrap().announce.len(),
+        1
+    );
     assert_eq!(
         hits_for(&tx, &roster, peer).await,
         (2, 0),
@@ -5850,12 +6028,12 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
 
     // Drain the stuck first announce so the resync has room, then fire
     // the dirty-resync timer.
-    let _ = g_rx.recv().await.unwrap();
-    let _ = u_rx.recv().await.unwrap();
+    let _ = g_rx.recv().await.map(delivered).unwrap();
+    let _ = u_rx.recv().await.map(delivered).unwrap();
     tokio::time::advance(Duration::from_secs(2)).await;
     // The resync delivers the previously-dropped prefix2 to both peers.
-    let _ = g_rx.recv().await.unwrap();
-    let _ = u_rx.recv().await.unwrap();
+    let _ = g_rx.recv().await.map(delivered).unwrap();
+    let _ = u_rx.recv().await.map(delivered).unwrap();
 
     let post_grouped = query_neighbor_policy_stats(&tx, grouped).await;
     let post_ungrouped = query_neighbor_policy_stats(&tx, ungrouped).await;
@@ -5957,7 +6135,7 @@ fn direct_clean_transition_manager_with_policy(
             negotiated_orf_recv: vec![],
             negotiated_llgr_families: vec![],
         });
-        let eor = outbound_rx.try_recv().unwrap();
+        let eor = outbound_rx.try_recv().map(delivered).unwrap();
         assert_eq!(eor.end_of_rib, ipv4_sendable());
         receivers.push(outbound_rx);
     }
@@ -5983,7 +6161,7 @@ fn direct_clean_transition_manager_with_policy(
     });
     while manager.process_next_route_chunk() {}
     for receiver in &mut receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     (manager, peers, receivers)
 }
@@ -6134,7 +6312,7 @@ async fn commit_flush_batches_are_bounded_and_drain_monotonically() {
             // per-poll count of newly delivered envelopes IS the batch size.
             let delivered = receivers
                 .iter_mut()
-                .filter_map(|receiver| receiver.try_recv().ok())
+                .filter_map(|receiver| receiver.try_recv().map(delivered).ok())
                 .count();
             batch_sizes.push(delivered);
             if outcome == "committed" {
@@ -6510,7 +6688,10 @@ async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     let (reply, response) = oneshot::channel();
@@ -6532,7 +6713,7 @@ async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
     );
     let committed_at = std::time::Instant::now();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert!(update.announce[0].attributes.iter().any(|attribute| {
             matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_2202))
         }));
@@ -6579,7 +6760,10 @@ async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
     .unwrap();
     let _ = count.await.unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
     assert_eq!(
         records(&captured).len(),
@@ -6667,7 +6851,7 @@ async fn commit_flush_uses_full_poll_budget_before_parking() {
     assert_eq!(commit_polls, 1, "budgeted poll drains the whole cohort");
     let delivered = receivers
         .iter_mut()
-        .filter_map(|receiver| receiver.try_recv().ok())
+        .filter_map(|receiver| receiver.try_recv().map(delivered).ok())
         .count();
     assert_eq!(delivered, MEMBER_COUNT);
     assert_eq!(
@@ -6698,7 +6882,7 @@ async fn commit_flush_never_falls_back_after_first_emission() {
     }
     for receiver in &mut receivers[..8] {
         assert!(
-            receiver.try_recv().is_ok(),
+            receiver.try_recv().map(delivered).is_ok(),
             "first batch flushed members 0..8"
         );
     }
@@ -6720,7 +6904,7 @@ async fn commit_flush_never_falls_back_after_first_emission() {
     );
     // The surviving ninth member got its envelope; the dead member's
     // membership still committed with the cohort.
-    assert!(receivers[8].try_recv().is_ok());
+    assert!(receivers[8].try_recv().map(delivered).is_ok());
     let destination = manager.grouped_member_of(peers[0]).expect("grouped");
     assert_eq!(manager.grouped_member_of(peers[9]), Some(destination));
 }
@@ -6848,7 +7032,7 @@ async fn healthy_transition_past_precommit_budget_hands_off_fail_closed() {
     // Fail-closed: nothing externally visible happened — no envelope
     // reached any member and every membership is unchanged.
     for receiver in &mut receivers {
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver.try_recv().map(delivered).is_err());
     }
     for &peer in &peers {
         assert_eq!(manager.grouped_member_of(peer), Some(source));
@@ -6962,7 +7146,10 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), ROUTE_COUNT);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            ROUTE_COUNT
+        );
     }
 
     // Enqueue the cohort, then a primary update, then a second cohort —
@@ -7018,16 +7205,16 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
         "the second cohort must queue behind the fence, not race the flush"
     );
     for receiver in &mut receivers {
-        let flush = receiver.recv().await.unwrap();
+        let flush = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(
             flush.announce.len(),
             ROUTE_COUNT,
             "cohort flush precedes the queued primary update"
         );
-        let primary = receiver.recv().await.unwrap();
+        let primary = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(primary.announce.len(), 1);
         assert_eq!(primary.announce[0].prefix, Prefix::V4(later_prefix));
-        let second_flush = receiver.recv().await.unwrap();
+        let second_flush = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(
             second_flush.announce.len(),
             ROUTE_COUNT + 1,
@@ -7069,7 +7256,7 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
     );
     let first_tick_envelopes = receivers
         .iter_mut()
-        .filter_map(|receiver| receiver.try_recv().ok())
+        .filter_map(|receiver| receiver.try_recv().map(delivered).ok())
         .count();
     assert_eq!(first_tick_envelopes, 1);
 
@@ -7095,7 +7282,7 @@ async fn dirty_resync_tick_bounds_peers_and_preserves_backlog() {
     );
     let second_tick_envelopes = receivers
         .iter_mut()
-        .filter_map(|receiver| receiver.try_recv().ok())
+        .filter_map(|receiver| receiver.try_recv().map(delivered).ok())
         .count();
     assert_eq!(second_tick_envelopes, PEER_COUNT - 1);
 }
@@ -7127,7 +7314,7 @@ async fn dirty_resync_tick_uses_full_poll_budget_before_parking() {
     );
     let envelopes = receivers
         .iter_mut()
-        .filter_map(|receiver| receiver.try_recv().ok())
+        .filter_map(|receiver| receiver.try_recv().map(delivered).ok())
         .count();
     assert_eq!(envelopes, PEER_COUNT);
 }
@@ -7247,18 +7434,18 @@ fn full_channel_manager(
             negotiated_orf_recv: vec![],
             negotiated_llgr_families: vec![],
         });
-        while outbound_rx.try_recv().is_ok() {}
+        while outbound_rx.try_recv().map(delivered).is_ok() {}
         receivers.push(outbound_rx);
     }
     let mut live_rx = receivers.pop().unwrap();
     let mut stuck_rx = receivers.pop().unwrap();
     assert_eq!(manager.grouped_member_of(stuck).is_none(), ungrouped);
     full_channel_pass(&mut manager, &[0, 1, 2], &[]);
-    while stuck_rx.try_recv().is_ok() {}
-    while live_rx.try_recv().is_ok() {}
+    while stuck_rx.try_recv().map(delivered).is_ok() {}
+    while live_rx.try_recv().map(delivered).is_ok() {}
     for third in 10..10 + u8::try_from(FULL_CHANNEL_CAPACITY).unwrap() {
         full_channel_pass(&mut manager, &[third], &[]);
-        while live_rx.try_recv().is_ok() {}
+        while live_rx.try_recv().map(delivered).is_ok() {}
     }
     assert!(manager.outbound_channel_full(stuck));
     assert!(!manager.dirty_peers.contains(&stuck));
@@ -7268,10 +7455,12 @@ fn full_channel_manager(
         "failed send marks dirty"
     );
     assert!(!manager.dirty_peers.contains(&live));
-    let live_withdraw = live_rx.try_recv().unwrap();
+    let live_withdraw = live_rx.try_recv().map(delivered).unwrap();
     assert!(
         live_withdraw
-            .withdraw
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
             .contains(&(full_channel_prefix(0), 0))
     );
     (manager, stuck, live, stuck_rx, live_rx)
@@ -7286,7 +7475,10 @@ fn dirty_member_with_full_channel_defers_resync(ungrouped: bool) {
     manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
 
     full_channel_pass(&mut manager, &[20], &[]);
-    let live_update = live_rx.try_recv().expect("the live member keeps receiving");
+    let live_update = live_rx
+        .try_recv()
+        .map(delivered)
+        .expect("the live member keeps receiving");
     assert!(
         live_update
             .announce
@@ -7305,17 +7497,27 @@ fn dirty_member_with_full_channel_defers_resync(ungrouped: bool) {
 
     // The session drains what was queued before the member went dirty.
     for _ in 0..FULL_CHANNEL_CAPACITY {
-        stuck_rx.try_recv().unwrap();
+        stuck_rx.try_recv().map(delivered).unwrap();
     }
-    assert!(stuck_rx.try_recv().is_err());
+    assert!(stuck_rx.try_recv().map(delivered).is_err());
 
     manager.resync_dirty_peers_bounded();
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
     assert!(!manager.dirty_peers.contains(&stuck));
-    let resync = stuck_rx.try_recv().expect("one resync envelope");
-    assert!(stuck_rx.try_recv().is_err(), "exactly one resync envelope");
+    let resync = stuck_rx
+        .try_recv()
+        .map(delivered)
+        .expect("one resync envelope");
     assert!(
-        resync.withdraw.contains(&(full_channel_prefix(0), 0)),
+        stuck_rx.try_recv().map(delivered).is_err(),
+        "exactly one resync envelope"
+    );
+    assert!(
+        resync
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(full_channel_prefix(0), 0)),
         "the resync withdraws the prefix withdrawn while the channel was full"
     );
     assert!(
@@ -7335,7 +7537,7 @@ fn dirty_member_with_full_channel_defers_resync(ungrouped: bool) {
     assert!(!manager.resync_tick_pending());
     manager.resync_dirty_peers_bounded();
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
-    assert!(stuck_rx.try_recv().is_err());
+    assert!(stuck_rx.try_recv().map(delivered).is_err());
     assert!(!manager.dirty_peers.contains(&live));
 }
 
@@ -7369,7 +7571,7 @@ fn apply_enhanced_refresh(
                 *stale = true;
             }
         }
-        for key in &update.withdraw {
+        for key in update.unicast_withdrawals() {
             assert!(
                 held.remove(key).is_some(),
                 "withdrawal of {key:?}, which the receiver does not hold"
@@ -7434,6 +7636,9 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
     };
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // A full channel is the refusal under test: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     manager.test_force_ungrouped = ungrouped;
     let stuck = peer_v4(Ipv4Addr::new(10, 44, 0, 1));
     let live = peer_v4(Ipv4Addr::new(10, 44, 0, 2));
@@ -7617,7 +7822,7 @@ fn grouped_refresh_answer_withdraws_only_the_family_keys_the_member_left() {
     let mut withdrawn = Vec::new();
     let mut announced = BTreeSet::new();
     while let Ok(update) = stuck_rx.try_recv() {
-        withdrawn.extend(update.withdraw.iter().copied());
+        withdrawn.extend(update.unicast_withdrawals().copied());
         announced.extend(update.announce.iter().map(|route| route.prefix));
     }
     assert_eq!(withdrawn, vec![(ipv4(1), 0)]);
@@ -7628,7 +7833,7 @@ fn grouped_refresh_answer_withdraws_only_the_family_keys_the_member_left() {
     manager.resync_dirty_peers_bounded();
     let mut resync_withdrawn = Vec::new();
     while let Ok(update) = stuck_rx.try_recv() {
-        resync_withdrawn.extend(update.withdraw.iter().copied());
+        resync_withdrawn.extend(update.unicast_withdrawals().copied());
     }
     assert_eq!(resync_withdrawn, vec![(ipv6, 0)]);
 }
@@ -7647,7 +7852,7 @@ fn force_resync_with_full_channel_defers_until_drained(ungrouped: bool) {
     assert!(manager.dirty_peers.contains(&stuck));
     for third in [20, 21, 22] {
         full_channel_pass(&mut manager, &[third], &[]);
-        while live_rx.try_recv().is_ok() {}
+        while live_rx.try_recv().map(delivered).is_ok() {}
         manager.resync_dirty_peers_bounded();
         assert_eq!(
             manager.adj_rib_out_commit_stats.resync_builds, 0,
@@ -7664,15 +7869,28 @@ fn force_resync_with_full_channel_defers_until_drained(ungrouped: bool) {
     );
 
     for _ in 0..FULL_CHANNEL_CAPACITY {
-        stuck_rx.try_recv().expect("queued envelope before the jam");
+        stuck_rx
+            .try_recv()
+            .map(delivered)
+            .expect("queued envelope before the jam");
     }
-    assert!(stuck_rx.try_recv().is_err());
+    assert!(stuck_rx.try_recv().map(delivered).is_err());
     manager.resync_dirty_peers_bounded();
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
-    let replay = stuck_rx.try_recv().expect("one forced replay after drain");
-    assert!(stuck_rx.try_recv().is_err(), "exactly one replay envelope");
+    let replay = stuck_rx
+        .try_recv()
+        .map(delivered)
+        .expect("one forced replay after drain");
     assert!(
-        replay.withdraw.contains(&(full_channel_prefix(0), 0)),
+        stuck_rx.try_recv().map(delivered).is_err(),
+        "exactly one replay envelope"
+    );
+    assert!(
+        replay
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(full_channel_prefix(0), 0)),
         "missed withdrawal is retained"
     );
     assert!(
@@ -7694,7 +7912,10 @@ fn force_resync_with_full_channel_defers_until_drained(ungrouped: bool) {
     assert!(!manager.resync_tick_pending());
     manager.resync_dirty_peers_bounded();
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
-    assert!(stuck_rx.try_recv().is_err(), "settled force stays quiet");
+    assert!(
+        stuck_rx.try_recv().map(delivered).is_err(),
+        "settled force stays quiet"
+    );
 }
 
 #[test]
@@ -7733,9 +7954,10 @@ fn clean_force_resync_waits_for_capacity_before_first_build() {
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
     let replay = receiver
         .try_recv()
+        .map(delivered)
         .expect("force replays after capacity returns");
     assert_eq!(replay.announce.len(), 1);
-    assert!(receiver.try_recv().is_err());
+    assert!(receiver.try_recv().map(delivered).is_err());
     assert!(!manager.force_outbound_peers.contains(&peer));
     assert!(!manager.dirty_peers.contains(&peer));
 }
@@ -7763,7 +7985,10 @@ fn empty_forced_view_clears_after_capacity_returns() {
 
     manager.resync_dirty_peers_bounded();
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 1);
-    assert!(receiver.try_recv().is_err(), "no empty envelope is emitted");
+    assert!(
+        receiver.try_recv().map(delivered).is_err(),
+        "no empty envelope is emitted"
+    );
     assert!(!manager.force_outbound_peers.contains(&peer));
     assert!(!manager.dirty_peers.contains(&peer));
     manager.resync_dirty_peers_bounded();
@@ -7797,13 +8022,16 @@ fn forced_peer_outside_dirty_tick_slice_waits_for_capacity() {
     );
     assert!(manager.force_outbound_peers.contains(&withheld));
     assert!(manager.dirty_peers.contains(&withheld));
-    assert!(receivers[peer_count - 1].try_recv().is_err());
+    assert!(receivers[peer_count - 1].try_recv().map(delivered).is_err());
     for receiver in &mut receivers[..1] {
-        assert_eq!(receiver.try_recv().unwrap().announce.len(), 1);
-        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            receiver.try_recv().map(delivered).unwrap().announce.len(),
+            1
+        );
+        assert!(receiver.try_recv().map(delivered).is_err());
     }
     for receiver in &mut receivers[1..peer_count - 1] {
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver.try_recv().map(delivered).is_err());
     }
 
     drop(permits);
@@ -7812,10 +8040,15 @@ fn forced_peer_outside_dirty_tick_slice_waits_for_capacity() {
     }
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, peer_count);
     assert_eq!(
-        receivers[peer_count - 1].try_recv().unwrap().announce.len(),
+        receivers[peer_count - 1]
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
         1
     );
-    assert!(receivers[peer_count - 1].try_recv().is_err());
+    assert!(receivers[peer_count - 1].try_recv().map(delivered).is_err());
     assert!(!manager.force_outbound_peers.contains(&withheld));
     assert!(!manager.dirty_peers.contains(&withheld));
     manager.resync_dirty_peers_bounded();
@@ -7947,7 +8180,7 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
         ));
         let mut healthy_rx =
             register_direct_peer_with_families(&mut manager, healthy, family.clone());
-        while healthy_rx.try_recv().is_ok() {}
+        while healthy_rx.try_recv().map(delivered).is_ok() {}
         if safi == Safi::MplsVpn {
             assert_eq!(manager.vpn_grouped_member_of(closed).is_some(), !ungrouped);
         }
@@ -7969,7 +8202,7 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
                 for index in 1..=3 {
                     announce_family_route(&mut manager, source, safi, index);
                     assert_eq!(
-                        family_delta_counts(&healthy_rx.try_recv().unwrap(), safi),
+                        family_delta_counts(&healthy_rx.try_recv().map(delivered).unwrap(), safi),
                         (1, 0)
                     );
                 }
@@ -7978,7 +8211,7 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
                     session_id: 0,
                 });
                 assert_eq!(
-                    family_delta_counts(&healthy_rx.try_recv().unwrap(), safi),
+                    family_delta_counts(&healthy_rx.try_recv().map(delivered).unwrap(), safi),
                     (0, 3)
                 );
             },
@@ -8038,20 +8271,20 @@ fn family_distribution_full_receivers_retry_and_replacements_stay_live() {
         drop(permits);
         manager.resync_dirty_peers_bounded();
         assert_eq!(
-            family_delta_counts(&receiver.try_recv().unwrap(), safi),
+            family_delta_counts(&receiver.try_recv().map(delivered).unwrap(), safi),
             (1, 0)
         );
         assert!(!manager.dirty_peers.contains(&peer));
         drop(receiver);
         let mut replacement = register_direct_peer_session(&mut manager, peer, family, 1);
-        while replacement.try_recv().is_ok() {}
+        while replacement.try_recv().map(delivered).is_ok() {}
         manager.handle_update(RibUpdate::PeerDown {
             peer,
             session_id: 0,
         });
         announce_family_route(&mut manager, source, safi, 2);
         assert_eq!(
-            family_delta_counts(&replacement.try_recv().unwrap(), safi),
+            family_delta_counts(&replacement.try_recv().map(delivered).unwrap(), safi),
             (1, 0)
         );
         assert_eq!(manager.outbound_session_ids[&peer], 1);
@@ -8075,7 +8308,7 @@ fn full_family_receiver(
     manager.test_force_ungrouped = ungrouped;
     let peer = PeerId::from_addr("10.43.0.1".parse().unwrap());
     let mut receiver = register_direct_peer_with_families(&mut manager, peer, vec![(afi, safi)]);
-    while receiver.try_recv().is_ok() {}
+    while receiver.try_recv().map(delivered).is_ok() {}
     let permits = (0..8)
         .map(|_| {
             manager.outbound_peers[&peer]
@@ -8132,7 +8365,10 @@ fn distribution_skips_closed_receivers_before_peer_down() {
     }
     let healthy = PeerId::from_addr("10.43.0.1".parse().unwrap());
     let mut healthy_rx = register_direct_peer(&mut manager, healthy);
-    assert_eq!(healthy_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert_eq!(
+        healthy_rx.try_recv().map(delivered).unwrap().end_of_rib,
+        ipv4_sendable()
+    );
     let captured = Arc::new(Mutex::new(Vec::new()));
     tracing::subscriber::with_default(
         CaptureSubscriber {
@@ -8146,7 +8382,7 @@ fn distribution_skips_closed_receivers_before_peer_down() {
             for index in 0..4 {
                 let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, index, 0), 24);
                 distribute_direct_route(&mut manager, source, prefix);
-                let update = healthy_rx.try_recv().unwrap();
+                let update = healthy_rx.try_recv().map(delivered).unwrap();
                 assert!(
                     update
                         .announce
@@ -8160,8 +8396,8 @@ fn distribution_skips_closed_receivers_before_peer_down() {
                 peer: peer_v4(source),
                 session_id: 0,
             });
-            let update = healthy_rx.try_recv().unwrap();
-            assert_eq!(update.withdraw.len(), 4);
+            let update = healthy_rx.try_recv().map(delivered).unwrap();
+            assert_eq!(update.unicast_withdrawals().count(), 4);
             assert_eq!(
                 manager.outbound_peers.len(),
                 1_001,
@@ -8235,7 +8471,15 @@ fn distribution_full_live_receiver_still_warns_and_retries() {
     );
     drop(permits);
     manager.resync_dirty_peers_bounded();
-    assert_eq!(receivers[0].try_recv().unwrap().announce.len(), 1);
+    assert_eq!(
+        receivers[0]
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        1
+    );
     assert!(!manager.dirty_peers.contains(&peer));
 }
 
@@ -8269,14 +8513,14 @@ fn distribution_replacement_of_closed_receiver_routes_normally() {
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
-    while replacement_rx.try_recv().is_ok() {}
+    while replacement_rx.try_recv().map(delivered).is_ok() {}
     manager.handle_update(RibUpdate::PeerDown {
         peer,
         session_id: 0,
     });
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
     distribute_direct_route(&mut manager, source, prefix);
-    let update = replacement_rx.try_recv().unwrap();
+    let update = replacement_rx.try_recv().map(delivered).unwrap();
     assert!(
         update
             .announce
@@ -8425,7 +8669,10 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 2);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            2
+        );
     }
 
     let (reply, response) = oneshot::channel();
@@ -8460,7 +8707,10 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     let (reply, response) = oneshot::channel();
@@ -8482,8 +8732,8 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     );
     let mut shared_cells = Vec::new();
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
-        assert_eq!(update.withdraw.len(), 0);
+        let update = receiver.recv().await.map(delivered).unwrap();
+        assert_eq!(update.unicast_withdrawals().count(), 0);
         assert_eq!(update.announce.len(), 3, "all three routes changed chains");
         assert!(
             update
@@ -8542,7 +8792,10 @@ async fn discarded_prepared_destination_is_removed() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     let (reply, response) = oneshot::channel();
@@ -8625,7 +8878,10 @@ async fn destination_prestage_completes_under_sustained_ingress() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 4);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            4
+        );
     }
 
     // Output-neutral ingress (withdrawals of a never-announced prefix) that
@@ -8739,7 +8995,10 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     // No await between the two commands: the transition may supersede the
@@ -8773,7 +9032,7 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
     // dropped/Err when superseded); it must never hang.
     let _ = prepare_response.await;
     for receiver in &mut receivers {
-        let update = receiver.recv().await.unwrap();
+        let update = receiver.recv().await.map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
         assert!(update.shared_group_encode.is_some());
     }
@@ -8835,7 +9094,10 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 3);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            3
+        );
     }
 
     // Queue the prestage AND a stranger's PeerUp (content-equal policy)
@@ -8900,7 +9162,10 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     // Collect everything the stranger was ever sent.
@@ -8973,7 +9238,10 @@ async fn prestage_control_join_without_prestage() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 3);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            3
+        );
     }
 
     // The same join as the regression test above, with no prestage queued.
@@ -9024,7 +9292,10 @@ async fn prestage_control_join_without_prestage() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            1
+        );
     }
 
     // Collect everything the stranger was ever sent.
@@ -9094,7 +9365,10 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
     .await
     .unwrap();
     for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 3);
+        assert_eq!(
+            receiver.recv().await.map(delivered).unwrap().announce.len(),
+            3
+        );
     }
 
     // Prepare one destination and let the walk complete.
@@ -9332,8 +9606,8 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     let mut folded: HashMap<Ipv4Addr, HashMap<Prefix, PeerId>> = HashMap::new();
     for (member, out_rx) in members.iter().zip(receivers.iter_mut()) {
         let table = folded.entry(*member).or_default();
-        while let Ok(update) = out_rx.try_recv() {
-            for (prefix, _) in &update.withdraw {
+        while let Ok(update) = out_rx.try_recv().map(delivered) {
+            for (prefix, _) in update.unicast_withdrawals() {
                 table.remove(prefix);
             }
             for route in update.announce.iter() {
@@ -9385,7 +9659,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     assert_metric(regroups_total(&metrics), 6.0, "regroups_total");
     for (member, out_rx) in members.iter().zip(receivers.iter_mut()) {
         assert!(
-            out_rx.try_recv().is_err(),
+            out_rx.try_recv().map(delivered).is_err(),
             "converged regroup must be byte-empty on {member}'s wire"
         );
     }
@@ -9414,8 +9688,11 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
         let _ = query_best_routes(&tx).await;
         let idx = members.iter().position(|m| *m == member).unwrap();
         let mut replayed = HashMap::new();
-        while let Ok(update) = receivers[idx].try_recv() {
-            assert!(update.withdraw.is_empty(), "refresh replay never withdraws");
+        while let Ok(update) = receivers[idx].try_recv().map(delivered) {
+            assert!(
+                update.unicast_withdrawals().next().is_none(),
+                "refresh replay never withdraws"
+            );
             for route in update.announce.iter() {
                 replayed.insert(route.prefix, route.peer);
             }
@@ -9479,7 +9756,7 @@ fn register_direct_pcb_peer_capacity(
     // Drain the initial dump (route replay for a late joiner) up to and
     // including its End-of-RIB marker.
     let mut saw_eor = false;
-    while let Ok(update) = outbound_rx.try_recv() {
+    while let Ok(update) = outbound_rx.try_recv().map(delivered) {
         if update.end_of_rib == ipv4_sendable() {
             saw_eor = true;
             break;
@@ -9560,7 +9837,7 @@ fn batched_pcb_fleet_n(export_policy: Option<&PolicyChain>, member_count: u16) -
         distribute_direct_route(&mut manager, source, shared_prefix);
     }
     for receiver in &mut receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     BatchedPcbFleet {
         manager,
@@ -9678,7 +9955,7 @@ fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
         .apply_export_policy_replacements_synchronously(batch_replacements(&members, export_policy))
         .unwrap();
     for receiver in &mut receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     assert_eq!(manager.loc_rib.len(), 4);
     manager.replacement_readiness_receipts.clear();
@@ -9761,7 +10038,7 @@ async fn queued_refresh_shares_inventory_and_releases_flags_before_replay() {
     let responses: Vec<_> = fleet
         .receivers
         .iter_mut()
-        .map(|rx| rx.try_recv().unwrap())
+        .map(|rx| rx.try_recv().map(delivered).unwrap())
         .collect();
     for (peer, response) in fleet.members.iter().zip(&responses) {
         assert!(Arc::ptr_eq(&responses[0].announce, &response.announce));
@@ -9801,6 +10078,7 @@ async fn queued_refresh_shares_inventory_and_releases_flags_before_replay() {
     assert!(
         fleet.receivers[0]
             .try_recv()
+            .map(delivered)
             .unwrap()
             .shared_group_encode
             .is_none()
@@ -9826,6 +10104,7 @@ async fn queued_refresh_stops_at_stale_session_and_preserves_page_advancement() 
     assert!(
         receivers[0]
             .try_recv()
+            .map(delivered)
             .unwrap()
             .shared_group_encode
             .is_none()
@@ -9837,7 +10116,7 @@ async fn queued_refresh_stops_at_stale_session_and_preserves_page_advancement() 
         manager.route_page_advertised_version.unwrap().generation,
         version.generation + 1
     );
-    assert!(receivers[1].try_recv().is_err());
+    assert!(receivers[1].try_recv().map(delivered).is_err());
     assert!(manager.drain_ready_updates().await);
     assert!(!last.load(Ordering::Acquire));
     assert_eq!(
@@ -9868,7 +10147,7 @@ async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
         assert_eq!(manager.primary_backlog(), peers.len() - admitted);
         for (i, (flag, receiver)) in flags.iter().zip(&mut receivers).enumerate() {
             assert_eq!(flag.load(Ordering::Acquire), i >= admitted);
-            assert_eq!(receiver.try_recv().is_ok(), i < admitted);
+            assert_eq!(receiver.try_recv().map(delivered).is_ok(), i < admitted);
         }
         if cutoff.is_some() {
             assert!(manager.expiry_cutoffs.any_exhausted());
@@ -9908,7 +10187,7 @@ async fn queued_refresh_keeps_route_mutations_between_cohorts() {
     ));
     assert!(later.iter().all(|flag| flag.load(Ordering::Acquire)));
     for receiver in &mut fleet.receivers[..2] {
-        let response = receiver.try_recv().unwrap();
+        let response = receiver.try_recv().map(delivered).unwrap();
         assert!(response.shared_group_encode.is_some());
         assert!(
             response
@@ -9917,10 +10196,11 @@ async fn queued_refresh_keeps_route_mutations_between_cohorts() {
                 .any(|route| route.prefix == Prefix::V4(fleet.shared_prefix))
         );
     }
-    assert!(fleet.receivers[2].try_recv().is_err());
+    assert!(fleet.receivers[2].try_recv().map(delivered).is_err());
     while fleet.manager.drain_ready_updates().await {}
     for receiver in &mut fleet.receivers[2..] {
-        let responses: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        let responses: Vec<_> =
+            std::iter::from_fn(|| receiver.try_recv().map(delivered).ok()).collect();
         let response = responses.last().unwrap();
         assert!(response.shared_group_encode.is_some());
         assert!(
@@ -9957,23 +10237,25 @@ async fn queued_refresh_keeps_initial_eor_and_saturation_per_member() {
         .collect();
     assert!(manager.drain_ready_updates().await);
     assert!(flags.iter().all(|flag| !flag.load(Ordering::Acquire)));
-    let initial = receivers[0].try_recv().unwrap();
+    let initial = receivers[0].try_recv().map(delivered).unwrap();
     assert!(initial.shared_group_encode.is_some());
     assert!(initial.refresh_markers.is_empty() && initial.end_of_rib.is_empty());
-    let eor = receivers[0].try_recv().unwrap();
+    let eor = receivers[0].try_recv().map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, vec![family]);
     assert!(eor.announce.is_empty());
     assert!(!manager.gr_deferred_eor.contains_key(&peers[0]));
-    assert!(receivers[1].try_recv().is_err());
-    assert!(manager.dirty_peers.contains(&peers[1]));
+    assert!(receivers[1].try_recv().map(delivered).is_err());
+    // The refused answer is refresh-only debt: not a dirty resync.
+    assert!(!manager.dirty_peers.contains(&peers[1]));
     assert!(manager.pending_refresh[&peers[1]].contains(&family));
-    let unaffected = receivers[2].try_recv().unwrap();
+    let unaffected = receivers[2].try_recv().map(delivered).unwrap();
     assert!(unaffected.shared_group_encode.is_some());
     assert_eq!(unaffected.refresh_markers.len(), 2);
     assert!(!manager.dirty_peers.contains(&peers[2]));
     drop(held);
     manager.resync_dirty_peers_bounded();
-    let recovered: Vec<_> = std::iter::from_fn(|| receivers[1].try_recv().ok()).collect();
+    let recovered: Vec<_> =
+        std::iter::from_fn(|| receivers[1].try_recv().map(delivered).ok()).collect();
     assert!(recovered.iter().any(|update| update.announce.len() == 2));
     assert!(!manager.dirty_peers.contains(&peers[1]));
 }
@@ -10005,12 +10287,18 @@ async fn queued_refresh_probe_failure_invalidates_only_its_member_and_recovers()
         for index in [0, 2] {
             assert!(responses[index].shared_group_encode.is_some());
             assert_eq!(responses[index].announce.len(), 2);
-            assert_eq!(responses[index].withdraw, Vec::new());
+            assert_eq!(
+                responses[index]
+                    .unicast_withdrawals()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                Vec::new()
+            );
         }
         let affected = &responses[1];
         assert_eq!(affected.announce.len(), if phase == 2 { 2 } else { 1 });
         assert_eq!(
-            affected.withdraw,
+            affected.unicast_withdrawals().copied().collect::<Vec<_>>(),
             if phase == 0 {
                 vec![(delivered.prefix, delivered.path_id)]
             } else {
@@ -10050,7 +10338,7 @@ async fn queued_refresh_preserves_member_prefix_limit_and_recovery() {
         ],
     );
     for receiver in &mut receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     assert_eq!(manager.grouped_advertised_routes(limited).unwrap().len(), 1);
     let (tx, rx) = mpsc::channel(8);
@@ -10060,7 +10348,7 @@ async fn queued_refresh_preserves_member_prefix_limit_and_recovery() {
     }
     assert!(manager.drain_ready_updates().await);
     for (index, receiver) in receivers.iter_mut().enumerate() {
-        let response = receiver.try_recv().unwrap();
+        let response = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(response.announce.len(), if index == 1 { 1 } else { 2 });
         assert_eq!(response.shared_group_encode.is_some(), index != 1);
     }
@@ -10081,7 +10369,7 @@ async fn queued_refresh_preserves_member_prefix_limit_and_recovery() {
         ),
         super::super::route_refresh::FamilyReplayOutcome::Committed
     );
-    let recovered = receivers[1].try_recv().unwrap();
+    let recovered = receivers[1].try_recv().map(delivered).unwrap();
     assert_eq!(recovered.announce.len(), 2);
     assert_eq!(recovered.refresh_markers, Vec::new());
     assert!(!manager.outbound_blocking(limited, Afi::Ipv4));
@@ -10142,7 +10430,7 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
         };
         let action = if limits_update {
             fleet.manager.handle_update(registration);
-            while outbound_rx.try_recv().is_ok() {}
+            while outbound_rx.try_recv().map(delivered).is_ok() {}
             RibUpdate::PeerAddPathLimits {
                 peer,
                 session_id: 7,
@@ -10231,7 +10519,7 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
         assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
         let mut announced = 0;
         let mut eor = false;
-        while let Ok(update) = outbound_rx.try_recv() {
+        while let Ok(update) = outbound_rx.try_recv().map(delivered) {
             assert!(!eor, "announcements must precede EoR");
             announced += update.announce.len();
             eor = !update.end_of_rib.is_empty();
@@ -10268,7 +10556,7 @@ fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
                 session_id: 0,
             });
             fleet.receivers[0] = register_direct_peer(&mut fleet.manager, peer);
-            while fleet.receivers[0].try_recv().is_ok() {}
+            while fleet.receivers[0].try_recv().map(delivered).is_ok() {}
             fleet.manager.replacement_readiness_receipts.clear();
         }
         let (readiness_tx, readiness_rx) = mpsc::channel(8);
@@ -10341,7 +10629,7 @@ fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
         assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
         let mut announced = 0;
         let mut eor = false;
-        while let Ok(update) = fleet.receivers[0].try_recv() {
+        while let Ok(update) = fleet.receivers[0].try_recv().map(delivered) {
             assert!(!eor, "announcements must precede EoR");
             announced += update.announce.len();
             eor = !update.end_of_rib.is_empty();
@@ -10397,17 +10685,20 @@ async fn ingest_cold_capture_services_readiness_and_fences_other_lanes() {
             negotiated_orf_recv: vec![],
             negotiated_llgr_families: vec![],
         });
-        while outbound_rx.try_recv().is_ok() {}
+        while outbound_rx.try_recv().map(delivered).is_ok() {}
         receivers.push(outbound_rx);
     }
     let mut live_rx = receivers.pop().unwrap();
     let mut stuck_rx = receivers.pop().unwrap();
     full_channel_pass(&mut manager, &(0..128).collect::<Vec<_>>(), &[]);
-    assert_eq!(stuck_rx.try_recv().unwrap().announce.len(), 128);
-    while live_rx.try_recv().is_ok() {}
+    assert_eq!(
+        stuck_rx.try_recv().map(delivered).unwrap().announce.len(),
+        128
+    );
+    while live_rx.try_recv().map(delivered).is_ok() {}
     for n in 240..248 {
         full_channel_pass(&mut manager, &[n], &[]);
-        while live_rx.try_recv().is_ok() {}
+        while live_rx.try_recv().map(delivered).is_ok() {}
     }
     let gid = manager.grouped_member_of(stuck).unwrap();
     assert!(manager.outbound_channel_full(stuck));
@@ -10512,13 +10803,16 @@ async fn ingest_cold_capture_services_readiness_and_fences_other_lanes() {
     assert!(manager.dirty_peers.contains(&stuck));
     for n in 240..248 {
         assert_eq!(
-            stuck_rx.try_recv().unwrap().announce[0].prefix,
+            stuck_rx.try_recv().map(delivered).unwrap().announce[0].prefix,
             full_channel_prefix(n)
         );
     }
     manager.resync_dirty_peers_bounded();
-    let recovered = stuck_rx.try_recv().unwrap();
-    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    let recovered = stuck_rx.try_recv().map(delivered).unwrap();
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(full_channel_prefix(0), 0)]
+    );
     let announced: HashSet<_> = recovered
         .announce
         .iter()
@@ -10695,9 +10989,9 @@ async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
     manager.resync_dirty_peers_bounded();
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 0);
     for _ in 0..FULL_CHANNEL_CAPACITY {
-        outbound.try_recv().unwrap();
+        outbound.try_recv().map(delivered).unwrap();
     }
-    while live_outbound.try_recv().is_ok() {}
+    while live_outbound.try_recv().map(delivered).is_ok() {}
     let actor = tokio::spawn(manager.run());
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
@@ -10732,7 +11026,7 @@ async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
     let mutation_held = tx.capacity() == 7;
     // Release before assertions so the negative control also reaps its actor.
     release_tx.send(()).unwrap();
-    let recovered = outbound.recv().await.unwrap();
+    let recovered = outbound.recv().await.map(delivered).unwrap();
     let announced: HashSet<_> = recovered
         .announce
         .iter()
@@ -10747,7 +11041,10 @@ async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
     .map(full_channel_prefix)
     .collect();
     assert_eq!(announced, expected);
-    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(full_channel_prefix(0), 0)]
+    );
     assert_eq!(ordinary.await.unwrap(), 8);
     let (reply, health) = oneshot::channel();
     tx.send(RibUpdate::TestQueryOutboundHealth { reply })
@@ -10884,6 +11181,9 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
     let (tx, rx) = mpsc::channel(8);
     let (query_tx, query_rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    // The fixture queues its whole setup undrained and counts it at the
+    // end: the default row credit, whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     manager.flush_poll_budget = Duration::ZERO;
     let source = Ipv4Addr::new(192, 0, 2, 35);
     let survivor = Ipv4Addr::new(192, 0, 2, 36);
@@ -10912,7 +11212,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
         peer,
         super::exportability::MockExactExportEncoder::accepting(1),
     );
-    while output.try_recv().is_ok() {}
+    while output.try_recv().map(delivered).is_ok() {}
     let received = |peer, announced| RibUpdate::RoutesReceived {
         peer,
         session_id: 0,
@@ -10965,7 +11265,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
     );
     assert_eq!(manager.loc_rib.len(), 9);
     let mut initial = [0; 6];
-    while let Ok(update) = output.try_recv() {
+    while let Ok(update) = output.try_recv().map(delivered) {
         for (total, count) in initial.iter_mut().zip([
             update.announce.len(),
             update.flowspec_announce.len(),
@@ -10976,7 +11276,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
         ]) {
             *total += count;
         }
-        assert!(update.withdraw.is_empty() && update.vpn_withdraw.is_empty());
+        assert!(update.unicast_withdrawals().next().is_none() && update.vpn_withdraw.is_empty());
     }
     assert_eq!(initial[0], 9);
     assert_eq!(initial[4], 2);
@@ -11081,9 +11381,9 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
     assert!(manager.grouped_member_of(peer).is_some());
     assert!(manager.evpn_grouped_member_of(peer).is_none());
     let mut withdrawn = [0; 6];
-    while let Ok(update) = output.try_recv() {
+    while let Ok(update) = output.try_recv().map(delivered) {
         for (total, count) in withdrawn.iter_mut().zip([
-            update.withdraw.len(),
+            update.unicast_withdrawals().count(),
             update.flowspec_withdraw.len(),
             update.evpn_withdraw.len(),
             update.bgpls_withdraw.len(),
@@ -11239,6 +11539,9 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
         Some(Ipv4Addr::new(192, 0, 2, 254)),
         BgpMetrics::new(),
     );
+    // A full channel is one retirement under test: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     manager.flush_poll_budget = Duration::ZERO;
     let peer = PeerId::from_addr(Ipv4Addr::new(10, 223, 4, 1).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);
@@ -11267,7 +11570,7 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
         peer,
         super::exportability::MockExactExportEncoder::accepting(1),
     );
-    while output.try_recv().is_ok() {}
+    while output.try_recv().map(delivered).is_ok() {}
     let unicast = |n: u8, med| {
         let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source);
         AttrSet::edit(&mut route.attributes, |attrs| {
@@ -11332,7 +11635,7 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
     }
     manager.handle_update(update);
     while manager.process_next_route_chunk() {}
-    let initial = output.try_recv().unwrap();
+    let initial = output.try_recv().map(delivered).unwrap();
     assert_eq!(
         (
             initial.announce.len(),
@@ -11347,7 +11650,7 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
             (128, 0, 0)
         }
     );
-    assert!(initial.withdraw.is_empty() && initial.vpn_withdraw.is_empty());
+    assert!(initial.unicast_withdrawals().next().is_none() && initial.vpn_withdraw.is_empty());
     let admitted_keys: HashSet<_> = initial
         .announce
         .iter()
@@ -11391,7 +11694,7 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
         assert!(manager.grouped_member_of(peer).is_some());
         assert_eq!(manager.pending_regroup_baseline[&peer].unicast.len(), 128);
         assert!(manager.dirty_peers.contains(&peer));
-        while output.try_recv().is_ok() {}
+        while output.try_recv().map(delivered).is_ok() {}
     }
     let live_attrs = if matches!(kind, PeerRetirement::Attributes) {
         let survivor = Ipv4Addr::new(192, 0, 2, 2);
@@ -11401,7 +11704,7 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
         );
         manager.handle_update(received(peer_v4(survivor), vec![route]));
         while manager.process_next_route_chunk() {}
-        assert_eq!(output.try_recv().unwrap().announce.len(), 1);
+        assert_eq!(output.try_recv().map(delivered).unwrap().announce.len(), 1);
         Some(Arc::downgrade(
             &manager.ribs[&peer_v4(survivor)]
                 .iter()
@@ -11555,20 +11858,23 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
     };
     let mut manager = actor.await.unwrap();
     if departing == source_peer {
-        let withdrawn = output.try_recv().unwrap();
+        let withdrawn = output.try_recv().map(delivered).unwrap();
         assert_eq!(
-            (withdrawn.withdraw.len(), withdrawn.vpn_withdraw.len()),
+            (
+                withdrawn.unicast_withdrawals().count(),
+                withdrawn.vpn_withdraw.len()
+            ),
             if vpn { (0, 128) } else { (128, 0) }
         );
         assert!(withdrawn.announce.is_empty() && withdrawn.vpn_announce.is_empty());
         let withdrawn_keys: HashSet<_> = withdrawn
-            .withdraw
-            .iter()
+            .unicast_withdrawals()
             .map(|&(prefix, path_id)| crate::update::ExactExportKey::Unicast(prefix, path_id))
             .chain(
                 withdrawn
                     .vpn_withdraw
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(crate::update::ExactExportKey::Vpn),
             )
             .collect();
@@ -11580,7 +11886,7 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
             "the detached source and following GC must release every obsolete attribute"
         );
     } else {
-        assert!(output.try_recv().is_err());
+        assert!(output.try_recv().map(delivered).is_err());
         assert_eq!(
             manager.ribs[&source_peer].len() + manager.ribs[&source_peer].evpn_len(),
             128
@@ -11671,7 +11977,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
         peer,
         super::exportability::MockExactExportEncoder::accepting(1),
     );
-    while outbound.try_recv().is_ok() {}
+    while outbound.try_recv().map(delivered).is_ok() {}
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(source),
         session_id: 0,
@@ -11682,7 +11988,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
     });
     while manager.process_next_route_chunk() {}
     assert_eq!(manager.loc_rib.vpn_len(), 128);
-    let initial = outbound.try_recv().unwrap();
+    let initial = outbound.try_recv().map(delivered).unwrap();
     assert_eq!(initial.vpn_announce.len(), 128);
     assert_eq!(initial.vpn_withdraw, []);
     for n in 128..136 {
@@ -11710,7 +12016,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
         136
     );
     for n in 128..136 {
-        let held = outbound.try_recv().unwrap();
+        let held = outbound.try_recv().map(delivered).unwrap();
         assert_eq!(
             held.vpn_announce[0].key(),
             make_vpn_rib_route(source, n, 100, 100).key()
@@ -11782,7 +12088,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
     let retirement_visits = visits.load(Ordering::Relaxed);
     release_tx.send(()).unwrap();
     let mut manager = actor.await.unwrap();
-    let recovered = outbound.try_recv().unwrap();
+    let recovered = outbound.try_recv().map(delivered).unwrap();
     let expected: HashSet<_> = (1..136)
         .map(|n| make_vpn_rib_route(source, n, 100, 100).key())
         .collect();
@@ -11874,7 +12180,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
         peer,
         super::exportability::MockExactExportEncoder::accepting(1),
     );
-    while output.try_recv().is_ok() {}
+    while output.try_recv().map(delivered).is_ok() {}
     let empty_credit = manager.pending_group_admitted.bytes();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
         peer: peer_v4(source),
@@ -11895,7 +12201,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
     while manager.process_next_route_chunk() {}
     assert!(manager.selection_deferred(family));
     assert_eq!(manager.loc_rib.vpn_len(), 0);
-    assert!(output.try_recv().is_err());
+    assert!(output.try_recv().map(delivered).is_err());
     let gid = manager.vpn_grouped_member_of(peer).unwrap();
     assert_eq!(manager.group_ribs[&gid].table.vpn_len(), 0);
     let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
@@ -11966,7 +12272,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
     let retirement_visits = visits.load(Ordering::Relaxed);
     release_tx.send(()).unwrap();
     let mut manager = actor.await.unwrap();
-    let update = output.try_recv().unwrap();
+    let update = output.try_recv().map(delivered).unwrap();
     let expected: HashSet<_> = (1..128)
         .map(|n| make_vpn_rib_route(source, n, 100, 100).key())
         .collect();
@@ -11981,10 +12287,10 @@ async fn vpn_group_stage_retirement_services_readiness() {
     );
     assert_eq!(update.vpn_withdraw, []);
     assert_eq!(update.end_of_rib, []);
-    let marker = output.try_recv().unwrap();
+    let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, vec![family]);
     assert!(marker.vpn_announce.is_empty() && marker.vpn_withdraw.is_empty());
-    assert!(output.try_recv().is_err());
+    assert!(output.try_recv().map(delivered).is_err());
     assert_eq!(manager.group_ribs[&gid].table.vpn_len(), 127);
     assert!(!manager.selection_deferred(family));
     assert!(!manager.dirty_peers.contains(&peer));
@@ -12052,9 +12358,12 @@ async fn evpn_refusal_prior_retirement_readiness(
         validated_with: None,
     });
     while manager.process_next_route_chunk() {}
-    let initial = output.try_recv().unwrap();
+    let initial = output.try_recv().map(delivered).unwrap();
     assert_eq!(initial.announce.len(), routes.len());
-    assert_eq!(initial.withdraw, []);
+    assert_eq!(
+        initial.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        []
+    );
     assert_eq!(manager.group_ribs[&gid].table.len(), routes.len());
     assert!(!manager.dirty_peers.contains(&peer));
     let empty_credit = manager.pending_group_admitted.bytes();
@@ -12176,7 +12485,7 @@ async fn evpn_refusal_prior_retirement_readiness(
         )
     );
     assert!(
-        output.try_recv().is_err(),
+        output.try_recv().map(delivered).is_err(),
         "no ANN, WD or EoR may escape refusal"
     );
     assert_eq!(manager.group_ribs[&gid].table.len(), routes.len());
@@ -12268,7 +12577,7 @@ fn unicast_cleanup_fixture(grouped: bool) -> UnicastCleanupFixture {
     manager.handle_update(registration);
     let encoder = super::exportability::MockExactExportEncoder::accepting(1);
     manager.peer_export_encoders.insert(peer, encoder.clone());
-    while output.try_recv().is_ok() {}
+    while output.try_recv().map(delivered).is_ok() {}
     let routes: Vec<_> = (0..128)
         .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
         .collect();
@@ -12287,7 +12596,10 @@ fn unicast_cleanup_fixture(grouped: bool) -> UnicastCleanupFixture {
     let mut delivered = Vec::new();
     let mut flowspec = Vec::new();
     while let Ok(initial) = output.try_recv() {
-        assert_eq!(initial.withdraw, []);
+        assert_eq!(
+            initial.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            []
+        );
         assert_eq!(initial.flowspec_withdraw, []);
         delivered.extend(
             initial
@@ -12495,13 +12807,16 @@ async fn admitted_prior_retain_services_readiness() {
         RibManager::resync_dirty_peers_bounded,
     ))
     .await;
-    let recovered = output.try_recv().unwrap();
+    let recovered = output.try_recv().map(delivered).unwrap();
     assert_eq!(recovered.announce.len(), 127);
-    assert_eq!(recovered.withdraw, vec![(routes[0].prefix, 0)]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(routes[0].prefix, 0)]
+    );
     assert_eq!(recovered.flowspec_withdraw, vec![flowspec]);
     assert!(recovered.flowspec_announce.is_empty());
     assert_eq!(recovered.end_of_rib, []);
-    assert!(output.try_recv().is_err());
+    assert!(output.try_recv().map(delivered).is_err());
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(manager.pending_group_admitted.is_empty());
     assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
@@ -12570,15 +12885,18 @@ async fn common_candidate_retirement_services_readiness() {
         ))
         .await;
         assert_eq!(result, Ok(()));
-        let recovered = output.try_recv().unwrap();
+        let recovered = output.try_recv().map(delivered).unwrap();
         assert!(recovered.announce.is_empty());
         assert_eq!(
-            recovered.withdraw.iter().copied().collect::<HashSet<_>>(),
+            recovered
+                .unicast_withdrawals()
+                .copied()
+                .collect::<HashSet<_>>(),
             routes.iter().map(|route| (route.prefix, 0)).collect()
         );
-        assert_eq!(recovered.withdraw.len(), 128);
+        assert_eq!(recovered.unicast_withdrawals().count(), 128);
         assert_eq!(recovered.end_of_rib, []);
-        assert!(output.try_recv().is_err());
+        assert!(output.try_recv().map(delivered).is_err());
         assert_eq!(manager.adj_ribs_out[&peer].len(), 0);
         assert!(manager.pending_group_admitted.is_empty());
         assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
@@ -12632,11 +12950,14 @@ async fn capacity_filtered_candidate_retirement_services_readiness() {
     ))
     .await;
     assert_eq!(result, Ok(()));
-    let update = output.try_recv().unwrap();
+    let update = output.try_recv().map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, []);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        []
+    );
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
-    assert!(output.try_recv().is_err());
+    assert!(output.try_recv().map(delivered).is_err());
     assert_eq!(manager.adj_ribs_out[&peer].len(), 128);
     assert!(
         routes
@@ -12688,7 +13009,7 @@ async fn batch_announce_retirement_services_readiness() {
             )
         )
     );
-    assert!(output.try_recv().is_err());
+    assert!(output.try_recv().map(delivered).is_err());
     assert_eq!(manager.adj_ribs_out[&peer].len(), 128);
     assert_eq!(manager.pending_group_admitted.bytes(), empty_credit);
     held.assert_serviced("batch_announce_retirement");
@@ -12754,9 +13075,12 @@ async fn evpn_refused_arc_retirement(
         validated_with: None,
     });
     while manager.process_next_route_chunk() {}
-    let initial = output.try_recv().unwrap();
+    let initial = output.try_recv().map(delivered).unwrap();
     assert_eq!(initial.announce.len(), 128);
-    assert_eq!(initial.withdraw, []);
+    assert_eq!(
+        initial.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        []
+    );
     assert!(!manager.dirty_peers.contains(&peer));
     let empty_credit = manager.pending_group_admitted.bytes();
     assert!(manager.capture_group_admitted_keys(peer));
@@ -12818,7 +13142,7 @@ async fn evpn_refused_arc_retirement(
         )
     );
     assert!(
-        output.try_recv().is_err(),
+        output.try_recv().map(delivered).is_err(),
         "no ANN, WD or EoR may escape refusal"
     );
     assert_eq!(manager.group_ribs[&gid].table.len(), 128);
@@ -12882,7 +13206,7 @@ fn batch_retirement_preserves_another_route_vector_owner() {
         OutboundCommitBatch::with_unicast(announce, vec![None; 128].into()),
     );
     assert!(result.is_err());
-    assert!(output.try_recv().is_err());
+    assert!(output.try_recv().map(delivered).is_err());
     assert_eq!(retained.len(), 128);
     assert!(retained.iter().zip(&routes).all(|(left, right)| left.prefix == right.prefix && left.attributes == right.attributes));
     assert!(tracked.iter().all(|value| value.upgrade().is_some()));
@@ -12910,7 +13234,7 @@ async fn ingest_dirty_replay_readiness(ungrouped: bool) {
     }
     assert!(manager.replacement_readiness.is_none());
     for _ in 0..FULL_CHANNEL_CAPACITY {
-        outbound.try_recv().unwrap();
+        outbound.try_recv().map(delivered).unwrap();
     }
     let family = (Afi::Ipv4, Safi::Unicast);
     manager.pending_eor.entry(stuck).or_default().insert(family);
@@ -12989,7 +13313,7 @@ async fn ingest_dirty_replay_readiness(ungrouped: bool) {
     let mutation_held = tx.capacity() == 7;
     release_tx.send(()).unwrap();
     let mut manager = actor.await.unwrap();
-    let recovered = outbound.try_recv().unwrap();
+    let recovered = outbound.try_recv().map(delivered).unwrap();
     let announced: HashSet<_> = recovered
         .announce
         .iter()
@@ -13004,7 +13328,10 @@ async fn ingest_dirty_replay_readiness(ungrouped: bool) {
     .map(full_channel_prefix)
     .collect();
     assert_eq!(announced, expected);
-    assert_eq!(recovered.withdraw, vec![(full_channel_prefix(0), 0)]);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(full_channel_prefix(0), 0)]
+    );
     assert_eq!(recovered.end_of_rib, vec![family]);
     assert!(!manager.pending_eor.contains_key(&stuck));
     assert!(!manager.dirty_peers.contains(&stuck));
@@ -13020,7 +13347,7 @@ async fn ingest_dirty_replay_readiness(ungrouped: bool) {
     assert!(
         matches!(manager.rx.try_recv().unwrap(), RibUpdate::PeerDown { peer, .. } if peer == live)
     );
-    assert!(live_outbound.try_recv().is_ok());
+    assert!(live_outbound.try_recv().map(delivered).is_ok());
     assert!(
         ordinary_held,
         "ordinary reads stay queued inside full replay"
@@ -13112,7 +13439,7 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
     }
     drop(held);
     for rx in &mut outbound {
-        while rx.try_recv().is_ok() {}
+        while rx.try_recv().map(delivered).is_ok() {}
     }
     manager.replacement_readiness_receipts.clear();
     if matches!(owner, ReplayReadinessOwner::Pending) {
@@ -13211,9 +13538,12 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
     }
     let mut manager = actor.await.unwrap();
     for rx in &mut outbound[..ages.len()] {
-        let update = rx.try_recv().unwrap();
+        let update = rx.try_recv().map(delivered).unwrap();
         assert_eq!(update.announce.len(), 3);
-        assert_eq!(update.withdraw, vec![(full_channel_prefix(0), 0)]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(full_channel_prefix(0), 0)]
+        );
         assert_eq!(update.end_of_rib, ipv4_sendable());
     }
     assert!(manager.dirty_peers.is_empty());
@@ -13267,7 +13597,7 @@ fn replay_readiness_restores_empty_and_force_scopes_without_wrapping_clean_fanou
     manager.drain_readiness_queries(None);
     assert_eq!(response.try_recv().unwrap(), Ok(2));
     for rx in &mut outbound {
-        while rx.try_recv().is_ok() {}
+        while rx.try_recv().map(delivered).is_ok() {}
     }
     manager.force_outbound_peers.insert(peers[0]);
     let mut response = queue_replacement_readiness(&tx);
@@ -13331,7 +13661,7 @@ fn dirty_resync_tick_withholds_forced_siblings_with_free_channels() {
     assert_eq!(
         outbound
             .iter_mut()
-            .filter_map(|rx| rx.try_recv().ok())
+            .filter_map(|rx| rx.try_recv().map(delivered).ok())
             .count(),
         1
     );
@@ -13342,9 +13672,12 @@ fn dirty_resync_tick_withholds_forced_siblings_with_free_channels() {
     assert!(manager.resync_dirty_peers_bounded());
     assert!(!manager.resync_dirty_peers_bounded());
     for receiver in &mut outbound {
-        while let Ok(update) = receiver.try_recv() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
             assert_eq!(update.announce.len(), 1);
-            assert_eq!(update.withdraw, []);
+            assert_eq!(
+                update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+                []
+            );
         }
     }
     assert!(manager.dirty_peers.is_empty());
@@ -13360,10 +13693,13 @@ fn dirty_resync_tick_preserves_unrelated_force_only_replay() {
     assert!(!manager.dirty_peers.contains(&peers[1]));
     assert!(!manager.resync_dirty_peers_bounded());
     for receiver in &mut outbound {
-        let update = receiver.try_recv().unwrap();
+        let update = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.withdraw, []);
-        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            []
+        );
+        assert!(receiver.try_recv().map(delivered).is_err());
     }
     assert!(manager.force_outbound_peers.is_empty());
     assert!(manager.dirty_peers.is_empty());
@@ -13408,7 +13744,7 @@ async fn dirty_resync_timer_member_ages(ages: &[Duration]) {
         assert_eq!(manager.pending_group_admitted.get(peer).unwrap().len(), 3);
     }
     drop(permits);
-    while outbound[2].try_recv().is_ok() {}
+    while outbound[2].try_recv().map(delivered).is_ok() {}
     let mut entered = Vec::new();
     let mut releases = Vec::new();
     for &peer in &peers[..ages.len()] {
@@ -13480,9 +13816,12 @@ async fn dirty_resync_timer_member_ages(ages: &[Duration]) {
             "mutations stay fenced inside a member replay"
         );
         releases[member].send(()).unwrap();
-        let recovered = outbound[member].recv().await.unwrap();
+        let recovered = outbound[member].recv().await.map(delivered).unwrap();
         assert_eq!(recovered.announce.len(), 2);
-        assert_eq!(recovered.withdraw, vec![(removed, 0)]);
+        assert_eq!(
+            recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            vec![(removed, 0)]
+        );
         if index + 1 == ages.len() {
             queued_reads.push(ordinary);
         } else {
@@ -13585,7 +13924,15 @@ fn dirty_resync_nested_readiness_keeps_owner_age_and_exact_count() {
     assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 2);
     assert!(fleet.manager.dirty_peers.is_empty());
     assert!(fleet.manager.pending_group_admitted.is_empty());
-    assert_eq!(fleet.receivers[0].try_recv().unwrap().announce.len(), 4);
+    assert_eq!(
+        fleet.receivers[0]
+            .try_recv()
+            .map(delivered)
+            .unwrap()
+            .announce
+            .len(),
+        4
+    );
     assert!(fleet.manager.readiness_rx.is_some());
     assert!(fleet.manager.replacement_readiness.is_none());
 }
@@ -13986,7 +14333,7 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
         }
         fleet.manager.replacement_readiness_test_hook = None;
         for receiver in &mut fleet.receivers {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         let mutation = fleet.manager.rx.try_recv().unwrap();
         fleet.manager.handle_update(mutation);
@@ -14209,7 +14556,7 @@ fn replacement_readiness_closed_forward_and_rollback_replies_keep_their_semantic
                 fleet
                     .receivers
                     .iter_mut()
-                    .all(|receiver| receiver.try_recv().is_err())
+                    .all(|receiver| receiver.try_recv().map(delivered).is_err())
             );
         }
         assert!(fleet.manager.replacement_readiness.is_none());
@@ -14259,7 +14606,7 @@ fn replacement_readiness_services_each_family_commit_without_changing_loc_rib_co
         .manager
         .replace_peer_export_policy_synchronously(peer, Some(peer_context_chain()))
         .unwrap();
-    while outbound.try_recv().is_ok() {}
+    while outbound.try_recv().map(delivered).is_ok() {}
     assert!(fleet.manager.grouped_member_of(peer).is_none());
     assert!(fleet.manager.vpn_grouped_member_of(peer).is_none());
     // Registration may already advertise the locally originated default RTC
@@ -14368,9 +14715,9 @@ fn replacement_readiness_services_each_family_commit_without_changing_loc_rib_co
             retained.map(|count| count + if withdraw { 0 } else { 2 })
         );
         assert_eq!(fleet.manager.loc_rib.len(), 4);
-        assert!(outbound.try_recv().is_ok());
+        assert!(outbound.try_recv().map(delivered).is_ok());
         assert!(
-            outbound.try_recv().is_err(),
+            outbound.try_recv().map(delivered).is_err(),
             "all families must share one outbound envelope"
         );
     }
@@ -14433,7 +14780,7 @@ fn authoritative_replacement_releases_unused_compiled_policy() {
         .apply_export_policy_replacements_synchronously(batch_replacements(&fleet.members, &a))
         .unwrap();
     for receiver in &mut fleet.receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     let source = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
     drop(a);
@@ -14448,7 +14795,7 @@ fn authoritative_replacement_releases_unused_compiled_policy() {
         .apply_export_policy_replacements_synchronously(batch_replacements(&fleet.members, &b))
         .unwrap();
     for receiver in &mut fleet.receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     let receipt = fleet
         .manager
@@ -14480,7 +14827,7 @@ fn distinct_authoritative_replacements_bound_compiled_policy_ownership() {
             ))
             .unwrap();
         for receiver in &mut fleet.receivers {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         let group = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
         assert!(
@@ -14536,7 +14883,7 @@ fn policy_reclamation_preserves_other_groups_sharing_the_chain() {
         .unwrap();
     drop(a);
     for receiver in &mut fleet.receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     let remaining_group = fleet.manager.grouped_member_of(fleet.members[1]).unwrap();
     assert_ne!(
@@ -14574,7 +14921,7 @@ fn authoritative_reclamation_keeps_later_preclassified_destinations() {
             .unwrap();
     }
     for receiver in &mut fleet.receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     let next = [
         rpol_community_chain(0xFDE8_0003),
@@ -14603,7 +14950,7 @@ fn authoritative_reclamation_keeps_later_preclassified_destinations() {
         fleet.manager.recompute_update_group(peer);
         assert_eq!(fleet.manager.grouped_member_of(peer), Some(group));
         let updates: Vec<_> =
-            std::iter::from_fn(|| fleet.receivers[index].try_recv().ok()).collect();
+            std::iter::from_fn(|| fleet.receivers[index].try_recv().map(delivered).ok()).collect();
         assert!(updates.iter().any(|update| !update.announce.is_empty()));
         assert!(
             updates
@@ -14645,7 +14992,7 @@ fn refreshed_grouped_member_manager() -> (
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
     });
-    let replayed: usize = std::iter::from_fn(|| receivers[0].try_recv().ok())
+    let replayed: usize = std::iter::from_fn(|| receivers[0].try_recv().map(delivered).ok())
         .map(|update| update.announce.len())
         .sum();
     assert_eq!(replayed, 2, "the refresh response replays the table");
@@ -15037,7 +15384,7 @@ fn prestaged_probe_snapshot_drift_requires_fenced_probe_or_rejection() {
                 assert_eq!(outcome, "fallback", "{seam}, owner={owner_changes}");
                 assert_eq!(probes.load(Ordering::Relaxed), 4);
                 for receiver in &mut receivers {
-                    assert!(receiver.try_recv().is_err());
+                    assert!(receiver.try_recv().map(delivered).is_err());
                 }
             } else {
                 assert_eq!(outcome, "committed", "{seam}, owner={owner_changes}");
@@ -15047,7 +15394,10 @@ fn prestaged_probe_snapshot_drift_requires_fenced_probe_or_rejection() {
                     "exactly one full fenced re-probe"
                 );
                 for receiver in &mut receivers {
-                    assert_eq!(receiver.try_recv().unwrap().announce.len(), 4);
+                    assert_eq!(
+                        receiver.try_recv().map(delivered).unwrap().announce.len(),
+                        4
+                    );
                 }
             }
         }
@@ -15071,7 +15421,7 @@ fn prestaged_probe_dirty_replacement_updates_exact_maximum() {
             vec![],
         );
         for receiver in &mut receivers {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         let probes = Arc::new(AtomicUsize::new(0));
         install_prestage_test_encoder(&mut manager, peers[0], 1, 65_535, &probes);
@@ -15094,7 +15444,7 @@ fn prestaged_probe_dirty_replacement_updates_exact_maximum() {
             vec![Prefix::V4(fixture_prefix(old_index))],
         );
         for receiver in &mut receivers {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         probes.store(0, Ordering::Relaxed);
         let fenced = fenced_inventory(&mut manager, source, destination, &[]).unwrap();
@@ -15126,14 +15476,17 @@ fn prestaged_probe_dirty_replacement_updates_exact_maximum() {
         );
         for receiver in &mut receivers {
             if expected == "committed" {
-                let update = receiver.try_recv().unwrap();
+                let update = receiver.try_recv().map(delivered).unwrap();
                 assert_eq!(update.announce.len(), 1);
                 assert_eq!(
                     update.announce[0].prefix,
                     Prefix::V4(fixture_prefix(new_index))
                 );
             } else {
-                assert!(receiver.try_recv().is_err(), "rejection emits nothing");
+                assert!(
+                    receiver.try_recv().map(delivered).is_err(),
+                    "rejection emits nothing"
+                );
             }
         }
     }
@@ -15276,7 +15629,7 @@ fn prestaged_probe_dirty_failure_discards_proof_and_fenced_probe_rejects() {
                 .collect(),
         );
         for receiver in &mut receivers {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         probes.store(0, Ordering::Relaxed);
         encoder.reuses.store(0, Ordering::Relaxed);
@@ -15313,7 +15666,7 @@ fn prestaged_probe_dirty_failure_discards_proof_and_fenced_probe_rejects() {
         );
         for receiver in &mut receivers {
             assert!(
-                receiver.try_recv().is_err(),
+                receiver.try_recv().map(delivered).is_err(),
                 "oversized transition emits nothing"
             );
         }
@@ -15362,7 +15715,7 @@ fn prestaged_probe_resized_payload_checks_current_maximum() {
                 .collect(),
         );
         for receiver in &mut receivers {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         probes.store(0, Ordering::Relaxed);
         let fenced = fenced_inventory(&mut manager, source, destination, &[]).unwrap();
@@ -15389,9 +15742,12 @@ fn prestaged_probe_resized_payload_checks_current_maximum() {
         );
         for receiver in &mut receivers {
             if expected == "committed" {
-                assert_eq!(receiver.try_recv().unwrap().announce.len(), 1);
+                assert_eq!(
+                    receiver.try_recv().map(delivered).unwrap().announce.len(),
+                    1
+                );
             } else {
-                assert!(receiver.try_recv().is_err());
+                assert!(receiver.try_recv().map(delivered).is_err());
             }
         }
     }
@@ -15951,7 +16307,8 @@ fn batched_authoritative_four_generations_emit_exact_terminal_receipts() {
             .unwrap()
             .peer;
         for (peer, receiver) in fleet.members.iter().zip(&mut fleet.receivers) {
-            let updates: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+            let updates: Vec<_> =
+                std::iter::from_fn(|| receiver.try_recv().map(delivered).ok()).collect();
             assert_eq!(
                 updates.len(),
                 if changed {
@@ -16176,14 +16533,14 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
     let mut shared_cells = Vec::new();
     for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
         let member = fleet.members[index];
-        let shared = receiver.try_recv().unwrap();
+        let shared = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(shared.announce_source_exclusion, Some(member));
         assert_eq!(
             shared.announce.len(),
             5,
             "marker-style change re-announces every slot"
         );
-        assert_eq!(shared.withdraw.len(), 0);
+        assert_eq!(shared.unicast_withdrawals().count(), 0);
         assert!(
             shared
                 .announce
@@ -16196,7 +16553,7 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
         shared_cells.push(shared.shared_group_encode.clone().unwrap());
         shared_announces.push(shared.announce.clone());
         if member == winner {
-            let supplement = receiver.try_recv().unwrap();
+            let supplement = receiver.try_recv().map(delivered).unwrap();
             assert_eq!(supplement.announce_source_exclusion, None);
             assert_eq!(supplement.announce.len(), 1);
             assert_eq!(
@@ -16207,10 +16564,10 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
                 supplement.announce[0].peer, winner,
                 "the lane substitutes the runner-up"
             );
-            assert_eq!(supplement.withdraw.len(), 0);
+            assert_eq!(supplement.unicast_withdrawals().count(), 0);
         }
         assert!(
-            receiver.try_recv().is_err(),
+            receiver.try_recv().map(delivered).is_err(),
             "no further envelopes: the batch emits at most shared + supplement"
         );
     }
@@ -16292,7 +16649,7 @@ fn batched_authoritative_apply_announces_only_changed_slots() {
         .peer;
     for (index, receiver) in fleet.receivers.iter_mut().enumerate() {
         let member = fleet.members[index];
-        let shared = receiver.try_recv().unwrap();
+        let shared = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(
             shared.announce.len(),
             1,
@@ -16300,13 +16657,13 @@ fn batched_authoritative_apply_announces_only_changed_slots() {
         );
         assert_eq!(shared.announce[0].prefix, Prefix::V4(shared_prefix));
         assert_eq!(shared.announce_source_exclusion, Some(member));
-        assert_eq!(shared.withdraw.len(), 0);
+        assert_eq!(shared.unicast_withdrawals().count(), 0);
         if member == winner {
-            let supplement = receiver.try_recv().unwrap();
+            let supplement = receiver.try_recv().map(delivered).unwrap();
             assert_eq!(supplement.announce.len(), 1);
             assert_eq!(supplement.announce[0].prefix, Prefix::V4(shared_prefix));
         }
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver.try_recv().map(delivered).is_err());
     }
 }
 
@@ -16355,7 +16712,7 @@ fn batched_authoritative_apply_skips_unregistered_and_degrades_dead_channels() {
     assert_eq!(fleet.manager.grouped_member_of(dead), Some(destination_gid));
     assert!(!fleet.manager.dirty_peers.contains(&dead));
     for receiver in &mut fleet.receivers {
-        let shared = receiver.try_recv().unwrap();
+        let shared = receiver.try_recv().map(delivered).unwrap();
         assert_eq!(shared.announce.len(), 5);
     }
 }
@@ -16394,10 +16751,10 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
         .unwrap();
     assert_eq!(fleet.manager.group_ribs[&destination].members.len(), 1);
     for receiver in &mut fleet.receivers[..3] {
-        assert!(receiver.try_recv().is_ok());
-        while receiver.try_recv().is_ok() {}
+        assert!(receiver.try_recv().map(delivered).is_ok());
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
-    assert!(fleet.receivers[3].try_recv().is_err());
+    assert!(fleet.receivers[3].try_recv().map(delivered).is_err());
     let incumbent_stats = fleet.manager.export_policy_counters[&incumbent].snapshot();
     let hits = Arc::clone(
         fleet.manager.export_chains[&incumbent]
@@ -16480,7 +16837,7 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
         prior_views[3]
     );
     assert!(
-        fleet.receivers[3].try_recv().is_err(),
+        fleet.receivers[3].try_recv().map(delivered).is_err(),
         "no incumbent emission"
     );
     let mut payloads = Vec::new();
@@ -16495,7 +16852,7 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
             &hits
         ));
         let updates: Vec<_> =
-            std::iter::from_fn(|| fleet.receivers[index].try_recv().ok()).collect();
+            std::iter::from_fn(|| fleet.receivers[index].try_recv().map(delivered).ok()).collect();
         let shared = updates
             .first()
             .expect("restored marker needs an announcement");
@@ -16508,7 +16865,7 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
         ));
         let mut restored = HashMap::new();
         for update in updates {
-            for (prefix, _) in update.withdraw {
+            for (prefix, _) in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
                 restored.remove(&prefix);
             }
             for route in update.announce.iter() {
@@ -16566,7 +16923,7 @@ fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
             ))
             .unwrap();
         for receiver in &mut fleet.receivers {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         let destination = fleet.manager.grouped_member_of(incumbent).unwrap();
         let sender = fleet.manager.outbound_peers[&incumbent].clone();
@@ -16592,10 +16949,10 @@ fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
         );
         let tombstones = fleet.manager.group_ribs[&destination].tombstones.clone();
         for receiver in &mut fleet.receivers[..3] {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         if !blocked {
-            while fleet.receivers[3].try_recv().is_ok() {}
+            while fleet.receivers[3].try_recv().map(delivered).is_ok() {}
         }
         let queued = fleet.receivers[3].len();
         let shared_before = fleet
@@ -16626,7 +16983,7 @@ fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
             fallback_before
         );
         for receiver in &mut fleet.receivers[..3] {
-            let shared = receiver.try_recv().unwrap();
+            let shared = receiver.try_recv().map(delivered).unwrap();
             assert!(shared.shared_group_encode.is_some());
         }
         assert_eq!(fleet.manager.dirty_peers.contains(&incumbent), blocked);
@@ -16649,10 +17006,17 @@ fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
         } else {
             let retry = fleet.receivers[3]
                 .try_recv()
+                .map(delivered)
                 .expect("the existing debt still gets its retry");
             assert!(retry.shared_group_encode.is_none());
-            assert!(retry.withdraw.contains(&(withdrawn, 0)));
-            assert!(fleet.receivers[3].try_recv().is_err());
+            assert!(
+                retry
+                    .unicast_withdrawals()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .contains(&(withdrawn, 0))
+            );
+            assert!(fleet.receivers[3].try_recv().map(delivered).is_err());
             assert!(fleet.manager.group_ribs[&destination].tombstones.is_empty());
         }
     }
@@ -16703,7 +17067,7 @@ fn batched_authoritative_occupied_dataset_transition_keeps_fallback() {
             ))
             .unwrap();
         for receiver in &mut fleet.receivers {
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
         }
         assert_eq!(
             handle.refresh(DatasetData::Prefix(PrefixSet::new([]))),
@@ -16737,7 +17101,7 @@ fn batched_authoritative_occupied_dataset_transition_keeps_fallback() {
             3
         );
         assert!(
-            fleet.receivers[3].try_recv().is_err(),
+            fleet.receivers[3].try_recv().map(delivered).is_err(),
             "no silent restage of the incumbent"
         );
         assert_eq!(fleet.manager.grouped_advertised_count(incumbent), Some(4));
@@ -16758,7 +17122,8 @@ fn batched_authoritative_occupied_dataset_transition_keeps_fallback() {
         for peer in &fleet.members {
             assert_eq!(fleet.manager.grouped_advertised_count(*peer), Some(0));
         }
-        assert!(fleet.receivers[3].try_recv().unwrap().withdraw.len() >= 4);
+        let withdrawn = fleet.receivers[3].try_recv().map(delivered).unwrap();
+        assert!(withdrawn.unicast_withdrawals().count() >= 4);
     }
 }
 
@@ -16773,7 +17138,7 @@ fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
         .apply_export_policy_replacements_synchronously(batch_replacements(movers, &next_policy))
         .unwrap();
     for receiver in &mut fleet.receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     let lagging = movers[1];
     let sender = fleet.manager.outbound_peers[&lagging].clone();
@@ -16793,7 +17158,7 @@ fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
     while fleet.manager.process_next_route_chunk() {}
     assert!(fleet.manager.dirty_peers.contains(&lagging));
     for receiver in &mut fleet.receivers {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     fleet
         .manager
@@ -16812,13 +17177,17 @@ fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
         ),
         (3, 1, 2)
     );
-    let retry = fleet.receivers[1].try_recv().unwrap();
+    let retry = fleet.receivers[1].try_recv().map(delivered).unwrap();
     assert!(
         retry.shared_group_encode.is_none(),
         "lagging mover cannot consume only the shared delta"
     );
     assert!(
-        retry.withdraw.contains(&(withdrawn, 0)),
+        retry
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>()
+            .contains(&(withdrawn, 0)),
         "missed source-group withdrawal must survive the move"
     );
     assert!(
@@ -16827,17 +17196,18 @@ fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
             .iter()
             .all(|route| route.communities().contains(&0xFDE8_0001))
     );
-    assert!(fleet.receivers[1].try_recv().is_err());
+    assert!(fleet.receivers[1].try_recv().map(delivered).is_err());
     for index in [0, 2] {
         assert!(
             fleet.receivers[index]
                 .try_recv()
+                .map(delivered)
                 .unwrap()
                 .shared_group_encode
                 .is_some()
         );
     }
-    assert!(fleet.receivers[3].try_recv().is_err());
+    assert!(fleet.receivers[3].try_recv().map(delivered).is_err());
     assert!(!fleet.manager.dirty_peers.contains(&lagging));
     assert!(!fleet.manager.pending_extra_withdraws.contains_key(&lagging));
 }
@@ -17461,8 +17831,7 @@ fn envelope_summary(update: &OutboundRouteUpdate) -> String {
         .collect();
     announce.sort();
     let mut withdraw: Vec<String> = update
-        .withdraw
-        .iter()
+        .unicast_withdrawals()
         .map(|(prefix, path_id)| format!("{prefix}#{path_id}"))
         .collect();
     withdraw.sort();
@@ -17499,7 +17868,7 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
     let source = Ipv4Addr::new(192, 0, 2, 26);
     distribute_direct_routes(&mut manager, source, [denied, permitted]);
     for receiver in [&mut grouped_rx, &mut sibling_rx, &mut distinct_rx] {
-        while receiver.try_recv().is_ok() {}
+        while receiver.try_recv().map(delivered).is_ok() {}
     }
     if force_ungrouped {
         assert_eq!(manager.grouped_member_of(grouped), None);
@@ -17544,7 +17913,7 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
     for (peer, receiver) in [(grouped, &mut grouped_rx), (distinct, &mut distinct_rx)] {
         manager.send_route_refresh_response(peer, Afi::Ipv4, Safi::Unicast);
         let mut refresh = Vec::new();
-        while let Ok(update) = receiver.try_recv() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
             refresh.push(envelope_summary(&update));
         }
         let policy_filtered = manager
@@ -17577,7 +17946,7 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
         .iter_mut()
         .zip([&mut grouped_rx, &mut distinct_rx])
     {
-        while let Ok(update) = receiver.try_recv() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
             observation.after_churn.push(envelope_summary(&update));
         }
     }
@@ -17656,7 +18025,7 @@ fn vpn_dirty_resync_case(
     manager.test_force_ungrouped = !grouped;
     let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 5));
     let mut outbound = register_direct_peer_with_families(&mut manager, peer, vpn_sendable());
-    while outbound.try_recv().is_ok() {}
+    while outbound.try_recv().map(delivered).is_ok() {}
     let routes: Vec<VpnRibRoute> = (0..routes)
         .map(|n| {
             let mut route = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 7), n, 100, 100);
@@ -17671,7 +18040,7 @@ fn vpn_dirty_resync_case(
         withdrawn: vec![],
     });
     while manager.process_next_route_chunk() {}
-    while outbound.try_recv().is_ok() {}
+    while outbound.try_recv().map(delivered).is_ok() {}
     assert_eq!(manager.vpn_grouped_member_of(peer).is_some(), grouped);
     if withdraw_while_dirty {
         // Hold every free slot so the withdrawal send fails and the peer
@@ -17693,12 +18062,12 @@ fn vpn_dirty_resync_case(
     } else {
         assert!(manager.mark_outbound_dirty(peer));
     }
-    assert!(outbound.try_recv().is_err());
+    assert!(outbound.try_recv().map(delivered).is_err());
     let inserts = manager.adj_rib_out_commit_stats.vpn_resync_key_inserts;
     manager.resync_dirty_peers_bounded();
     assert!(!manager.dirty_peers.contains(&peer), "the resync completes");
     let inserts = manager.adj_rib_out_commit_stats.vpn_resync_key_inserts - inserts;
-    (outbound.try_recv().ok(), inserts)
+    (outbound.try_recv().map(delivered).ok(), inserts)
 }
 
 /// A grouped VPN member's dirty resync assembles its VPN state from the
@@ -17752,7 +18121,7 @@ fn vpn_group_members_share_one_payload_and_encode_cell_with_private_control() {
                 }
                 let mut receiver =
                     register_direct_peer_with_families(&mut manager, *peer, vpn_sendable());
-                while receiver.try_recv().is_ok() {}
+                while receiver.try_recv().map(delivered).is_ok() {}
                 receiver
             })
             .collect();
@@ -17773,7 +18142,7 @@ fn vpn_group_members_share_one_payload_and_encode_cell_with_private_control() {
         while manager.process_next_route_chunk() {}
         let updates: Vec<_> = receivers
             .iter_mut()
-            .map(|rx| rx.try_recv().unwrap())
+            .map(|rx| rx.try_recv().map(delivered).unwrap())
             .collect();
         assert!(updates.iter().all(|update| update.vpn_announce.len() == 3));
         for update in &updates[1..] {
@@ -17806,7 +18175,7 @@ fn vpn_shared_fanout_keeps_dirty_and_source_flip_views_private() {
         .map(|peer| {
             let mut receiver =
                 register_direct_peer_with_families(&mut manager, *peer, vpn_sendable());
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
             receiver
         })
         .collect();
@@ -17820,7 +18189,15 @@ fn vpn_shared_fanout_keeps_dirty_and_source_flip_views_private() {
     });
     while manager.process_next_route_chunk() {}
     for receiver in &mut receivers {
-        assert_eq!(receiver.try_recv().unwrap().vpn_announce.len(), 1);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .map(delivered)
+                .unwrap()
+                .vpn_announce
+                .len(),
+            1
+        );
     }
     assert!(manager.mark_outbound_dirty(peers[3]));
     // A better route flips the source onto an existing receiver: that member
@@ -17842,7 +18219,7 @@ fn vpn_shared_fanout_keeps_dirty_and_source_flip_views_private() {
     while manager.process_next_route_chunk() {}
     let updates: Vec<_> = receivers
         .iter_mut()
-        .map(|rx| rx.try_recv().unwrap())
+        .map(|rx| rx.try_recv().map(delivered).unwrap())
         .collect();
     assert!(updates[0].vpn_announce.is_empty());
     assert_eq!(updates[0].vpn_withdraw, vec![route.key()]);
@@ -17882,7 +18259,7 @@ fn vpn_shared_fanout_isolates_rtc_and_exact_export_rejections() {
                     entries: vec![],
                 },
             );
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
             receiver
         })
         .collect();
@@ -17915,7 +18292,7 @@ fn vpn_shared_fanout_isolates_rtc_and_exact_export_rejections() {
     while manager.process_next_route_chunk() {}
     let updates: Vec<_> = receivers
         .iter_mut()
-        .map(|rx| rx.try_recv().unwrap())
+        .map(|rx| rx.try_recv().map(delivered).unwrap())
         .collect();
     assert_eq!(updates[0].vpn_announce.len(), 2);
     assert!(Arc::ptr_eq(
@@ -17951,7 +18328,7 @@ fn vpn_shared_fanout_preserves_admitted_keys_after_channel_refusal() {
         .map(|peer| {
             let mut receiver =
                 register_direct_peer_with_families(&mut manager, *peer, vpn_sendable());
-            while receiver.try_recv().is_ok() {}
+            while receiver.try_recv().map(delivered).is_ok() {}
             receiver
         })
         .collect();
@@ -17969,7 +18346,15 @@ fn vpn_shared_fanout_preserves_admitted_keys_after_channel_refusal() {
     });
     while manager.process_next_route_chunk() {}
     for receiver in &mut receivers {
-        assert_eq!(receiver.try_recv().unwrap().vpn_announce.len(), 1);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .map(delivered)
+                .unwrap()
+                .vpn_announce
+                .len(),
+            1
+        );
     }
     for _ in 0..8 {
         manager.outbound_peers[&peers[2]]
@@ -17983,8 +18368,8 @@ fn vpn_shared_fanout_preserves_admitted_keys_after_channel_refusal() {
         withdrawn: vec![route(1).key()],
     });
     while manager.process_next_route_chunk() {}
-    let a = receivers[0].try_recv().unwrap();
-    let b = receivers[1].try_recv().unwrap();
+    let a = receivers[0].try_recv().map(delivered).unwrap();
+    let b = receivers[1].try_recv().map(delivered).unwrap();
     assert!(Arc::ptr_eq(&a.vpn_announce, &b.vpn_announce));
     assert_eq!(a.vpn_withdraw, vec![route(1).key()]);
     assert!(manager.dirty_peers.contains(&peers[2]));
@@ -17992,10 +18377,17 @@ fn vpn_shared_fanout_preserves_admitted_keys_after_channel_refusal() {
     assert_eq!(proof.len(), 1);
     assert!(proof.contains(&crate::update::ExactExportKey::Vpn(route(1).key())));
     for _ in 0..8 {
-        assert!(receivers[2].try_recv().unwrap().vpn_announce.is_empty());
+        assert!(
+            receivers[2]
+                .try_recv()
+                .map(delivered)
+                .unwrap()
+                .vpn_announce
+                .is_empty()
+        );
     }
     manager.resync_dirty_peers_bounded();
-    let recovered = receivers[2].try_recv().unwrap();
+    let recovered = receivers[2].try_recv().map(delivered).unwrap();
     assert_eq!(recovered.vpn_withdraw, vec![route(1).key()]);
     assert_eq!(recovered.vpn_announce.len(), 1);
     assert_eq!(recovered.vpn_announce[0].key(), route(2).key());

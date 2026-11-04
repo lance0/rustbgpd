@@ -305,6 +305,14 @@ pub(super) struct NormMsg {
     pub(super) recovery: Option<RecoveryBoundary>,
 }
 
+impl NormMsg {
+    /// Every unicast withdrawal, the group's shared rows included
+    /// (`normalize` folds them in), as on an envelope.
+    pub(super) fn unicast_withdrawals(&self) -> std::slice::Iter<'_, (Prefix, u32)> {
+        self.withdraw.iter()
+    }
+}
+
 pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
     // Model source exclusion before comparing RIB events. Attribute preparation
     // and encoded bytes are checked separately by the transport oracle.
@@ -327,7 +335,7 @@ pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
     // `Prefix`/`Afi`/`Safi` don't implement `Ord` — sort textually
     // (comparison stability is all that matters here).
     announce.sort_by_key(|entry| (entry.0.to_string(), entry.1));
-    let mut withdraw = update.withdraw.clone();
+    let mut withdraw = update.unicast_withdrawals().copied().collect::<Vec<_>>();
     withdraw.sort_by_key(|(prefix, path_id)| (prefix.to_string(), *path_id));
     let mut end_of_rib = update.end_of_rib.clone();
     end_of_rib.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
@@ -666,7 +674,7 @@ fn trace(streams: &Streams) -> Trace {
                     );
                 }
             }
-            for (prefix, path_id) in &message.withdraw {
+            for (prefix, path_id) in message.unicast_withdrawals() {
                 record_event(
                     &mut result,
                     session,
@@ -1236,7 +1244,7 @@ pub(super) fn fold(streams: &Streams) -> FoldedState {
             if msg.session_start.is_some() {
                 table.clear();
             }
-            for (prefix, path_id) in &msg.withdraw {
+            for (prefix, path_id) in msg.unicast_withdrawals() {
                 assert!(
                     table.remove(&(*prefix, *path_id)).is_some(),
                     "spurious unicast withdrawal for {peer}: {prefix}, path {path_id}"
@@ -1301,7 +1309,18 @@ pub(super) struct Oracle {
     /// route messages never share a distribution window (the reference
     /// side of the cross-message coalescing tests).
     sequential_queue: bool,
+    /// Receivers that model a healthy session: at every quiesce their queued
+    /// updates are taken off the channel and marked sent ([`delivered`]),
+    /// as a session sends what the RIB queues; a session that had not sent
+    /// a whole-table update would hold back the peer's next one. The
+    /// scenario still reads them in order (`unread`). Small channels stay
+    /// under the scenario's explicit control.
+    prompt: BTreeSet<PeerId>,
+    unread: BTreeMap<PeerId, std::collections::VecDeque<OutboundRouteUpdate>>,
 }
+
+/// Channels at least this large model a healthy, promptly draining session.
+const PROMPT_CAPACITY: usize = 64;
 
 /// Session features that disqualify a peer from shared single-best staging.
 /// The fault corpus varies these only at stamped `PeerUp` boundaries, matching
@@ -1347,6 +1366,8 @@ impl Oracle {
             handle,
             collected: Streams::new(),
             sequential_queue: false,
+            prompt: BTreeSet::new(),
+            unread: BTreeMap::new(),
         }
     }
 
@@ -1468,6 +1489,11 @@ impl Oracle {
         features: OraclePeerFeatures,
     ) {
         let (out_tx, out_rx) = mpsc::channel(capacity);
+        if capacity >= PROMPT_CAPACITY {
+            self.prompt.insert(peer_v4(peer));
+        } else {
+            self.prompt.remove(&peer_v4(peer));
+        }
         let add_path_send_families = if features.add_path_send_max > 0 {
             sendable_families
                 .iter()
@@ -1506,8 +1532,11 @@ impl Oracle {
         // receiver; drain the predecessor first so its messages stay in
         // the collected stream.
         let msgs = self.collected.entry(peer_v4(peer)).or_default();
+        for update in self.unread.remove(&peer_v4(peer)).into_iter().flatten() {
+            msgs.push(normalize(&update));
+        }
         if let Some(mut old_rx) = self.outs.insert(peer_v4(peer), out_rx) {
-            while let Ok(update) = old_rx.try_recv() {
+            while let Ok(update) = old_rx.try_recv().map(delivered) {
                 msgs.push(normalize(&update));
             }
         }
@@ -1735,7 +1764,10 @@ impl Oracle {
     fn drain_collected(&mut self) {
         for (peer, rx) in &mut self.outs {
             let msgs = self.collected.entry(*peer).or_default();
-            while let Ok(update) = rx.try_recv() {
+            for update in self.unread.remove(peer).into_iter().flatten() {
+                msgs.push(normalize(&update));
+            }
+            while let Ok(update) = rx.try_recv().map(delivered) {
                 msgs.push(normalize(&update));
             }
         }
@@ -1829,11 +1861,23 @@ impl Oracle {
     /// RFC 2918 ROUTE-REFRESH from the peer: the grouped path replays
     /// the group table, the per-peer path re-runs full staging.
     async fn route_refresh(&mut self, peer: Ipv4Addr, afi: Afi, safi: Safi) {
+        self.route_refresh_generation(peer, SESSION, afi, safi)
+            .await;
+    }
+
+    /// [`Self::route_refresh`] from session `session_id`.
+    pub(super) async fn route_refresh_generation(
+        &mut self,
+        peer: Ipv4Addr,
+        session_id: u64,
+        afi: Afi,
+        safi: Safi,
+    ) {
         self.tx
             .send(RibUpdate::RouteRefreshRequest {
                 queued: Arc::default(),
                 peer: peer_v4(peer),
-                session_id: SESSION,
+                session_id,
                 afi,
                 safi,
             })
@@ -1858,6 +1902,8 @@ impl Oracle {
     /// the primary channel. The reply is also an ordering barrier for all
     /// prior updates and their resulting outbound sends.
     pub(super) async fn outbound_convergence(&mut self) -> crate::update::OutboundConvergence {
+        // Healthy sessions have sent what was queued before the query.
+        self.quiesce().await;
         let (reply, response) = oneshot::channel();
         self.tx
             .send(RibUpdate::QueryOutboundConvergence { reply })
@@ -1884,6 +1930,14 @@ impl Oracle {
     /// happened by the time the reply arrives.
     pub(super) async fn quiesce(&mut self) {
         let _ = self.best_routes().await;
+        for (peer, rx) in &mut self.outs {
+            if self.prompt.contains(peer) {
+                let unread = self.unread.entry(*peer).or_default();
+                while let Ok(update) = rx.try_recv() {
+                    unread.push_back(delivered(update));
+                }
+            }
+        }
     }
 
     /// Quiesce, then require every peer to be outbound-clean, so a resync
@@ -1906,6 +1960,26 @@ impl Oracle {
             assert!(
                 !self.peer_outbound_dirty(peer).await,
                 "{peer} is still outbound-dirty after its resync"
+            );
+        }
+        self.assert_no_refresh_owed().await;
+    }
+
+    /// No peer is owed a refresh answer: refused answers are refresh-only
+    /// debt, which no dirty-state check sees.
+    pub(super) async fn assert_no_refresh_owed(&mut self) {
+        let peers: Vec<PeerId> = self.outs.keys().copied().collect();
+        for peer in peers {
+            let (reply, owed) = oneshot::channel();
+            self.tx
+                .send(RibUpdate::TestQueryPeerOutboundOwed { peer, reply })
+                .await
+                .unwrap();
+            let owed = owed.await.unwrap();
+            assert!(
+                owed.refresh.is_empty(),
+                "{peer} is still owed refresh answers for {:?}",
+                owed.refresh
             );
         }
     }
@@ -1948,13 +2022,21 @@ impl Oracle {
     /// scenarios). The message stays in the collected stream so folded
     /// comparisons and the VPN invariant checker see the whole history.
     pub(super) async fn drain_one(&mut self, peer: Ipv4Addr) -> OutboundRouteUpdate {
-        let update = self
-            .outs
+        let unread = self
+            .unread
             .get_mut(&peer_v4(peer))
-            .expect("peer registered")
-            .recv()
-            .await
-            .expect("message pending");
+            .and_then(std::collections::VecDeque::pop_front);
+        let update = match unread {
+            Some(update) => update,
+            None => self
+                .outs
+                .get_mut(&peer_v4(peer))
+                .expect("peer registered")
+                .recv()
+                .await
+                .map(delivered)
+                .expect("message pending"),
+        };
         self.collected
             .entry(peer_v4(peer))
             .or_default()
@@ -2010,9 +2092,15 @@ impl Oracle {
     pub(super) async fn drain_peer_available(&mut self, peer: Ipv4Addr) -> Vec<NormMsg> {
         self.quiesce().await;
         let peer = peer_v4(peer);
+        let mut drained: Vec<NormMsg> = self
+            .unread
+            .remove(&peer)
+            .into_iter()
+            .flatten()
+            .map(|update| normalize(&update))
+            .collect();
         let rx = self.outs.get_mut(&peer).expect("peer registered");
-        let mut drained = Vec::new();
-        while let Ok(update) = rx.try_recv() {
+        while let Ok(update) = rx.try_recv().map(delivered) {
             drained.push(normalize(&update));
         }
         self.collected
@@ -2034,6 +2122,7 @@ impl Oracle {
     /// checker — the returned streams are the complete emission history.
     pub(super) async fn terminal_health(&mut self) -> (usize, usize, usize, usize, usize, usize) {
         self.quiesce().await;
+        self.assert_no_refresh_owed().await;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::TestQueryOutboundHealth { reply: reply_tx })
@@ -3296,9 +3385,17 @@ async fn run_vpn_swap_case(
         oracle
             .drain_before_recovery(C, RecoveryPath::QueueDeferral)
             .await;
+        // The prompt receivers send what the re-evaluation queued before
+        // the tick that resyncs any peer it left dirty.
+        oracle.quiesce().await;
         tokio::time::advance(Duration::from_secs(2)).await;
         oracle.quiesce().await;
         oracle.end_recovery(C).await;
+    } else {
+        // A small row credit can leave a peer dirty for its resync tick.
+        oracle.quiesce().await;
+        tokio::time::advance(Duration::from_millis(1300)).await;
+        oracle.quiesce().await;
     }
     let streams = oracle.finish().await;
     (fold(&streams), fold_vpn_paths(&streams), evals)
@@ -3455,7 +3552,7 @@ async fn check_vpn_swap_cases(mode: VpnSwapMode) {
 /// full pass produces, which is in turn the state of a run that started
 /// with the new contents. Accept/reject flips, attribute changes and
 /// non-best candidates all count.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dataset_swap_bounded_vpn_reevaluation_matches_full_pass() {
     for (ungrouped, add_path) in [(false, false), (true, false), (true, true)] {
         check_vpn_swap_cases(VpnSwapMode {
@@ -3488,7 +3585,7 @@ async fn dataset_swap_bounded_vpn_reevaluation_matches_full_pass_with_dirty_memb
 
 /// RT-Constrain receivers are outside the bounded path: every swap takes
 /// the full pass and stays exact.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dataset_swap_with_rtc_receivers_uses_full_pass() {
     for ungrouped in [false, true] {
         check_vpn_swap_cases(VpnSwapMode {
@@ -3910,7 +4007,10 @@ async fn oracle_dirty_missed_announce_then_withdraw_has_no_unknown_tombstone() {
         run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
     assert_route_parity(&grouped, &private);
     let c = &grouped[&peer_v4(C)];
-    assert!(c.iter().all(|message| message.withdraw.is_empty()));
+    assert!(
+        c.iter()
+            .all(|message| message.unicast_withdrawals().next().is_none())
+    );
     assert!(fold(&grouped)[&peer_v4(C)].contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
 }
 
@@ -3964,12 +4064,12 @@ async fn oracle_dirty_source_excluded_sibling_has_no_shared_tombstone_withdraw()
     assert!(
         grouped[&peer_v4(C)]
             .iter()
-            .all(|message| !message.withdraw.contains(&key))
+            .all(|message| !message.unicast_withdrawals().any(|row| row == &key))
     );
     assert_eq!(
         grouped[&peer_v4(D)]
             .iter()
-            .flat_map(|message| &message.withdraw)
+            .flat_map(|message| message.unicast_withdrawals())
             .filter(|withdraw| **withdraw == key)
             .count(),
         1
@@ -4320,9 +4420,10 @@ async fn oracle_source_flip_back_before_resync_keeps_route_without_spurious_with
     );
     // The retention guard must have dropped the staged extra withdraw:
     // no withdraw of p1 ever reaches C's wire.
-    let spurious = grouped[&peer_v4(C)]
-        .iter()
-        .any(|msg| msg.withdraw.contains(&(Prefix::V4(pfx(1, 0)), 0)));
+    let spurious = grouped[&peer_v4(C)].iter().any(|msg| {
+        msg.unicast_withdrawals()
+            .any(|row| row == &(Prefix::V4(pfx(1, 0)), 0))
+    });
     assert!(
         !spurious,
         "flip-back before resync must not put a spurious withdraw on the wire"
@@ -4564,7 +4665,9 @@ async fn oracle_clean_member_regroup_suppresses_unchanged_announces() {
         );
     }
     assert!(
-        c_msgs.iter().all(|msg| msg.withdraw.is_empty()),
+        c_msgs
+            .iter()
+            .all(|msg| msg.unicast_withdrawals().next().is_none()),
         "clean regroup with no verdict change must not withdraw anything"
     );
 }
@@ -5487,13 +5590,13 @@ async fn dirty_leaver_with_empty_view_leaves_no_extra_withdraw_entry() {
     o.peer_up(B, false, true, None, 64).await;
     // C's policy denies the only route, so its group table and advertised
     // view stay empty. Its capacity-1 channel is left holding the initial
-    // EoR, so the refresh response below cannot be sent: C goes dirty with
+    // EoR, so the forced resync below cannot be sent: C goes dirty with
     // nothing advertised and no group tombstones.
     o.peer_up(C, false, true, Some(deny_prefix_chain(pfx(1, 0))), 1)
         .await;
     o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
         .await;
-    o.route_refresh(C, Afi::Ipv4, Safi::Unicast).await;
+    o.refresh_outbound(C).await;
     let (dirty, _, _, _, _, extra_withdraw_peers) = o.terminal_health().await;
     assert_eq!(
         (dirty, extra_withdraw_peers),
@@ -5833,7 +5936,7 @@ async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .all(|msg| msg.withdraw.is_empty()),
+                .all(|msg| msg.unicast_withdrawals().next().is_none()),
             "promotion is an implicit replace at path_id 0 — never withdraw+announce"
         );
     }
@@ -5883,7 +5986,11 @@ async fn oracle_action_only_pcb_lane_change_and_promotion() {
             // separately carried action changes on B's exported candidate.
             o.routes(B, vec![candidate(!initially_self)], vec![]).await;
             let changed = o.drain_peer_available(A).await;
-            assert!(changed.iter().all(|msg| msg.withdraw.is_empty()));
+            assert!(
+                changed
+                    .iter()
+                    .all(|msg| msg.unicast_withdrawals().next().is_none())
+            );
             let changed: Vec<_> = changed.iter().flat_map(|msg| &msg.announce).collect();
             assert_eq!(
                 changed.len(),
@@ -5907,9 +6014,9 @@ async fn oracle_action_only_pcb_lane_change_and_promotion() {
             o.routes(A, vec![], vec![pfx(1, 0)]).await;
             let promotion = o.drain_peer_available(A).await;
             assert!(
-                promotion
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                promotion.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "promotion must not duplicate the already admitted action"
             );
 
@@ -5982,7 +6089,11 @@ async fn oracle_action_only_same_update_pcb_winner_promotion() {
             o.routes(B, vec![candidate(B, 200, !initially_self)], vec![])
                 .await;
             let replacement = o.drain_peer_available(A).await;
-            assert!(replacement.iter().all(|msg| msg.withdraw.is_empty()));
+            assert!(
+                replacement
+                    .iter()
+                    .all(|msg| msg.unicast_withdrawals().next().is_none())
+            );
             let replacement: Vec<_> = replacement.iter().flat_map(|msg| &msg.announce).collect();
             assert_eq!(
                 replacement.len(),
@@ -6089,7 +6200,8 @@ async fn oracle_action_only_equivalent_profile_pcb_prior_suppression() {
                     o.drain_peer_available(peer)
                         .await
                         .iter()
-                        .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                        .all(|msg| msg.announce.is_empty()
+                            && msg.unicast_withdrawals().next().is_none()),
                     "an equivalent winner action change must not reach {peer}"
                 );
             }
@@ -6109,10 +6221,9 @@ async fn oracle_action_only_equivalent_profile_pcb_prior_suppression() {
             o.routes(B, vec![candidate(pfx(2, 0), !initially_self)], vec![])
                 .await;
             assert!(
-                o.drain_peer_available(A)
-                    .await
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                o.drain_peer_available(A).await.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "an equivalent lane action change must not reach the winner's source"
             );
             runs.push(o.finish().await);
@@ -6196,7 +6307,10 @@ async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
                 ],
                 "the admitted key keeps its equivalent action without a replay"
             );
-            let withdrawn: Vec<_> = messages.iter().flat_map(|msg| &msg.withdraw).collect();
+            let withdrawn: Vec<_> = messages
+                .iter()
+                .flat_map(|msg| msg.unicast_withdrawals())
+                .collect();
             assert_eq!(withdrawn, vec![&(Prefix::V4(pfx(2, 0)), 0)]);
         }
     }
@@ -6371,7 +6485,7 @@ async fn oracle_pcb_new_winner_keeps_unchanged_runner_up_without_reannounce() {
         grouped
             .values()
             .flatten()
-            .all(|message| message.withdraw.is_empty())
+            .all(|message| message.unicast_withdrawals().next().is_none())
     );
 }
 
@@ -6447,7 +6561,7 @@ async fn oracle_pcb_lane_only_churn_reaches_only_the_best_source() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .all(|msg| msg.withdraw.is_empty()),
+                .all(|msg| msg.unicast_withdrawals().next().is_none()),
             "lane churn under a standing best must never reach a wire as a withdraw"
         );
     }
@@ -6539,7 +6653,7 @@ async fn oracle_pcb_route_refresh_replays_runner_up_substitution() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .all(|msg| msg.withdraw.is_empty()),
+                .all(|msg| msg.unicast_withdrawals().next().is_none()),
             "refresh replay must not withdraw anything"
         );
     }
@@ -7352,10 +7466,9 @@ async fn oracle_pcb_rs_control_equivalent_fallback_action_is_suppressed() {
             );
             o.routes(B, vec![fallback(!initially_self)], vec![]).await;
             assert!(
-                o.drain_peer_available(D)
-                    .await
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                o.drain_peer_available(D).await.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "force_ungrouped={force_ungrouped}: an equivalent fallback action change \
                  must not reach D"
             );
@@ -7483,10 +7596,9 @@ async fn oracle_pcb_rs_control_equivalent_fallback_action_with_winner_delta() {
                 .await;
             }
             assert!(
-                o.drain_peer_available(D)
-                    .await
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                o.drain_peer_available(D).await.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "promote={promote} force_ungrouped={force_ungrouped}: an equivalent \
                  action change must not reach D"
             );
@@ -7543,7 +7655,7 @@ async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
         assert!(
             grouped[&peer_v4(member)]
                 .iter()
-                .flat_map(|msg| &msg.withdraw)
+                .flat_map(|msg| msg.unicast_withdrawals())
                 .all(|(prefix, _)| *prefix != Prefix::V4(pfx(3, 0))),
             "{member} never held p3"
         );
@@ -7551,7 +7663,7 @@ async fn oracle_pcb_batched_transition_withdraws_only_held_keys() {
     assert!(
         grouped[&peer_v4(D)]
             .iter()
-            .flat_map(|msg| &msg.withdraw)
+            .flat_map(|msg| msg.unicast_withdrawals())
             .all(|(prefix, _)| *prefix != Prefix::V4(pfx(4, 0))),
         "D never held its own p4"
     );
@@ -7751,15 +7863,18 @@ async fn oracle_action_only_single_best_after_clean_regroup() {
                 !force_ungrouped
             );
             assert!(
-                o.drain_peer_available(C)
-                    .await
-                    .iter()
-                    .all(|msg| msg.announce.is_empty() && msg.withdraw.is_empty()),
+                o.drain_peer_available(C).await.iter().all(
+                    |msg| msg.announce.is_empty() && msg.unicast_withdrawals().next().is_none()
+                ),
                 "clean regroup must preserve the old action without replaying it"
             );
             o.routes(A, vec![candidate(!initially_self)], vec![]).await;
             let changed = o.drain_peer_available(C).await;
-            assert!(changed.iter().all(|msg| msg.withdraw.is_empty()));
+            assert!(
+                changed
+                    .iter()
+                    .all(|msg| msg.unicast_withdrawals().next().is_none())
+            );
             let changed: Vec<_> = changed.iter().flat_map(|msg| &msg.announce).collect();
             assert_eq!(changed.len(), 1);
             assert_eq!(
@@ -7854,7 +7969,11 @@ async fn oracle_action_only_refusal_regroup_and_replay() {
         assert_route_parity(&runs[0], &runs[1]);
         for stream in &runs {
             let messages = &stream[&peer_v4(C)];
-            assert!(messages.iter().all(|msg| msg.withdraw.is_empty()));
+            assert!(
+                messages
+                    .iter()
+                    .all(|msg| msg.unicast_withdrawals().next().is_none())
+            );
             let actions: Vec<_> = messages
                 .iter()
                 .flat_map(|msg| &msg.announce)
@@ -7971,5 +8090,40 @@ async fn oracle_strip_many_communities_export_parity() {
                 .contains(&PathAttribute::Communities(communities(99))),
             "a 99-community route keeps its communities"
         );
+    }
+}
+
+/// The oracle's liveness checks see refresh-only debt: a ROUTE-REFRESH
+/// from a receiver still holding its initial dump is owed, not a dirty
+/// resync. Once the receiver reads, the resync tick answers it and both
+/// `settle` and `terminal_health` pass. Red with that debt never retried:
+/// each reports the owed answer.
+#[tokio::test(start_paused = true)]
+async fn oracle_liveness_sees_an_owed_refresh_answer() {
+    for settle in [true, false] {
+        let mut oracle = Oracle::spawn(true, Some(Ipv4Addr::new(192, 0, 2, 1)));
+        oracle.peer_up(A, false, true, None, 64).await;
+        oracle
+            .routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+            .await;
+        oracle.peer_up(C, false, true, None, 2).await;
+        oracle.route_refresh(C, Afi::Ipv4, Safi::Unicast).await;
+        assert!(
+            !oracle.peer_outbound_dirty(C).await,
+            "the answer is owed, not a resync"
+        );
+        let table = oracle.drain_one(C).await;
+        assert_eq!(table.announce.len(), 1);
+        let eor = oracle.drain_one(C).await;
+        assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+        tokio::time::advance(Duration::from_millis(1100)).await;
+        if settle {
+            oracle.settle().await;
+        } else {
+            assert_eq!(oracle.terminal_health().await, (0, 0, 0, 0, 0, 0));
+        }
+        let answer = oracle.drain_one(C).await;
+        assert_eq!(answer.announce.len(), 1, "the owed answer");
+        drop(oracle.finish().await);
     }
 }

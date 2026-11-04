@@ -277,6 +277,9 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     session.negotiated = Some(Arc::new(negotiated));
     let v6_nh: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let update = OutboundRouteUpdate {
+        credit: None,
+        latch: None,
+        shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -353,6 +356,9 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
     let negotiated = negotiated_session(65002, true);
     session.negotiated = Some(Arc::new(negotiated));
     let update = OutboundRouteUpdate {
+        credit: None,
+        latch: None,
+        shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -412,6 +418,9 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     route.next_hop = IpAddr::V6(remote_ll);
     route.link_local_next_hop = Some(remote_ll);
     let update = OutboundRouteUpdate {
+        credit: None,
+        latch: None,
+        shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -471,6 +480,9 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
     route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     let update = OutboundRouteUpdate {
+        credit: None,
+        latch: None,
+        shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -525,6 +537,9 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
     let negotiated = negotiated_session(65002, false);
     session.negotiated = Some(Arc::new(negotiated));
     let update = OutboundRouteUpdate {
+        credit: None,
+        latch: None,
+        shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -650,6 +665,9 @@ async fn route_server_client_ipv6_preserves_next_hop() {
     session.negotiated = Some(Arc::new(negotiated));
     let v6_nh: Ipv6Addr = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
+        credit: None,
+        latch: None,
+        shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -730,6 +748,9 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
     let mut route = make_v6_unicast_route(remote_global);
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     let update = OutboundRouteUpdate {
+        credit: None,
+        latch: None,
+        shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -789,6 +810,9 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
     session.negotiated = Some(Arc::new(negotiated));
     let route_next_hop = "2001:db8::2".parse().unwrap();
     let update = OutboundRouteUpdate {
+        credit: None,
+        latch: None,
+        shared_withdraw: Arc::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),

@@ -220,14 +220,14 @@ struct Wire {
 
 fn drain(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Wire {
     let mut wire = Wire::default();
-    while let Ok(update) = rx.try_recv() {
+    while let Ok(update) = rx.try_recv().map(delivered) {
         wire.announced.extend(
             update
                 .announce
                 .iter()
                 .map(|route| (route.prefix, route.path_id)),
         );
-        wire.withdrawn.extend(update.withdraw.iter().copied());
+        wire.withdrawn.extend(update.unicast_withdrawals().copied());
     }
     wire
 }
@@ -685,6 +685,7 @@ async fn per_client_best_explain_keeps_both_causes_when_nothing_wins() {
             ..Shape::default()
         },
     );
+    drain(&mut rx);
     // The export chain permits only tagged routes: pending suppresses the
     // tagged candidate, and the chain denies the untagged one.
     let (reply, _result) = oneshot::channel();
@@ -1102,19 +1103,23 @@ async fn restore_during_a_settle_window_reinstates_state_and_wire() {
         ],
     );
     let mut rx = peer_up(&mut manager, TARGET, Shape::default());
+    drain(&mut rx);
     elapse(&mut manager, SETTLE).await;
     withdraw(&mut manager, SOURCE, condition());
     let _ = drain(&mut rx);
     advance(Duration::from_secs(2)).await;
     let deadline = manager.next_conditional_advertisement_deadline();
 
-    // A failed generation detaches the peer, then compensates.
+    // A failed generation detaches the peer, then compensates. The session
+    // sends each resync before the next.
     let capture = manager
         .handle_install_conditional_advertisements(ConditionalAdvertisementSet::default(), &[]);
     resync(&mut manager);
+    let mut withdrawn = drain(&mut rx).withdrawn;
     assert_eq!(manager.next_conditional_advertisement_deadline(), None);
     manager.handle_restore_conditional_advertisements(capture);
     resync(&mut manager);
+    withdrawn.extend(drain(&mut rx).withdrawn);
     assert_eq!(
         manager.next_conditional_advertisement_deadline(),
         deadline,
@@ -1130,10 +1135,8 @@ async fn restore_during_a_settle_window_reinstates_state_and_wire() {
     );
 
     elapse(&mut manager, Duration::from_secs(3)).await;
-    assert_eq!(
-        drain(&mut rx).withdrawn,
-        BTreeSet::from([(v4(controlled()), 0)])
-    );
+    withdrawn.extend(drain(&mut rx).withdrawn);
+    assert_eq!(withdrawn, BTreeSet::from([(v4(controlled()), 0)]));
 }
 
 /// A dataset swap reaches both predicates: `ReevaluatePeerExportPolicies`
@@ -1271,7 +1274,7 @@ async fn run_loop_withdraws_after_the_settle_window() {
     let started = tokio::time::Instant::now();
     let announced_at = tokio::time::timeout(Duration::from_mins(1), async {
         loop {
-            let update = out_rx.recv().await.unwrap();
+            let update = out_rx.recv().await.map(delivered).unwrap();
             if update
                 .announce
                 .iter()
@@ -1303,8 +1306,11 @@ async fn run_loop_withdraws_after_the_settle_window() {
     let lost = tokio::time::Instant::now();
     let withdrawn_at = tokio::time::timeout(Duration::from_mins(1), async {
         loop {
-            let update = out_rx.recv().await.unwrap();
-            if update.withdraw.contains(&(v4(controlled()), 0)) {
+            let update = out_rx.recv().await.map(delivered).unwrap();
+            if update
+                .unicast_withdrawals()
+                .any(|row| row == &(v4(controlled()), 0))
+            {
                 break tokio::time::Instant::now();
             }
         }
@@ -1404,6 +1410,12 @@ async fn same_address_neighbors_keep_their_own_conditional_attachments() {
         });
         outbound_rx
     });
+    // The sessions send their initial dumps before the settle timer fires.
+    let initial = receivers.each_mut().map(drain);
+    assert!(
+        !initial[1].announced.contains(&(v4(controlled()), 0)),
+        "eth1's initial dump does not export it"
+    );
     elapse(&mut manager, SETTLE).await;
     let exported = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
         drain(rx).announced.contains(&(v4(controlled()), 0))

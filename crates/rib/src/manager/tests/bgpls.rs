@@ -226,9 +226,9 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.bgpls_announce[0].key(), key);
     assert_eq!(update.bgpls_withdraw.len(), 0);
@@ -242,7 +242,7 @@ async fn bgpls_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.unwrap();
+    let withdraw = out_rx.recv().await.map(delivered).unwrap();
     assert!(withdraw.bgpls_announce.is_empty());
     assert_eq!(withdraw.bgpls_withdraw, vec![key]);
 
@@ -312,6 +312,7 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
         let _ = query_bgpls_routes(&tx).await;
         let initial = out_rx
             .try_recv()
+            .map(delivered)
             .expect("plain BGP-LS route must be announced");
         assert_eq!(initial.bgpls_announce.len(), 1);
         assert_eq!(initial.bgpls_announce[0].key(), key);
@@ -327,6 +328,7 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
         let _ = query_bgpls_routes(&tx).await;
         let source_scoped = out_rx
             .try_recv()
+            .map(delivered)
             .expect("source NO_ADVERTISE must withdraw the prior BGP-LS route");
         assert!(source_scoped.bgpls_announce.is_empty());
         assert_eq!(source_scoped.bgpls_withdraw, vec![key.clone()]);
@@ -340,7 +342,10 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
         .await
         .unwrap();
         let _ = query_bgpls_routes(&tx).await;
-        let source_recovered = out_rx.try_recv().expect("plain BGP-LS route must recover");
+        let source_recovered = out_rx
+            .try_recv()
+            .map(delivered)
+            .expect("plain BGP-LS route must recover");
         assert_eq!(source_recovered.bgpls_announce.len(), 1);
         assert_eq!(source_recovered.bgpls_withdraw.len(), 0);
 
@@ -356,6 +361,7 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
         let _ = query_bgpls_routes(&tx).await;
         let policy_scoped = out_rx
             .try_recv()
+            .map(delivered)
             .expect("policy-added NO_ADVERTISE must withdraw BGP-LS");
         assert!(policy_scoped.bgpls_announce.is_empty());
         assert_eq!(policy_scoped.bgpls_withdraw, vec![key]);
@@ -372,10 +378,11 @@ async fn bgpls_no_advertise_withdraws_exact_prior_and_recovers_for_both_safis() 
         let _ = query_bgpls_routes(&tx).await;
         let policy_recovered = out_rx
             .try_recv()
+            .map(delivered)
             .expect("removing policy-added NO_ADVERTISE must re-announce BGP-LS");
         assert_eq!(policy_recovered.bgpls_announce.len(), 1);
         assert_eq!(policy_recovered.bgpls_withdraw.len(), 0);
-        assert!(out_rx.try_recv().is_err());
+        assert!(out_rx.try_recv().map(delivered).is_err());
 
         drop(tx);
         handle.await.unwrap();
@@ -428,7 +435,7 @@ async fn bgpls_export_policy_does_not_match_dummy_default_prefix() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         update.bgpls_announce.len(),
         1,
@@ -507,7 +514,7 @@ async fn bgpls_routes_received_does_not_reflect_back_to_source_peer() {
     .await
     .unwrap();
 
-    let reflected = other_out_rx.recv().await.unwrap();
+    let reflected = other_out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(reflected.bgpls_announce.len(), 1);
     assert_eq!(reflected.bgpls_announce[0].key(), key);
 
@@ -703,13 +710,13 @@ async fn send_initial_table_includes_bgpls_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.bgpls_announce[0].key(), key);
     assert_eq!(update.bgpls_withdraw.len(), 0);
 
-    let eor = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, bgpls_sendable());
 
     drop(tx);
