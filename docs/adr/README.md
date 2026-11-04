@@ -170,6 +170,7 @@ event history was removed), is Superseded.
 | [0142](0142-interface-only-unnumbered-neighbors.md) | Interface-only unnumbered neighbors | Accepted | 2026-10-21 | Active |
 | [0143](0143-flowspec-direct-ip-actions.md) | Direct target-IP FlowSpec actions | Accepted | 2026-10-27 | Active |
 | [0144](0144-guarded-flowspec-mutations.md) | Guarded FlowSpec mutation contract | Accepted | 2026-10-30 | Active |
+| [0146](0146-vpn-flowspec.md) | IPv4 VPN FlowSpec origination (AFI 1 / SAFI 134) | Accepted (implementation in slices) | 2026-11-03 | Active |
 
 ## Supporting records
 
