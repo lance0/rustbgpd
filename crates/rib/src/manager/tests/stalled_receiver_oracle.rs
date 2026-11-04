@@ -54,7 +54,11 @@
 //!   subject receiver was dirty (the deferral and its resync operation)
 //!   relax to a subsequence. A key a graceful end carried into the session
 //!   with a different value has no common starting point; P1-P3 still apply
-//!   to it.
+//!   to it. A key the subject owed (ADR-0145 slice 1b's logged deferral,
+//!   read through the product's test hook each operation) relaxes the same
+//!   way, from the operation it became owed through the one that sent it;
+//!   a family owed whole relaxes every key of the family. Every other key,
+//!   and every barrier, stays exact.
 //! - P5, bounded retention: the peak queued envelopes per receiver stay
 //!   within [`retention_bound`]. Peak queued rows are recorded too, so a
 //!   later bound can pin them.
@@ -414,6 +418,10 @@ fn path_sets(table: &Table, family: Option<(u16, u8)>) -> PathSets {
     }
     sets
 }
+
+/// One owed key, or a family owed whole (`None`), as the product's test hook
+/// reports it: the family, then the key rendered like [`Nlri`]'s.
+type Owed = ((u16, u8), Option<String>);
 
 /// A barrier and the family state the receiver held when it arrived.
 #[derive(Debug)]
@@ -788,6 +796,19 @@ impl Arm {
         owed.refresh.into_iter().map(wire_family).collect()
     }
 
+    /// Owed private-family keys of `peer` (and families owed whole), now
+    /// or since the previous read.
+    async fn owed(&self, peer: usize) -> BTreeSet<Owed> {
+        let (reply, response) = oneshot::channel();
+        self.send(RibUpdate::TestQueryPeerOutboundOwed {
+            peer: peer_id(peer),
+            reply,
+        })
+        .await;
+        let owed = response.await.expect("RIB actor alive");
+        owed.owed.into_iter().collect()
+    }
+
     async fn dirty(&self, peer: usize) -> bool {
         let (reply, response) = oneshot::channel();
         self.send(RibUpdate::TestQueryPeerOutboundDirty {
@@ -920,6 +941,8 @@ struct Harness {
     /// Subject refresh-answer debt after each operation: the families each
     /// peer is owed an answer in.
     refresh_owed: Vec<[BTreeSet<(u16, u8)>; PEERS]>,
+    /// Subject owed keys after each operation (and marked during it).
+    owed: Vec<[BTreeSet<Owed>; PEERS]>,
     tolerated: BTreeSet<&'static str>,
     coverage: Coverage,
 }
@@ -939,6 +962,7 @@ impl Harness {
             peak_envelopes: [0; PEERS],
             depths: [0; PEERS],
             refresh_owed: Vec::new(),
+            owed: Vec::new(),
             tolerated: BTreeSet::new(),
             coverage: Coverage::default(),
         };
@@ -1063,6 +1087,7 @@ impl Harness {
         let depths = self.arms[SUBJECT].stamp(op);
         let mut dirty = [false; PEERS];
         let mut refresh_owed: [BTreeSet<(u16, u8)>; PEERS] = Default::default();
+        let mut owed: [BTreeSet<Owed>; PEERS] = Default::default();
         let was_dirty = self.dirty.last().copied().unwrap_or_default();
         for peer in 0..PEERS {
             self.peak_envelopes[peer] = self.peak_envelopes[peer].max(depths[peer]);
@@ -1080,10 +1105,20 @@ impl Harness {
                 self.coverage.dirty_episodes += 1;
             }
             refresh_owed[peer] = self.arms[SUBJECT].refresh_owed(peer).await;
+            owed[peer] = self.arms[SUBJECT].owed(peer).await;
+            if !owed[peer].is_empty() {
+                self.coverage.owing_ops += 1;
+            }
+            if !self.arms[REFERENCE].owed(peer).await.is_empty() {
+                return Err(format!(
+                    "INVALID: the reference arm owed keys to peer {peer} at op {op}"
+                ));
+            }
         }
         self.depths = depths.try_into().expect("one depth per peer");
         self.dirty.push(dirty);
         self.refresh_owed.push(refresh_owed);
+        self.owed.push(owed);
         Ok(())
     }
 
@@ -1323,6 +1358,7 @@ impl Harness {
                     .unwrap()
                     .iter()
                     .all(BTreeSet::is_empty)
+                && self.owed.last().unwrap().iter().all(BTreeSet::is_empty)
                 && self.arms[SUBJECT].stamps.iter().all(VecDeque::is_empty);
             quiet = if clean && delivered == 0 {
                 quiet + 1
@@ -1335,9 +1371,10 @@ impl Harness {
         }
         let dirty = *self.dirty.last().unwrap();
         let refresh_owed = self.refresh_owed.last().unwrap();
+        let owed = self.owed.last().unwrap();
         Err(format!(
             "liveness: subject not clean after {QUIESCE_ROUNDS} drain rounds (dirty \
-             {dirty:?}, refresh answers owed {refresh_owed:?})"
+             {dirty:?}, refresh answers owed {refresh_owed:?}, keys owed {owed:?})"
         ))
     }
 
@@ -1454,6 +1491,28 @@ impl Harness {
                 .filter_map(|op| reference.touched.get(op))
                 .flatten()
                 .collect();
+            // A key the subject owed, or a key of a family it owed whole,
+            // from the operation that recorded it through the one that sent
+            // it.
+            for op in 0..self.owed.len() {
+                let owed: BTreeSet<&Owed> = self.owed[op][peer]
+                    .iter()
+                    .chain(
+                        op.checked_sub(1)
+                            .into_iter()
+                            .flat_map(|before| &self.owed[before][peer]),
+                    )
+                    .collect();
+                if owed.is_empty() {
+                    continue;
+                }
+                covered.extend(reference.touched.get(&op).into_iter().flatten().filter(
+                    |(_, (family, nlri))| {
+                        owed.contains(&(*family, None))
+                            || owed.contains(&(*family, Some(nlri.clone())))
+                    },
+                ));
+            }
             for (op, families) in self.refresh_deferred(peer) {
                 covered.extend(
                     reference
@@ -1564,6 +1623,9 @@ struct Coverage {
     gr_sweeps: usize,
     /// An ORF push lifted a gate that still held the initial IPv4 `EoR`.
     orf_holds: usize,
+    /// Operations after which a subject receiver owed keys. Reported, not a
+    /// floor: only a small row credit makes receivers owe.
+    owing_ops: usize,
 }
 
 impl Coverage {
@@ -1574,6 +1636,7 @@ impl Coverage {
         self.refreshes_during_backlog += other.refreshes_during_backlog;
         self.gr_sweeps += other.gr_sweeps;
         self.orf_holds += other.orf_holds;
+        self.owing_ops += other.owing_ops;
     }
 
     fn missing(&self) -> Vec<&'static str> {
