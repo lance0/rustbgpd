@@ -2490,6 +2490,16 @@ fn a_batch_counts_the_rows_of_the_families_the_peer_holds_privately() {
         mixed_batch(&rows).private_rows(&manager, member),
         always + if vpn_private { vpn } else { 0 }
     );
+    for shared in [vec![], vec![(rows.unicast.prefix, 0)]] {
+        let mut batch = mixed_batch(&rows);
+        batch.withdraw = Vec::new();
+        batch.shared_withdraw = Some(Arc::new(shared));
+        assert_eq!(
+            batch.private_rows(&manager, member),
+            always + if vpn_private { vpn } else { 0 },
+            "shared unicast ownership leaves other private-family rows charged"
+        );
+    }
 }
 
 /// While closing, a private VPN or EVPN announcement that is not a move is
