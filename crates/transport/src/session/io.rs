@@ -230,6 +230,21 @@ impl PeerSession {
         tx.send(encoded).map_err(|_| TransportError::WriterClosed)
     }
 
+    /// Encoded bulk bytes admitted to the writer and not yet written.
+    pub(super) fn writer_bytes_held(&self) -> u64 {
+        self.writer_completed.as_ref().map_or(0, |completed| {
+            self.writer_bulk_admitted
+                .saturating_sub(*completed.borrow())
+        })
+    }
+
+    /// Whether the writer holds its whole byte budget
+    /// ([`super::writer::WRITER_BYTE_BUDGET`]), so no further outbound
+    /// work is admitted until a completed write frees some.
+    pub(super) fn writer_bytes_exhausted(&self) -> bool {
+        self.writer_bytes_held() >= super::writer::WRITER_BYTE_BUDGET
+    }
+
     /// Encode `msg` and enqueue it on the writer's **bulk** channel
     /// (`UPDATE`, `RouteRefresh` `BoRR`/`EoRR` markers, `EoR` markers). Returns
     /// `OutboundChannelFull` when the writer hasn't drained the bounded
@@ -303,6 +318,9 @@ impl PeerSession {
         match tx.try_send(encoded) {
             Ok(()) => {
                 self.writer_bulk_admitted = admitted;
+                if let Some(bytes) = &self.writer_bytes {
+                    bytes.admitted(admitted);
+                }
                 if let Some(update_pdu) = bmp_rib_out_pdu {
                     // Peer identity stays the REMOTE peer's; only the
                     // direction flips (O=1), and L=1 marks post-policy.
@@ -346,6 +364,9 @@ impl PeerSession {
                 i64::try_from(depth).unwrap_or(i64::MAX),
             );
         }
+        if let Some(bytes) = &self.writer_bytes {
+            bytes.publish();
+        }
         self.evaluate_slow_peer();
     }
 
@@ -356,10 +377,12 @@ impl PeerSession {
     /// reflector / route server.
     ///
     /// Semantics: the peer is flagged slow once its buffered outbound
-    /// bulk frames have stayed at or above
-    /// `slow_peer_threshold_pct`% of the writer's bulk-buffer capacity
-    /// for `slow_peer_duration` seconds, and the flag clears at the
-    /// first evaluation that sees the backlog below the threshold.
+    /// bulk frames, or its unwritten bytes, have stayed at or above
+    /// `slow_peer_threshold_pct`% of the writer's bulk-buffer capacity or of
+    /// its byte budget for `slow_peer_duration` seconds, and the flag clears
+    /// at the first evaluation that sees the backlog below both thresholds.
+    /// The byte budget usually holds admission long before the frame queue
+    /// fills, so a lagging peer is seen by its bytes.
     /// Evaluated after each bounded outbound admission step
     /// (piggybacked on [`Self::sample_outbound_queue_depth`]) plus a
     /// 1s re-check timer that is armed only while an episode is in
@@ -371,6 +394,7 @@ impl PeerSession {
         if self.config.slow_peer_duration == 0 {
             return; // detection disabled
         }
+        let held = self.writer_bytes_held();
         let Some(tx) = &self.writer_bulk_tx else {
             // No live connection — the flag cannot outlive its session.
             self.reset_slow_peer_state();
@@ -378,8 +402,10 @@ impl PeerSession {
         };
         let capacity = tx.max_capacity();
         let depth = capacity.saturating_sub(tx.capacity());
-        let threshold = (capacity * usize::from(self.config.slow_peer_threshold_pct)).div_ceil(100);
-        if depth >= threshold.max(1) {
+        let pct = self.config.slow_peer_threshold_pct;
+        let threshold = (capacity * usize::from(pct)).div_ceil(100);
+        let byte_threshold = (super::writer::WRITER_BYTE_BUDGET * u64::from(pct)).div_ceil(100);
+        if depth >= threshold.max(1) || held >= byte_threshold.max(1) {
             let since = *self
                 .slow_peer_backlog_since
                 .get_or_insert_with(std::time::Instant::now);
@@ -393,6 +419,7 @@ impl PeerSession {
                     peer = %self.peer_label,
                     depth,
                     capacity,
+                    held_bytes = held,
                     backlog_for = ?since.elapsed(),
                     "peer flagged slow: session alive but outbound queue \
                      persistently backlogged"
@@ -616,6 +643,9 @@ impl PeerSession {
         self.retire_pending_outbound();
         self.outbound_admission_timer = None;
         self.writer_completed = None;
+        if let Some(bytes) = self.writer_bytes.take() {
+            bytes.retire();
+        }
         if let Some(task) = self.connect_task.take() {
             task.abort();
         }
@@ -675,6 +705,9 @@ impl PeerSession {
         self.retire_pending_outbound();
         self.outbound_admission_timer = None;
         self.writer_completed = None;
+        if let Some(bytes) = self.writer_bytes.take() {
+            bytes.retire();
+        }
         debug!(peer = %self.peer_label, "TCP disconnected");
         if let Some(task) = self.connect_task.take() {
             task.abort();

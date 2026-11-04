@@ -41,8 +41,12 @@ impl RibManager {
     }
 
     /// Ensure `peer` has a credit entry.
+    /// Its refusal series are exported from registration, at zero, so a
+    /// scrape tells a peer never refused from one never sampled.
     pub(super) fn register_outbound_credit(&mut self, peer: PeerId) {
         self.outbound_credit.entry(peer).or_default();
+        self.metrics
+            .initialize_outbound_commit_refusal_series(&peer.label());
     }
 
     /// The per-peer row credit at the current number of registered outbound
@@ -201,6 +205,27 @@ impl RibManager {
         let registered = &self.outbound_peers;
         self.outbound_credit
             .retain(|peer, entry| registered.contains_key(peer) || entry.busy());
+    }
+
+    /// Publish the row credit in use and the live whole-table operations,
+    /// summed over every peer.
+    // ponytail: one pass over the peers per loop iteration; keep running
+    // totals in the credit and latch if a profile at thousands of peers
+    // shows it.
+    pub(super) fn sample_outbound_credit_gauges(&self) {
+        let (rows, operations) =
+            self.outbound_credit
+                .values()
+                .fold((0_usize, 0_usize), |(rows, operations), entry| {
+                    (
+                        rows + entry.credit.rows(),
+                        operations + usize::from(entry.latch.strong_count() != 0),
+                    )
+                });
+        self.metrics.set_rib_outbound_credit(
+            i64::try_from(rows).unwrap_or(i64::MAX),
+            i64::try_from(operations).unwrap_or(i64::MAX),
+        );
     }
 
     /// Live private rows held by `peer`'s envelopes.

@@ -812,6 +812,7 @@ impl PeerSession {
                             .writer_bulk_tx
                             .as_ref()
                             .is_none_or(|tx| tx.capacity() == 0)
+                            || self.writer_bytes_exhausted()
                             || self
                                 .enqueue_bulk_encoded(chunk.bytes.clone(), true)
                                 .is_err()
