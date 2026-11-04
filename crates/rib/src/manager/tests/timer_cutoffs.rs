@@ -678,7 +678,7 @@ fn trace_of(updates: &[OutboundRouteUpdate], prefix: Ipv4Prefix) -> Vec<&'static
     let prefix = Prefix::V4(prefix);
     let mut trace = Vec::new();
     for update in updates {
-        if update.withdraw.iter().any(|(p, _)| *p == prefix) {
+        if update.unicast_withdrawals().any(|(p, _)| *p == prefix) {
             trace.push("withdraw");
         }
         if update.announce.iter().any(|route| route.prefix == prefix) {

@@ -89,7 +89,10 @@ fn connect(
 fn announcements(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<(Prefix, u32)> {
     let mut routes = Vec::new();
     while let Ok(update) = receiver.try_recv() {
-        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(
+            update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+            [] as [(Prefix, u32); 0]
+        );
         routes.extend(
             update
                 .announce

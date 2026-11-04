@@ -780,7 +780,7 @@ impl FinalTransactionFixture {
                 .is_ok()
         );
         let rejection = output.try_recv().unwrap();
-        assert!(rejection.announce.is_empty() && rejection.withdraw.is_empty());
+        assert!(rejection.announce.is_empty() && rejection.unicast_withdrawals().next().is_none());
         assert_eq!(
             manager.peer_unexportable[&peer],
             HashSet::from([rejected_key])
@@ -1052,7 +1052,7 @@ fn final_evpn_admission_publishes_one_mixed_family_transaction_after_validation(
         assert_eq!(update.announce.len(), 1);
         assert_eq!(update.announce[0].prefix, fixture.unicast.prefix);
         assert!(
-            update.withdraw.is_empty(),
+            update.unicast_withdrawals().next().is_none(),
             "the previously rejected unicast identity was never admitted"
         );
         assert_eq!(update.evpn_announce.len(), 1);
@@ -1144,7 +1144,7 @@ fn assert_pcb_otc_overlay_order(reserve_refused: bool, later_accepts: Option<boo
             .is_ok()
     );
     let rejected = output.try_recv().unwrap();
-    assert!(rejected.announce.is_empty() && rejected.withdraw.is_empty());
+    assert!(rejected.announce.is_empty() && rejected.unicast_withdrawals().next().is_none());
     assert_eq!(
         manager.peer_unexportable[&peer],
         HashSet::from([key.clone()])
@@ -1205,7 +1205,8 @@ fn assert_pcb_otc_overlay_order(reserve_refused: bool, later_accepts: Option<boo
         vec![]
     };
     assert_eq!(
-        update.withdraw, expected_withdraw,
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        expected_withdraw,
         "OTC fallback must not reinterpret retirement of an old rejection as admission"
     );
     assert_eq!(

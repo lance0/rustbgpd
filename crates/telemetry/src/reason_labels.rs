@@ -770,13 +770,17 @@ pub enum OutboundCommitRefusal {
     MissingEncoder,
     /// EVPN recovery admission declined the batch.
     EvpnRecovery,
+    /// The peer's queued envelopes already hold its whole outbound row
+    /// credit, or another whole-table operation for it is still live.
+    OutboundCredit,
 }
 
 impl OutboundCommitRefusal {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::SelectionGate,
         Self::MissingEncoder,
         Self::EvpnRecovery,
+        Self::OutboundCredit,
     ];
 
     #[must_use]
@@ -785,6 +789,7 @@ impl OutboundCommitRefusal {
             Self::SelectionGate => "selection_gate",
             Self::MissingEncoder => "missing_encoder",
             Self::EvpnRecovery => "evpn_recovery",
+            Self::OutboundCredit => "outbound_credit",
         }
     }
 }
@@ -1031,7 +1036,12 @@ mod tests {
             .collect();
         assert_eq!(
             refusals,
-            ["selection_gate", "missing_encoder", "evpn_recovery"]
+            [
+                "selection_gate",
+                "missing_encoder",
+                "evpn_recovery",
+                "outbound_credit"
+            ]
         );
     }
 }

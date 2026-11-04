@@ -836,13 +836,12 @@ impl RibManager {
             // A peer bound to a vantage that resolved this pass takes the
             // per-vantage best; an unresolved vantage silently falls back
             // to the standard Loc-RIB best (same shape as unicast).
-            let orr_ctx = self
+            let orr_resolved = self
                 .peer_orr_vantage
                 .get(&peer)
-                .and_then(|vantage| self.orr.spf.get(vantage))
-                .map(|spf| (&self.orr.topology, spf));
+                .is_some_and(|vantage| self.orr.spf.contains_key(vantage));
             let peer_add_path = self.peer_labeled_add_path_send(peer);
-            let staged_keys = if orr_ctx.is_some() || peer_add_path {
+            let staged_keys = if orr_resolved || peer_add_path {
                 &affected_nlri
             } else {
                 &changed_keys
@@ -856,6 +855,18 @@ impl RibManager {
             }) {
                 continue;
             }
+            // Preflight, once the pass touches a family the peer negotiated:
+            // a peer without credit stages nothing (its resync covers this
+            // pass); unrelated churn leaves it clean.
+            if self.outbound_preflight_refused(peer) {
+                continue;
+            }
+            self.note_outbound_staging(peer);
+            let orr_ctx = self
+                .peer_orr_vantage
+                .get(&peer)
+                .and_then(|vantage| self.orr.spf.get(vantage))
+                .map(|spf| (&self.orr.topology, spf));
 
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
             let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);

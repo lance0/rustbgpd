@@ -207,7 +207,7 @@ impl Helper {
             self.routes.insert(route.prefix);
             self.log.push(format!("announce {}", route.prefix));
         }
-        for (prefix, _) in &update.withdraw {
+        for (prefix, _) in update.unicast_withdrawals() {
             self.stale.remove(prefix);
             self.routes.remove(prefix);
             self.log.push(format!("withdraw {prefix}"));

@@ -155,7 +155,7 @@ impl RibManager {
         self.invalidate_evpn_feed_completion(peer);
         let mut evpn_feed = if new_evpn_owned {
             new_gid
-                .filter(|_| !deferred_evpn_destination)
+                .filter(|_| !deferred_evpn_destination && !self.complete_feed_deferred(peer))
                 .and_then(|gid| {
                     self.prepare_complete_evpn_feed(
                         peer,
@@ -521,6 +521,7 @@ impl RibManager {
         }
         if deferred_evpn_destination {
             evpn_feed = new_gid
+                .filter(|_| !self.complete_feed_deferred(peer))
                 .and_then(|gid| self.prepare_complete_evpn_feed(peer, gid, None, old_evpn_clean));
         }
         evpn_feed

@@ -194,8 +194,8 @@ fn refresh_of(manager: &mut RibManager, address: Ipv4Addr, session_id: u64) {
 /// End-of-RIB, which drops every row still stale.
 fn apply(rx: &mut mpsc::Receiver<OutboundRouteUpdate>, rib: &mut PeerRib) -> Vec<&'static str> {
     let mut seen = Vec::new();
-    while let Ok(update) = rx.try_recv() {
-        for key in &update.withdraw {
+    while let Ok(update) = rx.try_recv().map(delivered) {
+        for key in update.unicast_withdrawals() {
             rib.remove(key);
         }
         for route in update.announce.iter() {
@@ -307,6 +307,43 @@ fn stale_holding_helper_gets_its_orf_table_before_the_initial_eor() {
         Some(&false),
         "re-announced, never swept"
     );
+}
+
+/// T8. The helper's first ROUTE-REFRESH unlocks its ORF table, which goes
+/// out before the held initial End-of-RIB, merged into the initial epoch:
+/// no BoRR/EoRR. The answer is a whole-table operation, so it goes even
+/// with the peer's ordinary credit spent. Red if the answer needed credit
+/// (or were deferred behind the initial `EoR`): the `EoR` is held for good or
+/// sent without the table.
+#[test]
+fn first_refresh_of_an_orf_helper_sends_its_table_before_the_eor_without_credit() {
+    for spent in [false, true] {
+        let mut manager = manager();
+        let (mut rx, mut rib) = flapped(&mut manager, Open::HelperOnly);
+        assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
+        if spent {
+            manager.outbound_row_credit_override = Some(0);
+        }
+        refresh(&mut manager, 182);
+        let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok().map(delivered)).collect();
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.refresh_markers.is_empty()),
+            "spent={spent}: no BoRR before the initial EoR"
+        );
+        let (sender, mut queued) = mpsc::channel(updates.len().max(1));
+        for update in updates {
+            sender.try_send(update).unwrap();
+        }
+        assert_eq!(
+            apply(&mut queued, &mut rib),
+            vec!["table", "eor"],
+            "spent={spent}"
+        );
+        assert_eq!(rib.get(&host().1), Some(&false), "spent={spent}");
+        assert!(!manager.dirty_peers.contains(&peer_v4(OBSERVER)));
+    }
 }
 
 /// A peer that never refreshes still gets the End-of-RIB at the cap, and
@@ -572,10 +609,12 @@ fn queued(map: &HashMap<PeerId, HashSet<(Afi, Safi)>>, peer: PeerId) -> bool {
 }
 
 /// The refresh's response is refused by a full writer after it lifted the
-/// gate, then the cap passes: the dirty resync's retry sends the table and
-/// one End-of-RIB after it. Red proof: dropping both the `pending_refresh`
-/// and the gate-lifted clause from the cap's partition sends
-/// `["table", "eor", "table", "eor"]`; either clause alone keeps one.
+/// gate, then the cap passes: the resync tick's retry of the owed response
+/// sends the table and one End-of-RIB after it. The refused response is
+/// refresh-only debt, so the peer is not dirty. Red proof: dropping both
+/// the `pending_refresh` and the gate-lifted clause from the cap's
+/// partition sends `["table", "eor", "table", "eor"]`; either clause alone
+/// keeps one.
 #[tokio::test(start_paused = true)]
 async fn refused_refresh_across_the_cap_sends_one_eor_after_the_table() {
     let mut manager = manager();
@@ -584,14 +623,14 @@ async fn refused_refresh_across_the_cap_sends_one_eor_after_the_table() {
     assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
     fill(&tx);
     refresh(&mut manager, 182);
-    assert!(manager.dirty_peers.contains(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
     assert!(queued(&manager.pending_refresh, peer));
     assert!(!queued(&manager.peer_orf_pending, peer), "the gate lifted");
     assert!(queued(&manager.gr_deferred_eor, peer));
     tokio::time::advance(ORF_EOR_HOLD_CAP).await;
     manager.expire_eor_holds(tokio::time::Instant::now());
     let mut seen = apply(&mut rx, &mut rib);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.resync_dirty_peers_bounded();
     seen.extend(apply(&mut rx, &mut rib));
     assert_eq!(seen.first(), Some(&"table"), "{seen:?}");
     assert_eq!(seen.iter().filter(|&&s| s == "eor").count(), 1, "{seen:?}");
@@ -899,6 +938,9 @@ fn register_dual_stack(
 #[tokio::test(start_paused = true)]
 async fn empty_view_resync_answers_the_owed_refresh_and_its_held_eor() {
     let mut manager = manager();
+    // A full channel is the refusal under test: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
     let peer = peer_v4(OBSERVER);
     let mut old_rx = register_dual_stack(&mut manager, 82, 64);
     permit_all_orf(&mut manager, 82);

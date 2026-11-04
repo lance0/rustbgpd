@@ -445,7 +445,7 @@ fn ipv4_flowspec_sendable() -> Vec<(Afi, Safi)> {
 async fn drain_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
     let eor = out_rx.recv().await.unwrap();
     assert!(eor.announce.is_empty());
-    assert_eq!(eor.withdraw.len(), 0);
+    assert_eq!(eor.unicast_withdrawals().count(), 0);
     assert_ne!(eor.end_of_rib.len(), 0);
 }
 
@@ -1150,6 +1150,16 @@ fn vantage_at_node_a() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, A, X))
 }
 
+/// What a session does once it has sent an envelope: release its credit
+/// charge and operation latch. A test that keeps the payload to inspect it
+/// would otherwise model a session that never finishes sending, which holds
+/// back the peer's next whole-table operation.
+fn delivered(mut update: OutboundRouteUpdate) -> OutboundRouteUpdate {
+    update.credit = None;
+    update.latch = None;
+    update
+}
+
 /// Apply all queued `RoutesReceived` chunks (the channel-driven manager
 /// drains these from its run loop).
 fn drain_route_chunks(manager: &mut RibManager) {
@@ -1562,6 +1572,7 @@ mod orf;
 mod orf_helper_initial_eor;
 mod orr;
 mod outbound_commit_accounting;
+mod outbound_credit;
 mod outbound_limit_install;
 mod outbound_prefix_limits;
 mod outbound_resync_state;

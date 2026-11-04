@@ -475,8 +475,10 @@ async fn unicast_stream_with_vantage(vantage: Option<IpAddr>) -> Vec<(Vec<String
             .map(|r| r.prefix.to_string())
             .collect();
         announce.sort();
-        let mut withdraw: Vec<String> =
-            update.withdraw.iter().map(|(p, _)| p.to_string()).collect();
+        let mut withdraw: Vec<String> = update
+            .unicast_withdrawals()
+            .map(|(p, _)| p.to_string())
+            .collect();
         withdraw.sort();
         stream.push((announce, withdraw));
     }
@@ -633,7 +635,7 @@ fn drain_final_unicast(
         for route in update.announce.iter() {
             state.insert((route.prefix, route.path_id), route.clone());
         }
-        for (prefix, path_id) in &update.withdraw {
+        for (prefix, path_id) in update.unicast_withdrawals() {
             state.remove(&(*prefix, *path_id));
         }
     }
@@ -1414,7 +1416,10 @@ async fn no_advertise_orr_winner_is_withdrawn_without_runner_up_fallback() {
         update.announce.is_empty(),
         "ORR must not fall back to the X runner-up"
     );
-    assert_eq!(update.withdraw, vec![orr_prefix_key()]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![orr_prefix_key()]
+    );
     assert!(out_rx.try_recv().is_err());
 
     let response = collect_advertised_routes(&tx, client_b).await;
@@ -1467,7 +1472,10 @@ async fn no_advertise_orr_winner_is_withdrawn_without_runner_up_fallback() {
         .try_recv()
         .expect("policy-added NO_ADVERTISE withdraws the ORR winner");
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw, vec![orr_prefix_key()]);
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![orr_prefix_key()]
+    );
 
     let response = collect_advertised_routes(&tx, client_b).await;
     assert!(response.is_empty());

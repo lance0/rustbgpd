@@ -96,7 +96,7 @@ fn apply_wire(
     );
     assert!(update.flowspec_announce.is_empty() && update.flowspec_withdraw.is_empty());
     assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
-    for &(prefix, path_id) in &update.withdraw {
+    for &(prefix, path_id) in update.unicast_withdrawals() {
         assert!(
             wire.remove(&(prefix, path_id)).is_some(),
             "a withdrawal must name an actually admitted route"

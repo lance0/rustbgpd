@@ -41,7 +41,7 @@ fn drain_vpn_delta(
 ) -> (Vec<VpnRibRoute>, Vec<crate::route::VpnRibRouteKey>) {
     let mut announced = Vec::new();
     let mut withdrawn = Vec::new();
-    while let Ok(update) = rx.try_recv() {
+    while let Ok(update) = rx.try_recv().map(delivered) {
         announced.extend(update.vpn_announce.iter().cloned());
         withdrawn.extend(update.vpn_withdraw);
     }
@@ -346,7 +346,7 @@ async fn vpn_gr_family_not_in_capability_is_withdrawn() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.vpn_announce.len(), 1);
 
     // GR capability carries only unicast: VPN is withdrawn, not retained.
@@ -363,7 +363,7 @@ async fn vpn_gr_family_not_in_capability_is_withdrawn() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.unwrap();
+    let withdraw = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         withdraw.vpn_withdraw,
         vec![key],
@@ -424,7 +424,7 @@ async fn vpn_gr_eor_clears_stale() {
     })
     .await
     .unwrap();
-    let announced = out_rx.recv().await.unwrap();
+    let announced = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(announced.vpn_announce.len(), 2);
 
     tx.send(RibUpdate::PeerGracefulRestart {
@@ -472,7 +472,7 @@ async fn vpn_gr_eor_clears_stale() {
 
     // The removal must be withdrawn downstream.
     loop {
-        let update = out_rx.recv().await.unwrap();
+        let update = out_rx.recv().await.map(delivered).unwrap();
         if update.vpn_withdraw.is_empty() {
             continue;
         }
@@ -1037,9 +1037,9 @@ async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
     assert_eq!(
@@ -1058,7 +1058,7 @@ async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
     .await
     .unwrap();
 
-    let withdraw = out_rx.recv().await.unwrap();
+    let withdraw = out_rx.recv().await.map(delivered).unwrap();
     assert!(withdraw.vpn_announce.is_empty());
     assert_eq!(withdraw.vpn_withdraw, vec![key]);
 
@@ -1119,7 +1119,7 @@ async fn vpn_route_with_otc_is_not_suppressed_toward_customer_role_peer() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.otc_blocked.is_empty());
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), route.key());
@@ -1417,7 +1417,7 @@ async fn vpn_rr_reflects_non_client_route_to_clients_only() {
     .await
     .unwrap();
 
-    let reflected = client_rx.recv().await.unwrap();
+    let reflected = client_rx.recv().await.map(delivered).unwrap();
     assert_eq!(reflected.vpn_announce.len(), 1);
     assert_eq!(reflected.vpn_announce[0].key(), key);
 
@@ -1487,7 +1487,7 @@ async fn vpn_same_peer_relabel_triggers_re_advertise() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(first.vpn_announce.len(), 1);
     assert_eq!(first.vpn_announce[0].nlri.labels[0].label, 100);
 
@@ -1499,7 +1499,7 @@ async fn vpn_same_peer_relabel_triggers_re_advertise() {
     })
     .await
     .unwrap();
-    let second = out_rx.recv().await.unwrap();
+    let second = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(
         second.vpn_announce.len(),
         1,
@@ -1554,7 +1554,7 @@ async fn vpn_dirty_resync_equality_skip_does_not_resend_unchanged_route() {
     })
     .await
     .unwrap();
-    let first = out_rx.recv().await.unwrap();
+    let first = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(first.vpn_announce.len(), 1);
 
     // Policy replace marks the peer dirty and runs a full resync; the staged
@@ -1623,13 +1623,13 @@ async fn send_initial_table_includes_vpn_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
     assert_eq!(update.vpn_withdraw.len(), 0);
 
-    let eor = out_rx.recv().await.unwrap();
+    let eor = out_rx.recv().await.map(delivered).unwrap();
     assert_eq!(eor.end_of_rib, vpn_sendable());
 
     drop(tx);
@@ -1680,8 +1680,8 @@ async fn route_refresh_vpn_re_advertises_routes() {
     .await
     .unwrap();
 
-    let _initial = out_rx.recv().await.unwrap();
-    let _eor = out_rx.recv().await.unwrap();
+    let _initial = out_rx.recv().await.map(delivered).unwrap();
+    let _eor = out_rx.recv().await.map(delivered).unwrap();
 
     tx.send(RibUpdate::RouteRefreshRequest {
         queued: Arc::default(),
@@ -1693,9 +1693,9 @@ async fn route_refresh_vpn_re_advertises_routes() {
     .await
     .unwrap();
 
-    let update = out_rx.recv().await.unwrap();
+    let update = out_rx.recv().await.map(delivered).unwrap();
     assert!(update.announce.is_empty());
-    assert_eq!(update.withdraw.len(), 0);
+    assert_eq!(update.unicast_withdrawals().count(), 0);
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.vpn_announce[0].key(), key);
     assert_eq!(update.vpn_withdraw.len(), 0);

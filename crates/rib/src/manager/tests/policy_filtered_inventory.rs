@@ -87,7 +87,11 @@ fn feed_candidates(manager: &mut RibManager) {
 
 fn manager() -> RibManager {
     let (_tx, rx) = mpsc::channel(1);
-    RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Inventory visit counts assume staging runs: the default row credit,
+    // whatever a credit sweep sets.
+    manager.outbound_row_credit_override = None;
+    manager
 }
 
 fn register_target(

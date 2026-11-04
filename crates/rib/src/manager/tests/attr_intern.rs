@@ -1127,3 +1127,526 @@ async fn unicast_attr_gc_amortizes_sparse_large_capacity_tables() {
     manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)], None);
     assert_eq!(manager.attr_intern.len(), 1);
 }
+
+/// Permit, adding `community`, for EVPN route type `evpn_route_type` (or
+/// every route).
+fn add_community_statement(
+    evpn_route_type: Option<u8>,
+    community: u32,
+) -> rustbgpd_policy::PolicyStatement {
+    use rustbgpd_policy::{PolicyAction, PolicyStatement, RouteModifications};
+    PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: evpn_route_type,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications {
+            communities_add: vec![community],
+            ..RouteModifications::default()
+        },
+    }
+}
+
+fn add_community_chain(
+    entries: Vec<rustbgpd_policy::PolicyStatement>,
+) -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries,
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
+fn evpn_add_community_policy(community: u32) -> rustbgpd_policy::PolicyChain {
+    add_community_chain(vec![add_community_statement(None, community)])
+}
+
+const EXPORT_COMMUNITY_A: u32 = (65400 << 16) + 1000;
+const EXPORT_COMMUNITY_B: u32 = (65400 << 16) + 2000;
+
+/// One source and three private eBGP EVPN receivers, each with its own export
+/// policy. The source announces two keys with the same inbound attribute set.
+/// By default two receivers add community A on export and one adds B.
+struct EvpnExportFixture {
+    manager: RibManager,
+    source: PeerId,
+    receivers: [PeerId; 3],
+    keys: Vec<rustbgpd_wire::EvpnRouteKey>,
+    outbound: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+}
+
+fn evpn_export_fixture() -> EvpnExportFixture {
+    evpn_export_fixture_with(
+        [
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_B),
+        ],
+        [100, 200].map(|tag| make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), tag)),
+    )
+}
+
+fn evpn_export_fixture_with(
+    receiver_policies: [rustbgpd_policy::PolicyChain; 3],
+    routes: impl Into<Vec<EvpnRibRoute>>,
+) -> EvpnExportFixture {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let receivers = [2, 3, 4].map(|host| peer_v4(Ipv4Addr::new(10, 0, 0, host)));
+    let policies = std::iter::once(None).chain(receiver_policies.map(Some));
+    let mut outbound = Vec::new();
+    for ((peer, export_policy), peer_asn) in std::iter::once(source)
+        .chain(receivers)
+        .zip(policies)
+        .zip(65101..)
+    {
+        let (outbound_tx, outbound_rx) = mpsc::channel(4096);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy,
+            sendable_families: evpn_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        outbound.push(outbound_rx);
+    }
+    manager.ribs.insert(source, AdjRibIn::new(source));
+    let routes: Vec<_> = routes.into();
+    let keys = routes.iter().map(EvpnRibRoute::key).collect();
+    if !routes.is_empty() {
+        manager.process_evpn_announce_chunk(source, routes);
+    }
+    EvpnExportFixture {
+        manager,
+        source,
+        receivers,
+        keys,
+        outbound,
+    }
+}
+
+impl EvpnExportFixture {
+    fn exported(&self, receiver: usize, key: usize) -> EvpnRibRoute {
+        self.manager.adj_ribs_out[&self.receivers[receiver]]
+            .get_evpn(&self.keys[key])
+            .expect("receiver must hold the exported EVPN route")
+            .clone()
+    }
+}
+
+#[test]
+fn evpn_export_equal_policy_output_shares_one_interned_allocation() {
+    let fixture = evpn_export_fixture();
+    let first = fixture.exported(0, 0);
+    assert!(first.communities().contains(&EXPORT_COMMUNITY_A));
+    for (receiver, key) in [(0, 1), (1, 0), (1, 1)] {
+        assert!(
+            Arc::ptr_eq(
+                &first.attributes,
+                &fixture.exported(receiver, key).attributes
+            ),
+            "receiver {receiver} key {key}: equal post-policy EVPN attributes \
+             must share one interned allocation across rows and peers"
+        );
+    }
+}
+
+#[test]
+fn evpn_export_distinct_policy_output_stays_distinct() {
+    let fixture = evpn_export_fixture();
+    let a = fixture.exported(0, 0);
+    let b = fixture.exported(2, 0);
+    assert!(!Arc::ptr_eq(&a.attributes, &b.attributes));
+    assert_ne!(a.attributes, b.attributes);
+    assert!(a.communities().contains(&EXPORT_COMMUNITY_A));
+    assert!(!a.communities().contains(&EXPORT_COMMUNITY_B));
+    assert!(b.communities().contains(&EXPORT_COMMUNITY_B));
+    assert!(!b.communities().contains(&EXPORT_COMMUNITY_A));
+    assert!(Arc::ptr_eq(
+        &b.attributes,
+        &fixture.exported(2, 1).attributes
+    ));
+}
+
+#[test]
+fn evpn_export_same_source_with_different_policy_outcomes_stays_distinct() {
+    // One staging call sees both routes with one interned source set, but the
+    // policy modifies them differently by EVPN route type.
+    let split = || {
+        add_community_chain(vec![
+            add_community_statement(Some(3), EXPORT_COMMUNITY_A),
+            add_community_statement(Some(6), EXPORT_COMMUNITY_B),
+        ])
+    };
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let fixture = evpn_export_fixture_with(
+        [split(), split(), split()],
+        [make_evpn_imet(source, 100), make_evpn_smet(source, 0)],
+    );
+    let imet = fixture.exported(0, 0);
+    let smet = fixture.exported(0, 1);
+    assert!(imet.communities().contains(&EXPORT_COMMUNITY_A));
+    assert!(!imet.communities().contains(&EXPORT_COMMUNITY_B));
+    assert!(smet.communities().contains(&EXPORT_COMMUNITY_B));
+    assert!(!smet.communities().contains(&EXPORT_COMMUNITY_A));
+    assert_eq!(imet.attributes, fixture.exported(1, 0).attributes);
+    assert_eq!(smet.attributes, fixture.exported(2, 1).attributes);
+}
+
+#[test]
+fn evpn_export_single_use_reuses_an_already_shared_outcome() {
+    // A later chunk carries one route with the same source set: its outcome
+    // occurs once in each staging call but is already interned.
+    let mut fixture = evpn_export_fixture();
+    let shared = fixture.exported(0, 0);
+    let route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 300);
+    let key = route.key();
+    let source = fixture.source;
+    fixture
+        .manager
+        .process_evpn_announce_chunk(source, vec![route]);
+    let single = fixture.manager.adj_ribs_out[&fixture.receivers[1]]
+        .get_evpn(&key)
+        .expect("exported")
+        .clone();
+    assert!(Arc::ptr_eq(&single.attributes, &shared.attributes));
+}
+
+#[test]
+fn evpn_export_unique_policy_outcomes_stay_out_of_the_intern_table() {
+    // Each receiver's outcome for each route occurs once per staging call
+    // and nowhere else: interning them would grow the global table, and every
+    // sweep of it, by the receiver count for no sharing.
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let routes = [(100, 1), (200, 2)].map(|(tag, med)| {
+        let mut route = make_evpn_imet(source, tag);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);
+        route
+    });
+    let fixture = evpn_export_fixture_with(
+        [
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_B),
+            evpn_add_community_policy((65400 << 16) + 3000),
+        ],
+        routes,
+    );
+    assert_eq!(
+        fixture.manager.attr_intern.len(),
+        2,
+        "the inbound sets only"
+    );
+    for receiver in 0..3 {
+        for key in 0..2 {
+            let exported = fixture.exported(receiver, key);
+            assert_eq!(exported.communities().len(), 1);
+            assert!(
+                fixture
+                    .manager
+                    .attr_intern
+                    .get(&exported.attributes)
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn evpn_export_interned_policy_output_reclaimed_after_withdrawal() {
+    let mut fixture = evpn_export_fixture();
+    let exported = [0, 2].map(|receiver| Arc::downgrade(&fixture.exported(receiver, 0).attributes));
+    // The transport consumes announce envelopes; only Adj-RIB-Out rows and
+    // the table may still hold the exported sets.
+    for rx in &mut fixture.outbound {
+        while rx.try_recv().is_ok() {}
+    }
+    let source = fixture.source;
+    let keys = fixture.keys.clone();
+    fixture.manager.process_evpn_withdraw_chunk(source, keys);
+    for receiver in fixture.receivers {
+        assert_eq!(fixture.manager.adj_ribs_out[&receiver].evpn_len(), 0);
+    }
+    for weak in exported {
+        assert!(
+            weak.upgrade().is_none(),
+            "withdrawal GC must reclaim interned post-policy EVPN attributes"
+        );
+    }
+}
+
+impl EvpnExportFixture {
+    /// Stand in for the transport consuming every queued envelope, so only
+    /// Adj-RIB-Out rows and the intern table may still hold exported sets.
+    fn drain_outbound(&mut self) {
+        for rx in &mut self.outbound {
+            while rx.try_recv().is_ok() {}
+        }
+    }
+
+    fn exported_sets(&self, key: usize) -> Vec<std::sync::Weak<AttrSet>> {
+        (0..self.receivers.len())
+            .map(|receiver| Arc::downgrade(&self.exported(receiver, key).attributes))
+            .collect()
+    }
+
+    fn intern_gauge(&self) -> f64 {
+        gauge_metric_value(
+            &self.manager.metrics,
+            "bgp_rib_attr_intern_global_size",
+            &[],
+        )
+    }
+}
+
+#[test]
+fn evpn_export_policy_replacements_keep_the_intern_table_steady() {
+    // Static inputs, repeated export-policy replacements: each generation's
+    // sets lose their rows and must leave the table, not accumulate.
+    let mut fixture = evpn_export_fixture();
+    for generation in 0..4_u32 {
+        fixture.drain_outbound();
+        let previous = fixture.exported_sets(0);
+        let community = (65401 << 16) + generation;
+        for receiver in fixture.receivers {
+            fixture
+                .manager
+                .replace_peer_export_policy_synchronously(
+                    receiver,
+                    Some(evpn_add_community_policy(community)),
+                )
+                .unwrap();
+        }
+        assert!(fixture.exported(0, 0).communities().contains(&community));
+        assert!(
+            previous.iter().all(|weak| weak.upgrade().is_none()),
+            "generation {generation}: replaced export sets must be reclaimed"
+        );
+        // The inbound set and the one shared outcome.
+        assert_eq!(
+            fixture.manager.attr_intern.len(),
+            2,
+            "generation {generation}"
+        );
+        assert!(
+            (fixture.intern_gauge() - 2.0).abs() < f64::EPSILON,
+            "generation {generation}: the gauge follows the table"
+        );
+    }
+}
+
+#[test]
+fn evpn_export_sets_reclaimed_when_a_paced_withdrawal_completes() {
+    // The withdraw chunk sweeps once its fanout parks after the first
+    // receiver; the later receivers still hold their rows then.
+    let mut fixture = evpn_export_fixture();
+    let exported = fixture.exported_sets(0);
+    fixture.drain_outbound();
+    fixture.manager.flush_poll_budget = Duration::ZERO;
+    let source = fixture.source;
+    let keys = fixture.keys.clone();
+    fixture
+        .manager
+        .ingest_evpn_withdraw_chunk(source, keys, true);
+    assert!(
+        fixture.manager.pending_evpn_fanout.is_some(),
+        "the fanout parks between receivers"
+    );
+    while fixture.manager.advance_evpn_fanout() {}
+    for receiver in fixture.receivers {
+        assert_eq!(fixture.manager.adj_ribs_out[&receiver].evpn_len(), 0);
+    }
+    assert!(
+        exported.iter().all(|weak| weak.upgrade().is_none()),
+        "the completed fanout must reclaim every receiver's export set"
+    );
+}
+
+#[test]
+fn evpn_export_sets_reclaimed_on_same_key_replacement() {
+    let mut fixture = evpn_export_fixture();
+    let exported = fixture.exported_sets(0);
+    fixture.drain_outbound();
+    let source = fixture.source;
+    let routes = [100, 200].map(|tag| {
+        let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), tag);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(7)]);
+        route
+    });
+    fixture
+        .manager
+        .process_evpn_announce_chunk(source, Vec::from(routes));
+    assert_eq!(fixture.exported(0, 0).med_attr(), Some(7));
+    assert!(
+        exported.iter().all(|weak| weak.upgrade().is_none()),
+        "replaced rows must release their export sets"
+    );
+}
+
+#[test]
+fn evpn_export_no_advertise_outcome_leaves_no_interned_set() {
+    let no_advertise = || evpn_add_community_policy(rustbgpd_wire::COMMUNITY_NO_ADVERTISE);
+    let fixture = evpn_export_fixture_with(
+        [no_advertise(), no_advertise(), no_advertise()],
+        [100, 200].map(|tag| make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), tag)),
+    );
+    for receiver in fixture.receivers {
+        assert_eq!(fixture.manager.adj_ribs_out[&receiver].evpn_len(), 0);
+    }
+    assert_eq!(
+        fixture.manager.attr_intern.len(),
+        1,
+        "only the inbound set: the suppressed outcome has no row to hold it"
+    );
+    assert!((fixture.intern_gauge() - 1.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn evpn_export_gauge_tracks_sets_interned_by_paced_continuations() {
+    // Distinct outcomes per receiver: the receivers served after the fanout
+    // parks intern new sets after the chunk's own gauge refresh.
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let mut fixture = evpn_export_fixture_with(
+        [
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_B),
+            evpn_add_community_policy((65400 << 16) + 3000),
+        ],
+        [100, 200].map(|tag| make_evpn_imet(source, tag)),
+    );
+    fixture.drain_outbound();
+    fixture.manager.flush_poll_budget = Duration::ZERO;
+    // Two routes share the new source set, so each receiver's outcome
+    // recurs and is interned.
+    let routes = [300, 301].map(|tag| {
+        let mut route = make_evpn_imet(source, tag);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(7)]);
+        route
+    });
+    let peer = fixture.source;
+    fixture
+        .manager
+        .ingest_evpn_announce_chunk(peer, Vec::from(routes), true);
+    assert!(fixture.manager.pending_evpn_fanout.is_some());
+    while fixture.manager.advance_evpn_fanout() {}
+    // Two inbound sets, each with three outcomes.
+    assert_eq!(fixture.manager.attr_intern.len(), 8);
+    assert!(
+        (fixture.intern_gauge() - 8.0).abs() < f64::EPSILON,
+        "gauge {} must equal the table length",
+        fixture.intern_gauge()
+    );
+}
+
+/// One route per chunk, from a source set no earlier load interned.
+fn trickle_route(tag: u32) -> EvpnRibRoute {
+    let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), tag);
+    route.attributes = AttrSet::new(vec![PathAttribute::Med(9)]);
+    route
+}
+
+#[test]
+fn evpn_export_single_route_updates_share_across_receivers() {
+    // MAC/IP trickle: every chunk carries one route, so no outcome recurs
+    // within a staging call. Receivers with an equal outcome must still
+    // share it.
+    let mut fixture = evpn_export_fixture_with(
+        [
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(fixture.manager.attr_intern.len(), 0, "nothing primed");
+    let source = fixture.source;
+    let keys: Vec<_> = (300..303).map(|tag| trickle_route(tag).key()).collect();
+    for tag in 300..303 {
+        fixture
+            .manager
+            .process_evpn_announce_chunk(source, vec![trickle_route(tag)]);
+        fixture.drain_outbound();
+    }
+    let row = |receiver: usize, key: &rustbgpd_wire::EvpnRouteKey| {
+        Arc::clone(
+            &fixture.manager.adj_ribs_out[&fixture.receivers[receiver]]
+                .get_evpn(key)
+                .expect("exported")
+                .attributes,
+        )
+    };
+    let first = row(0, &keys[0]);
+    assert!(first.iter().any(
+        |attr| matches!(attr, PathAttribute::Communities(c) if c.contains(&EXPORT_COMMUNITY_A))
+    ));
+    for receiver in 0..3 {
+        for key in &keys {
+            assert!(
+                Arc::ptr_eq(&first, &row(receiver, key)),
+                "receiver {receiver}: single-route updates must share the equal outcome"
+            );
+        }
+    }
+    // The inbound set and the one shared outcome.
+    assert_eq!(fixture.manager.attr_intern.len(), 2);
+}
+
+#[test]
+fn evpn_export_repeated_processing_does_not_promote_receiver_unique_outcomes() {
+    // Each receiver's outcome is its own. Re-announcing the same key to the
+    // same receivers is repeated processing, not sharing: those outcomes must
+    // stay out of the table however often they recur.
+    let mut fixture = evpn_export_fixture_with(
+        [
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_B),
+            evpn_add_community_policy((65400 << 16) + 3000),
+        ],
+        Vec::new(),
+    );
+    let source = fixture.source;
+    let keys: Vec<_> = (300..304).map(|tag| trickle_route(tag).key()).collect();
+    for cycle in 0..3 {
+        // One route per chunk while the earlier rows stay live: each receiver
+        // produces its own outcome again and again.
+        for tag in 300..304 {
+            fixture
+                .manager
+                .process_evpn_announce_chunk(source, vec![trickle_route(tag)]);
+            fixture.drain_outbound();
+            assert_eq!(
+                fixture.manager.attr_intern.len(),
+                1,
+                "cycle {cycle}, route {tag}: the inbound set only"
+            );
+        }
+        fixture
+            .manager
+            .process_evpn_withdraw_chunk(source, keys.clone());
+        fixture.drain_outbound();
+    }
+}

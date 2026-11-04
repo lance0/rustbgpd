@@ -55,7 +55,7 @@ mod rtc;
 mod unicast;
 mod vpn;
 
-pub(in crate::manager) use export_memo::ExportMemo;
+pub(in crate::manager) use export_memo::{ExportAdmission, ExportMemo};
 pub(in crate::manager) use unicast::{
     AddPathKeys, blackholing, exact_exportable, lease_rejection, multipath_candidate_suppressed,
 };
@@ -284,6 +284,9 @@ pub(in crate::manager) struct OutboundCommitBatch {
     /// commit probes with it rather than a fresh one.
     pub(in crate::manager) exact_export_snapshot:
         Option<Arc<dyn crate::update::ExactExportSnapshot>>,
+    /// The group's shared withdrawals when `withdraw` begins with a copy of
+    /// them; the enqueued envelope carries this `Arc` instead of the copy.
+    pub(in crate::manager) shared_withdraw: Option<Arc<Vec<(Prefix, u32)>>>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
     pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -300,6 +303,61 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
     pub(in crate::manager) rtc_announce: Vec<crate::route::RtcRibRoute>,
     pub(in crate::manager) rtc_withdraw: Vec<crate::route::RtcRibRouteKey>,
+    /// A slot of an admitted whole-table operation. `None`: the ladder
+    /// admits the batch itself, as an ordinary envelope or, for a complete
+    /// EVPN feed, as a one-envelope operation.
+    pub(in crate::manager) slot: Option<crate::outbound_credit::OutboundSlot>,
+}
+
+/// How the commit ladder admitted its envelope (`crate::outbound_credit`).
+enum LadderAdmission<'a> {
+    /// A reserved slot of a whole-table operation; charges no rows.
+    Slot(crate::outbound_credit::OutboundSlot),
+    /// An ordinary envelope; `credit` is charged its private rows.
+    Ordinary {
+        permit: tokio::sync::mpsc::Permit<'a, OutboundRouteUpdate>,
+        credit: Option<Arc<crate::outbound_credit::OutboundCredit>>,
+    },
+}
+
+/// Send an ordinary envelope charged to `credit`. A pass with more than
+/// [`crate::outbound_credit::CHUNK_ROWS`] rows goes out as pieces of that
+/// many rows, in phase order, when the channel takes them all now, otherwise
+/// as one envelope; each piece is charged its own private rows.
+pub(in crate::manager) fn enqueue_charged_outbound_update(
+    sender: &tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
+    permit: tokio::sync::mpsc::Permit<'_, OutboundRouteUpdate>,
+    mut update: OutboundRouteUpdate,
+    credit: &Arc<crate::outbound_credit::OutboundCredit>,
+    private: crate::outbound_credit::PrivateFamilies,
+) {
+    use crate::outbound_credit::{
+        CHUNK_ROWS, OutboundCharge, chunk_plan, chunkable, split_by_plan,
+    };
+    let charge = |mut update: OutboundRouteUpdate| {
+        let rows = private.rows(&update);
+        if rows != 0 {
+            update.credit = Some(OutboundCharge::new(credit, rows));
+        }
+        update
+    };
+    if chunkable(&update) {
+        let plan = chunk_plan(&update, CHUNK_ROWS);
+        if plan.len() > 1
+            && let Ok(permits) = sender.try_reserve_many(plan.len() - 1)
+        {
+            let mut chunks = split_by_plan(update, &plan).into_iter();
+            if let Some(first) = chunks.next() {
+                permit.send(charge(first));
+            }
+            for (permit, chunk) in permits.zip(chunks) {
+                permit.send(charge(chunk));
+            }
+            return;
+        }
+    }
+    update = charge(update);
+    permit.send(update);
 }
 
 /// Structurally aligned unicast payload for one outbound commit.
@@ -351,7 +409,7 @@ pub(in crate::manager) fn sort_evpn_announcements(
 }
 
 impl OutboundCommitBatch {
-    fn retire_with(
+    pub(in crate::manager) fn retire_with(
         &mut self,
         checkpoint: &mut impl FnMut(),
         #[cfg(test)] observer: Option<&(dyn Fn(&'static str) + Send + Sync)>,
@@ -396,7 +454,100 @@ impl OutboundCommitBatch {
         super::retire_vec(&mut self.rtc_announce, checkpoint);
         super::retire_vec(&mut self.rtc_withdraw, checkpoint);
         drop(self.shared_group_encode.take());
+        drop(self.shared_withdraw.take());
         checkpoint();
+    }
+
+    /// Rows of this batch in families `peer` holds privately; the
+    /// membership lookups run only for families the batch carries.
+    pub(in crate::manager) fn private_rows(&self, manager: &RibManager, peer: PeerId) -> usize {
+        let mut rows = self.flowspec_announce.len()
+            + self.flowspec_withdraw.len()
+            + self.bgpls_announce.len()
+            + self.bgpls_withdraw.len()
+            + self.labeled_announce.len()
+            + self.labeled_withdraw.len()
+            + self.rtc_announce.len()
+            + self.rtc_withdraw.len();
+        let unicast = self.unicast.announce.len() + self.withdraw.len();
+        if unicast != 0 && manager.grouped_member_of(peer).is_none() {
+            rows += unicast;
+        }
+        let vpn = self.vpn_announce.len() + self.vpn_withdraw.len();
+        if vpn != 0 && manager.vpn_grouped_member_of(peer).is_none() {
+            rows += vpn;
+        }
+        let evpn = self.evpn_announce.len() + self.evpn_withdraw.len();
+        if evpn != 0 && manager.evpn_grouped_member_of(peer).is_none() {
+            rows += evpn;
+        }
+        // OTC diagnostics the commit attaches retain route bodies too.
+        if !manager.pending_otc_blocked.is_empty() {
+            rows += manager
+                .pending_otc_blocked
+                .get(&peer)
+                .map_or(0, HashMap::len);
+        }
+        rows
+    }
+
+    /// Whether this batch may be admitted while closing without credit: its
+    /// private rows are withdrawals, plus announcements only of keys it also
+    /// withdraws (an Add-Path move, which must not hold back the
+    /// withdrawal).
+    pub(in crate::manager) fn closing_admissible(
+        &self,
+        private: crate::outbound_credit::PrivateFamilies,
+    ) -> bool {
+        use crate::outbound_credit::announces_only_withdrawn_keys as moves_only;
+        (!private.unicast
+            || moves_only(
+                &self.unicast.announce,
+                |route| route.prefix,
+                &self.withdraw,
+                |row| row.0,
+            ))
+            && (!private.vpn
+                || moves_only(
+                    &self.vpn_announce,
+                    |route| route.key().nlri_key,
+                    &self.vpn_withdraw,
+                    |key| key.nlri_key,
+                ))
+            && (!private.evpn
+                || moves_only(
+                    &self.evpn_announce,
+                    crate::route::EvpnRibRoute::key,
+                    &self.evpn_withdraw,
+                    Clone::clone,
+                ))
+            && moves_only(
+                &self.flowspec_announce,
+                crate::route::FlowSpecRoute::selection_key,
+                &self.flowspec_withdraw,
+                Clone::clone,
+            )
+            && moves_only(
+                &self.bgpls_announce,
+                |route| {
+                    let key = route.key();
+                    (key.family, key.nlri)
+                },
+                &self.bgpls_withdraw,
+                |key| (key.family, key.nlri.clone()),
+            )
+            && moves_only(
+                &self.labeled_announce,
+                |route| route.key().prefix,
+                &self.labeled_withdraw,
+                |key| key.prefix,
+            )
+            && moves_only(
+                &self.rtc_announce,
+                |route| route.key().nlri,
+                &self.rtc_withdraw,
+                |key| key.nlri,
+            )
     }
 
     #[track_caller]
@@ -2945,9 +3096,11 @@ impl RibManager {
         failure: OutboundCommitFailure,
     ) -> bool {
         let newly_dirty = !self.dirty_peers.contains(&peer);
-        let warn = self.mark_outbound_dirty(peer)
-            && newly_dirty
-            && failure == OutboundCommitFailure::WriterUnavailable;
+        let marked = self.mark_outbound_dirty(peer);
+        if marked && newly_dirty && failure == super::outbound_credit::CREDIT_REFUSAL {
+            debug!(%peer, "outbound credit exhausted — peer resyncs once it drains");
+        }
+        let warn = marked && newly_dirty && failure == OutboundCommitFailure::WriterUnavailable;
         #[cfg(test)]
         if warn {
             self.per_peer_deferral_warnings += 1;
@@ -2970,7 +3123,24 @@ impl RibManager {
 
     /// Count one failed outbound transaction under its own metric and return
     /// it, so no caller can attribute a refusal to a writer-channel drop.
-    fn outbound_commit_failed(
+    /// Whether this unicast pass changes a prefix in a family `peer`
+    /// negotiated: the only pass whose credit refusal costs it a resync.
+    fn unicast_pass_reaches(
+        &self,
+        peer: PeerId,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+    ) -> bool {
+        self.peer_sendable_families
+            .get(&peer)
+            .is_some_and(|families| {
+                best_changed.iter().chain(all_affected).any(|prefix| {
+                    families.contains(&crate::manager::helpers::prefix_family(prefix))
+                })
+            })
+    }
+
+    pub(in crate::manager) fn outbound_commit_failed(
         &self,
         peer: PeerId,
         failure: OutboundCommitFailure,
@@ -3544,15 +3714,46 @@ impl RibManager {
                 )
             };
         }
-        let Ok(permit) = tx.try_reserve() else {
-            batch.retire_with(
-                &mut || checkpoint(),
-                #[cfg(test)]
-                retirement_observer.as_deref(),
-            );
-            super::retire_hash_set(&mut group_prior, &mut || checkpoint());
-            self.replacement_checkpoint(true);
-            return self.outbound_commit_failed(peer, OutboundCommitFailure::WriterUnavailable);
+        // Admission (`crate::outbound_credit`): an operation's envelope fills
+        // its reserved slot; a complete EVPN feed sent outside one is its own
+        // one-envelope operation; an envelope with private rows needs credit.
+        // A sparse renewal seal (owned EVPN only) rides an ordinary delta.
+        let admission = if let Some(slot) = batch.slot.take() {
+            Ok(LadderAdmission::Slot(slot))
+        } else if batch
+            .evpn_complete_feed
+            .as_ref()
+            .is_some_and(|seal| !seal.is_sparse_renewal())
+        {
+            self.begin_outbound_operation(peer, 1).map(|mut operation| {
+                LadderAdmission::Slot(operation.slot().expect("one slot reserved"))
+            })
+        } else {
+            let credit = if batch.private_rows(self, peer) == 0 {
+                Ok(None)
+            } else {
+                self.admit_ordinary_credit(peer, || {
+                    batch.closing_admissible(self.private_families(peer))
+                })
+            };
+            credit.and_then(|credit| {
+                tx.try_reserve()
+                    .map(|permit| LadderAdmission::Ordinary { permit, credit })
+                    .map_err(|_| OutboundCommitFailure::WriterUnavailable)
+            })
+        };
+        let admission = match admission {
+            Ok(admission) => admission,
+            Err(failure) => {
+                batch.retire_with(
+                    &mut || checkpoint(),
+                    #[cfg(test)]
+                    retirement_observer.as_deref(),
+                );
+                super::retire_hash_set(&mut group_prior, &mut || checkpoint());
+                self.replacement_checkpoint(true);
+                return self.outbound_commit_failed(peer, failure);
+            }
         };
         // Partial admission cannot fall back to unknown OLD while selection
         // keeps ordinary rows frozen. Reserve before another family advances
@@ -3782,6 +3983,7 @@ impl RibManager {
             mut shared_group_encode,
             // Taken above for this commit's probes.
             exact_export_snapshot: _,
+            shared_withdraw,
             mut withdraw,
             end_of_rib,
             refresh_markers,
@@ -3798,6 +4000,8 @@ impl RibManager {
             mut labeled_withdraw,
             mut rtc_announce,
             mut rtc_withdraw,
+            // Taken at admission above.
+            slot: _,
         } = batch;
 
         // A grouped member's unicast advertised state is group-owned
@@ -5021,6 +5225,9 @@ impl RibManager {
         let flowspec_changed = !flowspec_announce.is_empty() || !flowspec_withdraw.is_empty();
         let evpn_changed = !evpn_announce.is_empty() || !evpn_withdraw.is_empty();
         let evpn_group_owned = self.evpn_grouped_member_of(peer).is_some();
+        // Rows this commit replaces or removes; their interned export sets
+        // may now be held only by the intern table.
+        let mut evpn_displaced = 0_usize;
         let evpn_admitted_count =
             staged_evpn_count.unwrap_or_else(|| self.evpn_admitted_count(peer));
         let bgpls_changed = !bgpls_announce.is_empty() || !bgpls_withdraw.is_empty();
@@ -5176,11 +5383,12 @@ impl RibManager {
             }
             for route in evpn_announce.iter().filter(|_| !evpn_group_owned) {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
+                evpn_displaced += usize::from(rib_out.get_evpn(&route.key()).is_some());
                 rib_out.insert_evpn(route.clone());
             }
             for key in evpn_withdraw.iter().filter(|_| !evpn_group_owned) {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
-                rib_out.remove_evpn(key);
+                evpn_displaced += usize::from(rib_out.remove_evpn(key));
             }
             for route in &bgpls_announce {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
@@ -5301,6 +5509,9 @@ impl RibManager {
                     "rtc",
                     gauge_val(rib_out.rtc_len()),
                 );
+            }
+            if evpn_changed {
+                self.settle_export_attr_gc(evpn_displaced);
             }
         }
         #[cfg(feature = "bench-internals")]
@@ -5444,35 +5655,67 @@ impl RibManager {
         } else {
             0
         };
-        enqueue_outbound_update(
-            permit,
-            OutboundRouteUpdate {
-                exact_export_snapshot,
-                announce_source_exclusion,
-                announce,
-                withdraw,
-                end_of_rib,
-                replay: None,
-                refresh_markers,
-                next_hop_override,
-                flowspec_announce,
-                flowspec_withdraw,
-                evpn_announce,
-                evpn_withdraw,
-                bgpls_announce,
-                bgpls_withdraw,
-                vpn_announce,
-                vpn_withdraw,
-                labeled_announce,
-                labeled_withdraw,
-                rtc_announce,
-                rtc_withdraw,
-                otc_blocked,
-                request_refresh_all_negotiated: false,
-                shared_group_encode,
-                exempt_announce,
-            },
-        );
+        // The ladder works on the member's full copy; once it still begins
+        // with the group's shared rows, queue the shared `Arc` instead, so a
+        // stalled member pins the group's vector, not its own.
+        let shared_withdraw = match shared_withdraw {
+            Some(shared) if !shared.is_empty() && withdraw.starts_with(&shared) => {
+                withdraw.drain(..shared.len());
+                if withdraw.is_empty() {
+                    withdraw = Vec::new();
+                } else {
+                    withdraw.shrink_to_fit();
+                }
+                shared
+            }
+            _ => Arc::default(),
+        };
+        let update = OutboundRouteUpdate {
+            exact_export_snapshot,
+            announce_source_exclusion,
+            announce,
+            shared_withdraw,
+            withdraw,
+            end_of_rib,
+            replay: None,
+            refresh_markers,
+            next_hop_override,
+            flowspec_announce,
+            flowspec_withdraw,
+            evpn_announce,
+            evpn_withdraw,
+            bgpls_announce,
+            bgpls_withdraw,
+            vpn_announce,
+            vpn_withdraw,
+            labeled_announce,
+            labeled_withdraw,
+            rtc_announce,
+            rtc_withdraw,
+            otc_blocked,
+            request_refresh_all_negotiated: false,
+            shared_group_encode,
+            exempt_announce,
+            credit: None,
+            latch: None,
+        };
+        match admission {
+            LadderAdmission::Slot(slot) => slot.send(update),
+            LadderAdmission::Ordinary {
+                permit,
+                credit: None,
+            } => enqueue_outbound_update(permit, update),
+            LadderAdmission::Ordinary {
+                permit,
+                credit: Some(credit),
+            } => enqueue_charged_outbound_update(
+                &tx,
+                permit,
+                update,
+                &credit,
+                self.private_families(peer),
+            ),
+        }
         if let Some(count) = staged_evpn_count {
             self.set_evpn_admitted_count(peer, count);
         }
@@ -8600,6 +8843,9 @@ impl RibManager {
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
         let mut shared_group_encodes: HashMap<usize, Arc<crate::update::SharedGroupEncode>> =
             HashMap::new();
+        // One shared withdrawal vector per group per pass (see
+        // `OutboundCommitBatch::shared_withdraw`).
+        let mut shared_withdraws: HashMap<usize, Arc<Vec<(Prefix, u32)>>> = HashMap::new();
         // LAN-474 emit-time filter: whether a group's pass carries any
         // control-tagged announce delta, memoized per (group, rs_asn) —
         // one delta scan per group per pass, not per member. Untagged
@@ -8698,16 +8944,31 @@ impl RibManager {
                             || (best_changed.is_empty() && all_affected.is_empty()),
                         "a grouped force-only resync cannot share a nonempty distribution pass"
                     );
-                    // Dirty and forced resyncs build the peer's whole table, then
-                    // need one free slot. A full channel makes that send certain to
-                    // fail, even on the first forced pass. Keep missed-pass residue
-                    // and the force flag for the retry; no drop is counted because
-                    // nothing was built. Only this actor sends on the channel, so a
-                    // free slot seen here is still free at the send.
-                    if (is_dirty || is_force) && self.outbound_channel_full(peer) {
-                        debug!(%peer, "outbound channel still full — deferring resync");
-                        self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
-                        break 'member;
+                    // Dirty and forced resyncs build the peer's whole table: one
+                    // whole-table operation, admitted before anything is built,
+                    // with a slot for the End-of-RIB flush behind it. It waits
+                    // while the channel lacks room or the peer's previous
+                    // operation (resync, refresh, dump or complete feed) is
+                    // still queued or being sent, so a stalled peer never
+                    // stacks table copies. Keep missed-pass residue and the
+                    // force flag for the retry; no drop is counted because
+                    // nothing was built.
+                    let mut resync_operation = None;
+                    if is_dirty || is_force {
+                        let flush = usize::from(self.pending_eor.contains_key(&peer));
+                        match self.begin_outbound_operation(peer, 1 + flush) {
+                            Ok(operation) => resync_operation = Some(operation),
+                            Err(failure) => {
+                                debug!(%peer, reason = failure.as_str(), "outbound resync deferred: channel full or a whole-table update still live");
+                                self.defer_unsent_outbound_pass(
+                                    peer,
+                                    member_of,
+                                    &group_stage,
+                                    &checkpoint,
+                                );
+                                break 'member;
+                            }
+                        }
                     }
                     if !is_dirty
                         && !is_force
@@ -8718,6 +8979,25 @@ impl RibManager {
                     {
                         self.flush_pending_eor(peer);
                         break 'member;
+                    }
+                    // Preflight: a private peer whose queued envelopes hold its
+                    // whole credit would be refused after staging; stage nothing
+                    // and leave it to the resync, as a refused send would. A live
+                    // whole-table operation already covers the peer's table, so
+                    // then the ladder decides by the rows the pass holds.
+                    if resync_operation.is_none()
+                        && member_of.is_none()
+                        && !evpn_feeds.contains_key(&peer)
+                        && self.outbound_credit_exhausted(peer)
+                        && !self.outbound_operation_live(peer)
+                        && self.unicast_pass_reaches(peer, &best_changed, &all_affected)
+                    {
+                        self.refuse_outbound_for_credit(peer);
+                        self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
+                        break 'member;
+                    }
+                    if resync_operation.is_none() && member_of.is_none() {
+                        self.note_outbound_staging(peer);
                     }
                     let resync = is_dirty || is_force;
                     installed = resync && self.begin_replacement_readiness();
@@ -9371,15 +9651,16 @@ impl RibManager {
                         // An empty view is still a completed resync: send the
                         // markers and refresh answers that waited for it, as
                         // the commit and unchanged exits below do.
+                        // They join the resync's operation, as there.
                         if is_dirty && !self.selection_resync_held(peer) {
                             self.dirty_peers.remove(&peer);
                             self.clear_grouped_member_synced(peer);
-                            self.flush_pending_eor(peer);
+                            self.flush_pending_eor_in(peer, resync_operation.as_mut());
                             if !self.dirty_peers.contains(&peer) {
-                                self.retry_pending_refresh(peer);
+                                self.retry_pending_refresh_in(peer, resync_operation.as_mut());
                             }
                         } else if is_dirty {
-                            self.flush_pending_eor(peer);
+                            self.flush_pending_eor_in(peer, resync_operation.as_mut());
                         }
                         if is_force && !self.selection_resync_held(peer) {
                             self.force_outbound_peers.remove(&peer);
@@ -9418,6 +9699,7 @@ impl RibManager {
                     let mut unicast_otc_prechecked = false;
                     let mut announce_source_exclusion = None;
                     let mut shared_group_encode = None;
+                    let mut shared_withdraw = None;
                     let mut fs_announce = Vec::new();
                     let mut fs_withdraw = Vec::new();
                     let mut evpn_announce = Vec::new();
@@ -9562,7 +9844,12 @@ impl RibManager {
                                             Arc::new(crate::update::SharedGroupEncode::default())
                                         }),
                                     ));
-                                    unicast.withdraw.extend_from_slice(&stage.shared_withdraw);
+                                    let shared =
+                                        Arc::clone(shared_withdraws.entry(gid).or_insert_with(
+                                            || Arc::new(stage.shared_withdraw.clone()),
+                                        ));
+                                    unicast.withdraw.extend_from_slice(&shared);
+                                    shared_withdraw = Some(shared);
                                 } else {
                                     #[cfg(feature = "bench-internals")]
                                     {
@@ -10022,6 +10309,7 @@ impl RibManager {
                             &mut evpn_announce,
                             &mut evpn_withdraw,
                             is_force,
+                            Some((&mut self.attr_intern, &mut self.export_admission)),
                             &mut || checkpoint(),
                         );
                         if let Some(handle) = private_evpn_recovery
@@ -10453,6 +10741,7 @@ impl RibManager {
                                     announce_source_exclusion,
                                     shared_group_encode,
                                     exact_export_snapshot: unicast.exact_export_snapshot,
+                                    shared_withdraw,
                                     withdraw: unicast.withdraw,
                                     end_of_rib: pending_eor.clone(),
                                     flowspec_announce: fs_announce,
@@ -10468,6 +10757,9 @@ impl RibManager {
                                     labeled_withdraw,
                                     rtc_announce,
                                     rtc_withdraw,
+                                    slot: resync_operation
+                                        .as_mut()
+                                        .and_then(crate::outbound_credit::OutboundOperation::slot),
                                     ..OutboundCommitBatch::with_unicast(announce, nh_override_flags)
                                 },
                                 group_prior,
@@ -10516,11 +10808,14 @@ impl RibManager {
                                         }
                                         self.dirty_peers.remove(&peer);
                                         self.clear_grouped_member_synced(peer);
-                                        self.flush_pending_eor(peer);
-                                        self.retry_pending_refresh(peer);
+                                        self.flush_pending_eor_in(peer, resync_operation.as_mut());
+                                        self.retry_pending_refresh_in(
+                                            peer,
+                                            resync_operation.as_mut(),
+                                        );
                                     } else if evpn_covered {
                                         self.set_selection_partial_caught_up(peer, true);
-                                        self.flush_pending_eor(peer);
+                                        self.flush_pending_eor_in(peer, resync_operation.as_mut());
                                     }
                                 }
                                 // A force request is complete only when every covered
@@ -10568,12 +10863,12 @@ impl RibManager {
                             if is_dirty && evpn_covered && !self.selection_resync_held(peer) {
                                 self.dirty_peers.remove(&peer);
                                 self.clear_grouped_member_synced(peer);
-                                self.flush_pending_eor(peer);
+                                self.flush_pending_eor_in(peer, resync_operation.as_mut());
                                 if !self.dirty_peers.contains(&peer) {
-                                    self.retry_pending_refresh(peer);
+                                    self.retry_pending_refresh_in(peer, resync_operation.as_mut());
                                 }
                             } else if is_dirty && evpn_covered {
-                                self.flush_pending_eor(peer);
+                                self.flush_pending_eor_in(peer, resync_operation.as_mut());
                             }
                             if is_force && evpn_covered && !self.selection_resync_held(peer) {
                                 self.force_outbound_peers.remove(&peer);

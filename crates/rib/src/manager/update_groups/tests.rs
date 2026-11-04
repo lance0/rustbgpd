@@ -3925,7 +3925,7 @@ fn folded_outbound(
         for (route, nh) in update.announce.iter().zip(update.next_hop_override.iter()) {
             announced.insert(route.prefix, (route.peer, nh.clone()));
         }
-        withdrawn.extend(update.withdraw.iter().copied());
+        withdrawn.extend(update.unicast_withdrawals().copied());
     }
     (announced, withdrawn)
 }
@@ -5466,7 +5466,7 @@ fn drain_wire(
     while let Ok(update) = rx.try_recv() {
         wire.announced
             .extend(update.announce.iter().map(|r| (r.prefix, r.peer)));
-        wire.withdrawn.extend(update.withdraw.iter().copied());
+        wire.withdrawn.extend(update.unicast_withdrawals().copied());
         wire.otc_blocked
             .extend(update.otc_blocked.iter().map(|r| (r.prefix, r.peer)));
     }
@@ -6318,7 +6318,7 @@ fn per_client_best_pending_diagnostic_does_not_invent_withdrawal() {
         "the blocked announce is stripped"
     );
     assert!(
-        update.withdraw.is_empty(),
+        update.unicast_withdrawals().next().is_none(),
         "a diagnostic alone is not evidence of an admitted route"
     );
     assert_eq!(update.otc_blocked.len(), 1);
@@ -6980,7 +6980,7 @@ fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
     let update = receiver.try_recv().unwrap();
     assert_eq!(update.announce.len(), 128);
     assert_eq!(update.vpn_announce.len(), 1);
-    assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+    assert!(update.unicast_withdrawals().next().is_none());
     assert_eq!(update.vpn_withdraw, [] as [VpnRibRouteKey; 0]);
     let proof = manager.pending_group_admitted.get(&OTHER2).expect(
         "empty-proof optional sharing must leave viable flat admission instead of sticky failure",

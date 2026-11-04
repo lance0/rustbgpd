@@ -304,8 +304,16 @@ fn shared_encode_eligible(update: &OutboundRouteUpdate) -> bool {
         !update.evpn_announce.is_empty(),
     ) {
         (true, false, false) => update.vpn_withdraw.is_empty() && update.evpn_withdraw.is_empty(),
-        (false, true, false) => update.withdraw.is_empty() && update.evpn_withdraw.is_empty(),
-        (false, false, true) => update.withdraw.is_empty() && update.vpn_withdraw.is_empty(),
+        (false, true, false) => {
+            update.shared_withdraw.is_empty()
+                && update.withdraw.is_empty()
+                && update.evpn_withdraw.is_empty()
+        }
+        (false, false, true) => {
+            update.shared_withdraw.is_empty()
+                && update.withdraw.is_empty()
+                && update.vpn_withdraw.is_empty()
+        }
         _ => false,
     };
     update.shared_group_encode.is_some()
@@ -770,7 +778,8 @@ impl PeerSession {
         // here: every earlier phase must precede announcements. It streams
         // from chunk 0 once the ordinary cursor has admitted those phases.
         // Requests remain excluded by shared_encode_eligible.
-        let mut own_send_healthy = update.withdraw.is_empty()
+        let mut own_send_healthy = update.shared_withdraw.is_empty()
+            && update.withdraw.is_empty()
             && update.vpn_withdraw.is_empty()
             && update.evpn_withdraw.is_empty()
             && !update
@@ -803,6 +812,7 @@ impl PeerSession {
                             .writer_bulk_tx
                             .as_ref()
                             .is_none_or(|tx| tx.capacity() == 0)
+                            || self.writer_bytes_exhausted()
                             || self
                                 .enqueue_bulk_encoded(chunk.bytes.clone(), true)
                                 .is_err()
