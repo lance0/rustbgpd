@@ -298,10 +298,16 @@ fn leased_keys_token(owner: &str, page: &LeasedKeysPage, cursor: &InjectedKeyCur
                 prefix.prefix_len()
             );
         }
-        InjectedKeyCursor::FlowSpec(afi, nlri) => {
+        InjectedKeyCursor::FlowSpec(afi, rd, nlri) => {
             let _ = write!(token, "f:{afi}:");
             for byte in nlri {
                 let _ = write!(token, "{byte:02x}");
+            }
+            if let Some(rd) = rd {
+                let _ = write!(token, ":r");
+                for byte in rd.0 {
+                    let _ = write!(token, "{byte:02x}");
+                }
             }
         }
     }
@@ -356,27 +362,45 @@ fn parse_leased_key_cursor(token: &str) -> Result<InjectedKeyCursor, Status> {
     }
     let rest = token.strip_prefix("f:").ok_or_else(invalid)?;
     let (afi, hex) = rest.split_once(':').ok_or_else(invalid)?;
+    // A VPN rule's cursor appends `:r` and its 8-octet Route Distinguisher.
+    let (hex, rd) = match hex.split_once(":r") {
+        Some((hex, rd)) => {
+            let rd: [u8; 8] = parse_hex(rd)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(invalid)?;
+            (hex, Some(rustbgpd_wire::RouteDistinguisher(rd)))
+        }
+        None => (hex, None),
+    };
     // A listing's cursor is one rule: at most 4,095 bytes plus a 2-byte
     // length prefix. Refuse anything longer before decoding it.
     if hex.len() % 2 != 0 || hex.len() > 2 * 4097 || !hex.is_ascii() {
         return Err(invalid());
     }
-    let nlri = (0..hex.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| invalid())?;
+    let nlri = parse_hex(hex).ok_or_else(invalid)?;
     // Only a cursor a listing could have produced: a FlowSpec AFI and exactly
     // one complete rule. Anything else would silently skip or repeat keys.
-    let afi = match afi.parse::<u16>().map_err(|_| invalid())? {
-        1 => Afi::Ipv4,
-        2 => Afi::Ipv6,
+    // VPN FlowSpec is IPv4 only (ADR-0146).
+    let afi = match (afi.parse::<u16>().map_err(|_| invalid())?, rd) {
+        (1, _) => Afi::Ipv4,
+        (2, None) => Afi::Ipv6,
         _ => return Err(invalid()),
     };
     match rustbgpd_wire::flowspec::decode_flowspec_nlri(&nlri, afi) {
-        Ok(rules) if rules.len() == 1 => Ok(InjectedKeyCursor::FlowSpec(afi as u16, nlri)),
+        Ok(rules) if rules.len() == 1 => Ok(InjectedKeyCursor::FlowSpec(afi as u16, rd, nlri)),
         _ => Err(invalid()),
     }
+}
+
+/// Bytes from an even-length ASCII hex string.
+fn parse_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).ok())
+        .collect()
 }
 
 fn leased_key_to_proto(row: &LeasedKeyRow) -> proto::LeasedKey {
@@ -1045,6 +1069,7 @@ fn build_injected_flowspec(req: proto::AddFlowSpecRequest) -> Result<FlowSpecRou
     Ok(FlowSpecRoute {
         rule,
         afi,
+        rd: None,
         peer: PeerId::LOCAL,
         attributes,
         received_at: std::time::Instant::now(),
@@ -1203,7 +1228,11 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::WithdrawFlowSpec {
-                key: rustbgpd_rib::FlowSpecKey { afi, rule },
+                key: rustbgpd_rib::FlowSpecKey {
+                    afi,
+                    rd: None,
+                    rule,
+                },
                 allow_missing: req.allow_missing,
                 owner: req.owner,
                 override_owner: req.override_owner,
@@ -1465,7 +1494,11 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::WithdrawGuardedFlowSpec {
-                key: rustbgpd_rib::FlowSpecKey { afi, rule },
+                key: rustbgpd_rib::FlowSpecKey {
+                    afi,
+                    rd: None,
+                    rule,
+                },
                 owner: req.owner.clone(),
                 revision,
                 reply: reply_tx,
@@ -1639,7 +1672,11 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         rule.validate()
             .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
         validate_flowspec_rule_encoded_len(&rule, afi)?;
-        let key = rustbgpd_rib::FlowSpecKey { afi, rule };
+        let key = rustbgpd_rib::FlowSpecKey {
+            afi,
+            rd: None,
+            rule,
+        };
         let binding = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -5042,6 +5079,7 @@ mod tests {
                 flowspec_announced: vec![FlowSpecRoute {
                     rule: FlowSpecRule { components },
                     afi: Afi::Ipv4,
+                    rd: None,
                     peer: source,
                     attributes: vec![
                         PathAttribute::Origin(Origin::Igp),

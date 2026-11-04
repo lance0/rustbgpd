@@ -313,6 +313,7 @@ async fn denied_flowspec_replacements_retire_exact_afi_rule_identity() {
     };
     let key = |afi, rule: &FlowSpecRule| FlowSpecKey {
         afi,
+        rd: None,
         rule: rule.clone(),
     };
 

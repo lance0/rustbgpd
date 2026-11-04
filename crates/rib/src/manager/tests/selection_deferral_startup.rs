@@ -485,3 +485,60 @@ fn dormant_private_evpn_membership_change_is_reconciled_at_selection_release() {
     assert_eq!(late_keys, vec![key]);
     assert_eq!(eors, 1);
 }
+
+/// Local VPN `FlowSpec` rules (ADR-0146) are deferral candidates, as local
+/// SAFI 133 rules are: a peer that joins while (1, 134) selection is deferred
+/// receives the injected rule at once, and its End-of-RIB waits.
+///
+/// Break-to-red: leaving SAFI 134 out of the deferral-eligible initial
+/// families sends the late peer nothing.
+#[test]
+fn local_vpn_flowspec_is_eligible_during_selection_deferral() {
+    let family = (Afi::Ipv4, Safi::FlowSpecVpn);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 255, 0, 254)),
+        BgpMetrics::new(),
+    )
+    .with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: peer_v4(WAITER),
+            families: vec![family],
+        }],
+    });
+    let _waiter_rx = connect(&mut manager, WAITER, 11, &[family], true, false);
+    assert!(manager.selection_deferred(family));
+
+    let mut route = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
+    route.peer = LOCAL_PEER;
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.peer_router_id = Ipv4Addr::UNSPECIFIED;
+    route.rd = Some(rustbgpd_wire::RouteDistinguisher([
+        0, 0, 0xad, 0x77, 0, 0, 0, 40,
+    ]));
+    route.attributes = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+    ];
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_inject_flowspec(route.clone(), reply);
+    response.try_recv().unwrap().unwrap();
+
+    let late = Ipv4Addr::new(192, 0, 2, 6);
+    let mut late_rx = connect(&mut manager, late, 16, &[family], false, false);
+    let updates = drain(&mut late_rx);
+    assert_eq!(
+        updates.iter().flat_map(announced).collect::<Vec<_>>(),
+        vec![ExactExportKey::FlowSpec(route.selection_key())]
+    );
+    assert!(
+        updates
+            .iter()
+            .all(|update| !update.end_of_rib.contains(&family)),
+        "End-of-RIB waits for the release"
+    );
+}

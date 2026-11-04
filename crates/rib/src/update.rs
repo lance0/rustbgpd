@@ -716,6 +716,7 @@ impl ExactExportKey {
         match self {
             Self::Unicast(Prefix::V4(_), _) => "ipv4_unicast",
             Self::Unicast(Prefix::V6(_), _) => "ipv6_unicast",
+            Self::FlowSpec(key) if key.rd.is_some() => "l3vpn_ipv4_flowspec",
             Self::FlowSpec(key) if key.afi == Afi::Ipv4 => "ipv4_flowspec",
             Self::FlowSpec(_) => "ipv6_flowspec",
             Self::Evpn(_) => "l2vpn_evpn",

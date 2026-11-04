@@ -2085,6 +2085,7 @@ impl RibManager {
             .and_then(|rib| {
                 rib.get_flowspec(&crate::route::FlowSpecRouteKey {
                     afi: key.afi,
+                    rd: key.rd,
                     rule: key.rule.clone(),
                     path_id: 0,
                 })
@@ -2451,7 +2452,7 @@ impl RibManager {
         rule: &crate::route::FlowSpecRoute,
     ) -> PeerRouteExport {
         use RouteExportDisposition::{Committed, Pending, Withheld};
-        let family = (rule.afi, Safi::FlowSpec);
+        let family = rule.family();
         let peer_interface = self.session_peer_scope(peer).peer_interface();
         let row = |disposition, reason: &str, explain_code, detail: String| PeerRouteExport {
             peer,

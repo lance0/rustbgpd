@@ -12,6 +12,7 @@ use super::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute,
     RtcRibRoute, VpnRibRoute,
 };
+use rustbgpd_wire::VpnFlowSpecRule;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1752,11 +1753,16 @@ impl PeerSession {
                 return;
             }
         }
-        // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by AFI
+        // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by family:
+        // global rules by AFI, VPN rules apart, each in its own typed list.
         if !update.flowspec_withdraw.is_empty() {
-            type FlowSpecWithdrawalGroup = Option<(Afi, Safi, Ipv4UnicastMode, Vec<FlowSpecRule>)>;
-            // Preserve the established deterministic wire order: IPv4, then IPv6.
-            let mut fs_withdrawals: [FlowSpecWithdrawalGroup; 2] = [None, None];
+            use super::export::FlowSpecNlri;
+            type GlobalGroup = Option<(Afi, Ipv4UnicastMode, Vec<FlowSpecRule>)>;
+            type VpnGroup = Option<(Afi, Ipv4UnicastMode, Vec<VpnFlowSpecRule>)>;
+            // Preserve the established deterministic wire order: IPv4, then
+            // IPv6, then IPv4 VPN (SAFI 134).
+            let mut global: [GlobalGroup; 2] = [None, None];
+            let mut vpn: VpnGroup = None;
             for key in &update.flowspec_withdraw {
                 let PreparedWithdrawal::FlowSpec(prepared) = export
                     .prepare_withdrawal(ExportWithdrawal::FlowSpec(key))
@@ -1764,33 +1770,51 @@ impl PeerSession {
                 else {
                     unreachable!("FlowSpec key must prepare as FlowSpec")
                 };
-                let slot = match prepared.afi {
-                    Afi::Ipv4 => &mut fs_withdrawals[0],
-                    Afi::Ipv6 => &mut fs_withdrawals[1],
-                    // FlowSpec is defined for IPv4/IPv6 only (RFC 8955/8956).
-                    _ => {
-                        warn!(afi = ?prepared.afi, "ignoring FlowSpec withdrawal with non-IP AFI");
-                        continue;
+                match prepared.nlri {
+                    FlowSpecNlri::Global(rule) => {
+                        let slot = match prepared.afi {
+                            Afi::Ipv4 => &mut global[0],
+                            Afi::Ipv6 => &mut global[1],
+                            // FlowSpec is defined for IPv4/IPv6 only (RFC 8955/8956).
+                            _ => {
+                                warn!(afi = ?prepared.afi, "ignoring FlowSpec withdrawal with non-IP AFI");
+                                continue;
+                            }
+                        };
+                        slot.get_or_insert_with(|| (prepared.afi, prepared.ipv4_mode, Vec::new()))
+                            .2
+                            .push(rule);
                     }
-                };
-                if let Some((_, _, _, rules)) = slot {
-                    rules.push(prepared.nlri);
-                } else {
-                    *slot = Some((
-                        prepared.afi,
-                        prepared.safi,
-                        prepared.ipv4_mode,
-                        vec![prepared.nlri],
-                    ));
+                    FlowSpecNlri::Vpn(rule) => vpn
+                        .get_or_insert_with(|| (prepared.afi, prepared.ipv4_mode, Vec::new()))
+                        .2
+                        .push(rule),
                 }
             }
-            for (afi, safi, ipv4_mode, rules) in fs_withdrawals.into_iter().flatten() {
-                let max_len = export.max_message_len();
+            let max_len = export.max_message_len();
+            for (afi, ipv4_mode, rules) in global.into_iter().flatten() {
                 if !self.send_mp_chunked(&rules, max_len, "FlowSpec", "withdrawal", |chunk| {
-                    export.build_mp_unreach(afi, safi, UnreachNlri::FlowSpec(chunk), ipv4_mode)
+                    export.build_mp_unreach(
+                        afi,
+                        Safi::FlowSpec,
+                        UnreachNlri::FlowSpec(chunk),
+                        ipv4_mode,
+                    )
                 }) {
                     return;
                 }
+            }
+            if let Some((afi, ipv4_mode, rules)) = vpn
+                && !self.send_mp_chunked(&rules, max_len, "VPN FlowSpec", "withdrawal", |chunk| {
+                    export.build_mp_unreach(
+                        afi,
+                        Safi::FlowSpecVpn,
+                        UnreachNlri::VpnFlowSpec(chunk),
+                        ipv4_mode,
+                    )
+                })
+            {
+                return;
             }
         }
         // Send EVPN withdrawals via MP_UNREACH_NLRI, chunked so each UPDATE
@@ -2191,23 +2215,34 @@ impl PeerSession {
                 }
             }
         }
-        // Send FlowSpec announcements via MP_REACH_NLRI, grouped by (AFI, attributes)
+        // Send FlowSpec announcements via MP_REACH_NLRI, grouped by (family,
+        // attributes) in typed lists: one UPDATE never mixes SAFI 133 and 134.
         if !update.flowspec_announce.is_empty() {
-            let mut fs_groups: Vec<(Afi, Vec<PathAttribute>, Vec<FlowSpecRule>)> = Vec::new();
+            use super::export::FlowSpecNlri;
+            type Group<T> = (Afi, Vec<PathAttribute>, Vec<T>);
+            fn push<T>(groups: &mut Vec<Group<T>>, afi: Afi, attrs: Vec<PathAttribute>, nlri: T) {
+                if let Some(group) = groups
+                    .iter_mut()
+                    .find(|(a, ga, _)| *a == afi && *ga == attrs)
+                {
+                    group.2.push(nlri);
+                } else {
+                    groups.push((afi, attrs, vec![nlri]));
+                }
+            }
+            let mut global: Vec<Group<FlowSpecRule>> = Vec::new();
+            let mut vpn: Vec<Group<VpnFlowSpecRule>> = Vec::new();
             for fs_route in &update.flowspec_announce {
                 let prepared = export.prepare_flowspec_candidate(fs_route);
-                let attrs = prepared.attrs;
-                if let Some(group) = fs_groups
-                    .iter_mut()
-                    .find(|(a, ga, _)| *a == prepared.afi && *ga == attrs)
-                {
-                    group.2.push(prepared.nlri);
-                } else {
-                    fs_groups.push((prepared.afi, attrs, vec![prepared.nlri]));
+                match prepared.nlri {
+                    FlowSpecNlri::Global(rule) => {
+                        push(&mut global, prepared.afi, prepared.attrs, rule);
+                    }
+                    FlowSpecNlri::Vpn(rule) => push(&mut vpn, prepared.afi, prepared.attrs, rule),
                 }
             }
             let max_len = export.max_message_len();
-            for (afi, attrs, rules) in &fs_groups {
+            for (afi, attrs, rules) in &global {
                 if !self.send_mp_chunked(rules, max_len, "FlowSpec", "announcement", |chunk| {
                     export.build_mp_reach(
                         *afi,
@@ -2216,6 +2251,21 @@ impl PeerSession {
                         None,
                         attrs,
                         ReachNlri::FlowSpec(chunk),
+                        Ipv4UnicastMode::Body,
+                    )
+                }) {
+                    return;
+                }
+            }
+            for (afi, attrs, rules) in &vpn {
+                if !self.send_mp_chunked(rules, max_len, "VPN FlowSpec", "announcement", |chunk| {
+                    export.build_mp_reach(
+                        *afi,
+                        Safi::FlowSpecVpn,
+                        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                        None,
+                        attrs,
+                        ReachNlri::VpnFlowSpec(chunk),
                         Ipv4UnicastMode::Body,
                     )
                 }) {
@@ -3077,7 +3127,8 @@ mod tests {
             flowspec_withdraw: (0..total)
                 .map(|_| FlowSpecKey {
                     afi: Afi::Ipv4,
-                    rule: FlowSpecRule {
+                    rd: None,
+                    rule: rustbgpd_wire::FlowSpecRule {
                         components: Vec::new(),
                     },
                 })

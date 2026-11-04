@@ -3513,7 +3513,7 @@ impl RibManager {
                     .inspect(|_| checkpoint())
                     .any(|route| {
                         route.peer != LOCAL_PEER
-                            && self.selection_deferred((route.afi, Safi::FlowSpec))
+                            && self.selection_deferred(route.family())
                     })
                 || ((!batch.evpn_announce.is_empty() || !batch.evpn_withdraw.is_empty())
                     && self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
@@ -5466,6 +5466,11 @@ impl RibManager {
                     &peer_label,
                     crate::manager::helpers::FLOWSPEC_FAMILIES,
                     lens.flowspec,
+                );
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer_label,
+                    "l3vpn_ipv4_flowspec",
+                    gauge_val(lens.flowspec_vpn),
                 );
             }
             if evpn_changed {
@@ -10274,7 +10279,7 @@ impl RibManager {
                             checkpoint();
                             route.peer == LOCAL_PEER
                                 || !self.selection_deferral.as_ref().is_some_and(|selection| {
-                                    selection.selection_deferred((route.afi, Safi::FlowSpec))
+                                    selection.selection_deferred(route.family())
                                 })
                         });
                     }

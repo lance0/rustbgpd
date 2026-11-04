@@ -101,10 +101,10 @@ impl PeerSession {
                     .filter(|prefix| unicast_family(*prefix) == family)
                     .collect(),
             ),
-            (_, Safi::FlowSpec) => RefreshStaleIdentities::FlowSpec(
+            (_, Safi::FlowSpec | Safi::FlowSpecVpn) => RefreshStaleIdentities::FlowSpec(
                 self.known_flowspec
                     .iter()
-                    .filter(|key| key.afi == afi)
+                    .filter(|key| key.family() == family)
                     .cloned()
                     .collect(),
             ),
@@ -351,11 +351,7 @@ impl PeerSession {
                 .iter()
                 .map(FlowSpecRoute::selection_key)
                 .chain(flowspec_withdrawn.iter().cloned())
-                .filter(|key| {
-                    self.refresh_accounting
-                        .windows
-                        .contains_key(&(key.afi, Safi::FlowSpec))
-                }),
+                .filter(|key| self.refresh_accounting.windows.contains_key(&key.family())),
         );
         if self
             .refresh_accounting
@@ -478,10 +474,7 @@ impl PeerSession {
             if let Some(RefreshMaxPrefixWindow {
                 stale: RefreshStaleIdentities::FlowSpec(stale),
                 ..
-            }) = self
-                .refresh_accounting
-                .windows
-                .get_mut(&(key.afi, Safi::FlowSpec))
+            }) = self.refresh_accounting.windows.get_mut(&key.family())
             {
                 stale.remove(&key);
             }

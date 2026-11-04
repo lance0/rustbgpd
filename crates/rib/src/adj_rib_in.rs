@@ -98,7 +98,7 @@ impl RetainedRoute for FlowSpecRoute {
         (self.is_stale, self.is_llgr_stale)
     }
     fn family(&self) -> (Afi, Safi) {
-        (self.afi, Safi::FlowSpec)
+        FlowSpecRoute::family(self)
     }
 }
 
@@ -148,9 +148,9 @@ impl RetainedRoute for RtcRibRoute {
 }
 
 /// Maintained per-family stale counts for one route table. A table spans at
-/// most two families, so the lookup is a short linear probe. A `Vec` keeps
-/// the per-table cost at one empty header; it allocates only when the table
-/// first holds a stale route.
+/// most three families (`FlowSpec`: IPv4, IPv6 and VPN-IPv4), so the lookup
+/// is a short linear probe. A `Vec` keeps the per-table cost at one empty
+/// header; it allocates only when the table first holds a stale route.
 #[derive(Debug, Default)]
 struct StaleCounters(Vec<((Afi, Safi), StaleRouteCounts)>);
 
@@ -3063,23 +3063,14 @@ impl AdjRibIn {
         self.clear_stale_rtc_with_checkpoint(family, true, &mut || {});
     }
 
-    /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
-    pub fn iter_flowspec_key<'a>(
-        &'a self,
-        key: &'a FlowSpecKey,
-    ) -> impl Iterator<Item = &'a FlowSpecRoute> + 'a {
-        self.flowspec_routes
-            .values()
-            .filter(move |route| route.afi == key.afi && route.rule == key.rule)
-    }
-
     /// Return the number of `FlowSpec` routes stored.
     #[must_use]
     pub fn flowspec_len(&self) -> usize {
         self.flowspec_routes.len()
     }
 
-    /// `FlowSpec` routes stored per AFI as `[IPv4, IPv6]`.
+    /// Global (SAFI 133) `FlowSpec` routes stored per AFI as `[IPv4, IPv6]`.
+    /// VPN rules (SAFI 134) are not counted.
     // ponytail: O(FlowSpec routes) walk per publish; FlowSpec tables are
     // small rule sets. Maintain a per-AFI counter if they grow large.
     #[must_use]
@@ -3092,13 +3083,14 @@ impl AdjRibIn {
         &self,
         checkpoint: &mut impl FnMut(),
     ) -> [usize; 2] {
-        let v6 = self
-            .flowspec_routes
-            .values()
-            .inspect(|_| checkpoint())
-            .filter(|route| route.afi == Afi::Ipv6)
-            .count();
-        [self.flowspec_routes.len() - v6, v6]
+        let mut lens = [0, 0];
+        for route in self.flowspec_routes.values() {
+            checkpoint();
+            if route.rd.is_none() {
+                lens[usize::from(route.afi == Afi::Ipv6)] += 1;
+            }
+        }
+        lens
     }
 
     /// Mark `FlowSpec` routes matching the given address family as stale.
@@ -3119,7 +3111,7 @@ impl AdjRibIn {
         family: (Afi, Safi),
         checkpoint: &mut impl FnMut(),
     ) -> Vec<FlowSpecKey> {
-        if family.1 != Safi::FlowSpec {
+        if !matches!(family.1, Safi::FlowSpec | Safi::FlowSpecVpn) {
             return Vec::new();
         }
         let mut already_stale: Vec<FlowSpecRouteKey> =
@@ -3129,16 +3121,13 @@ impl AdjRibIn {
             self.flowspec_routes
                 .iter()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale && r.afi == family.0)
+                .filter(|(_, r)| r.is_stale && r.family() == family)
                 .map(|(k, _)| k.clone()),
         );
         let mut deleted = Vec::with_capacity(already_stale.len());
         for key in &already_stale {
             checkpoint();
-            deleted.push(FlowSpecKey {
-                afi: key.afi,
-                rule: key.rule.clone(),
-            });
+            deleted.push(key.selection_key());
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
             checkpoint();
@@ -3150,7 +3139,7 @@ impl AdjRibIn {
         // neither delete nor re-mark them; the original deadline governs).
         self.flowspec_routes
             .for_each_mut_with_checkpoint(checkpoint, |_, route| {
-                if route.afi == family.0 && !route.is_llgr_stale {
+                if route.family() == family && !route.is_llgr_stale {
                     route.is_stale = true;
                 }
             });
@@ -3168,10 +3157,7 @@ impl AdjRibIn {
             .collect();
         let mut rules = Vec::new();
         for key in &stale {
-            rules.push(FlowSpecKey {
-                afi: key.afi,
-                rule: key.rule.clone(),
-            });
+            rules.push(key.selection_key());
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
@@ -3195,12 +3181,12 @@ impl AdjRibIn {
         family: (Afi, Safi),
         checkpoint: &mut impl FnMut(),
     ) {
-        if family.1 != Safi::FlowSpec {
+        if !matches!(family.1, Safi::FlowSpec | Safi::FlowSpecVpn) {
             return;
         }
         self.flowspec_routes
             .for_each_mut_with_checkpoint(checkpoint, |_, route| {
-                if route.afi == family.0 {
+                if route.family() == family {
                     route.is_stale = false;
                     route.is_llgr_stale = false;
                 }
@@ -3221,7 +3207,7 @@ impl AdjRibIn {
         llgr: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<FlowSpecKey> {
-        if family.1 != Safi::FlowSpec {
+        if !matches!(family.1, Safi::FlowSpec | Safi::FlowSpecVpn) {
             return Vec::new();
         }
         checkpoint();
@@ -3233,7 +3219,7 @@ impl AdjRibIn {
                 .iter()
                 .inspect(|_| checkpoint())
                 .filter(|(_, r)| {
-                    (if llgr { r.is_llgr_stale } else { r.is_stale }) && r.afi == family.0
+                    (if llgr { r.is_llgr_stale } else { r.is_stale }) && r.family() == family
                 })
                 .map(|(k, _)| k.clone()),
         );
@@ -3241,10 +3227,7 @@ impl AdjRibIn {
         checkpoint();
         for key in &stale {
             checkpoint();
-            rules.push(FlowSpecKey {
-                afi: key.afi,
-                rule: key.rule.clone(),
-            });
+            rules.push(key.selection_key());
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
             checkpoint();
@@ -3270,7 +3253,7 @@ impl AdjRibIn {
     ) -> Vec<FlowSpecKey> {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
-        if family.1 != Safi::FlowSpec {
+        if !matches!(family.1, Safi::FlowSpec | Safi::FlowSpecVpn) {
             return Vec::new();
         }
         checkpoint();
@@ -3280,7 +3263,7 @@ impl AdjRibIn {
         for (_, route) in self.flowspec_routes.iter() {
             checkpoint();
             if route.is_stale
-                && route.afi == family.0
+                && route.family() == family
                 && route.attributes.iter().any(|attr| {
                     attr.communities()
                         .is_some_and(|values| values.contains(&COMMUNITY_NO_LLGR))
@@ -3297,17 +3280,14 @@ impl AdjRibIn {
         checkpoint();
         for key in &no_llgr_keys {
             checkpoint();
-            affected.push(FlowSpecKey {
-                afi: key.afi,
-                rule: key.rule.clone(),
-            });
+            affected.push(key.selection_key());
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
             checkpoint();
         }
         self.flowspec_routes.for_each_mut(|_, route| {
             checkpoint();
-            if route.is_stale && route.afi == family.0 {
+            if route.is_stale && route.family() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 checkpoint();
@@ -3333,10 +3313,7 @@ impl AdjRibIn {
             .collect();
         let mut rules = Vec::new();
         for key in &stale {
-            rules.push(FlowSpecKey {
-                afi: key.afi,
-                rule: key.rule.clone(),
-            });
+            rules.push(key.selection_key());
             self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
@@ -3363,14 +3340,14 @@ impl AdjRibIn {
         family: (Afi, Safi),
         checkpoint: &mut impl FnMut(),
     ) {
-        if family.1 != Safi::FlowSpec {
+        if !matches!(family.1, Safi::FlowSpec | Safi::FlowSpecVpn) {
             return;
         }
         let mut clear_local_llgr = Vec::with_capacity(self.flowspec_llgr_stale_local_tags.len());
         checkpoint();
         self.flowspec_routes
             .for_each_mut_with_checkpoint(checkpoint, |_, route| {
-                if route.afi == family.0 {
+                if route.family() == family {
                     route.is_llgr_stale = false;
                     let key = route.key();
                     if self.flowspec_llgr_stale_local_tags.contains_key(&key) {
@@ -5011,6 +4988,7 @@ mod tests {
             deleted,
             vec![FlowSpecKey {
                 afi: Afi::Ipv4,
+                rd: None,
                 rule: gr_rule,
             }]
         );
@@ -5019,6 +4997,7 @@ mod tests {
             .flowspec_routes
             .get(&FlowSpecRouteKey {
                 afi: Afi::Ipv4,
+                rd: None,
                 rule: llgr_rule,
                 path_id: 0,
             })
@@ -5029,6 +5008,41 @@ mod tests {
                 .communities()
                 .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
         );
+    }
+
+    /// Clearing the stale flag of one `FlowSpec` family leaves the other
+    /// families' rules stale: global SAFI 133 and VPN SAFI 134 rules with the
+    /// same components are told apart by their RD, and a non-FlowSpec
+    /// family touches none of them.
+    #[test]
+    fn clear_stale_flowspec_scopes_to_the_exact_family() {
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut rib = AdjRibIn::new(peer);
+        for rd in [
+            None,
+            Some(rustbgpd_wire::RouteDistinguisher([
+                0, 0, 0xad, 0x77, 0, 0, 0, 40,
+            ])),
+        ] {
+            let mut route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+            route.rd = rd;
+            route.is_stale = true;
+            rib.insert_flowspec(route);
+        }
+        let stale = |rib: &AdjRibIn| {
+            let mut rows: Vec<_> = rib
+                .iter_flowspec()
+                .map(|route| (route.rd.is_some(), route.is_stale))
+                .collect();
+            rows.sort_unstable();
+            rows
+        };
+        rib.clear_stale_flowspec((Afi::Ipv4, Safi::Unicast));
+        assert_eq!(stale(&rib), [(false, true), (true, true)]);
+        rib.clear_stale_flowspec((Afi::Ipv4, Safi::FlowSpecVpn));
+        assert_eq!(stale(&rib), [(false, true), (true, false)]);
+        rib.clear_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
+        assert_eq!(stale(&rib), [(false, false), (true, false)]);
     }
 
     #[test]
@@ -5050,6 +5064,7 @@ mod tests {
             swept,
             vec![FlowSpecKey {
                 afi: Afi::Ipv4,
+                rd: None,
                 rule: v4_rule,
             }]
         );
@@ -6692,41 +6707,12 @@ mod tests {
             (afi, safi)
         }
 
-        /// Indices of the families with an Adj-RIB-In table. Received VPN
-        /// `FlowSpec` (ADR-0146) is discarded before the Adj-RIB-In, so it has
-        /// none.
-        fn table_families() -> Vec<usize> {
-            (0..rustbgpd_wire::CONFIGURED_FAMILIES.len())
-                .filter(|&index| family_at(index).1 != Safi::FlowSpecVpn)
-                .collect()
-        }
-
-        /// Removal marker for the [`table_families`] filter. VPN `FlowSpec`
-        /// storage adds a Route Distinguisher to `FlowSpecRoute`, which stops
-        /// this exhaustive pattern compiling: at that point the filter must
-        /// go, so these tests cover (1, 134) like every other family.
-        #[test]
-        fn flowspec_storage_holds_no_vpn_scope_yet() {
-            let crate::route::FlowSpecRoute {
-                rule: _,
-                afi: _,
-                peer: _,
-                attributes: _,
-                received_at: _,
-                origin_type: _,
-                peer_router_id: _,
-                is_stale: _,
-                is_llgr_stale: _,
-                path_id: _,
-            } = crate::test_support::make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
-        }
-
         #[test]
         fn detached_retirement_visits_all_family_storage_and_owned_tags() {
             let peer = PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 1).into());
             let mut empty_visits = 0;
             AdjRibIn::new(peer).retire_with(&mut || empty_visits += 1);
-            for family in table_families() {
+            for family in 0..rustbgpd_wire::CONFIGURED_FAMILIES.len() {
                 let mut rib = AdjRibIn::new(peer);
                 for key in 0..16 {
                     insert_or_withdraw(&mut rib, family, key, Some((1, false)));
@@ -6796,7 +6782,7 @@ mod tests {
         }
 
         fn op() -> impl Strategy<Value = Op> {
-            let family = prop::sample::select(table_families());
+            let family = 0..rustbgpd_wire::CONFIGURED_FAMILIES.len();
             let flags = prop_oneof![6 => Just(0u8), 1 => Just(1), 1 => Just(2)];
             prop_oneof![
                 8 => (family.clone(), 0u8..4, flags, any::<bool>()).prop_map(
@@ -6867,9 +6853,15 @@ mod tests {
                     (route.is_stale, route.is_llgr_stale) = (stale, llgr);
                     rib.insert(route);
                 }
-                (afi, Safi::FlowSpec) => {
+                (afi, safi @ (Safi::FlowSpec | Safi::FlowSpecVpn)) => {
                     let mut route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
                     route.afi = afi;
+                    // A VPN rule shares components with the global one; only
+                    // the RD tells the keys apart.
+                    route.rd =
+                        (safi == Safi::FlowSpecVpn).then_some(rustbgpd_wire::RouteDistinguisher([
+                            0, 0, 0xad, 0x77, 0, 0, 0, 40,
+                        ]));
                     route.path_id = u32::from(key);
                     if insert.is_none() {
                         rib.withdraw_flowspec(&route.key());
@@ -7065,7 +7057,7 @@ mod tests {
                     rib.withdraw_families_except(&[family_at(f)]);
                 }
                 Op::WithdrawAll(f) => match family_at(f).1 {
-                    Safi::FlowSpec => rib.clear_flowspec(),
+                    Safi::FlowSpec | Safi::FlowSpecVpn => rib.clear_flowspec(),
                     Safi::MplsVpn => drop(rib.withdraw_all_vpn()),
                     Safi::LabeledUnicast => drop(rib.withdraw_all_labeled()),
                     Safi::BgpLs | Safi::BgpLsVpn => drop(rib.withdraw_all_bgpls()),

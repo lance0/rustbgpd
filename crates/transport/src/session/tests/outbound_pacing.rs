@@ -432,6 +432,7 @@ impl QueuedInventory {
         update.flowspec_withdraw = (0..per_family)
             .map(|_| FlowSpecKey {
                 afi: Afi::Ipv4,
+                rd: None,
                 rule: make_flowspec_route().rule,
             })
             .collect();

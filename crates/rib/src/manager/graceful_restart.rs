@@ -521,16 +521,20 @@ impl RibManager {
             // advertised GR capability are retained. A negotiated typed
             // family whose tuple is absent from `retained` is withdrawn
             // outright — mirroring the EVPN not-in-gr arm below.
-            if [Afi::Ipv4, Afi::Ipv6]
-                .iter()
-                .any(|&afi| !retained.contains(&(afi, Safi::FlowSpec)))
+            if [
+                (Afi::Ipv4, Safi::FlowSpec),
+                (Afi::Ipv6, Safi::FlowSpec),
+                (Afi::Ipv4, Safi::FlowSpecVpn),
+            ]
+            .iter()
+            .any(|family| !retained.contains(family))
             {
                 let mut keys = Vec::with_capacity(rib.flowspec_len());
                 mark();
                 keys.extend(
                     rib.iter_flowspec()
                         .inspect(|_| mark())
-                        .filter(|route| !retained.contains(&(route.afi, Safi::FlowSpec)))
+                        .filter(|route| !retained.contains(&route.family()))
                         .map(crate::route::FlowSpecRoute::key),
                 );
                 for key in keys {
@@ -538,6 +542,7 @@ impl RibManager {
                     rib.withdraw_flowspec(&key);
                     fs_affected.insert(crate::route::FlowSpecKey {
                         afi: key.afi,
+                        rd: key.rd,
                         rule: key.rule,
                     });
                     mark();
@@ -649,7 +654,7 @@ impl RibManager {
                 affected.insert(route.prefix);
             }
             for route in rib.iter_flowspec().inspect(|_| inventory()) {
-                if retained.contains(&(route.afi, Safi::FlowSpec)) {
+                if retained.contains(&route.family()) {
                     fs_affected.insert(route.selection_key());
                 }
             }
@@ -999,11 +1004,12 @@ impl RibManager {
     )]
     fn sweep_gr_stale_with_readiness(&mut self, peer: PeerId) {
         /// Every tuple a GR-stale route can belong to.
-        const TUPLES: [(Afi, Safi); 12] = [
+        const TUPLES: [(Afi, Safi); 13] = [
             (Afi::Ipv4, Safi::Unicast),
             (Afi::Ipv6, Safi::Unicast),
             (Afi::Ipv4, Safi::FlowSpec),
             (Afi::Ipv6, Safi::FlowSpec),
+            (Afi::Ipv4, Safi::FlowSpecVpn),
             (Afi::L2Vpn, Safi::Evpn),
             (Afi::BgpLs, Safi::BgpLs),
             (Afi::BgpLs, Safi::BgpLsVpn),
@@ -1028,7 +1034,7 @@ impl RibManager {
                 inventory();
                 let index = match family.1 {
                     Safi::Unicast => 0,
-                    Safi::FlowSpec => 1,
+                    Safi::FlowSpec | Safi::FlowSpecVpn => 1,
                     Safi::Evpn => 2,
                     Safi::BgpLs | Safi::BgpLsVpn => 3,
                     Safi::MplsVpn => 4,
@@ -1263,7 +1269,7 @@ impl RibManager {
                 checkpoint();
                 let index = match family.1 {
                     Safi::Unicast => 0,
-                    Safi::FlowSpec => 1,
+                    Safi::FlowSpec | Safi::FlowSpecVpn => 1,
                     Safi::Evpn => 2,
                     Safi::BgpLs | Safi::BgpLsVpn => 3,
                     Safi::MplsVpn => 4,
@@ -1585,7 +1591,7 @@ impl RibManager {
                 inventory();
                 let index = match family.1 {
                     Safi::Unicast => 0,
-                    Safi::FlowSpec => 1,
+                    Safi::FlowSpec | Safi::FlowSpecVpn => 1,
                     Safi::Evpn => 2,
                     Safi::BgpLs | Safi::BgpLsVpn => 3,
                     Safi::MplsVpn => 4,

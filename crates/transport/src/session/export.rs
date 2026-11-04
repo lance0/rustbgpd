@@ -13,6 +13,7 @@ use super::{
     RtcRibRouteKey, Safi, TransportConfig, UpdateMessage, VpnRibRoute, VpnRibRouteKey,
     is_ipv6_link_local, is_private_asn,
 };
+use rustbgpd_wire::{RouteDistinguisher, VpnFlowSpecRule};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -822,7 +823,7 @@ impl SessionExportProfile {
             &route.attributes,
             route.origin_type,
             route.peer_router_id,
-            (route.afi, Safi::FlowSpec),
+            route.family(),
         )
     }
 
@@ -882,14 +883,15 @@ impl SessionExportProfile {
     pub(super) fn prepare_flowspec_candidate(
         &self,
         route: &FlowSpecRoute,
-    ) -> PreparedMpCandidate<FlowSpecRule> {
+    ) -> PreparedMpCandidate<FlowSpecNlri> {
+        let (afi, safi) = route.family();
         PreparedMpCandidate {
-            afi: route.afi,
-            safi: Safi::FlowSpec,
+            afi,
+            safi,
             next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             link_local_next_hop: None,
             attrs: self.prepare_flowspec_attributes(route),
-            nlri: route.rule.clone(),
+            nlri: FlowSpecNlri::new(route.rd, route.rule.clone()),
         }
     }
 
@@ -1374,7 +1376,7 @@ impl SessionExportProfile {
                     prepared.next_hop,
                     prepared.link_local_next_hop,
                     &prepared.attrs,
-                    ReachNlri::FlowSpec(std::slice::from_ref(&prepared.nlri)),
+                    prepared.nlri.reach(),
                     Ipv4UnicastMode::Body,
                 )
                 .map_err(Into::into)
@@ -1468,7 +1470,7 @@ impl SessionExportProfile {
                 .probe_mp_unreach(
                     prepared.afi,
                     prepared.safi,
-                    UnreachNlri::FlowSpec(std::slice::from_ref(&prepared.nlri)),
+                    prepared.nlri.unreach(),
                     prepared.ipv4_mode,
                 )
                 .map_err(Into::into),
@@ -1553,9 +1555,14 @@ impl SessionExportProfile {
                     NlriEntry { path_id, prefix },
                 )),
             },
-            ExportWithdrawal::FlowSpec(key) => PreparedWithdrawal::FlowSpec(
-                PreparedMpWithdrawal::new(key.afi, Safi::FlowSpec, key.rule.clone()),
-            ),
+            ExportWithdrawal::FlowSpec(key) => {
+                let (afi, safi) = key.family();
+                PreparedWithdrawal::FlowSpec(PreparedMpWithdrawal::new(
+                    afi,
+                    safi,
+                    FlowSpecNlri::new(key.rd, key.rule.clone()),
+                ))
+            }
             ExportWithdrawal::Evpn(key) => PreparedWithdrawal::Evpn(PreparedMpWithdrawal::new(
                 Afi::L2Vpn,
                 Safi::Evpn,
@@ -1774,7 +1781,7 @@ impl<T> PreparedMpWithdrawal<T> {
 pub(super) enum PreparedWithdrawal {
     Ipv4Body(Ipv4NlriEntry),
     Unicast(PreparedMpWithdrawal<NlriEntry>),
-    FlowSpec(PreparedMpWithdrawal<FlowSpecRule>),
+    FlowSpec(PreparedMpWithdrawal<FlowSpecNlri>),
     Evpn(PreparedMpWithdrawal<EvpnRoute>),
     BgpLs(PreparedMpWithdrawal<rustbgpd_wire::bgpls::BgpLsNlri>),
     Vpn(PreparedMpWithdrawal<rustbgpd_wire::VpnNlriEntry>),
@@ -2142,11 +2149,44 @@ impl ExactExportProbe {
     }
 }
 
+/// One outbound `FlowSpec` NLRI: a global SAFI 133 rule, or a VPN SAFI 134
+/// rule with its Route Distinguisher. The two are different types all the
+/// way to the wire, so no chunk can mix them and none can lose a rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FlowSpecNlri {
+    Global(FlowSpecRule),
+    Vpn(VpnFlowSpecRule),
+}
+
+impl FlowSpecNlri {
+    fn new(rd: Option<RouteDistinguisher>, rule: FlowSpecRule) -> Self {
+        match rd {
+            Some(rd) => Self::Vpn(VpnFlowSpecRule { rd, rule }),
+            None => Self::Global(rule),
+        }
+    }
+
+    fn reach(&self) -> ReachNlri<'_> {
+        match self {
+            Self::Global(rule) => ReachNlri::FlowSpec(std::slice::from_ref(rule)),
+            Self::Vpn(rule) => ReachNlri::VpnFlowSpec(std::slice::from_ref(rule)),
+        }
+    }
+
+    fn unreach(&self) -> UnreachNlri<'_> {
+        match self {
+            Self::Global(rule) => UnreachNlri::FlowSpec(std::slice::from_ref(rule)),
+            Self::Vpn(rule) => UnreachNlri::VpnFlowSpec(std::slice::from_ref(rule)),
+        }
+    }
+}
+
 /// The single `MP_REACH` builder accepts every outbound family so live chunks
 /// and future one-NLRI exportability probes cannot diverge by construction.
 pub(crate) enum ReachNlri<'a> {
     Unicast(&'a [NlriEntry]),
     FlowSpec(&'a [FlowSpecRule]),
+    VpnFlowSpec(&'a [VpnFlowSpecRule]),
     Evpn(&'a [EvpnRoute]),
     BgpLs(&'a [rustbgpd_wire::bgpls::BgpLsNlri]),
     Labeled(&'a [rustbgpd_wire::LabeledNlriEntry]),
@@ -2179,6 +2219,7 @@ impl ReachNlri<'_> {
         match self {
             Self::Unicast(entries) => value.announced = entries.to_vec(),
             Self::FlowSpec(entries) => value.flowspec_announced = entries.to_vec(),
+            Self::VpnFlowSpec(entries) => value.vpn_flowspec_announced = entries.to_vec(),
             Self::Evpn(entries) => value.evpn_announced = entries.to_vec(),
             Self::BgpLs(entries) => value.bgpls_announced = entries.to_vec(),
             Self::Labeled(entries) => value.labeled_announced = entries.to_vec(),
@@ -2193,6 +2234,7 @@ impl ReachNlri<'_> {
 pub(crate) enum UnreachNlri<'a> {
     Unicast(&'a [NlriEntry]),
     FlowSpec(&'a [FlowSpecRule]),
+    VpnFlowSpec(&'a [VpnFlowSpecRule]),
     Evpn(&'a [EvpnRoute]),
     BgpLs(&'a [rustbgpd_wire::bgpls::BgpLsNlri]),
     Labeled(&'a [rustbgpd_wire::LabeledNlriEntry]),
@@ -2217,6 +2259,7 @@ impl UnreachNlri<'_> {
         match self {
             Self::Unicast(entries) => value.withdrawn = entries.to_vec(),
             Self::FlowSpec(entries) => value.flowspec_withdrawn = entries.to_vec(),
+            Self::VpnFlowSpec(entries) => value.vpn_flowspec_withdrawn = entries.to_vec(),
             Self::Evpn(entries) => value.evpn_withdrawn = entries.to_vec(),
             Self::BgpLs(entries) => value.bgpls_withdrawn = entries.to_vec(),
             Self::Labeled(entries) => value.labeled_withdrawn = entries.to_vec(),

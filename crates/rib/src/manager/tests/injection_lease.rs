@@ -62,7 +62,11 @@ impl Harness {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             outbound_tx: out_tx,
             export_policy: None,
-            sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::FlowSpec)],
+            sendable_families: vec![
+                (Afi::Ipv4, Safi::Unicast),
+                (Afi::Ipv4, Safi::FlowSpec),
+                (Afi::Ipv4, Safi::FlowSpecVpn),
+            ],
             is_ebgp: true,
             route_reflector_client: false,
             orr_vantage: None,
@@ -555,6 +559,7 @@ async fn leased_keys_list_only_the_owners_keys_in_order() {
             InjectedKey::Unicast(host(3), 0),
             InjectedKey::FlowSpec(crate::route::FlowSpecKey {
                 afi: rule.afi,
+                rd: rule.rd,
                 rule: rule.rule,
             }),
         ]
@@ -2638,4 +2643,206 @@ async fn an_unchanged_flowspec_readd_does_constant_work_and_sends_nothing() {
             );
         }
     }
+}
+
+// ADR-0146: VPN FlowSpec keys are scoped by Route Distinguisher; leases stay
+// per owner, across RDs and families.
+
+/// A local rule for `203.0.113.<octet>/32` in RD `44407:<rd>` carrying Route
+/// Target `44407:<rt>`.
+fn vpn_rule(octet: u8, rd: u8, rt: u32) -> FlowSpecRoute {
+    let mut route = guarded_rule(octet, 0);
+    route.rd = Some(rustbgpd_wire::RouteDistinguisher([
+        0, 0, 0xad, 0x77, 0, 0, 0, rd,
+    ]));
+    route
+        .attributes
+        .push(PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::new(0x0002_ad77_0000_0000 | u64::from(rt)),
+        ]));
+    route
+}
+
+fn withdrawn_rds(updates: &[OutboundRouteUpdate]) -> Vec<Option<u8>> {
+    let mut rds: Vec<_> = updates
+        .iter()
+        .flat_map(|update| update.flowspec_withdraw.iter())
+        .map(|key| key.rd.map(|rd| rd.0[7]))
+        .collect();
+    rds.sort_unstable();
+    rds
+}
+
+/// The RD isolates identity, not lease deadlines. One owner's expiry
+/// withdraws its keys in every RD and family together; a different owner's
+/// key with the same components in another RD stays.
+///
+/// Break-to-red: scoping the lease by RD leaves owner `a`'s other keys after
+/// its deadline, or expires owner `b`'s key with them.
+#[tokio::test(start_paused = true)]
+async fn vpn_lease_expiry_follows_the_owner_across_rds() {
+    let mut h = Harness::start().await;
+    leased_rule(&h.tx, vpn_rule(1, 40, 777), "a", 5)
+        .await
+        .unwrap();
+    leased_rule(&h.tx, vpn_rule(1, 42, 777), "a", 5)
+        .await
+        .unwrap();
+    leased_rule(&h.tx, guarded_rule(1, 0), "a", 5)
+        .await
+        .unwrap();
+    leased_rule(&h.tx, vpn_rule(1, 41, 777), "b", 30)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+
+    tokio::time::advance(Duration::from_secs(5)).await;
+    h.settle().await;
+    assert_eq!(withdrawn_rds(&h.drain()), [None, Some(40), Some(42)]);
+    let left: Vec<_> = query_flowspec_routes(&h.tx)
+        .await
+        .into_iter()
+        .filter(|route| route.peer == LOCAL_PEER)
+        .map(|route| route.rd.map(|rd| rd.0[7]))
+        .collect();
+    assert_eq!(left, [Some(41)]);
+    h.stop().await;
+}
+
+/// Guarded revisions are per key. The same components in two RDs each hold
+/// revision 1. An RT-only change under the held revision is
+/// `REVISION_MISMATCH` and changes nothing; deleting that revision and adding
+/// the new RT under revision 2 replaces only that RD.
+///
+/// Break-to-red: a revision fence keyed without the RD refuses the second
+/// RD's first add.
+#[tokio::test(start_paused = true)]
+async fn guarded_vpn_rt_change_needs_a_new_revision_per_rd() {
+    let mut h = Harness::start().await;
+    let (window, _) = h.leases.issue_window("ctl", 120).unwrap();
+    guarded_add(&h.tx, vpn_rule(1, 40, 777), "ctl", window, 1)
+        .await
+        .unwrap();
+    guarded_add(&h.tx, vpn_rule(1, 41, 777), "ctl", window, 1)
+        .await
+        .unwrap();
+    h.settle().await;
+    h.drain();
+
+    assert_conflict(
+        guarded_add(&h.tx, vpn_rule(1, 40, 778), "ctl", window, 1).await,
+        LeaseConflict::RevisionMismatch,
+    );
+    h.settle().await;
+    assert!(h.drain().is_empty(), "a refused change sends nothing");
+
+    let (reply, rx) = oneshot::channel();
+    h.tx.send(RibUpdate::WithdrawGuardedFlowSpec {
+        key: vpn_rule(1, 40, 0).selection_key(),
+        owner: "ctl".to_string(),
+        revision: NonZeroU64::new(1).unwrap(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(rx.await.unwrap().unwrap().removed);
+    assert_eq!(
+        guarded_add(&h.tx, vpn_rule(1, 40, 778), "ctl", window, 2)
+            .await
+            .unwrap()
+            .0,
+        InjectOutcome::Created
+    );
+    h.settle().await;
+    let updates = h.drain();
+    assert_eq!(withdrawn_rds(&updates), [Some(40)]);
+    let announced: Vec<_> = updates
+        .iter()
+        .flat_map(|update| update.flowspec_announce.iter())
+        .map(|route| route.rd.map(|rd| rd.0[7]))
+        .collect();
+    assert_eq!(announced, [Some(40)]);
+    h.stop().await;
+}
+
+/// An expiry batch of one owner's VPN rules across many RDs stays inside the
+/// existing paced sweep: it passes the sweep's readiness checkpoint at every
+/// key, and it withdraws every key.
+///
+/// Break-to-red: an expiry that rebuilds the RD-blind key leaves every VPN
+/// rule selected.
+#[tokio::test]
+async fn a_vpn_expiry_batch_across_rds_checkpoints_every_key() {
+    const RDS: u8 = 16;
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut generation = None;
+    for rd in 0..RDS {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectLeasedFlowSpec {
+            route: vpn_rule(1, rd, 777),
+            owner: "a".to_string(),
+            lease_seconds: 30,
+            reply,
+        });
+        generation = Some(response.try_recv().unwrap().unwrap().1);
+    }
+    assert_eq!(manager.loc_rib.flowspec_len(), usize::from(RDS));
+
+    let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&visits);
+    manager.replacement_readiness_test_hook = Some(Arc::new(move |stage| {
+        if stage == "lease_expiry_sweep" {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }));
+    manager.handle_update(RibUpdate::ExpireInjectionLeases {
+        leases: vec![crate::injection_lease::ExpiredLease {
+            owner: Arc::from("a"),
+            generation: generation.unwrap(),
+            deadline: tokio::time::Instant::now(),
+        }],
+    });
+    assert!(visits.load(std::sync::atomic::Ordering::SeqCst) >= usize::from(RDS));
+    assert_eq!(manager.loc_rib.flowspec_len(), 0);
+}
+
+/// Leased-key pages order `FlowSpec` keys by AFI, then RD (global first),
+/// then rule. A page boundary between rules with identical components in
+/// different RDs resumes without skipping or repeating a key.
+///
+/// Break-to-red: a cursor without the RD gives the three keys one position,
+/// so the walk stops after the first page.
+#[tokio::test]
+async fn leased_key_pages_walk_identical_rules_across_rds() {
+    let mut manager = manager_for_keys();
+    for route in [
+        vpn_rule(1, 41, 777),
+        guarded_rule(1, 0),
+        vpn_rule(1, 40, 777),
+    ] {
+        let (reply, mut rx) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectLeasedFlowSpec {
+            route,
+            owner: "a".to_string(),
+            lease_seconds: 30,
+            reply,
+        });
+        rx.try_recv().unwrap().unwrap();
+    }
+    let mut page = leased_keys(&mut manager, "a", 1);
+    let mut walked = listed(&page);
+    while page.more {
+        page = try_leased_keys(&mut manager, "a", Some(resume_after(&page)), 1).unwrap();
+        walked.extend(listed(&page));
+    }
+    let rds: Vec<_> = walked
+        .iter()
+        .map(|key| match key {
+            InjectedKey::FlowSpec(key) => key.rd.map(|rd| rd.0[7]),
+            InjectedKey::Unicast(..) => panic!("only rules were leased"),
+        })
+        .collect();
+    assert_eq!(rds, [None, Some(40), Some(41)]);
 }

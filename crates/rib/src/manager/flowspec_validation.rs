@@ -104,6 +104,7 @@ impl DependencyScan {
                 Prefix::V4(_) => Afi::Ipv4,
                 Prefix::V6(_) => Afi::Ipv6,
             },
+            rd: None,
             rule,
         }
     }
@@ -146,13 +147,17 @@ impl ValidationState {
         loc: &LocRib,
         checkpoint: &impl Fn(),
     ) -> Vec<&'a FlowSpecRoute> {
-        if self.local_as.is_none() {
+        // VPN keys never enter the validation index (ADR-0146), so their
+        // candidates come straight from the Adj-RIBs-In, as without RFC 9117.
+        if self.local_as.is_none() || key.rd.is_some() {
             return ribs
                 .values()
                 .inspect(|_| checkpoint())
                 .flat_map(AdjRibIn::iter_flowspec)
                 .inspect(|_| checkpoint())
-                .filter(|route| route.afi == key.afi && route.rule == key.rule)
+                .filter(|route| {
+                    route.afi == key.afi && route.rd == key.rd && route.rule == key.rule
+                })
                 .collect();
         }
         self.candidates
@@ -163,6 +168,7 @@ impl ValidationState {
             .filter_map(|(peer, path_id)| {
                 let route_key = crate::route::FlowSpecRouteKey {
                     afi: key.afi,
+                    rd: key.rd,
                     rule: key.rule.clone(),
                     path_id: *path_id,
                 };
@@ -234,6 +240,9 @@ impl ValidationState {
         if self.local_as.is_none() || affected.is_empty() {
             return;
         }
+        // RFC 9117 validation covers SAFI 133 only (ADR-0146): a VPN rule
+        // (SAFI 134) is never checked against the default unicast table, so
+        // its key never enters the index.
         let mut groups: HashMap<_, Vec<&FlowSpecRoute>> = affected
             .iter()
             .inspect(|_| checkpoint())
@@ -244,13 +253,14 @@ impl ValidationState {
             .inspect(|_| checkpoint())
             .flat_map(AdjRibIn::iter_flowspec)
             .inspect(|_| checkpoint())
+            .filter(|route| route.rd.is_none())
         {
             if let Some(rows) = groups.get_mut(&(route.afi, &route.rule)) {
                 rows.push(route);
             }
         }
         let mut retired = false;
-        for key in affected {
+        for key in affected.iter().filter(|key| key.rd.is_none()) {
             checkpoint();
             let rows = groups.remove(&(key.afi, &key.rule)).unwrap_or_default();
             retired |= self.sync_rule(key, &rows, loc, checkpoint);
@@ -382,6 +392,7 @@ impl ValidationState {
             checkpoint();
             let route_key = crate::route::FlowSpecRouteKey {
                 afi: key.afi,
+                rd: key.rd,
                 rule: key.rule.clone(),
                 path_id,
             };
@@ -503,6 +514,11 @@ impl RibManager {
                     .and_then(|rows| rows.get(&(peer, route.path_id)));
                 let (validation, reason, pending) = if self.flowspec_validation.local_as.is_none() {
                     (FlowSpecValidationStatus::Disabled, None, false)
+                } else if route.rd.is_some() {
+                    // VPN rules stay outside RFC 9117 (ADR-0146). Received
+                    // ones are discarded on input, so a stored one is local
+                    // intent and reads as a local SAFI 133 rule does.
+                    (FlowSpecValidationStatus::Local, None, false)
                 } else if let Some(state) = state {
                     let (status, reason) = match state.completed {
                         None => (FlowSpecValidationStatus::Pending, None),
@@ -791,6 +807,7 @@ impl RibManager {
                     .observed_unicast_revision = observed;
                 let route_key = crate::route::FlowSpecRouteKey {
                     afi: id.0.afi,
+                    rd: id.0.rd,
                     rule: id.0.rule.clone(),
                     path_id: id.2,
                 };
@@ -937,6 +954,60 @@ mod tests {
             .recompute(cover.prefix, std::iter::once(&cover));
         manager.recompute_and_distribute_flowspec(&HashSet::from([flow.selection_key()]));
         (manager, tx, flow, cover)
+    }
+
+    /// RFC 9117 validation covers SAFI 133 only (ADR-0146): a VPN rule is
+    /// never indexed or checked against the default unicast table, so one
+    /// with no covering unicast route is still selected in `rfc9117` mode.
+    ///
+    /// Break-to-red: indexing VPN keys leaves the rule infeasible for want
+    /// of a cover; gathering a VPN key's candidates from the index leaves it
+    /// unselected because no verdict exists.
+    #[test]
+    fn flowspec_validation_never_indexes_a_vpn_rule() {
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, mpsc::channel(1).1, None, None, BgpMetrics::new())
+            .with_flowspec_validation(65000);
+        let mut flow = make_flowspec_route(Ipv4Addr::new(198, 51, 100, 1));
+        flow.attributes = vec![path(65001)];
+        flow.rd = Some(rustbgpd_wire::RouteDistinguisher([
+            0, 0, 0xad, 0x77, 0, 0, 0, 40,
+        ]));
+        // A global rule with the same components, from another peer.
+        let mut global = make_flowspec_route(Ipv4Addr::new(198, 51, 100, 2));
+        global.attributes = vec![path(65002)];
+        for route in [&flow, &global] {
+            manager
+                .ribs
+                .entry(route.peer)
+                .or_insert_with(|| AdjRibIn::new(route.peer))
+                .insert_flowspec(route.clone());
+        }
+        manager.recompute_and_distribute_flowspec(&HashSet::from([
+            flow.selection_key(),
+            global.selection_key(),
+        ]));
+        drain(&mut manager);
+        // The VPN key alone, so its reconciliation cannot depend on the
+        // order in which a mixed batch is walked.
+        manager.recompute_and_distribute_flowspec(&HashSet::from([flow.selection_key()]));
+        drain(&mut manager);
+        let candidates = &manager.flowspec_validation.candidates;
+        assert!(candidates.keys().all(|key| key.rd.is_none()));
+        assert_eq!(
+            candidates[&global.selection_key()]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [(global.peer, 0)],
+            "the VPN route is not a candidate of the global key"
+        );
+        assert!(
+            manager
+                .loc_rib
+                .get_flowspec(&flow.selection_key())
+                .is_some()
+        );
     }
 
     fn drain(manager: &mut RibManager) {

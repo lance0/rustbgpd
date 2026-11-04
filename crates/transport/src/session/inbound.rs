@@ -1429,12 +1429,13 @@ impl PeerSession {
                 let family = (mp.afi, mp.safi);
                 if self.negotiated_families().contains(&family) {
                     loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                    loop_fs_withdrawn.extend(
-                        mp.flowspec_withdrawn
-                            .iter()
-                            .cloned()
-                            .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
-                    );
+                    loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned().map(|rule| {
+                        FlowSpecKey {
+                            afi: mp.afi,
+                            rd: None,
+                            rule,
+                        }
+                    }));
                     loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                     if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                         loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
@@ -1521,12 +1522,13 @@ impl PeerSession {
             if let PathAttribute::MpReachNlri(mp) = attr
                 && self.negotiated_families().contains(&(mp.afi, mp.safi))
             {
-                loop_fs_rejected.extend(
-                    mp.flowspec_announced
-                        .iter()
-                        .cloned()
-                        .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
-                );
+                loop_fs_rejected.extend(mp.flowspec_announced.iter().cloned().map(|rule| {
+                    FlowSpecKey {
+                        afi: mp.afi,
+                        rd: None,
+                        rule,
+                    }
+                }));
                 loop_evpn_rejected.extend(mp.evpn_announced.iter().map(EvpnRoute::key));
             }
         }
@@ -2929,6 +2931,7 @@ impl PeerSession {
                                 flowspec_announced.push(FlowSpecRoute {
                                     rule: rule.clone(),
                                     afi: mp.afi,
+                                    rd: None,
                                     peer: self.rib_peer(),
                                     attributes: attrs,
                                     received_at: now,
@@ -2944,6 +2947,7 @@ impl PeerSession {
                             } else {
                                 denied_flowspec.push(FlowSpecKey {
                                     afi: mp.afi,
+                                    rd: None,
                                     rule: rule.clone(),
                                 });
                             }
@@ -3467,12 +3471,13 @@ impl PeerSession {
                         continue;
                     }
                     withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                    flowspec_withdrawn.extend(
-                        mp.flowspec_withdrawn
-                            .iter()
-                            .cloned()
-                            .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
-                    );
+                    flowspec_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned().map(|rule| {
+                        FlowSpecKey {
+                            afi: mp.afi,
+                            rd: None,
+                            rule,
+                        }
+                    }));
                     evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                     if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                         bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
