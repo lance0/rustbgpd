@@ -1423,6 +1423,57 @@ impl EvpnExportFixture {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn evpn_export_gc_counts_mixed_private_commits() {
+    let mut fixture = evpn_export_fixture();
+    fixture.drain_outbound();
+    let _live_sets: Vec<_> = (0..=ATTR_INTERN_GC_DISPLACED_LIMIT)
+        .map(|index| {
+            let mut attrs = AttrSet::new(vec![PathAttribute::Med(
+                100_000 + u32::try_from(index).unwrap(),
+            )]);
+            fixture.manager.attr_intern.intern(&mut attrs);
+            attrs
+        })
+        .collect();
+    assert!(fixture.manager.attr_intern.capacity() > ATTR_INTERN_GC_DISPLACED_LIMIT);
+    assert_eq!(fixture.manager.attr_intern_gc_displaced, 0);
+    let receiver = fixture.receivers[0];
+    let mut replacement = fixture.exported(0, 0);
+    replacement.attributes = AttrSet::new(vec![PathAttribute::Med(7)]);
+    let new = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 300);
+    let new_key = new.key();
+    let missing = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 400).key();
+    fixture
+        .manager
+        .try_send_and_commit_outbound_update(
+            receiver,
+            super::super::distribution::OutboundCommitBatch {
+                evpn_announce: vec![replacement, new.clone(), new].into(),
+                evpn_withdraw: vec![fixture.keys[1], missing],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.manager.attr_intern_gc_displaced, 3,
+        "one existing replacement, one duplicate new key, and one existing withdrawal"
+    );
+    assert_eq!(
+        fixture.manager.attr_intern_gc_deadline,
+        Some(tokio::time::Instant::now() + ATTR_INTERN_GC_INTERVAL)
+    );
+    let advertised = &fixture.manager.adj_ribs_out[&receiver];
+    assert_eq!(advertised.evpn_len(), 2);
+    assert_eq!(
+        advertised.get_evpn(&fixture.keys[0]).unwrap().med_attr(),
+        Some(7)
+    );
+    assert!(advertised.get_evpn(&new_key).is_some());
+    assert!(advertised.get_evpn(&fixture.keys[1]).is_none());
+    assert!(advertised.get_evpn(&missing).is_none());
+}
+
 #[test]
 fn evpn_export_policy_replacements_keep_the_intern_table_steady() {
     // Static inputs, repeated export-policy replacements: each generation's
