@@ -73,6 +73,29 @@ class ClassifierFixtures(unittest.TestCase):
     def test_cpu_fixture(self) -> None:
         self.run_check("classify_cpu.py", "cpu.folded", "cpu.expected.tsv")
 
+    def test_cpu_counts_unwound_samples_as_other(self) -> None:
+        # rrharness writes a sample it could not unwind as an empty stack or
+        # an empty frame; both must classify as "other", keeping totals exact.
+        def classify(folded_text: str) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                folded = Path(tmp) / "unwound.folded"
+                folded.write_text(folded_text, encoding="utf-8")
+                return subprocess.run(
+                    [sys.executable, str(HERE / "classify_cpu.py"), str(folded)],
+                    capture_output=True, text=True, check=False,
+                )
+
+        result = classify("ribmgr\t\t4\nribmgr\troot;\t2\nribmgr\troot;leaf\t1\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = dict(
+            line.split("\t")[:2] for line in result.stdout.splitlines()[1:]
+        )
+        self.assertEqual(rows["other"], "7")
+        self.assertEqual(rows["TOTAL"], "7")
+        # A malformed escape inside a nonempty frame is still rejected.
+        bad = classify("ribmgr\troot;bad%zz\t1\n")
+        self.assertNotEqual(bad.returncode, 0)
+
     def test_bgperf_csv_fixture(self) -> None:
         self.run_check(
             "sanitize_bgperf_csv.py", "bgperf.raw.csv", "bgperf.expected.csv"
