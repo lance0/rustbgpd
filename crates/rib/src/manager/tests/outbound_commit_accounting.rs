@@ -460,3 +460,56 @@ async fn outbound_dirty_oldest_seconds_is_max_over_current_episodes() {
     manager.sample_outbound_dirty_gauges();
     assert_eq!(oldest(&manager), 0.0);
 }
+
+/// The row credit in use and the live whole-table operations are published
+/// summed over every peer, and a registered peer's refusal series are
+/// exported at zero before any refusal, so a scrape tells a peer never
+/// refused from one never sampled.
+#[tokio::test]
+async fn outbound_credit_gauges_sum_over_peers_and_refusals_start_at_zero() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let [a, b] = [80, 81].map(|o| PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, o))));
+    manager.register_outbound_credit(a);
+    manager.register_outbound_credit(b);
+    let refusals = manager
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_outbound_commit_refusals_total")
+        .expect("refusals exported before any refusal");
+    for peer in [a, b] {
+        let label = peer.label();
+        assert!(refusals.get_metric().iter().any(|metric| {
+            let labels = metric.get_label();
+            labels
+                .iter()
+                .any(|l| l.name() == "peer" && l.value() == label)
+                && labels
+                    .iter()
+                    .any(|l| l.name() == "reason" && l.value() == "outbound_credit")
+                && metric.get_counter().get_value() == 0.0
+        }));
+    }
+
+    let rows = |m: &RibManager| gauge_metric_value(&m.metrics, "bgp_rib_outbound_credit_rows", &[]);
+    let operations =
+        |m: &RibManager| gauge_metric_value(&m.metrics, "bgp_rib_outbound_operations_live", &[]);
+    let charge_a = crate::OutboundCharge::new(&manager.outbound_credit_handle(a), 3);
+    let charge_b = crate::OutboundCharge::new(&manager.outbound_credit_handle(b), 4);
+    let (sender, _receiver) = mpsc::channel(4);
+    manager.outbound_peers.insert(a, sender);
+    let operation = manager.begin_outbound_operation(a, 1).unwrap();
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(rows(&manager), 7.0);
+    assert_eq!(operations(&manager), 1.0);
+
+    drop((charge_a, operation));
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(rows(&manager), 4.0);
+    assert_eq!(operations(&manager), 0.0);
+    drop(charge_b);
+    manager.sample_outbound_dirty_gauges();
+    assert_eq!(rows(&manager), 0.0);
+}
