@@ -31,66 +31,99 @@ use crate::PeerId;
 use crate::fast_hash::{FastMap, FastSet};
 use crate::outbound_credit::{CHUNK_ROWS, OutboundOperation, OutboundSlot};
 
-/// A dense owed-key set: insert-if-absent, contains, remove and pop in O(1).
+/// An owed-key set drained oldest first: insert-if-absent, remove and pop
+/// in amortized O(1). A key keeps its place while it stays owed, so keys
+/// re-marked on every pass never overtake an older one: any key is popped
+/// within as many pops as there were keys ahead of it.
 pub(super) struct OwedKeys<K> {
-    keys: Vec<K>,
-    slot: FastMap<K, u32>,
+    /// Keys in marking order with their mark sequence; an entry whose
+    /// sequence no longer matches `live` was removed (or re-marked later)
+    /// and is skipped.
+    order: std::collections::VecDeque<(K, u64)>,
+    live: FastMap<K, u64>,
+    next: u64,
 }
 
 impl<K> Default for OwedKeys<K> {
     fn default() -> Self {
         Self {
-            keys: Vec::new(),
-            slot: FastMap::default(),
+            order: std::collections::VecDeque::new(),
+            live: FastMap::default(),
+            next: 0,
         }
     }
 }
 
 impl<K: Clone + Eq + Hash> OwedKeys<K> {
     fn len(&self) -> usize {
-        self.keys.len()
+        self.live.len()
     }
 
     fn insert(&mut self, key: K) {
-        if self.slot.contains_key(&key) {
+        if self.live.contains_key(&key) {
             return;
         }
-        let index = u32::try_from(self.keys.len()).expect("owed keys fit u32");
-        self.slot.insert(key.clone(), index);
-        self.keys.push(key);
+        let sequence = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.live.insert(key.clone(), sequence);
+        self.order.push_back((key, sequence));
     }
 
     fn remove(&mut self, key: &K) {
-        let Some(index) = self.slot.remove(key) else {
-            return;
-        };
-        let index = index as usize;
-        self.keys.swap_remove(index);
-        if let Some(moved) = self.keys.get(index) {
-            *self.slot.get_mut(moved).expect("moved key indexed") =
-                u32::try_from(index).expect("owed keys fit u32");
+        if self.live.remove(key).is_some() {
+            while self
+                .order
+                .front()
+                .is_some_and(|(key, sequence)| self.live.get(key) != Some(sequence))
+            {
+                self.order.pop_front();
+            }
+            self.compact();
+            self.shrink();
         }
     }
 
+    /// The oldest owed key.
     fn pop(&mut self) -> Option<K> {
-        let key = self.keys.pop()?;
-        self.slot.remove(&key);
-        Some(key)
+        while let Some((key, sequence)) = self.order.pop_front() {
+            if self.live.get(&key) == Some(&sequence) {
+                self.live.remove(&key);
+                return Some(key);
+            }
+        }
+        None
     }
 
-    /// Bytes held by capacity, slack included, so the cap compares real
-    /// memory.
+    /// Every owed key, oldest first.
+    fn iter(&self) -> impl Iterator<Item = &K> {
+        self.order
+            .iter()
+            .filter(|(key, sequence)| self.live.get(key) == Some(sequence))
+            .map(|(key, _)| key)
+    }
+
+    /// Drop stale entries once they outnumber the live keys.
+    fn compact(&mut self) {
+        if self.order.len() > 2 * self.live.len() + 64 {
+            let live = &self.live;
+            self.order
+                .retain(|(key, sequence)| live.get(key) == Some(sequence));
+        }
+    }
+
+    /// Capacity-based byte estimate, including queue and map slack.
     fn bytes(&self) -> usize {
-        let key = std::mem::size_of::<K>();
-        self.keys.capacity() * key + self.slot.capacity() * (key + 4) + self.slot.capacity()
+        self.order.capacity() * std::mem::size_of::<(K, u64)>()
+            + self.live.capacity() * (std::mem::size_of::<(K, u64)>() + 1)
     }
 
     /// Release a drained set's peak capacity.
     fn shrink(&mut self) {
-        let len = self.keys.len();
-        if self.keys.capacity() > 4 * len + 64 {
-            self.keys.shrink_to(2 * len);
-            self.slot.shrink_to(2 * len);
+        let len = self.live.len();
+        if self.order.capacity() > 4 * len + 64 {
+            self.compact();
+            self.order.shrink_to(2 * len);
+            self.live.shrink_to(2 * len);
         }
     }
 
@@ -200,12 +233,12 @@ impl OwedFamily {
 
     /// Bytes per key that size the 64-key floor of the byte cap.
     fn key_cost(self) -> usize {
-        let key = match self {
-            Self::VPNV4 | Self::VPNV6 => std::mem::size_of::<VpnRouteKey>(),
-            Self::EVPN => std::mem::size_of::<EvpnRouteKey>(),
-            _ => std::mem::size_of::<Prefix>(),
+        let entry = match self {
+            Self::VPNV4 | Self::VPNV6 => std::mem::size_of::<(VpnRouteKey, u64)>(),
+            Self::EVPN => std::mem::size_of::<(EvpnRouteKey, u64)>(),
+            _ => std::mem::size_of::<(Prefix, u64)>(),
         };
-        2 * key + 8
+        2 * entry + 1
     }
 }
 
@@ -243,13 +276,33 @@ impl OwedKey {
 pub(super) struct PeerOwing {
     session_id: u64,
     unicast: [OwedKeys<Prefix>; 2],
+    /// Subset of `unicast` exempt from a GR selection hold (local host and
+    /// BLACKHOLE routes, `helpers::unicast_deferral_exempt`), classified when
+    /// marked: they drain inside a hold, the rest wait for its release.
+    unicast_exempt: [OwedKeys<Prefix>; 2],
     labeled: [OwedKeys<Prefix>; 2],
     vpn: [OwedKeys<VpnRouteKey>; 2],
     evpn: OwedKeys<EvpnRouteKey>,
     /// A bit per [`OwedFamily`] owed whole.
     whole: u16,
+    /// A bit per whole family already drained inside the current selection
+    /// hold (its exempt rows); it stays owed for the release.
+    hold_drained: u16,
     /// The drain's rotation cursor over [`OwedFamily::ALL`].
     next_family: u8,
+}
+
+/// Which owed keys of a family a drain step may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DrainScope {
+    /// Every owed key (or the whole family).
+    All,
+    /// Only keys exempt from the family's selection hold.
+    Exempt,
+}
+
+fn afi_index(prefix: &Prefix) -> usize {
+    usize::from(matches!(prefix, Prefix::V6(_)))
 }
 
 impl PeerOwing {
@@ -257,16 +310,31 @@ impl PeerOwing {
         Self {
             session_id,
             unicast: Default::default(),
+            unicast_exempt: Default::default(),
             labeled: Default::default(),
             vpn: Default::default(),
             evpn: OwedKeys::default(),
             whole: 0,
+            hold_drained: 0,
             next_family: 0,
         }
     }
 
     pub(super) fn is_whole(&self, family: OwedFamily) -> bool {
         self.whole & family.bit() != 0
+    }
+
+    fn whole_drained_in_hold(&self, family: OwedFamily) -> bool {
+        self.hold_drained & family.bit() != 0
+    }
+
+    /// Owed keys of `family` exempt from its selection hold.
+    fn exempt_len(&self, family: OwedFamily) -> usize {
+        match family {
+            OwedFamily::IPV4_UNICAST => self.unicast_exempt[0].len(),
+            OwedFamily::IPV6_UNICAST => self.unicast_exempt[1].len(),
+            _ => 0,
+        }
     }
 
     fn keyed_len(&self, family: OwedFamily) -> usize {
@@ -290,14 +358,19 @@ impl PeerOwing {
         self.whole == 0 && OwedFamily::ALL.iter().all(|&f| self.keyed_len(f) == 0)
     }
 
-    fn insert(&mut self, key: OwedKey) {
+    /// Owe `key`, updating its hold exemption without changing its FIFO place.
+    fn insert(&mut self, key: OwedKey, exempt: bool) {
         match key {
             OwedKey::Unicast(prefix) => {
-                self.unicast[usize::from(matches!(prefix, Prefix::V6(_)))].insert(prefix);
+                let index = afi_index(&prefix);
+                self.unicast[index].insert(prefix);
+                if exempt {
+                    self.unicast_exempt[index].insert(prefix);
+                } else {
+                    self.unicast_exempt[index].remove(&prefix);
+                }
             }
-            OwedKey::Labeled(prefix) => {
-                self.labeled[usize::from(matches!(prefix, Prefix::V6(_)))].insert(prefix);
-            }
+            OwedKey::Labeled(prefix) => self.labeled[afi_index(&prefix)].insert(prefix),
             OwedKey::Vpn(key) => {
                 let index = usize::from(OwedFamily::vpn_of(&key) == OwedFamily::VPNV6);
                 self.vpn[index].insert(key);
@@ -309,11 +382,10 @@ impl PeerOwing {
     fn remove(&mut self, key: &OwedKey) {
         match key {
             OwedKey::Unicast(prefix) => {
-                self.unicast[usize::from(matches!(prefix, Prefix::V6(_)))].remove(prefix);
+                self.unicast[afi_index(prefix)].remove(prefix);
+                self.unicast_exempt[afi_index(prefix)].remove(prefix);
             }
-            OwedKey::Labeled(prefix) => {
-                self.labeled[usize::from(matches!(prefix, Prefix::V6(_)))].remove(prefix);
-            }
+            OwedKey::Labeled(prefix) => self.labeled[afi_index(prefix)].remove(prefix),
             OwedKey::Vpn(key) => {
                 let index = usize::from(OwedFamily::vpn_of(key) == OwedFamily::VPNV6);
                 self.vpn[index].remove(key);
@@ -324,8 +396,8 @@ impl PeerOwing {
 
     fn set_bytes(&self, family: OwedFamily) -> usize {
         match family {
-            OwedFamily::IPV4_UNICAST => self.unicast[0].bytes(),
-            OwedFamily::IPV6_UNICAST => self.unicast[1].bytes(),
+            OwedFamily::IPV4_UNICAST => self.unicast[0].bytes() + self.unicast_exempt[0].bytes(),
+            OwedFamily::IPV6_UNICAST => self.unicast[1].bytes() + self.unicast_exempt[1].bytes(),
             OwedFamily::IPV4_LABELED => self.labeled[0].bytes(),
             OwedFamily::IPV6_LABELED => self.labeled[1].bytes(),
             OwedFamily::VPNV4 => self.vpn[0].bytes(),
@@ -348,9 +420,16 @@ impl PeerOwing {
     /// Forget everything owed for `family`, freeing its set.
     fn clear_family(&mut self, family: OwedFamily) {
         self.whole &= !family.bit();
+        self.hold_drained &= !family.bit();
         match family {
-            OwedFamily::IPV4_UNICAST => self.unicast[0].clear(),
-            OwedFamily::IPV6_UNICAST => self.unicast[1].clear(),
+            OwedFamily::IPV4_UNICAST => {
+                self.unicast[0].clear();
+                self.unicast_exempt[0].clear();
+            }
+            OwedFamily::IPV6_UNICAST => {
+                self.unicast[1].clear();
+                self.unicast_exempt[1].clear();
+            }
             OwedFamily::IPV4_LABELED => self.labeled[0].clear(),
             OwedFamily::IPV6_LABELED => self.labeled[1].clear(),
             OwedFamily::VPNV4 => self.vpn[0].clear(),
@@ -366,68 +445,101 @@ impl PeerOwing {
         self.whole |= family.bit();
     }
 
-    /// Up to `count` keys of `family`, removed from its set.
-    fn pop_keys(&mut self, family: OwedFamily, count: usize) -> Vec<OwedKey> {
+    /// Up to `count` of `family`'s oldest keys, restricted to the exempt
+    /// subset only while the selection hold requires it.
+    fn pop_keys(&mut self, family: OwedFamily, count: usize, scope: DrainScope) -> Vec<OwedKey> {
         fn pop<K: Clone + Eq + Hash>(
             set: &mut OwedKeys<K>,
             count: usize,
             wrap: impl Fn(K) -> OwedKey,
-        ) -> Vec<OwedKey> {
-            let keys = std::iter::from_fn(|| set.pop())
-                .take(count)
-                .map(wrap)
-                .collect();
+            into: &mut Vec<OwedKey>,
+        ) {
+            into.extend(std::iter::from_fn(|| set.pop()).take(count).map(wrap));
             set.shrink();
-            keys
         }
+        let mut keys = Vec::new();
         match family {
-            OwedFamily::IPV4_UNICAST => pop(&mut self.unicast[0], count, OwedKey::Unicast),
-            OwedFamily::IPV6_UNICAST => pop(&mut self.unicast[1], count, OwedKey::Unicast),
-            OwedFamily::IPV4_LABELED => pop(&mut self.labeled[0], count, OwedKey::Labeled),
-            OwedFamily::IPV6_LABELED => pop(&mut self.labeled[1], count, OwedKey::Labeled),
-            OwedFamily::VPNV4 => pop(&mut self.vpn[0], count, OwedKey::Vpn),
-            OwedFamily::VPNV6 => pop(&mut self.vpn[1], count, OwedKey::Vpn),
-            OwedFamily::EVPN => pop(&mut self.evpn, count, OwedKey::Evpn),
-            _ => Vec::new(),
+            OwedFamily::IPV4_UNICAST | OwedFamily::IPV6_UNICAST => {
+                let index = usize::from(family == OwedFamily::IPV6_UNICAST);
+                let (set, other) = if scope == DrainScope::All {
+                    (&mut self.unicast[index], &mut self.unicast_exempt[index])
+                } else {
+                    (&mut self.unicast_exempt[index], &mut self.unicast[index])
+                };
+                for prefix in std::iter::from_fn(|| set.pop()).take(count) {
+                    other.remove(&prefix);
+                    keys.push(OwedKey::Unicast(prefix));
+                }
+                set.shrink();
+                other.shrink();
+            }
+            OwedFamily::IPV4_LABELED => {
+                pop(&mut self.labeled[0], count, OwedKey::Labeled, &mut keys);
+            }
+            OwedFamily::IPV6_LABELED => {
+                pop(&mut self.labeled[1], count, OwedKey::Labeled, &mut keys);
+            }
+            OwedFamily::VPNV4 => pop(&mut self.vpn[0], count, OwedKey::Vpn, &mut keys),
+            OwedFamily::VPNV6 => pop(&mut self.vpn[1], count, OwedKey::Vpn, &mut keys),
+            OwedFamily::EVPN => pop(&mut self.evpn, count, OwedKey::Evpn, &mut keys),
+            _ => {}
         }
+        keys
     }
 
-    /// Every key of `family`, left in place.
-    fn copy_keys(&self, family: OwedFamily) -> Vec<OwedKey> {
+    /// Up to `count` keys of `family`, oldest first, left in place.
+    fn copy_keys(&self, family: OwedFamily, scope: DrainScope, count: usize) -> Vec<OwedKey> {
         match family {
-            OwedFamily::IPV4_UNICAST => self.unicast[0]
-                .keys
-                .iter()
-                .copied()
-                .map(OwedKey::Unicast)
-                .collect(),
-            OwedFamily::IPV6_UNICAST => self.unicast[1]
-                .keys
-                .iter()
-                .copied()
-                .map(OwedKey::Unicast)
-                .collect(),
+            OwedFamily::IPV4_UNICAST | OwedFamily::IPV6_UNICAST => {
+                let index = usize::from(family == OwedFamily::IPV6_UNICAST);
+                let set = if scope == DrainScope::Exempt {
+                    &self.unicast_exempt[index]
+                } else {
+                    &self.unicast[index]
+                };
+                set.iter()
+                    .take(count)
+                    .copied()
+                    .map(OwedKey::Unicast)
+                    .collect()
+            }
             OwedFamily::IPV4_LABELED => self.labeled[0]
-                .keys
                 .iter()
+                .take(count)
                 .copied()
                 .map(OwedKey::Labeled)
                 .collect(),
             OwedFamily::IPV6_LABELED => self.labeled[1]
-                .keys
                 .iter()
+                .take(count)
                 .copied()
                 .map(OwedKey::Labeled)
                 .collect(),
-            OwedFamily::VPNV4 => self.vpn[0].keys.iter().copied().map(OwedKey::Vpn).collect(),
-            OwedFamily::VPNV6 => self.vpn[1].keys.iter().copied().map(OwedKey::Vpn).collect(),
-            OwedFamily::EVPN => self.evpn.keys.iter().copied().map(OwedKey::Evpn).collect(),
+            OwedFamily::VPNV4 => self.vpn[0]
+                .iter()
+                .take(count)
+                .copied()
+                .map(OwedKey::Vpn)
+                .collect(),
+            OwedFamily::VPNV6 => self.vpn[1]
+                .iter()
+                .take(count)
+                .copied()
+                .map(OwedKey::Vpn)
+                .collect(),
+            OwedFamily::EVPN => self
+                .evpn
+                .iter()
+                .take(count)
+                .copied()
+                .map(OwedKey::Evpn)
+                .collect(),
             _ => Vec::new(),
         }
     }
 
     #[cfg(test)]
-    fn rendered(&self) -> Vec<((u16, u8), Option<String>)> {
+    pub(super) fn rendered(&self) -> Vec<((u16, u8), Option<String>)> {
         let mut out = Vec::new();
         for family in OwedFamily::ALL {
             let afi_safi = wire(family.afi_safis()[0]);
@@ -437,7 +549,7 @@ impl PeerOwing {
                 }
             }
             out.extend(
-                self.copy_keys(family)
+                self.copy_keys(family, DrainScope::All, usize::MAX)
                     .iter()
                     .map(|key| (afi_safi, Some(key.render()))),
             );
@@ -671,7 +783,20 @@ impl RibManager {
         self.fence_owing(peer);
         if let Some(owing) = self.owing(peer) {
             if owing.is_whole(family) {
-                return OwingGate::Whole;
+                // A new local change must re-arm the exempt pass even
+                // while the rest of this whole family stays held.
+                let held_exempt = (family.is_unicast()
+                    || family == OwedFamily::IPV4_FLOWSPEC
+                    || family == OwedFamily::IPV6_FLOWSPEC)
+                    && family
+                        .afi_safis()
+                        .iter()
+                        .any(|&family| self.selection_deferred(family));
+                return if held_exempt {
+                    OwingGate::Owe
+                } else {
+                    OwingGate::Whole
+                };
             }
             if owing.keyed_len(family) != 0 {
                 return OwingGate::Owe;
@@ -689,7 +814,8 @@ impl RibManager {
     }
 
     /// The byte cap of `peer`'s `family` set: a quarter of the family's
-    /// Loc-RIB plus the peer's Adj-RIB-Out, at least a 64-key floor.
+    /// Loc-RIB plus the peer's Adj-RIB-Out, in bytes at the per-key cost that
+    /// sizes the 64-key floor, and at least that floor.
     fn owing_theta(&self, peer: PeerId, family: OwedFamily) -> usize {
         let floor = self
             .owing_theta_floor
@@ -713,7 +839,8 @@ impl RibManager {
             }
             _ => 0,
         };
-        floor.max(size / 4)
+        // A quarter of the family, in the same bytes a key costs at the floor.
+        floor.max((size / 4).saturating_mul(family.key_cost()))
     }
 
     /// Record `keys` as owed to `peer`: each key the peer could still need
@@ -733,6 +860,7 @@ impl RibManager {
             self.replacement_checkpoint(false);
             let family = key.family();
             if owing.is_whole(family) {
+                owing.hold_drained &= !family.bit();
                 continue;
             }
             touched |= family.bit();
@@ -742,7 +870,8 @@ impl RibManager {
                     .entry(peer)
                     .or_default()
                     .insert((wire(family.afi_safis()[0]), Some(key.render())));
-                owing.insert(key);
+                let exempt = self.owed_key_exempt(peer, &key);
+                owing.insert(key, exempt);
             } else {
                 owing.remove(&key);
             }
@@ -769,7 +898,8 @@ impl RibManager {
             .unwrap_or_else(|| Box::new(PeerOwing::new(session_id)));
         for key in keys {
             if !owing.is_whole(key.family()) {
-                owing.insert(key);
+                let exempt = self.owed_key_exempt(peer, &key);
+                owing.insert(key, exempt);
             }
         }
         self.put_owing(peer, owing);
@@ -785,6 +915,8 @@ impl RibManager {
             owing.flip_whole(family);
             self.note_owing_whole(peer, family);
         }
+        // New debt inside a selection hold gets its own exempt pass.
+        owing.hold_drained &= !family.bit();
         self.put_owing(peer, owing);
     }
 
@@ -818,6 +950,25 @@ impl RibManager {
             }
         }
         self.put_owing(peer, owing);
+    }
+
+    /// Whether owed `key` is exempt from a GR selection hold: a local host or
+    /// BLACKHOLE route offers it, or `peer` holds a locally sourced row.
+    /// Staging uses the original provenance to preserve frozen local rows.
+    fn owed_key_exempt(&self, peer: PeerId, key: &OwedKey) -> bool {
+        use super::helpers::unicast_deferral_exempt;
+        let OwedKey::Unicast(prefix) = key else {
+            return false;
+        };
+        self.ribs
+            .get(&super::helpers::LOCAL_PEER)
+            .is_some_and(|rib| rib.iter_prefix(prefix).any(unicast_deferral_exempt))
+            || self.adj_ribs_out.get(&peer).is_some_and(|out| {
+                out.iter_prefix(prefix).any(|route| {
+                    route.peer == super::helpers::LOCAL_PEER
+                        || out.local_export_source(prefix, route.path_id).is_some()
+                })
+            })
     }
 
     /// Whether `peer` may still need `key`: the key has a candidate, the
@@ -913,15 +1064,76 @@ impl RibManager {
         }
     }
 
-    /// Whether `family`'s owed state toward `peer` may be drained now: no
-    /// selection deferral and no RFC 5291 initial-advertisement gate.
-    fn owed_family_runnable(&self, peer: PeerId, family: OwedFamily) -> bool {
-        family.afi_safis().iter().all(|&afi_safi| {
-            !self.selection_deferred(afi_safi)
-                && !self
-                    .peer_orf_pending
-                    .get(&peer)
-                    .is_some_and(|gated| gated.contains(&afi_safi))
+    /// What of `family`'s owed state toward `peer` may drain now, if
+    /// anything. An RFC 5291 initial-advertisement gate holds all of it. A
+    /// GR selection hold holds all but what its staging exempts: local host
+    /// and BLACKHOLE unicast keys, and one pass of a whole `FlowSpec`
+    /// family (its staging keeps local rules and withdrawals only). The
+    /// other families have no exemption and wait for the release.
+    fn owed_drain_scope(
+        &self,
+        peer: PeerId,
+        owing: &PeerOwing,
+        family: OwedFamily,
+    ) -> Option<DrainScope> {
+        if family.afi_safis().iter().any(|afi_safi| {
+            self.peer_orf_pending
+                .get(&peer)
+                .is_some_and(|gated| gated.contains(afi_safi))
+        }) {
+            return None;
+        }
+        if !family
+            .afi_safis()
+            .iter()
+            .any(|&afi_safi| self.selection_deferred(afi_safi))
+        {
+            return Some(DrainScope::All);
+        }
+        if family.is_unicast() && owing.exempt_len(family) != 0 {
+            return Some(DrainScope::Exempt);
+        }
+        let exempt_whole = family.is_unicast()
+            || family == OwedFamily::IPV4_FLOWSPEC
+            || family == OwedFamily::IPV6_FLOWSPEC;
+        (exempt_whole && owing.is_whole(family) && !owing.whole_drained_in_hold(family))
+            .then_some(DrainScope::Exempt)
+    }
+
+    /// Whether `family` of `owing` is drainable now (`latch_free`: a whole
+    /// family needs `peer`'s operation latch).
+    fn owed_family_drainable(
+        &self,
+        peer: PeerId,
+        owing: &PeerOwing,
+        family: OwedFamily,
+        latch_free: bool,
+    ) -> Option<DrainScope> {
+        if !owing.owes(family) || (owing.is_whole(family) && !latch_free) {
+            return None;
+        }
+        self.owed_drain_scope(peer, owing, family)
+    }
+
+    /// Whether `peer` owes a whole family that waits only for its live
+    /// operation latch: the resync timer stays armed so the latch release
+    /// wakes it.
+    fn owing_waits_on_latch(&self, peer: PeerId) -> bool {
+        self.owing(peer).is_some_and(|owing| {
+            self.outbound_operation_live(peer)
+                && OwedFamily::ALL.iter().any(|&family| {
+                    owing.is_whole(family) && self.owed_drain_scope(peer, owing, family).is_some()
+                })
+        })
+    }
+
+    /// Whether any owing peer waits on a live operation latch.
+    pub(super) fn owing_latch_pending(&self) -> bool {
+        self.owing_peers.iter().any(|&peer| {
+            self.replacement_checkpoint(false);
+            !self.dirty_peers.contains(&peer)
+                && !self.force_outbound_peers.contains(&peer)
+                && self.owing_waits_on_latch(peer)
         })
     }
 
@@ -948,9 +1160,8 @@ impl RibManager {
         };
         let latch_free = !self.outbound_operation_live(peer);
         OwedFamily::ALL.iter().any(|&family| {
-            owing.owes(family)
-                && (latch_free || !owing.is_whole(family))
-                && self.owed_family_runnable(peer, family)
+            self.owed_family_drainable(peer, owing, family, latch_free)
+                .is_some()
         }) || (latch_free && self.owed_eor_ready(peer))
     }
 
@@ -977,18 +1188,17 @@ impl RibManager {
         })
     }
 
-    /// The next family of `peer` the drain can run, rotating from its
-    /// cursor.
-    fn next_owed_family(&mut self, peer: PeerId) -> Option<OwedFamily> {
+    /// The next family of `peer` the drain can run, and what of it,
+    /// rotating from its cursor.
+    fn next_owed_family(&mut self, peer: PeerId) -> Option<(OwedFamily, DrainScope)> {
         let latch_free = !self.outbound_operation_live(peer);
         let owing = self.owing(peer)?;
         let start = owing.next_family;
-        let family = (0..OwedFamily::COUNT)
+        let (family, scope) = (0..OwedFamily::COUNT)
             .map(|offset| OwedFamily((start + offset) % OwedFamily::COUNT))
-            .find(|&family| {
-                owing.owes(family)
-                    && (latch_free || !owing.is_whole(family))
-                    && self.owed_family_runnable(peer, family)
+            .find_map(|family| {
+                self.owed_family_drainable(peer, owing, family, latch_free)
+                    .map(|scope| (family, scope))
             })?;
         if let Some(owing) = self
             .outbound_credit
@@ -997,7 +1207,7 @@ impl RibManager {
         {
             owing.next_family = (family.0 + 1) % OwedFamily::COUNT;
         }
-        Some(family)
+        Some((family, scope))
     }
 
     /// Drain owed keys under the tick's poll budget, round-robin over the
@@ -1056,14 +1266,21 @@ impl RibManager {
         if rows >= limit {
             return progressed;
         }
-        let Some(family) = self.next_owed_family(peer) else {
+        let Some((family, scope)) = self.next_owed_family(peer) else {
             return progressed;
         };
-        self.owing_drain_step(peer, family, limit - rows) || progressed
+        self.owing_drain_step(peer, family, scope, limit - rows) || progressed
     }
 
-    /// One drain step of `family` toward `peer` within `budget` rows.
-    fn owing_drain_step(&mut self, peer: PeerId, family: OwedFamily, budget: usize) -> bool {
+    /// One drain step of `family`'s `scope` toward `peer` within `budget`
+    /// rows.
+    fn owing_drain_step(
+        &mut self,
+        peer: PeerId,
+        family: OwedFamily,
+        scope: DrainScope,
+        budget: usize,
+    ) -> bool {
         let Some(owing) = self.owing(peer) else {
             return false;
         };
@@ -1074,6 +1291,18 @@ impl RibManager {
             let mut drain = OwingDrain::whole(peer, family);
             self.distribute_owing_drain(&mut drain);
             return match drain.outcome {
+                // Inside a selection hold the pass sent only what the hold
+                // exempts: the family stays owed for the release.
+                Some(Ok(())) if scope == DrainScope::Exempt => {
+                    if let Some(owing) = self
+                        .outbound_credit
+                        .get_mut(&peer)
+                        .and_then(|entry| entry.owing.as_deref_mut())
+                    {
+                        owing.hold_drained |= family.bit();
+                    }
+                    true
+                }
                 Some(Ok(())) => {
                     self.owing_family_settled(peer, family);
                     true
@@ -1092,28 +1321,32 @@ impl RibManager {
             OwedFamily::VPNV4 | OwedFamily::VPNV6 => self.peer_vpn_add_path_send(peer),
             _ => false,
         };
-        // Unicast and Add-Path keys are budgeted per key by the body; the
-        // rest hold at most two rows a key.
-        let count = if family.is_unicast() || add_path {
-            CHUNK_ROWS
-        } else {
-            CHUNK_ROWS.min((budget / 2).max(1))
-        };
-        let keys = match self
-            .outbound_credit
-            .get_mut(&peer)
-            .and_then(|entry| entry.owing.as_deref_mut())
-        {
-            Some(owing) => owing.pop_keys(family, count),
-            None => return false,
-        };
+        // Fit the FIFO batch before unordered staging; an unbounded
+        // Add-Path key takes a credit window by itself.
+        let add_path = add_path || (family.is_unicast() && self.peer_has_any_add_path_send(peer));
+        let count = self
+            .owing_rows_per_key(peer, add_path, family.afi_safis())
+            .map_or(1, |rows| CHUNK_ROWS.min((budget / rows).max(1)));
+        // Keep unstaged and refused keys in place until admission succeeds.
+        let keys = self
+            .owing(peer)
+            .expect("the peer still owes keys")
+            .copy_keys(family, scope, count);
         let popped = keys.len();
         let mut drain = OwingDrain::keyed(peer, family, budget, keys.clone());
         self.distribute_owing_drain(&mut drain);
         match drain.outcome {
             Some(Ok(())) => {
                 let unstaged = drain.unstaged.len();
-                self.reinsert_owed(peer, drain.unstaged);
+                let unstaged_keys: FastSet<_> = drain.unstaged.into_iter().collect();
+                if let Some(mut owing) = self.take_owing(peer) {
+                    for key in &keys {
+                        if !unstaged_keys.contains(key) {
+                            owing.remove(key);
+                        }
+                    }
+                    self.put_owing(peer, owing);
+                }
                 self.owing_family_settled(peer, family);
                 unstaged < popped
             }
@@ -1121,10 +1354,7 @@ impl RibManager {
                 self.owing_fallback(peer, failure);
                 false
             }
-            _ => {
-                self.reinsert_owed(peer, keys);
-                false
-            }
+            _ => false,
         }
     }
 
@@ -1178,8 +1408,10 @@ impl RibManager {
     /// Absorb `peer`'s owed state of `family` into `operation` ahead of the
     /// operation's barrier: the owed keys, or the whole family, are staged
     /// by diff into one envelope on a reserved slot. Nothing owed is a no-op.
-    /// `Err` means a capacity or credit refusal that left the owed state as
-    /// it was; any other refusal escalates the peer to a resync.
+    /// `Err` means the owed routes were not admitted, so the caller keeps its
+    /// barrier: a capacity or credit refusal leaves the owed state as it
+    /// was; any other refusal also escalates the peer to a resync, which
+    /// sends the barrier after its own diff.
     pub(super) fn absorb_owed_family(
         &mut self,
         peer: PeerId,
@@ -1203,7 +1435,12 @@ impl RibManager {
             OwingDrain::whole(peer, family)
         } else {
             // Copied, not popped: a refusal leaves the set as it was.
-            OwingDrain::keyed(peer, family, usize::MAX, owing.copy_keys(family))
+            OwingDrain::keyed(
+                peer,
+                family,
+                usize::MAX,
+                owing.copy_keys(family, DrainScope::All, usize::MAX),
+            )
         };
         drain.slot = Some(
             operation
@@ -1223,7 +1460,7 @@ impl RibManager {
             Some(Err(failure)) if retryable(failure) => Err(failure),
             Some(Err(failure)) => {
                 self.owing_fallback(peer, failure);
-                Ok(())
+                Err(failure)
             }
             None => Err(OutboundCommitFailure::WriterUnavailable),
         }
@@ -1265,7 +1502,7 @@ impl RibManager {
                         .get_mut(&peer)
                         .and_then(|entry| entry.owing.as_deref_mut())
                     {
-                        Some(owing) => owing.pop_keys(family, usize::MAX),
+                        Some(owing) => owing.pop_keys(family, usize::MAX, DrainScope::All),
                         None => continue,
                     };
                     OwingDrain::keyed(peer, family, usize::MAX, keys)
@@ -1487,6 +1724,37 @@ impl RibManager {
         }
     }
 
+    /// The most rows one key of `families` can stage toward `peer`: a
+    /// withdrawal and an announcement per path, at the largest effective
+    /// Add-Path cap among the families (the scalar send limit is the
+    /// smallest). `None` for send-all, whose paths per key are unbounded.
+    pub(super) fn owing_rows_per_key(
+        &self,
+        peer: PeerId,
+        add_path: bool,
+        families: &[(Afi, Safi)],
+    ) -> Option<usize> {
+        if !add_path {
+            return Some(2);
+        }
+        let scalar = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
+        let limits = self.peer_add_path_send_limits.get(&peer);
+        let cap = families
+            .iter()
+            .map(|family| {
+                limits
+                    .and_then(|limits| limits.get(family))
+                    .copied()
+                    .unwrap_or(scalar)
+            })
+            .max()
+            .unwrap_or(scalar);
+        (cap != u32::MAX)
+            .then(|| usize::try_from(cap).ok())
+            .flatten()
+            .map(|cap| 2 * cap.max(1))
+    }
+
     /// A gated producer's send failed: count a credit refusal that got past
     /// a bounded gate, then take slice 1a's resync path.
     pub(super) fn owing_send_failed(
@@ -1508,5 +1776,58 @@ pub(super) fn pass_budget(keys: usize, rows_per_key: Option<usize>, budget: usiz
     match rows_per_key {
         Some(rows) if keys.saturating_mul(rows) <= budget => usize::MAX,
         _ => budget,
+    }
+}
+
+#[cfg(test)]
+mod fifo_tests {
+    use super::*;
+
+    #[test]
+    fn marks_keep_fifo_order_and_canceled_entries_are_compacted() {
+        let mut keys = OwedKeys::default();
+        keys.insert(0);
+        keys.insert(1);
+        keys.insert(0);
+        keys.remove(&1);
+        keys.insert(2);
+        keys.insert(1);
+        for key in 3..1_000 {
+            keys.insert(key);
+            keys.remove(&key);
+        }
+        assert!(keys.order.len() <= 2 * keys.live.len() + 64);
+        assert_eq!(keys.pop(), Some(0));
+        assert_eq!(keys.pop(), Some(2));
+        assert_eq!(keys.pop(), Some(1));
+        assert_eq!(keys.pop(), None);
+    }
+
+    #[test]
+    fn exempt_index_preserves_normal_fifo_and_updates_existing_marks() {
+        let key = |index| {
+            OwedKey::Unicast(Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                std::net::Ipv4Addr::new(192, 0, 2, index),
+                32,
+            )))
+        };
+        let mut owing = PeerOwing::new(1);
+        let family = OwedFamily::IPV4_UNICAST;
+        owing.insert(key(1), false);
+        owing.insert(key(2), true);
+        assert_eq!(owing.copy_keys(family, DrainScope::All, 1), [key(1)]);
+        assert_eq!(owing.copy_keys(family, DrainScope::Exempt, 1), [key(2)]);
+        owing.insert(key(1), true);
+        assert_eq!(owing.keyed_len(family), 2);
+        assert_eq!(owing.exempt_len(family), 2);
+        assert_eq!(
+            owing.copy_keys(family, DrainScope::All, 2),
+            [key(1), key(2)]
+        );
+        owing.remove(&key(2));
+        assert_eq!(owing.copy_keys(family, DrainScope::Exempt, 1), [key(1)]);
+        owing.insert(key(1), false);
+        assert_eq!(owing.exempt_len(family), 0);
+        assert_eq!(owing.keyed_len(family), 1);
     }
 }

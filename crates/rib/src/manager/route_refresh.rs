@@ -2590,6 +2590,11 @@ impl RibManager {
         peer: PeerId,
         operation: Option<&mut OutboundOperation>,
     ) {
+        if operation.is_none()
+            && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer))
+        {
+            return;
+        }
         let Some(families) = self.pending_eor.remove(&peer) else {
             return;
         };
@@ -2639,6 +2644,12 @@ impl RibManager {
                     {
                         self.keep_pending_eor(peer, &mut ready, &[family]);
                     }
+                }
+                // One failed absorption escalates every family to the
+                // resync; no later marker may overtake that fallback.
+                if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
+                    self.pending_eor.entry(peer).or_default().extend(ready);
+                    return;
                 }
                 Some(own_operation.insert(absorbing))
             } else {

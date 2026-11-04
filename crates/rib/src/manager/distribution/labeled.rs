@@ -880,16 +880,14 @@ impl RibManager {
             };
             let bounded = budget != usize::MAX;
             // A key holds at most a withdrawal and an announcement per path.
-            let rows_per_key = if peer_add_path {
-                self.peer_add_path_send_max
-                    .get(&peer)
-                    .copied()
-                    .filter(|send_max| *send_max != u32::MAX)
-                    .and_then(|send_max| usize::try_from(send_max).ok())
-                    .map(|send_max| 2 * send_max)
-            } else {
-                Some(2)
-            };
+            let rows_per_key = self.owing_rows_per_key(
+                peer,
+                peer_add_path,
+                &[
+                    (Afi::Ipv4, Safi::LabeledUnicast),
+                    (Afi::Ipv6, Safi::LabeledUnicast),
+                ],
+            );
             let budget = crate::manager::outbound_owing::pass_budget(
                 staged_keys.len(),
                 rows_per_key,

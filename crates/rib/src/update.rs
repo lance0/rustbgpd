@@ -1249,6 +1249,8 @@ pub struct OutboundOwed {
     /// the oracles render it, or `None` for a family owed whole: everything
     /// owed now or marked since the previous query of this peer.
     pub owed: Vec<((u16, u8), Option<String>)>,
+    /// Keys and whole families still owed at this query, excluding settled log entries.
+    pub owed_pending: Vec<((u16, u8), Option<String>)>,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.

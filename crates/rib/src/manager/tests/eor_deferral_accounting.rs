@@ -75,11 +75,14 @@ fn initial_dump_eor_on_full_channel_is_counted() {
 #[test]
 fn flush_pending_eor_on_full_channel_is_counted() {
     let (mut manager, mut out_rx) = peer_up_with_full_queue();
+    // Standalone marker retries follow a successful resync.
+    assert!(manager.dirty_peers.remove(&PEER));
     manager.flush_pending_eor(PEER);
     assert!((eor_deferrals(&manager.metrics) - 2.0).abs() < f64::EPSILON);
     assert!(manager.pending_eor[&PEER].contains(&FAMILY));
 
     assert!(!out_rx.try_recv().unwrap().announce.is_empty());
+    assert!(manager.dirty_peers.remove(&PEER));
     manager.flush_pending_eor(PEER);
     assert_eq!(out_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
     assert!((eor_deferrals(&manager.metrics) - 2.0).abs() < f64::EPSILON);

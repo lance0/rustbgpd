@@ -4063,7 +4063,7 @@ impl RibManager {
     /// message makes it runnable and the next event loop turn arms this timer
     /// again.
     fn resync_tick_pending(&self) -> bool {
-        self.resync_tick_pending_unowed() || self.owing_runnable()
+        self.resync_tick_pending_unowed() || self.owing_runnable() || self.owing_latch_pending()
     }
 
     /// [`Self::resync_tick_pending`] apart from owed keys: dirty peers and
@@ -4127,7 +4127,10 @@ impl RibManager {
             && !self.resync_tick_pending_unowed()
             && !self.owing_tick_due()
         {
-            return true;
+            // Polling for returned credit at the backlog cadence; owed work
+            // that waits only on a latch keeps the ordinary interval, and
+            // the latch release wakes the tick.
+            return self.owing_runnable();
         }
         // A whole member replay can outlive the tick's peer-stride budget.
         // Activate its existing interior checkpoints on every timer arm.
@@ -5269,6 +5272,9 @@ impl RibManager {
                     end_of_rib: sorted(self.pending_eor.get(&peer)),
                     live_operation: self.outbound_operation_live(peer),
                     credit_rows: self.outbound_credit_rows(peer),
+                    owed_pending: self
+                        .owing(peer)
+                        .map_or_else(Vec::new, outbound_owing::PeerOwing::rendered),
                     owed: self.take_owing_log(peer),
                 });
             }
@@ -7118,8 +7124,10 @@ impl RibManager {
             }
 
             // Arm the resync timer when resync work transitions none → some.
-            // Owed keys drain at the backlog cadence.
-            if self.resync_tick_pending() && !resync_armed {
+            // Owed keys drain at the backlog cadence, including when other
+            // work already armed the ordinary interval: credit returns
+            // without telling the RIB, so the tick is what notices it.
+            if !resync_armed && self.resync_tick_pending() {
                 let interval = if self.owing_runnable() {
                     DIRTY_RESYNC_BACKLOG_INTERVAL
                 } else {
@@ -7129,6 +7137,11 @@ impl RibManager {
                     .as_mut()
                     .reset(tokio::time::Instant::now() + interval);
                 resync_armed = true;
+            } else if resync_armed && self.owing_runnable() {
+                let soon = tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL;
+                if resync_sleep.deadline() > soon {
+                    resync_sleep.as_mut().reset(soon);
+                }
             }
 
             // Arm the GR timer to the nearest stale deadline.

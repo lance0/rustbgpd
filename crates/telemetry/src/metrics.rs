@@ -1843,7 +1843,7 @@ impl BgpMetrics {
                 "Dirty-peer resync timer outcomes: 'still_dirty' (a tick left \
                  at least one peer dirty, or another retry, and the timer \
                  re-arms), 'owing' (a tick left only owed private-family keys \
-                 and the timer re-arms at the backlog cadence) or 'cleared' \
+                 and the timer re-arms) or 'cleared' \
                  (a tick drained the work, or the loop saw a message handler drain \
                  it; drains on early-continue loop paths may go uncounted).",
             ),

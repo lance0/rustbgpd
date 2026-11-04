@@ -2975,11 +2975,15 @@ fn received(peer: PeerId, announced: Vec<Route>, evpn_announced: Vec<EvpnRibRout
 /// End-of-RIB from another source are still applied, in order. `evpn` runs
 /// the batches through the private EVPN path; `credit` caps every peer's
 /// row credit, so the other source, which never reads its own channel,
-/// spends its credit (and owes the rest) while the rest goes on. Returns
-/// whether the other source was owed routes at the end. Red with any wait
-/// on a stalled peer in the actor, such as reserving a slot on every peer's
+/// spends its credit (and owes the rest) while the rest goes on; `None`
+/// sizes the credit as production does, whatever the suite's override.
+/// Returns what the other source owes at the end. Red with any wait on a
+/// stalled peer in the actor, such as reserving a slot on every peer's
 /// channel before each turn.
-async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>) -> bool {
+async fn assert_held_peer_never_holds_the_rib(
+    evpn: bool,
+    credit: Option<usize>,
+) -> crate::update::OutboundOwed {
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(
         rx,
@@ -2988,9 +2992,7 @@ async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>)
         Some(Ipv4Addr::new(10, 0, 0, 100)),
         BgpMetrics::new(),
     );
-    if let Some(credit) = credit {
-        manager = manager.with_outbound_row_credit(credit);
-    }
+    manager.outbound_row_credit_override = credit;
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
     let families = if evpn {
@@ -3078,17 +3080,32 @@ async fn assert_held_peer_never_holds_the_rib(evpn: bool, credit: Option<usize>)
     })
     .await
     .unwrap();
-    let other_owed = !owed.await.unwrap().owed.is_empty();
+    let other_owed = owed.await.unwrap();
     drop(tx);
     let _ = handle.await;
     other_owed
 }
 
+/// The small-credit arms: the unread other source holds at least its whole
+/// credit in queued rows and owes the rest, without a resync.
+fn assert_other_source_credit_spent(owed: &crate::update::OutboundOwed, credit: usize) {
+    assert!(
+        owed.credit_rows >= credit,
+        "the other source's credit was spent: {} rows held against {credit}",
+        owed.credit_rows
+    );
+    assert!(!owed.owed.is_empty(), "the other source owes the rest");
+    assert!(!owed.resync, "spent credit owes routes, not a resync");
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_peer_held_by_its_writer_never_holds_the_rib_or_a_healthy_peer() {
     assert!(
-        !assert_held_peer_never_holds_the_rib(false, None).await,
-        "the default credit holds the other source's routes"
+        assert_held_peer_never_holds_the_rib(false, None)
+            .await
+            .owed
+            .is_empty(),
+        "the production credit holds the other source's routes"
     );
 }
 
@@ -3096,17 +3113,20 @@ async fn a_peer_held_by_its_writer_never_holds_the_rib_or_a_healthy_peer() {
 /// of its updates, so with a small credit it is owed routes.
 #[tokio::test(start_paused = true)]
 async fn a_held_peer_with_spent_credit_never_holds_the_rib() {
-    assert!(
-        assert_held_peer_never_holds_the_rib(false, Some(4)).await,
-        "the other source's credit was spent"
+    assert_other_source_credit_spent(
+        &assert_held_peer_never_holds_the_rib(false, Some(4)).await,
+        4,
     );
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_held_private_evpn_peer_never_holds_the_rib() {
-    assert!(!assert_held_peer_never_holds_the_rib(true, None).await);
-    assert!(
-        assert_held_peer_never_holds_the_rib(true, Some(4)).await,
-        "the other source's credit was spent"
+    assert_eq!(
+        assert_held_peer_never_holds_the_rib(true, None).await.owed,
+        []
+    );
+    assert_other_source_credit_spent(
+        &assert_held_peer_never_holds_the_rib(true, Some(4)).await,
+        4,
     );
 }
