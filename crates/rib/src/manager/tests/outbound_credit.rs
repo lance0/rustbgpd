@@ -68,6 +68,36 @@ fn pinned_withdraw_bytes(updates: &[OutboundRouteUpdate]) -> usize {
         .sum()
 }
 
+#[test]
+fn group_members_share_empty_withdrawal_handle() {
+    let mut manager = manager();
+    let _source_output = peer_up_v4(&mut manager, peer_v4(SOURCE), 8);
+    let mut first = peer_up_v4(&mut manager, peer_v4(Ipv4Addr::new(10, 0, 1, 1)), 8);
+    let mut second = peer_up_v4(&mut manager, peer_v4(Ipv4Addr::new(10, 0, 1, 2)), 8);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(SOURCE),
+        announced: vec![source_route(0)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    let first = first.try_recv().unwrap();
+    let second = second.try_recv().unwrap();
+    assert_eq!(first.announce.len(), 1);
+    assert_eq!(second.announce.len(), 1);
+    assert!(first.shared_withdraw.is_empty());
+    assert!(second.shared_withdraw.is_empty());
+    assert!(
+        Arc::ptr_eq(&first.shared_withdraw, &second.shared_withdraw),
+        "an announce-only pass must not allocate an empty withdrawal handle per member"
+    );
+}
+
 /// T12. A 64-member update group with 16 members stalled while the rest
 /// drain: 400 passes each announce 8 new prefixes and withdraw the previous
 /// pass's 8. The withdrawal bytes the stalled queues pin stay those of one

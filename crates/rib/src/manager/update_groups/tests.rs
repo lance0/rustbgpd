@@ -1883,6 +1883,7 @@ fn pcb_emit_consumers_ignore_lane_fields() {
         .map(|r| (r.prefix, r.peer))
         .collect();
     let shared_withdraw_with_lane = out.shared_withdraw.clone();
+    let shared_encode_with_lane = Arc::clone(&out.shared_encode);
 
     out.lane_deltas.clear();
     let without_lane = (
@@ -1901,6 +1902,10 @@ fn pcb_emit_consumers_ignore_lane_fields() {
     assert_eq!(with_lane, without_lane);
     assert_eq!(shared_with_lane, shared_without_lane);
     assert_eq!(shared_withdraw_with_lane, out.shared_withdraw);
+    assert!(
+        !Arc::ptr_eq(&shared_encode_with_lane, &out.shared_encode),
+        "rebuilt payloads must not reuse a previous encoding"
+    );
 }
 
 /// The `join_group` table-build seam: lane commits live in the
@@ -2476,7 +2481,8 @@ fn member_emission(out: &GroupStageOutput, member: PeerId) -> (Vec<Route>, Vec<(
             );
         }
         assert_eq!(
-            withdraw, out.shared_withdraw,
+            withdraw.as_slice(),
+            out.shared_withdraw.as_slice(),
             "shared/walk withdraw diverged for {member}"
         );
     }
@@ -2498,7 +2504,8 @@ fn member_emission(out: &GroupStageOutput, member: PeerId) -> (Vec<Route>, Vec<(
             );
         }
         assert_eq!(
-            withdraw, out.shared_withdraw,
+            withdraw.as_slice(),
+            out.shared_withdraw.as_slice(),
             "source-excluded shared/walk withdraw diverged for {member}"
         );
     }

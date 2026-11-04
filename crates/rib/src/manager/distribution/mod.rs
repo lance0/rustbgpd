@@ -5381,14 +5381,18 @@ impl RibManager {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
                 rib_out.remove_flowspec(key);
             }
-            for route in evpn_announce.iter().filter(|_| !evpn_group_owned) {
-                super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
-                evpn_displaced += usize::from(rib_out.get_evpn(&route.key()).is_some());
-                rib_out.insert_evpn(route.clone());
-            }
-            for key in evpn_withdraw.iter().filter(|_| !evpn_group_owned) {
-                super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
-                evpn_displaced += usize::from(rib_out.remove_evpn(key));
+            if !evpn_group_owned {
+                let evpn_len_before = rib_out.evpn_len();
+                for route in evpn_announce.iter() {
+                    super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
+                    rib_out.insert_evpn(route.clone());
+                }
+                // Only new keys grow the table; all other inserts displaced a row.
+                evpn_displaced = evpn_announce.len() - (rib_out.evpn_len() - evpn_len_before);
+                for key in &evpn_withdraw {
+                    super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
+                    evpn_displaced += usize::from(rib_out.remove_evpn(key));
+                }
             }
             for route in &bgpls_announce {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
@@ -5659,7 +5663,8 @@ impl RibManager {
         // with the group's shared rows, queue the shared `Arc` instead, so a
         // stalled member pins the group's vector, not its own.
         let shared_withdraw = match shared_withdraw {
-            Some(shared) if !shared.is_empty() && withdraw.starts_with(&shared) => {
+            Some(shared) if shared.is_empty() => shared,
+            Some(shared) if withdraw.starts_with(&shared) => {
                 withdraw.drain(..shared.len());
                 if withdraw.is_empty() {
                     withdraw = Vec::new();
@@ -8841,11 +8846,6 @@ impl RibManager {
         let mut group_stage =
             self.stage_update_groups(&best_changed, &all_affected, &mut export_memo, targets);
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
-        let mut shared_group_encodes: HashMap<usize, Arc<crate::update::SharedGroupEncode>> =
-            HashMap::new();
-        // One shared withdrawal vector per group per pass (see
-        // `OutboundCommitBatch::shared_withdraw`).
-        let mut shared_withdraws: HashMap<usize, Arc<Vec<(Prefix, u32)>>> = HashMap::new();
         // LAN-474 emit-time filter: whether a group's pass carries any
         // control-tagged announce delta, memoized per (group, rs_asn) —
         // one delta scan per group per pass, not per member. Untagged
@@ -9839,15 +9839,8 @@ impl RibManager {
                                     ));
                                     announce_source_exclusion =
                                         shared_with_source_exclusion.then_some(peer);
-                                    shared_group_encode = Some(Arc::clone(
-                                        shared_group_encodes.entry(gid).or_insert_with(|| {
-                                            Arc::new(crate::update::SharedGroupEncode::default())
-                                        }),
-                                    ));
-                                    let shared =
-                                        Arc::clone(shared_withdraws.entry(gid).or_insert_with(
-                                            || Arc::new(stage.shared_withdraw.clone()),
-                                        ));
+                                    shared_group_encode = Some(Arc::clone(&stage.shared_encode));
+                                    let shared = Arc::clone(&stage.shared_withdraw);
                                     unicast.withdraw.extend_from_slice(&shared);
                                     shared_withdraw = Some(shared);
                                 } else {
@@ -10945,7 +10938,6 @@ impl RibManager {
             #[cfg(feature = "bench-internals")]
             export_memo.record_replacement_capacities(self);
             export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
-            crate::adj_rib_out::release_hash_map(&mut shared_group_encodes, &mut || checkpoint());
             crate::adj_rib_out::release_hash_map(&mut rs_tagged_pass, &mut || checkpoint());
             self.release_speculative_group_admitted_keys(&speculative_group_admitted);
             self.replacement_checkpoint(true);

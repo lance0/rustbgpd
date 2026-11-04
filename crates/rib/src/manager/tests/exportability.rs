@@ -1515,7 +1515,7 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
         )
         .remove(&gid)
         .unwrap();
-    assert_eq!(stage.shared_withdraw, vec![key]);
+    assert_eq!(stage.shared_withdraw.as_slice(), &[key]);
     assert!(stage.shared_applies_to(member));
     let prior_visits = observe_group_prior_materialization(&mut manager);
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
@@ -1524,7 +1524,7 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
             .try_send_and_commit_outbound_update_with_group_prior(
                 member,
                 OutboundCommitBatch {
-                    withdraw: stage.shared_withdraw.clone(),
+                    withdraw: stage.shared_withdraw.to_vec(),
                     ..OutboundCommitBatch::with_unicast(
                         Arc::clone(&stage.shared_announce),
                         Arc::clone(&stage.shared_nh),
