@@ -616,6 +616,9 @@ pub struct RibManager {
     /// route. Unicast UPDATE chunks amortize collection by displaced count
     /// and deadline; explicit teardown sweeps remain immediate.
     attr_intern: crate::attr_intern::AttrInternTable,
+    /// Bounded admission of single-use EVPN export outcomes into
+    /// `attr_intern` once a second receiver produces an equal one.
+    export_admission: distribution::ExportAdmission,
     /// Unicast replacements/removals since the last full attribute sweep.
     attr_intern_gc_displaced: usize,
     attr_intern_gc_deadline: Option<tokio::time::Instant>,
@@ -2644,6 +2647,7 @@ impl RibManager {
     /// Amortize the measured unicast UPDATE hot path without changing Arc
     /// ownership or the point at which routes become visible. At most one route
     /// chunk can take the displaced count over the limit before collection.
+    /// EVPN export commits feed their displaced rows here too.
     fn defer_unicast_attr_gc(&mut self, displaced: usize) {
         if displaced == 0 {
             return;
@@ -2662,6 +2666,15 @@ impl RibManager {
             // single large-table sweep exceeds the actor work budget.
             self.gc_attr_intern();
         }
+    }
+
+    /// EVPN export staging interns policy output, so a committed row that
+    /// replaces or removes another can leave a set only the table holds.
+    /// Reclaim those on the amortized schedule unicast uses, and refresh the
+    /// gauge for the sets the export batch inserted.
+    fn settle_export_attr_gc(&mut self, displaced: usize) {
+        self.defer_unicast_attr_gc(displaced);
+        self.sync_attr_intern_gauge();
     }
 
     /// Refresh the global intern-table gauge without sweeping. Run after
@@ -2758,6 +2771,7 @@ impl RibManager {
         Self {
             ribs: HashMap::new(),
             attr_intern: crate::attr_intern::AttrInternTable::new(),
+            export_admission: distribution::ExportAdmission::default(),
             attr_intern_gc_displaced: 0,
             attr_intern_gc_deadline: None,
             unicast_prefix_peers: UnicastPrefixPeers::default(),
