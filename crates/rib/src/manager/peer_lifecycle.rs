@@ -1612,6 +1612,9 @@ impl RibManager {
         self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
         self.outbound_session_ids.remove(&peer);
+        // Owed keys belong to the ended session; a new one's initial table
+        // owns its state.
+        self.drop_peer_owing(peer);
         self.pending_inbound_refresh.remove(&peer);
         if self.pending_inbound_refresh.is_empty() {
             self.pending_inbound_refresh_cursor = None;
@@ -2459,6 +2462,9 @@ impl RibManager {
         self.initialize_outbound_registration_gauges(peer);
         self.outbound_peers.insert(peer, outbound_tx);
         self.register_outbound_credit(peer);
+        // A registration starts from its initial table: nothing owed to an
+        // earlier session carries over, even under a reused session id.
+        self.drop_peer_owing(peer);
         self.outbound_session_ids.insert(peer, session_id);
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),

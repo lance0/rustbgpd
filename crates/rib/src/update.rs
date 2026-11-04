@@ -1245,6 +1245,10 @@ pub struct OutboundOwed {
     pub live_operation: bool,
     /// Private rows the peer's queued envelopes hold against its credit.
     pub credit_rows: usize,
+    /// Owed private-family keys, as `(family, key)` with the key rendered as
+    /// the oracles render it, or `None` for a family owed whole: everything
+    /// owed now or marked since the previous query of this peer.
+    pub owed: Vec<((u16, u8), Option<String>)>,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.

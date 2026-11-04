@@ -855,12 +855,47 @@ impl RibManager {
             }) {
                 continue;
             }
-            // Preflight, once the pass touches a family the peer negotiated:
-            // a peer without credit stages nothing (its resync covers this
-            // pass); unrelated churn leaves it clean.
-            if self.outbound_preflight_refused(peer) {
-                continue;
-            }
+            // The owed-key gate: an owing AFI marks its keys; a streaming
+            // one stages within the peer's remaining credit and owes the
+            // rest. Outside its scope, a peer without credit stages nothing
+            // (its resync covers this pass); unrelated churn leaves it clean.
+            let (staged_keys, budget) = match self.owing_keyed_pass(
+                peer,
+                staged_keys,
+                [
+                    crate::manager::outbound_owing::OwedFamily::IPV4_LABELED,
+                    crate::manager::outbound_owing::OwedFamily::IPV6_LABELED,
+                ],
+                |key| usize::from(matches!(key, Prefix::V6(_))),
+                |key| crate::manager::outbound_owing::OwedKey::Labeled(*key),
+            ) {
+                crate::manager::outbound_owing::KeyedPass::Preflight => {
+                    if self.outbound_preflight_refused(peer) {
+                        continue;
+                    }
+                    (std::borrow::Cow::Borrowed(staged_keys), usize::MAX)
+                }
+                crate::manager::outbound_owing::KeyedPass::Stage { keys, budget } => (keys, budget),
+                crate::manager::outbound_owing::KeyedPass::Skip => continue,
+            };
+            let bounded = budget != usize::MAX;
+            // A key holds at most a withdrawal and an announcement per path.
+            let rows_per_key = if peer_add_path {
+                self.peer_add_path_send_max
+                    .get(&peer)
+                    .copied()
+                    .filter(|send_max| *send_max != u32::MAX)
+                    .and_then(|send_max| usize::try_from(send_max).ok())
+                    .map(|send_max| 2 * send_max)
+            } else {
+                Some(2)
+            };
+            let budget = crate::manager::outbound_owing::pass_budget(
+                staged_keys.len(),
+                rows_per_key,
+                budget,
+            );
+            let staged_keys = staged_keys.as_ref();
             self.note_outbound_staging(peer);
             let orr_ctx = self
                 .peer_orr_vantage
@@ -926,15 +961,26 @@ impl RibManager {
                 policy_stats: &mut *policy_stats,
                 peer_label: &target_peer_label,
             };
-            Self::stage_labeled_routes_with_checkpoint(
-                &context,
-                staged_keys,
-                &mut target,
-                &mut labeled_announce,
-                &mut labeled_withdraw,
-                &mut checkpoint,
-            );
+            let unstaged =
+                crate::manager::outbound_owing::stage_within_budget(staged_keys, budget, |keys| {
+                    let before = labeled_announce.len() + labeled_withdraw.len();
+                    Self::stage_labeled_routes_with_checkpoint(
+                        &context,
+                        keys,
+                        &mut target,
+                        &mut labeled_announce,
+                        &mut labeled_withdraw,
+                        &mut checkpoint,
+                    );
+                    labeled_announce.len() + labeled_withdraw.len() - before
+                });
             crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
+            self.mark_owed(
+                peer,
+                unstaged
+                    .iter()
+                    .map(|key| crate::manager::outbound_owing::OwedKey::Labeled(*key)),
+            );
 
             if (!labeled_announce.is_empty() || !labeled_withdraw.is_empty())
                 && let Err(failure) = self.try_send_and_commit_outbound_update(
@@ -945,7 +991,7 @@ impl RibManager {
                         ..OutboundCommitBatch::default()
                     },
                 )
-                && self.mark_dirty_after_family_send_failure(peer, failure)
+                && self.owing_send_failed(peer, bounded, failure)
             {
                 warn!(%peer, "outbound channel full — labeled update deferred");
             }

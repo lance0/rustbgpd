@@ -804,23 +804,41 @@ impl RibManager {
                 "outbound replay could not admit a complete family",
             ));
         }
-        let mut operation = match self
-            .begin_outbound_operation(peer, families.len() + 1)
-            .and_then(|operation| {
-                if operation.reserved() == families.len() + 1 {
-                    Ok(operation)
-                } else {
-                    Err(OutboundCommitFailure::WriterUnavailable)
+        // One envelope per family, one per family whose owed keys are
+        // absorbed ahead of it (`outbound_owing`), and the terminal.
+        let absorbed = self.owed_absorptions(peer, &families);
+        let envelopes = families.len() + absorbed + 1;
+        let mut operation =
+            match self
+                .begin_outbound_operation(peer, envelopes)
+                .and_then(|operation| {
+                    if operation.reserved() == envelopes {
+                        Ok(operation)
+                    } else {
+                        Err(OutboundCommitFailure::WriterUnavailable)
+                    }
+                }) {
+                Ok(operation) => operation,
+                Err(failure) => {
+                    let _ = self.outbound_commit_failed(peer, failure);
+                    return Err(RibCommandError::internal(
+                        "outbound replay could not admit a complete family",
+                    ));
                 }
-            }) {
-            Ok(operation) => operation,
-            Err(failure) => {
-                let _ = self.outbound_commit_failed(peer, failure);
+            };
+        // Owed keys of the replayed families go first, so the terminal
+        // follows every route the operation covers. Copied, not popped, and
+        // only after acceptance, so a refusal above left them as they were.
+        for &family in &families {
+            if self
+                .absorb_owed_family(peer, family, &mut operation)
+                .is_err()
+            {
                 return Err(RibCommandError::internal(
                     "outbound replay could not admit a complete family",
                 ));
             }
-        };
+        }
         for &(afi, safi) in &families {
             if self.send_route_refresh_response_in(
                 peer,
@@ -1015,6 +1033,9 @@ impl RibManager {
                             .pending_eor
                             .get(&peer)
                             .is_some_and(|families| families.contains(&family)),
+                ) + usize::from(
+                    matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
+                        && self.owes(peer, family),
                 ),
             ) {
                 Ok(operation) => Some(own_operation.insert(operation)),
@@ -1036,7 +1057,18 @@ impl RibManager {
                 }
             }
             None => None,
-            Some(operation) => operation.slot().map(|slot| (Some(operation), Some(slot))),
+            // A peer refresh's markers follow its family's owed keys: they
+            // are absorbed into this operation ahead of the table. A refusal
+            // leaves them owed and defers the answer.
+            Some(operation) => {
+                if matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
+                    && self.absorb_owed_family(peer, family, operation).is_err()
+                {
+                    None
+                } else {
+                    operation.slot().map(|slot| (Some(operation), Some(slot)))
+                }
+            }
         };
         let Some((operation, slot)) = admitted else {
             match replay_kind {
@@ -2576,6 +2608,47 @@ impl RibManager {
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return;
         };
+        // A family that owes keys sends its marker only behind them: one
+        // operation absorbs them, then sends the marker. Refused, or inside
+        // another operation, the marker stays pending without a resync;
+        // the owed-key drain retries it once the latch is free.
+        let owed: Vec<(Afi, Safi)> = ready
+            .iter()
+            .copied()
+            .filter(|&family| self.owes(peer, family))
+            .collect();
+        let mut ready = ready;
+        let mut own_operation = None;
+        let operation = if owed.is_empty() {
+            operation
+        } else if operation.is_some() {
+            self.keep_pending_eor(peer, &mut ready, &owed);
+            operation
+        } else {
+            let envelopes = owed.len() + 1;
+            if let Some(mut absorbing) = self
+                .begin_outbound_operation(peer, envelopes)
+                .ok()
+                .filter(|operation| operation.reserved() == envelopes)
+            {
+                for &family in &owed {
+                    if self
+                        .absorb_owed_family(peer, family, &mut absorbing)
+                        .is_err()
+                    {
+                        self.keep_pending_eor(peer, &mut ready, &[family]);
+                    }
+                }
+                Some(own_operation.insert(absorbing))
+            } else {
+                debug!(%peer, ?owed, "End-of-RIB waits to absorb owed keys: a whole-table update is still live or the channel is full");
+                self.keep_pending_eor(peer, &mut ready, &owed);
+                None
+            }
+        };
+        if ready.is_empty() {
+            return;
+        }
         let evpn_marker = ready.contains(&(Afi::L2Vpn, Safi::Evpn));
         let marker_only = self.evpn_feed_is_current(peer);
         let eor = OutboundRouteUpdate {
@@ -2603,6 +2676,21 @@ impl RibManager {
             }
             self.complete_initial_selection_replay(peer);
             self.retire_completed_initial_group_admitted(peer);
+        }
+    }
+
+    /// Move `families` out of `ready` back to `peer`'s pending End-of-RIB:
+    /// they wait for their owed keys to be absorbed.
+    fn keep_pending_eor(
+        &mut self,
+        peer: PeerId,
+        ready: &mut HashSet<(Afi, Safi)>,
+        families: &[(Afi, Safi)],
+    ) {
+        for family in families {
+            if ready.remove(family) {
+                self.pending_eor.entry(peer).or_default().insert(*family);
+            }
         }
     }
 
@@ -2654,7 +2742,9 @@ impl RibManager {
                             .is_some_and(|owed| owed.contains(family))
                 })
                 .count();
-            match self.begin_outbound_operation(peer, families.len() + markers) {
+            let families_owed: Vec<_> = families.iter().copied().collect();
+            let absorbed = self.owed_absorptions(peer, &families_owed);
+            match self.begin_outbound_operation(peer, families.len() + markers + absorbed) {
                 Ok(operation) => Some(own_operation.insert(operation)),
                 Err(failure) => {
                     let _ = self.outbound_commit_failed(peer, failure);

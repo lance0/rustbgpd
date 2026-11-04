@@ -954,11 +954,14 @@ impl RibManager {
         {
             return;
         }
-        // Preflight: a peer without credit stages nothing (its resync covers
-        // these keys).
-        if self.outbound_preflight_refused(peer) {
+        // The owed-key gate: an owing peer marks the keys; a streaming one
+        // stages as many as its remaining credit holds (at most two rows a
+        // key) and owes the rest. Outside its scope, a peer without credit
+        // stages nothing (its resync covers these keys).
+        let Some((keys, bounded)) = self.owing_evpn_pass(peer, keys) else {
             return;
-        }
+        };
+        let keys = keys.as_ref();
         self.note_outbound_staging(peer);
 
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -1020,7 +1023,7 @@ impl RibManager {
                     ..OutboundCommitBatch::default()
                 },
             )
-            && self.mark_dirty_after_family_send_failure(peer, failure)
+            && self.owing_send_failed(peer, bounded, failure)
         {
             warn!(%peer, "outbound channel full — EVPN update deferred");
         }

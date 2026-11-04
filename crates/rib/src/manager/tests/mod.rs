@@ -1574,6 +1574,7 @@ mod orr;
 mod outbound_commit_accounting;
 mod outbound_credit;
 mod outbound_limit_install;
+mod outbound_owing;
 mod outbound_prefix_limits;
 mod outbound_resync_state;
 mod paged_query;

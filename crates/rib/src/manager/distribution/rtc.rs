@@ -318,10 +318,16 @@ impl RibManager {
                 continue;
             }
 
-            // Preflight: a peer without credit stages nothing (its resync
-            // covers this pass).
-            if self.outbound_preflight_refused(peer) {
-                continue;
+            let whole_pass =
+                self.owing_whole_pass(peer, &[crate::manager::outbound_owing::OwedFamily::RTC]);
+            match whole_pass {
+                crate::manager::outbound_owing::WholePass::Preflight => {
+                    if self.outbound_preflight_refused(peer) {
+                        continue;
+                    }
+                }
+                crate::manager::outbound_owing::WholePass::Stage => {}
+                crate::manager::outbound_owing::WholePass::Skip => continue,
             }
             self.note_outbound_staging(peer);
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -379,7 +385,11 @@ impl RibManager {
                         ..OutboundCommitBatch::default()
                     },
                 )
-                && self.mark_dirty_after_family_send_failure(peer, failure)
+                && self.owing_send_failed(
+                    peer,
+                    whole_pass == crate::manager::outbound_owing::WholePass::Stage,
+                    failure,
+                )
             {
                 warn!(%peer, "outbound channel full — RTC update deferred");
             }

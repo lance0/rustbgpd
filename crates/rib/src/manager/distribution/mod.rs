@@ -8672,6 +8672,7 @@ impl RibManager {
                 evpn_feeds,
                 targets,
                 owned,
+                None,
             );
         };
         // A replay pass, or one whose shared staging refreshes a group's
@@ -8709,6 +8710,28 @@ impl RibManager {
             })
     }
 
+    /// Run one owed-key drain step, absorption or close flush
+    /// ([`super::outbound_owing::OwingDrain`]) through the member body: the
+    /// pass preamble, shared group staging and speculative capture are
+    /// skipped, and only the drain's peer is visited.
+    pub(in crate::manager) fn distribute_owing_with_readiness(
+        &mut self,
+        empty: &HashSet<Prefix>,
+        targets: &HashSet<PeerId>,
+        drain: &mut super::outbound_owing::OwingDrain,
+    ) {
+        self.distribute_changes_with_readiness(
+            empty,
+            empty,
+            false,
+            false,
+            HashMap::new(),
+            Some(targets),
+            true,
+            Some(drain),
+        );
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "distribution loop coordinates dirty peers, forced resync, and all families"
@@ -8726,6 +8749,7 @@ impl RibManager {
         mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
         owned: bool,
+        mut drain: Option<&mut super::outbound_owing::OwingDrain>,
     ) {
         // Clean incremental fanout owns no readiness episode: its work is
         // bounded by the pass. Owned shared preparation and cleanup take one
@@ -8735,18 +8759,24 @@ impl RibManager {
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
 
-        self.record_deferred_unicast(best_changed);
-        self.record_deferred_unicast(all_affected);
-        // Candidate storage has already changed even when selection is held.
-        // Revoke in-flight dependency revisions before filtering held families.
-        self.invalidate_flowspec_dependencies(all_affected);
-        // ADR-0137: re-observe conditions before deferral filtering; a held
-        // family keeps observing while its settle timers stay unarmed. An
-        // applied transition (settle_time 0) marks its attached peers dirty
-        // for the bounded resync.
-        let _ = self.observe_conditional_advertisement_prefixes(
-            best_changed.iter().chain(all_affected.iter()),
-        );
+        // An owed-key drain carries no route change: none of a pass's
+        // preamble side effects apply to it.
+        let draining = drain.is_some();
+        if !draining {
+            self.record_deferred_unicast(best_changed);
+            self.record_deferred_unicast(all_affected);
+            // Candidate storage has already changed even when selection is
+            // held. Revoke in-flight dependency revisions before filtering
+            // held families.
+            self.invalidate_flowspec_dependencies(all_affected);
+            // ADR-0137: re-observe conditions before deferral filtering; a
+            // held family keeps observing while its settle timers stay
+            // unarmed. An applied transition (settle_time 0) marks its
+            // attached peers dirty for the bounded resync.
+            let _ = self.observe_conditional_advertisement_prefixes(
+                best_changed.iter().chain(all_affected.iter()),
+            );
+        }
         let best_changed: HashSet<_> = best_changed
             .iter()
             .inspect(|_| checkpoint())
@@ -8785,6 +8815,7 @@ impl RibManager {
             && self.dirty_peers.is_empty()
             && self.force_outbound_peers.is_empty()
             && evpn_feeds.is_empty()
+            && !draining
         {
             drop(readiness);
             self.finish_readiness_owner(prep_installed);
@@ -8798,16 +8829,19 @@ impl RibManager {
             self.advance_advertised_pages();
         }
 
-        let peers: Vec<PeerId> = self
-            .outbound_peers
-            .keys()
-            .filter(|peer| {
-                targets.is_none_or(|targets| targets.contains(*peer))
-                    || self.dirty_peers.contains(*peer)
-                    || self.force_outbound_peers.contains(*peer)
-            })
-            .copied()
-            .collect();
+        let peers: Vec<PeerId> = match drain.as_deref() {
+            Some(drain) => vec![drain.peer],
+            None => self
+                .outbound_peers
+                .keys()
+                .filter(|peer| {
+                    targets.is_none_or(|targets| targets.contains(*peer))
+                        || self.dirty_peers.contains(*peer)
+                        || self.force_outbound_peers.contains(*peer)
+                })
+                .copied()
+                .collect(),
+        };
         // Pass-scoped export memo: shares post-modification attribute
         // sets and AS_PATH match strings across the whole peer fanout —
         // this outlives the per-peer iteration deliberately, since the
@@ -8823,15 +8857,19 @@ impl RibManager {
         // best).
         let mut speculative_group_admitted = Vec::new();
         for &peer in &peers {
-            if self.grouped_member_of(peer).is_some()
+            if !draining
+                && self.grouped_member_of(peer).is_some()
                 && (self.outbound_channel_full(peer) || self.force_outbound_peers.contains(&peer))
                 && self.capture_group_admitted_keys(peer)
             {
                 speculative_group_admitted.push(peer);
             }
         }
-        let mut group_stage =
-            self.stage_update_groups(&best_changed, &all_affected, &mut export_memo, targets);
+        let mut group_stage = if draining {
+            HashMap::new()
+        } else {
+            self.stage_update_groups(&best_changed, &all_affected, &mut export_memo, targets)
+        };
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
         let mut shared_group_encodes: HashMap<usize, Arc<crate::update::SharedGroupEncode>> =
             HashMap::new();
@@ -8911,13 +8949,17 @@ impl RibManager {
                     {
                         self.set_selection_partial_caught_up(peer, false);
                     }
-                    let is_dirty =
-                        self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer);
+                    // A drain never runs a peer's resync: its callers skip
+                    // dirty and forced peers.
+                    let is_dirty = !draining
+                        && self.dirty_peers.contains(&peer)
+                        && !self.selection_partial_caught_up(peer);
                     // `is_force` peers are dirty-equivalent for prefix enumeration AND
                     // bypass the AdjRibOut equality suppression in the per-prefix
                     // helpers — see `RibUpdate::RefreshPeerOutbound` rationale on
                     // `force_outbound_peers`.
-                    let is_force = self.force_outbound_peers.contains(&peer)
+                    let is_force = !draining
+                        && self.force_outbound_peers.contains(&peer)
                         && !self.selection_partial_caught_up(peer);
                     let evpn_coverage_required =
                         evpn_group_owned || self.has_private_evpn_handoff(peer);
@@ -8946,11 +8988,23 @@ impl RibManager {
                     // force flag for the retry; no drop is counted because
                     // nothing was built.
                     let mut resync_operation = None;
-                    if is_dirty || is_force {
-                        let flush = usize::from(self.pending_eor.contains_key(&peer));
+                    // A whole-family drain is a family-scoped resync: its own
+                    // whole-table operation, unless it joins one (an
+                    // absorption brings a reserved slot).
+                    let drain_whole_operation = drain
+                        .as_deref()
+                        .is_some_and(|drain| drain.whole && drain.slot.is_none());
+                    if is_dirty || is_force || drain_whole_operation {
+                        let flush = usize::from(
+                            (is_dirty || is_force) && self.pending_eor.contains_key(&peer),
+                        );
                         match self.begin_outbound_operation(peer, 1 + flush) {
                             Ok(operation) => resync_operation = Some(operation),
                             Err(failure) => {
+                                if let Some(drain) = drain.as_deref_mut() {
+                                    drain.outcome = Some(Err(failure));
+                                    break 'member;
+                                }
                                 debug!(%peer, reason = failure.as_str(), "outbound resync deferred: channel full or a whole-table update still live");
                                 self.defer_unsent_outbound_pass(
                                     peer,
@@ -8962,7 +9016,8 @@ impl RibManager {
                             }
                         }
                     }
-                    if !is_dirty
+                    if !draining
+                        && !is_dirty
                         && !is_force
                         && self.selection_partial_caught_up(peer)
                         && best_changed.is_empty()
@@ -8977,7 +9032,15 @@ impl RibManager {
                     // and leave it to the resync, as a refused send would. A live
                     // whole-table operation already covers the peer's table, so
                     // then the ladder decides by the rows the pass holds.
+                    // An ungrouped peer's unicast takes the owed-key gate
+                    // instead (`outbound_owing`), below.
+                    let owing_unicast = !draining
+                        && resync_operation.is_none()
+                        && member_of.is_none()
+                        && self.owing_peer_in_scope(peer);
                     if resync_operation.is_none()
+                        && !draining
+                        && !owing_unicast
                         && member_of.is_none()
                         && !evpn_feeds.contains_key(&peer)
                         && self.outbound_credit_exhausted(peer)
@@ -8988,11 +9051,19 @@ impl RibManager {
                         self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
                         break 'member;
                     }
-                    if resync_operation.is_none() && member_of.is_none() {
+                    if resync_operation.is_none() && member_of.is_none() && !owing_unicast {
                         self.note_outbound_staging(peer);
                     }
                     let resync = is_dirty || is_force;
-                    installed = resync && self.begin_replacement_readiness();
+                    // The family a drain enumerates whole, as a resync would.
+                    let drain_whole = drain
+                        .as_deref()
+                        .filter(|drain| drain.whole)
+                        .map(|drain| drain.family);
+                    let whole =
+                        |family: super::outbound_owing::OwedFamily| drain_whole == Some(family);
+                    installed =
+                        (resync || drain_whole.is_some()) && self.begin_replacement_readiness();
                     let readiness = self.replacement_readiness.clone();
                     let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
                     let private_evpn_recovery = (resync && !evpn_group_owned)
@@ -9025,7 +9096,11 @@ impl RibManager {
                         bench_per_client_best_resync.then(std::time::Instant::now);
                     let group_resync_assembles =
                         resync && member_of.is_some_and(|gid| self.group_ribs.contains_key(&gid));
-                    let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
+                    let unicast_whole = whole(super::outbound_owing::OwedFamily::IPV4_UNICAST)
+                        || whole(super::outbound_owing::OwedFamily::IPV6_UNICAST);
+                    let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync
+                        || unicast_whole
+                    {
                         let mut capacity = self.loc_rib.len();
                         if let Some(gid) = member_of {
                             if let Some(group) = self.group_ribs.get(&gid) {
@@ -9150,7 +9225,16 @@ impl RibManager {
                         if let Some(history) = self.policy_filtered_routes.get(&peer) {
                             all.extend(history.keys().inspect(|_| checkpoint()).copied());
                         }
+                        // A whole-family drain enumerates one AFI.
+                        if !resync {
+                            all.retain(|prefix| {
+                                drain_whole
+                                    == Some(super::outbound_owing::OwedFamily::unicast_of(prefix))
+                            });
+                        }
                         Cow::Owned(all)
+                    } else if let Some(drain) = drain.as_deref_mut() {
+                        Cow::Owned(std::mem::take(&mut drain.unicast))
                     } else if let Some(gid) = member_of {
                         // Grouped peers have no ORR / Add-Path extras (both are
                         // grouping disqualifiers). A plain group's deltas cover
@@ -9230,7 +9314,10 @@ impl RibManager {
                             }
                         }
                     };
+                    let flowspec_whole = whole(super::outbound_owing::OwedFamily::IPV4_FLOWSPEC)
+                        || whole(super::outbound_owing::OwedFamily::IPV6_FLOWSPEC);
                     let mut effective_flowspec_rules: HashSet<crate::route::FlowSpecKey> = if resync
+                        || flowspec_whole
                     {
                         self.replacement_checkpoint(true);
                         let mut all: HashSet<crate::route::FlowSpecKey> = HashSet::with_capacity(
@@ -9257,12 +9344,23 @@ impl RibManager {
                         }
                         // No deferral filter: a deferred FlowSpec Loc-RIB
                         // holds only injected rules, which resync like any other.
+                        if !resync {
+                            all.retain(|key| {
+                                drain_whole
+                                    == super::outbound_owing::OwedFamily::of((
+                                        key.afi,
+                                        Safi::FlowSpec,
+                                    ))
+                            });
+                        }
                         all
                     } else {
                         HashSet::new()
                     };
 
-                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync {
+                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync
+                        || whole(super::outbound_owing::OwedFamily::EVPN)
+                    {
                         self.replacement_checkpoint(true);
                         let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::with_capacity(
                             self.loc_rib.evpn_len()
@@ -9294,6 +9392,8 @@ impl RibManager {
                             super::retire_hash_set(&mut all, &mut || checkpoint());
                         }
                         all
+                    } else if let Some(drain) = drain.as_deref_mut() {
+                        std::mem::take(&mut drain.evpn)
                     } else {
                         HashSet::new()
                     };
@@ -9303,7 +9403,9 @@ impl RibManager {
                     } else {
                         None
                     };
-                    let mut effective_bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = if resync {
+                    let mut effective_bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = if resync
+                        || whole(super::outbound_owing::OwedFamily::BGP_LS)
+                    {
                         self.replacement_checkpoint(true);
                         let mut all: HashSet<crate::route::BgpLsRouteKey> = HashSet::with_capacity(
                             self.loc_rib.bgpls_len()
@@ -9386,7 +9488,10 @@ impl RibManager {
                                         })
                                     })
                         });
-                    let mut effective_l3vpn_keys: FastSet<rustbgpd_wire::VpnRouteKey> = if resync
+                    let vpn_whole = whole(super::outbound_owing::OwedFamily::VPNV4)
+                        || whole(super::outbound_owing::OwedFamily::VPNV6);
+                    let mut effective_l3vpn_keys: FastSet<rustbgpd_wire::VpnRouteKey> = if (resync
+                        || vpn_whole)
                         && vpn_grouped.is_none()
                     {
                         self.replacement_checkpoint(true);
@@ -9457,13 +9562,20 @@ impl RibManager {
                                 rustbgpd_wire::VpnAddressFamily::V6 => (Afi::Ipv6, Safi::MplsVpn),
                             };
                             !self.selection_deferred(family)
+                                && (resync
+                                    || drain_whole
+                                        == Some(super::outbound_owing::OwedFamily::vpn_of(key)))
                         });
                         all
+                    } else if let Some(drain) = drain.as_deref_mut() {
+                        std::mem::take(&mut drain.vpn)
                     } else {
                         FastSet::default()
                     };
 
-                    let mut effective_labeled_keys: FastSet<Prefix> = if resync {
+                    let labeled_whole = whole(super::outbound_owing::OwedFamily::IPV4_LABELED)
+                        || whole(super::outbound_owing::OwedFamily::IPV6_LABELED);
+                    let mut effective_labeled_keys: FastSet<Prefix> = if resync || labeled_whole {
                         self.replacement_checkpoint(true);
                         let mut all = FastSet::with_capacity_and_hasher(
                             self.loc_rib.labeled_len()
@@ -9516,13 +9628,22 @@ impl RibManager {
                                 Prefix::V6(_) => Afi::Ipv6,
                             };
                             !self.selection_deferred((afi, Safi::LabeledUnicast))
+                                && (resync
+                                    || drain_whole
+                                        == Some(super::outbound_owing::OwedFamily::labeled_of(
+                                            prefix,
+                                        )))
                         });
                         all
+                    } else if let Some(drain) = drain.as_deref_mut() {
+                        std::mem::take(&mut drain.labeled)
                     } else {
                         FastSet::default()
                     };
 
-                    let mut effective_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = if resync {
+                    let mut effective_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = if resync
+                        || whole(super::outbound_owing::OwedFamily::RTC)
+                    {
                         self.replacement_checkpoint(true);
                         let mut all: HashSet<crate::route::RtcRibRouteKey> = HashSet::with_capacity(
                             self.loc_rib.rtc_len()
@@ -9558,6 +9679,70 @@ impl RibManager {
                         );
                     }
 
+                    // The owed-key gate for an ungrouped peer's unicast (P1):
+                    // an owing or whole AFI stages nothing and marks its keys
+                    // (as staging would filter them); a streaming AFI stages
+                    // complete keys within the peer's remaining credit and
+                    // owes the rest. A drain step brings its own budget.
+                    let mut unicast_budget = drain
+                        .as_deref()
+                        .filter(|drain| !drain.whole && drain.family.is_unicast())
+                        .map(|drain| drain.budget)
+                        .filter(|budget| *budget != usize::MAX);
+                    let mut owing_streamed = false;
+                    if owing_unicast && !effective_prefixes.is_empty() {
+                        use super::outbound_owing::{OwedFamily, OwedKey, OwingGate};
+                        let gates = [
+                            self.owing_gate(peer, OwedFamily::IPV4_UNICAST),
+                            self.owing_gate(peer, OwedFamily::IPV6_UNICAST),
+                        ];
+                        if gates.iter().any(|gate| *gate != OwingGate::UNBOUNDED) {
+                            let budget = gates
+                                .iter()
+                                .filter_map(|gate| match gate {
+                                    OwingGate::Stream { row_budget } => Some(*row_budget),
+                                    _ => None,
+                                })
+                                .min();
+                            if gates
+                                .iter()
+                                .any(|gate| !matches!(gate, OwingGate::Stream { .. }))
+                            {
+                                let sendable = self.peer_sendable_families.get(&peer);
+                                let orf = self.peer_orf_pending.get(&peer);
+                                let mut kept = HashSet::with_capacity(effective_prefixes.len());
+                                let mut marks = Vec::new();
+                                for prefix in effective_prefixes.iter() {
+                                    checkpoint();
+                                    let family = prefix_family(prefix);
+                                    match gates[usize::from(matches!(prefix, Prefix::V6(_)))] {
+                                        OwingGate::Stream { .. } => {
+                                            kept.insert(*prefix);
+                                        }
+                                        OwingGate::Owe
+                                            if sendable.is_some_and(|families| {
+                                                families.contains(&family)
+                                            }) && !orf
+                                                .is_some_and(|gated| gated.contains(&family)) =>
+                                        {
+                                            marks.push(OwedKey::Unicast(*prefix));
+                                        }
+                                        OwingGate::Owe | OwingGate::Whole => {}
+                                    }
+                                }
+                                self.mark_owed(peer, marks);
+                                if let Cow::Owned(prefixes) = &mut effective_prefixes {
+                                    super::retire_hash_set(prefixes, &mut || checkpoint());
+                                }
+                                effective_prefixes = Cow::Owned(kept);
+                            }
+                            unicast_budget = budget;
+                            owing_streamed = budget.is_some();
+                        }
+                    }
+                    if owing_unicast && !effective_prefixes.is_empty() {
+                        self.note_outbound_staging(peer);
+                    }
                     if !installed
                         && self.clean_member_rejection_work(peer, member_of, &effective_prefixes)
                     {
@@ -9622,6 +9807,14 @@ impl RibManager {
                         && complete_evpn_feed.is_none()
                         && private_evpn_feed_seal.is_none()
                     {
+                        if let Some(drain) = drain.as_deref_mut() {
+                            drain.outcome = Some(Ok(()));
+                        }
+                        // The resync covered every family it enumerated: owed
+                        // keys of those are settled before their markers go.
+                        if resync {
+                            self.owing_resync_covered(peer);
+                        }
                         // An empty force/dirty resync replaces this peer's complete
                         // export view, so an empty filtered inventory is
                         // authoritative. An uninvolved sibling in the same
@@ -10039,14 +10232,27 @@ impl RibManager {
                     } else {
                         &empty_prefixes
                     };
+                    // Rows staged so far, counted per complete key against the
+                    // owed-key budget; keys past it stay owed.
+                    let mut staged_rows = 0usize;
+                    let mut unstaged_prefixes: Vec<Prefix> = Vec::new();
+                    let mut drain_unstaged: Vec<super::outbound_owing::OwedKey> = Vec::new();
                     for prefix in staging_prefixes {
                         checkpoint();
+                        if unicast_budget.is_some_and(|budget| staged_rows >= budget) {
+                            unstaged_prefixes.push(*prefix);
+                            continue;
+                        }
                         let family = prefix_family(prefix);
                         // RFC 5291 §6 gate: suppress this family's advertisement (incl.
                         // ongoing churn) until the peer's first ROUTE-REFRESH lifts it.
                         if orf_gated.contains(&family) {
+                            if draining {
+                                unstaged_prefixes.push(*prefix);
+                            }
                             continue;
                         }
+                        let rows_before = unicast.announce.len() + unicast.withdraw.len();
                         let orf = orf_filters.as_ref().and_then(|m| m.get(&family));
                         let prefix_send_max = if peer_add_path_send_families.contains(&family) {
                             peer_add_path_send_limits
@@ -10237,9 +10443,19 @@ impl RibManager {
                                 &readiness,
                             );
                         }
+                        staged_rows = staged_rows.saturating_add(
+                            (unicast.announce.len() + unicast.withdraw.len())
+                                .saturating_sub(rows_before),
+                        );
                     }
 
-                    if resync && !effective_flowspec_rules.is_empty() {
+                    // A keyed drain stages its other families' keys within its
+                    // budget too; an absorption or close flush is unbounded.
+                    let drain_budget = drain
+                        .as_deref()
+                        .filter(|drain| !drain.whole)
+                        .map_or(usize::MAX, |drain| drain.budget);
+                    if (resync || flowspec_whole) && !effective_flowspec_rules.is_empty() {
                         Self::stage_flowspec_rules_with_checkpoint(
                             loc_rib,
                             rib_out,
@@ -10276,32 +10492,47 @@ impl RibManager {
                         evpn_announce = feed.announce;
                         evpn_withdraw = feed.withdraw;
                         evpn_complete_feed = Some(feed.seal);
-                    } else if resync && !effective_evpn_keys.is_empty() && !evpn_group_owned {
-                        Self::stage_evpn_routes_with_checkpoint(
-                            loc_rib,
-                            rib_out,
-                            &self.peer_is_rr_client,
+                    } else if !effective_evpn_keys.is_empty() && !evpn_group_owned {
+                        // Ordinary passes leave the set empty: only a resync or
+                        // a drain stages here.
+                        let unstaged = super::outbound_owing::stage_within_budget(
                             &effective_evpn_keys,
-                            &mut crate::manager::distribution::ExportTarget::Peer {
-                                peer,
-                                peer_asn: target_peer_asn,
-                                peer_group: target_peer_group,
-                                metrics: &metrics,
-                                policy_stats,
-                                peer_label: &target_peer_label,
+                            drain_budget,
+                            |keys| {
+                                let before = evpn_announce.len() + evpn_withdraw.len();
+                                Self::stage_evpn_routes_with_checkpoint(
+                                    loc_rib,
+                                    rib_out,
+                                    &self.peer_is_rr_client,
+                                    keys,
+                                    &mut crate::manager::distribution::ExportTarget::Peer {
+                                        peer,
+                                        peer_asn: target_peer_asn,
+                                        peer_group: target_peer_group,
+                                        metrics: &metrics,
+                                        policy_stats: &mut *policy_stats,
+                                        peer_label: &target_peer_label,
+                                    },
+                                    target_is_ebgp,
+                                    interpret_rfc1997,
+                                    target_is_rr_client,
+                                    cluster_id,
+                                    sendable.as_ref(),
+                                    llgr.as_ref(),
+                                    export_pol.as_ref(),
+                                    rtc_filter.as_ref(),
+                                    &mut evpn_announce,
+                                    &mut evpn_withdraw,
+                                    is_force,
+                                    &mut || checkpoint(),
+                                );
+                                evpn_announce.len() + evpn_withdraw.len() - before
                             },
-                            target_is_ebgp,
-                            interpret_rfc1997,
-                            target_is_rr_client,
-                            cluster_id,
-                            sendable.as_ref(),
-                            llgr.as_ref(),
-                            export_pol.as_ref(),
-                            rtc_filter.as_ref(),
-                            &mut evpn_announce,
-                            &mut evpn_withdraw,
-                            is_force,
-                            &mut || checkpoint(),
+                        );
+                        drain_unstaged.extend(
+                            unstaged
+                                .into_iter()
+                                .map(super::outbound_owing::OwedKey::Evpn),
                         );
                         if let Some(handle) = private_evpn_recovery
                             && let Ok(Some(proof)) = self.evpn_recovery.proof(handle)
@@ -10326,7 +10557,7 @@ impl RibManager {
                     }
                     let complete_evpn_producer = evpn_complete_feed.is_some();
 
-                    if resync && !effective_bgpls_keys.is_empty() {
+                    if !effective_bgpls_keys.is_empty() {
                         Self::stage_bgpls_routes_with_checkpoint(
                             loc_rib,
                             rib_out,
@@ -10374,46 +10605,72 @@ impl RibManager {
                     // A VPN-staging group member's VPN resync was assembled from
                     // the group table above — no per-peer staging, no policy
                     // re-evaluation.
-                    if resync && vpn_grouped.is_none() && !effective_l3vpn_keys.is_empty() {
-                        let mut target = ExportTarget::Peer {
-                            peer,
-                            peer_asn: target_peer_asn,
-                            peer_group: target_peer_group,
-                            metrics: &metrics,
-                            policy_stats: &mut *policy_stats,
-                            peer_label: &target_peer_label,
-                        };
-                        Self::stage_vpn_routes_with_checkpoint(
-                            &vpn_labeled_context,
+                    if vpn_grouped.is_none() && !effective_l3vpn_keys.is_empty() {
+                        let unstaged = super::outbound_owing::stage_within_budget(
                             &effective_l3vpn_keys,
-                            &mut target,
-                            rtc_filter.as_ref(),
-                            &mut vpn_announce,
-                            &mut vpn_withdraw,
-                            &mut || checkpoint(),
+                            drain_budget,
+                            |keys| {
+                                let before = vpn_announce.len() + vpn_withdraw.len();
+                                let mut target = ExportTarget::Peer {
+                                    peer,
+                                    peer_asn: target_peer_asn,
+                                    peer_group: target_peer_group,
+                                    metrics: &metrics,
+                                    policy_stats: &mut *policy_stats,
+                                    peer_label: &target_peer_label,
+                                };
+                                Self::stage_vpn_routes_with_checkpoint(
+                                    &vpn_labeled_context,
+                                    keys,
+                                    &mut target,
+                                    rtc_filter.as_ref(),
+                                    &mut vpn_announce,
+                                    &mut vpn_withdraw,
+                                    &mut || checkpoint(),
+                                );
+                                vpn_announce.len() + vpn_withdraw.len() - before
+                            },
+                        );
+                        drain_unstaged.extend(
+                            unstaged
+                                .into_iter()
+                                .map(super::outbound_owing::OwedKey::Vpn),
                         );
                     }
 
-                    if resync && !effective_labeled_keys.is_empty() {
-                        let mut target = ExportTarget::Peer {
-                            peer,
-                            peer_asn: target_peer_asn,
-                            peer_group: target_peer_group,
-                            metrics: &metrics,
-                            policy_stats: &mut *policy_stats,
-                            peer_label: &target_peer_label,
-                        };
-                        Self::stage_labeled_routes_with_checkpoint(
-                            &vpn_labeled_context,
+                    if !effective_labeled_keys.is_empty() {
+                        let unstaged = super::outbound_owing::stage_within_budget(
                             &effective_labeled_keys,
-                            &mut target,
-                            &mut labeled_announce,
-                            &mut labeled_withdraw,
-                            &mut || checkpoint(),
+                            drain_budget,
+                            |keys| {
+                                let before = labeled_announce.len() + labeled_withdraw.len();
+                                let mut target = ExportTarget::Peer {
+                                    peer,
+                                    peer_asn: target_peer_asn,
+                                    peer_group: target_peer_group,
+                                    metrics: &metrics,
+                                    policy_stats: &mut *policy_stats,
+                                    peer_label: &target_peer_label,
+                                };
+                                Self::stage_labeled_routes_with_checkpoint(
+                                    &vpn_labeled_context,
+                                    keys,
+                                    &mut target,
+                                    &mut labeled_announce,
+                                    &mut labeled_withdraw,
+                                    &mut || checkpoint(),
+                                );
+                                labeled_announce.len() + labeled_withdraw.len() - before
+                            },
+                        );
+                        drain_unstaged.extend(
+                            unstaged
+                                .into_iter()
+                                .map(super::outbound_owing::OwedKey::Labeled),
                         );
                     }
 
-                    if resync && !effective_rtc_keys.is_empty() {
+                    if !effective_rtc_keys.is_empty() {
                         Self::stage_rtc_routes_with_checkpoint(
                             loc_rib,
                             rib_out,
@@ -10514,6 +10771,80 @@ impl RibManager {
                         super::bench_support::bench_record_per_client_best_staging(
                             effective_prefixes.len(),
                             started.elapsed(),
+                        );
+                    }
+                    // Close flush (`BeginClose`): withdrawals go, with the
+                    // announcements of keys they move (an Add-Path or RTBH
+                    // move); a key that only announces stays owed.
+                    if drain.as_deref().is_some_and(|drain| drain.close) {
+                        let withdrawn: HashSet<Prefix> =
+                            unicast.withdraw.iter().map(|(prefix, _)| *prefix).collect();
+                        let announce = std::mem::take(&mut unicast.announce);
+                        let actions = std::mem::take(&mut unicast.next_hop_override);
+                        for (route, action) in announce.into_iter().zip(actions) {
+                            if withdrawn.contains(&route.prefix) {
+                                unicast.announce.push(route);
+                                unicast.next_hop_override.push(action);
+                            } else {
+                                unstaged_prefixes.push(route.prefix);
+                            }
+                        }
+                        let withdrawn: HashSet<_> = evpn_withdraw.iter().copied().collect();
+                        evpn_announce.retain(|route| {
+                            let moved = withdrawn.contains(&route.key());
+                            if !moved {
+                                drain_unstaged
+                                    .push(super::outbound_owing::OwedKey::Evpn(route.key()));
+                            }
+                            moved
+                        });
+                        let withdrawn: HashSet<_> =
+                            vpn_withdraw.iter().map(|key| key.nlri_key).collect();
+                        vpn_announce.retain(|route| {
+                            let key = route.key().nlri_key;
+                            let moved = withdrawn.contains(&key);
+                            if !moved {
+                                drain_unstaged.push(super::outbound_owing::OwedKey::Vpn(key));
+                            }
+                            moved
+                        });
+                        let withdrawn: HashSet<_> =
+                            labeled_withdraw.iter().map(|key| key.prefix).collect();
+                        labeled_announce.retain(|route| {
+                            let prefix = route.key().prefix;
+                            let moved = withdrawn.contains(&prefix);
+                            if !moved {
+                                drain_unstaged
+                                    .push(super::outbound_owing::OwedKey::Labeled(prefix));
+                            }
+                            moved
+                        });
+                        fs_announce.retain(|route| fs_withdraw.contains(&route.selection_key()));
+                        bgpls_announce.retain(|route| bgpls_withdraw.contains(&route.key()));
+                        rtc_announce.retain(|route| rtc_withdraw.contains(&route.key()));
+                    }
+                    // Keys left unstaged stay owed: a drain re-inserts them,
+                    // an ordinary pass marks them, and either way they leave
+                    // this pass's reconciliation scope.
+                    if !unstaged_prefixes.is_empty() {
+                        let prefixes = effective_prefixes.to_mut();
+                        for prefix in &unstaged_prefixes {
+                            prefixes.remove(prefix);
+                        }
+                    }
+                    if let Some(drain) = drain.as_deref_mut() {
+                        drain.unstaged.extend(
+                            unstaged_prefixes
+                                .drain(..)
+                                .map(super::outbound_owing::OwedKey::Unicast),
+                        );
+                        drain.unstaged.append(&mut drain_unstaged);
+                    } else if !unstaged_prefixes.is_empty() {
+                        self.mark_owed(
+                            peer,
+                            unstaged_prefixes
+                                .drain(..)
+                                .map(super::outbound_owing::OwedKey::Unicast),
                         );
                     }
                     // The outbound payload: the group-shared Arc for a covered
@@ -10748,9 +11079,14 @@ impl RibManager {
                                     labeled_withdraw,
                                     rtc_announce,
                                     rtc_withdraw,
-                                    slot: resync_operation
-                                        .as_mut()
-                                        .and_then(crate::outbound_credit::OutboundOperation::slot),
+                                    slot: drain
+                                        .as_deref_mut()
+                                        .and_then(|drain| drain.slot.take())
+                                        .or_else(|| {
+                                            resync_operation.as_mut().and_then(
+                                                crate::outbound_credit::OutboundOperation::slot,
+                                            )
+                                        }),
                                     ..OutboundCommitBatch::with_unicast(announce, nh_override_flags)
                                 },
                                 group_prior,
@@ -10769,7 +11105,13 @@ impl RibManager {
                                 &effective_prefixes,
                                 &current_policy_filtered_routes,
                             );
+                            if let Some(drain) = drain.as_deref_mut() {
+                                drain.outcome = Some(Ok(()));
+                            }
                             if resync {
+                                // Before any marker below: the resync covered
+                                // every owed key of the families it enumerated.
+                                self.owing_resync_covered(peer);
                                 info!(
                                     %peer,
                                     announced = announced_count,
@@ -10816,13 +11158,24 @@ impl RibManager {
                                 }
                             }
                         } else if let Err(failure) = commit {
-                            warn!(%peer, reason = failure.as_str(), "outbound update not sent — marking dirty for resync");
-                            self.defer_unsent_outbound_pass(
-                                peer,
-                                member_of,
-                                &group_stage,
-                                &checkpoint,
-                            );
+                            if let Some(drain) = drain.as_deref_mut() {
+                                // The drain re-owes or escalates; it never
+                                // takes a pass's dirty path.
+                                drain.outcome = Some(Err(failure));
+                            } else {
+                                if owing_streamed
+                                    && failure == super::outbound_credit::CREDIT_REFUSAL
+                                {
+                                    self.note_owing_credit_fallback();
+                                }
+                                warn!(%peer, reason = failure.as_str(), "outbound update not sent — marking dirty for resync");
+                                self.defer_unsent_outbound_pass(
+                                    peer,
+                                    member_of,
+                                    &group_stage,
+                                    &checkpoint,
+                                );
+                            }
                         }
                     } else {
                         super::retire_vec(&mut unicast.withdraw, &mut || checkpoint());
@@ -10846,7 +11199,11 @@ impl RibManager {
                             &effective_prefixes,
                             &current_policy_filtered_routes,
                         );
+                        if let Some(drain) = drain.as_deref_mut() {
+                            drain.outcome = Some(Ok(()));
+                        }
                         if resync {
+                            self.owing_resync_covered(peer);
                             // Resync triggered but no diff — already in sync.
                             debug!(%peer, "outbound routes unchanged after resync");
                             let evpn_covered = !evpn_coverage_required

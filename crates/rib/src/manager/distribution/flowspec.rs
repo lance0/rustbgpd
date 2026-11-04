@@ -721,11 +721,32 @@ impl RibManager {
                 continue;
             }
 
-            // Preflight, once the pass touches a family the peer negotiated:
-            // a peer without credit stages nothing (its resync covers this
-            // pass); unrelated churn leaves it clean.
-            if self.outbound_preflight_refused(peer) {
-                continue;
+            let whole_pass = self.owing_whole_pass(
+                peer,
+                &[Afi::Ipv4, Afi::Ipv6]
+                    .into_iter()
+                    .filter(|afi| {
+                        changed_keys.iter().any(|key| key.afi == *afi)
+                            && sendable.as_ref().is_some_and(|families| {
+                                families.contains(&(*afi, rustbgpd_wire::Safi::FlowSpec))
+                            })
+                    })
+                    .filter_map(|afi| {
+                        crate::manager::outbound_owing::OwedFamily::of((
+                            afi,
+                            rustbgpd_wire::Safi::FlowSpec,
+                        ))
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            match whole_pass {
+                crate::manager::outbound_owing::WholePass::Preflight => {
+                    if self.outbound_preflight_refused(peer) {
+                        continue;
+                    }
+                }
+                crate::manager::outbound_owing::WholePass::Stage => {}
+                crate::manager::outbound_owing::WholePass::Skip => continue,
             }
             self.note_outbound_staging(peer);
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -782,7 +803,11 @@ impl RibManager {
                         ..OutboundCommitBatch::default()
                     },
                 )
-                && self.mark_dirty_after_family_send_failure(peer, failure)
+                && self.owing_send_failed(
+                    peer,
+                    whole_pass == crate::manager::outbound_owing::WholePass::Stage,
+                    failure,
+                )
             {
                 warn!(%peer, "outbound channel full — FlowSpec update deferred");
             }
