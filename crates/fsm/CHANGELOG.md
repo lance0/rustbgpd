@@ -7,9 +7,9 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 - Move to wire `0.28.0` for IPv4 VPN FlowSpec (`Safi::FlowSpecVpn`). A
   configured `(Afi::Ipv4, Safi::FlowSpecVpn)` family is advertised and
-  negotiated like any other; Add-Path is never advertised for it, and it is
-  not yet in the Graceful Restart family set. There is no state-machine
-  change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These crate
+  negotiated like any other; Add-Path is never advertised for it, and
+  `graceful_restart_preserves_family` includes it, so it joins the Graceful
+  Restart and LLGR capability families. There is no state-machine change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These crate
   versions are not published by this change.
 
 ## 0.14.0 - 2026-11-01
