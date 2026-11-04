@@ -109,11 +109,13 @@ def parse_folded(path: Path) -> dict[str, int]:
             raise ValueError(f"{path}:{line_number}: invalid sample count {count_text!r}") from error
         if count <= 0 or count > MAX_U64:
             raise ValueError(f"{path}:{line_number}: sample count must fit positive u64")
+        # The in-process sampler records a sample it could not unwind as an
+        # empty stack or an empty frame. Such a sample has no phase marker, so
+        # it counts as "other" and the profile's totals stay exact.
         frames = stack.split(";") if stack else []
-        if not frames or any(not frame for frame in frames):
-            raise ValueError(f"{path}:{line_number}: stack frames must not be empty")
         for frame in frames:
-            validate_encoded_frame(frame, path, line_number)
+            if frame:
+                validate_encoded_frame(frame, path, line_number)
         key = (thread, tuple(frames))
         if previous_key is not None and key <= previous_key:
             raise ValueError(f"{path}:{line_number}: folded rows must be unique and sorted")
