@@ -3110,6 +3110,71 @@ async fn failback_survivor_without_enhanced_refresh_is_not_left_awaiting_refresh
     handle.await.unwrap();
 }
 
+/// Transport never asks a peer to refresh IPv4 VPN `FlowSpec` (received
+/// rules are discarded), so a failback survivor never produces the family's
+/// `BoRR`/`EoRR` pair. The family is excluded at failback and its End-of-RIB
+/// released at once, not held until the deferral timer.
+#[tokio::test]
+async fn failback_excludes_a_family_transport_never_refreshes() {
+    const VPN_FLOWSPEC: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpecVpn);
+    let survivor = peer(1);
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_mins(1),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: survivor,
+                families: vec![VPN_FLOWSPEC],
+            }],
+        });
+    let handle = tokio::spawn(manager.run());
+
+    let (survivor_tx, mut survivor_rx) = mpsc::channel(16);
+    stage_gr_context_with(&tx, survivor, 11, false, vec![VPN_FLOWSPEC]).await;
+    tx.send(peer_up_with_families(
+        survivor,
+        11,
+        survivor_tx,
+        vec![VPN_FLOWSPEC],
+    ))
+    .await
+    .unwrap();
+    let (replacement_tx, _replacement_rx) = mpsc::channel(8);
+    stage_gr_context_with(&tx, survivor, 12, false, vec![VPN_FLOWSPEC]).await;
+    tx.send(peer_up_with_families(
+        survivor,
+        12,
+        replacement_tx,
+        vec![VPN_FLOWSPEC],
+    ))
+    .await
+    .unwrap();
+    tx.send(RibUpdate::PeerDown {
+        peer: survivor,
+        session_id: 12,
+    })
+    .await
+    .unwrap();
+
+    let released = query_state(&tx, survivor).await;
+    assert_eq!(released.selection_deferral[0].waiter_state, "excluded");
+    assert!(
+        !released.selection_deferral[0].active,
+        "an unrefreshable family convergence-held the gate"
+    );
+    let mut saw_eor = false;
+    while let Ok(update) = survivor_rx.try_recv() {
+        saw_eor |= update.end_of_rib.contains(&VPN_FLOWSPEC);
+    }
+    assert!(
+        saw_eor,
+        "release must deliver the family EoR to the survivor"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[test]
 fn release_sends_single_eor_to_refresh_deferred_peer() {
     let source = peer(1);

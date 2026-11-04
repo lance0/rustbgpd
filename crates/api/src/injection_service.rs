@@ -279,8 +279,8 @@ const DEFAULT_LEASED_KEYS_PAGE_SIZE: usize = 100;
 /// daemon incarnation and owner generation:
 /// `t1:<incarnation>:<sequence, or w<watermark> without a live lease>:<key>`,
 /// where the key is
-/// `u:<addr>/<len>:<path_id>` or `f:<afi>:<hex NLRI>`. Clients treat it as
-/// opaque.
+/// `u:<addr>/<len>:<path_id>` or `f:<afi>:<hex NLRI>`, with `:r<hex RD>`
+/// appended for an IPv4 VPN `FlowSpec` key. Clients treat it as opaque.
 fn leased_keys_token(owner: &str, page: &LeasedKeysPage, cursor: &InjectedKeyCursor) -> String {
     let sequence = page.generation.map_or_else(
         || format!("w{}", page.watermark),

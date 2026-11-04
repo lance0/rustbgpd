@@ -731,7 +731,11 @@ impl SelectionDeferral {
     /// a Restart-State or non-GR family is excluded, and a survivor that did
     /// not negotiate enhanced route refresh (RFC 7313) is excluded too — it
     /// will never produce the `BoRR`/`EoRR` pair, so `AwaitingRefresh` would
-    /// convergence-hold the family for the entire deferral window.
+    /// convergence-hold the family for the entire deferral window. A family
+    /// transport never asks to refresh ([`requests_route_refresh`]) is
+    /// excluded for the same reason.
+    ///
+    /// [`requests_route_refresh`]: crate::route::requests_route_refresh
     ///
     /// `Some` means at least one active family was classified; the contained
     /// transitions stage any family whose ordinary waiters are already done.
@@ -765,6 +769,7 @@ impl SelectionDeferral {
             let state = if peer_restart_state
                 || !peer_gr_families.contains(&family)
                 || !peer_enhanced_refresh
+                || !crate::route::requests_route_refresh(family)
             {
                 WaiterState::Excluded { session_id }
             } else {

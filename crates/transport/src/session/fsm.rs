@@ -1195,7 +1195,8 @@ impl PeerSession {
                         .iter()
                         .map(|family| (family.afi, family.safi))
                         .collect();
-                    let peer_enhanced_refresh = neg.peer_enhanced_route_refresh;
+                    let peer_enhanced_refresh =
+                        neg.peer_route_refresh && neg.peer_enhanced_route_refresh;
                     let peer_llgr_families = if neg.peer_llgr_capable {
                         neg.peer_llgr_families.clone()
                     } else {

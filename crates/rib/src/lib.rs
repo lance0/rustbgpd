@@ -100,7 +100,7 @@ pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
     FibInstallNextHop, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey, LabeledRibRoute,
     LabeledRibRouteKey, NextHopScope, Route, RouteOrigin, RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
-    VpnRibRouteKey,
+    VpnRibRouteKey, requests_route_refresh,
 };
 pub use update::{
     AdjRibInRpkiCounts, AdjRibOutCounts, BestPathCandidate, BestRoutesPage, BgpLsRouteQueryKey,

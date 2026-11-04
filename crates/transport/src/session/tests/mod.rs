@@ -2185,6 +2185,37 @@ async fn real_establishment_shares_fsm_arc_until_transport_finishes_teardown() {
 }
 
 #[tokio::test]
+async fn failback_refresh_context_requires_basic_and_enhanced_capabilities() {
+    for basic in [false, true] {
+        for enhanced in [false, true] {
+            let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+            let mut negotiated = negotiated_session(65002, false);
+            negotiated.peer_route_refresh = basic;
+            negotiated.peer_enhanced_route_refresh = enhanced;
+            session
+                .execute_actions(vec![Action::SessionEstablished(Box::new(negotiated))])
+                .await;
+            let context = std::iter::from_fn(|| rib_rx.try_recv().ok()).find_map(|update| {
+                if let RibUpdate::SetPeerGracefulRestartContext {
+                    peer_enhanced_refresh,
+                    ..
+                } = update
+                {
+                    Some(peer_enhanced_refresh)
+                } else {
+                    None
+                }
+            });
+            assert_eq!(
+                context,
+                Some(basic && enhanced),
+                "basic={basic}, enhanced={enhanced}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn direct_action_fallback_rebuilds_fresh_arc_and_add_path_projection() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut first = negotiated_session(65002, false);

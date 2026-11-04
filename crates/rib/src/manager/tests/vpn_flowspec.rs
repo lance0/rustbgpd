@@ -307,15 +307,30 @@ async fn route_refresh_for_vpn_flowspec_replays_vpn_rules_only() {
 }
 
 /// RFC 4684 RT-Constrain does not gate VPN `FlowSpec` (ADR-0146 §5): a peer
-/// that negotiated RTC and announced no membership still receives the rule.
+/// that negotiated RTC and announced no membership still receives the rule,
+/// and the (1, 134) End-of-RIB is not held behind the peer's RTC End-of-RIB.
 /// Gating it later is a deliberate change.
 #[tokio::test]
 async fn rt_constrain_does_not_gate_vpn_flowspec() {
+    let vpn_unicast = (Afi::Ipv4, Safi::MplsVpn);
     let (tx, handle) = start();
-    let mut out_rx = register(&tx, 10, vec![RTC, VPN], None).await;
+    let mut out_rx = register(&tx, 10, vec![RTC, VPN, vpn_unicast], None).await;
     inject(&tx, local_rule(Some(RD_A), 777)).await;
     let _ = query_flowspec_routes(&tx).await;
-    assert_eq!(announced(&drain(&mut out_rx)), [key(Some(RD_A))]);
+    let updates = drain(&mut out_rx);
+    assert!(
+        !updates
+            .iter()
+            .any(|update| update.end_of_rib.contains(&vpn_unicast)),
+        "VPN unicast still waits for RT-Constrain End-of-RIB"
+    );
+    assert!(
+        updates
+            .iter()
+            .any(|update| update.end_of_rib.contains(&VPN)),
+        "the (1, 134) End-of-RIB waits for no RT-Constrain End-of-RIB"
+    );
+    assert_eq!(announced(&updates), [key(Some(RD_A))]);
 
     drop(tx);
     handle.await.unwrap();
@@ -353,8 +368,34 @@ async fn vpn_rules_are_counted_apart_from_global_ipv4_flowspec() {
     }
     let lens = manager.loc_rib.family_lens();
     assert_eq!((lens.flowspec, lens.flowspec_vpn), ([1, 0], 2));
-    let lens = manager.adj_ribs_out[&peer_v4(Ipv4Addr::new(192, 0, 2, 10))].family_lens();
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
+    let lens = manager.adj_ribs_out[&peer].family_lens();
     assert_eq!((lens.flowspec, lens.flowspec_vpn), ([1, 0], 2));
+
+    // The published gauges carry the same split.
+    let peer = peer.to_string();
+    for (family, expected) in [("ipv4_flowspec", 1.0), ("l3vpn_ipv4_flowspec", 2.0)] {
+        assert!(
+            (gauge_metric_value(
+                &manager.metrics,
+                "bgp_rib_loc_prefixes",
+                &[("family", family)]
+            ) - expected)
+                .abs()
+                < f64::EPSILON,
+            "Loc-RIB {family}"
+        );
+        assert!(
+            (gauge_metric_value(
+                &manager.metrics,
+                "bgp_rib_adj_out_prefixes",
+                &[("peer", &peer), ("family", family)]
+            ) - expected)
+                .abs()
+                < f64::EPSILON,
+            "Adj-RIB-Out {family}"
+        );
+    }
 }
 
 /// Exact-export metrics label a VPN rule with its own family.
@@ -373,10 +414,11 @@ fn exact_export_keys_label_each_flowspec_family() {
 }
 
 /// An enhanced route refresh of global `FlowSpec` (RFC 7313) snapshots,
-/// counts and sweeps that family's rules by full identity: a re-announced
-/// rule leaves the stale set, a withdrawn one is uncounted, the
-/// End-of-Route-Refresh sweeps only the rules that were not refreshed, and
-/// the window leaves no stale snapshot behind.
+/// counts and sweeps that family's rules by rule: a re-announced rule leaves
+/// the stale set, a withdrawn one is uncounted, the End-of-Route-Refresh
+/// sweeps only the rules that were not refreshed, and the window leaves no
+/// stale snapshot behind. The `withdrawing_*` tests below cover the AFI and
+/// RD parts of the identity.
 #[test]
 fn flowspec_refresh_window_counts_and_sweeps_by_identity() {
     let (_tx, rx) = mpsc::channel(8);
@@ -463,5 +505,147 @@ fn flowspec_refresh_window_counts_and_sweeps_by_identity() {
     assert!(
         !manager.refresh_stale_flowspec.contains_key(&peer),
         "the window's stale snapshot is released"
+    );
+}
+
+/// A rule with only a destination-port component, so the same components are
+/// legal in either AFI and in any RD.
+fn port_rule(source: Ipv4Addr, afi: Afi, rd: Option<RouteDistinguisher>) -> FlowSpecRoute {
+    let mut route = make_flowspec_route(source);
+    route.afi = afi;
+    route.rd = rd;
+    route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPort(vec![
+        rustbgpd_wire::NumericMatch {
+            end_of_list: true,
+            and_bit: false,
+            lt: false,
+            gt: false,
+            eq: true,
+            value: 80,
+        },
+    ])];
+    route
+}
+
+/// Receive `withdrawn` and `twin` (the same components under another AFI or
+/// RD), open the enhanced-refresh window of each family, and withdraw
+/// `withdrawn`. The twin must stay stale and counted, and be swept at its
+/// End-of-Route-Refresh.
+fn withdrawing_one_rule_keeps_its_twin_stale(
+    source: Ipv4Addr,
+    withdrawn: FlowSpecRoute,
+    twin: FlowSpecRoute,
+) {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = peer_v4(source);
+    let mut families = vec![withdrawn.family(), twin.family()];
+    families.dedup();
+    let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 2,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: families.clone(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    let received = |announced, withdrawn| RibUpdate::RoutesReceived {
+        session_id: 2,
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: announced,
+        flowspec_withdrawn: withdrawn,
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    let stale = |manager: &RibManager, (afi, safi): (Afi, Safi)| {
+        manager
+            .refresh_stale_counts
+            .get(&(peer, afi, safi))
+            .copied()
+            .unwrap_or(0)
+    };
+    let twin_family = twin.family();
+    let withdrawn_key = withdrawn.selection_key();
+    manager.handle_update(received(vec![withdrawn, twin], vec![]));
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.ribs[&peer].iter_flowspec().count(), 2);
+    for &(afi, safi) in &families {
+        manager.handle_update(RibUpdate::BeginRouteRefresh {
+            session_id: 2,
+            peer,
+            afi,
+            safi,
+        });
+    }
+
+    manager.handle_update(received(vec![], vec![withdrawn_key]));
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        stale(&manager, twin_family),
+        1,
+        "withdrawing one rule leaves its twin stale"
+    );
+
+    for &(afi, safi) in &families {
+        manager.handle_update(RibUpdate::EndRouteRefresh {
+            session_id: 2,
+            peer,
+            afi,
+            safi,
+        });
+    }
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        manager.ribs[&peer].iter_flowspec().count(),
+        0,
+        "the unrefreshed twin is swept at End-of-Route-Refresh"
+    );
+}
+
+/// The same destination-less rule in IPv4 and IPv6, both windows open.
+#[test]
+fn withdrawing_a_rule_keeps_its_other_afi_twin_stale() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    withdrawing_one_rule_keeps_its_twin_stale(
+        source,
+        port_rule(source, Afi::Ipv4, None),
+        port_rule(source, Afi::Ipv6, None),
+    );
+}
+
+/// The same components under RD A and RD B in one (1, 134) window.
+#[test]
+fn withdrawing_a_vpn_rule_keeps_its_other_rd_twin_stale() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    withdrawing_one_rule_keeps_its_twin_stale(
+        source,
+        port_rule(source, Afi::Ipv4, Some(RD_A)),
+        port_rule(source, Afi::Ipv4, Some(RD_B)),
+    );
+}
+
+/// The same components as a global rule and under RD A, with the (1, 133)
+/// and (1, 134) windows both open.
+#[test]
+fn withdrawing_a_global_rule_keeps_its_vpn_twin_stale() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    withdrawing_one_rule_keeps_its_twin_stale(
+        source,
+        port_rule(source, Afi::Ipv4, None),
+        port_rule(source, Afi::Ipv4, Some(RD_A)),
     );
 }
