@@ -1085,3 +1085,74 @@ fn owed_key_drain_never_starves_the_dirty_ring() {
         "the dirty peer resynced in the same tick"
     );
 }
+
+/// A drain step refused by a full channel keeps its keys owed, without a
+/// resync, and they go out once the channel has room. Red when a refused
+/// step drops what it popped: the keys are lost and the route never
+/// reaches the peer.
+#[test]
+fn a_drain_refused_by_a_full_channel_keeps_its_keys() {
+    let mut manager = manager(8);
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 19, 1));
+    let mut rx = up_session(&mut manager, peer, 0, ipv4_sendable(), 4);
+    send_all(&mut rx);
+    let filler = manager.outbound_credit_handle(peer);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    assert_eq!(owed(&manager, peer, V4), 1);
+    drop(charge);
+    let sender = manager.outbound_peers[&peer].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| sender.clone().try_reserve_owned().ok()).collect();
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(
+        owed(&manager, peer, V4),
+        1,
+        "the refused step re-owes its key"
+    );
+    assert!(!manager.dirty_peers.contains(&peer));
+    drop(occupied);
+    manager.resync_dirty_peers_bounded();
+    let sent = send_all(&mut rx);
+    assert!(
+        sent.iter()
+            .any(|update| update.announce.iter().any(|r| r.prefix == route_prefix(0))),
+        "the key is sent once the channel has room"
+    );
+    assert!(manager.owing(peer).is_none());
+}
+
+/// A resync covers every family it enumerated: the peer owes nothing after
+/// it, and no owed state is left to re-walk. Red when the resync leaves the
+/// owed sets in place: the peer still owes after its resync.
+#[test]
+fn a_resync_settles_what_the_peer_owed() {
+    let mut manager = manager(8);
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 20, 1));
+    let mut rx = up(&mut manager, peer, ipv4_sendable());
+    send_all(&mut rx);
+    let filler = manager.outbound_credit_handle(peer);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    received(
+        &mut manager,
+        vec![route(0, 0), route(1, 0)],
+        vec![],
+        vec![],
+        vec![],
+    );
+    send_all(&mut source);
+    assert_eq!(owed(&manager, peer, V4), 2);
+    drop(charge);
+    manager.mark_outbound_dirty(peer);
+    manager.resync_dirty_peers_bounded();
+    assert!(!manager.dirty_peers.contains(&peer), "the resync ran");
+    assert!(
+        manager.owing(peer).is_none(),
+        "the resync covered the owed keys"
+    );
+    let mut wire = Wire::default();
+    wire.apply(&send_all(&mut rx));
+    assert_eq!(wire.unicast.len(), 2);
+}
