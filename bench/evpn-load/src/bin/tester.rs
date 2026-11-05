@@ -395,6 +395,7 @@ fn build_update(
             vpn_announced: vec![],
             labeled_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
     }
     if !withdraws.is_empty() {
@@ -408,6 +409,7 @@ fn build_update(
             vpn_withdrawn: vec![],
             labeled_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         })));
     }
     let update = UpdateMessage::build(

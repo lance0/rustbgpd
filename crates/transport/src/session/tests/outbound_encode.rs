@@ -68,6 +68,7 @@ fn rich_ipv6_mp_iterator_build_matches_legacy_oracle() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         },
     )));
     let expected = rustbgpd_wire::UpdateMessage::try_build(
@@ -151,7 +152,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -547,7 +548,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -1308,6 +1309,7 @@ async fn extended_flowspec_chunk_probe_grows_and_preserves_exact_order() {
         .map(|rule| FlowSpecRoute {
             rule,
             afi: Afi::Ipv6,
+            rd: None,
             peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
             attributes: vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1440,6 +1442,7 @@ async fn extended_flowspec_chunk_probe_resets_failed_upper_for_smaller_entries()
         .map(|rule| FlowSpecRoute {
             rule,
             afi: Afi::Ipv6,
+            rd: None,
             peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
@@ -1518,6 +1521,7 @@ async fn destinationless_flowspec_withdrawal_uses_explicit_afi() {
     let route = |afi| FlowSpecRoute {
         rule: rule.clone(),
         afi,
+        rd: None,
         peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
         attributes: vec![PathAttribute::Origin(Origin::Igp)],
         received_at: Instant::now(),
@@ -1558,10 +1562,12 @@ async fn destinationless_flowspec_withdrawal_uses_explicit_afi() {
         flowspec_withdraw: vec![
             rustbgpd_rib::FlowSpecKey {
                 afi: Afi::Ipv6,
+                rd: None,
                 rule: rule.clone(),
             },
             rustbgpd_rib::FlowSpecKey {
                 afi: Afi::Ipv4,
+                rd: None,
                 rule: rule.clone(),
             },
         ],
@@ -1622,6 +1628,7 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
             (0..count).map(move |i| FlowSpecRoute {
                 rule: rule(afi, i),
                 afi,
+                rd: None,
                 peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
                 attributes: vec![PathAttribute::Origin(Origin::Igp)],
                 received_at: Instant::now(),
@@ -1753,7 +1760,7 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),

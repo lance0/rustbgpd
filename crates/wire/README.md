@@ -16,6 +16,18 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### 0.28.0 compatibility note
+
+`rustbgpd-wire` 0.28.0 is an unpublished breaking minor release that pairs
+with FSM 0.15 and RPKI 0.10. Upgrade the three crates together when
+exchanging public wire types. It adds IPv4 VPN FlowSpec (AFI 1 / SAFI 134,
+RFC 8955 §8): `Safi::FlowSpecVpn`, the `VpnFlowSpecRule` NLRI type and the
+`vpn_flowspec_announced` / `vpn_flowspec_withdrawn` fields on `MpReachNlri`
+and `MpUnreachNlri`. Code that builds those structs with a literal must set
+the new fields. `MP_REACH_NLRI` and `MP_UNREACH_NLRI` for (1, 134) now decode
+instead of failing as an unsupported SAFI; (2, 134) stays unsupported. See the
+[wire changelog](CHANGELOG.md).
+
 ### 0.27.0 compatibility note
 
 `rustbgpd-wire` 0.27.0 is a breaking minor release that pairs with FSM 0.14
@@ -459,7 +471,7 @@ Add the published codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.27.0"
+rustbgpd-wire = "0.28.0"
 bytes = "1"
 ```
 
@@ -664,7 +676,7 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   exhaustiveness](#enum-exhaustiveness)), so downstream matches need a wildcard
   arm and later registry additions are not breaking. `CONFIGURED_FAMILIES`,
   `parse_family`, and `family_label` provide the canonical configuration and
-  control-plane vocabulary for the twelve AFI/SAFI pairs rustbgpd supports;
+  control-plane vocabulary for the thirteen AFI/SAFI pairs rustbgpd supports;
   BGP-LS uses `linkstate` / `linkstate_vpn` there.
 - **Well-known community constants** — `u32` values for matching and setting
   standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /

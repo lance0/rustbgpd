@@ -346,6 +346,7 @@ fn build_update(origin: u32, announce: Vec<EvpnRoute>, withdraw: Vec<EvpnRoute>)
             vpn_announced: vec![],
             labeled_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
     }
     if !withdraw.is_empty() {
@@ -359,6 +360,7 @@ fn build_update(origin: u32, announce: Vec<EvpnRoute>, withdraw: Vec<EvpnRoute>)
             vpn_withdrawn: vec![],
             labeled_withdrawn: vec![],
             rtc_withdrawn: vec![],
+            vpn_flowspec_withdrawn: vec![],
         })));
     }
     Message::Update(UpdateMessage::build(

@@ -74,6 +74,7 @@ async fn enhanced_refresh_sweeps_every_counted_family_with_typed_identity() {
     session.remember_known_path(unicast, 7);
     let flowspec = rustbgpd_rib::FlowSpecKey {
         afi: Afi::Ipv4,
+        rd: None,
         rule: FlowSpecRule {
             components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
                 Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
@@ -761,6 +762,7 @@ async fn session_down_clears_all_known_sets() {
         rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
     session.known_flowspec.insert(rustbgpd_rib::FlowSpecKey {
         afi: Afi::Ipv4,
+        rd: None,
         rule: rustbgpd_wire::FlowSpecRule {
             components: vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
                 fs_prefix,
@@ -819,7 +821,7 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: None,
@@ -880,7 +882,7 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),

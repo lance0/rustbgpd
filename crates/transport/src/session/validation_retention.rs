@@ -505,6 +505,7 @@ impl PeerSession {
                         vpn_announced: Vec::new(),
                         labeled_announced: Vec::new(),
                         rtc_announced: Vec::new(),
+                        vpn_flowspec_announced: vec![],
                     })));
                     Vec::new()
                 }

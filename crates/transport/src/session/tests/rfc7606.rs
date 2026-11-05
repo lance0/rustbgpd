@@ -1521,6 +1521,7 @@ async fn domain_path_remains_opaque_on_vpn_and_evpn_routes() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         };
         if safi == Safi::Evpn {
             mp.evpn_announced.push(EvpnRoute::MacIp(EvpnMacIp {
@@ -1747,6 +1748,7 @@ async fn bgpls_attribute_discard_keeps_nlri_and_session() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
         PathAttribute::Unknown(RawAttribute {
             flags: rustbgpd_wire::constants::attr_flags::OPTIONAL,
@@ -2646,6 +2648,7 @@ async fn rfc7606_treat_as_withdraw_covers_previously_accepted_evpn_routes() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
@@ -3147,6 +3150,7 @@ async fn srv6_service_malformed_vpn_replacement_withdraws_and_recovers() {
                 nlri: route.nlri,
             }],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
         let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
         session.process_update(clean.clone()).await;

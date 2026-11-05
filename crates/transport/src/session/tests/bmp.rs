@@ -358,6 +358,7 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = rustbgpd_wire::UpdateMessage::build(

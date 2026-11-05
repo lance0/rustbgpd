@@ -814,7 +814,11 @@ impl AdjRibOut {
         let second = self.second_family;
         FamilyLens {
             unicast: split(self.routes.len(), second.unicast),
-            flowspec: split(self.flowspec_routes.len(), second.flowspec),
+            flowspec: split(
+                self.flowspec_routes.len() - second.flowspec_vpn,
+                second.flowspec,
+            ),
+            flowspec_vpn: second.flowspec_vpn,
             vpn: split(self.vpn_routes.len(), second.vpn),
             labeled: split(self.labeled_routes.len(), second.labeled),
             bgpls: split(self.bgpls_routes.len(), second.bgpls),
@@ -902,12 +906,13 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised `FlowSpec` route.
     pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
-        let v6 = route.afi == Afi::Ipv6;
+        let (v6, vpn) = (route.afi == Afi::Ipv6, route.rd.is_some());
         let added = self
             .flowspec_routes
             .insert(route.selection_key(), route)
             .is_none();
         track(&mut self.second_family.flowspec, v6, added, false);
+        track(&mut self.second_family.flowspec_vpn, vpn, added, false);
     }
 
     /// Remove a `FlowSpec` route by rule. Returns `true` if it existed.
@@ -916,6 +921,12 @@ impl AdjRibOut {
         track(
             &mut self.second_family.flowspec,
             key.afi == Afi::Ipv6,
+            false,
+            removed,
+        );
+        track(
+            &mut self.second_family.flowspec_vpn,
+            key.rd.is_some(),
             false,
             removed,
         );
@@ -937,12 +948,6 @@ impl AdjRibOut {
     #[must_use]
     pub fn flowspec_len(&self) -> usize {
         self.flowspec_routes.len()
-    }
-
-    /// Remove all advertised `FlowSpec` routes.
-    pub fn clear_flowspec(&mut self) {
-        self.second_family.flowspec = 0;
-        self.flowspec_routes.clear();
     }
 
     // --- EVPN methods (RFC 7432) ---
@@ -1215,7 +1220,7 @@ impl AdjRibOut {
             bump((afi, Safi::Unicast));
         }
         for route in self.flowspec_routes.values() {
-            bump((route.afi, Safi::FlowSpec));
+            bump(route.family());
         }
         for key in self.vpn_routes.keys() {
             bump(key.afi_safi());

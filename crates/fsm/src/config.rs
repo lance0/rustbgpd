@@ -12,7 +12,7 @@ use rustbgpd_wire::{
 /// Whether the RIB currently has GR/LLGR stale-retention handling for a family.
 ///
 /// Every typed Adj-RIB-In with a wired stale lifecycle is listed: unicast,
-/// `FlowSpec`, EVPN, VPNv4/VPNv6 (SAFI 128), labeled-unicast (SAFI 4),
+/// `FlowSpec` (including IPv4 VPN `FlowSpec`, SAFI 134), EVPN, VPNv4/VPNv6 (SAFI 128), labeled-unicast (SAFI 4),
 /// BGP-LS/BGP-LS-VPN (AFI 16388),
 /// and RT-Constrain (SAFI 132). A family absent here is excluded from the
 /// GR/LLGR capability sets and therefore withdrawn (not retained stale) on
@@ -26,7 +26,7 @@ pub fn graceful_restart_preserves_family((afi, safi): (Afi, Safi)) -> bool {
             Safi::Unicast | Safi::FlowSpec | Safi::MplsVpn | Safi::LabeledUnicast
         ) | (Afi::L2Vpn, Safi::Evpn)
             | (Afi::BgpLs, Safi::BgpLs | Safi::BgpLsVpn)
-            | (Afi::Ipv4, Safi::RtConstrain)
+            | (Afi::Ipv4, Safi::RtConstrain | Safi::FlowSpecVpn)
     )
 }
 
@@ -616,12 +616,13 @@ mod tests {
     #[test]
     fn restart_capabilities_include_preserved_typed_families() {
         // The GR/LLGR stale lifecycle is wired for BGP-LS, VPN,
-        // labeled-unicast, and RTC, so the advertised GR and LLGR
-        // capability sets carry every configured family in the
+        // labeled-unicast, RTC and VPN FlowSpec, so the advertised GR and
+        // LLGR capability sets carry every configured family in the
         // preservation allowlist.
         let mut cfg = test_config();
         cfg.families = vec![
             (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv4, Safi::FlowSpecVpn),
             (Afi::BgpLs, Safi::BgpLs),
             (Afi::BgpLs, Safi::BgpLsVpn),
             (Afi::Ipv4, Safi::MplsVpn),

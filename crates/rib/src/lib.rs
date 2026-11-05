@@ -100,7 +100,7 @@ pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
     FibInstallNextHop, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey, LabeledRibRoute,
     LabeledRibRouteKey, NextHopScope, Route, RouteOrigin, RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
-    VpnRibRouteKey,
+    VpnRibRouteKey, requests_route_refresh,
 };
 pub use update::{
     AdjRibInRpkiCounts, AdjRibOutCounts, BestPathCandidate, BestRoutesPage, BgpLsRouteQueryKey,
@@ -123,7 +123,7 @@ pub use update::{
     ReceivedFlowSpecRoute, RibCommandError, RibReadinessError, RibReadinessQuery, RibRowFilter,
     RibRowsPage, RibSummaryQuery, RibUpdate, RoutePage, RoutePageError, RoutePageVersion,
     RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RpkiValidationCounts,
-    RtcRouteQueryKey, SelectionDeferralPeerFamilyState, SharedGroupEncode,
+    RtcRouteQueryKey, SelectionDeferralPeerFamilyState, SharedGroupEncode, SharedWithdrawals,
     UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupComparisonDifference,
     UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict, UpdateGroupFamilyImpact,
     UpdateGroupFingerprint, UpdateGroupImpactPlan, UpdateGroupImpactRollup,

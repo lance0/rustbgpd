@@ -1515,7 +1515,7 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
         )
         .remove(&gid)
         .unwrap();
-    assert_eq!(stage.shared_withdraw, vec![key]);
+    assert_eq!(stage.shared_withdraw.as_slice(), &[key]);
     assert!(stage.shared_applies_to(member));
     let prior_visits = observe_group_prior_materialization(&mut manager);
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
@@ -1524,7 +1524,9 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
             .try_send_and_commit_outbound_update_with_group_prior(
                 member,
                 OutboundCommitBatch {
-                    withdraw: stage.shared_withdraw.clone(),
+                    shared_withdraw: Some(crate::SharedWithdrawals::from_shared(
+                        &stage.shared_withdraw,
+                    )),
                     ..OutboundCommitBatch::with_unicast(
                         Arc::clone(&stage.shared_announce),
                         Arc::clone(&stage.shared_nh),
@@ -1548,8 +1550,218 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
         vec![key]
     );
     assert!(withdrawn.announce.is_empty());
+    assert!(Arc::ptr_eq(
+        withdrawn.shared_withdraw.as_shared().unwrap(),
+        &stage.shared_withdraw
+    ));
+    assert_eq!(withdrawn.withdraw.capacity(), 0);
     assert_eq!(prior_visits.load(Ordering::Relaxed), 0);
     assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario pins prior rejection, sibling isolation and retained shared ownership"
+)]
+fn shared_withdrawal_filter_is_member_local() {
+    let mut manager = test_manager();
+    let members = [
+        peer_v4(Ipv4Addr::new(10, 220, 4, 8)),
+        peer_v4(Ipv4Addr::new(10, 220, 4, 9)),
+    ];
+    let routes = [1, 2].map(|octet| {
+        make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, octet), 32),
+            Ipv4Addr::new(192, 0, 2, 1),
+        )
+    });
+    let keys = routes.each_ref().map(|route| (route.prefix, route.path_id));
+    let prior = keys.map(|(prefix, path_id)| ExactExportKey::Unicast(prefix, path_id));
+    for route in &routes {
+        manager
+            .loc_rib
+            .recompute(route.prefix, std::iter::once(route));
+    }
+    let mut receivers = members.map(|member| {
+        let (outbound, mut receiver) = mpsc::channel(16);
+        manager.handle_update(super::update_groups_recovery::peer_up(
+            member, outbound, None,
+        ));
+        assert_eq!(receiver.try_recv().unwrap().announce.len(), 2);
+        while receiver.try_recv().is_ok() {}
+        receiver
+    });
+    let gid = manager.grouped_member_of(members[0]).unwrap();
+    assert_eq!(manager.grouped_member_of(members[1]), Some(gid));
+    let encoder = MockExactExportEncoder::accepting(1);
+    encoder.set_profile(2, [ExactExportKey::Unicast(keys[0].0, keys[0].1)]);
+    manager.peer_export_encoders.insert(members[1], encoder);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update_with_group_prior(
+                members[1],
+                OutboundCommitBatch {
+                    force_unicast_replay: true,
+                    ..OutboundCommitBatch::with_unicast(
+                        vec![routes[0].clone()].into(),
+                        vec![None].into()
+                    )
+                },
+                prior.iter().cloned().collect(),
+                None,
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        receivers[1]
+            .try_recv()
+            .unwrap()
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![keys[0]]
+    );
+    for key in &keys {
+        assert!(manager.loc_rib.recompute(key.0, std::iter::empty()));
+    }
+    let prefixes = keys.iter().map(|key| key.0).collect();
+    let stage = manager
+        .stage_update_groups(
+            &prefixes,
+            &prefixes,
+            &mut crate::manager::distribution::ExportMemo::default(),
+            None,
+        )
+        .remove(&gid)
+        .unwrap();
+    let staged = stage.shared_withdraw.as_ref().clone();
+    assert_eq!(
+        staged.iter().copied().collect::<HashSet<_>>(),
+        HashSet::from(keys)
+    );
+    for member in members {
+        assert!(
+            manager
+                .try_send_and_commit_outbound_update_with_group_prior(
+                    member,
+                    OutboundCommitBatch {
+                        shared_withdraw: Some(crate::SharedWithdrawals::from_shared(
+                            &stage.shared_withdraw
+                        )),
+                        ..OutboundCommitBatch::default()
+                    },
+                    prior.iter().cloned().collect(),
+                    None,
+                )
+                .is_ok()
+        );
+    }
+    let clean = receivers[0].try_recv().unwrap();
+    let filtered = receivers[1].try_recv().unwrap();
+    assert_eq!(
+        clean.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        staged
+    );
+    assert!(Arc::ptr_eq(
+        clean.shared_withdraw.as_shared().unwrap(),
+        &stage.shared_withdraw
+    ));
+    assert_eq!(clean.withdraw.capacity(), 0);
+    assert_eq!(
+        filtered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![keys[1]]
+    );
+    assert!(filtered.shared_withdraw.is_empty());
+    assert_eq!(stage.shared_withdraw.as_slice(), staged.as_slice());
+    assert!(!manager.peer_unexportable.contains_key(&members[1]));
+}
+
+#[test]
+fn shared_withdrawal_keeps_an_exact_rejection_suffix() {
+    let member = peer_v4(Ipv4Addr::new(10, 220, 4, 10));
+    let mut manager = test_manager();
+    let routes = [3, 4].map(|octet| {
+        make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, octet), 32),
+            Ipv4Addr::new(192, 0, 2, 1),
+        )
+    });
+    let keys = routes.each_ref().map(|route| (route.prefix, route.path_id));
+    for route in &routes {
+        manager
+            .loc_rib
+            .recompute(route.prefix, std::iter::once(route));
+    }
+    let (outbound, mut receiver) = mpsc::channel(16);
+    manager.handle_update(super::update_groups_recovery::peer_up(
+        member, outbound, None,
+    ));
+    assert_eq!(receiver.try_recv().unwrap().announce.len(), 2);
+    while receiver.try_recv().is_ok() {}
+    let gid = manager.grouped_member_of(member).unwrap();
+    let encoder = MockExactExportEncoder::accepting(1);
+    encoder.set_profile(2, [ExactExportKey::Unicast(keys[1].0, keys[1].1)]);
+    manager.peer_export_encoders.insert(member, encoder);
+    assert!(manager.loc_rib.recompute(keys[0].0, std::iter::empty()));
+    let mut changed = routes[1].clone();
+    AttrSet::edit(&mut changed.attributes, |attrs| {
+        attrs.push(rustbgpd_wire::PathAttribute::Med(42));
+    });
+    assert!(
+        manager
+            .loc_rib
+            .recompute(changed.prefix, std::iter::once(&changed))
+    );
+    let prefixes = keys.iter().map(|key| key.0).collect();
+    let stage = manager
+        .stage_update_groups(
+            &prefixes,
+            &prefixes,
+            &mut crate::manager::distribution::ExportMemo::default(),
+            None,
+        )
+        .remove(&gid)
+        .unwrap();
+    assert_eq!(stage.shared_withdraw.as_slice(), &[keys[0]]);
+    assert_eq!(stage.shared_announce.len(), 1);
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update_with_group_prior(
+                member,
+                OutboundCommitBatch {
+                    shared_withdraw: Some(crate::SharedWithdrawals::from_shared(
+                        &stage.shared_withdraw
+                    )),
+                    ..OutboundCommitBatch::with_unicast(
+                        Arc::clone(&stage.shared_announce),
+                        Arc::clone(&stage.shared_nh)
+                    )
+                },
+                keys.iter()
+                    .map(|&(prefix, path_id)| ExactExportKey::Unicast(prefix, path_id))
+                    .collect(),
+                None,
+            )
+            .is_ok()
+    );
+    let update = receiver.try_recv().unwrap();
+    assert!(update.announce.is_empty());
+    assert_eq!(
+        update.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        keys
+    );
+    assert!(Arc::ptr_eq(
+        update.shared_withdraw.as_shared().unwrap(),
+        &stage.shared_withdraw
+    ));
+    assert_eq!(update.withdraw, vec![keys[1]]);
+    assert_eq!(
+        update.withdraw.capacity(),
+        1,
+        "the detached shared prefix is freed promptly"
+    );
+    assert_eq!(stage.shared_withdraw.as_slice(), &[keys[0]]);
 }
 
 #[test]

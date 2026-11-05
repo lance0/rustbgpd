@@ -2079,7 +2079,7 @@ struct PeerSelectionDeferralContext {
     /// family (helper-only, RFC 4724 §3): the peer retains our routes.
     peer_gr_helper: bool,
     peer_gr_families: Vec<(Afi, Safi)>,
-    /// Peer negotiated enhanced route refresh (RFC 7313). Collision
+    /// Peer negotiated both basic and enhanced route refresh (RFC 7313). Collision
     /// failback only arms a `BoRR`/`EoRR` convergence wait when the
     /// survivor can actually produce the pair.
     peer_enhanced_refresh: bool,

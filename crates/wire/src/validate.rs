@@ -175,7 +175,7 @@ pub fn validate_update_attributes_with_context(
         match attr {
             PathAttribute::NextHop(addr) => check_next_hop(*addr),
             PathAttribute::AsPath(path) => check_as_path(path),
-            // RFC 8955 §4: for FlowSpec (SAFI 133), the NEXT_HOP
+            // RFC 8955 §4: for FlowSpec (SAFI 133, and 134 per §8), the NEXT_HOP
             // attribute value is "irrelevant" and is recommended
             // to be 0 when advertising. The on-wire NH-Len for
             // FlowSpec is 0 and the decoder fills `mp.next_hop`
@@ -185,7 +185,9 @@ pub fn validate_update_attributes_with_context(
             // against any RFC-compliant peer. Skip validation for
             // FlowSpec; the rule contents travel in
             // `flowspec_announced`, not next_hop.
-            PathAttribute::MpReachNlri(mp) if mp.safi != Safi::FlowSpec => {
+            PathAttribute::MpReachNlri(mp)
+                if !matches!(mp.safi, Safi::FlowSpec | Safi::FlowSpecVpn) =>
+            {
                 let allow_link_local_primary = options.allow_ipv4_link_local_mp_reach_next_hop
                     && mp.afi == crate::capability::Afi::Ipv4
                     && mp.safi == Safi::Unicast;
@@ -684,6 +686,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         // has_nlri=true, has_body_nlri=false (only MP NLRI), is_ebgp=true
@@ -715,6 +718,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         // has_nlri=true, has_body_nlri=true (body IPv4 NLRI present), is_ebgp=true
@@ -744,6 +748,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -770,6 +775,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -796,6 +802,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         assert!(validate_update_attributes(&attrs, true, false, true).is_err());
@@ -852,6 +859,7 @@ mod tests {
                     labeled_announced: vec![],
                     vpn_announced: vec![],
                     rtc_announced: vec![],
+                    vpn_flowspec_announced: vec![],
                 })),
             ];
             for enhe in [false, true] {
@@ -893,6 +901,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -946,6 +955,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -965,37 +975,41 @@ mod tests {
     fn mp_reach_flowspec_unspecified_next_hop_is_valid() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-        let attrs = vec![
-            PathAttribute::Origin(Origin::Igp),
-            PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![65001])],
-            }),
-            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
-                afi: Afi::Ipv4,
-                safi: Safi::FlowSpec,
-                // RFC 8955 §4 recommends 0.0.0.0 for FlowSpec
-                // advertisements; on the wire NH-Len is 0 and the
-                // decoder defaults this to 0.0.0.0.
-                next_hop: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                link_local_next_hop: None,
-                announced: vec![],
-                flowspec_announced: vec![],
-                evpn_announced: vec![],
-                bgpls_announced: vec![],
-                labeled_announced: vec![],
-                vpn_announced: vec![],
-                rtc_announced: vec![],
-            })),
-        ];
-        // Empty announced + empty body — FlowSpec EoR-equivalent
-        // shape FRR sends post-handshake. Must pass validation.
-        assert!(
-            validate_update_attributes(&attrs, false, false, true).is_ok(),
-            "FlowSpec MP_REACH with 0.0.0.0 next-hop must pass — RFC 8955 §4 \
-             specifies the next-hop value is irrelevant for FlowSpec and \
-             recommends 0. The pre-fix path tore sessions against every \
-             RFC-compliant FlowSpec peer."
-        );
+        // RFC 8955 §8: VPN FlowSpec (SAFI 134) uses the same NH-Len 0 form.
+        for safi in [Safi::FlowSpec, Safi::FlowSpecVpn] {
+            let attrs = vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65001])],
+                }),
+                PathAttribute::MpReachNlri(Box::new(MpReachNlri {
+                    afi: Afi::Ipv4,
+                    safi,
+                    // RFC 8955 §4 recommends 0.0.0.0 for FlowSpec
+                    // advertisements; on the wire NH-Len is 0 and the
+                    // decoder defaults this to 0.0.0.0.
+                    next_hop: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    link_local_next_hop: None,
+                    announced: vec![],
+                    flowspec_announced: vec![],
+                    evpn_announced: vec![],
+                    bgpls_announced: vec![],
+                    labeled_announced: vec![],
+                    vpn_announced: vec![],
+                    rtc_announced: vec![],
+                    vpn_flowspec_announced: vec![],
+                })),
+            ];
+            // Empty announced + empty body — FlowSpec EoR-equivalent
+            // shape FRR sends post-handshake. Must pass validation.
+            assert!(
+                validate_update_attributes(&attrs, false, false, true).is_ok(),
+                "{safi:?} MP_REACH with 0.0.0.0 next-hop must pass — RFC 8955 §4 \
+                 specifies the next-hop value is irrelevant for FlowSpec and \
+                 recommends 0. The pre-fix path tore sessions against every \
+                 RFC-compliant FlowSpec peer."
+            );
+        }
     }
     /// Audit follow-up: an IPv6 `MP_REACH` with NH-Len=32 (the
     /// global-and-link-local form, RFC 4760 §3 / RFC 2545 §3)
@@ -1029,6 +1043,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
@@ -1058,6 +1073,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         assert!(validate_update_attributes(&attrs, false, false, true).is_ok());

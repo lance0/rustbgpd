@@ -564,7 +564,9 @@ pub(in crate::manager) struct GroupStageOutput {
     /// Next-hop-override flags aligned with `shared_announce`.
     pub(in crate::manager) shared_nh: std::sync::Arc<Vec<Option<NextHopAction>>>,
     /// Withdraw keys for non-exception members.
-    pub(in crate::manager) shared_withdraw: Vec<(Prefix, u32)>,
+    pub(in crate::manager) shared_withdraw: Arc<Vec<(Prefix, u32)>>,
+    /// Encoding shared by members of this staged emission.
+    pub(in crate::manager) shared_encode: Arc<crate::update::SharedGroupEncode>,
     /// Tag-only transitions of this pass ([`RsTagTransition`]): keys
     /// whose staged route was equality-suppressed while the source
     /// control communities changed. Deliberately outside the shared
@@ -856,8 +858,8 @@ impl GroupStageOutput {
         checkpoint(true);
         let mut nh: Vec<Option<NextHopAction>> = Vec::with_capacity(announce_count);
         checkpoint(true);
-        self.shared_withdraw
-            .reserve_exact(self.deltas.len() - announce_count);
+        let withdraw = Arc::make_mut(&mut self.shared_withdraw);
+        withdraw.reserve_exact(self.deltas.len() - announce_count);
         checkpoint(true);
         let mut prior_tags =
             crate::manager::distribution::rs_control::ControlTagInventory::default();
@@ -892,7 +894,7 @@ impl GroupStageOutput {
                     self.exceptions.insert(source);
                     self.source_exclusion_unsafe.insert(source);
                 }
-                self.shared_withdraw.push((delta.prefix, delta.path_id));
+                withdraw.push((delta.prefix, delta.path_id));
             }
         }
         // A consumed lane transition emits toward its target alone —
@@ -919,6 +921,8 @@ impl GroupStageOutput {
         checkpoint(true);
         self.shared_nh = nh.into();
         checkpoint(true);
+        self.shared_encode = Arc::default();
+        checkpoint(true);
     }
 
     /// Retire discarded staging shells while the replacement fence is held.
@@ -933,7 +937,9 @@ impl GroupStageOutput {
         crate::manager::retire_vec(&mut self.lane_deltas, &mut || checkpoint(false));
         crate::manager::retire_vec(&mut self.rs_priors, &mut || checkpoint(false));
         self.evals.retire_with(checkpoint);
-        crate::manager::retire_vec(&mut self.shared_withdraw, &mut || checkpoint(false));
+        checkpoint(true);
+        drop(std::mem::take(&mut self.shared_withdraw));
+        checkpoint(true);
         crate::manager::retire_hash_set(&mut self.exceptions, &mut || checkpoint(false));
         crate::manager::retire_hash_set(&mut self.source_exclusion_unsafe, &mut || {
             checkpoint(false);
@@ -947,6 +953,8 @@ impl GroupStageOutput {
         drop(std::mem::take(&mut self.shared_announce));
         checkpoint(true);
         drop(std::mem::take(&mut self.shared_nh));
+        checkpoint(true);
+        drop(std::mem::take(&mut self.shared_encode));
         checkpoint(true);
     }
 }

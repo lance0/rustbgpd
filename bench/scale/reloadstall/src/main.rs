@@ -1426,6 +1426,7 @@ fn announce6_msgs(i: u32, prefixes: &[Ipv6Prefix]) -> Vec<Message> {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })));
             Message::Update(UpdateMessage::build(
                 &[],
@@ -1456,6 +1457,7 @@ fn withdraw6_msg(prefixes: &[Ipv6Prefix]) -> Message {
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     }))];
     Message::Update(UpdateMessage::build(
         &[],

@@ -319,6 +319,7 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         }),
         true,
         false,
@@ -340,6 +341,7 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         }),
         true,
         false,
@@ -1196,6 +1198,7 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),

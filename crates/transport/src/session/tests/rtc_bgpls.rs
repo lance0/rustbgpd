@@ -86,7 +86,7 @@ async fn oversized_bgpls_output_tears_down_session() {
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -186,6 +186,7 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: nlris,
+            vpn_flowspec_announced: vec![],
         }))
     };
     let unreach = |nlris: Vec<RtcNlri>| {
@@ -199,6 +200,7 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: nlris,
+            vpn_flowspec_withdrawn: vec![],
         }))
     };
     let update = |mut attributes: Vec<PathAttribute>, reach_attr, unreach_attr| {
@@ -390,6 +392,7 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             }))
         };
         let unreach = |nlris: Vec<BgpLsNlri>| {
@@ -403,6 +406,7 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
                 labeled_withdrawn: vec![],
                 vpn_withdrawn: vec![],
                 rtc_withdrawn: vec![],
+                vpn_flowspec_withdrawn: vec![],
             }))
         };
         let update = |mut attributes: Vec<PathAttribute>, reach_attr, unreach_attr| {
@@ -552,7 +556,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -618,7 +622,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),

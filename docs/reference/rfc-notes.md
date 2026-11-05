@@ -318,10 +318,12 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   Transport's Cease/8 path remains the final defense if a route-bearing
   envelope lacks the matching snapshot or a live encoder still finds an
   impossible single-route UPDATE.
-- FlowSpec identity is `(AFI, rule)` throughout Adj-RIB-In, Loc-RIB,
-  Adj-RIB-Out, recompute, distribution, and withdrawal. AFI is never inferred
-  from an optional destination-prefix component: legal destination-less IPv4
-  and IPv6 rules remain distinct.
+- FlowSpec identity is `(AFI, RD, rule)` throughout Adj-RIB-In, Loc-RIB,
+  Adj-RIB-Out, recompute, distribution, refresh, and withdrawal. The RD is
+  absent for global rules (SAFI 133) and present for IPv4 VPN rules
+  (SAFI 134), so the same components in global scope and in each RD are
+  distinct rules. AFI is never inferred from an optional destination-prefix
+  component: legal destination-less IPv4 and IPv6 rules remain distinct.
 
 ### §4.4 — KEEPALIVE Message
 

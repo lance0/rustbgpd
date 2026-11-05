@@ -167,6 +167,8 @@ fn tcp_ao_deletion_survivors(
     Ok(survivors)
 }
 
+pub(super) use rustbgpd_rib::requests_route_refresh;
+
 fn sorted_family_limits<T>(
     limits: impl Iterator<Item = ((Afi, Safi), T)>,
 ) -> Vec<((Afi, Safi), T)> {
@@ -195,7 +197,15 @@ impl PeerSession {
     /// again: the queued request reaches the peer after whatever prompted
     /// both, so at most one per family is queued. Only a live writer's claim
     /// counts: once the writer is gone the request fails as before.
+    ///
+    /// A family [`requests_route_refresh`] excludes is never requested: an
+    /// inbound soft reset has nothing to replay and succeeds without a
+    /// message.
     pub(super) fn send_route_refresh(&mut self, afi: Afi, safi: Safi) -> Result<(), String> {
+        if !requests_route_refresh((afi, safi)) {
+            debug!(peer = %self.peer_label, ?afi, ?safi, "ROUTE-REFRESH not sent: received VPN FlowSpec is discarded");
+            return Ok(());
+        }
         let family = (afi as u16, safi as u8);
         let writer_open = self
             .writer_priority_tx
@@ -1578,10 +1588,12 @@ impl PeerSession {
                     let _ = reply.send(Err(PeerCommandError::NotEstablished));
                     return ControlFlow::Continue(());
                 }
-                if !self
-                    .negotiated
-                    .as_ref()
-                    .is_some_and(|n| n.peer_route_refresh)
+                // A family that is never requested needs no capability.
+                if requests_route_refresh((afi, safi))
+                    && !self
+                        .negotiated
+                        .as_ref()
+                        .is_some_and(|n| n.peer_route_refresh)
                 {
                     let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
                     return ControlFlow::Continue(());

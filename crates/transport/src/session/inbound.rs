@@ -178,6 +178,7 @@ fn mp_reach_announced_count(mp: &rustbgpd_wire::MpReachNlri) -> usize {
         + mp.vpn_announced.len()
         + mp.labeled_announced.len()
         + mp.rtc_announced.len()
+        + mp.vpn_flowspec_announced.len()
 }
 
 fn bgpls_family_from_safi(safi: Safi) -> Option<BgpLsFamily> {
@@ -316,6 +317,7 @@ fn mp_reach_rendered(mp: &rustbgpd_wire::MpReachNlri) -> impl Iterator<Item = St
                 .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
         )
         .chain(mp.rtc_announced.iter().map(ToString::to_string))
+        .chain(mp.vpn_flowspec_announced.iter().map(ToString::to_string))
 }
 /// Announcements rendered into the treat-as-withdraw warning; the
 /// per-family counts and the RFC 7606 §6 debug dump cover the rest.
@@ -376,7 +378,7 @@ pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdra
         announced += count;
         add_family(log_family_label(mp.afi, mp.safi), count);
         // FlowSpec carries no next hop (NH-Len 0).
-        if mp.safi != Safi::FlowSpec {
+        if !matches!(mp.safi, Safi::FlowSpec | Safi::FlowSpecVpn) {
             next_hops.push(mp.next_hop.to_string());
             link_local_next_hop = link_local_next_hop.or(mp.link_local_next_hop);
         }
@@ -467,6 +469,7 @@ pub(crate) fn involved_nlri(parsed: &ParsedUpdate) -> String {
                             .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
                     )
                     .chain(mp.rtc_withdrawn.iter().map(ToString::to_string))
+                    .chain(mp.vpn_flowspec_withdrawn.iter().map(ToString::to_string))
                     .collect::<Vec<_>>(),
             ),
             _ => continue,
@@ -1426,12 +1429,13 @@ impl PeerSession {
                 let family = (mp.afi, mp.safi);
                 if self.negotiated_families().contains(&family) {
                     loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                    loop_fs_withdrawn.extend(
-                        mp.flowspec_withdrawn
-                            .iter()
-                            .cloned()
-                            .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
-                    );
+                    loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned().map(|rule| {
+                        FlowSpecKey {
+                            afi: mp.afi,
+                            rd: None,
+                            rule,
+                        }
+                    }));
                     loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                     if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                         loop_bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {
@@ -1518,12 +1522,13 @@ impl PeerSession {
             if let PathAttribute::MpReachNlri(mp) = attr
                 && self.negotiated_families().contains(&(mp.afi, mp.safi))
             {
-                loop_fs_rejected.extend(
-                    mp.flowspec_announced
-                        .iter()
-                        .cloned()
-                        .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
-                );
+                loop_fs_rejected.extend(mp.flowspec_announced.iter().cloned().map(|rule| {
+                    FlowSpecKey {
+                        afi: mp.afi,
+                        rd: None,
+                        rule,
+                    }
+                }));
                 loop_evpn_rejected.extend(mp.evpn_announced.iter().map(EvpnRoute::key));
             }
         }
@@ -2437,6 +2442,38 @@ impl PeerSession {
             .await;
             return;
         }
+        // ADR-0146: received VPN FlowSpec (AFI 1 / SAFI 134) is decoded so
+        // framing and malformed input are exact, then discarded before the
+        // Adj-RIB-In: no later stage reads its NLRI vectors. Counted only
+        // here, once every UPDATE-level gate (RFC 7606 disposition,
+        // validation, loop detection) has let the UPDATE through, so a reset
+        // or treat-as-withdraw UPDATE is not also reported as discarded.
+        if self
+            .negotiated_families()
+            .contains(&(Afi::Ipv4, Safi::FlowSpecVpn))
+        {
+            let discarded: usize = parsed
+                .attributes
+                .iter()
+                .map(|attr| match attr {
+                    PathAttribute::MpReachNlri(mp) => mp.vpn_flowspec_announced.len(),
+                    PathAttribute::MpUnreachNlri(mp) => mp.vpn_flowspec_withdrawn.len(),
+                    _ => 0,
+                })
+                .sum();
+            if discarded > 0 {
+                debug!(
+                    peer = %self.peer_label,
+                    family = "l3vpn_ipv4_flowspec",
+                    discarded,
+                    "discarded received VPN FlowSpec NLRIs; only local origination is supported"
+                );
+                self.metrics.record_vpn_flowspec_nlri_discarded(
+                    &self.peer_label,
+                    u64::try_from(discarded).unwrap_or(u64::MAX),
+                );
+            }
+        }
         // Normalize the attributes that policy and the RIB are allowed to
         // observe. MP_REACH/MP_UNREACH are per-UPDATE framing, not per-route
         // attributes. RFC 4271 §5.1.5 also requires a LOCAL_PREF received
@@ -2894,6 +2931,7 @@ impl PeerSession {
                                 flowspec_announced.push(FlowSpecRoute {
                                     rule: rule.clone(),
                                     afi: mp.afi,
+                                    rd: None,
                                     peer: self.rib_peer(),
                                     attributes: attrs,
                                     received_at: now,
@@ -2909,6 +2947,7 @@ impl PeerSession {
                             } else {
                                 denied_flowspec.push(FlowSpecKey {
                                     afi: mp.afi,
+                                    rd: None,
                                     rule: rule.clone(),
                                 });
                             }
@@ -3432,12 +3471,13 @@ impl PeerSession {
                         continue;
                     }
                     withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
-                    flowspec_withdrawn.extend(
-                        mp.flowspec_withdrawn
-                            .iter()
-                            .cloned()
-                            .map(|rule| FlowSpecKey { afi: mp.afi, rule }),
-                    );
+                    flowspec_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned().map(|rule| {
+                        FlowSpecKey {
+                            afi: mp.afi,
+                            rd: None,
+                            rule,
+                        }
+                    }));
                     evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                     if let Some(bgpls_family) = bgpls_family_from_safi(mp.safi) {
                         bgpls_withdrawn.extend(mp.bgpls_withdrawn.iter().map(|nlri| {

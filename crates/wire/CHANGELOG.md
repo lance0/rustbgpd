@@ -3,6 +3,31 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.28.0 - Unreleased
+
+- Add IPv4 VPN FlowSpec (AFI 1 / SAFI 134, RFC 8955 §8): `Safi::FlowSpecVpn`,
+  the `l3vpn_ipv4_flowspec` entry in `CONFIGURED_FAMILIES`, and the
+  `VpnFlowSpecRule` NLRI type (an 8-octet Route Distinguisher plus a
+  `FlowSpecRule`) with `flowspec::decode_vpn_flowspec_nlri` and
+  `flowspec::try_encode_vpn_flowspec_nlri`. The RFC 8955 §4.1 length covers
+  the RD, so a rule's components are limited to 4087 octets; RD types outside
+  RFC 4364 §4.2 stay raw.
+- `MpReachNlri` and `MpUnreachNlri` gain `vpn_flowspec_announced` and
+  `vpn_flowspec_withdrawn`. `MP_REACH_NLRI` for (1, 134) requires NH-Len 0,
+  as SAFI 133 does, and an empty `MP_UNREACH_NLRI` is its End-of-RIB.
+  (1, 134) attributes that failed as an unsupported SAFI now decode; (2, 134)
+  stays unsupported in both directions: the VPN codec takes no AFI, and an
+  `MpReachNlri`/`MpUnreachNlri` with SAFI 134 and any AFI but 1 fails to
+  encode with `EncodeError::ValueOutOfRange` before writing a byte. The new
+  public fields break struct literals, so this is a new minor compatibility
+  line.
+- Component type 13 (Flow Label) now decodes only for IPv6 FlowSpec, as
+  RFC 8956 defines it. In an IPv4 rule, global (SAFI 133) or VPN (SAFI 134),
+  it is an unknown component type and the NLRI is malformed (RFC 8955 §4.2);
+  earlier releases accepted it.
+- Pair this wire line with FSM 0.15 and RPKI 0.10 when sharing public wire
+  types. These crate versions are not published by this change.
+
 ## 0.27.0 - 2026-11-01
 
 - Add the IPv4 direct target-IP `FlowSpecAction::RedirectToIp` and the

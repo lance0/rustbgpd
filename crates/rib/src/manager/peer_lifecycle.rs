@@ -3035,7 +3035,7 @@ impl RibManager {
                 // Deferred unicast and FlowSpec select only injected routes;
                 // their initial UPDATEs pass while End-of-RIB stays held.
                 .filter(|family| {
-                    matches!(family.1, Safi::Unicast | Safi::FlowSpec)
+                    matches!(family.1, Safi::Unicast | Safi::FlowSpec | Safi::FlowSpecVpn)
                         || !self.selection_deferred(*family)
                 })
                 .collect::<Vec<_>>()
@@ -3515,9 +3515,10 @@ impl RibManager {
             fs_announce.retain(|route| {
                 checkpoint();
                 route.peer == super::helpers::LOCAL_PEER
-                    || !self.selection_deferral.as_ref().is_some_and(|selection| {
-                        selection.selection_deferred((route.afi, Safi::FlowSpec))
-                    })
+                    || !self
+                        .selection_deferral
+                        .as_ref()
+                        .is_some_and(|selection| selection.selection_deferred(route.family()))
             });
         }
 

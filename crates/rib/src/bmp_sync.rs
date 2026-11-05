@@ -124,6 +124,7 @@ fn empty_mp_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> MpReachNlri {
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     }
 }
 
@@ -138,6 +139,7 @@ fn empty_mp_unreach(afi: Afi, safi: Safi) -> MpUnreachNlri {
         vpn_withdrawn: vec![],
         labeled_withdrawn: vec![],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     }
 }
 

@@ -11,7 +11,7 @@ use rustbgpd_policy::{
     AsPathRegex, CommunityMatch, NeighborSetMatch, Policy, PolicyAction, PolicyChain,
     PolicyStatement, RouteModifications,
 };
-use rustbgpd_rib::AttrSet;
+use rustbgpd_rib::{AttrSet, SharedWithdrawals};
 use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
     Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LlgrFamily, Message, MplsLabelEntry,
@@ -669,6 +669,7 @@ fn ipv6_announce(prefix: Ipv6Prefix, path_id: u32) -> UpdateMessage {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ],
         true,
@@ -848,6 +849,7 @@ fn smet_update(routes: Vec<EvpnRoute>) -> UpdateMessage {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         },
     )));
     UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body)
@@ -919,6 +921,7 @@ fn make_flowspec_route() -> FlowSpecRoute {
             ))],
         },
         afi: Afi::Ipv4,
+        rd: None,
         peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: vec![PathAttribute::Origin(Origin::Igp)],
         received_at: Instant::now(),
@@ -1226,7 +1229,7 @@ fn empty_outbound_update() -> OutboundRouteUpdate {
     OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: None,
@@ -1652,6 +1655,7 @@ fn empty_nonunicast_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> rustbgpd_wi
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     }
 }
 
@@ -1666,6 +1670,7 @@ fn empty_nonunicast_unreach(afi: Afi, safi: Safi) -> rustbgpd_wire::MpUnreachNlr
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
+        vpn_flowspec_withdrawn: vec![],
     }
 }
 
@@ -2180,6 +2185,37 @@ async fn real_establishment_shares_fsm_arc_until_transport_finishes_teardown() {
 }
 
 #[tokio::test]
+async fn failback_refresh_context_requires_basic_and_enhanced_capabilities() {
+    for basic in [false, true] {
+        for enhanced in [false, true] {
+            let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+            let mut negotiated = negotiated_session(65002, false);
+            negotiated.peer_route_refresh = basic;
+            negotiated.peer_enhanced_route_refresh = enhanced;
+            session
+                .execute_actions(vec![Action::SessionEstablished(Box::new(negotiated))])
+                .await;
+            let context = std::iter::from_fn(|| rib_rx.try_recv().ok()).find_map(|update| {
+                if let RibUpdate::SetPeerGracefulRestartContext {
+                    peer_enhanced_refresh,
+                    ..
+                } = update
+                {
+                    Some(peer_enhanced_refresh)
+                } else {
+                    None
+                }
+            });
+            assert_eq!(
+                context,
+                Some(basic && enhanced),
+                "basic={basic}, enhanced={enhanced}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn direct_action_fallback_rebuilds_fresh_arc_and_add_path_projection() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let mut first = negotiated_session(65002, false);
@@ -2261,6 +2297,7 @@ mod tcp_ao;
 mod tcp_mss;
 mod update_group_wire_parity;
 mod vpn;
+mod vpn_flowspec;
 
 mod recovery;
 mod replay;

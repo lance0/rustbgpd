@@ -154,6 +154,7 @@ pub(crate) fn make_flowspec_route(peer: Ipv4Addr) -> FlowSpecRoute {
             ))],
         },
         afi: Afi::Ipv4,
+        rd: None,
         peer: PeerId::from_addr(IpAddr::V4(peer)),
         attributes: vec![],
         received_at: Instant::now(),

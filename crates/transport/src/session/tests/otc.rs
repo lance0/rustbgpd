@@ -276,6 +276,7 @@ async fn otc_replacements_withdraw_accepted_classic_and_mp_routes_only() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })));
         attrs
     };
@@ -766,6 +767,7 @@ async fn otc_ingress_counts_mp_reach_v6_prefixes() {
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -806,6 +808,7 @@ async fn otc_ingress_count_excludes_unnegotiated_mp_unicast() {
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
+        vpn_flowspec_announced: vec![],
     };
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1094,6 +1097,7 @@ fn otc_test_vpn_update(with_otc: Option<u32>) -> UpdateMessage {
                 },
             }],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     attrs.extend(with_otc.map(otc));

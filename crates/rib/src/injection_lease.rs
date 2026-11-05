@@ -106,15 +106,18 @@ pub enum InjectedKey {
 }
 
 /// Position of an injected key in the fixed order of per-owner key listings:
-/// unicast by `(prefix, path_id)`, then `FlowSpec` by AFI and the rule's
+/// unicast by `(prefix, path_id)`, then `FlowSpec` by AFI, Route
+/// Distinguisher (global SAFI 133 rules before VPN ones) and the rule's
 /// encoded NLRI. A listing resumes strictly after a cursor, so a page
 /// boundary survives keys added or removed elsewhere in the order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InjectedKeyCursor {
     /// Unicast `(prefix, path_id)`.
     Unicast(Prefix, u32),
-    /// `FlowSpec` AFI code and encoded rule (with its length prefix).
-    FlowSpec(u16, Vec<u8>),
+    /// `FlowSpec` AFI code, Route Distinguisher of a VPN rule, and encoded
+    /// rule (with its length prefix). Two RDs with identical components are
+    /// distinct positions.
+    FlowSpec(u16, Option<rustbgpd_wire::RouteDistinguisher>, Vec<u8>),
 }
 
 impl InjectedKeyCursor {
@@ -133,7 +136,7 @@ impl InjectedKeyCursor {
                     key.afi,
                 );
                 debug_assert!(encoded.is_ok(), "an injected rule encodes");
-                Self::FlowSpec(key.afi as u16, nlri)
+                Self::FlowSpec(key.afi as u16, key.rd, nlri)
             }
         }
     }

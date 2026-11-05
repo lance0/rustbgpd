@@ -426,6 +426,7 @@ async fn ibgp_import_policy_sees_unknown_aspa_for_ipv4_and_ipv6() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     session
@@ -706,6 +707,7 @@ async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
                     labeled_announced: vec![],
                     vpn_announced: vec![],
                     rtc_announced: vec![],
+                    vpn_flowspec_announced: vec![],
                 })),
             ],
             true,
@@ -998,6 +1000,7 @@ async fn session_verdicts_equal_rib_validation_for_the_same_tables() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
 

@@ -28,6 +28,7 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -103,6 +104,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -153,6 +155,7 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -204,6 +207,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv4_mp_without_extended_nexthop()
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
@@ -279,7 +283,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -358,7 +362,7 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -420,7 +424,7 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -482,7 +486,7 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -539,7 +543,7 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -667,7 +671,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -750,7 +754,7 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -812,7 +816,7 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -1014,6 +1018,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv6_mp_and_withdraws_replacement(
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ]
     };
@@ -1129,6 +1134,7 @@ async fn strict_peer_ipv4_session_rejects_ipv6_mp_replacement() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     session
@@ -1212,6 +1218,7 @@ async fn strict_peer_next_hop_rejects_link_local_companion_pair() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
+            vpn_flowspec_announced: vec![],
         })),
     ];
     session
@@ -1485,6 +1492,7 @@ async fn received_link_local_companion_records_the_receiving_interface() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             })),
         ];
         let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
@@ -1745,6 +1753,7 @@ async fn negotiated_link_local_receives_unicast_and_normalizes_legacy_pairs() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             };
             mp.link_local_next_hop = companion.map(|s| s.parse().unwrap());
             mp.announced.push(NlriEntry { path_id: 0, prefix });
@@ -1964,6 +1973,7 @@ async fn link_local_malformed_replacement_withdraws_negotiated_route() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             };
             let attrs = vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -3082,6 +3092,7 @@ async fn received_mpls_v6_link_local_companion_records_the_receiving_interface()
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
+                vpn_flowspec_announced: vec![],
             };
             if vpn {
                 mp.vpn_announced = vec![rustbgpd_wire::VpnNlriEntry {
