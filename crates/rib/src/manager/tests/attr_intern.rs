@@ -1203,10 +1203,21 @@ fn evpn_export_fixture_with(
     receiver_policies: [rustbgpd_policy::PolicyChain; 3],
     routes: impl Into<Vec<EvpnRibRoute>>,
 ) -> EvpnExportFixture {
+    evpn_export_fixture_for_receivers(
+        [2, 3, 4].map(|host| peer_v4(Ipv4Addr::new(10, 0, 0, host))),
+        receiver_policies,
+        routes,
+    )
+}
+
+fn evpn_export_fixture_for_receivers(
+    receivers: [PeerId; 3],
+    receiver_policies: [rustbgpd_policy::PolicyChain; 3],
+    routes: impl Into<Vec<EvpnRibRoute>>,
+) -> EvpnExportFixture {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
-    let receivers = [2, 3, 4].map(|host| peer_v4(Ipv4Addr::new(10, 0, 0, host)));
     let policies = std::iter::once(None).chain(receiver_policies.map(Some));
     let mut outbound = Vec::new();
     for ((peer, export_policy), peer_asn) in std::iter::once(source)
@@ -1700,6 +1711,47 @@ fn evpn_export_single_route_updates_share_across_receivers() {
     }
     // The inbound set and the one shared outcome.
     assert_eq!(fixture.manager.attr_intern.len(), 2);
+}
+
+#[test]
+fn evpn_export_single_route_updates_share_across_scoped_receivers() {
+    let receivers = ["swp1", "swp2", "swp3"].map(|interface| {
+        PeerId::allocate(crate::PeerEndpoint::new(
+            "fe80::1".parse().unwrap(),
+            Some(interface),
+        ))
+    });
+    assert_eq!(receivers[0].addr(), receivers[1].addr());
+    assert_ne!(receivers[0], receivers[1]);
+    let mut fixture = evpn_export_fixture_for_receivers(
+        receivers,
+        [
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_A),
+            evpn_add_community_policy(EXPORT_COMMUNITY_B),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(fixture.manager.attr_intern.len(), 0, "nothing primed");
+    for tag in 300..303 {
+        let route = trickle_route(tag);
+        fixture.keys = vec![route.key()];
+        fixture
+            .manager
+            .process_evpn_announce_chunk(fixture.source, vec![route]);
+        fixture.drain_outbound();
+        let first = fixture.exported(0, 0);
+        assert!(
+            Arc::ptr_eq(&first.attributes, &fixture.exported(1, 0).attributes),
+            "equal outcomes from distinct scoped receivers must share"
+        );
+        assert_ne!(first.attributes, fixture.exported(2, 0).attributes);
+        assert_eq!(
+            fixture.manager.attr_intern.len(),
+            2,
+            "only inbound and shared output; repeated receiver-unique output stays uninterned"
+        );
+    }
 }
 
 #[test]
