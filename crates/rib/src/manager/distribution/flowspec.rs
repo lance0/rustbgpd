@@ -34,6 +34,7 @@ impl RibManager {
             for key in flowspec_withdrawn {
                 let route_key = FlowSpecRouteKey {
                     afi: key.afi,
+                    rd: key.rd,
                     rule: key.rule.clone(),
                     path_id: 0,
                 };
@@ -41,15 +42,15 @@ impl RibManager {
                     debug!(%peer, afi = ?key.afi, rule = %key.rule, "flowspec withdrawn");
                     fs_affected.insert(key.clone());
                 }
-                if active_refresh.contains(&(key.afi, Safi::FlowSpec))
+                if active_refresh.contains(&key.family())
                     && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
                 {
                     stale.retain(|stale_key, ()| {
-                        let keep = stale_key.afi != key.afi || stale_key.rule != key.rule;
+                        let keep = stale_key.afi != key.afi
+                            || stale_key.rd != key.rd
+                            || stale_key.rule != key.rule;
                         if !keep {
-                            *removed_stale_counts
-                                .entry((stale_key.afi, Safi::FlowSpec))
-                                .or_default() += 1;
+                            *removed_stale_counts.entry(stale_key.family()).or_default() += 1;
                         }
                         keep
                     });
@@ -106,13 +107,11 @@ impl RibManager {
                 let stale_key = route.key();
                 fs_affected.insert(route.selection_key());
                 rib.insert_flowspec(route);
-                if active_refresh.contains(&(stale_key.afi, Safi::FlowSpec))
+                if active_refresh.contains(&stale_key.family())
                     && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
                     && stale.remove(&stale_key).is_some()
                 {
-                    *removed_stale_counts
-                        .entry((stale_key.afi, Safi::FlowSpec))
-                        .or_default() += 1;
+                    *removed_stale_counts.entry(stale_key.family()).or_default() += 1;
                 }
             }
 
@@ -307,6 +306,7 @@ impl RibManager {
         let owned_key = InjectedKey::FlowSpec(key.clone());
         let route_key = FlowSpecRouteKey {
             afi: key.afi,
+            rd: key.rd,
             rule: key.rule.clone(),
             path_id: 0,
         };
@@ -531,7 +531,7 @@ impl RibManager {
         sendable: Option<&Vec<(Afi, Safi)>>,
         llgr: Option<&Vec<(Afi, Safi)>>,
     ) -> Option<&'static str> {
-        let fs_family = (best.afi, Safi::FlowSpec);
+        let fs_family = best.family();
         if !sendable.is_some_and(|f| f.contains(&fs_family)) {
             return Some("family_not_sendable");
         }
@@ -651,26 +651,26 @@ impl RibManager {
             // local rule is looked up directly (injection always uses path
             // id 0, and local rules are always eligible), so replaying a
             // received table during deferral costs O(1) per key, not a scan.
-            let candidates: Vec<&FlowSpecRoute> =
-                if self.selection_deferred((key.afi, Safi::FlowSpec)) {
-                    let local = FlowSpecRouteKey {
-                        afi: key.afi,
-                        rule: key.rule.clone(),
-                        path_id: 0,
-                    };
-                    self.ribs
-                        .get(&LOCAL_PEER)
-                        .and_then(|rib| rib.get_flowspec(&local))
-                        .into_iter()
-                        .collect()
-                } else {
-                    self.flowspec_validation.selection_candidates(
-                        key,
-                        &self.ribs,
-                        &self.loc_rib,
-                        &checkpoint,
-                    )
+            let candidates: Vec<&FlowSpecRoute> = if self.selection_deferred(key.family()) {
+                let local = FlowSpecRouteKey {
+                    afi: key.afi,
+                    rd: key.rd,
+                    rule: key.rule.clone(),
+                    path_id: 0,
                 };
+                self.ribs
+                    .get(&LOCAL_PEER)
+                    .and_then(|rib| rib.get_flowspec(&local))
+                    .into_iter()
+                    .collect()
+            } else {
+                self.flowspec_validation.selection_candidates(
+                    key,
+                    &self.ribs,
+                    &self.loc_rib,
+                    &checkpoint,
+                )
+            };
             let did_change = self
                 .loc_rib
                 .recompute_flowspec(key.clone(), candidates.into_iter());
@@ -690,10 +690,15 @@ impl RibManager {
             return;
         }
 
+        let lens = self.loc_rib.family_lens();
         crate::manager::helpers::set_loc_rib_prefixes(
             &self.metrics,
             crate::manager::helpers::FLOWSPEC_FAMILIES,
-            self.loc_rib.family_lens().flowspec,
+            lens.flowspec,
+        );
+        self.metrics.set_loc_rib_prefixes(
+            "l3vpn_ipv4_flowspec",
+            crate::manager::helpers::gauge_val(lens.flowspec_vpn),
         );
 
         // Distribute FlowSpec changes to outbound peers
@@ -714,9 +719,9 @@ impl RibManager {
             // Only a change in a FlowSpec family the peer negotiated can
             // reach it.
             if !changed_keys.iter().any(|key| {
-                sendable.as_ref().is_some_and(|families| {
-                    families.contains(&(key.afi, rustbgpd_wire::Safi::FlowSpec))
-                })
+                sendable
+                    .as_ref()
+                    .is_some_and(|families| families.contains(&key.family()))
             }) {
                 continue;
             }
@@ -832,7 +837,9 @@ pub(in crate::manager) fn flowspec_export_context<'a>(
         peer_asn: target_peer_asn,
         peer_group: target_peer_group,
         route_type: Some(route_type(best.origin_type)),
-        family: Some(flowspec_route_family(best.afi)),
+        // `ipv4-flowspec` matches SAFI 133 only (ADR-0146). A VPN rule has
+        // no policy family until `vpnv4-flowspec` joins the vocabulary.
+        family: best.rd.is_none().then(|| flowspec_route_family(best.afi)),
         evpn_route_type: None,
         local_pref: best.local_pref_attr(),
         med: best.med_attr(),

@@ -731,7 +731,11 @@ impl SelectionDeferral {
     /// a Restart-State or non-GR family is excluded, and a survivor that did
     /// not negotiate enhanced route refresh (RFC 7313) is excluded too — it
     /// will never produce the `BoRR`/`EoRR` pair, so `AwaitingRefresh` would
-    /// convergence-hold the family for the entire deferral window.
+    /// convergence-hold the family for the entire deferral window. A family
+    /// transport never asks to refresh ([`requests_route_refresh`]) is
+    /// excluded for the same reason.
+    ///
+    /// [`requests_route_refresh`]: crate::route::requests_route_refresh
     ///
     /// `Some` means at least one active family was classified; the contained
     /// transitions stage any family whose ordinary waiters are already done.
@@ -765,6 +769,7 @@ impl SelectionDeferral {
             let state = if peer_restart_state
                 || !peer_gr_families.contains(&family)
                 || !peer_enhanced_refresh
+                || !crate::route::requests_route_refresh(family)
             {
                 WaiterState::Excluded { session_id }
             } else {
@@ -1081,7 +1086,7 @@ impl RibManager {
                     );
                 })
                 .filter_map(|key| {
-                    let family = (key.afi, Safi::FlowSpec);
+                    let family = key.family();
                     selection
                         .selection_deferred(family)
                         .then_some((family, key))
@@ -1452,7 +1457,7 @@ impl RibManager {
                 .into_iter()
                 .flat_map(crate::adj_rib_in::AdjRibIn::iter_flowspec)
                 .inspect(|_| checkpoint())
-                .filter(|route| families.contains(&(route.afi, Safi::FlowSpec)))
+                .filter(|route| families.contains(&route.family()))
                 .map(crate::route::FlowSpecRoute::selection_key)
                 .collect();
             if !flowspec.is_empty() {
@@ -1813,15 +1818,15 @@ impl RibManager {
                 .inspect(|_| checkpoint())
                 .flat_map(crate::adj_rib_in::AdjRibIn::iter_flowspec)
                 .inspect(|_| checkpoint())
-                .filter(|route| (route.afi, Safi::FlowSpec) == family)
+                .filter(|route| route.family() == family)
                 .map(crate::route::FlowSpecRoute::selection_key),
         );
-        if overflowed && family.1 == Safi::FlowSpec {
+        if overflowed && matches!(family.1, Safi::FlowSpec | Safi::FlowSpecVpn) {
             flowspec.extend(
                 self.loc_rib
                     .iter_flowspec()
                     .inspect(|_| checkpoint())
-                    .filter(|route| (route.afi, Safi::FlowSpec) == family)
+                    .filter(|route| route.family() == family)
                     .map(crate::route::FlowSpecRoute::selection_key),
             );
         }
@@ -1830,12 +1835,12 @@ impl RibManager {
                 .flowspec
                 .keys()
                 .inspect(|_| checkpoint())
-                .filter(|key| (key.afi, Safi::FlowSpec) == family)
+                .filter(|key| key.family() == family)
                 .cloned(),
         );
         self.deferred_selection_keys.flowspec.retain(|key, ()| {
             checkpoint();
-            (key.afi, Safi::FlowSpec) != family
+            key.family() != family
         });
         let mut flowspec = flowspec.into_set(&mut checkpoint);
         if !flowspec.is_empty() {
@@ -2492,6 +2497,7 @@ mod ledger_tests {
     fn nested_flowspec_and_bgpls_payloads_are_logically_charged() {
         let flowspec = crate::route::FlowSpecKey {
             afi: Afi::Ipv4,
+            rd: None,
             rule: rustbgpd_wire::FlowSpecRule {
                 components: vec![
                     rustbgpd_wire::FlowSpecComponent::IpProtocol(vec![

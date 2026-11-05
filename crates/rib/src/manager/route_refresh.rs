@@ -645,14 +645,14 @@ impl RibManager {
             || super::replacement_readiness_checkpoint_at(&readiness, "borr_retirement", false);
         let mut stale_count = 0usize;
         if let Some(rib) = self.ribs.get(&peer) {
-            if safi == Safi::FlowSpec {
+            if matches!(safi, Safi::FlowSpec | Safi::FlowSpecVpn) {
                 let stale = self.refresh_stale_flowspec.entry(peer).or_default();
                 stale.retain(|key, ()| {
                     retire();
-                    key.afi != afi
+                    key.family() != (afi, safi)
                 });
                 for route in rib.iter_flowspec().inspect(|_| visit()) {
-                    if route.afi == afi
+                    if route.family() == (afi, safi)
                         && !route.is_stale
                         && !route.is_llgr_stale
                         && stale.insert(route.key(), ()).is_none()
@@ -1224,14 +1224,14 @@ impl RibManager {
         let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> = HashSet::new();
         let mut grouped_otc_blocked = Vec::new();
 
-        if safi == Safi::FlowSpec {
+        if matches!(safi, Safi::FlowSpec | Safi::FlowSpecVpn) {
             let mut flow_rules: HashSet<FlowSpecKey> = self
                 .loc_rib
                 .iter_flowspec()
                 .inspect(|_| {
                     super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                 })
-                .filter(|route| route.afi == afi)
+                .filter(|route| route.family() == (afi, safi))
                 .map(FlowSpecRoute::selection_key)
                 .collect();
             if !flow_rules.is_empty() {
@@ -1988,7 +1988,7 @@ impl RibManager {
             let checkpoint = &mut |force| {
                 super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
             };
-            if safi == Safi::FlowSpec {
+            if matches!(safi, Safi::FlowSpec | Safi::FlowSpecVpn) {
                 sweep_owed_withdrawals(
                     fs_announce.iter().map(FlowSpecRoute::selection_key),
                     &mut fs_withdraw,
@@ -2002,7 +2002,7 @@ impl RibManager {
                                 false,
                             );
                         })
-                        .filter(|route| route.afi == afi)
+                        .filter(|route| route.family() == (afi, safi))
                         .map(FlowSpecRoute::selection_key),
                     checkpoint,
                 );
@@ -2784,7 +2784,7 @@ impl RibManager {
             .map(|stale| {
                 stale
                     .keys()
-                    .filter(|key| key.afi == afi && safi == Safi::FlowSpec)
+                    .filter(|key| key.family() == (afi, safi))
                     .cloned()
                     .collect()
             })
@@ -2867,6 +2867,7 @@ impl RibManager {
                 if rib.withdraw_flowspec(key) {
                     fs_affected.insert(FlowSpecKey {
                         afi: key.afi,
+                        rd: key.rd,
                         rule: key.rule.clone(),
                     });
                 }
@@ -2941,7 +2942,7 @@ impl RibManager {
 
         let clear_flowspec_stale_entry =
             if let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer) {
-                stale.retain(|key, ()| !(key.afi == afi && safi == Safi::FlowSpec));
+                stale.retain(|key, ()| key.family() != (afi, safi));
                 stale.is_empty()
             } else {
                 false

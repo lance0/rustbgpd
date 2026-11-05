@@ -3302,8 +3302,8 @@ impl BgpMetrics {
         registry
             .register(Box::new(rib_loc_prefixes.clone()))
             .expect("metric not already registered");
-        // VPN FlowSpec (ADR-0146) has no Loc-RIB storage yet, so no RIB path
-        // publishes the series; materialize its zero so the family is visible.
+        // VPN FlowSpec (ADR-0146) is published only once a rule changes;
+        // materialize its zero so the family is visible from startup.
         rib_loc_prefixes
             .with_label_values(&["l3vpn_ipv4_flowspec"])
             .set(0);

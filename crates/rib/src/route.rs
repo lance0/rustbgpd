@@ -10,8 +10,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
-    FlowSpecRule, LabeledNlri, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
-    RtcNlri, Safi, VpnAddressFamily, VpnNlri, VpnRouteKey,
+    FlowSpecRule, LabeledNlri, LargeCommunity, Origin, PathAttribute, Prefix, RouteDistinguisher,
+    RpkiValidation, RtcNlri, Safi, VpnAddressFamily, VpnNlri, VpnRouteKey,
     bgpls::{BgpLsNlri, BgpLsNlriKey},
 };
 
@@ -595,6 +595,9 @@ pub struct FlowSpecRoute {
     pub rule: FlowSpecRule,
     /// Address family (IPv4 or IPv6).
     pub afi: Afi,
+    /// Route Distinguisher of a VPN `FlowSpec` rule (RFC 8955 §8, SAFI 134);
+    /// `None` for a global SAFI 133 rule. Part of the rule's identity.
+    pub rd: Option<RouteDistinguisher>,
     /// The peer that advertised this route.
     pub peer: PeerId,
     /// BGP path attributes.
@@ -618,12 +621,58 @@ pub struct FlowSpecRoute {
 /// RFC 8955/8956 rules do not necessarily contain a destination prefix, so
 /// their AFI cannot be recovered from the rule payload. Carry it explicitly at
 /// every RIB and withdrawal boundary.
+///
+/// A VPN rule (RFC 8955 §8, SAFI 134) also carries its Route
+/// Distinguisher: the same components in global scope and in each RD are
+/// distinct keys.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowSpecKey {
     /// IPv4 or IPv6 `FlowSpec` address family.
     pub afi: Afi,
+    /// Route Distinguisher of a SAFI 134 key; `None` for SAFI 133.
+    pub rd: Option<RouteDistinguisher>,
     /// Structured `FlowSpec` NLRI.
     pub rule: FlowSpecRule,
+}
+
+impl FlowSpecKey {
+    /// The key's AFI/SAFI: SAFI 134 when it carries an RD, otherwise 133.
+    #[must_use]
+    pub fn family(&self) -> (Afi, Safi) {
+        flowspec_family(self.afi, self.rd.as_ref())
+    }
+
+    /// The Adj-RIB-In identity of this rule under `path_id`.
+    #[must_use]
+    pub fn route_key(&self, path_id: u32) -> FlowSpecRouteKey {
+        FlowSpecRouteKey {
+            afi: self.afi,
+            rd: self.rd,
+            rule: self.rule.clone(),
+            path_id,
+        }
+    }
+}
+
+/// The `FlowSpec` AFI/SAFI of a rule scoped by `rd`.
+#[must_use]
+pub fn flowspec_family(afi: Afi, rd: Option<&RouteDistinguisher>) -> (Afi, Safi) {
+    (
+        afi,
+        if rd.is_some() {
+            Safi::FlowSpecVpn
+        } else {
+            Safi::FlowSpec
+        },
+    )
+}
+
+/// Whether the daemon ever asks a peer to refresh `family`. Received VPN
+/// `FlowSpec` (AFI 1 / SAFI 134) is discarded (ADR-0146), so a refresh of it
+/// would replay rules that are thrown away, and no `BoRR`/`EoRR` pair follows.
+#[must_use]
+pub fn requests_route_refresh(family: (Afi, Safi)) -> bool {
+    family != (Afi::Ipv4, Safi::FlowSpecVpn)
 }
 
 /// Family-complete Adj-RIB-In `FlowSpec` identity including Add-Path ID.
@@ -631,10 +680,30 @@ pub struct FlowSpecKey {
 pub struct FlowSpecRouteKey {
     /// IPv4 or IPv6 `FlowSpec` address family.
     pub afi: Afi,
+    /// Route Distinguisher of a SAFI 134 key; `None` for SAFI 133.
+    pub rd: Option<RouteDistinguisher>,
     /// Structured `FlowSpec` NLRI.
     pub rule: FlowSpecRule,
     /// Add-Path identifier, or zero without Add-Path.
     pub path_id: u32,
+}
+
+impl FlowSpecRouteKey {
+    /// The key's AFI/SAFI: SAFI 134 when it carries an RD, otherwise 133.
+    #[must_use]
+    pub fn family(&self) -> (Afi, Safi) {
+        flowspec_family(self.afi, self.rd.as_ref())
+    }
+
+    /// The selection / Adj-RIB-Out identity, without the Add-Path ID.
+    #[must_use]
+    pub fn selection_key(&self) -> FlowSpecKey {
+        FlowSpecKey {
+            afi: self.afi,
+            rd: self.rd,
+            rule: self.rule.clone(),
+        }
+    }
 }
 
 /// A single BGP-LS route stored by the ADR-0077 receive/API slice.
@@ -1205,6 +1274,7 @@ impl FlowSpecRoute {
     pub fn selection_key(&self) -> FlowSpecKey {
         FlowSpecKey {
             afi: self.afi,
+            rd: self.rd,
             rule: self.rule.clone(),
         }
     }
@@ -1214,9 +1284,16 @@ impl FlowSpecRoute {
     pub fn key(&self) -> FlowSpecRouteKey {
         FlowSpecRouteKey {
             afi: self.afi,
+            rd: self.rd,
             rule: self.rule.clone(),
             path_id: self.path_id,
         }
+    }
+
+    /// The route's AFI/SAFI: SAFI 134 when it carries an RD, otherwise 133.
+    #[must_use]
+    pub fn family(&self) -> (Afi, Safi) {
+        flowspec_family(self.afi, self.rd.as_ref())
     }
 
     /// Extract the ORIGIN attribute value, defaulting to `Incomplete`.

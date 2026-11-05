@@ -2329,8 +2329,10 @@ Graceful Restart is enabled by default. rustbgpd implements:
 
 - **Helper mode (receiving speaker):** when a peer with GR capability
   restarts, routes for families listed in its GR capability are preserved as
-  stale during the restart window. Routes for omitted families, including
-  IPv4/IPv6 FlowSpec, are immediately withdrawn. Re-advertisements replace
+  stale during the restart window, including IPv4/IPv6 FlowSpec. IPv4 VPN
+  FlowSpec also participates in GR negotiation, though received VPN rules
+  are currently discarded. Routes for families the peer omits from its
+  capability are immediately withdrawn. Re-advertisements replace
   stale routes; each End-of-RIB marker removes the remaining stale routes
   for that family. If the timer expires first, remaining stale routes are swept.
 - **Minimal restarting-speaker mode:** after a coordinated daemon restart,

@@ -167,12 +167,7 @@ fn tcp_ao_deletion_survivors(
     Ok(survivors)
 }
 
-/// Whether the daemon ever asks a peer to refresh `family`. Received VPN
-/// `FlowSpec` (AFI 1 / SAFI 134) is discarded (ADR-0146), so a refresh of it
-/// would replay rules that are thrown away.
-pub(super) fn requests_route_refresh(family: (Afi, Safi)) -> bool {
-    family != (Afi::Ipv4, Safi::FlowSpecVpn)
-}
+pub(super) use rustbgpd_rib::requests_route_refresh;
 
 fn sorted_family_limits<T>(
     limits: impl Iterator<Item = ((Afi, Safi), T)>,

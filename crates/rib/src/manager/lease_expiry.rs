@@ -319,6 +319,7 @@ impl RibManager {
                     InjectedKey::FlowSpec(key) => {
                         let route_key = FlowSpecRouteKey {
                             afi: key.afi,
+                            rd: key.rd,
                             rule: key.rule.clone(),
                             path_id: 0,
                         };

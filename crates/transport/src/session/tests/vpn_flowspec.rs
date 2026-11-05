@@ -1,5 +1,6 @@
-//! ADR-0146 slice 1: received VPN `FlowSpec` (AFI 1 / SAFI 134) is decoded,
-//! counted and discarded; it never reaches the RIB.
+//! ADR-0146: received VPN `FlowSpec` (AFI 1 / SAFI 134) is decoded, counted
+//! and discarded, so it never reaches the RIB; locally originated VPN rules
+//! leave as SAFI 134 with their Route Distinguisher.
 
 use super::*;
 use rustbgpd_wire::{
@@ -7,6 +8,14 @@ use rustbgpd_wire::{
 };
 
 const DISCARDED: &str = "bgp_vpn_flowspec_nlri_discarded_total";
+
+/// The next message the peer receives. A missing message fails the test
+/// instead of leaving it waiting forever.
+async fn read_message(server: &mut tokio::net::TcpStream) -> Message {
+    tokio::time::timeout(Duration::from_secs(5), read_single_bgp_message(server))
+        .await
+        .expect("the peer receives the next message within 5 s")
+}
 
 #[test]
 fn rfc7606_diagnostics_list_vpn_flowspec_nlri() {
@@ -312,8 +321,8 @@ async fn rib_requested_refresh_skips_vpn_flowspec_on_the_direct_path() {
         end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
         ..OutboundRouteUpdate::default()
     });
-    let first = read_single_bgp_message(&mut server).await;
-    let second = read_single_bgp_message(&mut server).await;
+    let first = read_message(&mut server).await;
+    let second = read_message(&mut server).await;
     assert_eq!(
         refresh_requests(&[first]),
         [(Afi::Ipv4 as u16, Safi::Unicast as u8)]
@@ -361,4 +370,170 @@ async fn soft_reset_of_vpn_flowspec_needs_no_route_refresh_capability() {
         refresh(&mut session, Safi::FlowSpecVpn).await,
         Err(PeerCommandError::FamilyNotNegotiated { .. })
     ));
+}
+
+/// ADR-0146 slice 2: VPN rules leave as AFI 1 / SAFI 134 with their RD, and
+/// global rules with the same components as SAFI 133. Interleaved in one
+/// outbound batch with the same attributes, the families are partitioned
+/// into their own UPDATEs and no rule is lost. Withdrawals follow the same
+/// split.
+///
+/// Break-to-red: grouping by AFI alone puts the VPN rule into the SAFI 133
+/// UPDATE without its RD.
+#[tokio::test]
+async fn vpn_and_global_flowspec_leave_in_separate_updates() {
+    let (mut session, _rib_rx) = session_with(vec![
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::Ipv4, Safi::FlowSpecVpn),
+    ]);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let vpn = vpn_rule(40);
+    let other = FlowSpecRule {
+        components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 11), 32),
+        ))],
+    };
+    let route = |rd, rule: &FlowSpecRule| FlowSpecRoute {
+        rule: rule.clone(),
+        afi: Afi::Ipv4,
+        rd,
+        peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
+        attributes: vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+        ],
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Local,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+    };
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        flowspec_announce: vec![
+            route(None, &vpn.rule),
+            route(Some(vpn.rd), &vpn.rule),
+            route(None, &other),
+        ],
+        ..OutboundRouteUpdate::default()
+    });
+    let mut reaches = Vec::new();
+    for _ in 0..2 {
+        let Message::Update(update) = read_message(&mut server).await else {
+            panic!("expected a FlowSpec announcement");
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let mut mps = parsed.attributes.into_iter().filter_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(*mp),
+            _ => None,
+        });
+        reaches.push(mps.next().unwrap());
+        assert!(mps.next().is_none());
+    }
+    assert_eq!(reaches[0].safi, Safi::FlowSpec);
+    assert_eq!(
+        reaches[0].flowspec_announced,
+        [vpn.rule.clone(), other.clone()]
+    );
+    assert_eq!(reaches[0].vpn_flowspec_announced, []);
+    assert_eq!(reaches[1].safi, Safi::FlowSpecVpn);
+    assert_eq!(reaches[1].flowspec_announced, []);
+    assert_eq!(
+        reaches[1].vpn_flowspec_announced,
+        std::slice::from_ref(&vpn)
+    );
+
+    let key = |rd, rule: &FlowSpecRule| rustbgpd_rib::FlowSpecKey {
+        afi: Afi::Ipv4,
+        rd,
+        rule: rule.clone(),
+    };
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        flowspec_withdraw: vec![
+            key(Some(vpn.rd), &vpn.rule),
+            key(None, &vpn.rule),
+            key(None, &other),
+        ],
+        ..OutboundRouteUpdate::default()
+    });
+    let mut unreaches = Vec::new();
+    for _ in 0..2 {
+        let Message::Update(update) = read_message(&mut server).await else {
+            panic!("expected a FlowSpec withdrawal");
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        unreaches.extend(parsed.attributes.into_iter().filter_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(*mp),
+            _ => None,
+        }));
+    }
+    assert_eq!(unreaches.len(), 2);
+    assert_eq!(unreaches[0].safi, Safi::FlowSpec);
+    assert_eq!(unreaches[0].flowspec_withdrawn, [vpn.rule.clone(), other]);
+    assert_eq!(unreaches[1].safi, Safi::FlowSpecVpn);
+    assert_eq!(unreaches[1].vpn_flowspec_withdrawn, [vpn]);
+}
+
+/// One outbound batch carrying a VPN withdrawal, a VPN announcement and the
+/// family's End-of-RIB sends all three in order: a successful VPN send never
+/// cuts the rest of the batch short.
+#[tokio::test]
+async fn a_vpn_flowspec_batch_sends_every_section() {
+    let (mut session, _rib_rx) = session_with(vec![(Afi::Ipv4, Safi::FlowSpecVpn)]);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let withdrawn = vpn_rule(40);
+    let announced = vpn_rule(41);
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        flowspec_withdraw: vec![rustbgpd_rib::FlowSpecKey {
+            afi: Afi::Ipv4,
+            rd: Some(withdrawn.rd),
+            rule: withdrawn.rule.clone(),
+        }],
+        flowspec_announce: vec![FlowSpecRoute {
+            rule: announced.rule.clone(),
+            afi: Afi::Ipv4,
+            rd: Some(announced.rd),
+            peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
+            attributes: vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath { segments: vec![] }),
+            ],
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        }],
+        end_of_rib: vec![(Afi::Ipv4, Safi::FlowSpecVpn)],
+        ..OutboundRouteUpdate::default()
+    });
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let Message::Update(update) = read_message(&mut server).await else {
+            panic!("expected an UPDATE");
+        };
+        for attr in update.parse(true, false, &[]).unwrap().attributes {
+            match attr {
+                PathAttribute::MpUnreachNlri(mp) if mp.vpn_flowspec_withdrawn.is_empty() => {
+                    seen.push("end-of-rib");
+                }
+                PathAttribute::MpUnreachNlri(mp) => {
+                    assert_eq!(mp.vpn_flowspec_withdrawn, std::slice::from_ref(&withdrawn));
+                    seen.push("withdrawal");
+                }
+                PathAttribute::MpReachNlri(mp) => {
+                    assert_eq!(mp.vpn_flowspec_announced, std::slice::from_ref(&announced));
+                    seen.push("announcement");
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(seen, ["withdrawal", "announcement", "end-of-rib"]);
 }

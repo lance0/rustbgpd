@@ -8696,6 +8696,7 @@ mod tests {
                 let mut row = FlowSpecRoute {
                     rule: rustbgpd_wire::FlowSpecRule { components: vec![] },
                     afi,
+                    rd: None,
                     peer: PeerId::from_addr("0.0.0.0".parse().unwrap()),
                     attributes: vec![],
                     received_at: Instant::now(),
@@ -8829,6 +8830,7 @@ mod tests {
                         )],
                     },
                     afi: Afi::Ipv4,
+                    rd: None,
                     peer,
                     attributes: Vec::new(),
                     received_at: Instant::now(),
@@ -8908,6 +8910,7 @@ mod tests {
                 )],
             },
             afi: Afi::Ipv4,
+            rd: None,
             peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
             attributes,
             received_at: Instant::now(),
