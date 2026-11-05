@@ -537,6 +537,190 @@ fn mixed_peer_owes_private_evpn_and_keeps_its_group() {
     drop(charge);
 }
 
+fn assert_mixed_regroup_withdraws_old_route(owe_evpn: bool, refuse_capture: bool) {
+    use crate::manager::update_groups::RecoveryFallbackCause;
+    use crate::manager::update_groups::admitted_recovery::AdmittedRecovery;
+    use crate::update::ExactExportKey;
+
+    let mut manager = manager(8);
+    manager.test_force_ungrouped = false;
+    let both = vec![V4, EVPN];
+    let mut source = up(&mut manager, peer_v4(SOURCE), both.clone());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 8, 3));
+    let mut rx = up_session(&mut manager, peer, 0, both, 8);
+    send_all(&mut rx);
+    assert!(manager.grouped_member_of(peer).is_some());
+    assert!(manager.evpn_grouped_member_of(peer).is_none());
+
+    let mut wire = Wire::default();
+    received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
+    wire.apply(&send_all(&mut rx));
+    let old = (route_prefix(0), 0);
+    assert!(wire.unicast.contains_key(&old));
+    assert_eq!(manager.adj_ribs_out[&peer].len(), 0);
+
+    let credit = manager.outbound_credit_handle(peer);
+    let charge = owe_evpn.then(|| crate::outbound_credit::OutboundCharge::new(&credit, 8));
+    received(&mut manager, vec![], vec![], vec![evpn_route(1, 0)], vec![]);
+    send_all(&mut source);
+    wire.apply(&send_all(&mut rx));
+    assert_eq!(owed(&manager, peer, EVPN), usize::from(owe_evpn));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.pending_group_admitted.contains_key(&peer));
+    assert_eq!(manager.group_recovery_fallback(peer), None);
+    drop(charge);
+
+    if refuse_capture {
+        manager.pending_group_admitted = AdmittedRecovery::with_test_limits(0, 512 * 1024 * 1024);
+    }
+    // Pause admission so the regroup's proof can be observed before recovery consumes it.
+    let sender = manager.outbound_peers[&peer].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| sender.clone().try_reserve_owned().ok()).collect();
+    let mut policy = deny_prefixes_chain(&[old.0]);
+    policy.policies[0].policy.entries[0].match_neighbor_set =
+        Some(rustbgpd_policy::NeighborSetMatch {
+            addresses: vec![],
+            remote_asns: vec![65000],
+            peer_groups: vec![],
+        });
+    let policy = rustbgpd_policy::PolicyChain::from_named(policy.policies);
+    manager
+        .replace_peer_export_policy_synchronously(peer, Some(policy))
+        .unwrap();
+    assert!(manager.grouped_member_of(peer).is_none());
+    let captured_old = manager
+        .pending_group_admitted
+        .get(&peer)
+        .is_some_and(|proof| proof.contains(&ExactExportKey::Unicast(old.0, old.1)));
+    let fallback = manager.group_recovery_fallback(peer);
+    drop(occupied);
+
+    manager.resync_dirty_peers_bounded();
+    let recovered = send_all(&mut rx);
+    wire.apply(&recovered);
+    assert!(
+        wire.unicast.is_empty(),
+        "regroup must withdraw the admitted route denied by the new policy"
+    );
+    assert_eq!(
+        recovered
+            .iter()
+            .flat_map(|update| update.unicast_withdrawals().copied())
+            .collect::<Vec<_>>(),
+        vec![old]
+    );
+    assert_eq!(
+        wire.evpn.keys().collect::<Vec<_>>(),
+        vec![&format!("{:?}", evpn_route(1, 0).key())]
+    );
+    assert!(manager.owing(peer).is_none());
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.pending_group_admitted.contains_key(&peer));
+    assert_eq!(manager.group_recovery_fallback(peer), None);
+    if refuse_capture {
+        assert!(!captured_old);
+        assert_eq!(fallback, Some(RecoveryFallbackCause::PeerLimit));
+    } else {
+        assert_eq!(captured_old, owe_evpn);
+        assert_eq!(fallback, None);
+    }
+    manager.resync_dirty_peers_bounded();
+    assert!(send_all(&mut rx).is_empty());
+}
+
+#[test]
+fn owed_evpn_regroup_withdraws_the_old_group_route() {
+    assert_mixed_regroup_withdraws_old_route(true, false);
+}
+
+#[test]
+fn owed_evpn_regroup_keeps_withdrawals_when_capture_is_refused() {
+    assert_mixed_regroup_withdraws_old_route(true, true);
+}
+
+#[test]
+fn mixed_regroup_without_debt_keeps_withdrawals() {
+    for refuse_capture in [false, true] {
+        assert_mixed_regroup_withdraws_old_route(false, refuse_capture);
+    }
+}
+
+#[test]
+fn full_grouped_channel_defers_private_evpn_without_staging() {
+    for closed in [false, true] {
+        let mut manager = manager(8);
+        manager.test_force_ungrouped = false;
+        let both = vec![V4, EVPN];
+        let mut source = up(&mut manager, peer_v4(SOURCE), both.clone());
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 8, 4));
+        let mut rx = up_session(&mut manager, peer, 0, both, 4);
+        send_all(&mut rx);
+        let group = manager.grouped_member_of(peer).unwrap();
+        assert!(manager.evpn_grouped_member_of(peer).is_none());
+        for key in 0..4 {
+            received(&mut manager, vec![route(key, 0)], vec![], vec![], vec![]);
+            send_all(&mut source);
+        }
+        assert!(manager.outbound_channel_full(peer));
+        assert_eq!(rx.len(), 4);
+        assert_eq!(manager.outbound_credit_rows(peer), 0);
+        assert!(manager.owing(peer).is_none());
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert!(!manager.pending_group_admitted.contains_key(&peer));
+        assert_eq!(manager.group_recovery_fallback(peer), None);
+        if closed {
+            rx.close();
+        }
+
+        let stagings = manager.outbound_stagings(peer);
+        received(&mut manager, vec![], vec![], vec![evpn_route(1, 0)], vec![]);
+        send_all(&mut source);
+        assert_eq!(
+            manager.outbound_stagings(peer),
+            stagings,
+            "fresh private EVPN must not stage against a full channel"
+        );
+        assert_eq!(owed(&manager, peer, EVPN), usize::from(!closed));
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert!(!manager.group_ribs[&group].dirty_members.contains(&peer));
+        assert!(!manager.pending_group_admitted.contains_key(&peer));
+        assert_eq!(manager.group_recovery_fallback(peer), None);
+        assert_eq!(manager.grouped_member_of(peer), Some(group));
+        assert_eq!(manager.outbound_credit_rows(peer), 0);
+
+        let mut wire = Wire::default();
+        let grouped = send_all(&mut rx);
+        assert_eq!(rows(&grouped), 4);
+        wire.apply(&grouped);
+        assert_eq!(wire.unicast.len(), 4);
+        assert!(wire.evpn.is_empty());
+        manager.resync_dirty_peers_bounded();
+        let deferred = send_all(&mut rx);
+        if closed {
+            assert!(deferred.is_empty());
+        } else {
+            assert_eq!(rows(&deferred), 1);
+            assert!(deferred.iter().all(|update| update.announce.is_empty()
+                && update.unicast_withdrawals().next().is_none()
+                && update.evpn_withdraw.is_empty()));
+            assert_eq!(
+                deferred
+                    .iter()
+                    .flat_map(|update| update.evpn_announce.iter().map(EvpnRibRoute::key))
+                    .collect::<Vec<_>>(),
+                vec![evpn_route(1, 0).key()]
+            );
+            wire.apply(&deferred);
+            assert_eq!(wire.unicast.len(), 4);
+            assert_eq!(wire.evpn.len(), 1);
+        }
+        assert!(manager.owing(peer).is_none());
+        assert!(!manager.dirty_peers.contains(&peer));
+        manager.resync_dirty_peers_bounded();
+        assert!(send_all(&mut rx).is_empty());
+    }
+}
+
 fn route_prefix(index: u32) -> Prefix {
     route(index, 0).prefix
 }

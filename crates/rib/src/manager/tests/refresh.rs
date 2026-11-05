@@ -1584,7 +1584,9 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
         // receiver shares an update group where its families allow one.
         let mut receivers = Vec::new();
         let held_rows = 1 + usize::from(case.sibling.is_some());
-        for (address, capacity) in [(71, held_rows), (72, 64)]
+        let private_family = !grouped || case.family.1 != Safi::MplsVpn;
+        let capacity = held_rows + usize::from(private_family);
+        for (address, capacity) in [(71, capacity), (72, 64)]
             .into_iter()
             .take(1 + usize::from(grouped))
         {
@@ -1631,13 +1633,22 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
         }
         manager.handle_update((case.update)(true));
         while manager.process_next_route_chunk() {}
-        assert!(
-            manager.outbound_channel_full(receiver),
-            "{:?} grouped={grouped}",
-            case.family
-        );
+        let fill = if private_family {
+            // Refuse after preflight so this remains a dirty refresh-sweep
+            // control; a channel already full would only record owed keys.
+            assert_eq!(manager.outbound_peers[&receiver].capacity(), 1);
+            let fill = FillChannelOnSnapshot::install(&mut manager, receiver);
+            fill.arm();
+            Some(fill)
+        } else {
+            assert!(manager.outbound_channel_full(receiver));
+            None
+        };
         manager.handle_update((case.update)(false));
         while manager.process_next_route_chunk() {}
+        if let Some(fill) = &fill {
+            fill.assert_full();
+        }
         assert!(
             manager.dirty_peers.contains(&receiver),
             "{:?} grouped={grouped}",
@@ -1645,6 +1656,9 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
         );
         if grouped && case.family.1 == Safi::MplsVpn {
             assert!(manager.pending_group_admitted.contains_key(&receiver));
+        }
+        if let Some(fill) = &fill {
+            fill.release();
         }
         let (announced, _) = views(&mut receiver_rx);
         assert_eq!(

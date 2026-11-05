@@ -966,13 +966,18 @@ async fn empty_view_resync_answers_the_owed_refresh_and_its_held_eor() {
         "2001:db8::81".parse().unwrap(),
     ));
     let flapping = Prefix::V6(prefix);
-    for _ in 0..SESSION_CHANNEL / 2 {
+    // Leave capacity for preflight; the final announce loses its slots
+    // during staging and must take the empty-view dirty recovery path.
+    for _ in 0..SESSION_CHANNEL / 2 - 1 {
         inject(&mut manager, route.clone());
         withdraw_injected(&mut manager, flapping);
     }
-    assert!(manager.outbound_channel_full(peer));
+    assert_eq!(manager.outbound_peers[&peer].capacity(), 2);
+    let fill = FillChannelOnSnapshot::install(&mut manager, peer);
+    fill.arm();
     assert!(!manager.dirty_peers.contains(&peer));
     inject(&mut manager, route);
+    fill.assert_full();
     assert!(manager.dirty_peers.contains(&peer), "the refused announce");
     withdraw_injected(&mut manager, flapping);
     refresh(&mut manager, 182);
@@ -987,6 +992,7 @@ async fn empty_view_resync_answers_the_owed_refresh_and_its_held_eor() {
         "nothing is advertised to the dirty session"
     );
 
+    fill.release();
     let mut seen = apply(&mut rx, &mut rib);
     manager.resync_dirty_peers_bounded();
     seen.extend(apply(&mut rx, &mut rib));

@@ -1702,8 +1702,8 @@ fn deferred_withdraw_rejection_history_ungrouped() {
 }
 
 /// One UPDATE withdraws the denied route and announces a permitted one; the
-/// clean target's send fails on its full channel, so the pass's history
-/// refresh never commits.
+/// full target misses the update, so the pass's history refresh never
+/// commits. Dirty recovery must retire the denial afterward.
 fn failed_send_rejection_history(ungrouped: bool) {
     let (mut manager, receivers) = rejection_history_with_full_target(ungrouped);
     let source = member(0);
@@ -1725,6 +1725,9 @@ fn failed_send_rejection_history(ungrouped: bool) {
     }
     manager.handle_update(update);
     drain_route_chunks(&mut manager);
+    // The private gate can record owed keys before attempting a send;
+    // exercise dirty recovery's rejection-history retirement explicitly.
+    manager.mark_outbound_dirty(member(1));
     assert_eq!(manager.loc_rib.len(), 2);
     assert_eq!(retained_policy_rejection_keys(&manager, member(1)).len(), 1);
     resync_retires_stale_rejection_history(manager, receivers);
@@ -2151,7 +2154,7 @@ fn add_path_rtbh_demotion(size: usize) -> Work {
     let keys: Vec<u32> = (1..=u32::try_from(count).unwrap()).collect();
     assert_eq!(wire.keys().copied().collect::<Vec<_>>(), keys);
     assert!(wire.values().all(|&blackhole| blackhole));
-    // A full writer holds every demotion for one dirty resync.
+    // A full writer owes every demotion until the resync timer retries it.
     let writer = manager.outbound_peers[&target].clone();
     let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
     for index in 0..count {
@@ -2159,7 +2162,7 @@ fn add_path_rtbh_demotion(size: usize) -> Work {
     }
     drop(occupied);
     let work = checkpoints_in(|| {
-        manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([target]));
+        manager.resync_dirty_peers_bounded();
     });
     let withdrawn = apply(&mut receiver, &mut wire);
     assert_eq!(withdrawn, 0, "every demoted path keeps its own key");

@@ -1081,10 +1081,11 @@ fn a_full_writer_helper_flush_is_not_a_route_drop() {
 fn skipped_dirty_receiver_rechecks_its_settled_key() {
     let (mut manager, mut rib, (tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
     let occupied = occupy(&tx);
-    // A new live RTBH queues behind the full writer and leaves the
-    // receiver dirty.
+    // A new live RTBH waits behind the full writer. Explicitly require
+    // dirty recovery so this fixture exercises the skipped helper flush.
     let fresh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 4), 32);
     inject_rtbh(&mut manager, fresh);
+    manager.mark_outbound_dirty(peer_v4(OBSERVER));
     assert!(manager.dirty_peers.contains(&peer_v4(OBSERVER)));
     withdraw_received(&mut manager, rtbh);
     drop(occupied);

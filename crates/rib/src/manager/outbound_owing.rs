@@ -814,7 +814,7 @@ impl RibManager {
         }
         let limit = self.outbound_row_credit();
         let rows = self.outbound_credit[&peer].credit.rows();
-        if rows >= limit {
+        if rows >= limit || self.outbound_channel_full(peer) {
             OwingGate::Owe
         } else {
             OwingGate::Stream {

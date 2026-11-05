@@ -26,6 +26,74 @@ use crate::test_support::{
 };
 use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
+/// Fill a live channel after the producer's capacity gate, at the existing
+/// encoder-snapshot seam before the commit reserves its channel slot.
+struct FillChannelOnSnapshot {
+    encoder: Arc<dyn crate::update::ExactExportEncoder>,
+    sender: mpsc::Sender<OutboundRouteUpdate>,
+    // None is armed; Some(empty) is disarmed; Some(permits) holds the refusal.
+    held: std::sync::Mutex<Option<Vec<mpsc::OwnedPermit<OutboundRouteUpdate>>>>,
+}
+
+impl FillChannelOnSnapshot {
+    fn install(manager: &mut RibManager, peer: PeerId) -> Arc<Self> {
+        let fill = Arc::new(Self {
+            encoder: Arc::clone(&manager.peer_export_encoders[&peer]),
+            sender: manager.outbound_peers[&peer].clone(),
+            held: std::sync::Mutex::new(Some(Vec::new())),
+        });
+        manager.peer_export_encoders.insert(peer, fill.clone());
+        fill
+    }
+
+    fn arm(&self) {
+        let mut held = self.held.lock().unwrap();
+        assert!(held.as_ref().is_some_and(Vec::is_empty));
+        assert!(
+            self.sender.capacity() > 0,
+            "preflight must have a free slot"
+        );
+        *held = None;
+    }
+
+    fn assert_full(&self) {
+        assert!(
+            self.held
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|permits| !permits.is_empty()),
+            "the snapshot actually filled the channel"
+        );
+        assert_eq!(self.sender.capacity(), 0);
+    }
+
+    fn release(&self) {
+        self.assert_full();
+        *self.held.lock().unwrap() = Some(Vec::new());
+    }
+}
+
+impl crate::update::ExactExportEncoder for FillChannelOnSnapshot {
+    fn owner_id(&self) -> u64 {
+        self.encoder.owner_id()
+    }
+
+    fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+        let mut held = self.held.lock().unwrap();
+        if held.is_none() {
+            let mut permits = Vec::new();
+            while let Ok(permit) = self.sender.clone().try_reserve_owned() {
+                permits.push(permit);
+            }
+            assert!(!permits.is_empty(), "the send reached a free channel slot");
+            *held = Some(permits);
+        }
+        drop(held);
+        self.encoder.snapshot()
+    }
+}
+
 /// Every owned readiness checkpoint `work` passes, with whether it ran
 /// inside an executor handoff.
 pub(super) fn owned_checkpoints(

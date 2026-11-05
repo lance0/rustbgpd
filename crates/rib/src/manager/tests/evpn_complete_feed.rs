@@ -2242,8 +2242,16 @@ fn assert_review2_direct_family_refusal(family: u8) {
         .get_mut(&peer)
         .unwrap()
         .push(extra);
-    let sender = manager.outbound_peers[&peer].clone();
-    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    let fill = if family < 2 {
+        let fill = FillChannelOnSnapshot::install(&mut manager, peer);
+        fill.arm();
+        Some(fill)
+    } else {
+        // Group-owned VPN still takes the full-channel refusal path.
+        let sender = manager.outbound_peers[&peer].clone();
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        None
+    };
     let handle = manager.evpn_recovery_handle(peer).unwrap();
     let resets = count_reset_attempts(&mut manager);
     if family == 0 {
@@ -2274,6 +2282,9 @@ fn assert_review2_direct_family_refusal(family: u8) {
             withdrawn: vec![],
         });
     }
+    if let Some(fill) = &fill {
+        fill.assert_full();
+    }
     assert!(
         manager.dirty_peers.contains(&peer),
         "the actual direct family send must refuse"
@@ -2284,6 +2295,9 @@ fn assert_review2_direct_family_refusal(family: u8) {
         "direct refusal must retain actual EVPN OLD before another change"
     );
     manager.process_evpn_withdraw_chunk(route.peer, vec![route.key()]);
+    if let Some(fill) = &fill {
+        fill.release();
+    }
     while output.try_recv().map(delivered).is_ok() {}
     manager.resync_dirty_peers_bounded();
     let mut family_announces = 0;

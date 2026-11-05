@@ -143,9 +143,12 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     assert_eq!(manager.outbound_peers[&observer].capacity(), 0);
     assert!(!manager.dirty_peers.contains(&observer));
     inject_host(&mut manager, second);
+    // Private full-channel admission records owed keys; this fixture
+    // specifically exercises the dirty recovery path.
+    manager.mark_outbound_dirty(observer);
     assert!(
         manager.dirty_peers.contains(&observer),
-        "second RTBH admission really failed"
+        "dirty recovery is required for the missed RTBH admission"
     );
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(second)).unwrap().peer,
@@ -597,6 +600,9 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
             let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
             inject_host(&mut manager, first);
             inject_host(&mut manager, second);
+            // Keep this a dirty-resync fixture even when the private
+            // admission gate records the miss as owed keys.
+            manager.mark_outbound_dirty(peer_v4(OBSERVER));
             assert!(manager.dirty_peers.contains(&peer_v4(OBSERVER)));
             apply_wire(&mut rx, &mut wire);
             manager.distribute_changes(&HashSet::new(), &HashSet::new());
@@ -2985,19 +2991,36 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     );
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
     let writer = manager.outbound_peers[&observer].clone();
-    // A new RTBH waits behind a full writer, so the retry must reserve proof.
+    // A new RTBH waits behind a full writer; explicitly require dirty
+    // recovery so the retry must reserve proof.
     let pending = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32));
     let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
     inject_host(
         &mut manager,
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
     );
+    manager.mark_outbound_dirty(observer);
+    assert!(manager.dirty_peers.contains(&observer));
     drop(occupied);
     assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    let refusals = counter_metric_value(
+        &manager.metrics,
+        "bgp_update_group_recovery_fallback_total",
+        &[("cause", "allocation_failure")],
+    );
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
     manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    assert_eq!(
+        counter_metric_value(
+            &manager.metrics,
+            "bgp_update_group_recovery_fallback_total",
+            &[("cause", "allocation_failure")],
+        ),
+        refusals + 1.0,
+        "the dirty retry must refuse an admission-proof allocation"
+    );
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     assert!(manager.group_recovery_fallback(observer).is_some());
     // The private Add-Path receiver's complete bodies still prove the new

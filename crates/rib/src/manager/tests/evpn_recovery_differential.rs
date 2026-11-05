@@ -191,7 +191,7 @@ impl Run {
         }
         for _ in 0..64 {
             self.drain();
-            if self.manager.dirty_peers.is_empty() {
+            if self.manager.dirty_peers.is_empty() && self.manager.owing_peers.is_empty() {
                 break;
             }
             self.manager.resync_dirty_peers_bounded();
@@ -201,6 +201,10 @@ impl Run {
         }
         self.drain();
         assert!(self.manager.dirty_peers.is_empty(), "every receiver healed");
+        assert!(
+            self.manager.owing_peers.is_empty(),
+            "every owed key drained"
+        );
         let desired: BTreeMap<_, _> = self
             .manager
             .loc_rib

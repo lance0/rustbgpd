@@ -881,10 +881,12 @@ fn refresh_orf_and_full_channel_leave_no_peer_map_residue() {
             assert!(!manager.peer_orf_pending.contains_key(&peer_addr(1)));
         }
         if step == 6 {
-            assert!(manager.dirty_peers.contains(&peer_addr(1)));
+            assert!(manager.owes(peer_addr(1), FAMILY));
+            assert!(!manager.dirty_peers.contains(&peer_addr(1)));
         }
         if step == 7 {
             manager.resync_dirty_peers_bounded();
+            assert!(!manager.owes(peer_addr(1), FAMILY));
             assert!(!manager.dirty_peers.contains(&peer_addr(1)));
         }
         check_invariants(&manager, step);

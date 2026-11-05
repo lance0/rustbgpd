@@ -264,9 +264,11 @@ fn dirty_ipv6_retry_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
     assert_eq!(manager.outbound_peers[&target].capacity(), 0);
     assert!(!manager.dirty_peers.contains(&target));
     receive(&mut manager, &[ordinary_v6(0x101)]);
+    // Private admission may owe keys; this case requires dirty recovery.
+    manager.mark_outbound_dirty(target);
     assert!(
         manager.dirty_peers.contains(&target),
-        "IPv6 admission really failed"
+        "dirty recovery is required for the missed IPv6 admission"
     );
 
     // Main queues the selection-release EoR after distribution: retain the
@@ -368,9 +370,11 @@ fn dirty_ipv6_recovery_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
 
     // The real initial IPv6 table and its EoR occupy both writer slots.
     receive(&mut manager, &[ordinary_v6(0x101)]);
+    // Private admission may owe keys; this case requires dirty recovery.
+    manager.mark_outbound_dirty(target);
     assert!(
         manager.dirty_peers.contains(&target),
-        "IPv6 admission really failed"
+        "dirty recovery is required for the missed IPv6 admission"
     );
     let mut seen = BTreeSet::new();
     let mut eors = HashMap::new();
@@ -380,7 +384,7 @@ fn dirty_ipv6_recovery_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
 
     let commits = manager.dirty_resync_commits;
     release_v4(&mut manager);
-    // A direct empty distribution pass is the ordinary dirty-timer retry.
+    // Retry dirty recovery after selection release.
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     assert!(observe(&mut target_rx, false, &mut seen, &mut eors) > 0);
     assert!(manager.dirty_resync_commits > commits);
@@ -413,9 +417,11 @@ fn non_restarting_dirty_peer_keeps_orf_initial_eor_held_during_selection_release
 
     // The real initial IPv6 table and its EoR occupy both writer slots.
     receive(&mut manager, &[ordinary_v6(0x101)]);
+    // Private admission may owe keys; this case requires dirty recovery.
+    manager.mark_outbound_dirty(target);
     assert!(
         manager.dirty_peers.contains(&target),
-        "IPv6 admission really failed"
+        "dirty recovery is required for the missed IPv6 admission"
     );
     let mut seen = BTreeSet::new();
     let mut eors = HashMap::new();
@@ -425,7 +431,7 @@ fn non_restarting_dirty_peer_keeps_orf_initial_eor_held_during_selection_release
 
     let commits = manager.dirty_resync_commits;
     release_v4(&mut manager);
-    // A direct empty distribution pass is the ordinary dirty-timer retry.
+    // Retry dirty recovery after selection release.
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     assert!(observe(&mut target_rx, false, &mut seen, &mut eors) > 0);
     assert!(manager.dirty_resync_commits > commits);
@@ -593,6 +599,8 @@ fn still_withheld_orf_family_keeps_fresh_empty_completion_on_selection_release()
     let missed = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
     // A real runnable-family miss makes recovery necessary; IPv6 stays withheld.
     receive(&mut manager, &[missed]);
+    // Private admission may owe keys; this case requires dirty recovery.
+    manager.mark_outbound_dirty(target);
     assert!(manager.dirty_peers.contains(&target));
     assert!(!manager.peer_sendable_families[&target].contains(&V6));
     assert_eq!(

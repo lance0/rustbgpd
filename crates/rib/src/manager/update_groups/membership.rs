@@ -48,10 +48,10 @@ impl RibManager {
             // content-identical chains from shattering anything.
             return None;
         }
-        // Owed keys were recorded against the old ownership. The regroup
-        // baseline is admitted state, so a resync covers them.
+        // Owed keys were recorded against the old ownership. Capture admitted
+        // OLD before marking dirty so regroup recovery retains its withdrawals.
         if self.drop_peer_owing(peer) {
-            self.mark_outbound_dirty_inner(peer, false);
+            self.mark_outbound_dirty(peer);
         }
         let prev_gid = match previous {
             Some(GroupMembership::Grouped(id)) => Some(id),

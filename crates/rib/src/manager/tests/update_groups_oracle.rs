@@ -1962,20 +1962,20 @@ impl Oracle {
                 "{peer} is still outbound-dirty after its resync"
             );
         }
-        self.assert_no_refresh_owed().await;
+        self.assert_no_route_or_refresh_owed().await;
     }
 
-    /// No peer is owed a refresh answer: refused answers are refresh-only
-    /// debt, which no dirty-state check sees.
-    pub(super) async fn assert_no_refresh_owed(&mut self) {
+    /// Private keys and refused refresh answers need retries without making
+    /// the peer dirty, so cleanliness must check both kinds of debt.
+    async fn assert_no_route_or_refresh_owed(&mut self) {
         let peers: Vec<PeerId> = self.outs.keys().copied().collect();
         for peer in peers {
-            let (reply, owed) = oneshot::channel();
-            self.tx
-                .send(RibUpdate::TestQueryPeerOutboundOwed { peer, reply })
-                .await
-                .unwrap();
-            let owed = owed.await.unwrap();
+            let owed = self.peer_outbound_owed(peer).await;
+            assert!(
+                owed.owed_pending.is_empty(),
+                "{peer} is still owed route keys {:?}",
+                owed.owed_pending
+            );
             assert!(
                 owed.refresh.is_empty(),
                 "{peer} is still owed refresh answers for {:?}",
@@ -2122,7 +2122,7 @@ impl Oracle {
     /// checker — the returned streams are the complete emission history.
     pub(super) async fn terminal_health(&mut self) -> (usize, usize, usize, usize, usize, usize) {
         self.quiesce().await;
-        self.assert_no_refresh_owed().await;
+        self.assert_no_route_or_refresh_owed().await;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::TestQueryOutboundHealth { reply: reply_tx })
@@ -2143,6 +2143,21 @@ impl Oracle {
             .await
             .unwrap();
         reply_rx.await.unwrap()
+    }
+
+    async fn peer_outbound_owed(&mut self, peer: PeerId) -> crate::update::OutboundOwed {
+        let (reply, owed) = oneshot::channel();
+        self.tx
+            .send(RibUpdate::TestQueryPeerOutboundOwed { peer, reply })
+            .await
+            .unwrap();
+        owed.await.unwrap()
+    }
+
+    /// Queue deferral can retain private keys without a whole-peer resync.
+    pub(super) async fn peer_outbound_deferred(&mut self, peer: Ipv4Addr) -> bool {
+        let owed = self.peer_outbound_owed(peer_v4(peer)).await;
+        owed.resync || !owed.owed_pending.is_empty()
     }
 
     pub(super) async fn finish(mut self) -> Streams {
@@ -2516,7 +2531,7 @@ struct SwapMode {
     ungrouped: bool,
     per_client_best: bool,
     add_path: bool,
-    /// C's channel is full when the re-evaluation arrives, so C is dirty.
+    /// C's channel is full when the re-evaluation arrives, so C owes exports.
     jam: bool,
     /// C alone handles RFC 7947 control communities, and p8 asks not to be
     /// announced to its AS: grouped members whose outputs differ.
@@ -3204,7 +3219,7 @@ fn fold_vpn_paths(streams: &Streams) -> FoldedVpnPaths {
 struct VpnSwapMode {
     ungrouped: bool,
     add_path: bool,
-    /// C's channel is full when the re-evaluation arrives, so C is dirty.
+    /// C's channel is full when the re-evaluation arrives, so C owes exports.
     jam: bool,
     /// B and C negotiate RT-Constrain, whose export the bound does not cover.
     rtc: bool,
@@ -3385,11 +3400,22 @@ async fn run_vpn_swap_case(
         oracle
             .drain_before_recovery(C, RecoveryPath::QueueDeferral)
             .await;
-        // The prompt receivers send what the re-evaluation queued before
-        // the tick that resyncs any peer it left dirty.
-        oracle.quiesce().await;
-        tokio::time::advance(Duration::from_secs(2)).await;
-        oracle.quiesce().await;
+        // One slot admits one owed family per tick. Keep the same two-second
+        // deadline while returning credit between real timer retries.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            oracle.quiesce().await;
+            oracle.drain_available();
+            if !oracle.peer_outbound_deferred(C).await {
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            assert!(
+                now < deadline,
+                "C still owes exports after its retry deadline"
+            );
+            tokio::time::advance(DIRTY_RESYNC_BACKLOG_INTERVAL.min(deadline - now)).await;
+        }
         oracle.end_recovery(C).await;
     } else {
         // A small row credit can leave a peer dirty for its resync tick.
@@ -4044,15 +4070,18 @@ async fn oracle_dirty_source_excluded_sibling_has_no_shared_tombstone_withdraw()
         // Retry until both members are clean before closing their recovery
         // windows. A member's channel holds one message, so a resync the run
         // loop paces across polls can leave its tail queued behind a full
-        // channel: the member stays dirty and the next tick sends the rest.
+        // channel: the member stays deferred and the next tick sends the rest.
         for tick in 1.. {
             tokio::time::advance(Duration::from_secs(2)).await;
             o.quiesce().await;
             o.drain_available();
-            if !o.peer_outbound_dirty(C).await && !o.peer_outbound_dirty(D).await {
+            if !o.peer_outbound_deferred(C).await && !o.peer_outbound_deferred(D).await {
                 break;
             }
-            assert!(tick < 5, "C or D is still dirty after {tick} resync ticks");
+            assert!(
+                tick < 5,
+                "C or D is still deferred after {tick} resync ticks"
+            );
         }
         o.end_recovery(C).await;
         o.end_recovery(D).await;
@@ -5555,12 +5584,8 @@ async fn rtc_announce_only_delta_lost_to_full_channel_leaves_no_extra_withdraw_e
     o.peer_up_families(C, false, true, None, 2, vpn_rtc_sendable())
         .await;
     // Strict-empty membership: the staged route reaches neither B nor C.
-    o.vpn_routes(
-        A,
-        vec![vpn_route(vpn_nlri(1, 100), A, 100, vec![rt_ec(1)])],
-        vec![],
-    )
-    .await;
+    let route = vpn_route(vpn_nlri(1, 100), A, 100, vec![rt_ec(1)]);
+    o.vpn_routes(A, vec![route.clone()], vec![]).await;
     let (dirty, _, _, _, _, extra_withdraw_peers) = o.terminal_health().await;
     assert_eq!(
         (dirty, extra_withdraw_peers),
@@ -5570,13 +5595,47 @@ async fn rtc_announce_only_delta_lost_to_full_channel_leaves_no_extra_withdraw_e
 
     // C widens to RT1: one announce, no withdraws, and the send fails.
     o.rtc_routes(C, vec![rtc_interest(C, 1)]).await;
-    let (dirty, _, _, _, _, extra_withdraw_peers) = o.terminal_health().await;
+    // This intentionally jammed snapshot is not terminal: RTC distribution
+    // also retained whole-family debt before C's own-source filter could run.
+    let (reply, health) = oneshot::channel();
+    o.tx.send(RibUpdate::TestQueryOutboundHealth { reply })
+        .await
+        .unwrap();
+    let (dirty, _, _, _, _, extra_withdraw_peers) = health.await.unwrap();
     assert_eq!(dirty, 1, "the lost delta must leave C dirty for the resync");
     assert_eq!(
         extra_withdraw_peers, 0,
         "an announce-only delta must not create an extra-withdraw entry"
     );
-    o.finish().await;
+    // Free C's initial messages and let the production timer recover both
+    // the missed VPN delta and its pending RTC recheck.
+    o.drain_available();
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(o.terminal_health().await, (0, 0, 0, 0, 0, 0));
+    o.drain_available();
+    // A further idle tick must not replay the completed announcement.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(o.terminal_health().await, (0, 0, 0, 0, 0, 0));
+    let streams = o.finish().await;
+    let received = &streams[&peer_v4(C)];
+    let expected = normalize(&OutboundRouteUpdate {
+        vpn_announce: vec![route].into(),
+        ..OutboundRouteUpdate::default()
+    });
+    assert_eq!(
+        received
+            .iter()
+            .flat_map(|message| message.vpn_announce.iter().cloned())
+            .collect::<Vec<_>>(),
+        expected.vpn_announce,
+        "the missed VPN announcement is delivered exactly once"
+    );
+    assert!(
+        received
+            .iter()
+            .all(|message| message.vpn_withdraw.is_empty()),
+        "an announce-only recovery never withdraws a VPN route"
+    );
 }
 
 /// A member that leaves its group dirty with an empty advertised view has
