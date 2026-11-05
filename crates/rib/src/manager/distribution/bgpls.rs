@@ -321,8 +321,22 @@ impl RibManager {
                 continue;
             }
 
-            let whole_pass =
-                self.owing_whole_pass(peer, &[crate::manager::outbound_owing::OwedFamily::BGP_LS]);
+            let whole_pass = self.owing_whole_pass(
+                peer,
+                &[(Afi::BgpLs, Safi::BgpLs), (Afi::BgpLs, Safi::BgpLsVpn)]
+                    .into_iter()
+                    .filter(|family| {
+                        sendable
+                            .as_ref()
+                            .is_some_and(|families| families.contains(family))
+                            && changed_keys.iter().any(|key| {
+                                checkpoint();
+                                key.family.to_afi_safi() == *family
+                            })
+                    })
+                    .filter_map(crate::manager::outbound_owing::OwedFamily::of)
+                    .collect::<Vec<_>>(),
+            );
             match whole_pass {
                 crate::manager::outbound_owing::WholePass::Preflight => {
                     if self.outbound_preflight_refused(peer) {

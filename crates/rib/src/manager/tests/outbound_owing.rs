@@ -866,9 +866,12 @@ fn owed_key_keep_set_follows_the_resync_sources() {
     send_all(&mut source);
     send_all(&mut rx);
     let key = |index| OwedKey::Unicast(route_prefix(index));
-    assert!(manager.owed_key_kept(peer, &key(0)), "offered and held");
     assert!(
-        !manager.owed_key_kept(peer, &key(7)),
+        manager.owed_key_kept(peer, &key(0), &mut None, &mut None),
+        "offered and held"
+    );
+    assert!(
+        !manager.owed_key_kept(peer, &key(7), &mut None, &mut None),
         "neither offered nor held"
     );
     // A retained policy denial names the key.
@@ -886,19 +889,19 @@ fn owed_key_keep_set_follows_the_resync_sources() {
             }),
         );
     assert!(
-        manager.owed_key_kept(peer, &key(7)),
+        manager.owed_key_kept(peer, &key(7), &mut None, &mut None),
         "a policy denial keeps it"
     );
     // An OTC block names the key.
     manager.policy_filtered_routes.remove(&peer);
-    assert!(!manager.owed_key_kept(peer, &key(7)));
+    assert!(!manager.owed_key_kept(peer, &key(7), &mut None, &mut None));
     manager
         .peer_otc_blocked
         .entry(peer)
         .or_default()
         .insert(route_prefix(7), HashSet::from([0]));
     assert!(
-        manager.owed_key_kept(peer, &key(7)),
+        manager.owed_key_kept(peer, &key(7), &mut None, &mut None),
         "an OTC block keeps it"
     );
 }
@@ -3171,6 +3174,258 @@ fn begin_close_flushes_typed_withdrawals_and_moves_only() {
                 "close flush did not consume ordinary credit"
             );
             drop(held_credit);
+        }
+    }
+}
+
+/// A partial pass can leave unnegotiated keys behind its last staged row.
+/// Cancellation must filter that remainder before recording or flipping debt.
+#[test]
+fn partial_keyed_pass_only_owes_negotiated_families() {
+    use super::super::outbound_owing::{KeyedPass, OwedKey, stage_within_budget};
+    for safi in [Safi::Unicast, Safi::LabeledUnicast, Safi::MplsVpn] {
+        let families = [(Afi::Ipv4, safi), (Afi::Ipv6, safi)];
+        let keys: HashSet<_> = families
+            .into_iter()
+            .flat_map(|family| (1..=2).map(move |index| typed_key(family, index)))
+            .collect();
+        // Negotiate the first key's family so one real row exhausts the budget
+        // before either key of the other family is visited, regardless of hashing.
+        let first = *keys.iter().next().unwrap();
+        let available = first.family();
+        let available_family = available.afi_safis()[0];
+        let unavailable_family = families
+            .into_iter()
+            .find(|family| *family != available_family)
+            .unwrap();
+        let mut manager = manager(2).with_owing_theta_floor(0);
+        let mut source = up(&mut manager, peer_v4(SOURCE), families.to_vec());
+        for family in families {
+            typed_received(&mut manager, family, &[(1, 0), (2, 0)], &[], 0);
+        }
+        send_all(&mut source);
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 31, 1));
+        let mut rx = up(&mut manager, peer, vec![available_family]);
+        send_all(&mut rx);
+        let held_credit = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 1);
+        let KeyedPass::Stage { keys: pass, budget } = manager.owing_keyed_pass(
+            peer,
+            &keys,
+            families.map(|family| OwedFamily::of(family).unwrap()),
+            |key| usize::from(key.family() == OwedFamily::of(families[1]).unwrap()),
+            |key| *key,
+        ) else {
+            panic!("one row of credit stages a partial pass")
+        };
+        assert_eq!(budget, 1);
+        let mut staged = Vec::new();
+        let remainder = stage_within_budget(&pass, budget, |one| {
+            staged.extend(one.iter().copied());
+            usize::from(one.iter().all(|key| key.family() == available))
+        });
+        assert_eq!(staged, [first]);
+        assert!(remainder.iter().any(|key| key.family() != available));
+        manager.mark_owed(peer, remainder);
+        assert!(manager.owes(peer, available_family));
+        assert!(!manager.owes(peer, unavailable_family));
+        let unavailable_wire = (unavailable_family.0 as u16, unavailable_family.1 as u8);
+        assert!(
+            manager
+                .take_owing_log(peer)
+                .iter()
+                .all(|(family, _)| *family != unavailable_wire)
+        );
+        assert!(!manager.dirty_peers.contains(&peer));
+        drop(held_credit);
+        manager.resync_dirty_peers_bounded();
+        assert!(manager.owing(peer).is_none());
+        assert!(send_all(&mut rx).iter().all(|update| {
+            update
+                .announce
+                .iter()
+                .all(|route| OwedKey::Unicast(route.prefix).family() == available)
+                && update
+                    .labeled_announce
+                    .iter()
+                    .all(|route| OwedKey::Labeled(route.nlri.key()).family() == available)
+                && update
+                    .vpn_announce
+                    .iter()
+                    .all(|route| OwedKey::Vpn(route.nlri.key()).family() == available)
+        }));
+    }
+}
+
+/// The two BGP-LS SAFIs owe and drain independently, including when only
+/// the unheld sibling was negotiated by the receiver.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "both hold directions and the one-family drain share one lifecycle transcript"
+)]
+fn owed_bgpls_families_drain_independently_of_a_held_sibling() {
+    let families = [(Afi::BgpLs, Safi::BgpLs), (Afi::BgpLs, Safi::BgpLsVpn)];
+    for held_family in families {
+        let ready = families
+            .into_iter()
+            .find(|family| *family != held_family)
+            .unwrap();
+        for dual in [false, true] {
+            let negotiated = if dual { families.to_vec() } else { vec![ready] };
+            let mut manager = deferral_manager(vec![held_family], 64);
+            manager.flush_poll_budget = Duration::ZERO;
+            let mut source = up(&mut manager, peer_v4(SOURCE), families.to_vec());
+            let peer = peer_v4(Ipv4Addr::new(10, 0, 32, 1));
+            let mut rx = up(&mut manager, peer, negotiated.clone());
+            send_all(&mut rx);
+            let receive = |manager: &mut RibManager, preference| {
+                let announced = families
+                    .into_iter()
+                    .map(|family| {
+                        let mut route = make_bgpls_route(SOURCE, 1, preference);
+                        if family.1 == Safi::BgpLsVpn {
+                            route.family = BgpLsFamily::LinkStateVpn;
+                            route.nlri.route_distinguisher = Some([0, 0, 0, 0, 0, 0, 0, 1]);
+                        }
+                        route
+                    })
+                    .collect();
+                manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+                    peer: peer_v4(SOURCE),
+                    session_id: 0,
+                    announced,
+                    withdrawn: vec![],
+                });
+                drain_route_chunks(manager);
+            };
+            receive(&mut manager, 100);
+            send_all(&mut source);
+            let initial = send_all(&mut rx);
+            assert_eq!(
+                initial
+                    .iter()
+                    .flat_map(|update| update.bgpls_announce.iter())
+                    .count(),
+                negotiated.len()
+            );
+            let credit = manager.outbound_credit_handle(peer);
+            let held_credit = crate::OutboundCharge::new(&credit, 64);
+            receive(&mut manager, 200);
+            assert!(send_all(&mut rx).is_empty());
+            assert!(manager.owes(peer, ready));
+            assert_eq!(
+                manager.owes(peer, held_family),
+                dual,
+                "only negotiated SAFIs acquire whole debt"
+            );
+            let _waiter = connect_families(
+                &mut manager,
+                Ipv4Addr::new(192, 0, 2, 83),
+                vec![held_family],
+                true,
+            );
+            assert!(manager.selection_deferred(held_family));
+            drop(held_credit);
+            manager.resync_dirty_peers_bounded();
+            let sent = send_all(&mut rx);
+            let announced: Vec<_> = sent
+                .iter()
+                .flat_map(|update| update.bgpls_announce.iter())
+                .collect();
+            assert_eq!(
+                announced.len(),
+                1,
+                "the unheld sibling drains during the hold"
+            );
+            assert_eq!(announced[0].family.to_afi_safi(), ready);
+            assert_eq!(announced[0].local_pref_attr(), Some(200));
+            assert!(!manager.owes(peer, ready));
+            assert_eq!(manager.owes(peer, held_family), dual);
+            receive(&mut manager, 300);
+            let sent = send_all(&mut rx);
+            let announced: Vec<_> = sent
+                .iter()
+                .flat_map(|update| update.bgpls_announce.iter())
+                .collect();
+            assert_eq!(announced.len(), 1, "new unheld work still streams");
+            assert_eq!(announced[0].family.to_afi_safi(), ready);
+            assert_eq!(announced[0].local_pref_attr(), Some(300));
+            manager.handle_update(RibUpdate::EndOfRib {
+                peer: peer_v4(Ipv4Addr::new(192, 0, 2, 83)),
+                session_id: 83,
+                afi: held_family.0,
+                safi: held_family.1,
+            });
+            for _ in 0..4 {
+                manager.resync_dirty_peers_bounded();
+                send_all(&mut rx);
+                send_all(&mut source);
+            }
+            assert!(!manager.selection_deferred(held_family));
+            assert!(manager.owing(peer).is_none());
+            let rows: Vec<_> = manager.adj_ribs_out[&peer].iter_bgpls().collect();
+            assert_eq!(rows.len(), negotiated.len());
+            assert!(
+                rows.iter()
+                    .all(|route| route.local_pref_attr() == Some(300))
+            );
+            if dual {
+                let held_credit = crate::OutboundCharge::new(&credit, 64);
+                receive(&mut manager, 400);
+                assert!(
+                    families
+                        .into_iter()
+                        .all(|family| manager.owes(peer, family))
+                );
+                drop(held_credit);
+                manager.resync_dirty_peers_bounded();
+                let sent = send_all(&mut rx);
+                let announced: Vec<_> = sent
+                    .iter()
+                    .flat_map(|update| update.bgpls_announce.iter())
+                    .collect();
+                assert_eq!(
+                    announced.len(),
+                    1,
+                    "one whole family per bounded drain step"
+                );
+                assert_eq!(announced[0].local_pref_attr(), Some(400));
+                assert!(!manager.owes(peer, announced[0].family.to_afi_safi()));
+                assert!(manager.owing(peer).is_some(), "the sibling remains owed");
+                manager.handle_update(RibUpdate::PeerDown {
+                    peer: peer_v4(SOURCE),
+                    session_id: 0,
+                });
+                drain_route_chunks(&mut manager);
+                assert!(
+                    send_all(&mut rx).is_empty(),
+                    "a mixed whole/stream pass must not bypass existing debt"
+                );
+                assert!(
+                    families
+                        .into_iter()
+                        .all(|family| manager.owes(peer, family))
+                );
+                let mut drained = HashSet::new();
+                for _ in 0..2 {
+                    manager.resync_dirty_peers_bounded();
+                    let sent = send_all(&mut rx);
+                    assert!(sent.iter().all(|update| update.bgpls_announce.is_empty()));
+                    let withdrawn: Vec<_> = sent
+                        .iter()
+                        .flat_map(|update| update.bgpls_withdraw.iter())
+                        .collect();
+                    assert_eq!(
+                        withdrawn.len(),
+                        1,
+                        "one whole family per bounded drain step"
+                    );
+                    assert!(drained.insert(withdrawn[0].family.to_afi_safi()));
+                }
+                assert_eq!(drained, families.into_iter().collect());
+                assert!(manager.owing(peer).is_none());
+                assert_eq!(manager.adj_ribs_out[&peer].bgpls_len(), 0);
+            }
         }
     }
 }

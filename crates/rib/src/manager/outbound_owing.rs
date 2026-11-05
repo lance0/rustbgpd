@@ -151,10 +151,11 @@ impl OwedFamily {
     pub(super) const BGP_LS: Self = Self(9);
     pub(super) const RTC: Self = Self(10);
     pub(super) const VPNV4_FLOWSPEC: Self = Self(11);
-    const COUNT: u8 = 12;
+    pub(super) const BGP_LS_VPN: Self = Self(12);
+    const COUNT: u8 = 13;
 
     /// Every owed family, in drain rotation order.
-    pub(super) const ALL: [Self; 12] = [
+    pub(super) const ALL: [Self; 13] = [
         Self::IPV4_UNICAST,
         Self::IPV6_UNICAST,
         Self::IPV4_LABELED,
@@ -167,10 +168,10 @@ impl OwedFamily {
         Self::BGP_LS,
         Self::RTC,
         Self::VPNV4_FLOWSPEC,
+        Self::BGP_LS_VPN,
     ];
 
-    /// The owed family of a negotiated `(AFI, SAFI)`; both BGP-LS families
-    /// share one.
+    /// The owed family of a negotiated `(AFI, SAFI)`.
     pub(super) fn of(family: (Afi, Safi)) -> Option<Self> {
         Some(match family {
             (Afi::Ipv4, Safi::Unicast) => Self::IPV4_UNICAST,
@@ -183,7 +184,8 @@ impl OwedFamily {
             (Afi::Ipv4, Safi::FlowSpec) => Self::IPV4_FLOWSPEC,
             (Afi::Ipv6, Safi::FlowSpec) => Self::IPV6_FLOWSPEC,
             (Afi::Ipv4, Safi::FlowSpecVpn) => Self::VPNV4_FLOWSPEC,
-            (Afi::BgpLs, _) => Self::BGP_LS,
+            (Afi::BgpLs, Safi::BgpLs) => Self::BGP_LS,
+            (Afi::BgpLs, Safi::BgpLsVpn) => Self::BGP_LS_VPN,
             (Afi::Ipv4, Safi::RtConstrain) => Self::RTC,
             _ => return None,
         })
@@ -202,7 +204,8 @@ impl OwedFamily {
             Self::IPV4_FLOWSPEC => &[(Afi::Ipv4, Safi::FlowSpec)],
             Self::IPV6_FLOWSPEC => &[(Afi::Ipv6, Safi::FlowSpec)],
             Self::VPNV4_FLOWSPEC => &[(Afi::Ipv4, Safi::FlowSpecVpn)],
-            Self::BGP_LS => &[(Afi::BgpLs, Safi::BgpLs), (Afi::BgpLs, Safi::BgpLsVpn)],
+            Self::BGP_LS => &[(Afi::BgpLs, Safi::BgpLs)],
+            Self::BGP_LS_VPN => &[(Afi::BgpLs, Safi::BgpLsVpn)],
             _ => &[(Afi::Ipv4, Safi::RtConstrain)],
         }
     }
@@ -862,16 +865,22 @@ impl RibManager {
         let mut owing = self
             .take_owing(peer)
             .unwrap_or_else(|| Box::new(PeerOwing::new(session_id)));
+        let sendable = self.peer_sendable_families.get(&peer);
+        let mut rejected = None;
+        let mut pending_otc = None;
         let mut touched = 0u16;
         for key in keys {
             self.replacement_checkpoint(false);
             let family = key.family();
+            if !sendable.is_some_and(|families| families.contains(&family.afi_safis()[0])) {
+                continue;
+            }
             if owing.is_whole(family) {
                 owing.hold_drained &= !family.bit();
                 continue;
             }
             touched |= family.bit();
-            if self.owed_key_kept(peer, &key) {
+            if self.owed_key_kept(peer, &key, &mut rejected, &mut pending_otc) {
                 #[cfg(test)]
                 self.owing_log
                     .entry(peer)
@@ -882,6 +891,12 @@ impl RibManager {
             } else {
                 owing.remove(&key);
             }
+        }
+        if let Some(mut keys) = rejected {
+            super::retire_hash_set(&mut keys, &mut || self.replacement_checkpoint(false));
+        }
+        if let Some(mut prefixes) = pending_otc {
+            super::retire_hash_set(&mut prefixes, &mut || self.replacement_checkpoint(false));
         }
         for family in OwedFamily::ALL {
             if touched & family.bit() != 0
@@ -971,10 +986,8 @@ impl RibManager {
             .get(&super::helpers::LOCAL_PEER)
             .is_some_and(|rib| rib.iter_prefix(prefix).any(unicast_deferral_exempt))
             || self.adj_ribs_out.get(&peer).is_some_and(|out| {
-                out.iter_prefix(prefix).any(|route| {
-                    route.peer == super::helpers::LOCAL_PEER
-                        || out.local_export_source(prefix, route.path_id).is_some()
-                })
+                out.iter_prefix(prefix)
+                    .any(|route| route.peer == super::helpers::LOCAL_PEER)
             })
     }
 
@@ -982,10 +995,43 @@ impl RibManager {
     /// peer holds it, the family carries recovery residue, or a per-key
     /// record (a rejection, an OTC block, a policy denial, a GR carried
     /// withdrawal) still names it. Mirrors the resync enumeration.
-    pub(super) fn owed_key_kept(&self, peer: PeerId, key: &OwedKey) -> bool {
+    /// Both indexes belong to one peer's immutable marking pass.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one keep-set preserves lazy overlay lookup and short-circuit order for four typed families"
+    )]
+    pub(super) fn owed_key_kept(
+        &self,
+        peer: PeerId,
+        key: &OwedKey,
+        rejected_index: &mut Option<FastSet<OwedKey>>,
+        pending_otc_index: &mut Option<FastSet<Prefix>>,
+    ) -> bool {
         use crate::update::ExactExportKey;
         let out = self.adj_ribs_out.get(&peer);
         let rejected = self.peer_unexportable.get(&peer);
+        // Normalize path IDs once, only if this pass needs a cancellation lookup.
+        let mut was_rejected = || {
+            rejected_index
+                .get_or_insert_with(|| {
+                    rejected
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|key| {
+                            self.replacement_checkpoint_at("owing_cancel_overlay", false);
+                            match key {
+                                ExactExportKey::Unicast(prefix, _) => {
+                                    Some(OwedKey::Unicast(*prefix))
+                                }
+                                ExactExportKey::Labeled(key) => Some(OwedKey::Labeled(key.prefix)),
+                                ExactExportKey::Vpn(key) => Some(OwedKey::Vpn(key.nlri_key)),
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                })
+                .contains(key)
+        };
         let unicast_residue = || {
             self.pending_extra_withdraws
                 .get(&peer)
@@ -998,18 +1044,24 @@ impl RibManager {
                 self.unicast_prefix_peers.prefixes.contains_key(prefix)
                     || out.is_some_and(|out| out.iter_prefix(prefix).next().is_some())
                     || unicast_residue()
-                    || rejected.is_some_and(|keys| {
-                        keys.iter()
-                            .any(|key| matches!(key, ExactExportKey::Unicast(p, _) if p == prefix))
-                    })
+                    || was_rejected()
                     || self
                         .peer_otc_blocked
                         .get(&peer)
                         .is_some_and(|blocked| blocked.contains_key(prefix))
-                    || self
-                        .pending_otc_blocked
-                        .get(&peer)
-                        .is_some_and(|pending| pending.keys().any(|(p, _)| p == prefix))
+                    || pending_otc_index
+                        .get_or_insert_with(|| {
+                            self.pending_otc_blocked
+                                .get(&peer)
+                                .into_iter()
+                                .flat_map(|pending| pending.keys())
+                                .map(|&(prefix, _)| {
+                                    self.replacement_checkpoint_at("owing_cancel_overlay", false);
+                                    prefix
+                                })
+                                .collect()
+                        })
+                        .contains(prefix)
                     || self
                         .policy_filtered_routes
                         .get(&peer)
@@ -1032,11 +1084,7 @@ impl RibManager {
                         })
                         .is_some()
                     })
-                    || rejected.is_some_and(|keys| {
-                        keys.iter().any(
-                            |key| matches!(key, ExactExportKey::Labeled(k) if k.prefix == *prefix),
-                        )
-                    })
+                    || was_rejected()
             }
             OwedKey::Vpn(nlri_key) => {
                 self.loc_rib.get_vpn(nlri_key).is_some()
@@ -1054,11 +1102,7 @@ impl RibManager {
                         .is_some_and(|extras| !extras.vpn.is_empty())
                     || self.pending_group_admitted.contains_key(&peer)
                     || self.pending_regroup_baseline.contains_key(&peer)
-                    || rejected.is_some_and(|keys| {
-                        keys.iter().any(
-                            |key| matches!(key, ExactExportKey::Vpn(k) if k.nlri_key == *nlri_key),
-                        )
-                    })
+                    || was_rejected()
             }
             OwedKey::Evpn(evpn_key) => {
                 self.loc_rib.get_evpn(evpn_key).is_some()
@@ -1668,7 +1712,7 @@ impl RibManager {
     }
 
     /// The P5-P7 gate for a pass of the whole-only `families` toward
-    /// `peer`: spent credit owes each of them whole.
+    /// `peer`: spent credit or existing whole debt defers the whole pass.
     pub(super) fn owing_whole_pass(&mut self, peer: PeerId, families: &[OwedFamily]) -> WholePass {
         let gates: Vec<(OwedFamily, OwingGate)> = families
             .iter()
@@ -1677,7 +1721,10 @@ impl RibManager {
         if gates.iter().all(|(_, gate)| *gate == OwingGate::UNBOUNDED) {
             return WholePass::Preflight;
         }
-        if gates.iter().any(|(_, gate)| *gate == OwingGate::Owe) {
+        if gates
+            .iter()
+            .any(|(_, gate)| matches!(gate, OwingGate::Owe | OwingGate::Whole))
+        {
             for (family, gate) in gates {
                 if gate != OwingGate::UNBOUNDED {
                     self.owe_whole_family(peer, family);
@@ -1685,11 +1732,7 @@ impl RibManager {
             }
             return WholePass::Skip;
         }
-        if gates.iter().all(|(_, gate)| *gate == OwingGate::Whole) {
-            WholePass::Skip
-        } else {
-            WholePass::Stage
-        }
+        WholePass::Stage
     }
 
     /// The P2 gate over a private EVPN pass's `keys` toward `peer`: the

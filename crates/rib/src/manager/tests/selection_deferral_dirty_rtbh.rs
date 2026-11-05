@@ -217,6 +217,84 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
         "a caught-up partial recovery must park frozen work instead of replaying admitted RTBH"
     );
     assert!(manager.dirty_peers.contains(&observer));
+    if grouped {
+        assert!(manager.selection_partial_caught_up(observer));
+        assert!(!manager.peer_otc_blocked.contains_key(&observer));
+        assert!(!manager.pending_otc_blocked.contains_key(&observer));
+        let admitted = manager
+            .pending_group_admitted
+            .get(&observer)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        assert!(admitted.contains(&crate::update::ExactExportKey::Unicast(
+            Prefix::V4(ordinary),
+            0,
+        )));
+        let frozen_attributes = wire[&(Prefix::V4(ordinary), 0)].attributes.clone();
+        let before = manager.adj_rib_out_commit_stats;
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: u64::from(SOURCE.octets()[3]),
+            announced: vec![make_route_with_lp(ordinary, SOURCE, 200)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+        assert_eq!(
+            manager.ribs[&peer_v4(SOURCE)]
+                .get(&Prefix::V4(ordinary), 0)
+                .unwrap()
+                .local_pref(),
+            200
+        );
+        assert_eq!(
+            manager
+                .loc_rib
+                .get(&Prefix::V4(ordinary))
+                .unwrap()
+                .local_pref(),
+            100
+        );
+        assert!(
+            apply_wire(&mut observer_rx, &mut wire).is_empty(),
+            "a held received update must not replay the caught-up member's frozen view"
+        );
+        assert_eq!(
+            wire[&(Prefix::V4(ordinary), 0)].attributes,
+            frozen_attributes
+        );
+        assert_eq!(
+            manager
+                .adj_rib_out_commit_stats
+                .pristine_otc_reconcile_candidates,
+            before.pristine_otc_reconcile_candidates,
+            "an unchanged group view must not enter member reconciliation for retained recovery proof"
+        );
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.successful_enqueues,
+            before.successful_enqueues
+        );
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.successful_commits,
+            before.successful_commits
+        );
+        assert!(manager.selection_partial_caught_up(observer));
+        assert!(manager.dirty_peers.contains(&observer));
+        assert_eq!(
+            manager
+                .pending_group_admitted
+                .get(&observer)
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            admitted
+        );
+    }
     let (reply, mut count) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryAdvertisedCount {
         peer: observer,
@@ -329,6 +407,14 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     assert!(!manager.dirty_peers.contains(&observer));
     assert!(!manager.pending_group_admitted.contains_record(observer));
     assert_eq!(wire.len(), 3);
+    for prefix in [Prefix::V4(ordinary), Prefix::V4(first), Prefix::V4(second)] {
+        assert!(wire.contains_key(&(prefix, 0)));
+    }
+    assert_eq!(
+        wire[&(Prefix::V4(ordinary), 0)].local_pref(),
+        if grouped { 200 } else { 100 },
+        "release must advertise the latest received ordinary route"
+    );
     assert_eq!(manager.ribs.values().map(AdjRibIn::len).sum::<usize>(), 3);
     assert!(
         manager

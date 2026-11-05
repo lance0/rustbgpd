@@ -9460,6 +9460,7 @@ impl RibManager {
                     };
                     let mut effective_bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = if resync
                         || whole(super::outbound_owing::OwedFamily::BGP_LS)
+                        || whole(super::outbound_owing::OwedFamily::BGP_LS_VPN)
                     {
                         self.replacement_checkpoint(true);
                         let mut all: HashSet<crate::route::BgpLsRouteKey> = HashSet::with_capacity(
@@ -9484,6 +9485,11 @@ impl RibManager {
                         all.retain(|key| {
                             checkpoint();
                             !self.selection_deferred(key.family.to_afi_safi())
+                                && (resync
+                                    || drain_whole
+                                        == super::outbound_owing::OwedFamily::of(
+                                            key.family.to_afi_safi(),
+                                        ))
                         });
                         all
                     } else {
