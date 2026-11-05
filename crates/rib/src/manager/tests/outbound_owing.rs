@@ -3350,6 +3350,28 @@ fn owed_bgpls_families_drain_independently_of_a_held_sibling() {
             assert_eq!(announced.len(), 1, "new unheld work still streams");
             assert_eq!(announced[0].family.to_afi_safi(), ready);
             assert_eq!(announced[0].local_pref_attr(), Some(300));
+            assert_eq!(manager.outbound_credit_rows(peer), 0);
+            assert!(!manager.outbound_operation_live(peer));
+            manager.resync_dirty_peers_bounded();
+            assert!(
+                send_all(&mut rx).is_empty(),
+                "a retry must keep the held sibling's wire view frozen"
+            );
+            assert_eq!(
+                manager.owes(peer, held_family),
+                dual,
+                "a retry must preserve the held sibling's debt until release"
+            );
+            let held_rows: Vec<_> = manager.adj_ribs_out[&peer]
+                .iter_bgpls()
+                .filter(|route| route.family.to_afi_safi() == held_family)
+                .collect();
+            assert_eq!(held_rows.len(), usize::from(dual));
+            assert!(
+                held_rows
+                    .iter()
+                    .all(|route| route.local_pref_attr() == Some(100))
+            );
             manager.handle_update(RibUpdate::EndOfRib {
                 peer: peer_v4(Ipv4Addr::new(192, 0, 2, 83)),
                 session_id: 83,
