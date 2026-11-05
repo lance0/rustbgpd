@@ -675,7 +675,9 @@ impl RibManager {
             checkpoint();
         }
         if let Some((table, admission)) = export_interning {
-            let admission = target_peer.map(|receiver| (admission, receiver));
+            let admission = target
+                .split_horizon_peer()
+                .map(|receiver| (admission, receiver));
             Self::share_recurring_export_attrs(
                 evpn_announce,
                 &produced,
@@ -697,7 +699,7 @@ impl RibManager {
         routes: &mut [crate::route::EvpnRibRoute],
         produced: &[usize],
         table: &mut crate::attr_intern::AttrInternTable,
-        mut admission: Option<(&mut super::ExportAdmission, std::net::IpAddr)>,
+        mut admission: Option<(&mut super::ExportAdmission, PeerId)>,
         checkpoint: &mut impl FnMut(),
     ) {
         // The memo gives each (source, outcome) one allocation per call, so
