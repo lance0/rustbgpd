@@ -1426,6 +1426,11 @@ impl EvpnExportFixture {
 #[tokio::test(start_paused = true)]
 async fn evpn_export_gc_counts_mixed_private_commits() {
     let mut fixture = evpn_export_fixture();
+    for peer in std::iter::once(fixture.source).chain(fixture.receivers) {
+        fixture
+            .manager
+            .handle_peer_family_sendable(peer, 0, (Afi::Ipv4, Safi::Unicast), None);
+    }
     fixture.drain_outbound();
     let _live_sets: Vec<_> = (0..=ATTR_INTERN_GC_DISPLACED_LIMIT)
         .map(|index| {
@@ -1472,6 +1477,37 @@ async fn evpn_export_gc_counts_mixed_private_commits() {
     assert!(advertised.get_evpn(&new_key).is_some());
     assert!(advertised.get_evpn(&fixture.keys[1]).is_none());
     assert!(advertised.get_evpn(&missing).is_none());
+
+    let gc_deadline = fixture.manager.attr_intern_gc_deadline;
+    let unicast = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+        Ipv4Addr::new(10, 0, 0, 1),
+    );
+    let prefix = unicast.prefix;
+    fixture.manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: fixture.source,
+        announced: vec![unicast],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    while fixture.manager.process_next_route_chunk() {}
+    assert!(
+        fixture
+            .manager
+            .grouped_advertised_routes(receiver)
+            .unwrap()
+            .iter()
+            .any(|route| route.prefix == prefix)
+    );
+    let advertised = &fixture.manager.adj_ribs_out[&receiver];
+    assert_eq!(advertised.evpn_len(), 2);
+    assert_eq!(fixture.manager.attr_intern_gc_displaced, 3);
+    assert_eq!(fixture.manager.attr_intern_gc_deadline, gc_deadline);
 }
 
 #[test]

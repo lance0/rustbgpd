@@ -205,7 +205,23 @@ fn another_source_for_the_same_prefix_is_not_committed() {
     let _target_rx = peer_up(&mut manager, target, ipv4_sendable(), None, 0, 64);
     let _source_rx = peer_up(&mut manager, peer_v4(source), ipv4_sendable(), None, 0, 64);
     let prefix = v4_prefix();
+    assert!(manager.grouped_member_of(target).is_some());
+    assert!(
+        manager.adj_ribs_out[&target]
+            .local_export_sources()
+            .next()
+            .is_none()
+    );
     inject(&mut manager, local_route(prefix, 0));
+    assert_eq!(
+        manager.adj_ribs_out[&target]
+            .local_export_source(&prefix, 0)
+            .map(|source| source.path_id),
+        Some(0),
+        "the first local announcement installs provenance"
+    );
+    let untouched = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 7), 32));
+    inject(&mut manager, local_route(untouched, 17));
     let Prefix::V4(v4_prefix) = prefix else {
         unreachable!()
     };
@@ -225,6 +241,17 @@ fn another_source_for_the_same_prefix_is_not_committed() {
     });
     drain_route_chunks(&mut manager);
     assert_eq!(manager.loc_rib.get(&prefix).unwrap().peer, peer_v4(source));
+    assert_eq!(
+        manager.adj_ribs_out[&target].local_export_source(&prefix, 0),
+        None
+    );
+    assert_eq!(
+        manager.adj_ribs_out[&target]
+            .local_export_source(&untouched, 0)
+            .map(|source| source.path_id),
+        Some(17),
+        "a remote replacement preserves unrelated local provenance"
+    );
     // The target's advertised state holds the winner, in sync.
     let (reply, mut explained) = oneshot::channel();
     manager.handle_update(RibUpdate::ExplainAdvertisedRoute {

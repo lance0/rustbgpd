@@ -5241,12 +5241,15 @@ impl RibManager {
         let unicast_changed = !announce.is_empty() || !withdraw.is_empty();
         let flowspec_changed = !flowspec_announce.is_empty() || !flowspec_withdraw.is_empty();
         let evpn_changed = !evpn_announce.is_empty() || !evpn_withdraw.is_empty();
-        let evpn_group_owned = self.evpn_grouped_member_of(peer).is_some();
+        let evpn_group_owned = evpn_changed && self.evpn_grouped_member_of(peer).is_some();
         // Rows this commit replaces or removes; their interned export sets
         // may now be held only by the intern table.
         let mut evpn_displaced = 0_usize;
-        let evpn_admitted_count =
-            staged_evpn_count.unwrap_or_else(|| self.evpn_admitted_count(peer));
+        let evpn_admitted_count = if evpn_group_owned {
+            staged_evpn_count.unwrap_or_else(|| self.evpn_admitted_count(peer))
+        } else {
+            0
+        };
         let bgpls_changed = !bgpls_announce.is_empty() || !bgpls_withdraw.is_empty();
         let vpn_changed = !vpn_announce.is_empty() || !vpn_withdraw.is_empty();
         let labeled_changed = !labeled_announce.is_empty() || !labeled_withdraw.is_empty();
@@ -5398,7 +5401,7 @@ impl RibManager {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
                 rib_out.remove_flowspec(key);
             }
-            if !evpn_group_owned {
+            if evpn_changed && !evpn_group_owned {
                 let evpn_len_before = rib_out.evpn_len();
                 for route in evpn_announce.iter() {
                     super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
@@ -5460,17 +5463,19 @@ impl RibManager {
                 .adj_ribs_out
                 .get_mut(&peer)
                 .expect("the committed Adj-RIB-Out exists");
-            for route in announce
-                .iter()
-                .filter(|route| announce_source_exclusion != Some(route.peer))
-            {
-                checkpoint();
-                rib_out.set_local_export_source(
-                    (route.prefix, route.path_id),
-                    committed_local_sources
-                        .get(&(route.prefix, route.path_id))
-                        .copied(),
-                );
+            if !committed_local_sources.is_empty() || rib_out.local_export_sources().len() != 0 {
+                for route in announce
+                    .iter()
+                    .filter(|route| announce_source_exclusion != Some(route.peer))
+                {
+                    checkpoint();
+                    rib_out.set_local_export_source(
+                        (route.prefix, route.path_id),
+                        committed_local_sources
+                            .get(&(route.prefix, route.path_id))
+                            .copied(),
+                    );
+                }
             }
             let lens = rib_out.family_lens();
             if unicast_changed {
