@@ -2663,6 +2663,114 @@ fn vpn_rule(octet: u8, rd: u8, rt: u32) -> FlowSpecRoute {
     route
 }
 
+fn assert_local_flowspec_gauges(metrics: &BgpMetrics, expected: [f64; 3]) {
+    let gathered = metrics.registry().gather();
+    for name in ["bgp_rib_prefixes", "bgp_rib_loc_prefixes"] {
+        let gauge = gathered
+            .iter()
+            .find(|family| family.name() == name)
+            .expect("FlowSpec gauge is published");
+        for (family, expected) in ["ipv4_flowspec", "ipv6_flowspec", "l3vpn_ipv4_flowspec"]
+            .into_iter()
+            .zip(expected)
+        {
+            let value = gauge
+                .get_metric()
+                .iter()
+                .find(|metric| {
+                    let label = |key, value| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|label| label.name() == key && label.value() == value)
+                    };
+                    label("family", family)
+                        && (name == "bgp_rib_loc_prefixes" || label("peer", "0.0.0.0"))
+                })
+                .unwrap_or_else(|| panic!("missing {name} series for {family}"))
+                .get_gauge()
+                .get_value();
+            assert_eq!(value, expected, "{name} {family}");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_flowspec_gauges_separate_global_and_vpn_through_delete_and_expiry() {
+    let mut manager = manager_for_keys();
+    let metrics = manager.metrics.clone();
+    let mut v6 = local_rule();
+    v6.afi = Afi::Ipv6;
+    v6.rule.components = vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(
+        rustbgpd_wire::Ipv6PrefixOffset {
+            prefix: Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32),
+            offset: 0,
+        },
+    ))];
+    let global_keys = [local_rule().selection_key(), v6.selection_key()];
+    for route in [local_rule(), v6, vpn_rule(1, 40, 777)] {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectFlowSpec { route, reply });
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            InjectOutcome::Created
+        );
+    }
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectLeasedFlowSpec {
+        route: vpn_rule(1, 41, 777),
+        owner: "ctl".to_string(),
+        lease_seconds: 5,
+        reply,
+    });
+    assert_eq!(
+        response.try_recv().unwrap().unwrap().0,
+        InjectOutcome::Created
+    );
+    assert_local_flowspec_gauges(&metrics, [1.0, 1.0, 2.0]);
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectFlowSpec {
+        route: vpn_rule(1, 40, 778),
+        reply,
+    });
+    assert_eq!(
+        response.try_recv().unwrap().unwrap(),
+        InjectOutcome::Replaced
+    );
+    assert_local_flowspec_gauges(&metrics, [1.0, 1.0, 2.0]);
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawFlowSpec {
+        key: vpn_rule(1, 40, 778).selection_key(),
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    assert!(response.try_recv().unwrap().unwrap().removed);
+    assert_local_flowspec_gauges(&metrics, [1.0, 1.0, 1.0]);
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let (expired, _) = manager.injection_leases().take_expired();
+    assert_eq!(expired.len(), 1);
+    manager.handle_update(RibUpdate::ExpireInjectionLeases { leases: expired });
+    assert_local_flowspec_gauges(&metrics, [1.0, 1.0, 0.0]);
+
+    for key in global_keys {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawFlowSpec {
+            key,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(response.try_recv().unwrap().unwrap().removed);
+    }
+    assert_local_flowspec_gauges(&metrics, [0.0, 0.0, 0.0]);
+}
+
 fn withdrawn_rds(updates: &[OutboundRouteUpdate]) -> Vec<Option<u8>> {
     let mut rds: Vec<_> = updates
         .iter()

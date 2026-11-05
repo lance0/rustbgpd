@@ -157,6 +157,8 @@ pub enum RouteFamily {
     Ipv4Flowspec,
     /// AFI 2 / SAFI 133 (RFC 8956) — `ipv6-flowspec`.
     Ipv6Flowspec,
+    /// AFI 1 / SAFI 134 (RFC 8955) — `vpnv4-flowspec`.
+    Vpnv4Flowspec,
     /// AFI 25 / SAFI 70 (RFC 7432) — `evpn`.
     Evpn,
     /// AFI 1 / SAFI 132 (RFC 4684 Route Target Constrain) — `rtc`.
@@ -180,6 +182,7 @@ impl RouteFamily {
             RouteFamily::Vpnv6 => "vpnv6",
             RouteFamily::Ipv4Flowspec => "ipv4-flowspec",
             RouteFamily::Ipv6Flowspec => "ipv6-flowspec",
+            RouteFamily::Vpnv4Flowspec => "vpnv4-flowspec",
             RouteFamily::Evpn => "evpn",
             RouteFamily::RtConstrain => "rtc",
             RouteFamily::BgpLs => "bgp-ls",
@@ -210,6 +213,7 @@ impl RouteFamily {
             (Afi::Ipv6, Safi::MplsVpn) => Some(Self::Vpnv6),
             (Afi::Ipv4, Safi::FlowSpec) => Some(Self::Ipv4Flowspec),
             (Afi::Ipv6, Safi::FlowSpec) => Some(Self::Ipv6Flowspec),
+            (Afi::Ipv4, Safi::FlowSpecVpn) => Some(Self::Vpnv4Flowspec),
             (Afi::L2Vpn, Safi::Evpn) => Some(Self::Evpn),
             (Afi::Ipv4, Safi::RtConstrain) => Some(Self::RtConstrain),
             (Afi::BgpLs, Safi::BgpLs) => Some(Self::BgpLs),

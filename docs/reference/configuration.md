@@ -1917,7 +1917,8 @@ the peer via MP-BGP capabilities. Supported values:
   and is never refreshed. Rule origination follows in a later release
   ([ADR-0146](../adr/0146-vpn-flowspec.md)). An export policy that matches
   `route.family == ipv4-flowspec` matches SAFI 133 only, never these VPN
-  rules. IPv6 VPN FlowSpec (AFI 2, SAFI 134) is not supported.
+  rules; use `route.family == vpnv4-flowspec` for VPN rules. IPv6 VPN
+  FlowSpec (AFI 2, SAFI 134) is not supported.
 
 **Defaults:** If `families` is omitted, the default depends on the neighbor
 address type:
