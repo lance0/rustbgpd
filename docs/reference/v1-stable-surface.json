@@ -540,6 +540,7 @@
       {"construct": "ast.family.vpnv6", "classification": "v1", "reason": "`route.family == vpnv6`"},
       {"construct": "ast.family.ipv4-flowspec", "classification": "v1", "reason": "`route.family == ipv4-flowspec`"},
       {"construct": "ast.family.ipv6-flowspec", "classification": "v1", "reason": "`route.family == ipv6-flowspec`"},
+      {"construct": "ast.family.vpnv4-flowspec", "classification": "outside_v1", "reason": "IPv4 VPN FlowSpec policy family; qualification pending (ADR-0146)"},
       {"construct": "ast.family.evpn", "classification": "v1", "reason": "`route.family == evpn`, for the scoped EVPN reflector role"},
       {"construct": "ast.family.rtc", "classification": "v1", "reason": "`route.family == rtc`"},
       {"construct": "ast.family.bgp-ls", "classification": "v1", "reason": "`route.family == bgp-ls`"},

@@ -137,13 +137,17 @@ has a known type and every operator a fixed signature.
 | rpki-state | `valid`, `invalid`, `not-found` | `route.rpki` |
 | aspa-state | `valid`, `invalid`, `unknown` | `route.aspa` |
 | route-type | `local`, `internal`, `external` | `route.route-type` |
-| route-family | `ipv4-unicast`, `ipv6-unicast`, `ipv4-labeled-unicast`, `ipv6-labeled-unicast`, `vpnv4`, `vpnv6`, `ipv4-flowspec`, `ipv6-flowspec`, `evpn`, `rtc`, `bgp-ls`, `bgp-ls-vpn` | `route.family` |
+| route-family | `ipv4-unicast`, `ipv6-unicast`, `ipv4-labeled-unicast`, `ipv6-labeled-unicast`, `vpnv4`, `vpnv6`, `ipv4-flowspec`, `ipv6-flowspec`, `vpnv4-flowspec`, `evpn`, `rtc`, `bgp-ls`, `bgp-ls-vpn` | `route.family` |
 | IP address | address literals | `route.next-hop`, `peer.address` |
 | string | string literals | regexes, `peer.group` |
 
 `ipv4-flowspec` and `ipv6-flowspec` match global FlowSpec (SAFI 133) only.
-They never match IPv4 VPN FlowSpec (`l3vpn_ipv4_flowspec`, SAFI 134), so a
-policy that denies `ipv4-flowspec` does not deny VPN FlowSpec rules.
+Use `vpnv4-flowspec` for IPv4 VPN FlowSpec (AFI 1 / SAFI 134,
+`l3vpn_ipv4_flowspec` in configuration). A policy that denies `ipv4-flowspec`
+does not deny VPN FlowSpec rules. The VPN family starts outside the v1
+inventory under [ADR-0146](../adr/0146-vpn-flowspec.md). Its export policy can
+add or remove route targets with the existing extended-community actions;
+`NO_ADVERTISE` still suppresses the rule before and after policy evaluation.
 
 ## Sets
 
@@ -3322,6 +3326,7 @@ settles these cases:
 | `ast.family.vpnv6` | v1 | `route.family == vpnv6` |
 | `ast.family.ipv4-flowspec` | v1 | `route.family == ipv4-flowspec` |
 | `ast.family.ipv6-flowspec` | v1 | `route.family == ipv6-flowspec` |
+| `ast.family.vpnv4-flowspec` | outside_v1 | IPv4 VPN FlowSpec policy family; qualification pending (ADR-0146) |
 | `ast.family.evpn` | v1 | `route.family == evpn`, for the scoped EVPN reflector role |
 | `ast.family.rtc` | v1 | `route.family == rtc` |
 | `ast.family.bgp-ls` | v1 | `route.family == bgp-ls` |

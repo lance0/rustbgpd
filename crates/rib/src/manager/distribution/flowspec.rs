@@ -1,7 +1,7 @@
 use super::{
     AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, Ipv4Addr, LOCAL_PEER, LocRib,
     NeighborPolicyStats, OutboundCommitBatch, PolicyChain, Prefix, RibCommandError, RibManager,
-    RouteContext, Safi, debug, flowspec_route_family, record_export_policy_eval, route_type,
+    RouteContext, RouteFamily, Safi, debug, record_export_policy_eval, route_type,
     should_suppress_ibgp_inner, warn,
 };
 use crate::PeerId;
@@ -273,12 +273,7 @@ impl RibManager {
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         rib.insert_flowspec(route);
-        crate::manager::helpers::set_rib_prefixes(
-            &self.metrics,
-            &LOCAL_PEER.to_string(),
-            crate::manager::helpers::FLOWSPEC_FAMILIES,
-            rib.flowspec_lens(),
-        );
+        crate::manager::helpers::set_local_flowspec_prefixes(&self.metrics, rib);
         debug!(afi = ?key.afi, rule = %key.rule, ?outcome, "injected local FlowSpec route");
         let mut fs_affected = HashSet::new();
         fs_affected.insert(key);
@@ -333,12 +328,7 @@ impl RibManager {
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         let removed = rib.withdraw_flowspec(&route_key);
-        crate::manager::helpers::set_rib_prefixes(
-            &self.metrics,
-            &LOCAL_PEER.to_string(),
-            crate::manager::helpers::FLOWSPEC_FAMILIES,
-            rib.flowspec_lens(),
-        );
+        crate::manager::helpers::set_local_flowspec_prefixes(&self.metrics, rib);
         if removed {
             let tag = self.forget_injected(&owned_key);
             debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
@@ -821,6 +811,7 @@ pub(in crate::manager) fn flowspec_export_context<'a>(
     target_peer_asn: Option<u32>,
     target_peer_group: Option<&'a str>,
 ) -> RouteContext<'a> {
+    let (afi, safi) = best.family();
     RouteContext {
         prefix: best.rule.destination_prefix(),
         next_hop: None,
@@ -837,9 +828,7 @@ pub(in crate::manager) fn flowspec_export_context<'a>(
         peer_asn: target_peer_asn,
         peer_group: target_peer_group,
         route_type: Some(route_type(best.origin_type)),
-        // `ipv4-flowspec` matches SAFI 133 only (ADR-0146). A VPN rule has
-        // no policy family until `vpnv4-flowspec` joins the vocabulary.
-        family: best.rd.is_none().then(|| flowspec_route_family(best.afi)),
+        family: RouteFamily::from_afi_safi(afi, safi),
         evpn_route_type: None,
         local_pref: best.local_pref_attr(),
         med: best.med_attr(),

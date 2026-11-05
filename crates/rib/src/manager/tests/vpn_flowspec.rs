@@ -1,4 +1,4 @@
-//! ADR-0146 slice 2: IPv4 VPN `FlowSpec` (AFI 1 / SAFI 134) identity and
+//! ADR-0146: IPv4 VPN `FlowSpec` (AFI 1 / SAFI 134) identity, policy and
 //! distribution. A rule is keyed by `(family, RD, components)`: the same
 //! components in global scope and in each RD are distinct rules.
 
@@ -140,6 +140,199 @@ fn start() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     (tx, tokio::spawn(manager.run()))
+}
+
+fn rpol_chain(source: &str) -> rustbgpd_policy::PolicyChain {
+    let compiled = rustbgpd_policy::rpol::RpolFile::parse(source)
+        .expect("clean rpol")
+        .compile_policy("export", &[], &mut rustbgpd_policy::sets::SetStore::new())
+        .expect("export policy exists");
+    rustbgpd_policy::PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "export".to_string(),
+        Arc::new(compiled),
+    )])
+}
+
+#[tokio::test]
+async fn rpol_flowspec_family_denies_only_its_own_scope() {
+    let (tx, handle) = start();
+    let mut vpn_deny = peer_up(
+        &tx,
+        10,
+        vec![GLOBAL, VPN],
+        Some(rpol_chain(
+            "policy export { term vpn { if route.family == vpnv4-flowspec { reject } } }",
+        )),
+    )
+    .await;
+    let mut global_deny = peer_up(
+        &tx,
+        11,
+        vec![GLOBAL, VPN],
+        Some(rpol_chain(
+            "policy export { term global { if route.family == ipv4-flowspec { reject } } }",
+        )),
+    )
+    .await;
+
+    for rd in [None, Some(RD_A), Some(RD_B)] {
+        inject(&tx, local_rule(rd, 777)).await;
+    }
+    let vpn_updates = drain(&mut vpn_deny);
+    assert_eq!(
+        announced(&vpn_updates),
+        [key(None)],
+        "vpnv4-flowspec denies both VPN scopes while preserving the global rule"
+    );
+    assert_eq!(withdrawn(&vpn_updates), []);
+    let global_updates = drain(&mut global_deny);
+    assert_eq!(
+        announced(&global_updates),
+        [key(Some(RD_A)), key(Some(RD_B))],
+        "ipv4-flowspec does not match VPN rules"
+    );
+    assert_eq!(withdrawn(&global_updates), []);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn rpol_vpn_rt_rewrite_preserves_identity_actions_and_other_scopes() {
+    let policy = rpol_chain(
+        r"policy export {
+            term vpn {
+                if route.family == vpnv4-flowspec && route.ext-communities has RT:44407:777 {
+                    remove ext-community RT:44407:777
+                    add ext-community RT:44407:778
+                    accept
+                }
+            }
+        }",
+    );
+    let action =
+        ExtendedCommunity::from_flowspec_action(&rustbgpd_wire::FlowSpecAction::TrafficRateBytes {
+            asn: 0,
+            rate: 1_024.0,
+        });
+    let marker = (65000 << 16) | 0x2a;
+    let (tx, handle) = start();
+    let mut out_rx = peer_up(&tx, 10, vec![GLOBAL, VPN], Some(policy)).await;
+    for (rd, target) in [(None, 777), (Some(RD_A), 777), (Some(RD_B), 779)] {
+        let mut route = local_rule(rd, target);
+        for attr in &mut route.attributes {
+            if let PathAttribute::ExtendedCommunities(communities) = attr {
+                communities.push(action);
+            }
+        }
+        route
+            .attributes
+            .push(PathAttribute::Communities(vec![marker]));
+        inject(&tx, route).await;
+    }
+    let updates = drain(&mut out_rx);
+    assert_eq!(
+        announced(&updates),
+        [key(None), key(Some(RD_A)), key(Some(RD_B))],
+        "RT edits preserve the RD and rule components"
+    );
+    assert_eq!(withdrawn(&updates), []);
+    for route in updates.iter().flat_map(|update| &update.flowspec_announce) {
+        let target = match route.rd {
+            None => 777,
+            Some(RD_A) => 778,
+            Some(RD_B) => 779,
+            _ => unreachable!("the exact advertised keys were checked above"),
+        };
+        let expected = ExtendedCommunity::new(0x0002_ad77_0000_0000 | target);
+        assert_eq!(route.extended_communities().len(), 2);
+        assert!(route.extended_communities().contains(&expected));
+        assert!(route.extended_communities().contains(&action));
+        assert_eq!(route.communities(), [marker]);
+    }
+    let stored = query_flowspec_routes(&tx).await;
+    let original = stored.iter().find(|route| route.rd == Some(RD_A)).unwrap();
+    assert!(
+        original
+            .extended_communities()
+            .contains(&ExtendedCommunity::new(0x0002_ad77_0000_0309)),
+        "export modifications do not rewrite the selected input"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn vpn_no_advertise_suppresses_withdraws_and_recovers_exact_scope() {
+    let cases = [
+        (
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+            "policy export { term scrub { remove community NO_ADVERTISE; accept } }",
+        ),
+        (
+            (65000 << 16) | 0x63,
+            r"policy export {
+                term suppress {
+                    if route.family == vpnv4-flowspec && route.communities has 65000:99 {
+                        add community NO_ADVERTISE
+                        accept
+                    }
+                }
+            }",
+        ),
+    ];
+    for (marker, source) in cases {
+        let (tx, handle) = start();
+        let mut out_rx = peer_up(&tx, 10, vec![GLOBAL, VPN], Some(rpol_chain(source))).await;
+        let plain = local_rule(Some(RD_A), 777);
+        let mut restricted = plain.clone();
+        restricted
+            .attributes
+            .push(PathAttribute::Communities(vec![marker]));
+        inject(&tx, restricted.clone()).await;
+        assert!(
+            drain(&mut out_rx).is_empty(),
+            "first-seen source or policy NO_ADVERTISE sends neither announce nor withdrawal"
+        );
+
+        inject(&tx, local_rule(None, 777)).await;
+        inject(&tx, local_rule(Some(RD_B), 777)).await;
+        assert_eq!(inject(&tx, plain.clone()).await, InjectOutcome::Replaced);
+        let admitted = drain(&mut out_rx);
+        assert_eq!(
+            announced(&admitted),
+            [key(None), key(Some(RD_A)), key(Some(RD_B))]
+        );
+        assert_eq!(withdrawn(&admitted), []);
+
+        assert_eq!(
+            inject(&tx, restricted.clone()).await,
+            InjectOutcome::Replaced
+        );
+        let suppressed = drain(&mut out_rx);
+        assert_eq!(announced(&suppressed), []);
+        assert_eq!(
+            withdrawn(&suppressed),
+            [key(Some(RD_A))],
+            "NO_ADVERTISE withdraws only the previously admitted VPN scope"
+        );
+        restricted.attributes.push(PathAttribute::Med(999));
+        inject(&tx, restricted).await;
+        assert!(
+            drain(&mut out_rx).is_empty(),
+            "repeated suppression does not withdraw global or RD-sibling rules"
+        );
+
+        assert_eq!(inject(&tx, plain).await, InjectOutcome::Replaced);
+        let recovered = drain(&mut out_rx);
+        assert_eq!(announced(&recovered), [key(Some(RD_A))]);
+        assert_eq!(withdrawn(&recovered), []);
+        assert_eq!(selected(&tx).await, [None, Some(RD_A), Some(RD_B)]);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
 }
 
 /// The same components in global scope, RD A and RD B are three rules. An

@@ -1280,7 +1280,8 @@ impl BgpMetrics {
                 "bgp_rib_prefixes",
                 "Paths in a peer's Adj-RIB-In by canonical family, with each \
                  Add-Path path counted individually. Covers ipv4_unicast, \
-                 ipv6_unicast, l2vpn_evpn, ipv4_flowspec and ipv6_flowspec; \
+                 ipv6_unicast, l2vpn_evpn, ipv4_flowspec, ipv6_flowspec and \
+                 locally injected l3vpn_ipv4_flowspec at peer 0.0.0.0; \
                  other families are not counted.",
             ),
             &["peer", "family"],

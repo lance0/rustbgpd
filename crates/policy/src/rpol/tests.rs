@@ -2974,6 +2974,7 @@ fn family_eq_pins_every_supported_family() {
         ("vpnv6", RouteFamily::Vpnv6),
         ("ipv4-flowspec", RouteFamily::Ipv4Flowspec),
         ("ipv6-flowspec", RouteFamily::Ipv6Flowspec),
+        ("vpnv4-flowspec", RouteFamily::Vpnv4Flowspec),
         ("evpn", RouteFamily::Evpn),
         ("rtc", RouteFamily::RtConstrain),
         ("bgp-ls", RouteFamily::BgpLs),
@@ -3004,6 +3005,23 @@ fn family_eq_pins_every_supported_family() {
             );
         }
     }
+}
+
+#[test]
+fn family_vpn_flowspec_maps_only_supported_wire_scope() {
+    use crate::engine::RouteFamily;
+    use rustbgpd_wire::{Afi, Safi};
+
+    assert_eq!(
+        RouteFamily::from_afi_safi(Afi::Ipv4, Safi::FlowSpecVpn),
+        Some(RouteFamily::Vpnv4Flowspec)
+    );
+    assert_eq!(
+        RouteFamily::from_afi_safi(Afi::Ipv6, Safi::FlowSpecVpn),
+        None
+    );
+    assert_eq!(RouteFamily::Vpnv4Flowspec.as_str(), "vpnv4-flowspec");
+    assert!(!RouteFamily::Vpnv4Flowspec.carries_labels());
 }
 
 #[test]

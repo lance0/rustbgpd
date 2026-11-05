@@ -79,6 +79,18 @@ pub(super) fn set_rib_prefixes(
     }
 }
 
+/// Publish local global and VPN `FlowSpec` counts without another table walk.
+pub(super) fn set_local_flowspec_prefixes(metrics: &BgpMetrics, rib: &crate::adj_rib_in::AdjRibIn) {
+    let counts = rib.flowspec_lens();
+    let peer = LOCAL_PEER.to_string();
+    set_rib_prefixes(metrics, &peer, FLOWSPEC_FAMILIES, counts);
+    metrics.set_rib_prefixes(
+        &peer,
+        "l3vpn_ipv4_flowspec",
+        gauge_val(rib.flowspec_len() - counts[0] - counts[1]),
+    );
+}
+
 /// Publish one `bgp_rib_adj_out_prefixes` family pair for a peer.
 pub(super) fn set_adj_rib_out_prefixes(
     metrics: &BgpMetrics,
@@ -254,16 +266,6 @@ pub(super) fn vpn_route_family(key: &VpnRouteKey) -> RouteFamily {
     match key.prefix.family() {
         VpnAddressFamily::V4 => RouteFamily::Vpnv4,
         VpnAddressFamily::V6 => RouteFamily::Vpnv6,
-    }
-}
-
-/// `FlowSpec` family from the stored wire AFI (`FlowSpec` NLRIs are
-/// AFI 1/2 only — the decoder rejects anything else).
-#[must_use]
-pub(super) fn flowspec_route_family(afi: Afi) -> RouteFamily {
-    match afi {
-        Afi::Ipv6 => RouteFamily::Ipv6Flowspec,
-        _ => RouteFamily::Ipv4Flowspec,
     }
 }
 

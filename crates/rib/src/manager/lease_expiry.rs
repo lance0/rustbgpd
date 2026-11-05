@@ -350,17 +350,14 @@ impl RibManager {
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-        let (unicast_lens, flowspec_lens) = (rib.unicast_lens(), rib.flowspec_lens());
+        if !flowspec.is_empty() {
+            super::helpers::set_local_flowspec_prefixes(&self.metrics, rib);
+        }
+        let unicast_lens = rib.unicast_lens();
         if !unicast.is_empty() {
             self.finish_local_unicast_withdrawals(&unicast, unicast_lens);
         }
         if !flowspec.is_empty() {
-            super::helpers::set_rib_prefixes(
-                &self.metrics,
-                &LOCAL_PEER.to_string(),
-                super::helpers::FLOWSPEC_FAMILIES,
-                flowspec_lens,
-            );
             self.recompute_and_distribute_flowspec(&flowspec);
         }
         self.retire_exact_export_rejections(retired);
