@@ -40,7 +40,7 @@ use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
     ExportGateVerdict, NeighborPolicyStats, OutboundRouteUpdate, PeerExportPolicyReplacement,
-    PeerExportPolicyRestoreReceipt, RibCommandError, RibUpdate,
+    PeerExportPolicyRestoreReceipt, RibCommandError, RibUpdate, SharedWithdrawals,
 };
 
 mod bgpls;
@@ -284,9 +284,9 @@ pub(in crate::manager) struct OutboundCommitBatch {
     /// commit probes with it rather than a fresh one.
     pub(in crate::manager) exact_export_snapshot:
         Option<Arc<dyn crate::update::ExactExportSnapshot>>,
-    /// The group's shared withdrawals when `withdraw` begins with a copy of
-    /// them; the enqueued envelope carries this `Arc` instead of the copy.
-    pub(in crate::manager) shared_withdraw: Option<Arc<Vec<(Prefix, u32)>>>,
+    /// The group's shared withdrawals, used instead of `withdraw` until a
+    /// member-specific gate changes them.
+    pub(in crate::manager) shared_withdraw: Option<SharedWithdrawals>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
     pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -409,6 +409,11 @@ pub(in crate::manager) fn sort_evpn_announcements(
 }
 
 impl OutboundCommitBatch {
+    fn unicast_withdrawals(&self) -> &[(Prefix, u32)] {
+        debug_assert!(self.shared_withdraw.is_none() || self.withdraw.is_empty());
+        self.shared_withdraw.as_deref().unwrap_or(&self.withdraw)
+    }
+
     pub(in crate::manager) fn retire_with(
         &mut self,
         checkpoint: &mut impl FnMut(),
@@ -469,8 +474,13 @@ impl OutboundCommitBatch {
             + self.labeled_withdraw.len()
             + self.rtc_announce.len()
             + self.rtc_withdraw.len();
-        let unicast = self.unicast.announce.len() + self.withdraw.len();
-        if unicast != 0 && manager.grouped_member_of(peer).is_none() {
+        let unicast = self.unicast.announce.len() + self.unicast_withdrawals().len();
+        // A shared staged payload already proves unicast group ownership.
+        debug_assert!(self.shared_withdraw.is_none() || manager.grouped_member_of(peer).is_some());
+        if unicast != 0
+            && self.shared_withdraw.is_none()
+            && manager.grouped_member_of(peer).is_none()
+        {
             rows += unicast;
         }
         let vpn = self.vpn_announce.len() + self.vpn_withdraw.len();
@@ -504,7 +514,7 @@ impl OutboundCommitBatch {
             || moves_only(
                 &self.unicast.announce,
                 |route| route.prefix,
-                &self.withdraw,
+                self.unicast_withdrawals(),
                 |row| row.0,
             ))
             && (!private.vpn
@@ -3592,7 +3602,7 @@ impl RibManager {
         // state (OTC diagnostics or the rejected-route overlay). A failed
         // precommit leaves those structures intact for the retry.
         let has_candidate_route_payload = !batch.unicast.announce.is_empty()
-            || !batch.withdraw.is_empty()
+            || !batch.unicast_withdrawals().is_empty()
             || !batch.flowspec_announce.is_empty()
             || !batch.flowspec_withdraw.is_empty()
             || !batch.evpn_announce.is_empty()
@@ -3644,7 +3654,7 @@ impl RibManager {
         });
         if (suppressed || (batch.evpn_complete_feed.is_some() && !has_candidate_route_payload))
             && batch.unicast.announce.is_empty()
-            && batch.withdraw.is_empty()
+            && batch.unicast_withdrawals().is_empty()
             && batch.end_of_rib.is_empty()
             && batch.refresh_markers.is_empty()
             && batch.flowspec_announce.is_empty()
@@ -3766,7 +3776,7 @@ impl RibManager {
             && (self.grouped_member_of(peer).is_some()
                 || self.private_common_admission_incomplete(peer))
             && (!batch.unicast.announce.is_empty()
-                || !batch.withdraw.is_empty()
+                || !batch.unicast_withdrawals().is_empty()
                 || !batch.vpn_announce.is_empty()
                 || !batch.vpn_withdraw.is_empty())
         {
@@ -3805,8 +3815,8 @@ impl RibManager {
             }
             if !held_proof_reserved {
                 self.replacement_checkpoint(true);
-                let mut seen = HashSet::with_capacity(batch.withdraw.len());
-                let mut withdraw = Vec::with_capacity(batch.withdraw.len());
+                let mut seen = HashSet::with_capacity(batch.unicast_withdrawals().len());
+                let mut withdraw = Vec::with_capacity(batch.unicast_withdrawals().len());
                 // An exempt source this batch re-announces under another
                 // outbound path ID moved rather than left: withdrawing its
                 // old key while the announcement is refused would drop it.
@@ -3822,7 +3832,7 @@ impl RibManager {
                 self.replacement_checkpoint(true);
                 // Every other withdrawal of an exempt source (delete, expiry,
                 // demotion or an export-policy deny) leaves the peer's wire.
-                for &(prefix, path_id) in &batch.withdraw {
+                for &(prefix, path_id) in batch.unicast_withdrawals() {
                     checkpoint();
                     let source = self
                         .adj_ribs_out
@@ -3984,7 +3994,7 @@ impl RibManager {
             // Taken above for this commit's probes.
             exact_export_snapshot: _,
             shared_withdraw,
-            mut withdraw,
+            withdraw,
             end_of_rib,
             refresh_markers,
             mut flowspec_announce,
@@ -4003,6 +4013,13 @@ impl RibManager {
             // Taken at admission above.
             slot: _,
         } = batch;
+        let mut withdraw = match shared_withdraw.as_deref() {
+            Some(shared) => {
+                debug_assert_eq!(withdraw, []);
+                Cow::Borrowed(shared)
+            }
+            None => Cow::Owned(withdraw),
+        };
 
         // A grouped member's unicast advertised state is group-owned
         // (design §2: NO per-peer unicast storage) — skip the per-peer
@@ -4113,7 +4130,7 @@ impl RibManager {
                             .is_some())
                         && withdrawn_keys.insert((route.prefix, route.path_id))
                     {
-                        withdraw.push((route.prefix, route.path_id));
+                        withdraw.to_mut().push((route.prefix, route.path_id));
                     }
                 } else {
                     permitted.push(route.clone());
@@ -4143,7 +4160,7 @@ impl RibManager {
             .filter(|rejected| !rejected.is_empty())
         {
             let rejected = Some(rejected);
-            withdraw.retain(|(prefix, path_id)| {
+            withdraw.to_mut().retain(|(prefix, path_id)| {
                 !stage_exact_export_overlay_change(
                     rejected,
                     &mut overlay_changes,
@@ -4698,7 +4715,7 @@ impl RibManager {
                         match key {
                             ExactExportKey::Unicast(prefix, path_id) => {
                                 if !withdrawn.contains(&(prefix, path_id)) {
-                                    withdraw.push((prefix, path_id));
+                                    withdraw.to_mut().push((prefix, path_id));
                                 }
                             }
                             ExactExportKey::FlowSpec(key) => {
@@ -4964,7 +4981,7 @@ impl RibManager {
                     false,
                 );
                 if !originally_rejected && seen.insert((route.prefix, route.path_id)) {
-                    withdraw.push((route.prefix, route.path_id));
+                    withdraw.to_mut().push((route.prefix, route.path_id));
                 }
             }
             super::retire_hash_set(&mut seen, &mut || checkpoint());
@@ -5007,7 +5024,7 @@ impl RibManager {
                 match key {
                     crate::update::ExactExportKey::Unicast(prefix, path_id) => {
                         if unicast_seen.insert((prefix, path_id)) {
-                            withdraw.push((prefix, path_id));
+                            withdraw.to_mut().push((prefix, path_id));
                         }
                     }
                     crate::update::ExactExportKey::Vpn(key) => {
@@ -5030,7 +5047,7 @@ impl RibManager {
             .as_ref()
             .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
         {
-            withdraw.retain(|(prefix, path_id)| {
+            withdraw.to_mut().retain(|(prefix, path_id)| {
                 checkpoint();
                 let frozen = self.frozen_unicast_withdraw(peer, prefix, *path_id);
                 if frozen {
@@ -5103,7 +5120,7 @@ impl RibManager {
             && self.group_recovery_fallback(peer).is_none()
         {
             let mut seen = HashSet::new();
-            withdraw.retain(|(prefix, path_id)| {
+            withdraw.to_mut().retain(|(prefix, path_id)| {
                 checkpoint();
                 group_prior.contains(&crate::update::ExactExportKey::Unicast(*prefix, *path_id))
                     && seen.insert((*prefix, *path_id))
@@ -5112,7 +5129,7 @@ impl RibManager {
         }
         if let Some(admitted) = self.pending_group_admitted.get(&peer) {
             let mut seen = HashSet::new();
-            withdraw.retain(|(prefix, path_id)| {
+            withdraw.to_mut().retain(|(prefix, path_id)| {
                 checkpoint();
                 admitted.contains(&crate::update::ExactExportKey::Unicast(*prefix, *path_id))
                     && seen.insert((*prefix, *path_id))
@@ -5184,7 +5201,7 @@ impl RibManager {
 
         if self.pending_group_admitted.contains_key(&peer) {
             super::replacement_readiness_checkpoint(&readiness, true);
-            withdraw.sort_unstable_by(|left, right| {
+            withdraw.to_mut().sort_unstable_by(|left, right| {
                 checkpoint();
                 left.cmp(right)
             });
@@ -5368,7 +5385,7 @@ impl RibManager {
                     rib_out
                         .insert_with_next_hop(route.clone(), action.clone(), &mut || checkpoint());
                 }
-                for (prefix, path_id) in &withdraw {
+                for (prefix, path_id) in withdraw.iter() {
                     super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
                     rib_out.withdraw_with(prefix, *path_id, &mut || checkpoint());
                 }
@@ -5428,7 +5445,7 @@ impl RibManager {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
                 rib_out.remove_rtc(key);
             }
-            for &(prefix, path_id) in &withdraw {
+            for &(prefix, path_id) in withdraw.iter() {
                 checkpoint();
                 rib_out.set_local_export_source((prefix, path_id), None);
             }
@@ -5544,7 +5561,7 @@ impl RibManager {
         }
 
         if let Some(base) = self.pending_regroup_baseline.get_mut(&peer) {
-            for key in &withdraw {
+            for key in withdraw.iter() {
                 checkpoint();
                 base.unicast.remove(key);
                 base.next_hop_overrides.remove(key);
@@ -5664,21 +5681,29 @@ impl RibManager {
         } else {
             0
         };
-        // The ladder works on the member's full copy; once it still begins
-        // with the group's shared rows, queue the shared `Arc` instead, so a
-        // stalled member pins the group's vector, not its own.
-        let shared_withdraw = match shared_withdraw {
-            Some(shared) if shared.is_empty() => shared,
-            Some(shared) if withdraw.starts_with(&shared) => {
-                withdraw.drain(..shared.len());
-                if withdraw.is_empty() {
-                    withdraw = Vec::new();
-                } else {
-                    withdraw.shrink_to_fit();
-                }
-                shared
+        // Unchanged group withdrawals never need a member copy. After a
+        // gate detaches them, still share any intact prefix and free its copy.
+        let (shared_withdraw, withdraw) = match withdraw {
+            Cow::Borrowed(_) => (
+                shared_withdraw.expect("borrowed withdrawals retain their shared owner"),
+                Vec::new(),
+            ),
+            Cow::Owned(mut withdraw) => {
+                let shared = match shared_withdraw {
+                    Some(shared) if shared.is_empty() => shared,
+                    Some(shared) if withdraw.starts_with(&shared) => {
+                        withdraw.drain(..shared.len());
+                        if withdraw.is_empty() {
+                            withdraw = Vec::new();
+                        } else {
+                            withdraw.shrink_to_fit();
+                        }
+                        shared
+                    }
+                    _ => SharedWithdrawals::default(),
+                };
+                (shared, withdraw)
             }
-            _ => Arc::default(),
         };
         let update = OutboundRouteUpdate {
             exact_export_snapshot,
@@ -8050,6 +8075,10 @@ impl RibManager {
     }
 
     /// Partial recovery exports local RTBH while ordinary admitted rows stay frozen.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one filtering pass keeps unicast and VPN selection-held payloads aligned"
+    )]
     fn filter_deferred_unicast_recovery(&mut self, peer: PeerId, batch: &mut OutboundCommitBatch) {
         if (!self.dirty_peers.contains(&peer)
             && !self.force_outbound_peers.contains(&peer)
@@ -8104,12 +8133,28 @@ impl RibManager {
             });
             batch.shared_group_encode = None;
         }
-        batch.withdraw.retain(|(prefix, path_id)| {
+        let mut retain_withdrawal = |(prefix, path_id): &(Prefix, u32)| {
             self.replacement_checkpoint(false);
             let frozen = self.frozen_unicast_withdraw(peer, prefix, *path_id);
             partial |= frozen;
             !frozen
-        });
+        };
+        if let Some(shared) = &batch.shared_withdraw {
+            if let Some(first_removed) = shared.iter().position(|row| !retain_withdrawal(row)) {
+                let mut retained = Vec::with_capacity(shared.len());
+                retained.extend_from_slice(&shared[..first_removed]);
+                retained.extend(
+                    shared[first_removed + 1..]
+                        .iter()
+                        .copied()
+                        .filter(&mut retain_withdrawal),
+                );
+                batch.withdraw = retained;
+                batch.shared_withdraw = None;
+            }
+        } else {
+            batch.withdraw.retain(retain_withdrawal);
+        }
         if batch.vpn_announce.iter().any(|route| {
             self.replacement_checkpoint(false);
             self.selection_deferred(route.afi_safi())
@@ -9845,9 +9890,9 @@ impl RibManager {
                                     announce_source_exclusion =
                                         shared_with_source_exclusion.then_some(peer);
                                     shared_group_encode = Some(Arc::clone(&stage.shared_encode));
-                                    let shared = Arc::clone(&stage.shared_withdraw);
-                                    unicast.withdraw.extend_from_slice(&shared);
-                                    shared_withdraw = Some(shared);
+                                    shared_withdraw = Some(SharedWithdrawals::from_shared(
+                                        &stage.shared_withdraw,
+                                    ));
                                 } else {
                                     #[cfg(feature = "bench-internals")]
                                     {
@@ -10553,6 +10598,9 @@ impl RibManager {
                         };
                     self.replacement_checkpoint(true);
                     if !announce.is_empty()
+                        || shared_withdraw
+                            .as_ref()
+                            .is_some_and(|rows| !rows.is_empty())
                         || !unicast.withdraw.is_empty()
                         || !fs_announce.is_empty()
                         || !fs_withdraw.is_empty()
@@ -10608,7 +10656,8 @@ impl RibManager {
                             pending_eor.retain(|&family| family != (Afi::L2Vpn, Safi::Evpn));
                         }
                         let announced_count = announce.len();
-                        let withdrawn_count = unicast.withdraw.len();
+                        let withdrawn_count = unicast.withdraw.len()
+                            + shared_withdraw.as_ref().map_or(0, |rows| rows.len());
                         let has_non_unicast_route_payload = !fs_announce.is_empty()
                             || !fs_withdraw.is_empty()
                             || !evpn_announce.is_empty()

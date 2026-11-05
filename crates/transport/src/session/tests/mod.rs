@@ -11,7 +11,7 @@ use rustbgpd_policy::{
     AsPathRegex, CommunityMatch, NeighborSetMatch, Policy, PolicyAction, PolicyChain,
     PolicyStatement, RouteModifications,
 };
-use rustbgpd_rib::AttrSet;
+use rustbgpd_rib::{AttrSet, SharedWithdrawals};
 use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
     Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LlgrFamily, Message, MplsLabelEntry,
@@ -1229,7 +1229,7 @@ fn empty_outbound_update() -> OutboundRouteUpdate {
     OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: None,

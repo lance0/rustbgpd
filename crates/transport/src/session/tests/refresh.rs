@@ -821,7 +821,7 @@ async fn send_route_update_emits_route_refresh_requests_for_all_negotiated_famil
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: None,
@@ -882,7 +882,7 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
     session.send_route_update(OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),

@@ -58,18 +58,72 @@ fn pinned_withdraw_bytes(updates: &[OutboundRouteUpdate]) -> usize {
     updates
         .iter()
         .map(|update| {
-            let shared = if seen.insert(Arc::as_ptr(&update.shared_withdraw) as usize) {
-                update.shared_withdraw.capacity() * row
-            } else {
-                0
-            };
+            let shared = update.shared_withdraw.as_shared().map_or(0, |shared| {
+                if seen.insert(Arc::as_ptr(shared) as usize) {
+                    shared.capacity() * row
+                } else {
+                    0
+                }
+            });
             shared + update.withdraw.capacity() * row
         })
         .sum()
 }
 
 #[test]
-fn group_members_share_empty_withdrawal_handle() {
+fn shared_withdrawals_keep_empty_payloads_ownerless() {
+    let empty = crate::SharedWithdrawals::default();
+    assert!(empty.as_shared().is_none());
+    assert_eq!(empty.as_slice(), []);
+    let rows = Arc::new(Vec::<(Prefix, u32)>::with_capacity(8));
+    let borrowed = crate::SharedWithdrawals::from_shared(&rows);
+    assert!(borrowed.as_shared().is_none());
+    assert!(borrowed.clone().as_shared().is_none());
+    assert_eq!(
+        Arc::strong_count(&rows),
+        1,
+        "empty staging never clones its owner"
+    );
+    let weak = Arc::downgrade(&rows);
+    let owned = crate::SharedWithdrawals::from(rows);
+    assert!(owned.as_shared().is_none());
+    assert!(owned.is_empty());
+    assert!(
+        weak.upgrade().is_none(),
+        "an empty input releases its reserved capacity"
+    );
+}
+
+#[test]
+fn shared_withdrawals_retain_nonempty_ownership() {
+    let key = (source_route(0).prefix, 0);
+    let rows = Arc::new(vec![key]);
+    let shared = crate::SharedWithdrawals::from_shared(&rows);
+    assert!(Arc::ptr_eq(shared.as_shared().unwrap(), &rows));
+    let cloned = shared.clone();
+    assert!(Arc::ptr_eq(cloned.as_shared().unwrap(), &rows));
+    assert_eq!(Arc::strong_count(&rows), 3);
+    drop(shared);
+    assert_eq!(Arc::strong_count(&rows), 2);
+    let weak = Arc::downgrade(&rows);
+    let owned = crate::SharedWithdrawals::from(rows);
+    assert!(Arc::ptr_eq(
+        owned.as_shared().unwrap(),
+        cloned.as_shared().unwrap()
+    ));
+    assert_eq!(owned.as_slice(), &[key]);
+    assert_eq!(cloned[0], key);
+    drop(cloned);
+    assert!(weak.upgrade().is_some());
+    drop(owned);
+    assert!(
+        weak.upgrade().is_none(),
+        "the final payload drop releases its owner"
+    );
+}
+
+#[test]
+fn group_members_do_not_allocate_empty_withdrawal_handles() {
     let mut manager = manager();
     let _source_output = peer_up_v4(&mut manager, peer_v4(SOURCE), 8);
     let mut first = peer_up_v4(&mut manager, peer_v4(Ipv4Addr::new(10, 0, 1, 1)), 8);
@@ -92,10 +146,8 @@ fn group_members_share_empty_withdrawal_handle() {
     assert_eq!(second.announce.len(), 1);
     assert!(first.shared_withdraw.is_empty());
     assert!(second.shared_withdraw.is_empty());
-    assert!(
-        Arc::ptr_eq(&first.shared_withdraw, &second.shared_withdraw),
-        "an announce-only pass must not allocate an empty withdrawal handle per member"
-    );
+    assert!(first.shared_withdraw.as_shared().is_none());
+    assert!(second.shared_withdraw.as_shared().is_none());
 }
 
 /// T12. A 64-member update group with 16 members stalled while the rest
@@ -1838,8 +1890,8 @@ fn staggered_stalled_members_pin_the_union_of_their_windows() {
     let shared = |updates: &[OutboundRouteUpdate]| -> std::collections::BTreeSet<usize> {
         updates
             .iter()
-            .filter(|update| !update.shared_withdraw.is_empty())
-            .map(|update| Arc::as_ptr(&update.shared_withdraw) as usize)
+            .filter_map(|update| update.shared_withdraw.as_shared())
+            .map(|shared| Arc::as_ptr(shared) as usize)
             .collect()
     };
     let stalled = [held(&mut members[0].1), held(&mut members[1].1)];
@@ -2373,7 +2425,7 @@ fn mixed_envelope(rows: &FamilyRows) -> OutboundRouteUpdate {
         rtc_withdraw: copies(&rows.rtc.key(), 17),
         otc_blocked: copies(&rows.unicast, 19),
         announce: Arc::new(copies(&rows.unicast, 23)),
-        shared_withdraw: Arc::new(copies(&key, 29)),
+        shared_withdraw: Arc::new(copies(&key, 29)).into(),
         withdraw: copies(&key, 31),
         vpn_announce: Arc::new(copies(&rows.vpn, 37)),
         vpn_withdraw: copies(&rows.vpn.key(), 41),
@@ -2490,6 +2542,16 @@ fn a_batch_counts_the_rows_of_the_families_the_peer_holds_privately() {
         mixed_batch(&rows).private_rows(&manager, member),
         always + if vpn_private { vpn } else { 0 }
     );
+    for shared in [vec![], vec![(rows.unicast.prefix, 0)]] {
+        let mut batch = mixed_batch(&rows);
+        batch.withdraw = Vec::new();
+        batch.shared_withdraw = Some(Arc::new(shared).into());
+        assert_eq!(
+            batch.private_rows(&manager, member),
+            always + if vpn_private { vpn } else { 0 },
+            "shared unicast ownership leaves other private-family rows charged"
+        );
+    }
 }
 
 /// While closing, a private VPN or EVPN announcement that is not a move is
@@ -2620,7 +2682,7 @@ fn only_a_plain_envelope_over_the_chunk_size_is_chunkable() {
         (
             "shared withdrawal",
             OutboundRouteUpdate {
-                shared_withdraw: Arc::new(vec![(source_route(0).prefix, 0)]),
+                shared_withdraw: Arc::new(vec![(source_route(0).prefix, 0)]).into(),
                 ..plain(rows + 1)
             },
         ),

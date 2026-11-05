@@ -26,7 +26,7 @@ async fn shared_withdrawals_precede_own_withdrawals_on_the_wire() {
         .clone()
         .try_send(OutboundRouteUpdate {
             exact_export_snapshot: Some(session.publish_export_profile()),
-            shared_withdraw: Arc::new((0..SHARED).map(|i| (v4(i), 0)).collect()),
+            shared_withdraw: Arc::new((0..SHARED).map(|i| (v4(i), 0)).collect::<Vec<_>>()).into(),
             withdraw: (SHARED..SHARED + OWN).map(|i| (v4(i), 0)).collect(),
             end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
             ..OutboundRouteUpdate::default()

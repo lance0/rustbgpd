@@ -283,7 +283,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -362,7 +362,7 @@ async fn unnumbered_ipv4_extended_nexthop_sends_link_local_mp_reach() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -424,7 +424,7 @@ async fn unnumbered_ipv4_recomputes_link_local_companion_after_next_hop_self() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -486,7 +486,7 @@ async fn extended_nexthop_clears_companion_when_primary_next_hop_is_rewritten() 
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -543,7 +543,7 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -671,7 +671,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -754,7 +754,7 @@ async fn ipv6_next_hop_self_clears_stale_link_local_companion() {
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
@@ -816,7 +816,7 @@ async fn scoped_peer_does_not_send_ipv6_unicast_with_link_local_primary_next_hop
     let update = OutboundRouteUpdate {
         credit: None,
         latch: None,
-        shared_withdraw: Arc::default(),
+        shared_withdraw: SharedWithdrawals::default(),
         exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),

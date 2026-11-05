@@ -1119,6 +1119,43 @@ pub struct SharedGroupEncode {
     pub cell: std::sync::OnceLock<Arc<dyn Any + Send + Sync>>,
 }
 
+/// Shared unicast withdrawals; an empty payload retains no allocation.
+#[derive(Clone, Default)]
+pub struct SharedWithdrawals(Option<Arc<Vec<(Prefix, u32)>>>);
+
+impl SharedWithdrawals {
+    pub(crate) fn from_shared(rows: &Arc<Vec<(Prefix, u32)>>) -> Self {
+        Self((!rows.is_empty()).then(|| Arc::clone(rows)))
+    }
+
+    /// The immutable withdrawal inventory, empty when no shared owner is needed.
+    #[must_use]
+    #[inline]
+    pub fn as_slice(&self) -> &[(Prefix, u32)] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_shared(&self) -> Option<&Arc<Vec<(Prefix, u32)>>> {
+        self.0.as_ref()
+    }
+}
+
+impl From<Arc<Vec<(Prefix, u32)>>> for SharedWithdrawals {
+    fn from(rows: Arc<Vec<(Prefix, u32)>>) -> Self {
+        Self((!rows.is_empty()).then_some(rows))
+    }
+}
+
+impl std::ops::Deref for SharedWithdrawals {
+    type Target = [(Prefix, u32)];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
 /// Routes to be sent outbound to a peer.
 #[derive(Default)]
 pub struct OutboundRouteUpdate {
@@ -1139,8 +1176,9 @@ pub struct OutboundRouteUpdate {
     pub announce: Arc<Vec<Route>>,
     /// Withdrawals an update-group fanout stages once for every member,
     /// `Arc`-shared so a stalled member pins the group's vector rather than
-    /// its own copy. Sent in the unicast withdraw phase, before `withdraw`.
-    pub shared_withdraw: Arc<Vec<(Prefix, u32)>>,
+    /// its own copy. Empty payloads retain no shared owner. Sent in the
+    /// unicast withdraw phase, before `withdraw`.
+    pub shared_withdraw: SharedWithdrawals,
     /// Withdrawn routes with their path IDs. For non-Add-Path peers,
     /// `path_id` is always 0.
     pub withdraw: Vec<(Prefix, u32)>,
