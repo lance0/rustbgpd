@@ -422,7 +422,7 @@ impl AdjRibOut {
     /// Every admitted key's original local provenance.
     pub(crate) fn local_export_sources(
         &self,
-    ) -> impl Iterator<Item = (&(Prefix, u32), &LocalExportSource)> {
+    ) -> impl ExactSizeIterator<Item = (&(Prefix, u32), &LocalExportSource)> {
         self.local_export_sources.iter()
     }
 
