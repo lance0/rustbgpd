@@ -9373,7 +9373,8 @@ impl RibManager {
                         }
                     };
                     let flowspec_whole = whole(super::outbound_owing::OwedFamily::IPV4_FLOWSPEC)
-                        || whole(super::outbound_owing::OwedFamily::IPV6_FLOWSPEC);
+                        || whole(super::outbound_owing::OwedFamily::IPV6_FLOWSPEC)
+                        || whole(super::outbound_owing::OwedFamily::VPNV4_FLOWSPEC);
                     let mut effective_flowspec_rules: HashSet<crate::route::FlowSpecKey> = if resync
                         || flowspec_whole
                     {
@@ -9404,11 +9405,7 @@ impl RibManager {
                         // holds only injected rules, which resync like any other.
                         if !resync {
                             all.retain(|key| {
-                                drain_whole
-                                    == super::outbound_owing::OwedFamily::of((
-                                        key.afi,
-                                        Safi::FlowSpec,
-                                    ))
+                                drain_whole == super::outbound_owing::OwedFamily::of(key.family())
                             });
                         }
                         all

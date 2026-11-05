@@ -728,21 +728,20 @@ impl RibManager {
 
             let whole_pass = self.owing_whole_pass(
                 peer,
-                &[Afi::Ipv4, Afi::Ipv6]
-                    .into_iter()
-                    .filter(|afi| {
-                        changed_keys.iter().any(|key| key.afi == *afi)
-                            && sendable.as_ref().is_some_and(|families| {
-                                families.contains(&(*afi, rustbgpd_wire::Safi::FlowSpec))
-                            })
-                    })
-                    .filter_map(|afi| {
-                        crate::manager::outbound_owing::OwedFamily::of((
-                            afi,
-                            rustbgpd_wire::Safi::FlowSpec,
-                        ))
-                    })
-                    .collect::<Vec<_>>(),
+                &[
+                    (Afi::Ipv4, Safi::FlowSpec),
+                    (Afi::Ipv6, Safi::FlowSpec),
+                    (Afi::Ipv4, Safi::FlowSpecVpn),
+                ]
+                .into_iter()
+                .filter(|family| {
+                    changed_keys.iter().any(|key| key.family() == *family)
+                        && sendable
+                            .as_ref()
+                            .is_some_and(|families| families.contains(family))
+                })
+                .filter_map(crate::manager::outbound_owing::OwedFamily::of)
+                .collect::<Vec<_>>(),
             );
             match whole_pass {
                 crate::manager::outbound_owing::WholePass::Preflight => {

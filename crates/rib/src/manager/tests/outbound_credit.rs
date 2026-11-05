@@ -2289,6 +2289,10 @@ async fn deferred_work_runs_soon_after_the_latch_drops_under_ingest() {
 /// VPN, and the per-family producers stage nothing for it. Red with the preflight ahead
 /// of the family check: the unrelated change schedules a resync.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript checks all four unrelated-family producers under spent credit"
+)]
 fn spent_credit_ignores_a_change_in_a_family_the_peer_lacks() {
     let v6_flowspec = || {
         let mut route = make_flowspec_route(SOURCE);
@@ -2378,6 +2382,12 @@ fn spent_credit_ignores_a_change_in_a_family_the_peer_lacks() {
         assert!(
             !manager.dirty_peers.contains(&peer),
             "{name}: no resync owed"
+        );
+        assert!(manager.owing(peer).is_none(), "{name}: no key debt");
+        assert_eq!(
+            manager.take_owing_log(peer),
+            [],
+            "{name}: no transient debt"
         );
         // The unicast pass walks its changed prefixes for every peer and
         // finds none the peer negotiated; the other producers skip it.

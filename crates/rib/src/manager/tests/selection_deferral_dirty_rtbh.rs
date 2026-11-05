@@ -3215,7 +3215,9 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
                 peer: peer_v4(WAITER),
                 families: vec![FAMILY],
             }],
-        });
+        })
+        .with_outbound_row_credit(4);
+    manager.test_force_ungrouped = true;
     let (outbound_tx, mut observer_rx) = mpsc::channel(1);
     outbound_tx
         .try_send(OutboundRouteUpdate::default())
@@ -3242,6 +3244,52 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
         .expect("the IPv6 End-of-RIB");
     assert_eq!(flushed.end_of_rib, vec![IPV6]);
     assert!(observer_rx.try_recv().is_err(), "IPv4 waits for the hold");
+
+    assert!(manager.selection_partial_caught_up(observer));
+    let empty_stagings = manager.outbound_stagings(observer);
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    assert_eq!(
+        manager.outbound_stagings(observer),
+        empty_stagings,
+        "an empty follow-up pass does not repeat staging for a caught-up held peer"
+    );
+    let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(observer), 4);
+    let stagings = manager.outbound_stagings(observer);
+    let mut route = make_v6_route(
+        Ipv6Prefix::new("2001:db8:30::".parse().unwrap(), 64),
+        "2001:db8::81".parse().unwrap(),
+    );
+    set_peer(&mut route, LOCAL_PEER);
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+    ]);
+    let prefix = route.prefix;
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route, reply });
+    result.try_recv().unwrap().unwrap();
+    assert_eq!(
+        manager.outbound_stagings(observer),
+        stagings,
+        "a partially caught-up dirty peer still checks credit before staging an unheld family"
+    );
+    assert!(observer_rx.try_recv().is_err());
+    drop(spent);
+    manager.resync_dirty_peers_bounded();
+    let update = observer_rx
+        .try_recv()
+        .map(delivered)
+        .expect("IPv6 recovers while IPv4 stays held");
+    assert_eq!(
+        update
+            .announce
+            .iter()
+            .map(|route| route.prefix)
+            .collect::<Vec<_>>(),
+        [prefix]
+    );
+    assert_eq!(update.end_of_rib, []);
 
     manager.handle_update(RibUpdate::EndOfRib {
         peer: peer_v4(WAITER),

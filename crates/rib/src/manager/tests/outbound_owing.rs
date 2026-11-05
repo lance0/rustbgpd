@@ -697,6 +697,108 @@ fn refresh_answer_absorbs_owed_withdrawal_first() {
     assert_eq!(wire.unicast.len(), 1);
 }
 
+#[test]
+fn vpn_flowspec_refresh_absorbs_only_its_own_owed_withdrawals() {
+    const GLOBAL: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpec);
+    const VPN: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpecVpn);
+    for global in [false, true] {
+        let mut manager = manager(8);
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 12, 2));
+        let mut rx = up(
+            &mut manager,
+            peer,
+            if global { vec![GLOBAL, VPN] } else { vec![VPN] },
+        );
+        send_all(&mut rx);
+        let mut keys = Vec::new();
+        for rd in [
+            None,
+            Some(rustbgpd_wire::RouteDistinguisher([
+                0, 0, 0xad, 0x77, 0, 0, 0, 40,
+            ])),
+        ] {
+            let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
+            rule.peer = crate::PeerId::LOCAL;
+            rule.origin_type = crate::route::RouteOrigin::Local;
+            rule.rd = rd;
+            keys.push(rule.selection_key());
+            let (reply, mut result) = oneshot::channel();
+            manager.handle_update(RibUpdate::InjectFlowSpec { route: rule, reply });
+            result.try_recv().unwrap().unwrap();
+        }
+        let initial = send_all(&mut rx);
+        assert_eq!(
+            initial
+                .iter()
+                .map(|update| update.flowspec_announce.len())
+                .sum::<usize>(),
+            1 + usize::from(global)
+        );
+        let held_credit = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 8);
+        for key in &keys {
+            let (reply, mut result) = oneshot::channel();
+            manager.handle_update(RibUpdate::WithdrawFlowSpec {
+                key: key.clone(),
+                allow_missing: false,
+                owner: String::new(),
+                override_owner: false,
+                reply,
+            });
+            result.try_recv().unwrap().unwrap();
+        }
+        assert!(send_all(&mut rx).is_empty());
+        assert!(!manager.dirty_peers.contains(&peer));
+        let owed_vpn = manager.owes(peer, VPN);
+        drop(held_credit);
+        for (family, key) in [(VPN, &keys[1]), (GLOBAL, &keys[0])] {
+            if family == GLOBAL && !global {
+                continue;
+            }
+            manager.handle_update(RibUpdate::RouteRefreshRequest {
+                peer,
+                session_id: 0,
+                afi: family.0,
+                safi: family.1,
+                queued: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            });
+            let sent = send_all(&mut rx);
+            let withdrawal = sent
+                .iter()
+                .position(|update| update.flowspec_withdraw.contains(key))
+                .expect("the family's owed withdrawal is absorbed before its refresh completes");
+            let marker = sent
+                .iter()
+                .position(|update| update.end_of_rib.contains(&family))
+                .expect("the refresh completes its family");
+            assert!(withdrawal <= marker);
+            assert_eq!(
+                sent.iter()
+                    .flat_map(|update| &update.flowspec_withdraw)
+                    .collect::<Vec<_>>(),
+                [key]
+            );
+            assert!(
+                sent.iter()
+                    .all(|update| update.flowspec_announce.is_empty())
+            );
+            assert!(!manager.owes(peer, family));
+            if family == VPN {
+                assert!(owed_vpn, "VPN debt is recorded under SAFI 134");
+                assert_eq!(
+                    manager.owes(peer, GLOBAL),
+                    global,
+                    "global debt is independent"
+                );
+                assert!(
+                    sent.iter()
+                        .all(|update| !update.end_of_rib.contains(&GLOBAL))
+                );
+            }
+        }
+        assert!(manager.owing(peer).is_none());
+    }
+}
+
 /// An operator replay refused at its acceptance point (another whole-table
 /// update is live) sends nothing and leaves the owed keys exactly as they
 /// were; accepted later, the owed keys go ahead of the families and the
@@ -1087,10 +1189,8 @@ fn owed_key_drain_never_starves_the_dirty_ring() {
     );
 }
 
-/// A drain step refused by a full channel keeps its keys owed, without a
-/// resync, and they go out once the channel has room. Red when a refused
-/// step drops what it popped: the keys are lost and the route never
-/// reaches the peer.
+/// A full channel keeps keys owed without staging or a resync; they go
+/// out once the channel has room, even when row credit was always free.
 #[test]
 fn a_drain_refused_by_a_full_channel_keeps_its_keys() {
     let mut manager = manager(8);
@@ -1106,13 +1206,19 @@ fn a_drain_refused_by_a_full_channel_keeps_its_keys() {
     drop(charge);
     let sender = manager.outbound_peers[&peer].clone();
     let occupied: Vec<_> = std::iter::from_fn(|| sender.clone().try_reserve_owned().ok()).collect();
-    manager.resync_dirty_peers_bounded();
-    assert_eq!(
-        owed(&manager, peer, V4),
-        1,
-        "the refused step re-owes its key"
-    );
-    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.outbound_channel_full(peer));
+    assert_eq!(manager.outbound_credit_rows(peer), 0);
+    let stagings = manager.outbound_stagings(peer);
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+        assert_eq!(owed(&manager, peer, V4), 1, "the key stays owed");
+        assert_eq!(
+            manager.outbound_stagings(peer),
+            stagings,
+            "a full channel must not repeatedly stage owed keys"
+        );
+        assert!(!manager.dirty_peers.contains(&peer));
+    }
     drop(occupied);
     manager.resync_dirty_peers_bounded();
     let sent = send_all(&mut rx);
@@ -1122,6 +1228,200 @@ fn a_drain_refused_by_a_full_channel_keeps_its_keys() {
         "the key is sent once the channel has room"
     );
     assert!(manager.owing(peer).is_none());
+}
+
+/// Each step takes the oldest complete keys that fit its remaining credit.
+#[test]
+fn a_partial_credit_window_preserves_the_oldest_owed_keys() {
+    const CREDIT: usize = 10;
+    const HELD: usize = 4;
+    for cap in [0, 2, u32::MAX] {
+        let mut manager = manager(CREDIT).with_owing_theta_floor(1 << 30);
+        manager.flush_poll_budget = Duration::ZERO;
+        let mut sources = Vec::new();
+        for address in [SOURCE, Ipv4Addr::new(10, 0, 0, 2)] {
+            sources.push((address, up(&mut manager, peer_v4(address), ipv4_sendable())));
+        }
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 19, 2));
+        let (sender, mut rx) = mpsc::channel(64);
+        let mut registration = peer_up_message(peer, ipv4_sendable(), sender);
+        if let RibUpdate::PeerUp {
+            add_path_send_families,
+            add_path_send_max,
+            ..
+        } = &mut registration
+            && cap != 0
+        {
+            *add_path_send_families = ipv4_sendable();
+            *add_path_send_max = cap;
+        }
+        manager.handle_update(registration);
+        send_all(&mut rx);
+        let credit = manager.outbound_credit_handle(peer);
+        let retained = crate::OutboundCharge::new(&credit, HELD);
+        let spent = crate::OutboundCharge::new(&credit, CREDIT - HELD);
+        for index in 0..8 {
+            for (address, _) in &sources {
+                let mut path = route(index, 0);
+                path.peer = peer_v4(*address);
+                path.next_hop = IpAddr::V4(*address);
+                manager.handle_update(RibUpdate::RoutesReceived {
+                    session_id: 0,
+                    peer: peer_v4(*address),
+                    announced: vec![path],
+                    withdrawn: vec![],
+                    flowspec_announced: vec![],
+                    flowspec_withdrawn: vec![],
+                    evpn_announced: vec![],
+                    evpn_withdrawn: vec![],
+                    validated_with: None,
+                });
+                drain_route_chunks(&mut manager);
+            }
+        }
+        for (_, source) in &mut sources {
+            send_all(source);
+        }
+        assert_eq!(owed(&manager, peer, V4), 8);
+        drop(spent);
+        assert!(manager.drain_owing_bounded(std::time::Instant::now()));
+        let queued = held(&mut rx);
+        let count = if cap == 0 { 3 } else { 1 };
+        let prefixes: std::collections::BTreeSet<_> = queued
+            .iter()
+            .flat_map(|update| update.announce.iter().map(|route| route.prefix))
+            .collect();
+        assert_eq!(
+            prefixes,
+            (0..count).map(route_prefix).collect(),
+            "cap {cap}"
+        );
+        assert_eq!(rows(&queued), if cap == 0 { 3 } else { 2 });
+        assert_eq!(owed(&manager, peer, V4), 8 - count as usize);
+        assert_eq!(manager.outbound_credit_rows(peer), HELD + rows(&queued));
+        assert!(manager.outbound_credit_rows(peer) <= CREDIT);
+        drop((queued, retained));
+    }
+}
+
+#[test]
+fn an_owed_tick_keeps_draining_while_credit_and_time_remain() {
+    let mut manager = manager(16).with_owing_theta_floor(1 << 30);
+    manager.flush_poll_budget = Duration::from_secs(10);
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 19, 3));
+    let mut rx = up(&mut manager, peer, ipv4_sendable());
+    send_all(&mut rx);
+    let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 16);
+    received(
+        &mut manager,
+        (0..12).map(|key| route(key, 0)).collect(),
+        vec![],
+        vec![],
+        vec![],
+    );
+    send_all(&mut source);
+    assert_eq!(owed(&manager, peer, V4), 12);
+    drop(spent);
+    assert!(!manager.drain_owing_bounded(std::time::Instant::now()));
+    let queued = held(&mut rx);
+    assert_eq!(
+        queued
+            .iter()
+            .map(|update| update.announce.len())
+            .collect::<Vec<_>>(),
+        [8, 4],
+        "the second round uses the remaining credit in the same tick"
+    );
+    assert_eq!(manager.outbound_credit_rows(peer), 12);
+    assert!(manager.owing(peer).is_none());
+}
+
+#[test]
+fn owed_key_row_bounds_include_both_sides_and_every_family_cap() {
+    use super::super::outbound_owing::pass_budget;
+    let mut manager = manager(32);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 19, 4));
+    let families = [(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)];
+    manager.peer_add_path_send_max.insert(peer, 1);
+    manager
+        .peer_add_path_send_limits
+        .insert(peer, HashMap::from([(families[0], 2), (families[1], 8)]));
+    let bound = manager.owing_rows_per_key(peer, true, &families);
+    assert_eq!(
+        bound,
+        Some(16),
+        "eight paths can each withdraw and announce"
+    );
+    assert_eq!(pass_budget(2, bound, 31), 31);
+    assert_eq!(pass_budget(2, bound, 32), usize::MAX);
+    manager
+        .peer_add_path_send_limits
+        .get_mut(&peer)
+        .unwrap()
+        .insert(families[1], u32::MAX);
+    assert_eq!(manager.owing_rows_per_key(peer, true, &families), None);
+    assert_eq!(manager.owing_rows_per_key(peer, false, &families), Some(2));
+}
+
+#[test]
+fn unavailable_unicast_families_create_no_owed_keys() {
+    for orf in [false, true] {
+        let mut manager = manager(4);
+        let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 19, 5));
+        let (sender, mut rx) = mpsc::channel(64);
+        let mut registration = peer_up_message(
+            peer,
+            vec![if orf { V4 } else { (Afi::Ipv6, Safi::Unicast) }],
+            sender,
+        );
+        if let RibUpdate::PeerUp {
+            negotiated_orf_recv,
+            ..
+        } = &mut registration
+            && orf
+        {
+            *negotiated_orf_recv = vec![V4];
+        }
+        manager.handle_update(registration);
+        send_all(&mut rx);
+        let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 4);
+        received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
+        send_all(&mut source);
+        assert!(manager.owing(peer).is_none(), "orf={orf}");
+        assert!(
+            manager.take_owing_log(peer).is_empty(),
+            "no transient debt either"
+        );
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert!(
+            send_all(&mut rx)
+                .iter()
+                .all(|update| update.announce.is_empty())
+        );
+        drop(spent);
+    }
+}
+
+#[test]
+fn a_targeted_pass_still_serves_other_dirty_and_forced_peers() {
+    let mut manager = manager(32);
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable());
+    let peers = [6, 7, 8].map(|octet| peer_v4(Ipv4Addr::new(10, 0, 19, octet)));
+    let mut receivers = peers.map(|peer| up(&mut manager, peer, ipv4_sendable()));
+    received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
+    send_all(&mut source);
+    for rx in &mut receivers {
+        send_all(rx);
+    }
+    manager.mark_outbound_dirty(peers[1]);
+    manager.force_outbound_peers.insert(peers[2]);
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([peers[0]]));
+    assert!(!manager.dirty_peers.contains(&peers[1]));
+    assert!(!manager.force_outbound_peers.contains(&peers[2]));
+    assert!(send_all(&mut receivers[0]).is_empty());
+    assert_eq!(rows(&send_all(&mut receivers[2])), 1);
 }
 
 /// A resync covers every family it enumerated: the peer owes nothing after
@@ -1162,8 +1462,11 @@ fn a_resync_settles_what_the_peer_owed() {
 // Review round 1 reproductions (fail at the reviewed head).
 // ---------------------------------------------------------------------------
 
-fn inject_local(manager: &mut RibManager, prefix: Ipv4Prefix, blackhole: bool) {
-    let mut route = make_route(prefix, SOURCE);
+fn inject_local(manager: &mut RibManager, prefix: Prefix, blackhole: bool) {
+    let mut route = match prefix {
+        Prefix::V4(prefix) => make_route(prefix, SOURCE),
+        Prefix::V6(prefix) => make_v6_route(prefix, "2001:db8::1".parse().unwrap()),
+    };
     route.peer = crate::PeerId::LOCAL;
     route.origin_type = crate::route::RouteOrigin::Local;
     let mut attributes = vec![
@@ -1181,10 +1484,10 @@ fn inject_local(manager: &mut RibManager, prefix: Ipv4Prefix, blackhole: bool) {
     result.try_recv().unwrap().unwrap();
 }
 
-fn withdraw_local(manager: &mut RibManager, prefix: Ipv4Prefix) {
+fn withdraw_local(manager: &mut RibManager, prefix: Prefix) {
     let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::WithdrawInjected {
-        prefix: Prefix::V4(prefix),
+        prefix,
         path_id: 0,
         allow_missing: false,
         owner: String::new(),
@@ -1202,68 +1505,157 @@ fn withdraw_local(manager: &mut RibManager, prefix: Ipv4Prefix) {
 /// drain treats the whole deferred family as gated, and the withdrawal
 /// waits for the release.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "ordinary held debt, exempt withdrawal and family release form one dual-stack lifecycle"
+)]
 fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
-    for floor in [0, 1 << 30] {
-        for blackhole in [false, true] {
-            use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter};
-            const DEFERRAL_SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 81);
-            const WAITER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 83);
-            let mut manager = manager_with_dormant_waiter()
-                .with_outbound_row_credit(8)
-                .with_owing_theta_floor(floor);
-            manager.test_force_ungrouped = true;
-            let _source = connect(&mut manager, DEFERRAL_SOURCE, 4096, false, false);
-            let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 91));
-            let (target_tx, mut rx) = mpsc::channel(4096);
-            let mut target = peer_up_message(peer, vec![V4], target_tx);
-            if let RibUpdate::PeerUp { export_policy, .. } = &mut target {
-                *export_policy = Some(super::selection_deferral_dirty_rtbh::private_policy(Some(
-                    rustbgpd_wire::COMMUNITY_BLACKHOLE,
-                )));
-            }
-            manager.handle_update(target);
-            send_all(&mut rx);
-            let _waiter = connect(&mut manager, WAITER, 64, true, false);
-            assert!(manager.selection_deferred(V4));
-            let rtbh = Ipv4Prefix::new(
-                Ipv4Addr::new(198, 51, 100, 0),
-                if blackhole { 24 } else { 32 },
-            );
-            inject_local(&mut manager, rtbh, blackhole);
-            let mut wire = Wire::default();
-            wire.apply(&send_all(&mut rx));
-            assert!(
-                wire.unicast.contains_key(&(Prefix::V4(rtbh), 0)),
-                "the exempt RTBH is advertised inside the hold"
-            );
-            let filler = manager.outbound_credit_handle(peer);
-            let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
-            withdraw_local(&mut manager, rtbh);
-            assert!(
-                send_all(&mut rx).is_empty(),
-                "spent credit owes the withdrawal"
-            );
-            drop(charge);
-            for _ in 0..3 {
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let family = (afi, Safi::Unicast);
+        for floor in [0, 1 << 30] {
+            for blackhole in [false, true] {
+                const DEFERRAL_SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 81);
+                const WAITER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 83);
+                let mut manager = deferral_manager(vec![family], 8).with_owing_theta_floor(floor);
+                manager.flush_poll_budget = Duration::ZERO;
+                let _source = connect_families(&mut manager, DEFERRAL_SOURCE, vec![family], false);
+                let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 91));
+                let (target_tx, mut rx) = mpsc::channel(4096);
+                let mut target = peer_up_message(peer, vec![family], target_tx);
+                if let RibUpdate::PeerUp { export_policy, .. } = &mut target {
+                    *export_policy = Some(super::selection_deferral_dirty_rtbh::private_policy(
+                        Some(rustbgpd_wire::COMMUNITY_BLACKHOLE),
+                    ));
+                }
+                manager.handle_update(target);
+                send_all(&mut rx);
+                let filler = manager.outbound_credit_handle(peer);
+                let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+                let mut ordinary = route(40, 0);
+                if afi == Afi::Ipv6 {
+                    ordinary.prefix =
+                        Prefix::V6(Ipv6Prefix::new("2001:db8:101::".parse().unwrap(), 64));
+                    ordinary.next_hop = "2001:db8::81".parse().unwrap();
+                }
+                set_peer(&mut ordinary, peer_v4(DEFERRAL_SOURCE));
+                let ordinary_key = ordinary.prefix;
+                manager.handle_update(RibUpdate::RoutesReceived {
+                    session_id: u64::from(DEFERRAL_SOURCE.octets()[3]),
+                    peer: peer_v4(DEFERRAL_SOURCE),
+                    announced: vec![ordinary],
+                    withdrawn: vec![],
+                    flowspec_announced: vec![],
+                    flowspec_withdrawn: vec![],
+                    evpn_announced: vec![],
+                    evpn_withdrawn: vec![],
+                    validated_with: None,
+                });
+                drain_route_chunks(&mut manager);
+                assert!(manager.owes(peer, family));
+                assert!(send_all(&mut rx).is_empty());
+                drop(charge);
+                let _waiter = connect_families(&mut manager, WAITER, vec![family], true);
+                assert!(manager.selection_deferred(family));
+                manager.pending_eor.entry(peer).or_default().insert(family);
+                let rtbh = if afi == Afi::Ipv6 {
+                    Prefix::V6(Ipv6Prefix::new(
+                        "2001:db8:100::".parse().unwrap(),
+                        if blackhole { 64 } else { 128 },
+                    ))
+                } else {
+                    Prefix::V4(Ipv4Prefix::new(
+                        Ipv4Addr::new(198, 51, 100, 0),
+                        if blackhole { 24 } else { 32 },
+                    ))
+                };
+                inject_local(&mut manager, rtbh, blackhole);
+                manager.resync_dirty_peers_bounded();
+                let mut wire = Wire::default();
+                wire.apply(&send_all(&mut rx));
+                assert!(
+                    wire.unicast.contains_key(&(rtbh, 0)),
+                    "the exempt RTBH is advertised inside the hold"
+                );
+                assert!(!wire.unicast.contains_key(&(ordinary_key, 0)));
+                let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+                withdraw_local(&mut manager, rtbh);
+                assert!(
+                    send_all(&mut rx).is_empty(),
+                    "spent credit owes the withdrawal"
+                );
+                assert!(manager.owes(peer, family));
+                assert_eq!(owed(&manager, peer, family), 2 * usize::from(floor != 0));
+                let other_afi = if afi == Afi::Ipv4 {
+                    Afi::Ipv6
+                } else {
+                    Afi::Ipv4
+                };
+                assert!(!manager.owes(peer, (other_afi, Safi::Unicast)));
+                drop(charge);
+                assert!(
+                    manager.owing_runnable(),
+                    "the exempt withdrawal is runnable"
+                );
+                for _ in 0..3 {
+                    manager.resync_dirty_peers_bounded();
+                    wire.apply(&send_all(&mut rx));
+                }
+                assert!(manager.selection_deferred(family), "still inside the hold");
+                assert!(
+                    !wire.unicast.contains_key(&(rtbh, 0)),
+                    "the exempt withdrawal is sent inside the hold once credit returns"
+                );
+                assert!(!manager.owing_runnable(), "no second pass inside the hold");
+                assert!(!manager.owing_tick_due());
+                assert!(manager.owes(peer, family), "the ordinary key stays owed");
+                assert_eq!(owed(&manager, peer, family), usize::from(floor != 0));
+
+                // A whole family keeps its held remainder; later local changes re-arm it.
+                inject_local(&mut manager, rtbh, blackhole);
                 manager.resync_dirty_peers_bounded();
                 wire.apply(&send_all(&mut rx));
+                assert!(wire.unicast.contains_key(&(rtbh, 0)));
+                withdraw_local(&mut manager, rtbh);
+                manager.resync_dirty_peers_bounded();
+                wire.apply(&send_all(&mut rx));
+                assert!(!wire.unicast.contains_key(&(rtbh, 0)));
+                assert!(manager.selection_deferred(family));
+                assert!(!manager.owing_runnable());
+                assert!(!manager.owing_tick_due());
+                assert!(!wire.unicast.contains_key(&(ordinary_key, 0)));
+                assert!(manager.pending_eor[&peer].contains(&family));
+                manager.expire_selection_deferral();
+                let mut released = Vec::new();
+                for _ in 0..4 {
+                    manager.resync_dirty_peers_bounded();
+                    let sent = send_all(&mut rx);
+                    wire.apply(&sent);
+                    released.extend(sent);
+                }
+                assert!(
+                    manager.owing(peer).is_none(),
+                    "the release settles its family"
+                );
+                assert_eq!(wire.unicast.len(), 1);
+                assert!(wire.unicast.contains_key(&(ordinary_key, 0)));
+                let data = released
+                    .iter()
+                    .position(|update| {
+                        update
+                            .announce
+                            .iter()
+                            .any(|route| route.prefix == ordinary_key)
+                    })
+                    .expect("release sends the ordinary route");
+                let marker = released
+                    .iter()
+                    .position(|update| update.end_of_rib.contains(&family))
+                    .expect("release sends the held End-of-RIB");
+                assert!(
+                    data <= marker,
+                    "ordinary debt is delivered before its End-of-RIB"
+                );
             }
-            assert!(manager.selection_deferred(V4), "still inside the hold");
-            assert!(
-                !wire.unicast.contains_key(&(Prefix::V4(rtbh), 0)),
-                "the exempt withdrawal is sent inside the hold once credit returns"
-            );
-
-            // A whole family keeps its held remainder; later local changes re-arm it.
-            inject_local(&mut manager, rtbh, blackhole);
-            manager.resync_dirty_peers_bounded();
-            wire.apply(&send_all(&mut rx));
-            assert!(wire.unicast.contains_key(&(Prefix::V4(rtbh), 0)));
-            withdraw_local(&mut manager, rtbh);
-            manager.resync_dirty_peers_bounded();
-            wire.apply(&send_all(&mut rx));
-            assert!(!wire.unicast.contains_key(&(Prefix::V4(rtbh), 0)));
-            assert!(manager.selection_deferred(V4));
         }
     }
 }
@@ -1586,99 +1978,267 @@ fn owed_evpn_keys_wait_for_the_selection_release() {
 /// settles it. Red when the drain treats the held family as gated: the
 /// withdrawal waits for the release.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "revocation, sibling absorption, rearming and release form one family lifecycle"
+)]
 fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
-    let flowspec = (Afi::Ipv4, Safi::FlowSpec);
-    let mut manager = deferral_manager(vec![flowspec], 8);
-    let peer = peer_v4(Ipv4Addr::new(10, 0, 25, 1));
-    let mut rx = connect_families(
-        &mut manager,
-        Ipv4Addr::new(10, 0, 25, 1),
-        vec![flowspec],
-        false,
-    );
-    send_all(&mut rx);
-    let _waiter = connect_families(
-        &mut manager,
-        Ipv4Addr::new(192, 0, 2, 83),
-        vec![flowspec],
-        true,
-    );
-    assert!(manager.selection_deferred(flowspec));
-    let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
-    rule.peer = crate::PeerId::LOCAL;
-    let key = rule.selection_key();
-    let (reply, mut result) = oneshot::channel();
-    manager.handle_update(RibUpdate::InjectFlowSpec { route: rule, reply });
-    result.try_recv().unwrap().unwrap();
-    let sent = send_all(&mut rx);
-    assert!(
-        sent.iter()
-            .any(|update| !update.flowspec_announce.is_empty()),
-        "the local rule is advertised inside the hold"
-    );
-    let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
-    let (reply, mut result) = oneshot::channel();
-    manager.handle_update(RibUpdate::WithdrawFlowSpec {
-        key: key.clone(),
-        allow_missing: false,
-        owner: String::new(),
-        override_owner: false,
-        reply,
-    });
-    result.try_recv().unwrap().unwrap();
-    assert!(send_all(&mut rx).is_empty());
-    assert!(manager.owes_whole(peer, OwedFamily::IPV4_FLOWSPEC));
-    drop(charge);
-    manager.resync_dirty_peers_bounded();
-    let sent = send_all(&mut rx);
-    assert!(
-        sent.iter()
-            .any(|update| update.flowspec_withdraw.contains(&key)),
-        "the revocation is sent inside the hold"
-    );
-    assert!(
-        manager.owes_whole(peer, OwedFamily::IPV4_FLOWSPEC),
-        "the family stays owed for the release"
-    );
-    for _ in 0..3 {
-        manager.resync_dirty_peers_bounded();
-    }
-    assert!(send_all(&mut rx).is_empty(), "one pass per hold");
-    let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
-    rule.peer = crate::PeerId::LOCAL;
-    let (reply, mut result) = oneshot::channel();
-    manager.handle_update(RibUpdate::InjectFlowSpec { route: rule, reply });
-    result.try_recv().unwrap().unwrap();
-    manager.resync_dirty_peers_bounded();
-    assert!(
-        send_all(&mut rx)
-            .iter()
-            .any(|update| !update.flowspec_announce.is_empty()),
-        "a new local change re-arms the held whole family"
-    );
-    let (reply, mut result) = oneshot::channel();
-    manager.handle_update(RibUpdate::WithdrawFlowSpec {
-        key: key.clone(),
-        allow_missing: false,
-        owner: String::new(),
-        override_owner: false,
-        reply,
-    });
-    result.try_recv().unwrap().unwrap();
-    manager.resync_dirty_peers_bounded();
-    assert!(
-        send_all(&mut rx)
-            .iter()
-            .any(|update| update.flowspec_withdraw.contains(&key)),
-        "a second revocation also drains inside the hold"
-    );
-    manager.expire_selection_deferral();
-    for _ in 0..4 {
-        manager.resync_dirty_peers_bounded();
+    for flowspec in [
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::Ipv6, Safi::FlowSpec),
+        (Afi::Ipv4, Safi::FlowSpecVpn),
+    ] {
+        let afi = flowspec.0;
+        let owed_family = OwedFamily::of(flowspec).unwrap();
+        let mut manager = deferral_manager(vec![flowspec], 8).with_owing_theta_floor(0);
+        manager.flush_poll_budget = Duration::ZERO;
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 25, 1));
+        let mut rx = connect_families(
+            &mut manager,
+            Ipv4Addr::new(10, 0, 25, 1),
+            vec![V4, flowspec],
+            false,
+        );
         send_all(&mut rx);
+        let _waiter = connect_families(
+            &mut manager,
+            Ipv4Addr::new(192, 0, 2, 83),
+            vec![flowspec],
+            true,
+        );
+        assert!(manager.selection_deferred(flowspec));
+        manager
+            .pending_eor
+            .entry(peer)
+            .or_default()
+            .insert(flowspec);
+        let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
+        rule.peer = crate::PeerId::LOCAL;
+        if afi == Afi::Ipv6 {
+            rule.afi = afi;
+            rule.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                rustbgpd_wire::FlowSpecPrefix::V6(rustbgpd_wire::Ipv6PrefixOffset {
+                    prefix: Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64),
+                    offset: 0,
+                }),
+            )];
+        }
+        if flowspec.1 == Safi::FlowSpecVpn {
+            rule.rd = Some(RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40]));
+        }
+        let key = rule.selection_key();
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectFlowSpec {
+            route: rule.clone(),
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        let sent = send_all(&mut rx);
+        assert!(
+            sent.iter()
+                .any(|update| !update.flowspec_announce.is_empty()),
+            "the local rule is advertised inside the hold"
+        );
+        let filler = manager.outbound_credit_handle(peer);
+        let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawFlowSpec {
+            key: key.clone(),
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        assert!(send_all(&mut rx).is_empty());
+        assert!(manager.owes_whole(peer, owed_family));
+        drop(charge);
+        assert!(manager.owing_runnable());
+        assert!(manager.owing_tick_due());
+        manager.resync_dirty_peers_bounded();
+        let sent = send_all(&mut rx);
+        assert!(
+            sent.iter()
+                .any(|update| update.flowspec_withdraw.contains(&key)),
+            "the revocation is sent inside the hold"
+        );
+        assert!(
+            manager.owes_whole(peer, owed_family),
+            "the family stays owed for the release"
+        );
+        assert!(!manager.owing_runnable(), "the held pass already ran");
+        assert!(!manager.owing_tick_due());
+        for _ in 0..3 {
+            manager.resync_dirty_peers_bounded();
+        }
+        assert!(send_all(&mut rx).is_empty(), "one pass per hold");
+        let unicast = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 7), 32));
+        // Absorbing unicast must preserve a drained or rearmed held sibling.
+        for rearm in [false, true] {
+            let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+            if rearm {
+                let (reply, mut result) = oneshot::channel();
+                manager.handle_update(RibUpdate::InjectFlowSpec {
+                    route: rule.clone(),
+                    reply,
+                });
+                result.try_recv().unwrap().unwrap();
+                withdraw_local(&mut manager, unicast);
+            } else {
+                inject_local(&mut manager, unicast, false);
+            }
+            assert!(manager.owes_whole(peer, OwedFamily::IPV4_UNICAST));
+            assert!(send_all(&mut rx).is_empty());
+            drop(charge);
+            manager.pending_eor.entry(peer).or_default().insert(V4);
+            manager.flush_pending_eor(peer);
+            let sibling = send_all(&mut rx);
+            assert_eq!(
+                sibling
+                    .iter()
+                    .flat_map(|update| update.announce.iter().map(|route| route.prefix))
+                    .collect::<Vec<_>>(),
+                if rearm { vec![] } else { vec![unicast] },
+            );
+            assert_eq!(
+                sibling
+                    .iter()
+                    .flat_map(OutboundRouteUpdate::unicast_withdrawals)
+                    .copied()
+                    .collect::<Vec<_>>(),
+                if rearm { vec![(unicast, 0)] } else { vec![] },
+            );
+            assert_eq!(
+                sibling
+                    .iter()
+                    .flat_map(|update| update.end_of_rib.iter())
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![V4],
+            );
+            assert!(sibling.iter().all(|update| {
+                update.flowspec_announce.is_empty() && update.flowspec_withdraw.is_empty()
+            }));
+            assert!(!manager.owes(peer, V4));
+            assert!(manager.owes_whole(peer, owed_family));
+            assert_eq!(
+                manager.owing_runnable(),
+                rearm,
+                "clearing a sibling preserves the held pass"
+            );
+            assert_eq!(manager.owing_tick_due(), rearm);
+        }
+        manager.resync_dirty_peers_bounded();
+        assert!(
+            send_all(&mut rx)
+                .iter()
+                .any(|update| !update.flowspec_announce.is_empty()),
+            "a new local change re-arms the held whole family"
+        );
+        assert!(!manager.owing_runnable());
+        assert!(!manager.owing_tick_due());
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawFlowSpec {
+            key: key.clone(),
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        manager.resync_dirty_peers_bounded();
+        assert!(
+            send_all(&mut rx)
+                .iter()
+                .any(|update| update.flowspec_withdraw.contains(&key)),
+            "a second revocation also drains inside the hold"
+        );
+        assert!(!manager.owing_runnable());
+        assert!(!manager.owing_tick_due());
+        assert!(manager.pending_eor[&peer].contains(&flowspec));
+        manager.expire_selection_deferral();
+        let mut released_eor = Vec::new();
+        for _ in 0..4 {
+            manager.resync_dirty_peers_bounded();
+            let sent = send_all(&mut rx);
+            released_eor.extend(
+                sent.iter()
+                    .flat_map(|update| update.end_of_rib.iter())
+                    .copied(),
+            );
+        }
+        assert!(manager.owing(peer).is_none(), "the release settles it");
+        assert_eq!(released_eor, vec![flowspec]);
     }
-    assert!(manager.owing(peer).is_none(), "the release settles it");
+}
+
+/// Only otherwise-eligible whole-family debt needs its live operation's
+/// release notification. Keyed debt and a held non-exempt family do not.
+#[test]
+fn only_eligible_whole_debt_waits_on_a_live_latch() {
+    use super::super::outbound_owing::OwingGate;
+
+    for (whole, held_family, live_latch) in [
+        (true, false, false),
+        (false, false, true),
+        (true, true, true),
+        (true, false, true),
+    ] {
+        let family = if held_family { EVPN } else { V4 };
+        let owed_family = OwedFamily::of(family).unwrap();
+        let mut manager =
+            deferral_manager(vec![EVPN], 8).with_owing_theta_floor(if whole { 0 } else { 1 << 30 });
+        let mut source = up(&mut manager, peer_v4(SOURCE), vec![V4, EVPN]);
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 25, 2));
+        let mut rx = up(&mut manager, peer, vec![V4, EVPN]);
+        send_all(&mut rx);
+        let credit = manager.outbound_credit_handle(peer);
+        let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8);
+        received(
+            &mut manager,
+            if held_family {
+                vec![]
+            } else {
+                vec![route(0, 0)]
+            },
+            vec![],
+            if held_family {
+                vec![evpn_route(0, 0)]
+            } else {
+                vec![]
+            },
+            vec![],
+        );
+        send_all(&mut source);
+        assert!(send_all(&mut rx).is_empty());
+        assert!(manager.owes(peer, family));
+        assert_eq!(manager.owes_whole(peer, owed_family), whole);
+        let _waiter = held_family.then(|| {
+            connect_families(&mut manager, Ipv4Addr::new(192, 0, 2, 83), vec![EVPN], true)
+        });
+        assert_eq!(manager.selection_deferred(family), held_family);
+        if whole {
+            assert_eq!(manager.owing_gate(peer, owed_family), OwingGate::Whole);
+        }
+        drop(charge);
+        let operation = live_latch.then(|| manager.begin_outbound_operation(peer, 1).unwrap());
+        assert_eq!(manager.outbound_operation_live(peer), live_latch);
+        assert_eq!(
+            manager.owing_latch_pending(),
+            whole && live_latch && !held_family,
+            "whole={whole}, held={held_family}, live={live_latch}",
+        );
+        assert_eq!(
+            manager.owing_runnable(),
+            !whole || (!live_latch && !held_family)
+        );
+        assert_eq!(
+            manager.owing_tick_due(),
+            !whole || (!live_latch && !held_family)
+        );
+        drop(operation);
+        assert!(!manager.owing_latch_pending());
+    }
 }
 
 /// An absorption that cannot be admitted (here the session has no export
@@ -2073,4 +2633,544 @@ async fn owed_keys_drain_across_poll_slices_through_the_actor() {
     }
     drop(tx);
     handle.await.unwrap();
+}
+
+fn typed_prefix(afi: Afi, index: u8) -> Prefix {
+    match afi {
+        Afi::Ipv4 => Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, index, 0), 24)),
+        Afi::Ipv6 => Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, u16::from(index), 0, 0, 0, 0, 0),
+            48,
+        )),
+        _ => unreachable!("the fixture uses IP prefixes"),
+    }
+}
+
+fn typed_vpn_route(afi: Afi, index: u8) -> VpnRibRoute {
+    let mut route = make_vpn_rib_route(SOURCE, index, 100, 100);
+    if let Prefix::V6(prefix) = typed_prefix(afi, index) {
+        route.nlri.prefix = VpnPrefix::v6(prefix.addr, prefix.len).unwrap();
+        route.next_hop = IpAddr::V6("2001:db8::1".parse().unwrap());
+    }
+    route
+}
+
+fn typed_labeled_route(afi: Afi, index: u8) -> crate::route::LabeledRibRoute {
+    let mut route = make_labeled_rib_route(SOURCE, index, 100, 100);
+    route.nlri.prefix = typed_prefix(afi, index);
+    if afi == Afi::Ipv6 {
+        route.next_hop = IpAddr::V6("2001:db8::1".parse().unwrap());
+    }
+    route
+}
+
+fn typed_key(family: (Afi, Safi), index: u8) -> super::super::outbound_owing::OwedKey {
+    use super::super::outbound_owing::OwedKey;
+    match family.1 {
+        Safi::Unicast => OwedKey::Unicast(typed_prefix(family.0, index)),
+        Safi::LabeledUnicast => OwedKey::Labeled(typed_prefix(family.0, index)),
+        Safi::MplsVpn => OwedKey::Vpn(typed_vpn_route(family.0, index).nlri.key()),
+        Safi::Evpn => OwedKey::Evpn(evpn_route(u32::from(index), 0).key()),
+        _ => unreachable!("the fixture uses keyed families"),
+    }
+}
+
+/// The tuples carry source key and path ID; each update uses one attribute version.
+fn typed_received(
+    manager: &mut RibManager,
+    family: (Afi, Safi),
+    announced: &[(u8, u32)],
+    withdrawn: &[(u8, u32)],
+    variant: u32,
+) {
+    let attributes = |path| {
+        AttrSet::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            PathAttribute::LocalPref(100),
+            PathAttribute::Med(variant + path),
+        ])
+    };
+    let update = match family.1 {
+        Safi::Unicast | Safi::Evpn => RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(SOURCE),
+            announced: announced
+                .iter()
+                .filter(|_| family.1 == Safi::Unicast)
+                .map(|&(index, path)| {
+                    let mut route = route(u32::from(index), variant);
+                    route.prefix = typed_prefix(family.0, index);
+                    if family.0 == Afi::Ipv6 {
+                        route.next_hop = IpAddr::V6("2001:db8::1".parse().unwrap());
+                    }
+                    route.path_id = path;
+                    route.attributes = attributes(path);
+                    route
+                })
+                .collect(),
+            withdrawn: withdrawn
+                .iter()
+                .filter(|_| family.1 == Safi::Unicast)
+                .map(|&(index, path)| (typed_prefix(family.0, index), path))
+                .collect(),
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: announced
+                .iter()
+                .filter(|_| family.1 == Safi::Evpn)
+                .map(|&(index, _)| evpn_route(u32::from(index), variant))
+                .collect(),
+            evpn_withdrawn: withdrawn
+                .iter()
+                .filter(|_| family.1 == Safi::Evpn)
+                .map(|&(index, _)| evpn_route(u32::from(index), variant).key())
+                .collect(),
+            validated_with: None,
+        },
+        Safi::MplsVpn => RibUpdate::VpnRoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: 0,
+            announced: announced
+                .iter()
+                .map(|&(index, path)| {
+                    let mut route = typed_vpn_route(family.0, index);
+                    route.path_id = path;
+                    route.attributes = attributes(path);
+                    route
+                })
+                .collect(),
+            withdrawn: withdrawn
+                .iter()
+                .map(|&(index, path_id)| crate::route::VpnRibRouteKey {
+                    nlri_key: typed_vpn_route(family.0, index).nlri.key(),
+                    path_id,
+                })
+                .collect(),
+        },
+        Safi::LabeledUnicast => RibUpdate::LabeledRoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: 0,
+            announced: announced
+                .iter()
+                .map(|&(index, path)| {
+                    let mut route = typed_labeled_route(family.0, index);
+                    route.path_id = path;
+                    route.attributes = attributes(path);
+                    route
+                })
+                .collect(),
+            withdrawn: withdrawn
+                .iter()
+                .map(|&(index, path_id)| crate::route::LabeledRibRouteKey {
+                    prefix: typed_prefix(family.0, index),
+                    path_id,
+                })
+                .collect(),
+        },
+        _ => unreachable!("the fixture uses keyed families"),
+    };
+    manager.handle_update(update);
+    drain_route_chunks(manager);
+}
+
+type TypedWire = HashMap<(super::super::outbound_owing::OwedKey, u32), String>;
+
+/// Apply real outbound rows, rejecting withdrawals the receiver never held.
+fn apply_typed_wire(wire: &mut TypedWire, updates: &[OutboundRouteUpdate]) -> (usize, usize) {
+    use super::super::outbound_owing::OwedKey;
+    let (mut announced, mut withdrawn) = (0, 0);
+    for update in updates {
+        let withdrawals = update
+            .unicast_withdrawals()
+            .map(|&(prefix, path)| (OwedKey::Unicast(prefix), path))
+            .chain(
+                update
+                    .evpn_withdraw
+                    .iter()
+                    .map(|&key| (OwedKey::Evpn(key), 0)),
+            )
+            .chain(
+                update
+                    .vpn_withdraw
+                    .iter()
+                    .map(|key| (OwedKey::Vpn(key.nlri_key), key.path_id)),
+            )
+            .chain(
+                update
+                    .labeled_withdraw
+                    .iter()
+                    .map(|key| (OwedKey::Labeled(key.prefix), key.path_id)),
+            );
+        for key in withdrawals {
+            assert!(
+                wire.remove(&key).is_some(),
+                "unadvertised withdrawal: {key:?}"
+            );
+            withdrawn += 1;
+        }
+        let announcements = update
+            .announce
+            .iter()
+            .map(|route| {
+                (
+                    (OwedKey::Unicast(route.prefix), route.path_id),
+                    format!("{route:?}"),
+                )
+            })
+            .chain(
+                update
+                    .evpn_announce
+                    .iter()
+                    .map(|route| ((OwedKey::Evpn(route.key()), 0), format!("{route:?}"))),
+            )
+            .chain(update.vpn_announce.iter().map(|route| {
+                (
+                    (OwedKey::Vpn(route.nlri.key()), route.path_id),
+                    format!("{route:?}"),
+                )
+            }))
+            .chain(update.labeled_announce.iter().map(|route| {
+                (
+                    (OwedKey::Labeled(route.nlri.key()), route.path_id),
+                    format!("{route:?}"),
+                )
+            }));
+        for (key, route) in announcements {
+            wire.insert(key, route);
+            announced += 1;
+        }
+    }
+    (announced, withdrawn)
+}
+
+/// Typed FIFO batches use remaining credit, account for every cumulative
+/// announcement/withdrawal delta, and settle both AFIs from current state.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript pins the first finite batch, remaining debt and final wire state"
+)]
+fn typed_owed_drains_use_partial_credit_and_converge() {
+    for family in [
+        EVPN,
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv6, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::Ipv6, Safi::LabeledUnicast),
+    ] {
+        for gone in [0, 6, 8] {
+            let mut manager = manager(20).with_owing_theta_floor(1 << 30);
+            manager.flush_poll_budget = Duration::ZERO;
+            let families = if family == EVPN {
+                vec![V4, EVPN]
+            } else {
+                vec![family]
+            };
+            let mut source = up(&mut manager, peer_v4(SOURCE), families.clone());
+            let reference = peer_v4(Ipv4Addr::new(10, 0, 31, 1));
+            let peer = peer_v4(Ipv4Addr::new(10, 0, 31, 2));
+            let [mut reference_rx, mut rx] = [reference, peer].map(|target| {
+                let (tx, rx) = mpsc::channel(4096);
+                let mut registration = peer_up_message(target, families.clone(), tx);
+                if family == EVPN
+                    && let RibUpdate::PeerUp {
+                        add_path_send_families,
+                        add_path_send_max,
+                        ..
+                    } = &mut registration
+                {
+                    *add_path_send_families = vec![V4];
+                    *add_path_send_max = u32::MAX;
+                }
+                manager.handle_update(registration);
+                rx
+            });
+            send_all(&mut source);
+            send_all(&mut reference_rx);
+            send_all(&mut rx);
+            let mut reference_wire = TypedWire::new();
+            let mut wire = TypedWire::new();
+            typed_received(
+                &mut manager,
+                family,
+                &(1..=gone).map(|key| (key, 0)).collect::<Vec<_>>(),
+                &[],
+                0,
+            );
+            apply_typed_wire(&mut reference_wire, &send_all(&mut reference_rx));
+            apply_typed_wire(&mut wire, &send_all(&mut rx));
+            assert_eq!(wire.len(), usize::from(gone));
+            let credit = manager.outbound_credit_handle(peer);
+            let retained = crate::outbound_credit::OutboundCharge::new(&credit, 4);
+            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 16);
+            for key in 1..=12 {
+                if key <= gone {
+                    typed_received(&mut manager, family, &[], &[(key, 0)], 0);
+                } else {
+                    typed_received(&mut manager, family, &[(key, 0)], &[], 10);
+                }
+                send_all(&mut source);
+                apply_typed_wire(&mut reference_wire, &send_all(&mut reference_rx));
+            }
+            assert_eq!(owed(&manager, peer, family), 12);
+            assert!(held(&mut rx).is_empty());
+            drop(spent);
+            assert_eq!(credit.rows(), 4);
+            manager.resync_dirty_peers_bounded();
+            let first = held(&mut rx);
+            assert_eq!(
+                apply_typed_wire(&mut wire, &first),
+                (usize::from(8 - gone), usize::from(gone)),
+                "{family:?}, gone={gone}: one finite batch"
+            );
+            assert_eq!(
+                credit.rows(),
+                12,
+                "four retained plus eight newly queued rows"
+            );
+            assert_eq!(owed(&manager, peer, family), 4);
+            let expected: TypedWire = reference_wire
+                .iter()
+                .filter(|((key, _), _)| {
+                    (gone + 1..=8).any(|index| *key == typed_key(family, index))
+                })
+                .map(|(key, value)| (*key, value.clone()))
+                .collect();
+            assert_eq!(
+                wire, expected,
+                "{family:?}: exact first-step keys and bodies"
+            );
+            drop(first);
+            for _ in 0..8 {
+                manager.resync_dirty_peers_bounded();
+                apply_typed_wire(&mut wire, &send_all(&mut rx));
+                if manager.owing(peer).is_none() {
+                    break;
+                }
+            }
+            assert_eq!(wire, reference_wire, "{family:?}: exact final state");
+            assert!(manager.owing(peer).is_none());
+            assert!(!manager.dirty_peers.contains(&peer));
+            assert_eq!(credit.rows(), 4);
+            drop(retained);
+        }
+    }
+}
+
+/// Whole VPN/labeled debt enumerates only the runnable AFI, keeps its held
+/// sibling intact, then converges that sibling when selection releases.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "held and released AFI episodes share the same receiver and exact wire history"
+)]
+fn whole_typed_debt_isolates_held_and_ready_afis() {
+    for safi in [Safi::MplsVpn, Safi::LabeledUnicast] {
+        for held_afi in [Afi::Ipv4, Afi::Ipv6] {
+            let held_family = (held_afi, safi);
+            let ready_family = (
+                if held_afi == Afi::Ipv4 {
+                    Afi::Ipv6
+                } else {
+                    Afi::Ipv4
+                },
+                safi,
+            );
+            let families = vec![held_family, ready_family];
+            let mut manager = deferral_manager(vec![held_family], 64).with_owing_theta_floor(0);
+            manager.flush_poll_budget = Duration::ZERO;
+            let mut source = up(&mut manager, peer_v4(SOURCE), families.clone());
+            let reference = peer_v4(Ipv4Addr::new(10, 0, 32, 1));
+            let mut reference_rx = up(&mut manager, reference, families.clone());
+            let peer = peer_v4(Ipv4Addr::new(10, 0, 32, 2));
+            let mut rx = up(&mut manager, peer, families.clone());
+            send_all(&mut rx);
+            send_all(&mut reference_rx);
+            let mut reference_wire = TypedWire::new();
+            let mut wire = TypedWire::new();
+            for family in &families {
+                typed_received(&mut manager, *family, &[(1, 0)], &[], 0);
+            }
+            apply_typed_wire(&mut reference_wire, &send_all(&mut reference_rx));
+            apply_typed_wire(&mut wire, &send_all(&mut rx));
+            assert_eq!(wire.len(), 2);
+            let initial = wire.clone();
+            let credit = manager.outbound_credit_handle(peer);
+            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 64);
+            for family in &families {
+                typed_received(&mut manager, *family, &[(2, 0), (3, 0)], &[(1, 0)], 10);
+                assert!(manager.owes_whole(peer, OwedFamily::of(*family).unwrap()));
+            }
+            send_all(&mut source);
+            apply_typed_wire(&mut reference_wire, &send_all(&mut reference_rx));
+            let _waiter = connect_families(
+                &mut manager,
+                Ipv4Addr::new(192, 0, 2, 83),
+                vec![held_family],
+                true,
+            );
+            assert!(manager.selection_deferred(held_family));
+            assert!(!manager.selection_deferred(ready_family));
+            drop(spent);
+            manager.resync_dirty_peers_bounded();
+            assert_eq!(apply_typed_wire(&mut wire, &send_all(&mut rx)), (2, 1));
+            let expected: TypedWire = initial
+                .into_iter()
+                .filter(|((key, _), _)| key.family() == OwedFamily::of(held_family).unwrap())
+                .chain(
+                    reference_wire
+                        .iter()
+                        .filter(|((key, _), _)| {
+                            key.family() == OwedFamily::of(ready_family).unwrap()
+                        })
+                        .map(|(key, value)| (*key, value.clone())),
+                )
+                .collect();
+            assert_eq!(wire, expected, "{held_family:?}: held AFI is unchanged");
+            assert!(manager.owes_whole(peer, OwedFamily::of(held_family).unwrap()));
+            assert!(!manager.owes(peer, ready_family));
+            manager.resync_dirty_peers_bounded();
+            assert!(
+                send_all(&mut rx).is_empty(),
+                "no held-family output before release"
+            );
+            manager.expire_selection_deferral();
+            for _ in 0..8 {
+                manager.resync_dirty_peers_bounded();
+                apply_typed_wire(&mut wire, &send_all(&mut rx));
+                if manager.owing(peer).is_none() {
+                    break;
+                }
+            }
+            assert_eq!(wire, reference_wire, "{held_family:?}: both AFIs converge");
+            assert!(manager.owing(peer).is_none());
+            assert!(!manager.dirty_peers.contains(&peer));
+
+            // With both AFIs runnable, one whole pass must still exclude its sibling.
+            let before = wire.clone();
+            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 64);
+            for family in &families {
+                typed_received(
+                    &mut manager,
+                    *family,
+                    &[(4, 0), (5, 0)],
+                    &[(2, 0), (3, 0)],
+                    20,
+                );
+                assert!(manager.owes_whole(peer, OwedFamily::of(*family).unwrap()));
+            }
+            send_all(&mut source);
+            apply_typed_wire(&mut reference_wire, &send_all(&mut reference_rx));
+            drop(spent);
+            manager.resync_dirty_peers_bounded();
+            assert_eq!(apply_typed_wire(&mut wire, &send_all(&mut rx)), (2, 2));
+            let v4 = OwedFamily::of((Afi::Ipv4, safi)).unwrap();
+            let expected: TypedWire = before
+                .into_iter()
+                .filter(|((key, _), _)| key.family() != v4)
+                .chain(
+                    reference_wire
+                        .iter()
+                        .filter(|((key, _), _)| key.family() == v4)
+                        .map(|(key, value)| (*key, value.clone())),
+                )
+                .collect();
+            assert_eq!(wire, expected, "one runnable AFI per whole-family step");
+            assert!(!manager.owes(peer, (Afi::Ipv4, safi)));
+            assert!(manager.owes_whole(peer, OwedFamily::of((Afi::Ipv6, safi)).unwrap()));
+            manager.resync_dirty_peers_bounded();
+            assert_eq!(apply_typed_wire(&mut wire, &send_all(&mut rx)), (2, 2));
+            assert_eq!(wire, reference_wire);
+            assert!(manager.owing(peer).is_none());
+        }
+    }
+}
+
+/// Closing sends pure withdrawals and an Add-Path move in each IP family,
+/// while an announcement-only key remains owed and never reaches the wire.
+#[test]
+fn begin_close_flushes_typed_withdrawals_and_moves_only() {
+    for safi in [Safi::Unicast, Safi::MplsVpn, Safi::LabeledUnicast] {
+        for afi in [Afi::Ipv4, Afi::Ipv6] {
+            let family = (afi, safi);
+            let mut manager = manager(64).with_owing_theta_floor(1 << 30);
+            let mut source = up(&mut manager, peer_v4(SOURCE), vec![family]);
+            let reference = peer_v4(Ipv4Addr::new(10, 0, 33, 1));
+            let peer = peer_v4(Ipv4Addr::new(10, 0, 33, 2));
+            let [mut reference_rx, mut rx] = [reference, peer].map(|target| {
+                let (tx, rx) = mpsc::channel(4096);
+                let mut registration = peer_up_message(target, vec![family], tx);
+                if let RibUpdate::PeerUp {
+                    add_path_send_families,
+                    add_path_send_max,
+                    ..
+                } = &mut registration
+                {
+                    *add_path_send_families = vec![family];
+                    *add_path_send_max = 2;
+                }
+                manager.handle_update(registration);
+                rx
+            });
+            send_all(&mut rx);
+            send_all(&mut reference_rx);
+            let mut reference_wire = TypedWire::new();
+            let mut wire = TypedWire::new();
+            typed_received(&mut manager, family, &[(1, 1), (2, 1), (2, 2)], &[], 0);
+            apply_typed_wire(&mut reference_wire, &send_all(&mut reference_rx));
+            apply_typed_wire(&mut wire, &send_all(&mut rx));
+            assert_eq!(wire.len(), 3);
+            let credit = manager.outbound_credit_handle(peer);
+            let held_credit = crate::outbound_credit::OutboundCharge::new(&credit, 64);
+            typed_received(
+                &mut manager,
+                family,
+                &[(2, 1), (3, 1)],
+                &[(1, 1), (2, 2)],
+                10,
+            );
+            send_all(&mut source);
+            apply_typed_wire(&mut reference_wire, &send_all(&mut reference_rx));
+            assert_eq!(owed(&manager, peer, family), 3);
+            assert!(held(&mut rx).is_empty());
+            manager.handle_update(RibUpdate::BeginClose);
+            let sent = held(&mut rx);
+            assert_eq!(
+                apply_typed_wire(&mut wire, &sent),
+                (1, 2),
+                "{family:?}: move plus withdrawals"
+            );
+            let expected: TypedWire = reference_wire
+                .into_iter()
+                .filter(|((key, _), _)| *key == typed_key(family, 2))
+                .collect();
+            assert_eq!(
+                wire, expected,
+                "{family:?}: only the moved key remains on wire"
+            );
+            assert_eq!(
+                owed(&manager, peer, family),
+                1,
+                "announcement-only debt is retained"
+            );
+            let pending = manager.owing(peer).unwrap().rendered();
+            let key = typed_key(family, 3);
+            let rendered = match key {
+                super::super::outbound_owing::OwedKey::Vpn(key) => format!("{key:?}"),
+                super::super::outbound_owing::OwedKey::Unicast(prefix)
+                | super::super::outbound_owing::OwedKey::Labeled(prefix) => prefix.to_string(),
+                super::super::outbound_owing::OwedKey::Evpn(_) => unreachable!(),
+            };
+            assert_eq!(pending, vec![((afi as u16, safi as u8), Some(rendered))]);
+            assert!(!manager.dirty_peers.contains(&peer));
+            drop(sent);
+            assert_eq!(
+                credit.rows(),
+                64,
+                "close flush did not consume ordinary credit"
+            );
+            drop(held_credit);
+        }
+    }
 }

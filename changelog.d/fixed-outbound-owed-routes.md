@@ -5,7 +5,8 @@
   (ungrouped unicast, labeled unicast, private VPN and EVPN). The RIB records
   which routes it owes, keeps one entry per route however often the route
   changes, and drains older owed keys first from current state once the
-  receiver drains, checking returned credit every 10 ms. Local host and
+  receiver drains, checking returned credit every 10 ms. A full outbound
+  channel retains the debt without repeatedly staging it. Local host and
   BLACKHOLE route withdrawals and local FlowSpec revocations continue to
   drain during graceful-restart selection deferral. A route-reflector client
   with grouped unicast and private EVPN therefore keeps its grouped unicast
@@ -14,7 +15,9 @@
   owed in their family, including after a failed absorption falls back to
   resync. Owed-set capacity is capped using a quarter-table byte estimate
   with a 64-key floor; above it, the family is sent by one diff instead.
-  FlowSpec, BGP-LS and RT-Constrain always take that path. Shutdown makes a
+  Queue and membership-map allocations shrink independently as keys drain.
+  FlowSpec, BGP-LS and RT-Constrain always take that path. Global and VPN
+  FlowSpec keep separate debt and refresh ordering. Shutdown makes a
   best-effort flush of owed withdrawals ahead of the Cease. A graceful-restart
   helper's carried withdrawals are sent in chunks admitted one at a time
   against the receiver's credit.

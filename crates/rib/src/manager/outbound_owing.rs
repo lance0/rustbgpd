@@ -123,6 +123,8 @@ impl<K: Clone + Eq + Hash> OwedKeys<K> {
         if self.order.capacity() > 4 * len + 64 {
             self.compact();
             self.order.shrink_to(2 * len);
+        }
+        if self.live.capacity() > 4 * len + 64 {
             self.live.shrink_to(2 * len);
         }
     }
@@ -148,10 +150,11 @@ impl OwedFamily {
     pub(super) const IPV6_FLOWSPEC: Self = Self(8);
     pub(super) const BGP_LS: Self = Self(9);
     pub(super) const RTC: Self = Self(10);
-    const COUNT: u8 = 11;
+    pub(super) const VPNV4_FLOWSPEC: Self = Self(11);
+    const COUNT: u8 = 12;
 
     /// Every owed family, in drain rotation order.
-    pub(super) const ALL: [Self; 11] = [
+    pub(super) const ALL: [Self; 12] = [
         Self::IPV4_UNICAST,
         Self::IPV6_UNICAST,
         Self::IPV4_LABELED,
@@ -163,6 +166,7 @@ impl OwedFamily {
         Self::IPV6_FLOWSPEC,
         Self::BGP_LS,
         Self::RTC,
+        Self::VPNV4_FLOWSPEC,
     ];
 
     /// The owed family of a negotiated `(AFI, SAFI)`; both BGP-LS families
@@ -178,6 +182,7 @@ impl OwedFamily {
             (Afi::L2Vpn, Safi::Evpn) => Self::EVPN,
             (Afi::Ipv4, Safi::FlowSpec) => Self::IPV4_FLOWSPEC,
             (Afi::Ipv6, Safi::FlowSpec) => Self::IPV6_FLOWSPEC,
+            (Afi::Ipv4, Safi::FlowSpecVpn) => Self::VPNV4_FLOWSPEC,
             (Afi::BgpLs, _) => Self::BGP_LS,
             (Afi::Ipv4, Safi::RtConstrain) => Self::RTC,
             _ => return None,
@@ -196,6 +201,7 @@ impl OwedFamily {
             Self::EVPN => &[(Afi::L2Vpn, Safi::Evpn)],
             Self::IPV4_FLOWSPEC => &[(Afi::Ipv4, Safi::FlowSpec)],
             Self::IPV6_FLOWSPEC => &[(Afi::Ipv6, Safi::FlowSpec)],
+            Self::VPNV4_FLOWSPEC => &[(Afi::Ipv4, Safi::FlowSpecVpn)],
             Self::BGP_LS => &[(Afi::BgpLs, Safi::BgpLs), (Afi::BgpLs, Safi::BgpLsVpn)],
             _ => &[(Afi::Ipv4, Safi::RtConstrain)],
         }
@@ -787,7 +793,8 @@ impl RibManager {
                 // while the rest of this whole family stays held.
                 let held_exempt = (family.is_unicast()
                     || family == OwedFamily::IPV4_FLOWSPEC
-                    || family == OwedFamily::IPV6_FLOWSPEC)
+                    || family == OwedFamily::IPV6_FLOWSPEC
+                    || family == OwedFamily::VPNV4_FLOWSPEC)
                     && family
                         .afi_safis()
                         .iter()
@@ -1095,7 +1102,8 @@ impl RibManager {
         }
         let exempt_whole = family.is_unicast()
             || family == OwedFamily::IPV4_FLOWSPEC
-            || family == OwedFamily::IPV6_FLOWSPEC;
+            || family == OwedFamily::IPV6_FLOWSPEC
+            || family == OwedFamily::VPNV4_FLOWSPEC;
         (exempt_whole && owing.is_whole(family) && !owing.whole_drained_in_hold(family))
             .then_some(DrainScope::Exempt)
     }
@@ -1263,7 +1271,7 @@ impl RibManager {
             .outbound_credit
             .get(&peer)
             .map_or(limit, |entry| entry.credit.rows());
-        if rows >= limit {
+        if rows >= limit || self.outbound_channel_full(peer) {
             return progressed;
         }
         let Some((family, scope)) = self.next_owed_family(peer) else {
@@ -1782,6 +1790,230 @@ pub(super) fn pass_budget(keys: usize, rows_per_key: Option<usize>, budget: usiz
 #[cfg(test)]
 mod fifo_tests {
     use super::*;
+
+    #[test]
+    fn capacity_bytes_include_both_allocations_and_map_control_bytes() {
+        fn check<K: Clone + Eq + Hash>() {
+            let mut keys = OwedKeys::<K>::default();
+            let entry_bytes = std::mem::size_of::<(K, u64)>();
+            assert_eq!(keys.bytes(), 0);
+            keys.order.reserve(17);
+            assert_eq!(keys.bytes(), keys.order.capacity() * entry_bytes);
+            keys.live.reserve(37);
+            let entries = keys.order.capacity() + keys.live.capacity();
+            assert_eq!(keys.bytes(), entries * entry_bytes + keys.live.capacity());
+        }
+
+        check::<Prefix>();
+        check::<VpnRouteKey>();
+        check::<EvpnRouteKey>();
+    }
+
+    #[test]
+    fn family_key_cost_counts_two_entries_and_one_map_control_byte() {
+        let prefix = std::mem::size_of::<(Prefix, u64)>();
+        let vpn = std::mem::size_of::<(VpnRouteKey, u64)>();
+        let evpn = std::mem::size_of::<(EvpnRouteKey, u64)>();
+        for (family, entry_bytes) in [
+            (OwedFamily::IPV4_UNICAST, prefix),
+            (OwedFamily::IPV6_UNICAST, prefix),
+            (OwedFamily::IPV4_LABELED, prefix),
+            (OwedFamily::IPV6_LABELED, prefix),
+            (OwedFamily::VPNV4, vpn),
+            (OwedFamily::VPNV6, vpn),
+            (OwedFamily::EVPN, evpn),
+        ] {
+            assert_eq!(
+                family.key_cost(),
+                entry_bytes + entry_bytes + std::mem::size_of::<u8>(),
+                "{family:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicast_capacity_includes_the_exempt_index_for_each_afi() {
+        let capacity_bytes = |keys: &OwedKeys<Prefix>| {
+            (keys.order.capacity() + keys.live.capacity()) * std::mem::size_of::<(Prefix, u64)>()
+                + keys.live.capacity()
+        };
+        let mut owing = PeerOwing::new(1);
+        for (index, prefix) in [
+            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                std::net::Ipv4Addr::new(192, 0, 2, 1),
+                32,
+            )),
+            Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+                "2001:db8::1".parse().unwrap(),
+                128,
+            )),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = OwedKey::Unicast(prefix);
+            let family = key.family();
+            owing.insert(key, false);
+            let main_bytes = capacity_bytes(&owing.unicast[index]);
+            assert!(main_bytes > 0);
+            assert_eq!(owing.set_bytes(family), main_bytes, "{family:?}");
+            owing.insert(key, true);
+            let exempt_bytes = capacity_bytes(&owing.unicast_exempt[index]);
+            assert!(exempt_bytes > 0);
+            assert_eq!(owing.keyed_len(family), 1);
+            assert_eq!(owing.exempt_len(family), 1);
+            assert_eq!(
+                owing.set_bytes(family),
+                main_bytes + exempt_bytes,
+                "{family:?}"
+            );
+        }
+        let v4_bytes = owing.set_bytes(OwedFamily::IPV4_UNICAST);
+        owing.clear_family(OwedFamily::IPV6_UNICAST);
+        assert_eq!(owing.keyed_len(OwedFamily::IPV6_UNICAST), 0);
+        assert_eq!(owing.exempt_len(OwedFamily::IPV6_UNICAST), 0);
+        assert_eq!(owing.set_bytes(OwedFamily::IPV6_UNICAST), 0);
+        assert_eq!(owing.set_bytes(OwedFamily::IPV4_UNICAST), v4_bytes);
+        owing.clear_family(OwedFamily::IPV4_UNICAST);
+        assert_eq!(owing.set_bytes(OwedFamily::IPV4_UNICAST), 0);
+    }
+
+    #[test]
+    fn clearing_a_family_preserves_sibling_whole_and_held_state() {
+        let v4 = OwedFamily::IPV4_UNICAST;
+        let v6 = OwedFamily::IPV6_UNICAST;
+        for (drained, after_v4, after_v6) in [
+            (0, 0, 0),
+            (v4.bit(), 0, v4.bit()),
+            (v6.bit(), v6.bit(), 0),
+            (v4.bit() | v6.bit(), v6.bit(), v4.bit()),
+        ] {
+            for (family, whole, held) in [(v4, v6.bit(), after_v4), (v6, v4.bit(), after_v6)] {
+                let mut owing = PeerOwing::new(1);
+                owing.flip_whole(v4);
+                owing.flip_whole(v6);
+                owing.hold_drained = drained;
+                owing.clear_family(family);
+                assert_eq!(owing.whole, whole, "{family:?}, drained={drained}");
+                assert_eq!(owing.hold_drained, held, "{family:?}, drained={drained}");
+            }
+        }
+    }
+
+    #[test]
+    fn canceled_tail_compaction_has_linear_hash_work() {
+        #[derive(Clone)]
+        struct CountedKey<'a> {
+            value: usize,
+            hashes: &'a std::cell::Cell<usize>,
+        }
+
+        impl PartialEq for CountedKey<'_> {
+            fn eq(&self, other: &Self) -> bool {
+                self.value == other.value
+            }
+        }
+
+        impl Eq for CountedKey<'_> {}
+
+        impl Hash for CountedKey<'_> {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.hashes.set(self.hashes.get() + 1);
+                self.value.hash(state);
+            }
+        }
+
+        const LIVE: usize = 1_024;
+        const CHURN: usize = 4 * LIVE;
+        let hashes = std::cell::Cell::new(0);
+        let key = |value| CountedKey {
+            value,
+            hashes: &hashes,
+        };
+        let mut keys = OwedKeys::default();
+        for value in 0..LIVE {
+            keys.insert(key(value));
+        }
+        hashes.set(0);
+        for value in LIVE..LIVE + CHURN {
+            keys.insert(key(value));
+            keys.remove(&key(value));
+        }
+        // Leave room for map growth as well as the amortized compaction scans.
+        assert!(
+            hashes.get() <= 12 * CHURN,
+            "{} hashes for {CHURN} canceled tail keys",
+            hashes.get()
+        );
+        assert_eq!(keys.len(), LIVE);
+        assert!(keys.order.len() <= 2 * LIVE + 64);
+        assert!(keys.iter().map(|key| key.value).eq(0..LIVE));
+    }
+
+    #[test]
+    fn gradual_drain_shrinks_with_linear_queue_reallocation_work() {
+        const PEAK: usize = 4_096;
+        let mut keys = OwedKeys::default();
+        for key in 0..PEAK {
+            keys.insert(key);
+        }
+        let mut reallocated_entries = 0;
+        for key in 0..PEAK {
+            let capacity = keys.order.capacity();
+            keys.remove(&key);
+            let bound = 4 * keys.len() + 64;
+            assert!(keys.order.capacity() <= bound);
+            assert!(
+                keys.live.capacity() <= bound,
+                "{} map slots for {} live keys exceed {bound}",
+                keys.live.capacity(),
+                keys.len()
+            );
+            if keys.order.capacity() < capacity {
+                // A capacity reduction may move every retained queue entry.
+                reallocated_entries += keys.order.len();
+            }
+        }
+        assert!(
+            reallocated_entries <= 2 * PEAK,
+            "{reallocated_entries} entries across queue capacity reductions"
+        );
+        assert_eq!(keys.len(), 0);
+        assert!(keys.order.capacity() <= 64);
+        assert!(keys.live.capacity() <= 64);
+    }
+
+    #[test]
+    fn bulk_pop_releases_peak_capacity_with_small_or_empty_remainders() {
+        let family = OwedFamily::IPV4_LABELED;
+        let expected: Vec<_> = (0..1_024_u32)
+            .map(|index| {
+                OwedKey::Labeled(Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                    std::net::Ipv4Addr::from(0x0a00_0000 + index),
+                    32,
+                )))
+            })
+            .collect();
+        for remaining in [16, 0] {
+            let mut owing = PeerOwing::new(1);
+            for &key in &expected {
+                owing.insert(key, false);
+            }
+            let count = expected.len() - remaining;
+            assert_eq!(
+                owing.pop_keys(family, count, DrainScope::All),
+                expected[..count]
+            );
+            assert_eq!(
+                owing.copy_keys(family, DrainScope::All, usize::MAX),
+                expected[count..]
+            );
+            let keys = &owing.labeled[0];
+            assert_eq!(keys.len(), remaining);
+            assert!(keys.order.capacity() <= 4 * remaining + 64);
+            assert!(keys.live.capacity() <= 4 * remaining + 64);
+        }
+    }
 
     #[test]
     fn marks_keep_fifo_order_and_canceled_entries_are_compacted() {
