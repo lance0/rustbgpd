@@ -211,8 +211,8 @@ tokio-util = { workspace = true, features = ["rt"] }
 tokio-stream.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.23"
-netlink-packet-route = "0.33"
+rtnetlink = "0.24"
+netlink-packet-route = "0.34"
 libc.workspace = true
 nix = { workspace = true, features = ["fs", "resource", "sched", "signal", "time", "user"] }
 futures = "0.3"

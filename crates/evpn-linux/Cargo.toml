@@ -21,8 +21,8 @@ tracing.workspace = true
 # without promising non-Linux daemon support. The netlink crates form a coherent ecosystem
 # released together; bump them as a set to avoid duplicate major-version families.
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.23"
-netlink-packet-route = "0.33"
+rtnetlink = "0.24"
+netlink-packet-route = "0.34"
 netlink-packet-core = "0.9"
 netlink-sys = { version = "0.9", features = ["tokio_socket"] }
 futures = "0.3"

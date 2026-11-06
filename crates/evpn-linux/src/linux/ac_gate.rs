@@ -27,7 +27,7 @@
 //! state sticks. The privileged round-trip proof lives in
 //! `tests/netns_ac_gate.rs` (`EVPN_LINUX_NETNS=1`).
 //!
-//! netlink-packet-route 0.33's typed `LinkAttribute::ProtoInfoBridge`
+//! netlink-packet-route 0.34's typed `LinkAttribute::ProtoInfoBridge`
 //! emits the required nested outer envelope; the untyped inner state stays in
 //! `LinkProtoInfoBridge::Other(DefaultNla)` and keeps
 //! the message byte-exact (pinned by a unit test below).
