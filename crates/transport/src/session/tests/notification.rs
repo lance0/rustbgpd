@@ -1965,16 +1965,49 @@ fn duplicate_attribute_warnings_are_bounded_per_update_and_connection() {
     assert_eq!(process(&mut session).len(), 0, "third UPDATE is DEBUG only");
     assert_eq!(process(&mut session).len(), 1, "fourth UPDATE warns");
     session.close_tcp();
-    assert_eq!(process(&mut session).len(), 1, "a new connection re-arms");
+    let warned: Vec<_> = (0..5).map(|_| process(&mut session).len()).collect();
+    assert_eq!(warned, [1, 1, 0, 1, 0], "a new connection re-arms");
+    session.handle_tcp_disconnect();
+    assert_eq!(process(&mut session).len(), 1, "a disconnect re-arms");
 
     // RFC 7606 §3 (g) disposition is unchanged: the first MED survives.
-    assert_eq!(update_malformed_count(&session, "attribute_discard"), 5);
+    assert_eq!(update_malformed_count(&session, "attribute_discard"), 10);
     assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 0);
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
         panic!("attribute-discard keeps the route");
     };
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].med(), 42);
+}
+
+/// Load-bearing: naming the first record pairs treat-as-withdraw with the
+/// earlier duplicate MED instead of the `AS_SET` that caused it.
+#[test]
+fn malformed_attribute_warning_names_the_cause_of_the_applied_disposition() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let _server = runtime.block_on(async {
+        let (client, server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        server
+    });
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let mut update = aspa_first_as_update(prefix, 65002, true);
+    let mut attributes = update.path_attributes.to_vec();
+    attributes.extend([0x80, 4, 4, 0, 0, 0, 1, 0x80, 4, 4, 0, 0, 0, 2]); // MED twice
+    attributes.extend([0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA]); // AS_PATH again, AS_SET
+    update.path_attributes = Bytes::from(attributes);
+
+    let events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["disposition"], "treat-as-withdraw");
+    assert_eq!(events[0]["attr_type"], "2", "{events:?}");
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 1);
 }
 
 #[test]

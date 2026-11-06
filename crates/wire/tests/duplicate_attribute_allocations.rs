@@ -54,19 +54,19 @@ impl CountingAllocator {
     }
 }
 
-/// ORIGIN, `AS_PATH` and `NEXT_HOP`, then `repeats` + 1 `MULTI_EXIT_DISC`.
-fn duplicate_med_attributes(repeats: usize) -> Vec<u8> {
+/// ORIGIN, `AS_PATH` and `NEXT_HOP`, then `repeats` + 1 copies of `item`.
+fn duplicate_attributes(item: &[u8], repeats: usize) -> Vec<u8> {
     let mut buf = vec![0x40, 1, 1, 0];
     buf.extend([0x40, 2, 6, 2, 1, 0, 0, 0xFD, 0xE9]);
     buf.extend([0x40, 3, 4, 10, 0, 0, 2]);
     for _ in 0..=repeats {
-        buf.extend([0x80, 4, 4, 0, 0, 0, 5]);
+        buf.extend(item);
     }
     buf
 }
 
-fn decode_allocations(repeats: usize) -> usize {
-    let buf = duplicate_med_attributes(repeats);
+fn decode_allocations(item: &[u8], repeats: usize) -> usize {
+    let buf = duplicate_attributes(item, repeats);
     ALLOCATOR.allocations.store(0, Ordering::Relaxed);
     COUNTING.set(true);
     let decoded = decode_path_attributes_revised(&buf, true, false, &[]);
@@ -76,15 +76,17 @@ fn decode_allocations(repeats: usize) -> usize {
     allocations
 }
 
-/// Load-bearing: one record or detail string per repeat makes the larger
-/// UPDATE allocate thousands of times more and fails here.
+/// Load-bearing: one record, detail string, or error data copy per repeat
+/// of any cause (duplicate, AS 0, AS_SET) fails here.
 #[test]
 fn duplicate_attribute_decode_allocations_do_not_grow_with_repeats() {
-    let few = decode_allocations(2);
-    // About 9,000 repeats fill a 65,535-octet Extended Message.
-    let many = decode_allocations(9_000);
-    assert_eq!(
-        few, many,
-        "allocations: 2 repeats {few}, 9000 repeats {many}"
-    );
+    for item in [
+        &[0x80, 4, 4, 0, 0, 0, 5][..],             // MED
+        &[0x40, 2, 6, 2, 1, 0, 0, 0, 0][..],       // AS_PATH with AS 0
+        &[0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xE9][..], // AS_PATH with AS_SET
+    ] {
+        let few = decode_allocations(item, 2);
+        let many = decode_allocations(item, 6_000);
+        assert_eq!(few, many, "{item:?}: 2 repeats {few}, 6000 repeats {many}");
+    }
 }

@@ -831,10 +831,12 @@ impl PeerSession {
         malformed: &[rustbgpd_wire::MalformedAttribute],
         coalesced_duplicates: u32,
     ) {
-        let (Some(first), Some(disposition)) = (
-            malformed.first(),
-            malformed.iter().map(|m| m.disposition).max(),
-        ) else {
+        let Some(disposition) = malformed.iter().map(|m| m.disposition).max() else {
+            return;
+        };
+        // Name the cause that set the applied disposition, e.g. the AS_SET
+        // behind a treat-as-withdraw rather than an earlier discard.
+        let Some(cause) = malformed.iter().find(|m| m.disposition == disposition) else {
             return;
         };
         self.malformed_attribute_updates = self.malformed_attribute_updates.saturating_add(1);
@@ -845,9 +847,9 @@ impl PeerSession {
                 malformed_attributes = malformed.len(),
                 coalesced_duplicates,
                 disposition = disposition.as_str(),
-                attr_type = first.type_code,
-                error = %first.error,
-                "malformed path attributes (RFC 7606 revised error handling); first cause shown, all causes at DEBUG"
+                attr_type = cause.type_code,
+                error = %cause.error,
+                "malformed path attributes (RFC 7606 revised error handling); the first cause with the applied disposition is shown, all causes at DEBUG"
             );
         }
         for m in malformed {

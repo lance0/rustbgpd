@@ -1205,11 +1205,11 @@ pub(crate) fn decode_path_attributes_revised_observed(
     let mut bgpls_discarded = 0_u32;
     let mut evpn_discarded = crate::evpn::EvpnNlriDiscardObservations::new();
     let mut malformed = Vec::new();
-    let mut seen = [false; 256];
-    // Causes already recorded per type code. A peer can repeat one type
-    // thousands of times in a single UPDATE; later repeats are counted, not
-    // recorded, so they cost no allocation here or log line in the caller.
-    let mut reported = [0_u8; 256];
+    // Per type code: `SEEN`, plus the causes already recorded. A peer can
+    // repeat one type thousands of times in a single UPDATE; later repeats
+    // are counted, not recorded, so they cost no allocation here or log
+    // line in the caller.
+    let mut seen = [0_u8; 256];
     let mut coalesced_duplicates = 0_u32;
     while !buf.is_empty() {
         let (flags, type_code, value) = match split_next_attribute_mp_aware(&mut buf) {
@@ -1250,7 +1250,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
             _ => None,
         };
         if let Some(segment_type) = prohibited_segment
-            && first_report(&mut reported, type_code, REPORTED_AS_SET)
+            && first_report(&mut seen, type_code, REPORTED_AS_SET)
         {
             malformed.push(MalformedAttribute {
                 type_code,
@@ -1263,7 +1263,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
         }
         let as_path_zero = type_code == attr_type::AS_PATH
             && as_path_contains_zero(value, if four_octet_as { 4 } else { 2 });
-        let duplicate = std::mem::replace(&mut seen[usize::from(type_code)], true);
+        let duplicate = !first_report(&mut seen, type_code, SEEN);
         if duplicate {
             // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal.
             // A duplicate Community Container is treat-as-withdraw; other
@@ -1284,7 +1284,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
             }
             // RFC 7607: a later AS_PATH containing AS 0 still contributes
             // treat-as-withdraw before RFC 7606 discards the duplicate.
-            if as_path_zero && first_report(&mut reported, type_code, REPORTED_AS_ZERO) {
+            if as_path_zero && first_report(&mut seen, type_code, REPORTED_AS_ZERO) {
                 malformed.push(MalformedAttribute {
                     type_code,
                     disposition: ErrorDisposition::TreatAsWithdraw,
@@ -1297,7 +1297,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
             }
             // Every repeat has the same disposition, so one record carries
             // the §3 (h) outcome for all of them.
-            if first_report(&mut reported, type_code, REPORTED_DUPLICATE) {
+            if first_report(&mut seen, type_code, REPORTED_DUPLICATE) {
                 malformed.push(MalformedAttribute {
                     type_code,
                     disposition: if type_code == attr_type::COMMUNITY_CONTAINER {
@@ -1486,15 +1486,16 @@ pub(crate) fn decode_path_attributes_revised_observed(
     ))
 }
 
-const REPORTED_DUPLICATE: u8 = 1;
-const REPORTED_AS_SET: u8 = 1 << 1;
-const REPORTED_AS_ZERO: u8 = 1 << 2;
+const SEEN: u8 = 1;
+const REPORTED_DUPLICATE: u8 = 1 << 1;
+const REPORTED_AS_SET: u8 = 1 << 2;
+const REPORTED_AS_ZERO: u8 = 1 << 3;
 
-/// Mark `cause` reported for `type_code`; true only the first time.
-fn first_report(reported: &mut [u8; 256], type_code: u8, cause: u8) -> bool {
-    let slot = &mut reported[usize::from(type_code)];
-    let first = *slot & cause == 0;
-    *slot |= cause;
+/// Set `bit` for `type_code`; true only the first time.
+fn first_report(seen: &mut [u8; 256], type_code: u8, bit: u8) -> bool {
+    let slot = &mut seen[usize::from(type_code)];
+    let first = *slot & bit == 0;
+    *slot |= bit;
     first
 }
 
@@ -8337,6 +8338,40 @@ mod tests {
             ErrorDisposition::AttributeDiscard
         );
         assert_eq!(decoded.coalesced_duplicates, 999);
+    }
+    /// Load-bearing: coalescing is per type code. One duplicate record per
+    /// UPDATE would let a duplicate MED hide a later duplicate Community
+    /// Container, losing its treat-as-withdraw.
+    #[test]
+    fn revised_duplicate_coalescing_is_per_type() {
+        let mut buf = valid_attrs_plus(&attr_bytes(
+            attr_flags::OPTIONAL,
+            attr_type::MULTI_EXIT_DISC,
+            &[0, 0, 0, 5],
+        ));
+        let med = attr_bytes(
+            attr_flags::OPTIONAL,
+            attr_type::MULTI_EXIT_DISC,
+            &[0, 0, 0, 9],
+        );
+        let cc = attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::COMMUNITY_CONTAINER,
+            &[0, 2, 0, 0, 0, 6],
+        );
+        for part in [&med, &med, &cc, &cc] {
+            buf.extend_from_slice(part);
+        }
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert!(
+            decoded
+                .malformed
+                .iter()
+                .any(|m| m.type_code == attr_type::COMMUNITY_CONTAINER
+                    && m.disposition == ErrorDisposition::TreatAsWithdraw),
+            "{:?}",
+            decoded.malformed
+        );
     }
     /// Load-bearing: coalescing must not hide a stronger cause. A prohibited
     /// AS-set first seen in a late repeat still makes the UPDATE

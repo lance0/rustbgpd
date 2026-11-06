@@ -1441,6 +1441,30 @@ mod tests {
         assert_eq!(reader.discarded_bgpls_nlris(), 0);
     }
 
+    /// Load-bearing: without `coalesced_duplicates` the count drops to one
+    /// record for the two discarded copies.
+    #[test]
+    fn repeated_duplicates_count_every_discarded_copy() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        let med = [
+            attr_flags::OPTIONAL,
+            attr_type::MULTI_EXIT_DISC,
+            4,
+            0,
+            0,
+            0,
+            7,
+        ];
+        append_v4_rib_with_attributes(&mut data, &med.repeat(3));
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let (entries, err) = drain(&mut reader);
+        assert!(err.is_none(), "unexpected error: {err:?}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(reader.discarded_path_attributes(), 2);
+    }
+
     #[test]
     fn treat_as_withdraw_attribute_still_fails_and_fuses() {
         let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);

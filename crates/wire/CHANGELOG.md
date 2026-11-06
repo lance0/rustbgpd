@@ -38,7 +38,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   so decoding allocates the same amount however often a type repeats.
   `RevisedAttributeDecode` and `RevisedParsedUpdate` gain
   `coalesced_duplicates`, the repeats represented by an earlier record.
-  Dispositions are unchanged. The new public fields break struct literals.
+  Dispositions are unchanged. The new public fields break struct literals
+  and exhaustive struct patterns.
 - Pair this wire line with FSM 0.15 and RPKI 0.10 when sharing public wire
   types. These crate versions are not published by this change.
 

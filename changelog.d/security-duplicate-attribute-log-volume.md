@@ -6,9 +6,12 @@
   discarded after the first occurrence. Previously each repeated occurrence
   produced its own decode record and WARN line, so a single UPDATE could emit
   thousands of log lines while the session stayed up. Repeats of one type now
-  share one record, and the session logs one WARN per malformed UPDATE, at
-  power-of-two counts per TCP connection, with every record still available at
-  DEBUG. `bgp_update_malformed_total` still counts every malformed UPDATE.
+  share one record per cause. The malformed-attribute WARN is now one summary
+  line per UPDATE, naming the cause behind the applied disposition, and is
+  emitted at power-of-two counts per TCP connection; every cause is still
+  logged at DEBUG. The treat-as-withdraw, validation, and ASPA warnings are
+  unchanged at one line per UPDATE. `bgp_update_malformed_total` still counts
+  every malformed UPDATE.
   **Operator-visible:** `bgp_update_malformed_causes_total` now reports a
   duplicated attribute type, and a prohibited AS-set in repeated `AS_PATH` or
   `AS4_PATH` copies, once per UPDATE rather than once per occurrence.
