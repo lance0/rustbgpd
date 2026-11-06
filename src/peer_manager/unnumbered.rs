@@ -247,15 +247,15 @@ struct HeldState {
 }
 
 impl Unnumbered {
-    /// Drop the graceful-shutdown intent every unbound neighbor holds for
+    /// Set the graceful-shutdown intent every unbound neighbor holds for
     /// its next peer.
-    pub(super) fn clear_held_graceful_shutdown(&mut self) {
+    pub(super) fn set_held_graceful_shutdown(&mut self, enabled: bool) {
         for held in self
             .ports
             .values_mut()
             .filter_map(|port| port.held.as_mut())
         {
-            held.graceful_shutdown = false;
+            held.graceful_shutdown = enabled;
         }
     }
 

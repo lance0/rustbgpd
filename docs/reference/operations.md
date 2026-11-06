@@ -4382,7 +4382,7 @@ already moved.
 # Start the drain on one peer
 rbgp gshut --neighbor 10.0.0.2
 
-# Or drain every currently-managed peer at once
+# Or drain every peer at once
 rbgp gshut --all
 
 # Wait for traffic to shift (operator-defined, typically 30s-5min
@@ -4403,6 +4403,20 @@ the `ManagedPeer` desired-state record, mirrors to the live session,
 and survives session flaps mid-maintenance. The toggle does NOT
 persist across daemon restart by design (RFC 8326 is a maintenance-
 window action, not a steady state).
+
+`--all` and `--all --clear` also reach neighbors that are between sessions,
+so one that comes back during the maintenance window follows the latest
+all-peers toggle:
+
+- an unbound interface-only neighbor, through the state it keeps for its
+  next endpoint;
+- a dynamic neighbor whose last session went down with an operator intent
+  still pending (graceful shutdown, an unfired route refresh or export
+  change), through its dead-letter entry. That table holds at most
+  `dynamic_neighbor_limit` entries and evicts the oldest when full. A
+  dynamic neighbor without an entry, including an evicted one, is accepted
+  as a new peer with no graceful-shutdown intent; re-run `rbgp gshut --all`
+  after it reconnects.
 
 The command returns once every live session has accepted the toggle (a
 session that could not is reported as a failure; it picks the toggle up when
