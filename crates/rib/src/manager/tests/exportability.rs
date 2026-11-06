@@ -3074,7 +3074,10 @@ fn family_rows(updates: &[OutboundRouteUpdate], family: (Afi, Safi)) -> (usize, 
 /// leaves the best unchanged at release, the grouped view counts a route the
 /// member was never sent. The per-peer path is the reference. Without a
 /// re-announcement the release withdraws the row from the accepting peer
-/// only, and the rejection retires with it in the same pass.
+/// only, and the rejection retires with it in the same pass. A non-waiter's
+/// End-of-RIB inside the hold runs the full rejection prune, which must keep
+/// the frozen row's rejection too. The hold releases on its timer or on the
+/// waiter's End-of-RIB.
 #[expect(
     clippy::too_many_lines,
     reason = "one hold lifecycle checks every advertised surface of both paths"
@@ -3083,8 +3086,12 @@ fn assert_deferred_frozen_rejection_stays_exact(
     family: (Afi, Safi),
     force_ungrouped: bool,
     reannounce: bool,
+    release_by_eor: bool,
 ) {
-    let case = format!("{family:?} force_ungrouped={force_ungrouped} reannounce={reannounce}");
+    let case = format!(
+        "{family:?} force_ungrouped={force_ungrouped} reannounce={reannounce} \
+         release_by_eor={release_by_eor}"
+    );
     let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 83));
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
@@ -3188,10 +3195,32 @@ fn assert_deferred_frozen_rejection_stays_exact(
         "{case}: the hold freezes the withdrawn best"
     );
     assert_eq!(bmp_advertised(&mut manager, classic, family), 0, "{case}");
+    let end_of_rib = |peer| RibUpdate::EndOfRib {
+        peer,
+        session_id: 7,
+        afi: family.0,
+        safi: family.1,
+    };
+    let prunes = manager.test_exact_export_full_prune_calls;
+    manager.handle_update(end_of_rib(extended));
+    assert!(
+        manager.test_exact_export_full_prune_calls > prunes,
+        "{case}: the non-waiter's End-of-RIB ran the full prune"
+    );
+    assert!(manager.selection_deferred(family), "{case}: still held");
+    assert!(
+        manager.peer_unexportable.contains_key(&classic),
+        "{case}: the prune keeps the frozen row's rejection"
+    );
     if reannounce {
         source_update(&mut manager, true);
     }
-    manager.expire_selection_deferral();
+    if release_by_eor {
+        manager.handle_update(end_of_rib(waiter));
+        drain_route_chunks(&mut manager);
+    } else {
+        manager.expire_selection_deferral();
+    }
     assert!(!manager.selection_deferred(family), "{case}");
     assert_eq!(frozen(&manager), reannounce, "{case}");
 
@@ -3236,11 +3265,14 @@ fn assert_deferred_frozen_rejection_stays_exact(
 fn deferred_frozen_unicast_rejection_keeps_the_grouped_view_exact() {
     for force_ungrouped in [false, true] {
         for reannounce in [true, false] {
-            assert_deferred_frozen_rejection_stays_exact(
-                DEFERRED_UNICAST,
-                force_ungrouped,
-                reannounce,
-            );
+            for release_by_eor in [false, true] {
+                assert_deferred_frozen_rejection_stays_exact(
+                    DEFERRED_UNICAST,
+                    force_ungrouped,
+                    reannounce,
+                    release_by_eor,
+                );
+            }
         }
     }
 }
@@ -3249,7 +3281,14 @@ fn deferred_frozen_unicast_rejection_keeps_the_grouped_view_exact() {
 fn deferred_frozen_vpn_rejection_keeps_the_grouped_view_exact() {
     for force_ungrouped in [false, true] {
         for reannounce in [true, false] {
-            assert_deferred_frozen_rejection_stays_exact(DEFERRED_VPN, force_ungrouped, reannounce);
+            for release_by_eor in [false, true] {
+                assert_deferred_frozen_rejection_stays_exact(
+                    DEFERRED_VPN,
+                    force_ungrouped,
+                    reannounce,
+                    release_by_eor,
+                );
+            }
         }
     }
 }
@@ -3259,6 +3298,13 @@ fn deferred_frozen_vpn_rejection_keeps_the_grouped_view_exact() {
 #[test]
 fn deferred_frozen_private_evpn_rejection_retires_at_release() {
     for reannounce in [true, false] {
-        assert_deferred_frozen_rejection_stays_exact(DEFERRED_EVPN, false, reannounce);
+        for release_by_eor in [false, true] {
+            assert_deferred_frozen_rejection_stays_exact(
+                DEFERRED_EVPN,
+                false,
+                reannounce,
+                release_by_eor,
+            );
+        }
     }
 }
