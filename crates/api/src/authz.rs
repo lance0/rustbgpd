@@ -34,6 +34,24 @@ impl AuthTier {
     }
 }
 
+/// Request extension set by the authorization layer: the highest tier the
+/// caller may use on this listener, the lower of its role ceiling and the
+/// listener's `max_tier`. A handler that widens what a request may touch
+/// for operators reads it; a request without it is treated as below
+/// `operator_only`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CallerTier(pub AuthTier);
+
+impl CallerTier {
+    /// Whether `extensions` carry `operator_only` authority.
+    #[must_use]
+    pub fn is_operator(extensions: &tonic::Extensions) -> bool {
+        extensions
+            .get::<Self>()
+            .is_some_and(|tier| tier.0 == AuthTier::OperatorOnly)
+    }
+}
+
 /// ADR-0064 role assigned to an authenticated gRPC principal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrincipalRole {

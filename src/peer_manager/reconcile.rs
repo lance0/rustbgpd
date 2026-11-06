@@ -13,6 +13,30 @@ use crate::policy_admin::fib_table_snapshot_to_config;
 
 use super::PeerManager;
 
+/// Load a `DiffRuntimeConfig` / `PlanConfigTransaction` candidate. This
+/// reads the candidate's external policy sources, so the actor runs it on
+/// the blocking pool (see `PeerManager::spawn_candidate_load`).
+///
+/// Only the config-transaction path captures the candidate's external
+/// sources for identity verification (ADR-0130). The gNMI Set bridge plans
+/// without capture, so its candidates classify as `Unverified` and keep the
+/// #1370 presence fence.
+///
+/// `accepted_roots` confines the candidate's external sources (callers below
+/// `operator_only`); `None` is for operator callers.
+pub(super) fn load_runtime_candidate(
+    candidate_toml: &str,
+    capture_external_inputs: bool,
+    accepted_roots: Option<&[std::path::PathBuf]>,
+) -> Result<Config, String> {
+    Config::load_rpc_candidate(
+        candidate_toml,
+        "candidate runtime config",
+        capture_external_inputs,
+        accepted_roots,
+    )
+}
+
 impl PeerManager {
     /// Reconcile the peer set as one operation: one import-roster
     /// publication however many peers it adds, removes or replaces.
@@ -219,36 +243,56 @@ impl PeerManager {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn diff_runtime_config(
         &self,
         candidate_toml: &str,
     ) -> Result<RuntimeConfigDiff, RuntimeConfigDiffError> {
-        let candidate =
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
-                .map_err(RuntimeConfigDiffError::InvalidCandidate)?;
+        self.diff_loaded_runtime_config(load_runtime_candidate(
+            candidate_toml,
+            false,
+            Some(&self.current_config.candidate_source_roots()),
+        ))
+    }
+
+    /// Diff a candidate loaded off the actor by [`load_runtime_candidate`].
+    pub(super) fn diff_loaded_runtime_config(
+        &self,
+        candidate: Result<Config, String>,
+    ) -> Result<RuntimeConfigDiff, RuntimeConfigDiffError> {
+        let candidate = candidate.map_err(RuntimeConfigDiffError::InvalidCandidate)?;
         let diff = crate::config::diff_config(&self.current_config, &candidate);
         runtime_config_diff_from_config_diff(&diff, None).map_err(RuntimeConfigDiffError::Internal)
     }
 
+    #[cfg(test)]
     pub(super) async fn plan_config_transaction(
         &mut self,
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
         verify_external_inputs: bool,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
+        let candidate = load_runtime_candidate(
+            candidate_toml,
+            verify_external_inputs,
+            Some(&self.current_config.candidate_source_roots()),
+        );
+        self.plan_loaded_config_transaction(candidate, expected_runtime_snapshot_token)
+            .await
+    }
+
+    /// Plan a candidate loaded off the actor by [`load_runtime_candidate`].
+    /// A stale snapshot token is reported ahead of a candidate load error.
+    pub(super) async fn plan_loaded_config_transaction(
+        &mut self,
+        candidate: Result<Config, String>,
+        expected_runtime_snapshot_token: Option<&str>,
+    ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
         let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
             .config_transaction_plan_context(expected_runtime_snapshot_token)
             .await?;
-        // Only the config-transaction path captures the candidate's external
-        // sources for identity verification (ADR-0130). The gNMI Set bridge
-        // plans with the plain loader, so its candidates classify as
-        // `Unverified` and keep the #1370 presence fence.
-        let mut candidate = if verify_external_inputs {
-            Config::load_toml_candidate_captured(candidate_toml, "candidate runtime config")
-        } else {
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
-        }
-        .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        let mut candidate =
+            candidate.map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
         let external_inputs = self.verified_external_inputs(&mut candidate);
         let materialization = crate::config::materialize_rfc8212_transaction_candidate(
             &self.current_config,

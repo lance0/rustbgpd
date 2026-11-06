@@ -728,7 +728,14 @@ not dataset file contents: when datasets are declared, `rustbgpd --diff` and
 rather than claiming `No changes.` SIGHUP re-reads the staged dataset files and
 evaluates loader errors when it executes the generation route. `rbgp config diff`
 resolves relative `.rpol` and dataset paths from the candidate file's directory
-before sending the configuration to the daemon.
+before sending the configuration to the daemon. Below `operator_only`, a
+candidate sent over the API (diff, plan, or EVPN apply) may name only `.rpol`
+files, `rpol_roots` and dataset files that resolve under the running config's
+policy directories: its `[policy] rpol_roots` and the directories of its
+`.rpol` and dataset files. Operator callers may stage candidate sources
+elsewhere. For every API caller, compile and dataset errors for those files
+report path, line and column without quoting file text; `rbgp policy check`
+on the host shows the full diagnostic.
 
 ## Related
 

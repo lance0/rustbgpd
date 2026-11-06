@@ -295,11 +295,13 @@ impl proto::config_service_server::ConfigService for ConfigService {
             &request,
             diff_runtime_config_summary(&request.get_ref().candidate_toml),
         );
+        let operator_sources = crate::authz::CallerTier::is_operator(request.extensions());
         let candidate_toml = request.into_inner().candidate_toml;
         match request_peer_manager(
             &self.peer_mgr_tx,
             |reply| PeerManagerCommand::DiffRuntimeConfig {
                 candidate_toml,
+                operator_sources,
                 reply,
             },
             "peer manager dropped config diff reply",
@@ -322,6 +324,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 &request.get_ref().expected_runtime_snapshot_token,
             ),
         );
+        let operator_sources = crate::authz::CallerTier::is_operator(request.extensions());
         let request = request.into_inner();
         let expected_runtime_snapshot_token = (!request.expected_runtime_snapshot_token.is_empty())
             .then_some(request.expected_runtime_snapshot_token);
@@ -331,6 +334,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
                 candidate_toml: request.candidate_toml,
                 expected_runtime_snapshot_token,
                 verify_external_inputs: true,
+                operator_sources,
                 reply,
             },
             "peer manager dropped config transaction plan reply",
@@ -893,6 +897,57 @@ mod tests {
         );
     }
 
+    /// Only a caller whose effective tier is `operator_only` may name new
+    /// external source paths; a lower or missing tier stays confined.
+    #[tokio::test]
+    async fn diff_and_plan_mark_operator_callers_for_source_paths() {
+        use crate::authz::{AuthTier, CallerTier};
+
+        for (tier, operator) in [
+            (None, false),
+            (Some(AuthTier::SensitiveRead), false),
+            (Some(AuthTier::Mutating), false),
+            (Some(AuthTier::OperatorOnly), true),
+        ] {
+            let (tx, mut rx) = mpsc::channel(2);
+            let svc = ConfigService::new(AccessMode::ReadWrite, tx);
+            let server = tokio::spawn(async move {
+                let Some(PeerManagerCommand::DiffRuntimeConfig {
+                    operator_sources,
+                    reply,
+                    ..
+                }) = rx.recv().await
+                else {
+                    panic!("expected DiffRuntimeConfig command");
+                };
+                let _ = reply.send(Err(RuntimeConfigDiffError::InvalidCandidate(
+                    "refused".to_string(),
+                )));
+                let Some(PeerManagerCommand::PlanConfigTransaction {
+                    operator_sources: plan_operator_sources,
+                    reply,
+                    ..
+                }) = rx.recv().await
+                else {
+                    panic!("expected PlanConfigTransaction command");
+                };
+                let _ = reply.send(Err(RuntimeConfigTransactionPlanError::InvalidCandidate(
+                    "refused".to_string(),
+                )));
+                (operator_sources, plan_operator_sources)
+            });
+            let mut diff = Request::new(proto::DiffRuntimeConfigRequest::default());
+            let mut plan = Request::new(proto::PlanConfigTransactionRequest::default());
+            if let Some(tier) = tier {
+                diff.extensions_mut().insert(CallerTier(tier));
+                plan.extensions_mut().insert(CallerTier(tier));
+            }
+            assert!(svc.diff_runtime_config(diff).await.is_err());
+            assert!(svc.plan_config_transaction(plan).await.is_err());
+            assert_eq!(server.await.unwrap(), (operator, operator), "{tier:?}");
+        }
+    }
+
     #[tokio::test]
     async fn diff_runtime_config_forwards_candidate_to_peer_manager() {
         let (tx, mut rx) = mpsc::channel(1);
@@ -900,6 +955,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig {
                 candidate_toml,
+                operator_sources: false,
                 reply,
             }) = rx.recv().await
             else {
@@ -1030,6 +1086,7 @@ mod tests {
                 candidate_toml,
                 expected_runtime_snapshot_token,
                 verify_external_inputs: true,
+                operator_sources: false,
                 reply,
             }) = rx.recv().await
             else {

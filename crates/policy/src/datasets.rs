@@ -46,7 +46,7 @@ use sha2::{Digest, Sha256};
 use crate::sets::{AsnSet, CommunitySet, PrefixSet};
 
 /// Maximum dataset file size in bytes (64 MiB). Enforced before the
-/// file is read into memory.
+/// file is read into memory and again by the bounded read.
 pub const MAX_DATASET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Maximum records (entries) per dataset. Enforced while parsing.
@@ -470,18 +470,65 @@ impl fmt::Display for MissingDatasets {
 /// or the first parse errors with line numbers). Callers keep the
 /// prior snapshot on error.
 pub fn load_dataset_file(path: &Path, kind: DatasetKind) -> Result<DatasetData, String> {
-    let meta =
-        std::fs::metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
-    if meta.len() > MAX_DATASET_BYTES {
-        return Err(format!(
-            "{} is {} bytes — larger than the {MAX_DATASET_BYTES}-byte dataset bound",
-            path.display(),
-            meta.len()
-        ));
-    }
-    let text = std::fs::read_to_string(path)
+    let bytes = read_regular_file_bounded(path, MAX_DATASET_BYTES)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let text =
+        String::from_utf8(bytes).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     crate::rpol::parse_dataset_text(&text, kind)
+}
+
+/// Read a whole regular file holding at most `max_bytes`.
+///
+/// External policy inputs (`.rpol` modules, dataset files) can name
+/// any path, so the reader refuses what is not a regular file before
+/// it reads: the path is checked with `stat`, opened with `O_NONBLOCK`
+/// (opening a FIFO for reading otherwise waits for a writer), and the
+/// opened descriptor is checked again with `fstat`. The read itself is
+/// capped at `max_bytes + 1` bytes, so a file that grows after the
+/// check, or a size the kernel reports as zero, still cannot exceed
+/// the bound.
+///
+/// # Errors
+///
+/// The open or read failure, [`std::io::ErrorKind::InvalidInput`] for
+/// a FIFO, device, socket or directory, and
+/// [`std::io::ErrorKind::FileTooLarge`] for a file over the bound.
+#[doc(hidden)]
+pub fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind};
+
+    let not_regular = || Error::new(ErrorKind::InvalidInput, "not a regular file");
+    let too_large = || {
+        Error::new(
+            ErrorKind::FileTooLarge,
+            format!("larger than the {max_bytes}-byte bound"),
+        )
+    };
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    if meta.len() > max_bytes {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
 
 /// Lossless path and byte identity captured by the dataset loader.
@@ -504,28 +551,8 @@ pub fn load_dataset_file_captured(
     let canonical_path = path
         .canonicalize()
         .map_err(|e| failure(format!("cannot stat {}: {e}", path.display())))?;
-    let file = std::fs::File::open(&canonical_path)
+    let bytes = read_regular_file_bounded(&canonical_path, MAX_DATASET_BYTES)
         .map_err(|e| failure(format!("cannot read {}: {e}", path.display())))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| failure(format!("cannot stat {}: {e}", path.display())))?;
-    if meta.len() > MAX_DATASET_BYTES {
-        return Err(failure(format!(
-            "{} is {} bytes — larger than the {MAX_DATASET_BYTES}-byte dataset bound",
-            path.display(),
-            meta.len()
-        )));
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    file.take(MAX_DATASET_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| failure(format!("cannot read {}: {e}", path.display())))?;
-    if bytes.len() as u64 > MAX_DATASET_BYTES {
-        return Err(failure(format!(
-            "{} grew larger than the {MAX_DATASET_BYTES}-byte dataset bound while reading",
-            path.display()
-        )));
-    }
     let source = DatasetFileFingerprint {
         canonical_path,
         raw_len: u64::try_from(bytes.len()).expect("bounded source length fits u64"),
@@ -545,6 +572,74 @@ pub fn load_dataset_file_captured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run `load` on its own thread and wait at most five seconds, so a
+    /// reader that blocks or never finishes fails the test instead of
+    /// hanging it.
+    fn within_deadline<T: Send + 'static>(load: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(load());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_sources_refuse_fifos_and_devices_without_blocking() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo = dir.path().join("pipe.rpol");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        for path in [fifo.clone(), PathBuf::from("/dev/zero")] {
+            let source = path.clone();
+            let rpol = within_deadline(move || {
+                crate::rpol::RpolFile::load(&source, &[], 1024 * 1024)
+                    .map(|_| ())
+                    .map_err(|error| error.render(false))
+            });
+            let source = path.clone();
+            let dataset =
+                within_deadline(move || load_dataset_file(&source, DatasetKind::Asn).map(|_| ()));
+            let source = path.clone();
+            let captured = within_deadline(move || {
+                load_dataset_file_captured(&source, DatasetKind::Asn)
+                    .map(|_| ())
+                    .map_err(|(error, _)| error)
+            });
+            // Release a reader blocked in open(2) so a failing run exits.
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo);
+            for (what, result) in [("rpol", rpol), ("dataset", dataset), ("captured", captured)] {
+                let error = result
+                    .unwrap_or_else(|| panic!("{what} load of {} blocked", path.display()))
+                    .expect_err("not a regular file");
+                assert!(error.contains("not a regular file"), "{what}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_read_refuses_a_file_over_the_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big");
+        std::fs::write(&path, [b'#'; 65]).expect("write");
+        assert_eq!(
+            read_regular_file_bounded(&path, 65)
+                .expect("at the bound")
+                .len(),
+            65
+        );
+        let error = read_regular_file_bounded(&path, 64).expect_err("over the bound");
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+    }
 
     fn asn_data(asns: &[u32]) -> DatasetData {
         DatasetData::Asn(AsnSet::new(asns.iter().copied()))

@@ -10,8 +10,8 @@ use rustbgpd_api::peer_types::{
     OwnedCatalogMutation, OwnedCatalogMutationOutcome, OwnedHotUpdatePeerOutcome,
     OwnedNeighborMutation, OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerKey,
     PeerManagerCommand, PeerManagerNeighborConfig, PeerManagerOperatorQuery,
-    PeerManagerReadinessQuery, PeerReconcileAuthority, PolicyEvent,
-    RuntimeConfigTransactionPlanError, SessionEvent, SessionLifecycleEvent,
+    PeerManagerReadinessQuery, PeerReconcileAuthority, PolicyEvent, RuntimeConfigDiff,
+    RuntimeConfigDiffError, RuntimeConfigTransactionPlanError, SessionEvent, SessionLifecycleEvent,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -599,6 +599,31 @@ pub(crate) enum DynamicBfdSocketOutcome {
     Ambiguous(String),
 }
 
+/// Candidate loads in flight before diff/plan requests are refused.
+/// Each load is bounded by its source budgets; this bounds their sum.
+const MAX_CANDIDATE_LOADS: usize = 4;
+
+/// The request a candidate load resumes on the actor.
+enum PendingCandidate {
+    Diff {
+        reply: oneshot::Sender<Result<RuntimeConfigDiff, RuntimeConfigDiffError>>,
+    },
+    Plan {
+        expected_runtime_snapshot_token: Option<String>,
+        reply: oneshot::Sender<
+            Result<
+                rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
+                RuntimeConfigTransactionPlanError,
+            >,
+        >,
+    },
+}
+
+struct LoadedCandidate {
+    candidate: Result<Config, String>,
+    pending: PendingCandidate,
+}
+
 pub(crate) enum InternalCommand {
     /// ADR-0142 preflight of a SIGHUP candidate, before the reload route's
     /// first effect outside the peer manager. Acceptance holds the
@@ -876,6 +901,11 @@ pub struct PeerManager {
     /// At most the operator lane's capacity; dropping the manager aborts
     /// them, and their callers observe a dropped reply.
     detached_list_peers: JoinSet<()>,
+    /// `DiffRuntimeConfig` / `PlanConfigTransaction` candidates loading on
+    /// the blocking pool. Loading reads the candidate's external policy
+    /// sources, so it never runs on this actor; the diff or plan resumes
+    /// here when the load completes. At most [`MAX_CANDIDATE_LOADS`].
+    candidate_loads: JoinSet<LoadedCandidate>,
     /// The outbound refresher, which replays graceful-shutdown toggles'
     /// outbound inventories one peer per RIB turn, off this actor. Started
     /// on first use.
@@ -1759,6 +1789,68 @@ impl PeerManager {
         command
     }
 
+    /// Load a diff or plan candidate on the blocking pool; the request
+    /// resumes in [`Self::finish_candidate_load`]. Beyond
+    /// [`MAX_CANDIDATE_LOADS`] in flight the request is refused. Unless
+    /// the caller is an operator, the candidate's external sources are
+    /// confined to the current config's policy directories.
+    fn spawn_candidate_load(
+        &mut self,
+        candidate_toml: String,
+        capture_external_inputs: bool,
+        operator_sources: bool,
+        pending: PendingCandidate,
+    ) {
+        if self.candidate_loads.len() >= MAX_CANDIDATE_LOADS {
+            let busy =
+                format!("{MAX_CANDIDATE_LOADS} config candidates are already loading; retry");
+            match pending {
+                PendingCandidate::Diff { reply } => {
+                    let _ = reply.send(Err(RuntimeConfigDiffError::Internal(busy)));
+                }
+                PendingCandidate::Plan { reply, .. } => {
+                    let _ = reply.send(Err(RuntimeConfigTransactionPlanError::Unavailable(busy)));
+                }
+            }
+            return;
+        }
+        let accepted_roots =
+            (!operator_sources).then(|| self.current_config.candidate_source_roots());
+        self.candidate_loads
+            .spawn_blocking(move || LoadedCandidate {
+                candidate: reconcile::load_runtime_candidate(
+                    &candidate_toml,
+                    capture_external_inputs,
+                    accepted_roots.as_deref(),
+                ),
+                pending,
+            });
+    }
+
+    async fn finish_candidate_load(&mut self, loaded: LoadedCandidate) {
+        match loaded.pending {
+            PendingCandidate::Diff { reply } => {
+                let _ = reply.send(self.diff_loaded_runtime_config(loaded.candidate));
+            }
+            PendingCandidate::Plan {
+                expected_runtime_snapshot_token,
+                mut reply,
+            } => {
+                let planning = self.plan_loaded_config_transaction(
+                    loaded.candidate,
+                    expected_runtime_snapshot_token.as_deref(),
+                );
+                tokio::pin!(planning);
+                let result = tokio::select! {
+                    biased;
+                    () = reply.closed() => return,
+                    result = &mut planning => result,
+                };
+                let _ = reply.send(result);
+            }
+        }
+    }
+
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
@@ -1825,6 +1917,7 @@ impl PeerManager {
             operator_rx: None,
             deferred_operator_queries: VecDeque::new(),
             detached_list_peers: JoinSet::new(),
+            candidate_loads: JoinSet::new(),
             outbound_refresher: None,
             operator_read_seam: OperatorReadSeam::Unfenced,
             completed_operator_seam: None,
@@ -2621,29 +2714,32 @@ impl PeerManager {
             }
             PeerManagerCommand::DiffRuntimeConfig {
                 candidate_toml,
+                operator_sources,
                 reply,
             } => {
-                let result = self.diff_runtime_config(&candidate_toml);
-                let _ = reply.send(result);
+                self.spawn_candidate_load(
+                    candidate_toml,
+                    false,
+                    operator_sources,
+                    PendingCandidate::Diff { reply },
+                );
             }
             PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 expected_runtime_snapshot_token,
                 verify_external_inputs,
-                mut reply,
+                operator_sources,
+                reply,
             } => {
-                let planning = self.plan_config_transaction(
-                    &candidate_toml,
-                    expected_runtime_snapshot_token.as_deref(),
+                self.spawn_candidate_load(
+                    candidate_toml,
                     verify_external_inputs,
+                    operator_sources,
+                    PendingCandidate::Plan {
+                        expected_runtime_snapshot_token,
+                        reply,
+                    },
                 );
-                tokio::pin!(planning);
-                let result = tokio::select! {
-                    biased;
-                    () = reply.closed() => return ControlFlow::Continue(()),
-                    result = &mut planning => result,
-                };
-                let _ = reply.send(result);
             }
             PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
                 self.local_forwarding_state
@@ -3411,6 +3507,14 @@ impl PeerManager {
                     };
                     if Box::pin(self.dispatch_command(cmd)).await.is_break() {
                         return;
+                    }
+                }
+                Some(loaded) = self.candidate_loads.join_next(), if !self.candidate_loads.is_empty() => {
+                    match loaded {
+                        Ok(loaded) => self.finish_candidate_load(loaded).await,
+                        // A panicking load drops its reply; the caller sees
+                        // the dropped-reply error.
+                        Err(error) => warn!(%error, "config candidate load task failed"),
                     }
                 }
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {

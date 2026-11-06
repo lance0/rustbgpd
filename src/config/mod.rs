@@ -281,6 +281,53 @@ pub(crate) fn absolute_config_path(path: &std::path::Path) -> Result<PathBuf, St
         .map_err(|error| format!("error: failed to resolve {}: {error}", path.display()))
 }
 
+/// How a config load treats the `.rpol`, policy-root and dataset paths it
+/// reads.
+#[derive(Clone, Copy)]
+enum SourceRules<'a> {
+    /// The on-disk config or a snapshot of it: paths are the host
+    /// operator's include directives, and diagnostics quote source text.
+    OnDisk,
+    /// A candidate received over the API. Errors quote no file text; with
+    /// `Some`, every path must resolve under one of these canonical
+    /// directories.
+    Api(Option<&'a [PathBuf]>),
+}
+
+/// Check that an external source named by an RPC candidate resolves under
+/// one of `confine` (canonical directories). A path that cannot be resolved
+/// is reported as outside unless it lies under a root lexically, so the
+/// error does not say whether an arbitrary path exists.
+fn confined_source_path(path: &std::path::Path, confine: &[PathBuf]) -> Result<(), String> {
+    let outside = || {
+        format!(
+            "{} is outside the accepted config's policy directories ([policy] rpol_roots and \
+             the directories of its .rpol and dataset files); add new locations through the \
+             on-disk config and a reload",
+            path.display()
+        )
+    };
+    match path.canonicalize() {
+        Ok(canonical) if confine.iter().any(|root| canonical.starts_with(root)) => Ok(()),
+        Err(error) if confine.iter().any(|root| path.starts_with(root)) => {
+            Err(format!("cannot resolve {}: {error}", path.display()))
+        }
+        _ => Err(outside()),
+    }
+}
+
+/// A dataset parse error (`line N: …`) can quote the offending entry; keep
+/// only its line number.
+fn redact_dataset_reason(reason: String) -> String {
+    match reason
+        .strip_prefix("line ")
+        .and_then(|rest| rest.split_once(':'))
+    {
+        Some((line, _)) => format!("line {line}: invalid entry"),
+        None => reason,
+    }
+}
+
 impl Config {
     fn peer_group_for_neighbor(
         &self,
@@ -329,9 +376,12 @@ impl Config {
             None,
             None,
             None,
+            SourceRules::OnDisk,
         )
     }
 
+    /// `sources` is [`SourceRules::Api`] for a candidate received over the
+    /// API (see [`Self::load_rpc_candidate`]).
     #[expect(
         clippy::too_many_arguments,
         reason = "captured reload keeps live handles, accepted evidence, and source provenance explicit"
@@ -345,6 +395,7 @@ impl Config {
         mut capture: Option<&mut source_provenance::SourceCapture>,
         prior_manifest: Option<&source_provenance::SourceManifest>,
         accepted_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+        sources: SourceRules<'_>,
     ) -> Result<Self, String> {
         let load_started = std::time::Instant::now();
         let mut config: Config = match toml::from_str(content) {
@@ -369,8 +420,8 @@ impl Config {
         // errors in their own right.
         let phase_started = std::time::Instant::now();
         let rpol_result = match capture.as_deref_mut() {
-            Some(capture) => config.load_rpol_files_capturing(base_dir, Some(capture)),
-            None => config.load_rpol_files(base_dir),
+            Some(capture) => config.load_rpol_files_capturing(base_dir, Some(capture), sources),
+            None => config.load_rpol_files_capturing(base_dir, None, sources),
         };
         if let Err(error) = rpol_result {
             return Err(match &error {
@@ -402,8 +453,17 @@ impl Config {
                 Some(capture),
                 prior_manifest,
                 accepted_datasets,
+                sources,
             ),
-            None => config.bind_datasets(base_dir, prior_datasets, dataset_bind_mode),
+            None => config.bind_datasets_capturing(
+                base_dir,
+                prior_datasets,
+                dataset_bind_mode,
+                None,
+                None,
+                None,
+                sources,
+            ),
         };
         let dataset_summary = dataset_result.map_err(|error| format!("error: {error}"))?;
         let dataset_bind_ms = elapsed_ms(phase_started);
@@ -468,24 +528,26 @@ impl Config {
     /// however, `canonicalize()`d immediately before it is read
     /// (LAN-218), closing the symlink TOCTOU window between path
     /// resolution and open — canonicalization resolves the target, it
-    /// does not confine it. (Untrusted candidate configs arrive via
-    /// `load_toml_with_diagnostics` with `base_dir = None`, so relative
-    /// entries resolve against the process CWD and never against a
-    /// caller-influenced base.)
+    /// does not confine it. That trust model covers the on-disk config
+    /// and operator API callers only: other API callers' candidates are
+    /// held under the accepted config's policy directories (see
+    /// [`Self::load_rpc_candidate`]).
     ///
     /// In-language `import` declarations (LAN-300) are the opposite:
     /// they are transitive rather than operator-listed, so they ARE
     /// confined — every import must resolve inside the importing
     /// entry's directory or a configured `[policy] rpol_roots` entry
     /// (enforced by `RpolFile::load`).
+    #[cfg(test)]
     fn load_rpol_files(&mut self, base_dir: Option<&std::path::Path>) -> Result<(), ConfigError> {
-        self.load_rpol_files_capturing(base_dir, None)
+        self.load_rpol_files_capturing(base_dir, None, SourceRules::OnDisk)
     }
 
     fn load_rpol_files_capturing(
         &mut self,
         base_dir: Option<&std::path::Path>,
         mut capture: Option<&mut source_provenance::SourceCapture>,
+        sources: SourceRules<'_>,
     ) -> Result<(), ConfigError> {
         use rustbgpd_policy::rpol::{LoadError, RpolFile, RpolPolicyEntry};
 
@@ -512,6 +574,13 @@ impl Config {
             {
                 path = base.join(path);
             }
+            if let SourceRules::Api(Some(confine)) = sources {
+                confined_source_path(&path, confine).map_err(|reason| {
+                    ConfigError::InvalidPolicyEntry {
+                        reason: format!("[policy] rpol_roots: {reason}"),
+                    }
+                })?;
+            }
             *root = path.display().to_string();
         }
         let roots: Vec<PathBuf> = self.policy.rpol_roots.iter().map(PathBuf::from).collect();
@@ -525,6 +594,14 @@ impl Config {
                 path = base.join(path);
             }
             let display = path.display().to_string();
+            if let SourceRules::Api(Some(confine)) = sources {
+                confined_source_path(&path, confine).map_err(|reason| {
+                    ConfigError::InvalidRpolFile {
+                        path: display.clone(),
+                        reason,
+                    }
+                })?;
+            }
             // `RpolFile::load` canonicalizes before reading (LAN-218):
             // symlinks and `..` resolve once, then that resolved path
             // is read (closes the symlink TOCTOU window). It also
@@ -537,9 +614,16 @@ impl Config {
                     return Err(ConfigError::InvalidRpolFile { path, reason });
                 }
                 Err(error @ LoadError::Compile { .. }) => {
+                    // The caller of an RPC candidate did not supply the file:
+                    // report locations only, never its text.
+                    let rendered = if matches!(sources, SourceRules::Api(_)) {
+                        error.render_locations()
+                    } else {
+                        error.render(false)
+                    };
                     return Err(ConfigError::InvalidRpolFile {
                         path: display.clone(),
-                        reason: format!("compile failed\n{}", error.render(false)),
+                        reason: format!("compile failed\n{rendered}"),
                     });
                 }
             };
@@ -594,18 +678,10 @@ impl Config {
     /// 8.5). Datasets with no prior handle (initial load, new
     /// declarations, kind changes) must load cleanly or the whole load
     /// fails — introducing a dataset is a config transaction.
-    fn bind_datasets(
-        &mut self,
-        base_dir: Option<&std::path::Path>,
-        prior: Option<&rustbgpd_policy::datasets::DatasetBindings>,
-        mode: DatasetBindMode,
-    ) -> Result<DatasetLoadSummary, ConfigError> {
-        self.bind_datasets_capturing(base_dir, prior, mode, None, None, None)
-    }
-
     #[expect(
         clippy::too_many_lines,
-        reason = "active provenance capture preserves the existing linear load state machine"
+        clippy::too_many_arguments,
+        reason = "active provenance capture and RPC confinement preserve the existing linear load state machine"
     )]
     fn bind_datasets_capturing(
         &mut self,
@@ -615,6 +691,7 @@ impl Config {
         mut capture: Option<&mut source_provenance::SourceCapture>,
         prior_manifest: Option<&source_provenance::SourceManifest>,
         accepted_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+        sources: SourceRules<'_>,
     ) -> Result<DatasetLoadSummary, ConfigError> {
         use rustbgpd_policy::datasets::{
             DatasetBindings, DatasetHandle, DatasetKind, load_dataset_file,
@@ -694,6 +771,13 @@ impl Config {
             let accepted = accepted_datasets
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
+            if let SourceRules::Api(Some(confine)) = sources {
+                confined_source_path(&path, confine).map_err(|reason| {
+                    ConfigError::InvalidPolicyEntry {
+                        reason: format!("dataset {name:?}: {reason}"),
+                    }
+                })?;
+            }
             let loaded = if let Some(capture) = capture.as_deref_mut() {
                 match source_provenance::load_dataset_captured(
                     &path,
@@ -745,6 +829,14 @@ impl Config {
                         Err(reason)
                     }
                 }
+            };
+            // A dataset parse error quotes the offending entry; an RPC
+            // candidate's caller did not supply the file.
+            let loaded = match loaded {
+                Err(reason) if matches!(sources, SourceRules::Api(_)) => {
+                    Err(redact_dataset_reason(reason))
+                }
+                loaded => loaded,
             };
             match (existing, loaded, mode) {
                 (
@@ -870,10 +962,100 @@ impl Config {
     /// candidate whose external inputs are byte-identical to the
     /// accepted snapshot's, and every other load path leaves the digest
     /// empty so classification falls back to the presence fence.
+    #[cfg(test)]
     pub(crate) fn load_toml_candidate_captured(
         content: &str,
         source_name: &str,
     ) -> Result<Self, String> {
+        Self::load_candidate(content, source_name, true, SourceRules::OnDisk)
+    }
+
+    /// The directories an RPC-supplied candidate may name external policy
+    /// sources under: this (accepted) config's `[policy] rpol_roots`, and
+    /// the directories of its `.rpol` files and dataset files. See
+    /// [`Self::load_rpc_candidate`].
+    pub(crate) fn candidate_source_roots(&self) -> Vec<PathBuf> {
+        let parent = |path: &str| std::path::Path::new(path).parent().map(PathBuf::from);
+        self.policy
+            .rpol_roots
+            .iter()
+            .map(PathBuf::from)
+            .chain(
+                self.policy
+                    .rpol_files
+                    .iter()
+                    .filter_map(|path| parent(path)),
+            )
+            .chain(
+                self.policy
+                    .datasets
+                    .values()
+                    .filter_map(|dataset| parent(&dataset.path)),
+            )
+            .collect()
+    }
+
+    /// Load a candidate received over the API (config diff, plan, apply,
+    /// EVPN apply). Compile and dataset parse errors carry locations,
+    /// never file text: the caller did not supply those files.
+    ///
+    /// With `accepted_roots` (callers below `operator_only`), the load is
+    /// confined: every `.rpol` file, `[policy] rpol_roots` entry and
+    /// dataset file must resolve (symlinks included) under one of them;
+    /// they come from [`Self::candidate_source_roots`] of the accepted
+    /// config. Imports stay confined as usual, to the candidate's own
+    /// roots, which are themselves inside. `None` is for operator callers,
+    /// who may stage a candidate's sources anywhere the daemon can read,
+    /// as an on-disk config can.
+    ///
+    /// With `capture_external_inputs`, the byte identity of every external
+    /// source read is recorded in `policy.external_sources_digest`
+    /// (ADR-0121 v2 framing). Only the config-transaction plan and apply
+    /// paths capture: the digest lets the planner admit a full-snapshot
+    /// candidate whose external inputs are byte-identical to the accepted
+    /// snapshot's; every other path leaves it empty, so classification
+    /// falls back to the presence fence.
+    ///
+    /// This reads files: run it off the peer-manager actor.
+    pub(crate) fn load_rpc_candidate(
+        content: &str,
+        source_name: &str,
+        capture_external_inputs: bool,
+        accepted_roots: Option<&[PathBuf]>,
+    ) -> Result<Self, String> {
+        let confine: Option<Vec<PathBuf>> = accepted_roots.map(|roots| {
+            roots
+                .iter()
+                .filter_map(|root| root.canonicalize().ok())
+                .collect()
+        });
+        Self::load_candidate(
+            content,
+            source_name,
+            capture_external_inputs,
+            SourceRules::Api(confine.as_deref()),
+        )
+    }
+
+    fn load_candidate(
+        content: &str,
+        source_name: &str,
+        capture_external_inputs: bool,
+        sources: SourceRules<'_>,
+    ) -> Result<Self, String> {
+        if !capture_external_inputs {
+            return Self::load_from_toml_source_with_capture(
+                content,
+                source_name,
+                None,
+                None,
+                DatasetBindMode::Apply,
+                None,
+                None,
+                None,
+                sources,
+            );
+        }
         let mut capture = source_provenance::SourceCapture::default();
         let mut config = Self::load_from_toml_source_with_capture(
             content,
@@ -884,6 +1066,7 @@ impl Config {
             Some(&mut capture),
             None,
             None,
+            sources,
         )?;
         // The document hash is irrelevant here: only the external-source
         // frames feed the digest.

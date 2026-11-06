@@ -2470,6 +2470,7 @@ async fn fake_live_policy_peer_manager(
                 candidate_toml,
                 expected_runtime_snapshot_token,
                 verify_external_inputs: _,
+                operator_sources: _,
                 reply,
             } => {
                 let mut response = attach_committed_candidate(plan.clone(), &candidate_toml);

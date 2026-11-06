@@ -958,6 +958,12 @@ pub enum PeerManagerCommand {
     DiffRuntimeConfig {
         /// Candidate TOML content supplied by the caller.
         candidate_toml: String,
+        /// The caller holds `operator_only` authority, so the candidate's
+        /// `.rpol`, policy-root and dataset paths may name any file the
+        /// daemon can read. Otherwise they must resolve under the accepted
+        /// config's policy directories. Either way the reads are bounded,
+        /// refuse non-regular files, and errors quote no file text.
+        operator_sources: bool,
         /// Reply channel returning redacted diff output only.
         reply: oneshot::Sender<Result<RuntimeConfigDiff, RuntimeConfigDiffError>>,
     },
@@ -976,6 +982,12 @@ pub enum PeerManagerCommand {
         /// leaves it false so gNMI full-snapshot candidates keep the
         /// external-input presence fence.
         verify_external_inputs: bool,
+        /// The caller holds `operator_only` authority, so the candidate's
+        /// `.rpol`, policy-root and dataset paths may name any file the
+        /// daemon can read. Otherwise they must resolve under the accepted
+        /// config's policy directories. Either way the reads are bounded,
+        /// refuse non-regular files, and errors quote no file text.
+        operator_sources: bool,
         /// Reply channel returning the transaction plan.
         reply: oneshot::Sender<
             Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError>,

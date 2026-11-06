@@ -485,11 +485,26 @@ impl EvpnRuntimeReloadApply {
         &self,
         request: &proto::ApplyEvpnRuntimeRequest,
     ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
-        let candidate = Config::load_toml_with_diagnostics(
-            &request.candidate_toml,
-            "candidate EVPN runtime config",
-        )
-        .map_err(|err| GrpcEvpnRuntimeApplyError::InvalidArgument(err.clone()))?;
+        // External sources stay under the committed config's policy
+        // directories, and reading them stays off the async workers.
+        let accepted_roots = match self.committed_config.lock() {
+            Ok(guard) => guard.candidate_source_roots(),
+            Err(poisoned) => poisoned.into_inner().candidate_source_roots(),
+        };
+        let candidate_toml = request.candidate_toml.clone();
+        let candidate = tokio::task::spawn_blocking(move || {
+            Config::load_rpc_candidate(
+                &candidate_toml,
+                "candidate EVPN runtime config",
+                false,
+                Some(&accepted_roots),
+            )
+        })
+        .await
+        .map_err(|error| {
+            GrpcEvpnRuntimeApplyError::Internal(format!("EVPN candidate load failed: {error}"))
+        })?
+        .map_err(GrpcEvpnRuntimeApplyError::InvalidArgument)?;
         self.apply_candidate_config(&candidate, request.validate_only)
             .await
     }

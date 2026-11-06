@@ -131,6 +131,9 @@ where
             .expect("a request without a resolved role was denied above");
         let audit_handle = GrpcAuditHandle::default();
         req.extensions_mut().insert(role);
+        req.extensions_mut().insert(crate::authz::CallerTier(
+            role.max_tier().min(self.context.max_tier),
+        ));
         req.extensions_mut().insert(audit_handle.clone());
         let context = self.context.clone();
         let metrics = self.metrics.clone();

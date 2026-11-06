@@ -3407,6 +3407,7 @@ dependencies = [
  "arc-swap",
  "ariadne",
  "criterion",
+ "libc",
  "logos",
  "regex",
  "rustbgpd-wire",
