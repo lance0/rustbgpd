@@ -89,7 +89,12 @@ pub struct LinuxDataplane {
     /// `&mut self` so we already serialize, but `probe` and
     /// `dump_snapshot` both write here from the same actor task — the lock
     /// makes future concurrency easy if the actor ever splits.
-    link_cache: Arc<Mutex<links::LinkCache>>,
+    ///
+    /// The inventory is published as an `Arc` so readers (the notify
+    /// task on every neighbour event, the apply path on every FDB op)
+    /// take a reference-counted snapshot instead of deep-cloning every
+    /// map; see [`link_cache_snapshot`].
+    link_cache: SharedLinkCache,
     /// Upward `LocalMacObservation` channel receiver, taken once via
     /// [`Dataplane::take_local_mac_rx`] and handed to the daemon's
     /// originator. `Some` while the dataplane owns it; `None` after
@@ -208,8 +213,8 @@ impl LinuxDataplane {
         // make progress.
         tokio::spawn(connection);
 
-        let link_cache: Arc<Mutex<links::LinkCache>> =
-            Arc::new(Mutex::new(links::LinkCache::default()));
+        let link_cache: SharedLinkCache =
+            Arc::new(Mutex::new(Arc::new(links::LinkCache::default())));
 
         // Prime the link cache with one synchronous dump_links pass
         // BEFORE spawning the notify loop. The notify classifier
@@ -234,7 +239,7 @@ impl LinuxDataplane {
         .await
         {
             Ok(Ok(cache)) => {
-                *link_cache.lock().await = cache;
+                *link_cache.lock().await = Arc::new(cache);
                 tracing::debug!("primed link cache for RTNLGRP_NEIGH classifier");
             }
             Ok(Err(e)) => {
@@ -298,6 +303,17 @@ impl LinuxDataplane {
     }
 }
 
+/// The published link inventory: replaced wholesale by each dump,
+/// read through cheap `Arc` snapshots.
+type SharedLinkCache = Arc<Mutex<Arc<links::LinkCache>>>;
+
+/// Take a snapshot of the published link inventory. The lock is held
+/// only to bump the reference count, so a reader never deep-clones the
+/// cache's maps and never holds the lock across netlink I/O.
+async fn link_cache_snapshot(link_cache: &Mutex<Arc<links::LinkCache>>) -> Arc<links::LinkCache> {
+    Arc::clone(&*link_cache.lock().await)
+}
+
 /// Drain the unsolicited multicast message stream and forward
 /// classified observations to the daemon. Exits when the upstream
 /// connection task closes the stream.
@@ -306,7 +322,7 @@ async fn notify_loop(
         netlink_packet_core::NetlinkMessage<RouteNetlinkMessage>,
         netlink_sys::SocketAddr,
     )>,
-    link_cache: Arc<Mutex<links::LinkCache>>,
+    link_cache: SharedLinkCache,
     local_mac_tx: mpsc::Sender<LocalMacObservation>,
     kernel_event_tx: mpsc::Sender<KernelEvent>,
     on_observation_drop: ObservationDropHook,
@@ -320,7 +336,7 @@ async fn notify_loop(
         };
         match payload {
             RouteNetlinkMessage::NewNeighbour(neigh) => {
-                let cache = link_cache.lock().await.clone();
+                let cache = link_cache_snapshot(&link_cache).await;
                 if let Some(obs) =
                     notify::classify_neigh(notify::NeighEventKind::New, &neigh, &cache)
                 {
@@ -354,7 +370,7 @@ async fn notify_loop(
                 }
             }
             RouteNetlinkMessage::DelNeighbour(neigh) => {
-                let cache = link_cache.lock().await.clone();
+                let cache = link_cache_snapshot(&link_cache).await;
                 let key = notify::ip_neighbour_cache_key(&neigh);
                 let obs = notify::classify_neigh(notify::NeighEventKind::Del, &neigh, &cache)
                     .or_else(|| {
@@ -409,13 +425,11 @@ async fn notify_loop(
             // wake path; our own port writes echo here and cost one
             // coalesced no-op pass.
             RouteNetlinkMessage::NewLink(link) | RouteNetlinkMessage::DelLink(link) => {
-                // Classify under the guard (read-only) — cloning the
-                // cache per event would be a per-event allocation on a
+                // Classify against a reference-counted snapshot: a deep
+                // clone per event would be a per-event allocation on a
                 // group that is chatty under host container churn.
-                let relevant = {
-                    let cache = link_cache.lock().await;
-                    notify::classify_link_event(&link, &cache)
-                };
+                let cache = link_cache_snapshot(&link_cache).await;
+                let relevant = notify::classify_link_event(&link, &cache);
                 if relevant {
                     let _ = kernel_event_tx.try_send(KernelEvent::KernelStateChanged);
                 }
@@ -502,8 +516,8 @@ impl Dataplane for LinuxDataplane {
         let cache = match refresh {
             Ok(mut c) => {
                 c.bind_local_mac_vlan_attribution(instances);
-                let mut guard = self.link_cache.lock().await;
-                *guard = c.clone();
+                let c = Arc::new(c);
+                *self.link_cache.lock().await = Arc::clone(&c);
                 c
             }
             Err(e) => {
@@ -525,11 +539,13 @@ impl Dataplane for LinuxDataplane {
 
     async fn dump_snapshot(&mut self) -> Result<KernelSnapshot, DataplaneError> {
         let mut cache = links::dump_links(&self.handle).await?;
-        {
+        let cache = {
             let mut guard = self.link_cache.lock().await;
             cache.inherit_local_mac_vlan_attribution_from(&guard);
-            *guard = cache.clone();
-        }
+            let cache = Arc::new(cache);
+            *guard = Arc::clone(&cache);
+            cache
+        };
         let fdb_entries = fdb::dump_fdb(&self.handle, &cache).await?;
         let mut snap = KernelSnapshot::new();
         snap.local_fdb = fdb_entries.local;
@@ -703,21 +719,21 @@ impl Dataplane for LinuxDataplane {
                 ac_gate::apply_ac_port_state(&self.handle, *ifindex, *blocked).await
             }
             DataplaneOp::AddPeerSyncFdb { .. } | DataplaneOp::RemovePeerSyncFdb { .. } => {
-                let cache = self.link_cache.lock().await.clone();
+                let cache = link_cache_snapshot(&self.link_cache).await;
                 fdb::apply_peer_sync_op(&self.handle, &cache, op).await
             }
             DataplaneOp::AddRemoteFdb { .. }
             | DataplaneOp::UpdateRemoteFdb { .. }
             | DataplaneOp::RemoveRemoteFdb { .. } => {
-                let cache = self.link_cache.lock().await.clone();
+                let cache = link_cache_snapshot(&self.link_cache).await;
                 fdb::apply_op(&self.handle, &cache, op).await
             }
             DataplaneOp::AddFloodFdb { vni, dst } => {
-                let cache = self.link_cache.lock().await.clone();
+                let cache = link_cache_snapshot(&self.link_cache).await;
                 fdb::apply_flood_op(&self.handle, &cache, *vni, *dst, true).await
             }
             DataplaneOp::RemoveFloodFdb { vni, dst } => {
-                let cache = self.link_cache.lock().await.clone();
+                let cache = link_cache_snapshot(&self.link_cache).await;
                 fdb::apply_flood_op(&self.handle, &cache, *vni, *dst, false).await
             }
             DataplaneOp::AddRemoteIpRoute { .. }
@@ -905,7 +921,7 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
         vlan: Option<u16>,
         nh_id: u32,
     ) -> Result<(), DataplaneError> {
-        let cache = self.link_cache.lock().await.clone();
+        let cache = link_cache_snapshot(&self.link_cache).await;
         fdb_nhg::apply_install_fdb_nhg_row(&self.handle, &cache, vni, mac, vlan, nh_id).await
     }
 
@@ -915,7 +931,7 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
         mac: rustbgpd_evpn::MacAddress,
         vlan: Option<u16>,
     ) -> Result<(), DataplaneError> {
-        let cache = self.link_cache.lock().await.clone();
+        let cache = link_cache_snapshot(&self.link_cache).await;
         fdb_nhg::apply_remove_fdb_nhg_row(&self.handle, &cache, vni, mac, vlan).await
     }
 
@@ -1102,6 +1118,21 @@ mod tests {
     }
 
     /// An IP that rebinds to a new MAC arrives as one `RTM_NEWNEIGH`
+    /// LAN-2909 L-E1: readers share the published inventory instead of
+    /// deep-cloning it. Every neighbour event and every FDB op used to
+    /// copy each map in the cache under the lock.
+    #[tokio::test]
+    async fn link_cache_snapshots_share_the_published_inventory() {
+        let link_cache = Mutex::new(Arc::new(notify::tests::cache_for(100, 11, 22)));
+        let first = link_cache_snapshot(&link_cache).await;
+        let second = link_cache_snapshot(&link_cache).await;
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "snapshot deep-cloned the cache"
+        );
+        assert!(Arc::ptr_eq(&first, &*link_cache.lock().await));
+    }
+
     /// replacing the row in place; the kernel sends no `RTM_DELNEIGH`
     /// for the old binding. The notify loop must deliver the change as
     /// `IpRemoved` for the displaced MAC before `IpAdded` for the new
@@ -1115,7 +1146,7 @@ mod tests {
         let (msg_tx, msg_rx) = futures::channel::mpsc::unbounded();
         let (obs_tx, mut obs_rx) = mpsc::channel(16);
         let (event_tx, _event_rx) = mpsc::channel(16);
-        let link_cache = Arc::new(Mutex::new(notify::tests::cache_for(100, 11, 22)));
+        let link_cache = Arc::new(Mutex::new(Arc::new(notify::tests::cache_for(100, 11, 22))));
         let hook: ObservationDropHook =
             Arc::new(|reason: &'static str| panic!("unexpected observation drop: {reason}"));
 
