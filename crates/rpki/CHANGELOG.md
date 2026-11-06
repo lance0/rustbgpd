@@ -27,6 +27,10 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   (10000000) budget. Previously the only limit was the per-transaction record
   budget, which reset with every serial update.
 - The new API is additive, and `RtrError` was already `#[non_exhaustive]`.
+- A cache that answers the v2 query at a lower version during §7 negotiation is
+  no longer sent a fatal Error Report code 8. That code is for a version that
+  differs from a negotiated one. The client now closes the connection and
+  reconnects at the lower version, as 8210bis §7 allows.
 - Enforce the RTR expire interval (RFC 8210 §6) while a query is in flight and
   while a reconnect is connecting. Previously the expiry was checked only while
   the session sat idle and between retries, so a cache that accepted a query and

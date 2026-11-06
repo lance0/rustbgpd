@@ -1148,7 +1148,9 @@ impl RtrClient {
         // An Error Report, where the draft calls for one, is sent
         // BEFORE the session is dropped (8210bis §5.11, §12) — and
         // never in response to a received Error Report.
-        if let Some((code, pdu, text)) = teardown_report(&result, &parse_buf) {
+        if let Some((code, pdu, text)) =
+            teardown_report(&result, &parse_buf, self.negotiation_complete)
+        {
             self.send_error_report(stream, code, &pdu, text).await;
         }
         Err(result)
@@ -1779,7 +1781,11 @@ impl RtrClient {
 /// Returns `None` for received Error Reports — §5.11: "An Error Report
 /// PDU MUST NOT be sent as a response to an Error Report PDU" — and for
 /// events with no draft-assigned code (transport loss, local budgets).
-fn teardown_report(error: &RtrError, parse_buf: &[u8]) -> Option<(u16, Vec<u8>, &'static str)> {
+fn teardown_report(
+    error: &RtrError,
+    parse_buf: &[u8],
+    negotiated: bool,
+) -> Option<(u16, Vec<u8>, &'static str)> {
     // §5.11/§7: never answer an Error Report — even one that is itself
     // erroneous (bad version byte, undecodable) — with an Error Report.
     let offending_is_error_report =
@@ -1795,8 +1801,17 @@ fn teardown_report(error: &RtrError, parse_buf: &[u8]) -> Option<(u16, Vec<u8>, 
         // negotiated one → code 8 ("Unexpected Protocol Version") for a
         // known-but-wrong version, code 4 ("Unsupported Protocol
         // Version") for a version this implementation does not know.
-        RtrError::VersionMismatch { got, .. } => {
+        RtrError::VersionMismatch { expected, got } => {
             if offending_is_error_report {
+                return None;
+            }
+            // §7: a response at a lower version than the router's query is
+            // the cache downgrading, and the router "MUST either downgrade
+            // ... or terminate the connection". Terminating needs no
+            // report: code 8 is for a version that "differs from the
+            // protocol version negotiated", and none has been negotiated
+            // yet. The fallback then reconnects at the lower version.
+            if !negotiated && got < expected {
                 return None;
             }
             let (code, text) = if matches!(got, 0..=2) {
@@ -3869,6 +3884,52 @@ mod tests {
         assert_eq!(update, VrpUpdate::ServerDown { server: addr });
         assert!(accepted.elapsed() <= Duration::from_secs(120));
         assert!(dials.load(Ordering::SeqCst) >= 2);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §7: a cache that answers the v2 query with a v1 Cache Response is
+    /// downgrading. The router terminates without an Error Report (code 8
+    /// applies only once a version is negotiated) and reconnects at v1.
+    #[tokio::test]
+    async fn downgrade_reply_during_negotiation_falls_back_without_error_report() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, _vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut stream).await,
+            (crate::rtr_codec::RTR_VERSION_2, RtrPdu::ResetQuery)
+        );
+        write_pdu_version(
+            &mut stream,
+            RtrPdu::CacheResponse { session_id: 7 },
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        let mut rest = Vec::new();
+        timeout(Duration::from_secs(5), stream.read_to_end(&mut rest))
+            .await
+            .expect("the client did not close the downgraded connection")
+            .unwrap();
+        assert!(
+            rest.is_empty(),
+            "the client answered the downgrade with {:?}",
+            RtrPdu::decode(&rest).map(|(pdu, _)| pdu)
+        );
+
+        let (mut v1, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut v1).await,
+            (crate::rtr_codec::RTR_VERSION, RtrPdu::ResetQuery)
+        );
 
         client_handle.abort();
         let _ = client_handle.await;
