@@ -5928,6 +5928,11 @@ impl RibManager {
             )
             .chain(
                 self.loc_rib
+                    .iter_labeled()
+                    .map(|route| ExactExportKey::Labeled(route.key()).nlri_identity()),
+            )
+            .chain(
+                self.loc_rib
                     .iter_evpn()
                     .map(|route| ExactExportKey::Evpn(route.key())),
             )
@@ -5986,11 +5991,14 @@ impl RibManager {
                         .inspect(|_| checkpoint())
                         .any(|rib| rib.iter_vpn_for_nlri(&key.nlri_key).next().is_some())
             }
-            ExactExportKey::Labeled(key) => self
-                .ribs
-                .values()
-                .inspect(|_| checkpoint())
-                .any(|rib| rib.iter_labeled_for_prefix(&key.prefix).next().is_some()),
+            ExactExportKey::Labeled(key) => {
+                self.loc_rib.get_labeled(&key.prefix).is_some()
+                    || self
+                        .ribs
+                        .values()
+                        .inspect(|_| checkpoint())
+                        .any(|rib| rib.iter_labeled_for_prefix(&key.prefix).next().is_some())
+            }
             ExactExportKey::Rtc(key) => self.ribs.values().any(|rib| {
                 checkpoint();
                 rib.iter_rtc().inspect(|_| checkpoint()).any(|route| {

@@ -3308,3 +3308,130 @@ fn deferred_frozen_private_evpn_rejection_retires_at_release() {
         }
     }
 }
+
+/// Labeled unicast is per-peer, so its wire and counts never include a
+/// rejected route, but the advertised-route explain reads the rejection
+/// overlay. A labeled Loc-RIB row frozen by a selection hold keeps its
+/// rejection through the source's withdrawal and an in-hold End-of-RIB
+/// prune, so explain still reports `exact_export_rejected` after an
+/// identical re-announcement; without one, the release retires it.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one hold lifecycle checks the overlay and explain for both release outcomes"
+)]
+fn deferred_frozen_labeled_rejection_keeps_the_explain_exact() {
+    let family = (Afi::Ipv4, Safi::LabeledUnicast);
+    for reannounce in [true, false] {
+        let case = format!("reannounce={reannounce}");
+        let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 83));
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_selection_deferral(SelectionDeferralConfig {
+                timeout: Duration::from_secs(60),
+                waiters: vec![SelectionDeferralWaiterConfig {
+                    peer: waiter.into(),
+                    families: vec![family],
+                }],
+            });
+        let classic = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
+        let source = Ipv4Addr::new(198, 51, 100, 10);
+        let route = make_labeled_rib_route(source, 30, 1030, 100);
+        let prefix = route.nlri.prefix;
+        let key = ExactExportKey::Labeled(route.key());
+        let rejecting = MockExactExportEncoder::accepting(31);
+        rejecting.set_profile(31, [key.clone()]);
+        let mut classic_rx = sync_peer_up(&mut manager, classic, family, Some(rejecting), false);
+        let send = |manager: &mut RibManager, announce: bool| {
+            manager.handle_update(RibUpdate::LabeledRoutesReceived {
+                peer: peer_v4(source),
+                session_id: 0,
+                announced: if announce {
+                    vec![route.clone()]
+                } else {
+                    vec![]
+                },
+                withdrawn: if announce { vec![] } else { vec![route.key()] },
+            });
+        };
+        let rejected = |manager: &RibManager| {
+            manager
+                .peer_unexportable
+                .get(&classic)
+                .is_some_and(|keys| keys.contains(&key))
+        };
+        let explain = |manager: &mut RibManager| {
+            let (reply, mut result) = oneshot::channel();
+            manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+                peer: classic,
+                prefix,
+                rd: None,
+                labeled: true,
+                source: None,
+                reply,
+            });
+            result.try_recv().unwrap().unwrap()
+        };
+        send(&mut manager, true);
+        assert!(rejected(&manager), "{case}: the encoder rejected the route");
+
+        let _waiter = sync_peer_up(&mut manager, waiter, family, None, true);
+        assert!(manager.selection_deferred(family), "{case}");
+        send(&mut manager, false);
+        assert!(
+            manager.loc_rib.get_labeled(&prefix).is_some(),
+            "{case}: the hold freezes the withdrawn best"
+        );
+        let prunes = manager.test_exact_export_full_prune_calls;
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: classic,
+            session_id: 7,
+            afi: family.0,
+            safi: family.1,
+        });
+        assert!(
+            manager.test_exact_export_full_prune_calls > prunes,
+            "{case}: the End-of-RIB ran the full prune"
+        );
+        assert!(manager.selection_deferred(family), "{case}: still held");
+        assert!(
+            rejected(&manager),
+            "{case}: the frozen row keeps its rejection"
+        );
+        if reannounce {
+            send(&mut manager, true);
+        }
+        manager.expire_selection_deferral();
+        assert!(!manager.selection_deferred(family), "{case}");
+        assert_eq!(
+            manager.loc_rib.get_labeled(&prefix).is_some(),
+            reannounce,
+            "{case}"
+        );
+        assert_eq!(
+            rejected(&manager),
+            reannounce,
+            "{case}: the rejection lives exactly as long as the route"
+        );
+        if reannounce {
+            let explanation = explain(&mut manager);
+            assert_eq!(
+                explanation.decision,
+                crate::update::ExplainDecision::Deny,
+                "{case}"
+            );
+            assert_eq!(
+                explanation.gates.last().map(|gate| gate.code),
+                Some("exact_export_rejected"),
+                "{case}"
+            );
+        }
+        let announced: usize = std::iter::from_fn(|| classic_rx.try_recv().ok())
+            .map(|update| update.labeled_announce.len())
+            .sum();
+        assert_eq!(
+            announced, 0,
+            "{case}: the classic peer is never sent the route"
+        );
+    }
+}

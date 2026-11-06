@@ -2085,6 +2085,15 @@ impl RibManager {
         let mut labeled = labeled.into_set(&mut checkpoint);
         if !labeled.is_empty() {
             self.recompute_labeled_keys(&labeled);
+            if !self.peer_unexportable.is_empty() {
+                let gone: Vec<_> = labeled
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|key| self.loc_rib.get_labeled(&key.prefix).is_none())
+                    .map(|key| crate::update::ExactExportKey::Labeled(*key))
+                    .collect();
+                self.retire_exact_export_rejections(gone);
+            }
             super::retire_hash_set(&mut labeled, &mut checkpoint);
         }
 
