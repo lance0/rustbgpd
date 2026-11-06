@@ -6,5 +6,6 @@
   withdrew. If the source then re-announced the route unchanged, the
   member's advertised count, advertised-route listing and BMP Adj-RIB-Out
   statistics included a route it was never sent once the hold released.
-  Ungrouped peers were not affected. A rejection whose
-  held row the release removes now retires at the release.
+  Ungrouped peers were not affected. When the release removes a held
+  unicast, VPN or EVPN row, the release now retires that row's rejections
+  in the same pass, instead of leaving them until the next bulk prune.

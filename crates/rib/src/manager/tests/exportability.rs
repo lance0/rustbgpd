@@ -3044,22 +3044,27 @@ fn bmp_advertised(manager: &mut RibManager, peer: PeerId, family: (Afi, Safi)) -
     })
 }
 
-/// Rows of the scenario family announced and withdrawn in `updates`.
-fn family_rows(updates: &[OutboundRouteUpdate], vpn: bool) -> (usize, usize) {
+const DEFERRED_UNICAST: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+const DEFERRED_VPN: (Afi, Safi) = (Afi::Ipv4, Safi::MplsVpn);
+const DEFERRED_EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+
+/// Rows of `family` announced and withdrawn in `updates`.
+fn family_rows(updates: &[OutboundRouteUpdate], family: (Afi, Safi)) -> (usize, usize) {
     updates
         .iter()
-        .fold((0, 0), |(announced, withdrawn), update| {
-            if vpn {
-                (
-                    announced + update.vpn_announce.len(),
-                    withdrawn + update.vpn_withdraw.len(),
-                )
-            } else {
-                (
-                    announced + update.announce.len(),
-                    withdrawn + update.unicast_withdrawals().count(),
-                )
-            }
+        .fold((0, 0), |(announced, withdrawn), update| match family {
+            DEFERRED_VPN => (
+                announced + update.vpn_announce.len(),
+                withdrawn + update.vpn_withdraw.len(),
+            ),
+            DEFERRED_EVPN => (
+                announced + update.evpn_announce.len(),
+                withdrawn + update.evpn_withdraw.len(),
+            ),
+            _ => (
+                announced + update.announce.len(),
+                withdrawn + update.unicast_withdrawals().count(),
+            ),
         })
 }
 
@@ -3068,23 +3073,18 @@ fn family_rows(updates: &[OutboundRouteUpdate], vpn: bool) -> (usize, usize) {
 /// must outlive the source. Otherwise, after an identical re-announcement
 /// leaves the best unchanged at release, the grouped view counts a route the
 /// member was never sent. The per-peer path is the reference. Without a
-/// re-announcement the release withdraws the row from the accepting member
-/// only, and the rejection retires with it.
+/// re-announcement the release withdraws the row from the accepting peer
+/// only, and the rejection retires with it in the same pass.
 #[expect(
     clippy::too_many_lines,
     reason = "one hold lifecycle checks every advertised surface of both paths"
 )]
 fn assert_deferred_frozen_rejection_stays_exact(
-    vpn: bool,
+    family: (Afi, Safi),
     force_ungrouped: bool,
     reannounce: bool,
 ) {
-    let case = format!("vpn={vpn} force_ungrouped={force_ungrouped} reannounce={reannounce}");
-    let family = if vpn {
-        (Afi::Ipv4, Safi::MplsVpn)
-    } else {
-        (Afi::Ipv4, Safi::Unicast)
-    };
+    let case = format!("{family:?} force_ungrouped={force_ungrouped} reannounce={reannounce}");
     let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 83));
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
@@ -3102,23 +3102,28 @@ fn assert_deferred_frozen_rejection_stays_exact(
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route_with_lp(prefix, source, 100);
     let vpn_route = make_vpn_rib_route(source, 30, 1030, 100);
-    let key = if vpn {
-        ExactExportKey::Vpn(vpn_route.key())
-    } else {
-        ExactExportKey::Unicast(route.prefix, route.path_id)
+    let evpn_route = make_evpn_imet(source, 30);
+    let key = match family {
+        DEFERRED_VPN => ExactExportKey::Vpn(vpn_route.key()),
+        DEFERRED_EVPN => ExactExportKey::Evpn(evpn_route.key()),
+        _ => ExactExportKey::Unicast(route.prefix, route.path_id),
     };
     let rejecting = MockExactExportEncoder::accepting(31);
     rejecting.set_profile(31, [key]);
     let mut classic_rx = sync_peer_up(&mut manager, classic, family, Some(rejecting), false);
     let accepting = MockExactExportEncoder::accepting(32);
     let mut extended_rx = sync_peer_up(&mut manager, extended, family, Some(accepting), false);
-    assert_eq!(
-        manager.grouped_member_of(classic).is_some(),
-        !force_ungrouped,
-        "{case}"
-    );
+    if family == DEFERRED_EVPN {
+        assert!(manager.evpn_grouped_member_of(classic).is_none(), "{case}");
+    } else {
+        assert_eq!(
+            manager.grouped_member_of(classic).is_some(),
+            !force_ungrouped,
+            "{case}"
+        );
+    }
     let source_update = |manager: &mut RibManager, announce: bool| {
-        manager.handle_update(if vpn {
+        manager.handle_update(if family == DEFERRED_VPN {
             RibUpdate::VpnRoutesReceived {
                 session_id: 0,
                 peer: peer_v4(source),
@@ -3134,38 +3139,46 @@ fn assert_deferred_frozen_rejection_stays_exact(
                 },
             }
         } else {
+            let evpn = family == DEFERRED_EVPN;
             RibUpdate::RoutesReceived {
                 session_id: 0,
                 peer: peer_v4(source),
-                announced: if announce {
+                announced: if announce && !evpn {
                     vec![route.clone()]
                 } else {
                     vec![]
                 },
-                withdrawn: if announce {
+                withdrawn: if announce || evpn {
                     vec![]
                 } else {
                     vec![(Prefix::V4(prefix), 0)]
                 },
                 flowspec_announced: Vec::new(),
                 flowspec_withdrawn: Vec::new(),
-                evpn_announced: Vec::new(),
-                evpn_withdrawn: Vec::new(),
+                evpn_announced: if announce && evpn {
+                    vec![evpn_route.clone()]
+                } else {
+                    vec![]
+                },
+                evpn_withdrawn: if !announce && evpn {
+                    vec![evpn_route.key()]
+                } else {
+                    vec![]
+                },
                 validated_with: None,
             }
         });
         drain_route_chunks(manager);
     };
-    let frozen = |manager: &RibManager| {
-        if vpn {
-            manager.loc_rib.get_vpn(&vpn_route.nlri.key()).is_some()
-        } else {
-            manager.loc_rib.get(&Prefix::V4(prefix)).is_some()
-        }
+    let frozen = |manager: &RibManager| match family {
+        DEFERRED_VPN => manager.loc_rib.get_vpn(&vpn_route.nlri.key()).is_some(),
+        DEFERRED_EVPN => manager.loc_rib.get_evpn(&evpn_route.key()).is_some(),
+        _ => manager.loc_rib.get(&Prefix::V4(prefix)).is_some(),
     };
     source_update(&mut manager, true);
     assert_eq!(bmp_advertised(&mut manager, classic, family), 0, "{case}");
     assert_eq!(bmp_advertised(&mut manager, extended, family), 1, "{case}");
+    assert!(manager.peer_unexportable.contains_key(&classic), "{case}");
 
     let _waiter = sync_peer_up(&mut manager, waiter, family, None, true);
     assert!(manager.selection_deferred(family), "{case}");
@@ -3185,14 +3198,14 @@ fn assert_deferred_frozen_rejection_stays_exact(
     assert_eq!(
         bmp_advertised(&mut manager, classic, family),
         0,
-        "{case}: the classic member was never sent the route"
+        "{case}: the classic peer was never sent the route"
     );
     assert_eq!(
         bmp_advertised(&mut manager, extended, family),
         u64::from(reannounce),
         "{case}"
     );
-    if !vpn {
+    if family == DEFERRED_UNICAST {
         let (reply, mut result) = oneshot::channel();
         manager.handle_update(RibUpdate::QueryAdvertisedCount {
             peer: classic,
@@ -3202,13 +3215,13 @@ fn assert_deferred_frozen_rejection_stays_exact(
     }
     let classic_sent: Vec<_> = std::iter::from_fn(|| classic_rx.try_recv().ok()).collect();
     assert_eq!(
-        family_rows(&classic_sent, vpn),
+        family_rows(&classic_sent, family),
         (0, 0),
-        "{case}: the classic member is neither sent nor withdrawn the route"
+        "{case}: the classic peer is neither sent nor withdrawn the route"
     );
     let extended_sent: Vec<_> = std::iter::from_fn(|| extended_rx.try_recv().ok()).collect();
     assert_eq!(
-        family_rows(&extended_sent, vpn),
+        family_rows(&extended_sent, family),
         (1, usize::from(!reannounce)),
         "{case}"
     );
@@ -3223,7 +3236,11 @@ fn assert_deferred_frozen_rejection_stays_exact(
 fn deferred_frozen_unicast_rejection_keeps_the_grouped_view_exact() {
     for force_ungrouped in [false, true] {
         for reannounce in [true, false] {
-            assert_deferred_frozen_rejection_stays_exact(false, force_ungrouped, reannounce);
+            assert_deferred_frozen_rejection_stays_exact(
+                DEFERRED_UNICAST,
+                force_ungrouped,
+                reannounce,
+            );
         }
     }
 }
@@ -3232,7 +3249,16 @@ fn deferred_frozen_unicast_rejection_keeps_the_grouped_view_exact() {
 fn deferred_frozen_vpn_rejection_keeps_the_grouped_view_exact() {
     for force_ungrouped in [false, true] {
         for reannounce in [true, false] {
-            assert_deferred_frozen_rejection_stays_exact(true, force_ungrouped, reannounce);
+            assert_deferred_frozen_rejection_stays_exact(DEFERRED_VPN, force_ungrouped, reannounce);
         }
+    }
+}
+
+/// Private EVPN, the production path: a release that drops the frozen row
+/// retires its rejection in the same pass.
+#[test]
+fn deferred_frozen_private_evpn_rejection_retires_at_release() {
+    for reannounce in [true, false] {
+        assert_deferred_frozen_rejection_stays_exact(DEFERRED_EVPN, false, reannounce);
     }
 }

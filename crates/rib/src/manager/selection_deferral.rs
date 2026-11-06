@@ -1990,6 +1990,16 @@ impl RibManager {
                     checkpoint();
                     self.distribute_evpn_keys_to_peer(peer, &evpn, &mut checkpoint);
                 }
+                // As for unicast: retire rejections whose held row is gone.
+                if !self.peer_unexportable.is_empty() {
+                    let gone: Vec<_> = evpn
+                        .iter()
+                        .inspect(|_| checkpoint())
+                        .filter(|key| self.loc_rib.get_evpn(key).is_none())
+                        .map(|key| crate::update::ExactExportKey::Evpn(*key))
+                        .collect();
+                    self.retire_exact_export_rejections(gone);
+                }
                 super::retire_hash_set(&mut evpn, &mut checkpoint);
             }
             self.complete_selection_evpn_feeds();
