@@ -8732,7 +8732,7 @@ impl RibManager {
         targets: Option<&HashSet<PeerId>>,
     ) {
         let pass = |manager: &mut Self, owned: bool| {
-            manager.distribute_changes_with_readiness(
+            manager.distribute_changes_with_readiness::<false>(
                 best_changed,
                 all_affected,
                 service_ingest_readiness,
@@ -8788,7 +8788,7 @@ impl RibManager {
         targets: &HashSet<PeerId>,
         drain: &mut super::outbound_owing::OwingDrain,
     ) {
-        self.distribute_changes_with_readiness(
+        self.distribute_changes_with_readiness::<true>(
             empty,
             empty,
             false,
@@ -8808,7 +8808,7 @@ impl RibManager {
         clippy::too_many_arguments,
         reason = "the owned flag records the executor handoff decided by the caller"
     )]
-    fn distribute_changes_with_readiness(
+    fn distribute_changes_with_readiness<const DRAINING: bool>(
         &mut self,
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
@@ -8817,8 +8817,11 @@ impl RibManager {
         mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
         owned: bool,
-        mut drain: Option<&mut super::outbound_owing::OwingDrain>,
+        drain: Option<&mut super::outbound_owing::OwingDrain>,
     ) {
+        // The two callers fix the mode; ordinary passes carry no drain state.
+        debug_assert_eq!(DRAINING, drain.is_some());
+        let mut drain = if DRAINING { drain } else { None };
         // Clean incremental fanout owns no readiness episode: its work is
         // bounded by the pass. Owned shared preparation and cleanup take one
         // each, so their ages never bleed into a member's.
@@ -8829,7 +8832,7 @@ impl RibManager {
 
         // An owed-key drain carries no route change: none of a pass's
         // preamble side effects apply to it.
-        let draining = drain.is_some();
+        let draining = DRAINING;
         if !draining {
             self.record_deferred_unicast(best_changed);
             self.record_deferred_unicast(all_affected);
