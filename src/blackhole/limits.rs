@@ -36,14 +36,14 @@ impl InstallLimits {
         values.rotate_left(split);
     }
 
-    /// No new install can be admitted until an active row goes away.
-    pub(super) fn at_capacity(&self, active: usize) -> bool {
+    /// New installs the active cap still allows; `None` without a cap.
+    pub(super) fn headroom(&self, active: usize) -> Option<usize> {
         self.max_active
-            .is_some_and(|limit| active >= limit as usize)
+            .map(|limit| (limit as usize).saturating_sub(active))
     }
 
     pub(super) fn admit(&mut self, active: usize, now: Instant) -> Result<(), &'static str> {
-        if self.at_capacity(active) {
+        if self.headroom(active) == Some(0) {
             return Err("active_limit_exceeded");
         }
         let Some(bucket) = &mut self.bucket else {

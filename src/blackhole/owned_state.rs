@@ -24,7 +24,8 @@ const FILE_NAME: &str = "blackhole-owned.json";
 const TEMP_PREFIX: &str = ".blackhole-owned.json.tmp";
 const SCHEMA: &str = "rustbgpd.blackhole-owned/v1";
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_PREFIXES: usize = 1_000_000;
+/// Most prefixes one receipt can hold.
+pub(super) const MAX_PREFIXES: usize = 1_000_000;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Deserialize)]
@@ -115,6 +116,18 @@ impl OwnershipState {
     /// a receipt that holds neither the last durable nor the last
     /// attempted set was changed outside the actor and disables ownership.
     pub(super) fn flush(&mut self) -> bool {
+        self.publish(false)
+    }
+
+    /// [`Self::flush`] for the write ahead of kernel installs: the receipt
+    /// is read back and checked even when it needs no write, so an install
+    /// never relies on a receipt that was deleted or changed outside the
+    /// actor.
+    pub(super) fn flush_verified(&mut self) -> bool {
+        self.publish(true)
+    }
+
+    fn publish(&mut self, verify: bool) -> bool {
         if !self.available {
             return false;
         }
@@ -122,7 +135,8 @@ impl OwnershipState {
             self.persisted.clone_from(&self.prefixes);
             return true;
         };
-        if self.attempted.is_none() && self.prefixes == self.persisted {
+        let unchanged = self.attempted.is_none() && self.prefixes == self.persisted;
+        if unchanged && !verify {
             return true;
         }
         let on_disk = match store.read() {
@@ -141,6 +155,9 @@ impl OwnershipState {
             return false;
         }
         self.persisted = on_disk;
+        if unchanged {
+            return true;
+        }
         match store.replace(&self.persisted, &self.prefixes) {
             Ok(()) => {
                 self.persisted.clone_from(&self.prefixes);

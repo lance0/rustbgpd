@@ -829,7 +829,12 @@ async fn reconcile_once<F>(
         state.ownership.prefixes.clone_from(&retained);
         if state.ownership.flush() {
             state.adoption.swept = true;
-            for prefix in retained {
+            // A row claimed while an earlier sweep could not publish is
+            // already owned; queueing it would reap it after a withdrawal.
+            for prefix in retained
+                .into_iter()
+                .filter(|prefix| !state.owned.contains_key(prefix))
+            {
                 state.adoption.pending.insert(prefix);
                 metrics.record_blackhole_discard_adopted();
                 info!(
@@ -1038,35 +1043,82 @@ async fn reconcile_once<F>(
 /// written ahead of it; the next pass retries.
 const RECEIPT_WRITE_FAILED: &str = "receipt_write_failed";
 
+/// Report a candidate the install limits refused this pass.
+fn reject_for_limit(
+    state: &ReconcilerState,
+    metrics: &BgpMetrics,
+    statuses: &mut Vec<BlackholeStatus>,
+    current_rejected: &mut HashSet<RejectedBlackhole>,
+    candidate: &Candidate,
+    reason: &'static str,
+) {
+    let rejected_key = RejectedBlackhole {
+        prefix: candidate.prefix,
+        reason,
+    };
+    current_rejected.insert(rejected_key);
+    if !state.rejected.contains(&rejected_key) {
+        metrics.record_blackhole_discard_rejected(reason);
+    }
+    statuses.push(BlackholeStatus {
+        prefix: candidate.prefix,
+        peer: candidate.route.peer.addr(),
+        peer_interface: candidate.route.peer_interface(),
+        state: BlackholeState::Rejected,
+        reason: reason.to_string(),
+    });
+}
+
 /// Install the pass's eligible candidates. The receipt names them first,
 /// in one write, so it is a superset of the kernel rows the actor owns at
 /// every instant: a crash after any install leaves a receipt that adopts
-/// the row. Admission runs per candidate, so a failed install frees its
-/// slot for the next one; the pass's closing flush drops every candidate
-/// that was not installed.
+/// the row. The pass's closing flush drops every candidate that was not
+/// installed.
+///
+/// Only candidates that could be installed are written ahead: as many as
+/// the active cap still allows, and no more than the receipt can hold, in
+/// admission order. The rest are refused as `active_limit_exceeded` and
+/// retried next pass, which is also when a slot freed by a failed install
+/// is used.
+#[expect(
+    clippy::too_many_lines,
+    reason = "write-ahead bound, admission and install outcomes stay in one ordered pass"
+)]
 async fn install_eligible<F>(
     fib: &mut F,
     metrics: &BgpMetrics,
     state: &mut ReconcilerState,
-    eligible: Vec<Candidate>,
+    mut eligible: Vec<Candidate>,
     statuses: &mut Vec<BlackholeStatus>,
     current_rejected: &mut HashSet<RejectedBlackhole>,
 ) where
     F: BlackholeFib,
 {
+    let receipt_room = owned_state::MAX_PREFIXES.saturating_sub(state.ownership.prefixes.len());
+    let ahead = state
+        .limits
+        .headroom(state.active_count())
+        .unwrap_or(usize::MAX)
+        .min(receipt_room)
+        .min(eligible.len());
+    for candidate in eligible.split_off(ahead) {
+        reject_for_limit(
+            state,
+            metrics,
+            statuses,
+            current_rejected,
+            &candidate,
+            "active_limit_exceeded",
+        );
+    }
     if eligible.is_empty() {
         return;
     }
-    // At the active cap every candidate is rejected below without an
-    // install (the active count only grows here), so nothing is written.
-    let at_capacity = state.limits.at_capacity(state.active_count());
-    if !at_capacity {
-        state
-            .ownership
-            .prefixes
-            .extend(eligible.iter().map(|candidate| candidate.prefix));
-    }
-    if !at_capacity && !state.ownership.flush() {
+    state
+        .ownership
+        .prefixes
+        .extend(eligible.iter().map(|candidate| candidate.prefix));
+    if !state.ownership.flush_verified() {
         let reason = if state.ownership.available {
             RECEIPT_WRITE_FAILED
         } else {
@@ -1090,21 +1142,14 @@ async fn install_eligible<F>(
             .admit(state.active_count(), tokio::time::Instant::now())
         {
             state.ownership.prefixes.remove(&candidate.prefix);
-            let rejected_key = RejectedBlackhole {
-                prefix: candidate.prefix,
+            reject_for_limit(
+                state,
+                metrics,
+                statuses,
+                current_rejected,
+                &candidate,
                 reason,
-            };
-            current_rejected.insert(rejected_key);
-            if !state.rejected.contains(&rejected_key) {
-                metrics.record_blackhole_discard_rejected(reason);
-            }
-            statuses.push(BlackholeStatus {
-                prefix: candidate.prefix,
-                peer: candidate.route.peer.addr(),
-                peer_interface: candidate.route.peer_interface(),
-                state: BlackholeState::Rejected,
-                reason: reason.to_string(),
-            });
+            );
             continue;
         }
 
@@ -3601,6 +3646,9 @@ pub(super) mod tests {
         );
     }
 
+    /// A foreign row never takes the active slot. A failed install frees
+    /// it: the admission cursor moves past the failed candidate, so the
+    /// next pass writes the other candidate ahead and installs it.
     #[tokio::test]
     async fn failed_and_foreign_candidates_do_not_consume_active_capacity() {
         let first = v4_host(65);
@@ -3624,22 +3672,16 @@ pub(super) mod tests {
             } else {
                 fib.fail_install.insert(first, "denied".to_string());
             }
-            let metrics = BgpMetrics::with_registry(Registry::new());
-            let mut owned = HashMap::new();
-            let mut rejected = HashSet::new();
-            let mut adoption = deferred_adoption();
-            let _ = reconcile_for_test_with_config_and_adoption(
-                routes.clone(),
-                &mut fib,
-                &mut owned,
-                &mut rejected,
-                &metrics,
-                &mut adoption,
+            let mut state = ReconcilerState::new(
                 capped(1),
-            )
-            .await;
-            assert!(owned.contains_key(&second));
-            assert!(!owned.contains_key(&first));
+                deferred_adoption().reap_after,
+                OwnershipState::ephemeral([]),
+            );
+            for _ in 0..if foreign { 1 } else { 2 } {
+                pass_with(capped(1), &mut state, &mut fib, routes.clone()).await;
+            }
+            assert!(state.owned.contains_key(&second), "foreign={foreign}");
+            assert!(!state.owned.contains_key(&first));
         }
     }
 
@@ -4487,46 +4529,207 @@ pub(super) mod tests {
         (row.state, row.reason.as_str())
     }
 
-    /// A failing receipt write never strands a discard row. Rows owned
-    /// before the failure are still removed by withdrawal and the shutdown
-    /// drain, and a restart forgets the receipted prefix that has no row.
+    /// A failing receipt write never strands a discard row. With the fault
+    /// active, a new install is refused and owned rows are still removed:
+    /// a withdrawal that keeps another row publishes through the write
+    /// path, and a drain that empties the receipt publishes through the
+    /// unlink path, so each fault point fires where it can. A restart then
+    /// forgets the receipted prefixes that have no row.
     #[tokio::test]
     async fn receipt_write_failure_keeps_discard_removable() {
-        let prefix = v4(32);
-        for fault in RECEIPT_FAULTS {
-            for withdraw in [true, false] {
-                let (_dir, pinned, ownership) = durable_ownership(owned_state::FaultPoint::None);
-                let mut state =
-                    ReconcilerState::new(enabled(), deferred_adoption().reap_after, ownership);
-                let mut fib = FakeFib::default();
-                pass(&mut state, &mut fib, blackholed(&[prefix])).await;
-                assert!(fib.installed.contains(&prefix), "{fault:?}: not installed");
-                receipt_store(&mut state).fault = fault;
-                if withdraw {
-                    pass(&mut state, &mut fib, Vec::new()).await;
-                } else {
-                    let metrics = BgpMetrics::with_registry(Registry::new());
-                    drain_owned(&mut fib, &metrics, &mut state).await;
+        use owned_state::FaultPoint::{DirectorySync, FileSync, Rename, Unlink, Write};
+        let (gone, kept, refused) = (v4_host(1), v4_host(2), v4_host(3));
+        let cases = [
+            (Write, true),
+            (FileSync, true),
+            (Rename, true),
+            (DirectorySync, true),
+            (Unlink, false),
+            (DirectorySync, false),
+        ];
+        for (fault, withdraw) in cases {
+            let (_dir, pinned, ownership) = durable_ownership(owned_state::FaultPoint::None);
+            let mut state =
+                ReconcilerState::new(enabled(), deferred_adoption().reap_after, ownership);
+            let mut fib = FakeFib::default();
+            pass(&mut state, &mut fib, blackholed(&[gone, kept])).await;
+            assert_eq!(fib.installed, [gone, kept].into(), "{fault:?}");
+            receipt_store(&mut state).fault = fault;
+            if withdraw {
+                let statuses = pass(&mut state, &mut fib, blackholed(&[kept, refused])).await;
+                assert_eq!(
+                    reason_of(&statuses, refused),
+                    (BlackholeState::Failed, "receipt_write_failed"),
+                    "{fault:?}: the write-path fault did not fire"
+                );
+                assert_eq!(
+                    fib.installed,
+                    [kept].into(),
+                    "{fault:?}: withdrawal stranded"
+                );
+            } else {
+                let metrics = BgpMetrics::with_registry(Registry::new());
+                drain_owned(&mut fib, &metrics, &mut state).await;
+                assert!(fib.installed.is_empty(), "{fault:?}: drain stranded a row");
+                if fault == Unlink {
+                    assert_eq!(
+                        receipt_on_disk(&mut state),
+                        [gone, kept].into(),
+                        "the unlink fault did not fire"
+                    );
                 }
-                assert!(
-                    !fib.installed.contains(&prefix),
-                    "{fault:?} withdraw={withdraw}: discard row stranded after receipt write failure"
-                );
-                assert!(
-                    state.ownership.available,
-                    "{fault:?}: I/O failure fail-stopped"
-                );
-
-                drop(state);
-                let mut restarted = ReconcilerState::new(
-                    enabled(),
-                    reapable_adoption().reap_after,
-                    OwnershipState::load(Some(pinned)),
-                );
-                pass(&mut restarted, &mut fib, Vec::new()).await;
-                assert_eq!(fib.remove_calls, vec![prefix], "{fault:?}");
-                assert!(restarted.ownership.available && restarted.ownership.prefixes.is_empty());
             }
+            assert!(
+                state.ownership.available,
+                "{fault:?}: I/O failure fail-stopped"
+            );
+
+            drop(state);
+            let mut restarted = ReconcilerState::new(
+                enabled(),
+                reapable_adoption().reap_after,
+                OwnershipState::load(Some(pinned)),
+            );
+            pass(&mut restarted, &mut fib, Vec::new()).await;
+            assert!(fib.installed.is_empty(), "{fault:?}: restart left a row");
+            assert!(restarted.ownership.available && restarted.ownership.prefixes.is_empty());
+        }
+    }
+
+    /// The write-ahead reads the receipt back even when it needs no write:
+    /// an owned row that vanished from the kernel is not reinstalled after
+    /// its receipt was deleted under the actor.
+    #[tokio::test]
+    async fn write_ahead_verifies_receipt_before_reinstall() {
+        let prefix = v4(32);
+        let (dir, _pinned, ownership) = durable_ownership(owned_state::FaultPoint::None);
+        let mut state = ReconcilerState::new(enabled(), deferred_adoption().reap_after, ownership);
+        let mut fib = FakeFib::default();
+        pass(&mut state, &mut fib, blackholed(&[prefix])).await;
+        std::fs::remove_file(dir.path().join("blackhole-owned.json")).unwrap();
+        fib.installed.remove(&prefix);
+
+        let statuses = pass(&mut state, &mut fib, blackholed(&[prefix])).await;
+        assert_eq!(
+            fib.install_calls,
+            vec![prefix],
+            "reinstalled without receipt evidence"
+        );
+        assert!(!state.ownership.available);
+        assert_eq!(
+            reason_of(&statuses, prefix),
+            (BlackholeState::Failed, "ownership_state_unavailable")
+        );
+    }
+
+    /// A startup sweep that cannot publish leaves a live receipted row for
+    /// the candidate loop to claim. When publication recovers, the retried
+    /// sweep must not queue that owned row for reaping: after a withdrawal
+    /// the reap would find it unowned and disable ownership.
+    #[tokio::test]
+    async fn failed_sweep_does_not_queue_claimed_row_for_reap() {
+        let (live, orphan) = (v4_host(1), v4_host(2));
+        let (_dir, pinned, _) = durable_ownership(owned_state::FaultPoint::None);
+        let (store, empty) = owned_state::OwnedStateStore::load(Arc::clone(&pinned)).unwrap();
+        store
+            .replace(&empty, &BTreeSet::from([live, orphan]))
+            .unwrap();
+        let mut ownership = OwnershipState::load(Some(pinned));
+        ownership.store.as_mut().unwrap().fault = owned_state::FaultPoint::Write;
+        let mut state = ReconcilerState::new(enabled(), reapable_adoption().reap_after, ownership);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(live);
+
+        let statuses = pass(&mut state, &mut fib, blackholed(&[live])).await;
+        assert!(!state.adoption.swept);
+        assert_eq!(
+            reason_of(&statuses, live),
+            (BlackholeState::Installed, "adopted")
+        );
+
+        receipt_store(&mut state).fault = owned_state::FaultPoint::None;
+        pass(&mut state, &mut fib, Vec::new()).await;
+        assert!(state.adoption.swept);
+        assert!(state.ownership.available, "the reap disabled ownership");
+        assert!(fib.installed.is_empty());
+        assert_eq!(fib.remove_calls, vec![live]);
+        assert!(receipt_on_disk(&mut state).is_empty());
+    }
+
+    async fn pass_with(
+        config: BlackholeConfig,
+        state: &mut ReconcilerState,
+        fib: &mut FakeFib,
+        routes: Vec<Route>,
+    ) -> Vec<BlackholeStatus> {
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        reconcile_once(
+            config,
+            &rib_with_routes(routes),
+            fib,
+            &metrics,
+            &status_tx,
+            state,
+        )
+        .await;
+        status_rx.borrow().clone()
+    }
+
+    /// The write-ahead names only the candidates the active cap can admit,
+    /// in admission order, so a large backlog neither fails the receipt nor
+    /// keeps the routes the cap allows from installing.
+    #[tokio::test]
+    async fn write_ahead_is_bounded_by_active_capacity() {
+        let rows: Vec<Prefix> = (1..=6).map(v4_host).collect();
+        let (dir, _pinned, ownership) = durable_ownership(owned_state::FaultPoint::None);
+        let config = capped(2);
+        let mut state = ReconcilerState::new(config, deferred_adoption().reap_after, ownership);
+        let mut fib = FakeFib {
+            crash_receipt: Some(dir.path().join("blackhole-owned.json")),
+            ..FakeFib::default()
+        };
+        let statuses = pass_with(config, &mut state, &mut fib, blackholed(&rows)).await;
+
+        assert_eq!(fib.installed, rows[..2].iter().copied().collect());
+        let at_install = String::from_utf8(fib.crash_snapshot.take().unwrap()).unwrap();
+        let named = rows
+            .iter()
+            .filter(|row| at_install.contains(&format!("\"{row}\"")))
+            .count();
+        assert_eq!(named, 2, "the write-ahead named rows the cap cannot admit");
+        let limited = statuses
+            .iter()
+            .filter(|row| row.reason == "active_limit_exceeded")
+            .count();
+        assert_eq!(limited, 4);
+        assert_eq!(receipt_writes(&mut state), 1);
+    }
+
+    /// Without an active cap, the write-ahead stops at the receipt's
+    /// prefix limit instead of failing every pass.
+    #[tokio::test]
+    async fn write_ahead_is_bounded_by_receipt_limit() {
+        let held = (0..owned_state::MAX_PREFIXES - 1).map(|i| {
+            let i = u32::try_from(i).unwrap();
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + i), 32))
+        });
+        let rows = [v4_host(1), v4_host(2), v4_host(3)];
+        let mut state = ReconcilerState::new(
+            enabled(),
+            deferred_adoption().reap_after,
+            OwnershipState::ephemeral(held),
+        );
+        state.adoption.swept = true;
+        let mut fib = FakeFib::default();
+        let statuses = pass(&mut state, &mut fib, blackholed(&rows)).await;
+        assert_eq!(fib.installed, [rows[0]].into());
+        assert_eq!(state.ownership.prefixes.len(), owned_state::MAX_PREFIXES);
+        for row in &rows[1..] {
+            assert_eq!(
+                reason_of(&statuses, *row),
+                (BlackholeState::Rejected, "active_limit_exceeded")
+            );
         }
     }
 

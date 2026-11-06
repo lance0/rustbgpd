@@ -454,7 +454,12 @@ candidates into the receipt before installing them, and deletes kernel rows
 before writing the receipt without them. The receipt is written at most once
 for the pass's installs, once for each batch of removals, and once to drop
 candidates that were not installed. A crash at any point therefore leaves every
-daemon row receipted. Restart adopts only receipt∩marker and forgets receipted
+daemon row receipted. Only candidates that can be installed are written ahead:
+no more than the active cap still allows, and no more than the receipt's limit
+of 1,000,000 prefixes, in admission order. The rest report
+`rejected/active_limit_exceeded` and retry on the next pass. Before installing,
+the daemon reads the receipt back, so it never installs on the strength of a
+receipt that was deleted or changed outside it. Restart adopts only receipt∩marker and forgets receipted
 prefixes that have no marker row; unreceipted marker-identical rows remain
 foreign. Unclaimed receipt rows stay `adopted_pending_reap` until the 500 s
 deferral expires.
