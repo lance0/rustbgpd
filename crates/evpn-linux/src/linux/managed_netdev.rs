@@ -161,6 +161,15 @@ async fn create_bridge(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        bridge.ifindex,
+        &bridge.altnames,
+        name,
+        ownership_stamp,
+        "managed bridge",
+    )
+    .await?;
     adopt_existing_bridge(handle, name, &bridge, vlan_filtering, ownership_stamp).await
 }
 
@@ -292,6 +301,15 @@ async fn create_vxlan(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        vxlan.ifindex,
+        &vxlan.altnames,
+        name,
+        ownership_stamp,
+        "managed VXLAN",
+    )
+    .await?;
     adopt_existing_vxlan(handle, name, &vxlan, spec, ownership_stamp).await
 }
 
@@ -337,6 +355,10 @@ async fn remove_vxlan(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "create, stamp, stamp confirmation and binding convergence stay in one ordered sequence"
+)]
 async fn create_svd_vxlan(
     handle: &Handle,
     name: &str,
@@ -443,6 +465,15 @@ async fn create_svd_vxlan(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        vxlan.ifindex,
+        &vxlan.altnames,
+        name,
+        ownership_stamp,
+        "managed SVD VXLAN",
+    )
+    .await?;
     ensure_svd_vxlan_converged(handle, name, vxlan, spec, ownership_stamp, &fresh.bridges).await
 }
 
@@ -634,6 +665,15 @@ async fn create_vrf(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        vrf.ifindex,
+        &vrf.altnames,
+        name,
+        ownership_stamp,
+        "managed VRF",
+    )
+    .await?;
     ensure_exact_owned_vrf(name, &vrf, spec, ownership_stamp)
 }
 
@@ -745,6 +785,15 @@ async fn create_l3vxlan(
             )))
         };
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        vxlan.ifindex,
+        &vxlan.altnames,
+        name,
+        ownership_stamp,
+        "managed L3VXLAN",
+    )
+    .await?;
     ensure_exact_owned_l3vxlan(name, &vxlan, spec, ownership_stamp)
 }
 
@@ -826,6 +875,15 @@ async fn create_vlan_upper(
     let Some(link) = fresh.vlan_upper.as_ref() else {
         return Err(missing_vlan_upper_after(name, &fresh, "stamp"));
     };
+    ensure_stamp_landed_or_roll_back(
+        handle,
+        link.ifindex,
+        &link.altnames,
+        name,
+        ownership_stamp,
+        "managed VLAN upper",
+    )
+    .await?;
     adopt_existing_vlan_upper(handle, name, link, spec, ownership_stamp).await
 }
 
@@ -1453,6 +1511,32 @@ async fn rollback_unstamped_create(handle: &Handle, ifindex: u32, name: &str, co
             );
         }
     }
+}
+
+/// Confirm the ownership stamp landed on a link rustbgpd just created.
+///
+/// The stamp step tolerates `EEXIST` from the altname add, which covers
+/// a stamp that is already on this link. The kernel returns the same
+/// errno when another link already holds that altname, and then this
+/// link stays unstamped. An unstamped link reads as foreign and is
+/// never reaped, so roll the create back and fail permanently until
+/// the conflicting altname is removed.
+async fn ensure_stamp_landed_or_roll_back(
+    handle: &Handle,
+    ifindex: u32,
+    altnames: &[String],
+    name: &str,
+    ownership_stamp: &str,
+    context: &str,
+) -> Result<(), DataplaneError> {
+    if altnames.iter().any(|alt| alt == ownership_stamp) {
+        return Ok(());
+    }
+    rollback_unstamped_create(handle, ifindex, name, context).await;
+    Err(DataplaneError::InvalidArgument(format!(
+        "{context} {name}: ownership stamp {ownership_stamp} is held by another link; \
+         the unstamped create was rolled back"
+    )))
 }
 
 /// Downgrade a would-be-permanent failure from a post-stamp completion

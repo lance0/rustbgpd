@@ -1020,4 +1020,45 @@ async fn managed_bridge_create_adopt_and_reap_round_trip_inner() {
         .expect("dump after non-bridge preserve");
     assert!(preserved.link_name_exists("brdummy"));
     assert!(!preserved.links.contains_key("brdummy"));
+
+    // LAN-2909 L-E4: the ownership altname is already held by another
+    // link, so the stamp step gets EEXIST. The bridge rustbgpd just
+    // created must not be left behind unstamped (it would read as
+    // foreign-present and never be reaped): the create rolls it back.
+    run(
+        "ip",
+        &["link", "add", "name", "stampthief", "type", "dummy"],
+    );
+    run(
+        "ip",
+        &[
+            "link",
+            "property",
+            "add",
+            "dev",
+            "stampthief",
+            "altname",
+            "rustbgpd:bridge:leaf-1:brstolen",
+        ],
+    );
+    let err = restarted
+        .apply(&DataplaneOp::CreateManagedBridge {
+            name: "brstolen".to_string(),
+            vlan_filtering: true,
+            ownership_stamp: "rustbgpd:bridge:leaf-1:brstolen".to_string(),
+        })
+        .await
+        .expect_err("a stamp held by another link cannot be applied");
+    assert!(
+        err.to_string().contains("ownership stamp"),
+        "unexpected error: {err}"
+    );
+    let after = restarted
+        .dump_snapshot()
+        .await
+        .expect("dump after stolen-stamp create");
+    assert!(
+        !after.link_name_exists("brstolen"),
+        "unstamped just-created bridge must be rolled back"
+    );
 }
