@@ -477,6 +477,7 @@ fn build_tls(
         }
         verifier = verifier.with_crls(crls).enforce_revocation_expiration();
     }
+    let checks_crl = source.client_crl_file.is_some();
     let verifier = verifier
         .build()
         .map_err(|e| format!("listener {index}: invalid client-CA verifier: {e}"))?;
@@ -484,6 +485,13 @@ fn build_tls(
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
         .map_err(|e| format!("listener {index}: certificate/private-key mismatch: {e}"))?;
+    if checks_crl {
+        // A resumed session skips client-certificate verification, so a
+        // client authenticated before the CRL's nextUpdate could keep
+        // reconnecting after it. Every handshake must consult the CRL.
+        config.session_storage = Arc::new(tokio_rustls::rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
+    }
     // tonic's `ServerTlsConfig` advertises HTTP/2 over ALPN; the manual
     // rustls config must do the same, or ALPN-strict gRPC clients
     // (grpc-go: gnmic, gobgp) refuse to negotiate h2 on the TLS session.
@@ -1047,9 +1055,30 @@ mod tests {
 
         /// A CRL from this CA revoking `revoked`, valid until `next_year`.
         fn crl(&self, revoked: &[u64], next_year: i32) -> String {
-            rcgen::CertificateRevocationListParams {
+            self.crl_with(revoked, |params| {
+                params.next_update = rcgen::date_time_ymd(next_year, 1, 1);
+            })
+        }
+
+        /// A CRL with no revocations whose nextUpdate is `seconds` from now.
+        fn crl_expiring_in(&self, seconds: u64) -> String {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            self.crl_with(&[], |params| {
+                params.next_update = rcgen::date_time_ymd(1970, 1, 1)
+                    + std::time::Duration::from_secs(now.as_secs() + seconds);
+            })
+        }
+
+        fn crl_with(
+            &self,
+            revoked: &[u64],
+            edit: impl FnOnce(&mut rcgen::CertificateRevocationListParams),
+        ) -> String {
+            let mut params = rcgen::CertificateRevocationListParams {
                 this_update: rcgen::date_time_ymd(2000, 1, 1),
-                next_update: rcgen::date_time_ymd(next_year, 1, 1),
+                next_update: rcgen::date_time_ymd(2999, 1, 1),
                 crl_number: 1_u64.into(),
                 issuing_distribution_point: None,
                 revoked_certs: revoked
@@ -1062,11 +1091,9 @@ mod tests {
                     })
                     .collect(),
                 key_identifier_method: rcgen::KeyIdMethod::Sha256,
-            }
-            .signed_by(&self.issuer)
-            .unwrap()
-            .pem()
-            .unwrap()
+            };
+            edit(&mut params);
+            params.signed_by(&self.issuer).unwrap().pem().unwrap()
         }
 
         fn stage(&self, crl: Option<&NamedTempFile>) -> (CredentialStore, [NamedTempFile; 3]) {
@@ -1142,6 +1169,67 @@ mod tests {
         store.reload().unwrap();
         assert!(!mtls_handshake(&store, fixture.revoked.clone()).await);
         assert!(mtls_handshake(&store, fixture.good.clone()).await);
+    }
+
+    /// One mTLS exchange that reads the server's reply, so the client also
+    /// receives any session ticket; true when the server accepted the client.
+    async fn mtls_round_trip(store: &CredentialStore, client: Arc<ClientConfig>) -> bool {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = store.load().listener(0).tls.clone().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = TlsAcceptor::from(config).accept(tcp).await?;
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await?;
+            stream.write_all(&byte).await?;
+            stream.flush().await?;
+            Ok::<_, std::io::Error>(byte)
+        });
+        if let Ok(mut stream) = connect(client, addr).await {
+            let mut byte = [0];
+            let _ = stream.write_all(b"x").await;
+            let _ = stream.flush().await;
+            let _ = stream.read_exact(&mut byte).await;
+        }
+        matches!(server.await.unwrap(), Ok(byte) if byte == *b"x")
+    }
+
+    /// Load-bearing: a resumed TLS session skips client-certificate
+    /// verification, so a CRL-checked listener must not offer resumption.
+    /// A client that connected while the CRL was current, and kept its
+    /// session, is refused once the CRL has expired; a CRL reload that
+    /// revokes it refuses its cached session too. Offering resumption
+    /// accepts the expired-CRL reconnect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn crl_listener_refuses_a_resumed_session() {
+        const VALID_FOR_SECS: u64 = 4;
+        let fixture = RevocationFixture::new();
+        let mut crl = token_file(&fixture.crl_expiring_in(VALID_FOR_SECS));
+        let (store, _files) = fixture.stage(Some(&crl));
+        let started = std::time::Instant::now();
+        assert!(mtls_round_trip(&store, fixture.good.clone()).await);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(VALID_FOR_SECS - 1),
+            "the first handshake must finish while the CRL is current"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(VALID_FOR_SECS + 1)).await;
+        assert!(
+            !mtls_round_trip(&store, fixture.good.clone()).await,
+            "a cached session must not outlive the CRL"
+        );
+
+        overwrite(&mut crl, fixture.crl(&[], 2999).as_bytes());
+        store.reload().unwrap();
+        assert!(mtls_round_trip(&store, fixture.revoked.clone()).await);
+        overwrite(
+            &mut crl,
+            fixture
+                .crl(&[RevocationFixture::REVOKED_SERIAL], 2999)
+                .as_bytes(),
+        );
+        store.reload().unwrap();
+        assert!(!mtls_round_trip(&store, fixture.revoked.clone()).await);
     }
 
     /// Load-bearing fail-closed cases: once configured, an expired CRL

@@ -757,7 +757,10 @@ not checked, as before. Once configured, the daemon fails closed:
 - a CRL past its `nextUpdate` refuses every client until a fresh CRL is
   installed and reloaded;
 - every certificate in a client chain must be covered by a CRL from its
-  issuer, so a deployment with intermediate CAs needs a CRL from each.
+  issuer, so a deployment with intermediate CAs needs a CRL from each;
+- the listener offers no TLS session resumption, because a resumed session
+  skips the certificate check, so every connection runs a full handshake
+  against the current CRL.
 
 SIGHUP re-reads the CRL with the other credential files; replace the file
 before its `nextUpdate` and reload. Changing the path, or adding or removing
