@@ -93,6 +93,11 @@ pub(crate) struct SnapRoute {
     pub(crate) unknown_attrs: Vec<UnknownWireAttr>,
 }
 
+/// Largest snapshot either adapter writes. The output is measured before
+/// the first byte reaches stdout, so an input that would render past it is
+/// refused (exit 2) with nothing written.
+pub(crate) const MAX_OUTPUT_BYTES: u64 = 1 << 32;
+
 /// Run the adapter: print the snapshot to stdout on success, an error to
 /// stderr on refusal, and return the exit code.
 #[must_use]
@@ -117,6 +122,26 @@ fn emit_mrt_snapshot(result: Result<String, String>, writer: &mut dyn std::io::W
 /// output failure is reported.
 pub(crate) fn write_snapshot(writer: &mut dyn std::io::Write, bytes: &[u8], context: &str) -> i32 {
     match writer.write_all(bytes).and_then(|()| writer.flush()) {
+        Ok(()) => EXIT_OK,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                eprintln!("Error: cannot write {context}: {error}");
+            }
+            EXIT_REFUSED
+        }
+    }
+}
+
+/// Stream a validated snapshot through `render` and flush it (shared by
+/// the MRT and BMP adapters). A closed pipe exits 2 quietly; every other
+/// output failure is reported.
+pub(crate) fn write_streamed(
+    writer: &mut dyn std::io::Write,
+    context: &str,
+    render: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> i32 {
+    let mut buffered = std::io::BufWriter::new(writer);
+    match render(&mut buffered).and_then(|()| std::io::Write::flush(&mut buffered)) {
         Ok(()) => EXIT_OK,
         Err(error) => {
             if error.kind() != std::io::ErrorKind::BrokenPipe {
@@ -190,6 +215,14 @@ fn render(opts: &FromMrtOpts<'_>, peer: IpAddr, routes: &[(IpAddr, u8, SnapRoute
     out
 }
 
+/// The counted trailer line, newline included (shared by both adapters).
+pub(crate) fn trailer_line(routes: usize) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"record": "trailer", "routes": routes})
+    )
+}
+
 /// Render one `rbgp-ribsnap/1` route record (shared by the MRT and BMP
 /// adapters). Absent attributes are omitted, never defaulted.
 pub(crate) fn route_record_json(
@@ -198,6 +231,29 @@ pub(crate) fn route_record_json(
     addr: IpAddr,
     len: u8,
     route: &SnapRoute,
+) -> String {
+    route_record_json_with(
+        peer,
+        peer_asn,
+        addr,
+        len,
+        route,
+        route.next_hop,
+        route.path_id,
+    )
+}
+
+/// [`route_record_json`] with the per-NLRI fields supplied separately, so
+/// many routes can render from one shared attribute set; `route.next_hop`
+/// and `route.path_id` are ignored.
+pub(crate) fn route_record_json_with(
+    peer: IpAddr,
+    peer_asn: u32,
+    addr: IpAddr,
+    len: u8,
+    route: &SnapRoute,
+    next_hop: Option<IpAddr>,
+    path_id: Option<u32>,
 ) -> String {
     let mut record = serde_json::json!({
         "record": "route",
@@ -212,7 +268,7 @@ pub(crate) fn route_record_json(
     if !route.as_path.is_empty() {
         object.insert("as_path".into(), route.as_path.clone().into());
     }
-    if let Some(next_hop) = route.next_hop {
+    if let Some(next_hop) = next_hop {
         object.insert("next_hop".into(), next_hop.to_string().into());
     }
     if let Some(med) = route.med {
@@ -252,7 +308,7 @@ pub(crate) fn route_record_json(
             .collect();
         object.insert("unknown_attrs".into(), rendered.into());
     }
-    if let Some(path_id) = route.path_id {
+    if let Some(path_id) = path_id {
         object.insert("path_id".into(), path_id.into());
     }
     record.to_string()
@@ -307,6 +363,20 @@ impl<'a> Cursor<'a> {
         let b = self.take(8)?;
         Ok(u64::from_be_bytes(b.try_into().expect("length checked")))
     }
+}
+
+/// Fill `buf` unless the input ends first; returns the bytes read.
+pub(crate) fn read_full(reader: &mut dyn std::io::Read, buf: &mut [u8]) -> Result<usize, String> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("cannot read input: {e}")),
+        }
+    }
+    Ok(filled)
 }
 
 /// Parse a `TABLE_DUMP_V2` dump into (prefix, length, route) entries, one

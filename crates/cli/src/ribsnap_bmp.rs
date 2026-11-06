@@ -50,6 +50,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
+use std::sync::Arc;
 
 use rustbgpd_wire::attribute::{AsPath, MpReachNlri, MpUnreachNlri, PathAttribute};
 use rustbgpd_wire::capability::{AddPathMode, Afi, Capability, Safi};
@@ -60,7 +61,8 @@ use rustbgpd_wire::open::OpenMessage;
 use rustbgpd_wire::update::UpdateMessage;
 
 use crate::ribsnap::{
-    Cursor, EXIT_REFUSED, SNAPSHOT_SCHEMA, SnapRoute, route_record_json, write_snapshot,
+    Cursor, EXIT_REFUSED, MAX_OUTPUT_BYTES, SNAPSHOT_SCHEMA, SnapRoute, read_full,
+    route_record_json_with, trailer_line, write_streamed,
 };
 
 // BMP message types (RFC 7854 §4.1).
@@ -103,6 +105,9 @@ struct Limits {
     routes: usize,
     /// Maximum distinct source path IDs per (peer, family, NLRI).
     paths_per_nlri: usize,
+    /// Maximum rendered snapshot bytes. Every route record repeats its
+    /// attributes, so one UPDATE renders to many times its own size.
+    output_bytes: u64,
 }
 
 impl Default for Limits {
@@ -113,6 +118,7 @@ impl Default for Limits {
             peers: 4096,
             routes: 4_000_000,
             paths_per_nlri: 64,
+            output_bytes: MAX_OUTPUT_BYTES,
         }
     }
 }
@@ -134,11 +140,30 @@ pub struct FromBmpOpts<'a> {
 /// stderr), an error to stderr on refusal, and return the exit code.
 #[must_use]
 pub fn from_bmp(opts: &FromBmpOpts<'_>) -> i32 {
-    let result = run(opts);
     let stdout = std::io::stdout();
-    emit_bmp_snapshot(result, &mut stdout.lock())
+    from_bmp_to(opts, &mut stdout.lock())
 }
 
+/// [`from_bmp`] with the snapshot written to `writer`. The capture is read
+/// one BMP message at a time; routes from one UPDATE share one attribute
+/// set; the snapshot is validated and measured before it is streamed.
+#[must_use]
+pub fn from_bmp_to(opts: &FromBmpOpts<'_>, writer: &mut dyn std::io::Write) -> i32 {
+    match prepare(opts, Limits::default()) {
+        Ok(snapshot) => {
+            for note in &snapshot.notes {
+                eprintln!("note: {note}");
+            }
+            write_streamed(writer, "BMP snapshot output", |w| snapshot.write_to(w))
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            EXIT_REFUSED
+        }
+    }
+}
+
+#[cfg(test)]
 fn emit_bmp_snapshot(
     result: Result<(String, Vec<String>), String>,
     writer: &mut dyn std::io::Write,
@@ -148,7 +173,7 @@ fn emit_bmp_snapshot(
             for note in notes {
                 eprintln!("note: {note}");
             }
-            write_snapshot(writer, snapshot.as_bytes(), "BMP snapshot output")
+            crate::ribsnap::write_snapshot(writer, snapshot.as_bytes(), "BMP snapshot output")
         }
         Err(e) => {
             eprintln!("Error: {e}");
@@ -157,14 +182,20 @@ fn emit_bmp_snapshot(
     }
 }
 
+#[cfg(test)]
 fn run(opts: &FromBmpOpts<'_>) -> Result<(String, Vec<String>), String> {
     run_with_limits(opts, Limits::default())
 }
 
+#[cfg(test)]
 fn run_with_limits(
     opts: &FromBmpOpts<'_>,
     limits: Limits,
 ) -> Result<(String, Vec<String>), String> {
+    prepare(opts, limits)?.into_text()
+}
+
+fn prepare(opts: &FromBmpOpts<'_>, limits: Limits) -> Result<BmpSnapshot, String> {
     let peer_filter: BTreeSet<IpAddr> = opts
         .peers
         .iter()
@@ -174,7 +205,9 @@ fn run_with_limits(
         })
         .collect::<Result<_, _>>()?;
     let display = opts.file.display();
-    let size = std::fs::metadata(opts.file)
+    let file = std::fs::File::open(opts.file).map_err(|e| format!("cannot read {display}: {e}"))?;
+    let size = file
+        .metadata()
         .map_err(|e| format!("cannot read {display}: {e}"))?
         .len();
     if size > limits.input_bytes {
@@ -183,8 +216,8 @@ fn run_with_limits(
             limits.input_bytes
         ));
     }
-    let data = std::fs::read(opts.file).map_err(|e| format!("cannot read {display}: {e}"))?;
-    convert_with_limits(opts, &peer_filter, &data, limits)
+    let mut reader = std::io::Read::take(std::io::BufReader::new(file), limits.input_bytes);
+    convert_reader(opts, &peer_filter, &mut reader, limits)
 }
 
 /// Convert an in-memory capture into the snapshot text and notes under the
@@ -201,30 +234,37 @@ pub fn convert(
     peer_filter: &BTreeSet<IpAddr>,
     data: &[u8],
 ) -> Result<(String, Vec<String>), String> {
-    convert_with_limits(opts, peer_filter, data, Limits::default())
+    convert_reader(opts, peer_filter, &mut &data[..], Limits::default())?.into_text()
 }
 
-fn convert_with_limits(
+fn convert_reader(
     opts: &FromBmpOpts<'_>,
     peer_filter: &BTreeSet<IpAddr>,
-    data: &[u8],
+    reader: &mut dyn std::io::Read,
     limits: Limits,
-) -> Result<(String, Vec<String>), String> {
+) -> Result<BmpSnapshot, String> {
+    use std::io::Read as _;
+
     let display = opts.file.display();
     let mut importer = Importer::default();
     let mut offset = 0_usize;
     let mut index = 0_usize;
-    while offset < data.len() {
+    let mut body = Vec::new();
+    loop {
+        let mut header = [0_u8; BMP_COMMON_HEADER_LEN];
+        let got =
+            read_full(reader, &mut header).map_err(|e| format!("{display}: byte {offset}: {e}"))?;
+        if got == 0 {
+            break;
+        }
         index += 1;
         let context = |e: String| format!("{display}: BMP message #{index} at byte {offset}: {e}");
-        let rest = &data[offset..];
-        if rest.len() < BMP_COMMON_HEADER_LEN {
+        if got < BMP_COMMON_HEADER_LEN {
             return Err(context(format!(
-                "truncated common header ({} trailing bytes)",
-                rest.len()
+                "truncated common header ({got} trailing bytes)"
             )));
         }
-        let version = rest[0];
+        let version = header[0];
         if version != 3 {
             return Err(context(format!(
                 "BMP version {version} is not supported (this adapter reads RFC 7854 \
@@ -232,8 +272,8 @@ fn convert_with_limits(
                  a raw BMP capture)"
             )));
         }
-        let length = u32::from_be_bytes([rest[1], rest[2], rest[3], rest[4]]) as usize;
-        let msg_type = rest[5];
+        let length = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        let msg_type = header[5];
         if length < BMP_COMMON_HEADER_LEN {
             return Err(context(format!(
                 "message length {length} below header size"
@@ -245,19 +285,97 @@ fn convert_with_limits(
                 limits.bmp_message_len
             )));
         }
-        if length > rest.len() {
+        body.clear();
+        reader
+            .take((length - BMP_COMMON_HEADER_LEN) as u64)
+            .read_to_end(&mut body)
+            .map_err(|e| context(format!("cannot read: {e}")))?;
+        if body.len() + BMP_COMMON_HEADER_LEN < length {
             return Err(context(format!(
                 "truncated: message declares {length} bytes but only {} remain \
                  (the capture is cut mid-message)",
-                rest.len()
+                body.len() + BMP_COMMON_HEADER_LEN
             )));
         }
-        let body = &rest[BMP_COMMON_HEADER_LEN..length];
-        importer.handle(msg_type, body, limits).map_err(context)?;
+        importer.handle(msg_type, &body, limits).map_err(context)?;
         offset += length;
     }
 
-    importer.finish(opts, peer_filter)
+    importer.finish(opts, peer_filter, limits)
+}
+
+/// One retained route: the per-NLRI fields plus the attribute set shared
+/// by every NLRI of its UPDATE. Cloning the attributes per NLRI let one
+/// UPDATE multiply its attribute bytes by its NLRI count.
+struct BmpRoute {
+    attrs: Arc<SnapRoute>,
+    next_hop: Option<IpAddr>,
+    path_id: Option<u32>,
+}
+
+/// A validated, measured snapshot, ready to stream.
+struct BmpSnapshot {
+    header: String,
+    peers: Vec<(IpAddr, PeerState)>,
+    routes: usize,
+    notes: Vec<String>,
+}
+
+impl BmpSnapshot {
+    fn records(&self) -> impl Iterator<Item = String> + '_ {
+        self.peers.iter().flat_map(|(addr, state)| {
+            state
+                .routes
+                .iter()
+                .map(move |((_, prefix, len, _), route)| {
+                    route_record_json_with(
+                        *addr,
+                        state.asn,
+                        *prefix,
+                        *len,
+                        &route.attrs,
+                        route.next_hop,
+                        route.path_id,
+                    )
+                })
+        })
+    }
+
+    /// Count the routes and refuse a snapshot longer than `limit` bytes.
+    fn measure(&mut self, limit: u64) -> Result<(), String> {
+        let over_limit =
+            || format!("the snapshot would exceed the {limit}-byte output limit; refusing");
+        let mut size = self.header.len() as u64;
+        let mut routes = 0_usize;
+        for record in self.records() {
+            size += record.len() as u64 + 1;
+            if size > limit {
+                return Err(over_limit());
+            }
+            routes += 1;
+        }
+        if size + trailer_line(routes).len() as u64 > limit {
+            return Err(over_limit());
+        }
+        self.routes = routes;
+        Ok(())
+    }
+
+    fn write_to(&self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        out.write_all(self.header.as_bytes())?;
+        for record in self.records() {
+            out.write_all(record.as_bytes())?;
+            out.write_all(b"\n")?;
+        }
+        out.write_all(trailer_line(self.routes).as_bytes())
+    }
+
+    fn into_text(self) -> Result<(String, Vec<String>), String> {
+        let mut out = Vec::new();
+        self.write_to(&mut out).map_err(|e| e.to_string())?;
+        let text = String::from_utf8(out).map_err(|e| e.to_string())?;
+        Ok((text, self.notes))
+    }
 }
 
 /// Family key for the state maps — the two families `rbgp-ribsnap/1`
@@ -317,7 +435,7 @@ struct PeerState {
     expected: BTreeSet<Fam>,
     /// Families whose End-of-RIB has been seen in this generation.
     eor: BTreeSet<Fam>,
-    routes: BTreeMap<RouteKey, SnapRoute>,
+    routes: BTreeMap<RouteKey, BmpRoute>,
     /// Non-unicast NLRI carriers skipped for this peer (not expressible
     /// in `rbgp-ribsnap/1`).
     non_unicast_skipped: u64,
@@ -638,12 +756,13 @@ impl Importer {
         Ok(())
     }
 
-    /// Validate completeness and render the snapshot.
+    /// Validate completeness and measure the snapshot.
     fn finish(
-        self,
+        mut self,
         opts: &FromBmpOpts<'_>,
         peer_filter: &BTreeSet<IpAddr>,
-    ) -> Result<(String, Vec<String>), String> {
+        limits: Limits,
+    ) -> Result<BmpSnapshot, String> {
         let display = opts.file.display();
         if self.generation == 0 {
             return Err(format!(
@@ -651,12 +770,12 @@ impl Importer {
                  the capture does not start at the beginning of a session"
             ));
         }
-        let mut selected: Vec<(IpAddr, &PeerState)> = Vec::new();
+        let mut selected: Vec<(IpAddr, PeerState)> = Vec::new();
         if peer_filter.is_empty() {
-            selected.extend(self.peers.iter().map(|(a, s)| (*a, s)));
+            selected.extend(std::mem::take(&mut self.peers));
         } else {
             for addr in peer_filter {
-                let Some(state) = self.peers.get(addr) else {
+                let Some(state) = self.peers.remove(addr) else {
                     return Err(format!(
                         "{display}: peer {addr} has no state in the capture's final \
                          connection generation (no Peer Up, or invalidated by a \
@@ -687,7 +806,6 @@ impl Importer {
             }
         }
 
-        let mut out = String::new();
         let mut source = "from-bmp/1 view=adj-rib-out-post-policy".to_string();
         if let Some(label) = opts.source {
             source.push(' ');
@@ -699,19 +817,16 @@ impl Importer {
             "source": source,
             "generation": opts.generation,
         });
-        out.push_str(&header.to_string());
-        out.push('\n');
-        let mut count = 0_usize;
-        for (addr, state) in &selected {
-            for ((_, prefix, len, _), route) in &state.routes {
-                out.push_str(&route_record_json(*addr, state.asn, *prefix, *len, route));
-                out.push('\n');
-                count += 1;
-            }
-        }
-        let trailer = serde_json::json!({"record": "trailer", "routes": count});
-        out.push_str(&trailer.to_string());
-        out.push('\n');
+        let mut snapshot = BmpSnapshot {
+            header: format!("{header}\n"),
+            peers: selected,
+            routes: 0,
+            notes: Vec::new(),
+        };
+        // Measure before anything reaches stdout: a refusal must leave it empty.
+        snapshot
+            .measure(limits.output_bytes)
+            .map_err(|e| format!("{display}: {e}"))?;
 
         let mut notes = Vec::new();
         if self.rib_in_skipped > 0 {
@@ -733,7 +848,7 @@ impl Importer {
                  rbgp-ribsnap/1 carries the global unicast view only)"
             ));
         }
-        for (addr, state) in &selected {
+        for (addr, state) in &snapshot.peers {
             if state.non_unicast_skipped > 0 {
                 notes.push(format!(
                     "peer {addr}: {} non-unicast NLRI carriers skipped \
@@ -742,7 +857,8 @@ impl Importer {
                 ));
             }
         }
-        Ok((out, notes))
+        snapshot.notes = notes;
+        Ok(snapshot)
     }
 }
 
@@ -868,6 +984,7 @@ fn fold_update(
     for attribute in &parsed.attributes {
         convert_attribute(attribute, &mut base, &mut mp_reach, &mut mp_unreach)?;
     }
+    let base = Arc::new(base);
 
     // Body IPv4-unicast withdrawals and announcements.
     for entry in &parsed.withdrawn {
@@ -881,7 +998,7 @@ fn fold_update(
         );
     }
     for entry in &parsed.announced {
-        let route = clone_route(&base, base.next_hop, addpath_v4.then_some(entry.path_id));
+        let route = shared_route(&base, base.next_hop, addpath_v4.then_some(entry.path_id));
         insert_route(
             state,
             total_routes,
@@ -915,7 +1032,7 @@ fn fold_update(
                 for entry in &mp.announced {
                     let (addr, len) = split_prefix(entry.prefix);
                     let route =
-                        clone_route(&base, Some(mp.next_hop), addpath.then_some(entry.path_id));
+                        shared_route(&base, Some(mp.next_hop), addpath.then_some(entry.path_id));
                     insert_route(
                         state,
                         total_routes,
@@ -1078,19 +1195,12 @@ fn flatten_as_path(path: &AsPath) -> Vec<u32> {
         .collect()
 }
 
-/// Copy the shared attribute template for one NLRI entry.
-fn clone_route(base: &SnapRoute, next_hop: Option<IpAddr>, path_id: Option<u32>) -> SnapRoute {
-    SnapRoute {
-        path_id,
-        origin: base.origin,
-        as_path: base.as_path.clone(),
+/// One NLRI entry referencing its UPDATE's shared attribute set.
+fn shared_route(base: &Arc<SnapRoute>, next_hop: Option<IpAddr>, path_id: Option<u32>) -> BmpRoute {
+    BmpRoute {
+        attrs: Arc::clone(base),
         next_hop,
-        med: base.med,
-        local_pref: base.local_pref,
-        communities: base.communities.clone(),
-        extended_communities: base.extended_communities.clone(),
-        large_communities: base.large_communities.clone(),
-        unknown_attrs: base.unknown_attrs.clone(),
+        path_id,
     }
 }
 
@@ -1101,7 +1211,7 @@ fn insert_route(
     total_routes: &mut usize,
     limits: Limits,
     key: RouteKey,
-    route: SnapRoute,
+    route: BmpRoute,
 ) -> Result<(), String> {
     let (fam, addr, len, _) = key;
     state.expected.insert(fam);
@@ -2204,6 +2314,33 @@ mod tests {
         let file = write_capture(&capture);
         let err = run_with_limits(&opts(file.path(), &[]), tiny).unwrap_err();
         assert!(err.contains("exceeds the 64 byte limit"), "{err}");
+    }
+
+    /// Load-bearing: without the output bound, a capture whose snapshot
+    /// renders past the limit converts instead of refusing.
+    #[test]
+    fn output_over_limit_is_refused() {
+        let (mut capture, info) = v4_peer_capture();
+        for i in 0..3u8 {
+            capture.extend(route_monitoring(&info, &simple_announce([10, i, 0, 0], 24)));
+        }
+        capture.extend(route_monitoring(&info, &eor_v4()));
+        let file = write_capture(&capture);
+        let (snapshot, _) = run(&opts(file.path(), &[])).unwrap();
+        let exact = Limits {
+            output_bytes: snapshot.len() as u64,
+            ..Limits::default()
+        };
+        assert_eq!(
+            run_with_limits(&opts(file.path(), &[]), exact).unwrap().0,
+            snapshot
+        );
+        let short = Limits {
+            output_bytes: snapshot.len() as u64 - 1,
+            ..Limits::default()
+        };
+        let err = run_with_limits(&opts(file.path(), &[]), short).unwrap_err();
+        assert!(err.contains("output limit"), "{err}");
     }
 
     #[test]

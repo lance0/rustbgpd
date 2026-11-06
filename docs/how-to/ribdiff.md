@@ -451,8 +451,11 @@ artifact. Use `diff snapshots` to compare these values on both sides. A live
 comparison requires `--ignore-attribute unknown` if accepting that gRPC
 cannot verify them.
 Hard limits (not flags) bound input bytes (1 GiB), per-message length
-(1 MiB), peers (4096), routes (4M), and paths per NLRI (64); exceeding
-any refuses the conversion.
+(1 MiB), peers (4096), routes (4M), paths per NLRI (64), and snapshot
+output (4 GiB); exceeding any refuses the conversion. The capture is read
+one message at a time, and the routes of one UPDATE share one copy of its
+attributes, so memory follows the retained routes rather than the rendered
+output; the snapshot is measured before it is written.
 
 ### Golden fixtures
 
