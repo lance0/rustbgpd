@@ -86,6 +86,7 @@ SHARDS = {
                 "birdwatcher_adapter_smoke",
                 "config_import",
                 "config_transaction_exit_codes",
+                "converter_memory",
                 "daemon",
                 "daemon_wide_confirmation",
                 "diff_snapshots",
