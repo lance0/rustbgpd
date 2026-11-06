@@ -1025,6 +1025,7 @@ impl PeerManager {
         ) {
             return Err(PeerLifecycleError::Invalid(reason));
         }
+        self.open_bfd_member_family(config.address).await?;
 
         // A static neighbor at a retained dynamic neighbor's address is a new
         // neighbor: none of the retained identity carries over, and the

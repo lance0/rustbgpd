@@ -38,12 +38,12 @@ fn range_bfd(profile: &str) -> crate::config::BfdConfig {
     }
 }
 
-struct Lab {
-    mgr: PeerManager,
+pub(super) struct Lab {
+    pub(super) mgr: PeerManager,
     /// The desired set as the BFD actor sees it, by either publication.
-    desired: watch::Receiver<BfdRuntimeConfig>,
+    pub(super) desired: watch::Receiver<BfdRuntimeConfig>,
     /// Every set the fake actor took through the acknowledged path.
-    applied: mpsc::UnboundedReceiver<BfdRuntimeConfig>,
+    pub(super) applied: mpsc::UnboundedReceiver<BfdRuntimeConfig>,
     /// The fake actor takes the next acknowledged change but drops its reply.
     drop_next_reply: Arc<AtomicBool>,
     clients: Vec<TcpStream>,
@@ -51,7 +51,7 @@ struct Lab {
 
 /// A coupled manager over `config`, on a running RIB, with a fake BFD actor
 /// that acknowledges every acknowledged membership change.
-fn lab(config: Config) -> Lab {
+pub(super) fn lab(config: Config) -> Lab {
     let (rib_tx, rib_rx) = mpsc::channel(256);
     let (_query_tx, query_rx) = mpsc::channel(4);
     tokio::spawn(
@@ -131,7 +131,7 @@ impl Lab {
     }
 
     /// The published sessions: (peer, label, enabled).
-    fn published(&self) -> Vec<(IpAddr, String, bool)> {
+    pub(super) fn published(&self) -> Vec<(IpAddr, String, bool)> {
         let mut sessions: Vec<_> = self
             .desired
             .borrow()
@@ -143,7 +143,7 @@ impl Lab {
         sessions
     }
 
-    fn member(&self, peer: IpAddr) -> Option<&crate::bfd_runtime::BfdSessionParams> {
+    pub(super) fn member(&self, peer: IpAddr) -> Option<&crate::bfd_runtime::BfdSessionParams> {
         self.mgr.bfd_coupling.as_ref()?.configured.get(&peer)
     }
 

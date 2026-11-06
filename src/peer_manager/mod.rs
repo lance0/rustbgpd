@@ -1219,6 +1219,7 @@ impl PeerManager {
         self.peers.set_datasets(&self.current_config);
         self.conditional_reconcile_pending = true;
         self.unnumbered_runtime.config_due = true;
+        self.follow_bfd_membership(&previous);
         previous
     }
 
