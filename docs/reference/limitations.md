@@ -49,7 +49,9 @@ out of alpha.
   Received VPN rules are decoded and discarded, with no default-unicast
   feasibility lookup or RT-Constrain filtering. rustbgpd creates no local
   VRF, and local acceptance does not prove router installation or traffic
-  enforcement.
+  enforcement. Nonzero IPv6 prefix offsets do not interoperate with GoBGP
+  4.11.0; the [qualification receipt](../artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
+  separates that comparator failure from the passing core checks.
 - Confederations are not implemented.
 - Conditional advertisement ([ADR-0137](../adr/0137-conditional-advertisement.md))
   is alpha and outside the v1 inventory. It covers IPv4 and IPv6 unicast only,

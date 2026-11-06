@@ -1,0 +1,215 @@
+{
+  "image": "ghcr.io/lance0/rustbgpd@sha256:f8a6d62ced049e415d702e31c43cbd6dac62fa9bcfdd0f410938f3c6cc418a64",
+  "results": [
+    {
+      "name": "vpn-13-AddFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-13-AddFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-13-AddLeasedFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-13-AddLeasedFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-13-AddGuardedFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-13-AddGuardedFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-13-DeleteFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-13-DeleteFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-13-DeleteGuardedFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-13-DeleteGuardedFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-13-ListFlowSpecRoutes",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-13-ListFlowSpecRoutes-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-13-ListFlowSpecExportDispositions",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-13-ListFlowSpecExportDispositions-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-14-AddFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-14-AddFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-14-AddLeasedFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-14-AddLeasedFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-14-AddGuardedFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-14-AddGuardedFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-14-DeleteFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-14-DeleteFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-14-DeleteGuardedFlowSpec",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-14-DeleteGuardedFlowSpec-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-14-ListFlowSpecRoutes",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-14-ListFlowSpecRoutes-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "vpn-14-ListFlowSpecExportDispositions",
+      "status": "PASS",
+      "detail": "InvalidArgument"
+    },
+    {
+      "name": "vpn-14-ListFlowSpecExportDispositions-inventory",
+      "status": "PASS",
+      "detail": "global rules and leases byte-identical"
+    },
+    {
+      "name": "global-3-AddFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-3-AddLeasedFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-3-AddGuardedFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-3-DeleteFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-3-DeleteGuardedFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-3-ListFlowSpecRoutes",
+      "status": "PASS",
+      "detail": "matching global operation succeeded"
+    },
+    {
+      "name": "global-3-ListFlowSpecExportDispositions",
+      "status": "PASS",
+      "detail": "matching global operation succeeded"
+    },
+    {
+      "name": "global-4-AddFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-4-AddLeasedFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-4-AddGuardedFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-4-DeleteFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-4-DeleteGuardedFlowSpec",
+      "status": "PASS",
+      "detail": "matching global operation succeeded and changed inventory"
+    },
+    {
+      "name": "global-4-ListFlowSpecRoutes",
+      "status": "PASS",
+      "detail": "matching global operation succeeded"
+    },
+    {
+      "name": "global-4-ListFlowSpecExportDispositions",
+      "status": "PASS",
+      "detail": "matching global operation succeeded"
+    }
+  ]
+}

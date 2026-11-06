@@ -1,0 +1,101 @@
+{
+  "runtime_source_commit": "fa44a729bae3a8269529371e40a6fad84bed9970",
+  "runtime_source_tree": "8c131f80ee2fe189b97293fb219eacd4598a7489",
+  "harness_commit": "170915fff1d7f5ca097c9d801840fbf22aa59218",
+  "binary_sha256": "964661e2346fe76e738f0d64aa5c1ff1cf57e5e5d8c9fc531b937e641f66617a",
+  "comparator": {
+    "version": "GoBGP 4.11.0",
+    "source_commit": "53ceb78fe284018ce83a92f3039198f0a86dc823"
+  },
+  "execution": {
+    "start_utc": "2026-11-06T04:34:23Z",
+    "end_utc": "2026-11-06T04:34:40Z",
+    "exit_code": 0,
+    "cpu_affinity": "0-23,32-55",
+    "exit_zero_meaning": "Both probes completed; the nonzero-offset comparator verdict remains FAIL."
+  },
+  "core": {
+    "result": "PASS",
+    "initial_rules": 11,
+    "exact_withdrawals": 11,
+    "rt_replacements": 1,
+    "families": [
+      [
+        1,
+        133
+      ],
+      [
+        2,
+        133
+      ],
+      [
+        1,
+        134
+      ],
+      [
+        2,
+        134
+      ]
+    ],
+    "rd_inclusive_nlri_length_boundaries": [
+      239,
+      240
+    ],
+    "vpn_received_add_delete_discards": 4,
+    "global_ipv6_receive_control": "PASS",
+    "unnegotiated_vpn_export": "none"
+  },
+  "nonzero_offset": {
+    "result": "FAIL",
+    "reason": "Pinned GoBGP 4.11.0 is incompatible with RFC 8956 nonzero-offset prefix framing.",
+    "rfc_send_witness": "0000ad7700000385026840123456789a038106",
+    "gobgp_receive": "unknown component; CLI path nlri=null and attrs=null",
+    "vendor_send_expected": "0000ad7700000386026840123456789a038106",
+    "vendor_send_observed": "0000ad77000003860268400000000000000000123456789a038106",
+    "receiver_response": "NOTIFICATION 3/9; session Idle; flapCount 1 after core qualification"
+  },
+  "capture": {
+    "core_packets": 99,
+    "offset_packets": 8,
+    "kernel_drops": 0
+  },
+  "cleanup": {
+    "result": "PASS",
+    "remaining_owned_resources": []
+  },
+  "prior_attempt": {
+    "directory": "runtime-20261106T040708Z",
+    "result": "INVALID",
+    "exit_code": 1,
+    "reason": "Checker expected neighbor-ip; pinned GoBGP CLI uses peer-address. Raw failure retained, corrected checker replay passed all eight views."
+  },
+  "scope": "Owned GoBGP wire/control-plane only. No installation, forwarding, timing, scale, IOS XR or hardware qualification.",
+  "rollback": {
+    "result": "PASS",
+    "released_source_commit": "eb1749d7018cd9691e4f4c9adef3b9adb830e9a8",
+    "image": "ghcr.io/lance0/rustbgpd@sha256:f8a6d62ced049e415d702e31c43cbd6dac62fa9bcfdd0f410938f3c6cc418a64",
+    "application_refusals": 14,
+    "unchanged_snapshots": 14,
+    "matching_global_controls": 14,
+    "negative_controls": {
+      "call_transport": "INVALID",
+      "after_snapshot_transport": "INVALID",
+      "deliberate_global_fallback": "FAIL"
+    }
+  },
+  "oracle_tests": {
+    "gobgp": 7,
+    "rollback": 6,
+    "result": "PASS"
+  },
+  "artifacts": {
+    "gobgp-evidence.tar.gz": {
+      "bytes": 56787,
+      "sha256": "1e902b465e1e526ee8cb928e797fa31737152746c870185d40a395dff626fa51"
+    },
+    "rollback-evidence.tar.gz": {
+      "bytes": 49533,
+      "sha256": "65ad248cbba10d7cfff12e5db66fc9a922423fa1506fb0a02505503222d91899"
+    }
+  }
+}

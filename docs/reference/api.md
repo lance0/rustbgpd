@@ -4304,6 +4304,13 @@ for AFI 2 / SAFI 134 and IPv6 components. This API does not create a local
 VRF or provide receive/reflection, router installation or traffic
 enforcement guarantees.
 
+The [pinned GoBGP qualification](../artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
+covers RD/RT preservation, replacement, withdrawal, family isolation and
+239/240-byte NLRI framing. Nonzero IPv6 prefix offsets do not interoperate
+with GoBGP 4.11.0: its codec uses the full prefix length instead of the
+RFC 8956 pattern length. Offset-zero IPv6 and IPv4 checks passed; router
+installation and forwarding remain unqualified.
+
 | Message | Scope fields |
 |---|---|
 | `AddFlowSpecRequest`, including leased/guarded wrappers | `rd` (7), `route_targets` (8) |
