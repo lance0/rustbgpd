@@ -250,9 +250,19 @@ struct HeldState {
 
 impl Unnumbered {
     /// Set the graceful-shutdown intent every unbound neighbor, bound
-    /// before or not, holds for its next peer.
-    pub(super) fn set_held_graceful_shutdown(&mut self, enabled: bool) {
-        for port in self.ports.values_mut().filter(|port| port.bound.is_none()) {
+    /// before or not, holds for its next peer. A port kept only for a
+    /// deleted neighbor's cleanup is skipped, so a neighbor re-added there
+    /// does not inherit a toggle that ran while it was not configured.
+    pub(super) fn set_held_graceful_shutdown(
+        &mut self,
+        enabled: bool,
+        configured: impl Fn(&str) -> bool,
+    ) {
+        for (_, port) in self
+            .ports
+            .iter_mut()
+            .filter(|(name, port)| port.bound.is_none() && configured(name))
+        {
             port.graceful_shutdown = enabled;
         }
     }
