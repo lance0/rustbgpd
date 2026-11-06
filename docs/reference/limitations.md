@@ -49,8 +49,14 @@ out of alpha.
   Received VPN rules are decoded and discarded, with no default-unicast
   feasibility lookup or RT-Constrain filtering. rustbgpd creates no local
   VRF, and local acceptance does not prove router installation or traffic
-  enforcement. Nonzero IPv6 prefix offsets do not interoperate with GoBGP
-  4.11.0; the [qualification receipt](../artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
+  enforcement. Nonzero IPv6 prefix offsets use RFC 8956 pattern framing and
+  do not interoperate with peers that use the older full-prefix framing,
+  including GoBGP 4.11.0 and earlier rustbgpd releases. A rule with a nonzero
+  offset from such a peer fails to decode and resets the whole session with
+  NOTIFICATION 3/9, every time it is sent. Keep IPv6 FlowSpec rules with a
+  nonzero prefix offset (global or VPN) withdrawn on both sides until every
+  peer uses RFC 8956 framing; offset-zero IPv6 and IPv4 rules are unaffected.
+  The [qualification receipt](../artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
   separates that comparator failure from the passing core checks.
 - Confederations are not implemented.
 - Conditional advertisement ([ADR-0137](../adr/0137-conditional-advertisement.md))
