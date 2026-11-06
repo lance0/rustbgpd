@@ -1289,6 +1289,27 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 if let Some(def) = self.file.asn_sets.iter().find(|s| s.name.node == name.node) {
+                    // A range is a probe surface, not a member list: a
+                    // loop over `0..4294967295` would have no useful bound.
+                    if let Some(range) = def
+                        .entries
+                        .iter()
+                        .find(|entry| !matches!(entry.node, crate::sets::AsnMember::Exact(_)))
+                    {
+                        self.diags.push(
+                            Diagnostic::coded(
+                                DiagnosticCode::Typecheck,
+                                name.span,
+                                format!("asn-set `{}` holds ranges and is not iterable", name.node),
+                                "set with ranges",
+                            )
+                            .with_label(range.span, "range member")
+                            .with_note(
+                                "probe it with `in` instead, or iterate a set of exact ASNs",
+                            ),
+                        );
+                        return;
+                    }
                     // Set sizes are compile-time knowledge: enforce
                     // the per-loop bound here instead of erroring per
                     // route at runtime.

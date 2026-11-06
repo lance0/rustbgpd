@@ -112,6 +112,9 @@ boundaries; error messages remain in the legacy `diagnostics` array.
     an inclusive range `a..b`, or `PRIVATE_AS` — `65000:*`, `*:666`,
     `65000:100..199`, `PRIVATE_AS:*`, `65000:1..9:*`, `RT:65000:*` (see
     "Sets"). A pattern is one token: `65000:*` and `65000 : *` differ.
+  - ASN range, valid only as an `asn-set` or ASN dataset member: two u32
+    integers joined by `..`, `64496..64511`. Like a pattern it is one
+    token, so `64496 .. 64511` is a parse error.
   - Strings (AS-path regexes, peer-group names): `"..."` with `\"`
     and `\\` escapes.
 - **Statement separators**: `;` between statements is conventional
@@ -157,7 +160,7 @@ extended-community actions;
 ```rpol
 prefix-set NAME { PREFIX [ge N] [le N], ... }
 community-set NAME { COMMUNITY-LITERAL, ... }
-asn-set NAME { ASN, ... }
+asn-set NAME { ASN | ASN..ASN | PRIVATE_AS, ... }
 ```
 
 Set names share one namespace across kinds and with datasets: a
@@ -187,12 +190,14 @@ not tell which to probe.
   parameters filter by kind at runtime.
 - Community-set members may be **patterns** that match a range of
   values (see "Community patterns" below).
-- ASN sets hold plain ASN literals (u32; 4-byte ASNs are first-class,
-  out-of-range literals are a compile error, duplicates deduplicate).
+- ASN sets hold ASN literals (u32; 4-byte ASNs are first-class,
+  out-of-range literals are a compile error, duplicates deduplicate),
+  inclusive ranges `a..b`, and `PRIVATE_AS` (see "ASN ranges" below).
   Membership is probed by `route.origin-as in NAME` and
-  `peer.asn in NAME` — one hash probe regardless of set size. Like
-  strict next-hop, this is an `.rpol`-only surface: the TOML frontend
-  has no equivalent.
+  `peer.asn in NAME`: one hash probe for the exact members, then a
+  binary search of the ranges when the set has any. Like strict
+  next-hop, this is an `.rpol`-only surface: the TOML frontend has no
+  equivalent.
 - Sets are content-interned: identical sets (in any member order)
   share one indexed structure across all policies.
 - There is no `as-path-set` in V1 — inline
@@ -257,6 +262,49 @@ counts an `in` probe as one step whatever the set holds, so patterns
 multiply the work behind that step by up to 64 comparisons per route
 community: at the wire bound of 16,383 standard communities, about one
 million comparisons for one probe of a set at the limit.
+
+### ASN ranges
+
+An asn-set or ASN dataset member can cover many ASNs:
+
+```rpol
+asn-set invalid-asns {
+    0,                          # reserved (RFC 7607)
+    23456,                      # AS_TRANS (RFC 6793)
+    64496..64511,               # documentation (RFC 5398)
+    PRIVATE_AS,                 # private use (RFC 6996)
+    65535..65551,               # reserved (RFC 7300) and documentation (RFC 5398)
+    4294967295                  # reserved (RFC 7300)
+}
+
+policy no-invalid-asn-in-path {
+    term invalid {
+        for asn in route.as-path { if asn in invalid-asns { reject } }
+    }
+    term rest { accept }
+}
+```
+
+- `a..b` matches every ASN from `a` through `b`. Both ends are u32
+  literals; an end beyond 4294967295 is a compile error, and so is a
+  range whose low end exceeds its high end (`200..100`), which would be
+  empty. A one-value range (`5..5`) is the exact member `5`.
+- `PRIVATE_AS` is the RFC 6996 private-use ASNs, 64512–65534 and
+  4200000000–4294967294: the same values as the `PRIVATE_AS` community
+  pattern field. It does not include the RFC 7300 last ASNs 65535 and
+  4294967295, which are reserved rather than private-use; list them
+  separately when a filter wants them, as above.
+- A set holding a range or `PRIVATE_AS` is **not iterable**: `for a in S`
+  is a compile error, because a range has no member list a loop could
+  bound. Probe it with `in` instead. A set of exact ASNs still iterates.
+- Ranges that overlap or touch merge, and an exact member inside or next
+  to a range joins it, so two spellings of the same membership are the
+  same set. Exact members never merge into a range by themselves.
+
+**Cost.** Exact members stay one hash probe, and a set without ranges
+evaluates exactly as before. A set with ranges adds a binary search over
+its merged ranges, O(log n) in the number of ranges. The evaluation-cost
+budget counts an `in` probe as one step either way.
 
 Migrating an origin lock from an AS-path regex to an ASN set:
 
@@ -352,6 +400,8 @@ declared kind's set definition:
 64500
 64501   # trailing comments are fine
 4200000001
+64496..64511   # ranges and PRIVATE_AS work as in an asn-set
+PRIVATE_AS
 ```
 
 ```text
@@ -657,7 +707,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.as-path contains 65001` | boundary-anchored ASN presence (sugar for `matches "_65001_"`) |
 | `route.as-path matches "^65010"` | Cisco/Quagga-style regex; `_` is a boundary anchor |
 | `route.origin-as == 64500` | origin AS — the last ASN of the rightmost non-empty `AS_SEQUENCE` (`==`/`!=` only) |
-| `route.origin-as in customers` | asn-set membership (one hash probe) |
+| `route.origin-as in customers` | asn-set membership (one hash probe, plus a binary search of the set's ranges) |
 | `peer.asn in customers` | evaluation-peer ASN against the same asn-sets |
 | `route.local-pref >= 200`, `route.med <= 50` | u32 comparisons; `==`/`!=` also allowed |
 | `route.med + 50 >= threshold`, `route.as-path.len * 10 >= route.med` | saturating-arithmetic comparison (see "Saturating u32 value expressions"); a missing operand makes it false |
@@ -1036,7 +1086,8 @@ runtime-meterable.
 - A named `asn-set` — members in canonical order (sorted, deduplicated
   — the interned representation), so iteration order is deterministic
   across compiles and insertion orders. Sets larger than the 4,096
-  per-loop bound are rejected at compile time (probe those with `in`).
+  per-loop bound are rejected at compile time (probe those with `in`),
+  and so are sets holding a range or `PRIVATE_AS`.
 
 **The loop variable in guards and actions.** It resolves like any
 `let` binding, by type. An ASN compares and orders against integers and
@@ -2104,7 +2155,8 @@ prefix-set-def    := "prefix-set" IDENT "{" [prefix-entry ("," prefix-entry)*] "
 prefix-entry      := PREFIX ["ge" INT] ["le" INT]
 community-set-def := "community-set" IDENT "{" [community-member ("," community-member)*] "}"
 community-member  := community | COMMUNITY-PATTERN   # `65000:*`, `65000:1..9:*`, `RT:65000:*`
-asn-set-def       := "asn-set" IDENT "{" [INT ("," INT)*] "}"
+asn-set-def       := "asn-set" IDENT "{" [asn-member ("," asn-member)*] "}"
+asn-member        := INT | ASN-RANGE | "PRIVATE_AS"   # `64500`, `64496..64511`
 fn-def      := "fn" IDENT "(" [param ("," param)*] ")" "->" "u32"
                "{" fn-let* value "}"               # contextual `fn`
 fn-let      := "let" IDENT "=" value [";"]
@@ -3371,6 +3423,8 @@ settles these cases:
 | `ast.set.pattern.route-origin` | v1 | `RO:` pattern |
 | `ast.set.pattern-field.range` | v1 | pattern field `*` or `a..b` |
 | `ast.set.pattern-field.private-as` | v1 | pattern field `PRIVATE_AS` |
+| `ast.set.asn.range` | v1 | asn-set or ASN dataset member `a..b` |
+| `ast.set.asn.private-as` | v1 | asn-set or ASN dataset member `PRIVATE_AS` |
 | `ast.test.dataset-override` | v1 | `dataset NAME { ... }` content in a test |
 | `ast.test.route.prefix` | v1 | `route { prefix ... }` test fixture field |
 | `ast.test.route.communities` | v1 | `route { communities ... }` test fixture field |

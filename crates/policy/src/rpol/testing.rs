@@ -523,12 +523,12 @@ pub(super) fn override_data(
             },
         ))),
         DatasetKind::Asn => {
-            DatasetData::Asn(AsnSet::new(entries.iter().filter_map(
-                |entry| match &entry.node {
+            DatasetData::Asn(AsnSet::with_members(entries.iter().filter_map(|entry| {
+                match &entry.node {
                     DatasetEntryAst::Asn(asn) => Some(*asn),
                     _ => None,
-                },
-            )))
+                }
+            })))
         }
         DatasetKind::Community => {
             let (criteria, patterns) =

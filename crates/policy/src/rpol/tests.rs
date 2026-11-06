@@ -13795,3 +13795,306 @@ test exceeds {
         assert_eq!(fits.evaluate(&ctx).modifications.prepend_len(), 255);
     }
 }
+
+/// ASN ranges (`a..b`) and `PRIVATE_AS` in asn-sets, ASN datasets and
+/// test-block dataset overrides.
+mod asn_ranges {
+    use std::fmt::Write as _;
+
+    use super::super::{format_rpol, parse_dataset_text, run_rpol_tests};
+    use super::{compile_ok, diagnostics_of};
+    use crate::datasets::{DatasetData, DatasetKind};
+
+    const SETS: &str = r"
+asn-set invalid { 0, 23456, 64496..64511, PRIVATE_AS, 65535..65551, 4294967295 }
+asn-set private { PRIVATE_AS }
+asn-set everything { 0..4294967295 }
+
+policy origin-in { term t { if route.origin-as in invalid { reject } } term rest { accept } }
+policy peer-in { term t { if peer.asn in invalid { reject } } term rest { accept } }
+policy private-in { term t { if route.origin-as in private { reject } } term rest { accept } }
+policy any-in { term t { if route.origin-as in everything { reject } } term rest { accept } }
+policy path-in {
+    term t { for asn in route.as-path { if asn in invalid { reject } } accept }
+}
+policy const-in(candidate: u32) {
+    term t { if candidate in invalid { reject } }
+    term rest { accept }
+}
+policy set-param(s: asn-set) { term t { if route.origin-as in s { reject } } term rest { accept } }
+";
+
+    /// One `test` per `(policy call, fixture, rejected)`.
+    fn run_cases(table: &[(&str, String, bool)]) {
+        let mut source = SETS.to_string();
+        for (index, (call, fixture, reject)) in table.iter().enumerate() {
+            let verdict = if *reject { "reject" } else { "accept" };
+            writeln!(
+                source,
+                "test case-{index} {{ route {{ prefix 192.0.2.0/24; {fixture} }} \
+                 expect {call} == {verdict} }}"
+            )
+            .unwrap();
+        }
+        let report = run_rpol_tests(&source).expect("compiles");
+        assert_eq!(report.total, table.len());
+        let failed: Vec<String> = report
+            .failures
+            .iter()
+            .map(|failure| {
+                let index: usize = failure.name["case-".len()..].parse().unwrap();
+                format!("{:?}: {}", table[index], failure.message)
+            })
+            .collect();
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    fn origin(asn: u32) -> String {
+        format!("as-path \"3333 {asn}\"")
+    }
+
+    #[test]
+    fn ranges_and_private_as_match_at_every_boundary() {
+        let mut table = Vec::new();
+        for (asn, reject) in [
+            (0, true),
+            (1, false),
+            (23455, false),
+            (23456, true),
+            (23457, false),
+            (64495, false),
+            (64496, true),
+            (64511, true),
+            // PRIVATE_AS, 16-bit half (RFC 6996).
+            (64512, true),
+            (65534, true),
+            // The RFC 7300 last 16-bit ASN, then the RFC 5398 documentation block.
+            (65535, true),
+            (65536, true),
+            (65551, true),
+            (65552, false),
+            (4_199_999_999, false),
+            // PRIVATE_AS, 32-bit half (RFC 6996).
+            (4_200_000_000, true),
+            (4_294_967_294, true),
+            // The RFC 7300 last 32-bit ASN, an exact member here.
+            (4_294_967_295, true),
+        ] {
+            table.push(("origin-in", origin(asn), reject));
+            table.push((
+                "peer-in",
+                format!("as-path \"3333\" }} peer {{ asn {asn}"),
+                reject,
+            ));
+            table.push(("path-in", format!("as-path \"{asn} 3333\""), reject));
+        }
+        run_cases(&table);
+    }
+
+    #[test]
+    fn private_as_is_exactly_the_rfc_6996_ranges() {
+        let table: Vec<_> = [
+            (64_511, false),
+            (64_512, true),
+            (65_534, true),
+            (65_535, false),
+            (4_199_999_999, false),
+            (4_200_000_000, true),
+            (4_294_967_294, true),
+            (4_294_967_295, false),
+        ]
+        .into_iter()
+        .map(|(asn, reject)| ("private-in", origin(asn), reject))
+        .collect();
+        run_cases(&table);
+    }
+
+    #[test]
+    fn full_range_constant_and_set_parameter_probes() {
+        let table = vec![
+            ("any-in", origin(0), true),
+            ("any-in", origin(4_294_967_295), true),
+            ("const-in(64512)", origin(1), true),
+            ("const-in(4200000000)", origin(1), true),
+            ("const-in(3333)", origin(1), false),
+            ("set-param(private)", origin(4_200_000_001), true),
+            ("set-param(private)", origin(64_500), false),
+        ];
+        run_cases(&table);
+    }
+
+    #[test]
+    fn invalid_ranges_are_rejected_with_their_reason() {
+        for (source, reason) in [
+            ("asn-set s { 200..100 }", "is empty"),
+            ("asn-set s { 4294967295..0 }", "is empty"),
+            ("asn-set s { 1..4294967296 }", "does not fit in u32"),
+            (
+                "asn-set s { 4294967296..4294967297 }",
+                "does not fit in u32",
+            ),
+            ("asn-set s { 1 .. 2 }", "expected"),
+            ("asn-set s { PRIVATE_ASX }", "expected"),
+            ("asn-set s { private_as }", "expected"),
+        ] {
+            let (_, rendered) = diagnostics_of(source);
+            assert!(rendered.contains(reason), "{source}: {rendered}");
+        }
+        // A one-value range is the exact member.
+        let chain = compile_ok(
+            "asn-set s { 5..5, 7 } policy p { term t { if route.origin-as in s { reject } } }",
+        );
+        assert_eq!(chain.asn_sets[0].asns(), &[5, 7]);
+        assert_eq!(chain.asn_sets[0].ranges(), &[] as &[(u32, u32)]);
+    }
+
+    /// A set with ranges has no compile-time member list to iterate, so
+    /// `for` over it is a compile error; probing it is fine.
+    #[test]
+    fn ranged_sets_are_not_iterable() {
+        for set in ["64512..65534", "PRIVATE_AS", "1, 2..3"] {
+            let (_, rendered) = diagnostics_of(&format!(
+                "asn-set s {{ {set} }}
+                 policy p {{ term t {{ for a in s {{ if a == 1 {{ reject }} }} accept }} }}"
+            ));
+            assert!(
+                rendered.contains("asn-set `s` holds ranges and is not iterable"),
+                "{set}: {rendered}"
+            );
+        }
+        compile_ok(
+            "asn-set s { 1, 2, 3 }
+             policy p { term t { for a in s { if a == 1 { reject } } accept } }",
+        );
+    }
+
+    #[test]
+    fn ranges_canonicalize_for_set_identity() {
+        let chain = compile_ok(
+            "asn-set a { 1..3, 10, 4294967290..4294967295 }
+             asn-set b { 4294967295, 2..3, 1..2, 10, 4294967290..4294967294, 2 }
+             policy p { term t { if route.origin-as in a || route.origin-as in b { reject } } }",
+        );
+        assert_eq!(chain.asn_sets[0], chain.asn_sets[1]);
+        assert_eq!(chain.asn_sets[0].asns(), &[10]);
+        assert_eq!(
+            chain.asn_sets[0].ranges(),
+            &[(1, 3), (4_294_967_290, 4_294_967_295)]
+        );
+        let chain = compile_ok(
+            "asn-set p { PRIVATE_AS, 64512 }
+             policy q { term t { if route.origin-as in p { reject } } }",
+        );
+        assert!(
+            chain.asn_sets[0].asns().is_empty(),
+            "covered member dropped"
+        );
+        assert_eq!(
+            chain.asn_sets[0].ranges(),
+            &[(64_512, 65_534), (4_200_000_000, 4_294_967_294)]
+        );
+    }
+
+    #[test]
+    fn dataset_files_and_test_overrides_accept_ranges() {
+        let text = "# invalid\n0\n64496..64511\nPRIVATE_AS   # RFC 6996\n4294967295\n";
+        let data = parse_dataset_text(text, DatasetKind::Asn).expect("valid");
+        let DatasetData::Asn(set) = &data else {
+            panic!("asn data");
+        };
+        for (asn, member) in [
+            (0, true),
+            (64_495, false),
+            (64_496, true),
+            (65_534, true),
+            (65_535, false),
+            (4_200_000_000, true),
+            (4_294_967_295, true),
+        ] {
+            assert_eq!(set.contains(asn), member, "{asn}");
+        }
+        // 64496..64511 and 64512..65534 touch and merge, and 4294967295
+        // joins 4200000000..4294967294: one exact member, two ranges.
+        assert_eq!(data.records(), 3);
+        let err = parse_dataset_text("1\n9..1\n", DatasetKind::Asn).expect_err("empty");
+        assert!(err.starts_with("line 2: invalid ASN range"), "{err}");
+        let err = parse_dataset_text("1..2 3\n", DatasetKind::Asn).expect_err("two entries");
+        assert!(err.contains("one entry per line"), "{err}");
+        parse_dataset_text("1..2\n", DatasetKind::Community).expect_err("community file");
+
+        let source = r#"
+dataset asn-set bogons
+policy p { term t { if route.origin-as in bogons { reject } } term rest { accept } }
+test hit {
+    dataset bogons { 64496..64511, PRIVATE_AS }
+    route { prefix 192.0.2.0/24; as-path "4200000000" }
+    expect p == reject
+}
+test miss {
+    dataset bogons { 64496..64511, PRIVATE_AS }
+    route { prefix 192.0.2.0/24; as-path "4294967295" }
+    expect p == accept
+}
+"#;
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, 2);
+        assert!(report.all_passed(), "{:?}", report.failures);
+    }
+
+    #[test]
+    fn route_key_refresh_scoping_sees_range_changes() {
+        let old = parse_dataset_text("64512..65534\n", DatasetKind::Asn).unwrap();
+        let new = parse_dataset_text("64512..65000\n", DatasetKind::Asn).unwrap();
+        let prefix = super::v4(192, 0, 2, 0, 24);
+        assert!(old.route_key_verdict_differs(&new, prefix, Some(65_001)));
+        assert!(!old.route_key_verdict_differs(&new, prefix, Some(64_600)));
+        assert!(!old.route_key_verdict_differs(&new, prefix, Some(1)));
+    }
+
+    #[test]
+    fn fmt_keeps_ranges_and_private_as() {
+        let source = "asn-set s { 64496..64511, PRIVATE_AS, 7 }\n";
+        assert_eq!(format_rpol(source).unwrap(), source);
+    }
+
+    /// Ranges are part of the warm-checkpoint identity: two sets that differ
+    /// only in their ranges answer differently, so they must not share an
+    /// identity. An exact-only set keeps the bytes it had before ranges.
+    #[test]
+    fn ranges_take_part_in_the_checkpoint_identity() {
+        use sha2::{Digest, Sha256};
+
+        let identity = |members: &str| {
+            crate::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+                "p".into(),
+                std::sync::Arc::new(compile_ok(&format!(
+                    "asn-set s {{ {members} }} \
+                     policy p {{ term t {{ if route.origin-as in s {{ reject }} }} }}"
+                ))),
+            )])
+            .warm_checkpoint_identity_v1()
+            .unwrap()
+        };
+        // Pinned from the encoding before ranges existed.
+        let exact = identity("64500, 64501");
+        assert_eq!(
+            Sha256::digest(&exact)
+                .iter()
+                .fold(String::new(), |mut hex, byte| {
+                    let _ = write!(hex, "{byte:02x}");
+                    hex
+                }),
+            "7d0bddd3507d0001244532c2e2a4415fd0bc3da02d4b606cb0ed042a769dfb4f",
+            "{}",
+            String::from_utf8_lossy(&exact)
+        );
+        assert_ne!(identity("100..200"), identity("300..400"));
+        assert_ne!(identity("7, 100..200"), identity("7, 100..201"));
+        assert_ne!(identity("PRIVATE_AS"), identity("64512..65534"));
+        assert_eq!(
+            identity("PRIVATE_AS"),
+            identity("64512..65534, 4200000000..4294967294"),
+            "PRIVATE_AS is its canonical ranges"
+        );
+    }
+}
