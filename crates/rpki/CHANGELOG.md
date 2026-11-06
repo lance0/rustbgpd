@@ -56,7 +56,10 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   on a new connection). Previously any failure before the first End of Data,
   such as one connection reset, kept the cache at v1, without ASPA, for the
   life of the process. A probe the cache refuses falls back to v1 at once and
-  keeps the held v1 data and serial.
+  keeps the held v1 data and serial. Only a failure before the cache answers
+  counts as a refusal: once a Cache Response completes negotiation, a later
+  error such as a corrupt Prefix PDU ends the session under its own §12
+  handling, flushing the held data where that applies.
 - Move to wire `0.28.0` for IPv4 VPN FlowSpec (`Safi::FlowSpecVpn` and the
   new `MpReachNlri`/`MpUnreachNlri` fields). There is no independent verifier
   or RTR change. Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together. These

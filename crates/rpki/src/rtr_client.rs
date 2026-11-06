@@ -783,9 +783,13 @@ impl RtrClient {
         // accepted: no epoch is held, or the held epoch is from v1 and
         // this attempt probes v2. Real-world caches like GoRTR and StayRTR
         // disconnect on unsupported versions instead of sending error
-        // code 4.
-        self.epoch
-            .is_none_or(|epoch| epoch.version < self.negotiated_version)
+        // code 4. Once the cache has answered at v2, negotiation is over
+        // and a later failure is an ordinary session error: a corrupt
+        // Prefix PDU must take its flush, not a fallback that keeps data.
+        !self.negotiation_complete
+            && self
+                .epoch
+                .is_none_or(|epoch| epoch.version < self.negotiated_version)
             && matches!(
                 error,
                 RtrError::Io(_)
@@ -3915,6 +3919,82 @@ mod tests {
             "the v1 epoch was not kept through the refused probe"
         );
         assert!(vrp_rx.try_recv().is_err(), "held data was flushed");
+        drop(v1);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// A v2 re-probe that the cache accepts has completed negotiation, so a
+    /// corrupt Prefix PDU in its first transaction is the §12 fatal error it
+    /// is anywhere else: the held v1 data is flushed. Before End of Data the
+    /// held epoch is still v1, which must not turn the error into a v1
+    /// fallback that keeps the data.
+    #[tokio::test(start_paused = true)]
+    async fn corrupt_prefix_after_accepted_v2_reprobe_flushes_held_data() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (stream, _) = listener.accept().await.unwrap();
+        drop(stream);
+        let (mut v1, _) = listener.accept().await.unwrap();
+        let _ = read_pdu_with_version(&mut v1).await;
+        write_pdus_version(
+            &mut v1,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: Ipv4Addr::new(203, 0, 113, 0),
+                    asn: 65001,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 3600,
+                    retry: 0,
+                    expire: 7200,
+                },
+            ],
+            crate::rtr_codec::RTR_VERSION,
+        )
+        .await;
+        let _ = vrp_rx.recv().await.unwrap();
+
+        let (mut probe, _) = timeout(Duration::from_secs(4000), listener.accept())
+            .await
+            .expect("no reconnect after the re-probe interval")
+            .unwrap();
+        assert_eq!(
+            read_pdu_with_version(&mut probe).await,
+            (crate::rtr_codec::RTR_VERSION_2, RtrPdu::ResetQuery)
+        );
+        write_pdus(&mut probe, &[RtrPdu::CacheResponse { session_id: 9 }]).await;
+        // Host bits set: a corrupt Prefix PDU (§12, code 0).
+        write_pdus(
+            &mut probe,
+            &[RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 1),
+                asn: 65001,
+            }],
+        )
+        .await;
+
+        assert_eq!(
+            timeout(Duration::from_secs(5), vrp_rx.recv())
+                .await
+                .expect("the corrupt Prefix PDU did not flush the held data")
+                .unwrap(),
+            VrpUpdate::ServerDown { server: addr }
+        );
         drop(v1);
 
         client_handle.abort();
