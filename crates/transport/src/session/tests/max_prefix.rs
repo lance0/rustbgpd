@@ -2569,6 +2569,34 @@ async fn add_path_receive_max_shutdown_latches_with_path_count() {
     );
 }
 
+/// The safety ceiling only overrides `"warning"`. A configured cap at or
+/// above it under `"shutdown"` still shuts the session down, and the counter
+/// labels every excess attempt with the action that was actually taken.
+#[tokio::test]
+async fn add_path_receive_max_at_ceiling_shutdown_counts_as_shutdown() {
+    let cap = u32::from(DEFAULT_ADD_PATH_RECEIVE_MAX);
+    let (mut session, _rib_rx, _notify_rx, _server) =
+        notifying_session(mode_config(crate::config::MaxPrefixAction::Shutdown)).await;
+    session.config.peer.paths_limit_receive_max = DEFAULT_ADD_PATH_RECEIVE_MAX;
+    install_dual_stack_session(&mut session, true);
+    let prefix = v4_prefix(1);
+    let entries: Vec<_> = (0..cap + 2)
+        .map(|path_id| Ipv4NlriEntry { path_id, prefix })
+        .collect();
+    session
+        .process_update(add_path_update(&entries, None, PEER_NEXT_HOP))
+        .await;
+    assert!(session.stop_requested);
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "shutdown") - 2.0).abs()
+            < f64::EPSILON
+    );
+    assert!(
+        add_path_receive_attempts(&session, "ipv4_unicast", "block").abs() < f64::EPSILON,
+        "no attempt is labeled block when the session shut down"
+    );
+}
+
 #[tokio::test]
 async fn add_path_receive_max_counts_same_update_after_withdrawal() {
     let config = mode_config(crate::config::MaxPrefixAction::Block);

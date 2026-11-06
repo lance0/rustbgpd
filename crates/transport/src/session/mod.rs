@@ -760,8 +760,11 @@ impl PathReceiveAdmission {
             + self.reserved_counts.get(&prefix).copied().unwrap_or(0);
         if count >= bound {
             // `"warning"` observes the configured cap but never lifts the
-            // safety ceiling: past it the excess is withheld regardless.
-            let action = if count >= bound.max(usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX)) {
+            // safety ceiling: past it the excess is withheld as `"block"`.
+            // `"block"` and `"shutdown"` already act at the cap itself.
+            let action = if action == MaxPrefixAction::Warning
+                && count >= bound.max(usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX))
+            {
                 MaxPrefixAction::Block
             } else {
                 action
