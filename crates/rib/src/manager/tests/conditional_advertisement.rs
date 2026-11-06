@@ -1113,8 +1113,11 @@ async fn spawn_with_source(
 ) -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    // Coalescing must not depend on wall-clock speed under test load.
+    // Coalescing must not depend on wall-clock speed under test load, and
+    // neither may the actor's poll: a spent wall-clock poll budget yields
+    // after an update, before the loop top observes a due deadline.
     manager.distribution_window_limits.elapsed = Duration::from_secs(3_600);
+    manager.flush_poll_budget = Duration::from_secs(3_600);
     let _ = manager.install_conditional_advertisements(vec![absent_if(SETTLE)]);
     let handle = tokio::spawn(manager.run());
     tx.send(peer_up_update(source, 1, 65001)).await.unwrap();
@@ -1237,11 +1240,21 @@ async fn expiry_cutoff_holds_when_the_rtc_end_of_rib_cap_is_due_too() {
     // End-of-RIB hold cap.
     let _rtc_rx = vpn_rtc_peer_up(&tx, peer(3)).await;
     barrier(&tx).await;
+    // Let the actor finish the barrier's turn and park in its select, so
+    // the clock passes both deadlines while it waits there.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
 
     for octet in [7, 8, 9] {
         tx.send(unrelated_two_chunk(source, octet)).await.unwrap();
     }
-    // Both the settle deadline and the RTC cap are now overdue.
+    // Both the settle deadline and the RTC cap are now overdue. The parked
+    // actor wakes on the first queued update before the timer driver fires
+    // either sleep, so it handles that update in its receive branch and only
+    // then reaches the loop top that captures the cutoffs. Nothing in that
+    // branch may yield before the capture, or the condition change below
+    // would enter the captured backlog.
     advance(Duration::from_secs(61)).await;
     tx.send(routes_received(
         source,
