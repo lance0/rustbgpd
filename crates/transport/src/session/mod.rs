@@ -718,12 +718,13 @@ struct MaxPrefixViolation {
 /// Reservations for one UPDATE after its explicit withdrawals have been
 /// accounted. Accepted identities and rejected identities retained by a
 /// received-prefix bound share the per-prefix budget. Excess IDs are never
-/// retained as tombstones.
+/// retained as tombstones. Each exceeded attempt records the action applied
+/// to it: the configured one, or `Block` past the safety ceiling.
 #[derive(Default)]
 struct PathReceiveAdmission {
     reserved: HashSet<(Prefix, u32)>,
     reserved_counts: HashMap<Prefix, usize>,
-    exceeded: Vec<(Prefix, u32, usize)>,
+    exceeded: Vec<(Prefix, u32, usize, MaxPrefixAction)>,
 }
 
 impl PathReceiveAdmission {
@@ -758,7 +759,14 @@ impl PathReceiveAdmission {
                 .unwrap_or(0)
             + self.reserved_counts.get(&prefix).copied().unwrap_or(0);
         if count >= bound {
-            self.exceeded.push((prefix, path_id, count + 1));
+            // `"warning"` observes the configured cap but never lifts the
+            // safety ceiling: past it the excess is withheld regardless.
+            let action = if count >= bound.max(usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX)) {
+                MaxPrefixAction::Block
+            } else {
+                action
+            };
+            self.exceeded.push((prefix, path_id, count + 1, action));
             if action != MaxPrefixAction::Warning {
                 return false;
             }
@@ -918,9 +926,11 @@ fn tcp_ao_key_metadata(
 const OUTBOUND_BUFFER: usize = 4096;
 
 /// Per-prefix IPv4/IPv6-unicast Add-Path receive cap when
-/// `add_path.receive_max` is unset or zero. The Adj-RIB-In keeps each
-/// prefix's path IDs in a scanned list, so an uncapped peer can make every
-/// insert and withdrawal for one prefix linear in its path count.
+/// `add_path.receive_max` is unset or zero, and the floor of the safety
+/// ceiling `max(receive_max, this)` that even `"warning"` cannot lift. The
+/// Adj-RIB-In keeps each prefix's path IDs in a scanned list, so an uncapped
+/// peer can make every insert and withdrawal for one prefix linear in its
+/// path count.
 const DEFAULT_ADD_PATH_RECEIVE_MAX: u16 = 1024;
 
 /// Retry cadence for the forced BMP peer-state reset after a dropped
@@ -1116,7 +1126,8 @@ impl PeerSession {
     /// Per-prefix Add-Path receive cap and the action applied past it. A
     /// configured `receive_max` follows `max_prefix_action`; without one the
     /// default cap always withholds the excess, so an unconfigured peer is
-    /// neither torn down nor left unbounded by a `"warning"` action.
+    /// not torn down. Either way, admission withholds anything past the
+    /// safety ceiling `max(cap, DEFAULT_ADD_PATH_RECEIVE_MAX)`.
     fn path_receive_limit(&self) -> (u16, MaxPrefixAction) {
         match self.config.peer.paths_limit_receive_max {
             0 => (DEFAULT_ADD_PATH_RECEIVE_MAX, MaxPrefixAction::Block),
@@ -1687,13 +1698,13 @@ impl PeerSession {
     /// enters accepted or rejected storage under `block` or `shutdown`.
     async fn enforce_path_receive_admission(&mut self, admission: PathReceiveAdmission) -> bool {
         let (bound, max_prefix_action) = self.path_receive_limit();
-        let action = match max_prefix_action {
-            MaxPrefixAction::Shutdown => "shutdown",
-            MaxPrefixAction::Block => "block",
-            MaxPrefixAction::Warning => "warning",
-        };
         let mut first = None;
-        for (prefix, path_id, count) in admission.exceeded {
+        for (prefix, path_id, count, action) in admission.exceeded {
+            let action = match action {
+                MaxPrefixAction::Shutdown => "shutdown",
+                MaxPrefixAction::Block => "block",
+                MaxPrefixAction::Warning => "warning",
+            };
             let (index, family, afi) = match prefix {
                 Prefix::V4(_) => (0, "ipv4_unicast", Afi::Ipv4),
                 Prefix::V6(_) => (1, "ipv6_unicast", Afi::Ipv6),

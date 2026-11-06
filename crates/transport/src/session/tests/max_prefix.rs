@@ -2199,6 +2199,10 @@ async fn add_path_receive_max_blocks_third_path_for_one_prefix() {
 #[tokio::test]
 async fn add_path_receive_default_cap_withholds_excess_paths() {
     use crate::config::MaxPrefixAction;
+    assert_eq!(
+        DEFAULT_ADD_PATH_RECEIVE_MAX, 1024,
+        "the documented and changelogged default"
+    );
     let cap = u32::from(DEFAULT_ADD_PATH_RECEIVE_MAX);
     for action in [
         MaxPrefixAction::Shutdown,
@@ -2213,21 +2217,9 @@ async fn add_path_receive_default_cap_withholds_excess_paths() {
         let entries: Vec<_> = (0..cap + 2)
             .map(|path_id| Ipv4NlriEntry { path_id, prefix })
             .collect();
-        let flood = UpdateMessage::build(
-            &entries,
-            &[],
-            &[
-                PathAttribute::Origin(Origin::Igp),
-                PathAttribute::AsPath(AsPath {
-                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
-                }),
-                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-            ],
-            true,
-            true,
-            Ipv4UnicastMode::Body,
-        );
-        session.process_update(flood).await;
+        session
+            .process_update(add_path_update(&entries, None, PEER_NEXT_HOP))
+            .await;
 
         assert!(session.read_half.is_some(), "{action:?} must not tear down");
         assert_eq!(session.known_prefix_count(), 1);
@@ -2258,6 +2250,148 @@ async fn add_path_receive_default_cap_withholds_excess_paths() {
             usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX)
         );
     }
+}
+
+const PEER_NEXT_HOP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+
+/// One Add-Path body-NLRI UPDATE carrying `entries`, optionally tagged with
+/// an extra path attribute (for example OTC).
+fn add_path_update(
+    entries: &[Ipv4NlriEntry],
+    extra: Option<PathAttribute>,
+    next_hop: Ipv4Addr,
+) -> UpdateMessage {
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(next_hop),
+    ];
+    attrs.extend(extra);
+    UpdateMessage::build(entries, &[], &attrs, true, true, Ipv4UnicastMode::Body)
+}
+
+/// The under-cap precheck must hold for every prefix in an UPDATE, not just
+/// one: a fresh prefix alongside a full one cannot reopen the full prefix.
+#[tokio::test]
+async fn add_path_receive_default_cap_holds_in_multi_prefix_update() {
+    let cap = u32::from(DEFAULT_ADD_PATH_RECEIVE_MAX);
+    let (mut session, _rib_rx, _notify_rx, _server) =
+        notifying_session(mode_config(crate::config::MaxPrefixAction::Block)).await;
+    install_dual_stack_session(&mut session, true);
+    let full = v4_prefix(1);
+    let fresh = v4_prefix(2);
+    let saturating: Vec<_> = (0..cap)
+        .map(|path_id| Ipv4NlriEntry {
+            path_id,
+            prefix: full,
+        })
+        .collect();
+    session
+        .process_update(add_path_update(&saturating, None, PEER_NEXT_HOP))
+        .await;
+    assert_eq!(
+        session.known_prefix_refcounts[&Prefix::V4(full)],
+        usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX)
+    );
+    let mixed = [
+        Ipv4NlriEntry {
+            path_id: 0,
+            prefix: fresh,
+        },
+        Ipv4NlriEntry {
+            path_id: cap + 100,
+            prefix: full,
+        },
+    ];
+    session
+        .process_update(add_path_update(&mixed, None, PEER_NEXT_HOP))
+        .await;
+    assert!(session.known_paths.contains(&(Prefix::V4(fresh), 0)));
+    assert!(!session.known_paths.contains(&(Prefix::V4(full), cap + 100)));
+    assert_eq!(
+        session.known_prefix_refcounts[&Prefix::V4(full)],
+        usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX)
+    );
+}
+
+/// OTC and strict-peer next-hop ownership rejections retain their IDs when a
+/// received-prefix bound tracks rejected identities, so they must enter the
+/// under-cap precheck: at the cap, a rejected new ID is withheld, not kept.
+#[tokio::test]
+async fn add_path_receive_max_bounds_otc_and_ownership_rejected_ids() {
+    for gate in ["otc", "ownership"] {
+        let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+        config.max_prefixes_received_ipv4 = Some(10);
+        let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+        session.config.peer.paths_limit_receive_max = 2;
+        install_dual_stack_session(&mut session, true);
+        let prefix = v4_prefix(1);
+        for path_id in [0, 1] {
+            session
+                .process_update(ipv4_announce(prefix, path_id, true))
+                .await;
+        }
+        let entry = [Ipv4NlriEntry { path_id: 2, prefix }];
+        let update = if gate == "otc" {
+            session.config.peer.local_role = Some(BgpRole::RouteServer);
+            add_path_update(
+                &entry,
+                Some(PathAttribute::OnlyToCustomer(65002)),
+                PEER_NEXT_HOP,
+            )
+        } else {
+            session.config.next_hop_ownership_strict_peer = true;
+            add_path_update(&entry, None, Ipv4Addr::new(10, 0, 0, 99))
+        };
+        session.process_update(update).await;
+        assert!(
+            !session.rejected_paths.contains(&(Prefix::V4(prefix), 2)),
+            "{gate}: a rejected ID past the cap is not retained"
+        );
+        assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 2);
+        assert!(
+            (add_path_receive_attempts(&session, "ipv4_unicast", "block") - 1.0).abs()
+                < f64::EPSILON,
+            "{gate}: the withheld rejected ID is counted"
+        );
+    }
+}
+
+/// `"warning"` observes a configured `receive_max` but cannot lift the safety
+/// ceiling: past `max(receive_max, 1024)` the excess is withheld and counted
+/// as `"block"`, and the session stays up.
+#[tokio::test]
+async fn add_path_receive_max_warning_still_withholds_past_the_ceiling() {
+    let ceiling = u32::from(DEFAULT_ADD_PATH_RECEIVE_MAX);
+    let (mut session, _rib_rx, _notify_rx, _server) =
+        notifying_session(mode_config(crate::config::MaxPrefixAction::Warning)).await;
+    session.config.peer.paths_limit_receive_max = 4;
+    install_dual_stack_session(&mut session, true);
+    let prefix = v4_prefix(1);
+    let entries: Vec<_> = (0..ceiling + 2)
+        .map(|path_id| Ipv4NlriEntry { path_id, prefix })
+        .collect();
+    session
+        .process_update(add_path_update(&entries, None, PEER_NEXT_HOP))
+        .await;
+    assert!(session.read_half.is_some());
+    assert_eq!(
+        session.known_prefix_refcounts[&Prefix::V4(prefix)],
+        usize::from(DEFAULT_ADD_PATH_RECEIVE_MAX)
+    );
+    assert!(!session.known_paths.contains(&(Prefix::V4(prefix), ceiling)));
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "warning") - f64::from(ceiling - 4))
+            .abs()
+            < f64::EPSILON,
+        "IDs 4..1024 are admitted with a warning"
+    );
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "block") - 2.0).abs() < f64::EPSILON,
+        "IDs past the ceiling are withheld and counted as block"
+    );
 }
 
 #[tokio::test]

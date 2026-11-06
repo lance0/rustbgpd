@@ -1437,8 +1437,9 @@ diagnostics remain separately capacity-bounded. An existing ID can be
 replaced at the cap, and a withdrawal releases its slot. Under `"block"`, a
 net-new over-limit ID is withheld; recovery requires peer reannouncement or
 a session reset. Under `"shutdown"`, the peer receives Cease/1 and is latched
-off as above. Under `"warning"`, a configured cap observes the excess but
-accepts it, so it does not bound memory. `bgp_add_path_receive_limit_attempts_total`
+off as above. Under `"warning"`, a configured cap observes the excess and
+accepts it up to a safety ceiling of `max(receive_max, 1024)` path IDs per
+prefix; past the ceiling the excess is withheld and counted as `"block"`. `bgp_add_path_receive_limit_attempts_total`
 counts net-new ID admission attempts beyond the cap, including repeated
 attempts to send a withheld ID. Replacing an already admitted ID does not
 count. The counter is labeled by peer, family and action; the default cap

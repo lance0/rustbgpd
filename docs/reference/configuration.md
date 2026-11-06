@@ -2667,7 +2667,9 @@ prefix's retained path IDs. Accepted IDs count; rejected IDs count only when
 `max_prefixes_received_ipv4_unicast` or `max_prefixes_received_ipv6_unicast` enables received
 identity tracking for that family. `max_prefix_action = "block"` withholds a
 net-new ID beyond the cap, `"shutdown"` sends Cease/1 and latches the peer,
-and `"warning"` reports the over-limit attempt but keeps accepting. A
+and `"warning"` reports the over-limit attempt but keeps accepting up to a
+safety ceiling of `max(receive_max, 1024)` IDs, past which the excess is
+withheld and counted as `"block"`. A
 replacement of an existing ID needs no new slot, and a withdrawal releases
 one. Without `receive_max` (or with 0), rustbgpd advertises no Paths-Limit
 capability but still caps each IPv4/IPv6-unicast prefix at 1024 retained path

@@ -1642,7 +1642,10 @@ experimental interoperability feature, not an adopted IETF standard.
 rustbgpd caps what it sends at the peer's advertised limit. It also applies
 its own nonzero advertised limit locally to retained path identities per
 prefix for negotiated IPv4/IPv6-unicast Add-Path receive; other families have
-no local receive enforcement. Rejected identities count only when the
+no local receive enforcement. With `receive_max` unset or 0, nothing is
+advertised and a default local cap of 1024 paths per prefix applies; past
+`max(receive_max, 1024)` the excess is always withheld, even under
+`max_prefix_action = "warning"`. Rejected identities count only when the
 family's received-prefix bound already enables their tracking. This local
 cap is defensive; the draft places the sender-side obligation on the peer.
 If this local cap shuts down a session, Cease/1 carries no optional RFC 4486
