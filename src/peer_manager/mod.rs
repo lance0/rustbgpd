@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::ControlFlow;
@@ -27,7 +27,7 @@ use rustbgpd_transport::{
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, raw_config_document_bounded};
 use crate::policy_admin::{
@@ -79,7 +79,7 @@ mod unnumbered {
             match self {}
         }
 
-        pub(super) fn clear_held_graceful_shutdown(&mut self) {
+        pub(super) fn set_held_graceful_shutdown(&mut self, _: bool) {
             match *self {}
         }
     }
@@ -894,6 +894,10 @@ pub struct PeerManager {
     /// Process-wide local restarting-speaker GR deadline. Static peers
     /// restored during this window advertise `restart_state = true`.
     local_gr_restart_until: Option<Instant>,
+    /// Interface-only neighbors of the planned restart (the startup roster):
+    /// only their bindings advertise `restart_state = true` in the window,
+    /// as only startup static peers do.
+    planned_restart_interfaces: HashSet<String>,
     metrics: BgpMetrics,
     rib_tx: mpsc::Sender<RibUpdate>,
     /// Optional BMP event sender (None when BMP not configured).
@@ -1215,11 +1219,22 @@ impl PeerManager {
     /// Replace the live configuration, republishing its dataset bindings in
     /// the import roster. Every wholesale replacement goes through here.
     fn replace_current_config(&mut self, config: Config) -> Config {
+        let (previous, bfd) = self.install_current_config(config);
+        if let Err(error) = bfd {
+            warn!(%error, "BFD membership not updated for the configuration change");
+        }
+        previous
+    }
+
+    /// [`Self::replace_current_config`], also returning whether the BFD
+    /// membership followed the new configuration.
+    fn install_current_config(&mut self, config: Config) -> (Config, Result<(), String>) {
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
         self.conditional_reconcile_pending = true;
         self.unnumbered_runtime.config_due = true;
-        previous
+        let bfd = self.follow_bfd_membership(&previous);
+        (previous, bfd)
     }
 
     /// Install the bounded operator snapshot lane.
@@ -1774,6 +1789,20 @@ impl PeerManager {
             0,
             Config::effective_dynamic_neighbor_limit(&current_config),
         );
+        // The startup configuration is the planned restart's roster; the
+        // daemon has already refused to start on an unresolvable one.
+        let planned_restart_interfaces = if local_gr_restart_until.is_some() {
+            current_config
+                .interface_only_resolved_for_comparison()
+                .map(|neighbors| {
+                    crate::planned_restart_neighbors(&neighbors)
+                        .filter_map(|transport| transport.peer_interface.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
         Self {
             peers: PeerTable::new(&current_config),
             configured_owners: configured_owners::ConfiguredOwners::new(&current_config),
@@ -1800,6 +1829,7 @@ impl PeerManager {
             router_id,
             cluster_id,
             local_gr_restart_until,
+            planned_restart_interfaces,
             metrics,
             rib_tx,
             bmp_tx,
@@ -2296,27 +2326,7 @@ impl PeerManager {
                 // Static delete and both dynamic operations validate
                 // before effect; static add reports cleanup explicitly.
                 let outcome = match mutation {
-                    OwnedNeighborMutation::Add(spec) => {
-                        let mut effect = lifecycle::RuntimeCreatePeerFailureEffect::NoEffect;
-                        match self
-                            .runtime_create_peer_classified(spec, Some(&mut effect))
-                            .await
-                        {
-                            Ok(()) => OwnedNeighborMutationOutcome::Success,
-                            Err(error) => match effect {
-                                lifecycle::RuntimeCreatePeerFailureEffect::NoEffect => {
-                                    OwnedNeighborMutationOutcome::RejectedNoEffect(
-                                        OwnedNeighborMutationError::Peer(error),
-                                    )
-                                }
-                                lifecycle::RuntimeCreatePeerFailureEffect::FullyCompensated => {
-                                    OwnedNeighborMutationOutcome::FullyCompensated(
-                                        OwnedNeighborMutationError::Peer(error),
-                                    )
-                                }
-                            },
-                        }
-                    }
+                    OwnedNeighborMutation::Add(spec) => self.owned_runtime_create_peer(spec).await,
                     OwnedNeighborMutation::Delete(peer) => {
                         match self.delete_peer_runtime(peer, true).await {
                             Ok(_) => OwnedNeighborMutationOutcome::Success,

@@ -229,7 +229,7 @@ async fn selection_deferral_timer_fires_under_sustained_ingress() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(10),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
+                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)).into(),
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             }],
         });
@@ -265,7 +265,7 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(10),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
+                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)).into(),
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });
@@ -365,7 +365,7 @@ async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(10),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
+                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)).into(),
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });

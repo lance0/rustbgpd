@@ -29,7 +29,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | EVPN (Types 1–5 reflection scoped RR-only v1; Type 6 and Linux/VXLAN VTEP alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap), RFC 9251 (SMET relay) | Route types 1–6; Type 6 SMET relay only; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), RFC 9324 (opt-in), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention; local VRP/ASPA re-evaluation without Route Refresh when `[rpki] local_revalidation` is set |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
-| FlowSpec / blackhole | RFC 8955/8956 and RFC 9117 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Opt-in FlowSpec feasibility; opt-in BLACKHOLE Linux FIB discard |
+| FlowSpec / blackhole | RFC 8955/8956 (SAFI 133/134), RFC 9117 (global FlowSpec), RFC 7999 (BLACKHOLE) | Global FlowSpec feasibility is opt-in; VPN FlowSpec is controller origination only; opt-in BLACKHOLE Linux FIB discard |
 | Liveness | RFC 5880/5881/5882/5883 (BFD), RFC 9384 (BFD Down Cease subcode), RFC 9687 (Send Hold Timer) | Single-hop and multihop async BFD for static neighbors, single-hop for dynamic-range sessions; typed Cease/10 teardown on a genuine BFD Down |
 | Maintenance | RFC 8326 (Graceful Shutdown), RFC 9003 (Extended Admin Shutdown Communication) | Receiver gating + initiator toggle |
 | Monitoring | RFC 7854/8671/9069 (BMP trio), RFC 9972 (selected BMP statistics), RFC 6396 (MRT TABLE_DUMP_V2), RFC 7951 (gNMI/OpenConfig JSON) | Pre-policy / post-policy / Loc-RIB BMP views |
@@ -1857,7 +1857,21 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ## RFC 8955/8956 — FlowSpec
 
-- SAFI 133. IPv4 and IPv6 unicast FlowSpec.
+- SAFI 133 supports global IPv4 and IPv6 FlowSpec. SAFI 134 supports
+  explicit IPv4/IPv6 controller origination with `(AFI, RD, components)`
+  identity and RT attributes. Received VPN rules are fully decoded, then
+  discarded before the RIB; no VRF import, receive validation, reflection or
+  dataplane behavior is implied. See the
+  [VPN API contract](api.md#vpn-flowspec-controller-api), which extends
+  [ADR-0146's IPv4 design](../adr/0146-vpn-flowspec.md) to IPv6.
+- IPv6 prefix components carry `length - offset` pattern bits, including
+  non-byte-aligned offsets. Only `length = offset = 0` or
+  `offset < length <= 128` is valid; padding bits are ignored on decode and
+  zeroed on encode. IPv6 fragment operands occupy one octet; reserved bits
+  are ignored on receive and omitted from originated keys and encoding.
+  Flow Label uses the existing minimal numeric width to preserve the ability
+  to re-encode a legal 4095-octet received rule; RFC 8956 recommends four
+  octets but does not require them.
 - 13 match component types (destination/source prefix, protocol, ports,
   ICMP, TCP flags, packet length, DSCP, fragment, flow label).
 - Actions via extended communities: traffic-rate, traffic-action,

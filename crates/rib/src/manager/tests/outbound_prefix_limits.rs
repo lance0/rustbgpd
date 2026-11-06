@@ -1397,7 +1397,7 @@ fn gated_closed_recovery_is_cleaned_once_without_clearing_protocol_gates() {
             manager = manager.with_selection_deferral(SelectionDeferralConfig {
                 timeout: std::time::Duration::from_mins(1),
                 waiters: vec![SelectionDeferralWaiterConfig {
-                    peer: PeerId::from_addr("10.113.1.8".parse().unwrap()),
+                    peer: PeerId::from_addr("10.113.1.8".parse().unwrap()).into(),
                     families: ipv4_sendable(),
                 }],
             });
@@ -1548,7 +1548,7 @@ fn selection_held_recovery_parks_without_protocol_state_or_timer_spin() {
     let mut manager = manager.with_selection_deferral(SelectionDeferralConfig {
         timeout: std::time::Duration::from_mins(1),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: waiter,
+            peer: waiter.into(),
             families: ipv4_sendable(),
         }],
     });

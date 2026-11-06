@@ -135,7 +135,7 @@ fn removing_blackhole_from_same_key(prefix: Prefix, leased: bool) {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_mins(2),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: waiter,
+                peer: waiter.into(),
                 families: vec![family],
             }],
         });

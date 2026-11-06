@@ -292,7 +292,7 @@ fn exact_evpn_explain_source_scope_deferral_dirty_and_encoder_overlay_are_distin
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: old.peer,
+            peer: old.peer.into(),
             families: evpn_sendable(),
         }],
     });

@@ -26,7 +26,7 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_mins(1),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: feed_peer,
+                peer: feed_peer.into(),
                 families: vec![family],
             }],
         });

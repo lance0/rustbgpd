@@ -322,3 +322,35 @@ on the same port is not implemented.
 All-active CE forwarding requires an `interface` binding. Unbound segments
 retain their control-plane behavior, but cannot install a local attachment
 row and do not qualify as an all-active CE forwarding deployment.
+
+## Amendment (2026-11-05): an unready `auto-lacp` segment keeps its operator drain
+
+Decision 2 says GC drops all reasons with the ES. That holds when the segment
+leaves the config. An `esi = "auto-lacp"` segment also leaves the runtime while
+its bond has no usable LACP partner, which a carrier loss causes, but it is
+still configured. Dropping its `Operator` reason then broke the maintenance
+flow above: the segment re-originated, undrained, as soon as the partner
+returned.
+
+The readiness table now keeps the last derived ESI of a bond that dropped out
+as *parked*. GC keeps the `Operator` reason of a parked ESI and drops its
+`Link` reason with the binding, as for any unbound segment. The parked entry
+ends when the bond is ready again, or when the bond leaves the committed
+config. A bond that returns under the same partner is still operator-drained.
+A different partner is a new segment identity and starts undrained, as a
+re-added ESI does under ADR-0084.
+
+The GC inside a converge also keeps every ESI a ready bond derives. One
+readiness round can return one bond and park another. That plan is an ES add
+plus an ES delete, so it converges in decomposed steps. The intermediate
+candidate holds neither segment, and its GC must not strip the returning
+segment's drain. Entries the table no longer names are collected by one more
+GC pass, run against the committed segments after every successful config
+commit and readiness re-converge. That pass covers the plans with no converge
+GC: removing a parked or collision-suppressed bond from the config, a derived
+ESI suppressed by a collision (a no-op plan), and a multi-segment additive
+build-up.
+
+The returning segment is still a new binding to the link coordinator, so
+Decision 1's direct first probe applies to it rather than the Decision 3
+hold-off.

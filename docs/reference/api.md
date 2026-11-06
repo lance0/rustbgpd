@@ -1342,12 +1342,13 @@ IPv6 unicast.
 `AddNeighbor` returns `INVALID_ARGUMENT`. Empty inherits a non-empty peer-group
 list; when both are empty, partial negotiation is preserved.
 `NeighborState.config.required_families` reports the effective inherited list.
-Both fields accept the same thirteen canonical labels as the configuration file:
+Both fields accept the same canonical labels as the configuration file:
 `ipv4_unicast`, `ipv6_unicast`, `ipv4_flowspec`, `ipv6_flowspec`,
 `l2vpn_evpn`, `linkstate`, `linkstate_vpn`, `l3vpn_ipv4_unicast`,
 `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `rtc`,
-and `l3vpn_ipv4_flowspec`. Read responses return those same labels; the `bgpls` spellings remain
-metric labels rather than configuration aliases.
+`l3vpn_ipv4_flowspec`, and `l3vpn_ipv6_flowspec`. Read responses return those
+same labels; the `bgpls` spellings remain metric labels rather than
+configuration aliases.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -2331,7 +2332,7 @@ resets on daemon restart.
 ### List FlowSpec routes
 
 ```bash
-# List all FlowSpec routes
+# List global IPv4 and IPv6 FlowSpec routes (SAFI 133)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
 
@@ -2341,10 +2342,28 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
 ```
 
+`ADDRESS_FAMILY_UNSPECIFIED` (0) selects only global IPv4 and IPv6 FlowSpec
+(SAFI 133), in every view: selected, local intent, received and advertised.
+The explicit global families also exclude VPN rules. Select
+`ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC` (13) or
+`ADDRESS_FAMILY_L3VPN_IPV6_FLOWSPEC` (14) to read the corresponding VPN
+FlowSpec family (AFI 1 or 2 / SAFI 134). Its rows carry `rd` and typed
+`route_targets`; the RTs also remain in raw `extended_communities`.
+VPN receive/reflection is outside
+the origination contract: received SAFI 134 is decoded and discarded, so
+remote received views have no retained VPN rows. See the
+[VPN controller contract](#vpn-flowspec-controller-api).
+
 `rbgp --json flowspec` retains the legacy formatted `components` array and
 also emits ordered `component_details` records with the API component `type`,
 `prefix`, `value`, and `offset`. The explicit offset preserves the RFC 8956
 IPv6 prefix-match semantics, including zero and nonzero values.
+When a returned row contains VPN scope, JSON also preserves nonempty `rd`
+and `route_targets`; empty fields are omitted, preserving global output.
+The CLI accepts and renders `l3vpn_ipv4_flowspec` and `l3vpn_ipv6_flowspec`,
+and includes RD/RTs in text rows. Select a VPN family explicitly with
+`--family`; `flowspec add` takes `--rd` and repeated `--route-target` flags,
+and `flowspec delete` takes the same `--rd`.
 
 Each row reports its action communities twice: typed in `actions`, and raw
 in `extended_communities` (8-octet values) or `ipv6_extended_communities`
@@ -2412,7 +2431,7 @@ when empty; ordinary mode leaves both unset. An empty received view for an
 address that names no known peer returns `NOT_FOUND` instead
 ([unknown peers](#unknown-peers-in-peer-scoped-views)). Clients must check this
 acknowledgement because older servers ignore the additive request field.
-`rbgp flowspec received PEER [-a ipv4_flowspec|ipv6_flowspec]` performs that
+`rbgp flowspec received PEER [-a FAMILY]` performs that
 check and reports an unsupported operation instead of displaying an older
 server's selected routes as received candidates.
 
@@ -2436,7 +2455,7 @@ rbgp flowspec advertised 192.0.2.1 -a ipv4_flowspec
 
 Clients must check `advertised_view` before interpreting the rows: an older
 server ignores the selector and returns its selected Loc-RIB instead.
-`rbgp flowspec advertised PEER [-a ipv4_flowspec|ipv6_flowspec]` rejects that
+`rbgp flowspec advertised PEER [-a FAMILY]` rejects that
 unacknowledged response. This gRPC mode belongs to the
 [scoped controller contract](v1-stable-contract.md#flowspec-controller-boundary)
 and retains the `sensitive_read` authorization tier.
@@ -3699,13 +3718,20 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ##### FlowSpec read-back
 
 `ListFlowSpecExportDispositions` reports the per-peer export disposition of
-one rule added with `AddFlowSpec` or `AddLeasedFlowSpec`, named by the same
-`(afi_safi, components)` key. This new diagnostic RPC is outside v1. Rows, peer order,
+one rule added with `AddFlowSpec`, `AddLeasedFlowSpec` or
+`AddGuardedFlowSpec`, named by the same `(afi_safi, rd, components)` key.
+`rd` is empty for global rules and required for VPN families 13 and 14.
+This diagnostic RPC is outside v1. Rows, peer order,
 `include_configured`, paging, the page-to-page `ABORTED` check and the token
 rules are those of [`ListPathExportDispositions`](#export-read-back), applied
 to the rule: its content is its path attributes, and the token is bound to
 the rule key. A key with no local rule returns `NOT_FOUND`; a malformed key
 returns `INVALID_ARGUMENT`.
+
+The token is bound to the complete scope: it cannot resume a different RD's
+walk. A peer that negotiated only global FlowSpec (AFI 1 or 2, SAFI 133)
+still reports `WITHHELD` / `family_not_negotiated` for a VPN rule without
+the corresponding SAFI-134 family.
 
 `COMMITTED` means the peer's Adj-RIB-Out holds this key from the local rule,
 with the attributes export would send now. A received rule with the same key
@@ -3746,7 +3772,8 @@ place. `AddLeasedPath` and `AddLeasedFlowSpec` take the same request as
 `AddPath` and `AddFlowSpec` plus an `InjectionLease { owner, lease_seconds }`,
 and return the same outcome plus the owner's `LeaseGeneration`
 ([ADR-0141](../adr/0141-injection-owner-lease.md)). Every entry an owner adds
-shares that owner's one lease. When the lease's deadline passes without a
+shares that owner's one lease across all families and VPN RDs. Separate
+deadlines require separate owners. When the lease's deadline passes without a
 renewal or a further leased add, the daemon withdraws all of the owner's
 routes and rules in one RIB turn, logs a WARN line with the counts and the
 lag from the deadline, and counts it in
@@ -3836,15 +3863,24 @@ entry's owner and remaining lease, in text and under `lease` in `--json`.
 
 `InjectionService.ListLeasedKeys` lists exactly the keys one owner holds:
 each unicast key as the `(prefix, prefix_length, path_id)` that `DeletePath`
-takes, each FlowSpec key as the `afi_safi` and `components` that
+takes, each FlowSpec key as the `afi_safi`, `rd` and `components` that
 `DeleteFlowSpec` takes, with the key's `LeaseGeneration` and
 `lease_remaining_ms` (0 means expired, withdrawal pending). Another owner's
 keys and unowned entries never appear. Keys come in a fixed order, unicast by
-prefix and `path_id` and then FlowSpec, `page_size` 0 returns up to 100 keys,
-larger values are capped at 1000, and a non-empty `next_page_token`
+prefix and `path_id` and then FlowSpec by AFI, optional RD and components.
+An absent RD identifies SAFI 133; a present RD identifies SAFI 134. The
+existing `t1` cursor preserves that complete identity, including boundaries
+between global scope and two RDs with identical components. `page_size` 0
+returns up to 100 keys, larger values are capped at 1000, and a non-empty `next_page_token`
 continues after the last key returned, so a key added or removed elsewhere
 does not shift the pages. An owner holds at most 16,384 keys. It is a
 `sensitive_read`, served on read-only listeners.
+
+VPN lease keys report family 13 or 14 and their lossless RD. Echo both into
+a delete: either VPN family without its RD returns `INVALID_ARGUMENT`,
+including when an older client drops the unknown RD field. It cannot address a global
+sibling. Every scoped key counts toward the same per-owner cap; an RD does
+not create another lease or quota.
 
 Every page carries `generation`, the owner's live generation the walk is
 bound to, so an empty page is never ambiguous:
@@ -4127,11 +4163,18 @@ RFC 8956 unicast component set. The daemon does not reorder components; an
 out-of-order or repeated type is rejected with `INVALID_ARGUMENT`. Each
 injected or withdrawn rule must also encode to at most 4095 NLRI payload
 bytes; larger rules are rejected with `INVALID_ARGUMENT`.
+Prefix lengths must be at most 32 for IPv4 or 128 for IPv6; oversized
+lengths are rejected rather than clamped. IPv4 prefix offsets must be zero.
+For IPv6, use length and offset both zero for an all-address match; otherwise
+`offset < length <= 128`. The API canonicalizes skipped leading bits to
+zero before forming the rule key. These checks apply to global and VPN
+adds, deletes and export-disposition queries.
 
 #### FlowSpec injection contract
 
-A local rule is identified by `(afi_safi, components)`. `AddFlowSpec` is an
-upsert on that key, so a controller can re-announce its whole rule set on
+A local rule is identified by `(afi_safi, rd, components)`, with an empty RD
+for global SAFI 133. `AddFlowSpec` is an upsert on that key, so a controller
+can re-announce its whole rule set on
 every reconcile pass:
 
 | `AddFlowSpecResponse.outcome` | Meaning |
@@ -4185,9 +4228,10 @@ returns `NOT_FOUND`, and a present rule is deleted with outcome
 `UNSPECIFIED` on success means the rule was deleted; it never means the rule
 was absent.
 
-To list exactly the injected rules, call `RibService.ListFlowSpecRoutes`
-with `received_peer_address: "0.0.0.0"`. The received view returns every
-local rule, including one a received rule currently out-selects
+To list the injected global rules, call `RibService.ListFlowSpecRoutes`
+with `received_peer_address: "0.0.0.0"`. Set family 13 or 14 explicitly to
+list injected IPv4 or IPv6 VPN rules. The received view returns every local
+rule in the requested family scope, including one a received rule currently out-selects
 (`selected: false`), with `route.peer_address` set to `0.0.0.0`. Selection
 deferral never holds a local rule, so `selected: false` on a local rule means
 a received rule with the same key is selected. A rule in a peer's received
@@ -4212,10 +4256,11 @@ daemon). With `--allow-missing`, a missing rule prints `FlowSpec rule not
 present` and exits 0; without the flag a missing rule is still an error. An
 older daemon's success prints `FlowSpec rule deleted (the daemon did not
 report an outcome)`.
-`rbgp flowspec received 0.0.0.0` shows the injected rules.
+`rbgp flowspec received 0.0.0.0` shows injected global rules; add
+`-a l3vpn_ipv4_flowspec` or `-a l3vpn_ipv6_flowspec` for VPN rules.
 
-`AddFlowSpec`, `DeleteFlowSpec`, and the selected, local-intent and advertised
-listing modes belong to the
+The global IPv4/IPv6 modes of `AddFlowSpec`, `DeleteFlowSpec`, and the
+selected, local-intent and advertised listings belong to the
 [scoped v1 controller contract](v1-stable-contract.md#flowspec-controller-boundary).
 Remote received-candidate mode, `Config.flowspec`, and the shared
 `ReceivedFlowSpecRouteEntry.path_id`, `.validation`, `.reason`, `.pending`
@@ -4242,6 +4287,121 @@ The current FRR oracle also rejects additional match components in both table
 paths and detailed rows. An offline recheck of all 26 retained snapshots passed
 with those checks, covering 980 paths and their matching detailed rows without
 changing the original receipt or driver identity.
+
+#### VPN FlowSpec controller API
+
+Families `ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC` (13) and
+`ADDRESS_FAMILY_L3VPN_IPV6_FLOWSPEC` (14) originate IPv4 and IPv6 VPN FlowSpec
+with explicit RD identity and Route Target attributes. The existing plain,
+leased and guarded add/delete RPCs, `ListFlowSpecRoutes`, `ListLeasedKeys`
+and `ListFlowSpecExportDispositions` retain that scope. These additions are
+outside v1; the global controller contract above is unchanged.
+[ADR-0146](../adr/0146-vpn-flowspec.md) records the original IPv4-only design.
+The IPv6 extension keeps that origination contract, using
+[RFC 8955 §8](https://www.rfc-editor.org/rfc/rfc8955.html#section-8) for VPN
+scope and [RFC 8956 §§2–3](https://www.rfc-editor.org/rfc/rfc8956.html#section-2)
+for AFI 2 / SAFI 134 and IPv6 components. This API does not create a local
+VRF or provide receive/reflection, router installation or traffic
+enforcement guarantees.
+
+The [pinned GoBGP qualification](../artifacts/interop/vpn-flowspec-qualification-20261106/README.md)
+covers RD/RT preservation, replacement, withdrawal, family isolation and
+239/240-byte NLRI framing. Nonzero IPv6 prefix offsets do not interoperate
+with GoBGP 4.11.0: its codec uses the full prefix length instead of the
+RFC 8956 pattern length. Offset-zero IPv6 and IPv4 checks passed; router
+installation and forwarding remain unqualified.
+
+| Message | Scope fields |
+|---|---|
+| `AddFlowSpecRequest`, including leased/guarded wrappers | `rd` (7), `route_targets` (8) |
+| `DeleteFlowSpecRequest` | `rd` (6) |
+| `DeleteGuardedFlowSpecRequest` | `rd` (5) |
+| `LeasedFlowSpecKey` | `rd` (3) |
+| `ListFlowSpecExportDispositionsRequest` | `rd` (6) |
+| `FlowSpecRouteEntry` | `rd` (13), `route_targets` (14) |
+
+Both VPN families require an RD of type 0, 1 or 2. Structured input accepts
+`asn16:u32`, `a.b.c.d:u16` and `asn32:u16`; `0x` plus 16 hexadecimal digits
+preserves an exact supported encoding. A small-ASN type-2 RD reads back in
+raw hex so re-injection retains its type. Global families reject a nonempty
+RD or typed `route_targets`. Components use their selected AFI's grammar,
+including source-prefix matches. Family 13 rejects IPv6 prefixes, nonzero
+prefix offsets and the IPv6 Flow Label component (type 13). Family 14
+accepts IPv6 prefixes, valid prefix offsets and Flow Label, with the IPv6
+upper-layer protocol and fragment semantics of RFC 8956; it rejects IPv4
+prefixes. In families 4 and 14, a fragment (type 12) value may set only IsF
+(`0x02`), FF (`0x04`) and LF (`0x08`); DF (`0x01`) is IPv4-only, and it or
+any reserved bit is rejected. The rule plus its eight-octet RD must fit in 4,095 bytes, leaving
+at most 4,087 bytes for components. Invalid scope or payload is rejected
+with `INVALID_ARGUMENT` before mutation.
+
+A VPN add requires at least one scope RT, typed in `route_targets` or raw
+in `extended_communities`. Supported scope RTs have exact types `0x00`,
+`0x01` or `0x02` and subtype `0x02`. Non-transitive raw forms (`0x40`–`0x42`)
+remain passthrough values and do not satisfy this requirement. A redirect
+action is not a scope RT. Typed RTs accept the same administrator grammar
+as `FlowSpecRedirect.route_target`: AS2, IPv4, AS4 and RFC 5396 asdot+.
+A small-ASN AS4 RT reads back as `0.ASN:value` to preserve its encoding.
+Both families use the existing FlowSpec actions; API acceptance does not
+establish a receiver's support for an action or combination.
+
+Rows return scope RTs both typed and raw. Re-inject each RT in **one**
+representation: retain `route_targets` and remove their raw twins, or leave
+`route_targets` empty and retain the raw values. With distinct scope RTs,
+an otherwise identical payload is `UNCHANGED` in either representation.
+Raw RT duplicates remain accepted and appear in both read-back lists; replay
+such rows using the raw list with `route_targets` empty. Repeated typed RTs,
+including aliases for the same encoded value, and typed/raw duplicates
+return `INVALID_ARGUMENT`. Removing duplicates changes the payload: a plain
+or same-owner leased retry can be `REPLACED`, while a guarded retry under
+the same revision returns `REVISION_MISMATCH`. Keep the existing typed-or-raw
+action rule too. Global raw-community behavior remains unchanged.
+
+Identical components in global scope, RD A and RD B are separate keys,
+as are rules in different AFIs. An RT-only plain or same-owner leased update
+replaces one key's attributes.
+It sends a replacement to eligible peers and withdraws from peers whose
+export policy now rejects the rule. A guarded RT change under the held
+revision returns `REVISION_MISMATCH`: delete that revision, then add the
+new payload under a new revision. Changing the RD creates a new key; retire
+the old identity explicitly. One owner's lease and 16,384-key cap span all
+of its RDs and families; admission revisions remain scoped to each key.
+
+The CLI uses the same identity and scope attributes:
+
+```bash
+rbgp flowspec add -a l3vpn_ipv4_flowspec --rd 44407:40 --route-target 44407:777 \
+  --match "dest=192.0.2.0/24 port==80" --action drop
+rbgp flowspec add -a l3vpn_ipv6_flowspec --rd 44407:40 --route-target 44407:777 \
+  --match "dest=2001:db8::/48 port==80" --action drop
+rbgp flowspec received 0.0.0.0 -a l3vpn_ipv6_flowspec
+rbgp flowspec delete -a l3vpn_ipv6_flowspec --rd 44407:40 \
+  --match "dest=2001:db8::/48 port==80"
+```
+
+Repeat `--route-target` for multiple RTs. Each peer must explicitly enable
+the corresponding VPN family; see the
+[controller configuration](../../examples/vpn-flowspec-controller/config.toml).
+
+The release floor is **UNASSIGNED**: the first published release containing
+this API has not been assigned. `HealthResponse.daemon_version` alone does
+not establish support. Pin a build containing this contract and require the
+read-only local-intent probe for each required family, which needs no peer:
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"afi_safi": 13, "received_peer_address": "0.0.0.0"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
+```
+
+Use `afi_safi: 14` for the IPv6 probe. A supporting daemon acknowledges
+`received_view: true`, even when the result is empty. A daemon that does
+not recognize the requested family returns `INVALID_ARGUMENT`.
+A transport or authentication failure is not that
+capability result. Never retry a refused VPN request as global FlowSpec,
+or send an RD with a global family: an older daemon can ignore the unknown
+RD field and operate on the global key. A family requiring an RD is refused
+without one on the new API, protecting old clients that echo lease keys.
 
 ### Inject an EVPN Type 2 (MAC/IP) route
 
@@ -4830,6 +4990,13 @@ Drain state is in memory only. A daemon restart clears it and replays the
 configured state, so re-apply a drain after a restart that happens during
 maintenance. `UNAVAILABLE` means the daemon's Ethernet Segment drain control
 is not running.
+
+An `esi = "auto-lacp"` segment leaves the runtime while its bond has no
+usable LACP partner, for example after carrier loss. Its `operator` reason
+stays on the last derived ESI meanwhile, so a segment that returns under the
+same partner is still drained. While the segment is absent the RPC returns
+`NOT_FOUND` for that ESI. A different partner is a new segment and starts
+undrained. Removing the segment from the config drops the drain.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

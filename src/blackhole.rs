@@ -165,13 +165,14 @@ struct RejectedBlackhole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KernelRoutePresence {
     Absent,
-    /// Only rows carrying our ownership marker (`RTPROT_BGP` +
-    /// `RTN_BLACKHOLE`) match the prefix. Whether the row is *owned* is
-    /// the reconciler's call, not the kernel's — a marker row may be
-    /// ours from this lifetime, a crash leftover, or operator-installed
+    /// A row carrying our ownership marker (`RTPROT_BGP` +
+    /// `RTN_BLACKHOLE`) matches the prefix, possibly beside foreign
+    /// rows at other metrics. Whether the row is *owned* is the
+    /// reconciler's call, not the kernel's — a marker row may be ours
+    /// from this lifetime, a crash leftover, or operator-installed
     /// `proto bgp` state (indistinguishable by design, ADR-0079).
     Marker,
-    /// At least one non-marker row matches the prefix.
+    /// Only non-marker rows match the prefix.
     Foreign,
 }
 
@@ -241,9 +242,13 @@ impl ReconcilerState {
     }
 }
 
-/// Collapse the dump into per-prefix presence. A foreign row dominates:
+/// Collapse the dump into per-prefix presence. A marker row dominates:
 /// the kernel can hold several routes for one prefix (different
-/// metrics), and any non-marker row makes the prefix unsafe to claim.
+/// metrics), and a foreign row beside our marker row does not make that
+/// row any less ours. Treating the pair as foreign would drop the
+/// receipt while the discard route stays in the kernel, past withdrawal
+/// and restart. Ownership still needs receipt evidence, and installs
+/// still refuse a prefix that holds only foreign rows.
 fn presence_by_prefix(entries: &[KernelRouteEntry]) -> HashMap<Prefix, KernelRoutePresence> {
     let mut map = HashMap::with_capacity(entries.len());
     for entry in entries {
@@ -254,8 +259,8 @@ fn presence_by_prefix(entries: &[KernelRouteEntry]) -> HashMap<Prefix, KernelRou
         };
         map.entry(entry.prefix)
             .and_modify(|existing| {
-                if presence == KernelRoutePresence::Foreign {
-                    *existing = KernelRoutePresence::Foreign;
+                if presence == KernelRoutePresence::Marker {
+                    *existing = KernelRoutePresence::Marker;
                 }
             })
             .or_insert(presence);
@@ -1553,8 +1558,22 @@ fn build_blackhole_route(prefix: Prefix) -> netlink_packet_route::route::RouteMe
             Prefix::V4(p) => RouteAddress::Inet(p.addr),
             Prefix::V6(p) => RouteAddress::Inet6(p.addr),
         }));
+    // IPv6 route deletion ignores the route type, so a delete without a
+    // metric removes the first `proto bgp` row for the prefix, which can
+    // be a co-resident daemon's unicast route. Pin the metric the kernel
+    // assigns by default (IP6_RT_PRIO_USER) on install and delete alike.
+    // IPv4 deletion matches the BLACKHOLE type and needs no metric.
+    if let Prefix::V6(_) = prefix {
+        msg.attributes
+            .push(RouteAttribute::Priority(IPV6_BLACKHOLE_METRIC));
+    }
     msg
 }
+
+/// The kernel's default IPv6 route metric, which rows installed before
+/// the metric was pinned also carry.
+#[cfg(target_os = "linux")]
+const IPV6_BLACKHOLE_METRIC: u32 = 1024;
 
 /// Parse one dumped kernel route into a main-table entry. Returns
 /// `None` for routes in other tables and for messages whose destination
@@ -3595,6 +3614,98 @@ pub(super) mod tests {
         assert_eq!(statuses[0].reason, "foreign_route_exists");
     }
 
+    /// A foreign route at another metric beside our marker row must not
+    /// strand the discard route: ownership survives, and the withdrawal
+    /// removes our row while the foreign row stays.
+    #[tokio::test]
+    async fn owned_route_beside_foreign_row_is_kept_and_removed_on_withdrawal() {
+        let prefix = v4(32);
+        let desired = vec![route(
+            prefix,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        )];
+        let mut fib = FakeFib::default();
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = deferred_adoption();
+
+        let _ = reconcile_for_test_with_adoption(
+            desired.clone(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+        assert_eq!(fib.install_calls, vec![prefix]);
+
+        fib.foreign.insert(prefix);
+        let statuses = reconcile_for_test_with_adoption(
+            desired,
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+        assert!(owned.contains_key(&prefix));
+        assert!(fib.receipt.as_ref().unwrap().contains(&prefix));
+        assert_eq!(statuses[0].state, BlackholeState::Installed);
+        assert_eq!(statuses[0].reason, "owned");
+
+        let statuses = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+        assert_eq!(fib.remove_calls, vec![prefix]);
+        assert!(!fib.installed.contains(&prefix));
+        assert!(fib.foreign.contains(&prefix));
+        assert!(owned.is_empty());
+        assert!(fib.receipt.as_ref().unwrap().is_empty());
+        assert_eq!(statuses.len(), 0);
+    }
+
+    /// After a restart, a receipt-backed marker row beside a foreign
+    /// row is adopted and reaped, not forgotten in the kernel.
+    #[tokio::test]
+    async fn adopted_row_beside_foreign_row_is_reaped() {
+        let prefix = v4(32);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        fib.foreign.insert(prefix);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+        let mut adoption = reapable_adoption();
+
+        let _ = reconcile_for_test_with_adoption(
+            Vec::new(),
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+            &mut adoption,
+        )
+        .await;
+
+        assert_eq!(fib.remove_calls, vec![prefix]);
+        assert!(!fib.installed.contains(&prefix));
+        assert!(fib.foreign.contains(&prefix));
+        assert!(adoption.pending.is_empty());
+        assert!(fib.receipt.as_ref().unwrap().is_empty());
+        let reaped = plain_counter_value(&metrics, "bgp_blackhole_discard_reaped_total");
+        assert!((reaped - 1.0).abs() < f64::EPSILON, "got {reaped}");
+    }
+
     #[tokio::test]
     async fn reconcile_reinstalls_owned_route_missing_from_kernel() {
         let prefix = v4(32);
@@ -3915,8 +4026,8 @@ pub(super) mod tests {
     }
 
     /// If a foreign row replaces an adopted marker before the reap
-    /// deadline, foreign ownership dominates and the daemon must forget
-    /// the pending adoption instead of deleting the replacement.
+    /// deadline, the marker is gone and the daemon must forget the
+    /// pending adoption instead of deleting the replacement.
     #[tokio::test]
     async fn adopted_pending_row_replaced_by_foreign_clears_without_reap() {
         let prefix = v4(32);
@@ -4224,5 +4335,180 @@ pub(super) mod tests {
             assert_eq!(statuses[0].reason, "adopted_pending_reap");
         }
         assert_eq!(fib.remove_calls.len(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ip_cmd(args: &[&str]) -> String {
+        let out = std::process::Command::new("ip")
+            .args(args)
+            .output()
+            .expect("spawn ip");
+        assert!(
+            out.status.success(),
+            "ip {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Gate on `EVPN_LINUX_NETNS=1` and re-run `test` inside a throwaway
+    /// netns. Returns `true` only in that inner run, after the setup.
+    #[cfg(target_os = "linux")]
+    fn enter_blackhole_netns(test: &str) -> bool {
+        const INNER: &str = "RUSTBGPD_BLACKHOLE_NETNS_INNER";
+        if std::env::var("EVPN_LINUX_NETNS").as_deref() != Ok("1") {
+            eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run the privileged blackhole test");
+            return false;
+        }
+        if std::env::var(INNER).is_err() {
+            let ns = format!("rbgp-blackhole-{}", std::process::id());
+            let delete = || {
+                let _ = std::process::Command::new("ip")
+                    .args(["netns", "delete", &ns])
+                    .output();
+            };
+            delete();
+            ip_cmd(&["netns", "add", &ns]);
+            let status = std::process::Command::new("ip")
+                .args(["netns", "exec", &ns])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "--nocapture",
+                    &format!("blackhole::tests::{test}"),
+                ])
+                .env(INNER, "1")
+                .status()
+                .expect("spawn inner");
+            delete();
+            assert!(status.success(), "inner test invocation failed");
+            return false;
+        }
+        ip_cmd(&["link", "set", "lo", "up"]);
+        ip_cmd(&["link", "add", "bh0", "type", "dummy"]);
+        ip_cmd(&["link", "set", "bh0", "up"]);
+        ip_cmd(&["addr", "add", "192.0.2.2/24", "dev", "bh0"]);
+        ip_cmd(&[
+            "-6",
+            "addr",
+            "add",
+            "2001:db8:1::2/64",
+            "dev",
+            "bh0",
+            "nodad",
+        ]);
+        true
+    }
+
+    /// Privileged netns proof: a foreign route at another metric beside
+    /// the daemon's BLACKHOLE row neither strands that row nor gets
+    /// deleted with it. The foreign rows include a `proto bgp` unicast
+    /// row, the shape a co-resident routing daemon installs. Run via
+    /// `bash crates/evpn-linux/tests/docker/run-netns-tests.sh blackhole_discard`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn netns_blackhole_discard_beside_foreign_metric_is_withdrawn() {
+        if !enter_blackhole_netns("netns_blackhole_discard_beside_foreign_metric_is_withdrawn") {
+            return;
+        }
+
+        let prefixes = [
+            (v4(32), "203.0.113.66/32", "192.0.2.1", "-4"),
+            (v6(128), "2001:db8::66/128", "2001:db8:1::1", "-6"),
+        ];
+        let desired: Vec<Route> = prefixes
+            .iter()
+            .map(|(prefix, ..)| {
+                route(
+                    *prefix,
+                    RouteOrigin::Ebgp,
+                    vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+                )
+            })
+            .collect();
+        let config = BlackholeConfig {
+            enabled: true,
+            ..BlackholeConfig::default()
+        };
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut fib = LinuxBlackholeFib::connect(metrics.clone()).expect("netlink connect");
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let mut state = ReconcilerState::new(
+            config,
+            tokio::time::Instant::now() + Duration::from_hours(1),
+            OwnershipState::ephemeral([]),
+        );
+        let show =
+            |family: &str, text: &str| ip_cmd(&[family, "route", "show", "table", "main", text]);
+
+        reconcile_once(
+            config,
+            &rib_with_routes(desired.clone()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut state,
+        )
+        .await;
+        for (prefix, text, gateway, family) in prefixes {
+            assert!(state.owned.contains_key(&prefix), "{text} not installed");
+            assert!(
+                show(family, text).contains("blackhole"),
+                "{text}: {}",
+                show(family, text)
+            );
+            ip_cmd(&[
+                family, "route", "add", text, "via", gateway, "proto", "bgp", "metric", "20",
+            ]);
+            ip_cmd(&[
+                family, "route", "add", text, "via", gateway, "metric", "100",
+            ]);
+        }
+
+        reconcile_once(
+            config,
+            &rib_with_routes(desired),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut state,
+        )
+        .await;
+        for (prefix, text, ..) in prefixes {
+            assert!(
+                state.owned.contains_key(&prefix),
+                "{text} ownership dropped"
+            );
+        }
+
+        reconcile_once(
+            config,
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut state,
+        )
+        .await;
+        assert!(state.owned.is_empty());
+        assert!(state.ownership.prefixes.is_empty());
+        for (_, text, gateway, family) in prefixes {
+            let rows = show(family, text);
+            assert!(
+                !rows.contains("blackhole"),
+                "{text} discard stranded: {rows}"
+            );
+            assert!(
+                rows.lines().any(|row| row.contains(gateway)
+                    && row.contains("proto bgp")
+                    && row.contains("metric 20")),
+                "{text} foreign proto bgp row deleted: {rows}"
+            );
+            assert!(
+                rows.lines()
+                    .any(|row| row.contains(gateway) && row.contains("metric 100")),
+                "{text} foreign static row deleted: {rows}"
+            );
+        }
     }
 }

@@ -92,7 +92,7 @@ fn rtc_interest_added_during_vpn_hold_survives_an_empty_dirty_resync() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![VPN],
             }],
         });

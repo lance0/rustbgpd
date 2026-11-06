@@ -623,7 +623,7 @@ fn deferred_flowspec_replay(size: usize) -> Work {
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_mins(2),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)).into(),
             families: vec![FLOWSPEC],
         }],
     });
@@ -693,7 +693,7 @@ fn deferred_unicast_manager() -> (mpsc::Sender<RibUpdate>, RibManager) {
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_mins(2),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)).into(),
             families: vec![(Afi::Ipv4, Safi::Unicast)],
         }],
     });
@@ -1043,7 +1043,7 @@ fn deferred_initial_admission_local_replay(size: usize) -> Work {
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_mins(2),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: waiter,
+            peer: waiter.into(),
             families: vec![family],
         }],
     });
@@ -1289,7 +1289,7 @@ fn deferred_post_miss_rtbh_replay(size: usize) -> Work {
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_mins(2),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: waiter,
+            peer: waiter.into(),
             families: vec![family],
         }],
     });
@@ -1950,7 +1950,7 @@ fn late_private_arm(size: usize) -> Work {
     manager = manager.with_selection_deferral(SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: waiter,
+            peer: waiter.into(),
             families: vec![family],
         }],
     });
@@ -2199,7 +2199,7 @@ fn held_bulk_promotion(size: usize) -> Work {
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_mins(2),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: waiter,
+            peer: waiter.into(),
             families: vec![(Afi::Ipv4, Safi::Unicast)],
         }],
     });

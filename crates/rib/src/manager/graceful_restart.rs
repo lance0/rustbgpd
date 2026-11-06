@@ -525,6 +525,7 @@ impl RibManager {
                 (Afi::Ipv4, Safi::FlowSpec),
                 (Afi::Ipv6, Safi::FlowSpec),
                 (Afi::Ipv4, Safi::FlowSpecVpn),
+                (Afi::Ipv6, Safi::FlowSpecVpn),
             ]
             .iter()
             .any(|family| !retained.contains(family))
@@ -1004,12 +1005,13 @@ impl RibManager {
     )]
     fn sweep_gr_stale_with_readiness(&mut self, peer: PeerId) {
         /// Every tuple a GR-stale route can belong to.
-        const TUPLES: [(Afi, Safi); 13] = [
+        const TUPLES: [(Afi, Safi); 14] = [
             (Afi::Ipv4, Safi::Unicast),
             (Afi::Ipv6, Safi::Unicast),
             (Afi::Ipv4, Safi::FlowSpec),
             (Afi::Ipv6, Safi::FlowSpec),
             (Afi::Ipv4, Safi::FlowSpecVpn),
+            (Afi::Ipv6, Safi::FlowSpecVpn),
             (Afi::L2Vpn, Safi::Evpn),
             (Afi::BgpLs, Safi::BgpLs),
             (Afi::BgpLs, Safi::BgpLsVpn),

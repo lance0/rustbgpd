@@ -263,7 +263,7 @@ fn dormant_typed_selection_replays_unchanged_rows_before_late_initial_eor() {
             .with_selection_deferral(SelectionDeferralConfig {
                 timeout: Duration::from_secs(60),
                 waiters: vec![SelectionDeferralWaiterConfig {
-                    peer: peer_v4(WAITER),
+                    peer: peer_v4(WAITER).into(),
                     families: vec![afi_safi],
                 }],
             });
@@ -381,7 +381,7 @@ fn dormant_private_evpn_membership_change_is_reconciled_at_selection_release() {
     .with_selection_deferral(SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: peer_v4(WAITER),
+            peer: peer_v4(WAITER).into(),
             families: vec![EVPN],
         }],
     });
@@ -506,7 +506,7 @@ fn local_vpn_flowspec_is_eligible_during_selection_deferral() {
     .with_selection_deferral(SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: peer_v4(WAITER),
+            peer: peer_v4(WAITER).into(),
             families: vec![family],
         }],
     });

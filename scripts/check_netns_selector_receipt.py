@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 BASE = (
-    "fdb_nhg", "fib_runtime", "bfd_runtime", "dataplane_vlan_fdb",
+    "fdb_nhg", "fib_runtime", "blackhole_discard", "bfd_runtime", "dataplane_vlan_fdb",
     "peer_sync_local_fdb", "dataplane_remote_mac", "vlan_local_mac_attribution",
     "macip_vlan_attribution", "svd_fdb_vni", "flood_list", "svd_flood_list",
     "managed_bridge",

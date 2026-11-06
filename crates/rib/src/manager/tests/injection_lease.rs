@@ -1181,6 +1181,108 @@ async fn an_owner_holds_at_most_the_key_cap() {
     );
 }
 
+/// Global IPv4/IPv6 and both VPN AFIs share the owner's existing key cap.
+#[tokio::test(start_paused = true)]
+async fn scoped_flowspec_siblings_share_the_owner_key_cap() {
+    assert_eq!(MAX_KEYS_PER_OWNER, 16_384);
+    let mut manager = manager_for_keys();
+    let scopes = [
+        (Afi::Ipv4, None),
+        (Afi::Ipv6, None),
+        (Afi::Ipv4, Some(40)),
+        (Afi::Ipv4, Some(41)),
+        (Afi::Ipv6, Some(40)),
+        (Afi::Ipv6, Some(41)),
+    ];
+    let rule = |afi: Afi, rd: Option<u8>, port: u64| {
+        let mut route = vpn_rule(1, rd.unwrap_or(0), 777);
+        route.afi = afi;
+        if rd.is_none() {
+            route.rd = None;
+        }
+        route.rule.components = vec![FlowSpecComponent::DestinationPort(vec![
+            rustbgpd_wire::NumericMatch {
+                end_of_list: true,
+                and_bit: false,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: port,
+            },
+        ])];
+        route
+    };
+    let add = |manager: &mut RibManager, route, lease_seconds| {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectLeasedFlowSpec {
+            route,
+            owner: "a".to_string(),
+            lease_seconds,
+            reply,
+        });
+        response.try_recv().unwrap()
+    };
+    for index in 0..MAX_KEYS_PER_OWNER - scopes.len() {
+        let mut route = local_route(0);
+        route.prefix = Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::from(0x0a00_0000 | u32::try_from(index).unwrap()),
+            32,
+        ));
+        manager.inject_local_route(route, Some(("a", 30))).unwrap();
+    }
+    for (afi, rd) in scopes {
+        assert_eq!(
+            add(&mut manager, rule(afi, rd, 80), 30).unwrap().0,
+            InjectOutcome::Created
+        );
+    }
+    assert_eq!(manager.owner_keys["a"].len(), MAX_KEYS_PER_OWNER);
+    assert_eq!(manager.loc_rib.family_lens().flowspec, [1, 1]);
+    assert_eq!(manager.loc_rib.family_lens().flowspec_vpn, [2, 2]);
+    let snapshot = |manager: &RibManager| {
+        (
+            manager.ribs[&LOCAL_PEER]
+                .iter_flowspec()
+                .map(|route| (route.key(), route.attributes.clone()))
+                .collect::<HashMap<_, _>>(),
+            manager.loc_rib.family_lens(),
+            manager.owner_keys.clone(),
+            manager.injected_owners.clone(),
+            manager.injection_leases().list(None),
+        )
+    };
+    let before = snapshot(&manager);
+    for (afi, rd) in scopes {
+        assert!(matches!(
+            add(&mut manager, rule(afi, rd, 443), 300),
+            Err(RibCommandError::ResourceExhausted(_))
+        ));
+        assert_eq!(
+            snapshot(&manager),
+            before,
+            "{afi:?}/{rd:?}: no admission or renewal"
+        );
+    }
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawFlowSpec {
+        key: rule(Afi::Ipv6, Some(41), 80).selection_key(),
+        owner: "a".to_string(),
+        allow_missing: false,
+        override_owner: false,
+        reply,
+    });
+    assert!(response.try_recv().unwrap().unwrap().removed);
+    assert_eq!(manager.owner_keys["a"].len(), MAX_KEYS_PER_OWNER - 1);
+    assert_eq!(
+        add(&mut manager, rule(Afi::Ipv6, Some(42), 443), 30)
+            .unwrap()
+            .0,
+        InjectOutcome::Created
+    );
+    assert_eq!(manager.owner_keys["a"].len(), MAX_KEYS_PER_OWNER);
+    assert_eq!(manager.loc_rib.family_lens().flowspec_vpn, [2, 2]);
+}
+
 /// Expiry removes only the local intent: a learned route for the same
 /// prefix, out-selected while the leased route lived, becomes best and is
 /// advertised to the peer in place of the local one.
@@ -2661,6 +2763,114 @@ fn vpn_rule(octet: u8, rd: u8, rt: u32) -> FlowSpecRoute {
             rustbgpd_wire::ExtendedCommunity::new(0x0002_ad77_0000_0000 | u64::from(rt)),
         ]));
     route
+}
+
+fn assert_local_flowspec_gauges(metrics: &BgpMetrics, expected: [f64; 3]) {
+    let gathered = metrics.registry().gather();
+    for name in ["bgp_rib_prefixes", "bgp_rib_loc_prefixes"] {
+        let gauge = gathered
+            .iter()
+            .find(|family| family.name() == name)
+            .expect("FlowSpec gauge is published");
+        for (family, expected) in ["ipv4_flowspec", "ipv6_flowspec", "l3vpn_ipv4_flowspec"]
+            .into_iter()
+            .zip(expected)
+        {
+            let value = gauge
+                .get_metric()
+                .iter()
+                .find(|metric| {
+                    let label = |key, value| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|label| label.name() == key && label.value() == value)
+                    };
+                    label("family", family)
+                        && (name == "bgp_rib_loc_prefixes" || label("peer", "0.0.0.0"))
+                })
+                .unwrap_or_else(|| panic!("missing {name} series for {family}"))
+                .get_gauge()
+                .get_value();
+            assert_eq!(value, expected, "{name} {family}");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_flowspec_gauges_separate_global_and_vpn_through_delete_and_expiry() {
+    let mut manager = manager_for_keys();
+    let metrics = manager.metrics.clone();
+    let mut v6 = local_rule();
+    v6.afi = Afi::Ipv6;
+    v6.rule.components = vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(
+        rustbgpd_wire::Ipv6PrefixOffset {
+            prefix: Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32),
+            offset: 0,
+        },
+    ))];
+    let global_keys = [local_rule().selection_key(), v6.selection_key()];
+    for route in [local_rule(), v6, vpn_rule(1, 40, 777)] {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectFlowSpec { route, reply });
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            InjectOutcome::Created
+        );
+    }
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectLeasedFlowSpec {
+        route: vpn_rule(1, 41, 777),
+        owner: "ctl".to_string(),
+        lease_seconds: 5,
+        reply,
+    });
+    assert_eq!(
+        response.try_recv().unwrap().unwrap().0,
+        InjectOutcome::Created
+    );
+    assert_local_flowspec_gauges(&metrics, [1.0, 1.0, 2.0]);
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectFlowSpec {
+        route: vpn_rule(1, 40, 778),
+        reply,
+    });
+    assert_eq!(
+        response.try_recv().unwrap().unwrap(),
+        InjectOutcome::Replaced
+    );
+    assert_local_flowspec_gauges(&metrics, [1.0, 1.0, 2.0]);
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawFlowSpec {
+        key: vpn_rule(1, 40, 778).selection_key(),
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    assert!(response.try_recv().unwrap().unwrap().removed);
+    assert_local_flowspec_gauges(&metrics, [1.0, 1.0, 1.0]);
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let (expired, _) = manager.injection_leases().take_expired();
+    assert_eq!(expired.len(), 1);
+    manager.handle_update(RibUpdate::ExpireInjectionLeases { leases: expired });
+    assert_local_flowspec_gauges(&metrics, [1.0, 1.0, 0.0]);
+
+    for key in global_keys {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawFlowSpec {
+            key,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(response.try_recv().unwrap().unwrap().removed);
+    }
+    assert_local_flowspec_gauges(&metrics, [0.0, 0.0, 0.0]);
 }
 
 fn withdrawn_rds(updates: &[OutboundRouteUpdate]) -> Vec<Option<u8>> {

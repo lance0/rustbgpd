@@ -460,7 +460,7 @@ enum Command {
         #[command(subcommand)]
         action: Option<FlowspecAction>,
 
-        /// Address family (ipv4_flowspec, ipv6_flowspec)
+        /// Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)
         #[arg(short = 'a', long)]
         family: Option<String>,
     },
@@ -1998,7 +1998,7 @@ enum FlowspecAction {
         /// Destination peer IP address (fe80::1%eth0 for a link-local peer)
         #[arg(value_parser = commands::neighbor::parse_peer_address)]
         peer: String,
-        /// Address family (ipv4_flowspec or ipv6_flowspec)
+        /// Global or VPN FlowSpec family; defaults to both global families
         #[arg(short = 'a', long)]
         family: Option<String>,
     },
@@ -2007,15 +2007,21 @@ enum FlowspecAction {
         /// Source peer IP address (fe80::1%eth0 for a link-local peer)
         #[arg(value_parser = commands::neighbor::parse_peer_address)]
         peer: String,
-        /// Address family (ipv4_flowspec or ipv6_flowspec)
+        /// Global or VPN FlowSpec family; defaults to both global families
         #[arg(short = 'a', long)]
         family: Option<String>,
     },
     /// Add a FlowSpec rule
     Add {
-        /// Address family (required: ipv4_flowspec or ipv6_flowspec)
+        /// Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)
         #[arg(short = 'a', long)]
         family: String,
+        /// Route distinguisher (required for VPN families), e.g. 65000:100
+        #[arg(long)]
+        rd: Option<String>,
+        /// VPN scope route target; repeat for multiple targets
+        #[arg(long = "route-target")]
+        route_targets: Vec<String>,
         /// Match components (e.g., dest=10.0.0.0/24 port==80)
         #[arg(long = "match", value_delimiter = ' ')]
         components: Vec<String>,
@@ -2025,9 +2031,12 @@ enum FlowspecAction {
     },
     /// Delete a FlowSpec rule
     Delete {
-        /// Address family (required: ipv4_flowspec or ipv6_flowspec)
+        /// Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)
         #[arg(short = 'a', long)]
         family: String,
+        /// Route distinguisher identifying the VPN rule
+        #[arg(long)]
+        rd: Option<String>,
         /// Match components identifying the rule
         #[arg(long = "match", value_delimiter = ' ')]
         components: Vec<String>,
@@ -5808,16 +5817,28 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 }
                 Some(FlowspecAction::Add {
                     family: fam,
+                    rd,
+                    route_targets,
                     components,
                     action: actions,
                 }) => {
                     let f = parse_family(&fam).ok_or_else(|| {
                         CliError::Argument(format!("unknown address family: {fam}"))
                     })?;
-                    commands::flowspec::add(connection, f, &components, &actions, json).await
+                    commands::flowspec::add(
+                        connection,
+                        f,
+                        rd.unwrap_or_default(),
+                        route_targets,
+                        &components,
+                        &actions,
+                        json,
+                    )
+                    .await
                 }
                 Some(FlowspecAction::Delete {
                     family: fam,
+                    rd,
                     components,
                     allow_missing,
                     owner,
@@ -5829,6 +5850,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     commands::flowspec::delete(
                         connection,
                         f,
+                        rd.unwrap_or_default(),
                         &components,
                         allow_missing,
                         commands::InjectedOwner::new(owner, override_owner),

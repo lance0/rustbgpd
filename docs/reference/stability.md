@@ -47,14 +47,20 @@ In particular:
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.
-- FlowSpec controller origination, local-intent reconciliation, and selected /
-  committed advertised views use the
+- Global IPv4/IPv6 FlowSpec controller origination, local-intent reconciliation,
+  and selected / committed advertised views use the
   [scoped controller boundary](v1-stable-contract.md#flowspec-controller-boundary),
   including the typed traffic-rate-bytes, traffic-rate-packets and redirect
   actions. That pins the API shape only, with no forwarding or enforcement
   guarantee. `Config.flowspec`, receive-side validation and its shared diagnostic fields,
   remote received-candidate mode, FlowSpec CLI surfaces, GR/LLGR guarantees,
   and dataplane enforcement remain outside that promise.
+- IPv4/IPv6 VPN FlowSpec origination (SAFI 134), including its RD/RT API
+  fields, config and policy vocabulary, metrics and CLI, remains alpha.
+  The [VPN controller API](api.md#vpn-flowspec-controller-api) preserves
+  scope through injection, reconciliation, leases and export evidence.
+  Received VPN rules are decoded and discarded; no receive/reflection or
+  router enforcement claim follows from this origination surface.
 - Unicast injection inventories `AddPath`, `DeletePath` and the
   `ListPathExportDispositions` read-back. A committed disposition proves
   outbound admission to a peer's Adj-RIB-Out, not remote receipt, and new

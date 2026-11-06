@@ -207,7 +207,7 @@ fn explicit_replay_rejects_selection_deferral_without_releasing_gate() {
     let mut manager = manager().with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
+            peer: PeerId::from_addr("192.0.2.1".parse().unwrap()).into(),
             families: ipv4_sendable(),
         }],
     });

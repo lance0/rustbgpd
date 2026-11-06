@@ -1282,7 +1282,9 @@ impl BgpMetrics {
                 "bgp_rib_prefixes",
                 "Paths in a peer's Adj-RIB-In by canonical family, with each \
                  Add-Path path counted individually. Covers ipv4_unicast, \
-                 ipv6_unicast, l2vpn_evpn, ipv4_flowspec and ipv6_flowspec; \
+                 ipv6_unicast, l2vpn_evpn, ipv4_flowspec, ipv6_flowspec and \
+                 locally injected l3vpn_ipv4_flowspec and l3vpn_ipv6_flowspec \
+                 at peer 0.0.0.0; \
                  other families are not counted.",
             ),
             &["peer", "family"],
@@ -2359,7 +2361,7 @@ impl BgpMetrics {
         let vpn_flowspec_nlri_discarded = IntCounterVec::new(
             Opts::new(
                 "bgp_vpn_flowspec_nlri_discarded_total",
-                "Total received VPN FlowSpec (AFI 1 / SAFI 134) NLRIs decoded and discarded; only local origination is supported",
+                "Total received VPN FlowSpec (AFI 1 or 2 / SAFI 134) NLRIs decoded and discarded; only local origination is supported",
             ),
             &["peer"],
         )
@@ -3321,11 +3323,11 @@ impl BgpMetrics {
         registry
             .register(Box::new(rib_loc_prefixes.clone()))
             .expect("metric not already registered");
-        // VPN FlowSpec (ADR-0146) is published only once a rule changes;
-        // materialize its zero so the family is visible from startup.
-        rib_loc_prefixes
-            .with_label_values(&["l3vpn_ipv4_flowspec"])
-            .set(0);
+        // VPN FlowSpec is published only once a rule changes;
+        // materialize both zeros so the families are visible from startup.
+        for family in ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"] {
+            rib_loc_prefixes.with_label_values(&[family]).set(0);
+        }
         registry
             .register(Box::new(peer_outbound_queue_depth.clone()))
             .expect("metric not already registered");
@@ -5930,7 +5932,8 @@ impl BgpMetrics {
             | "ipv4_labeled_unicast"
             | "ipv6_labeled_unicast"
             | "rtc"
-            | "l3vpn_ipv4_flowspec" => family,
+            | "l3vpn_ipv4_flowspec"
+            | "l3vpn_ipv6_flowspec" => family,
             _ => "unknown",
         }
     }
@@ -6285,7 +6288,7 @@ impl BgpMetrics {
             .inc_by(count);
     }
 
-    /// Record received VPN `FlowSpec` (AFI 1 / SAFI 134) NLRIs, announced or
+    /// Record received VPN `FlowSpec` (AFI 1 or 2 / SAFI 134) NLRIs, announced or
     /// withdrawn, that were decoded and discarded before the Adj-RIB-In.
     pub fn record_vpn_flowspec_nlri_discarded(&self, peer: &str, count: u64) {
         self.0
@@ -8380,6 +8383,16 @@ mod tests {
         );
         m.record_exact_export_rejection("10.0.0.1", "invented-family", ExactExportReason::Encoding);
         m.record_exact_export_rejection("10.0.0.2", "l2vpn_evpn", ExactExportReason::Encoding);
+        for family in ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"] {
+            m.record_exact_export_rejection("10.0.0.2", family, ExactExportReason::Encoding);
+            assert_eq!(
+                m.0.exact_export_rejections
+                    .with_label_values(&["10.0.0.2", family, "encoding"])
+                    .get(),
+                1,
+                "VPN families retain their canonical labels"
+            );
+        }
 
         assert_eq!(
             m.0.exact_export_rejections
@@ -10271,18 +10284,20 @@ mod tests {
             .into_iter()
             .find(|family| family.name() == "bgp_rib_loc_prefixes")
             .expect("bgp_rib_loc_prefixes is gathered");
-        let vpn: Vec<_> = family
-            .get_metric()
-            .iter()
-            .filter(|metric| {
-                metric
-                    .get_label()
-                    .iter()
-                    .any(|label| label.value() == "l3vpn_ipv4_flowspec")
-            })
-            .map(|metric| metric.get_gauge().get_value())
-            .collect();
-        assert_eq!(vpn, [0.0]);
+        for label in ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"] {
+            let vpn: Vec<_> = family
+                .get_metric()
+                .iter()
+                .filter(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|value| value.name() == "family" && value.value() == label)
+                })
+                .map(|metric| metric.get_gauge().get_value())
+                .collect();
+            assert_eq!(vpn, [0.0], "{label}");
+        }
     }
 
     #[test]

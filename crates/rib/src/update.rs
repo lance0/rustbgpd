@@ -716,6 +716,9 @@ impl ExactExportKey {
         match self {
             Self::Unicast(Prefix::V4(_), _) => "ipv4_unicast",
             Self::Unicast(Prefix::V6(_), _) => "ipv6_unicast",
+            Self::FlowSpec(key) if key.rd.is_some() && key.afi == Afi::Ipv6 => {
+                "l3vpn_ipv6_flowspec"
+            }
             Self::FlowSpec(key) if key.rd.is_some() => "l3vpn_ipv4_flowspec",
             Self::FlowSpec(key) if key.afi == Afi::Ipv4 => "ipv4_flowspec",
             Self::FlowSpec(_) => "ipv6_flowspec",
@@ -2813,7 +2816,8 @@ pub enum RibUpdate {
         keep_series: bool,
     },
     /// Configuration removed an interface-only neighbor, including one that
-    /// never bound and therefore has no peer handle to delete.
+    /// never bound and therefore has no peer handle to delete: its startup
+    /// End-of-RIB grace window and selection-deferral roster entry end.
     RetireEorGraceInterface {
         /// Configured interface name.
         interface: Arc<str>,

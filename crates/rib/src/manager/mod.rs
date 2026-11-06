@@ -4651,6 +4651,16 @@ impl RibManager {
                 keep_series,
             } => self.handle_peer_deleted(peer, label, keep_series),
             RibUpdate::RetireEorGraceInterface { interface } => {
+                let transitions = self
+                    .selection_deferral
+                    .as_mut()
+                    .map_or_else(Vec::new, |selection| {
+                        selection.retire_interface(&interface, &self.metrics)
+                    });
+                self.apply_selection_deferral_transitions(
+                    transitions,
+                    "interface-only neighbor removed from configuration",
+                );
                 self.retire_eor_grace_interface(interface);
             }
             RibUpdate::ReleasePeer { peer } => self.handle_release_peer(peer),

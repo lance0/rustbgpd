@@ -38,25 +38,26 @@ fn range_bfd(profile: &str) -> crate::config::BfdConfig {
     }
 }
 
-struct Lab {
-    mgr: PeerManager,
+pub(super) struct Lab {
+    pub(super) mgr: PeerManager,
     /// The desired set as the BFD actor sees it, by either publication.
-    desired: watch::Receiver<BfdRuntimeConfig>,
+    pub(super) desired: watch::Receiver<BfdRuntimeConfig>,
     /// Every set the fake actor took through the acknowledged path.
-    applied: mpsc::UnboundedReceiver<BfdRuntimeConfig>,
+    pub(super) applied: mpsc::UnboundedReceiver<BfdRuntimeConfig>,
     /// The fake actor takes the next acknowledged change but drops its reply.
-    drop_next_reply: Arc<AtomicBool>,
+    pub(super) drop_next_reply: Arc<AtomicBool>,
     clients: Vec<TcpStream>,
 }
 
 /// A coupled manager over `config`, on a running RIB, with a fake BFD actor
 /// that acknowledges every acknowledged membership change.
-fn lab(config: Config) -> Lab {
+pub(super) fn lab(config: Config) -> Lab {
     let (rib_tx, rib_rx) = mpsc::channel(256);
     let (_query_tx, query_rx) = mpsc::channel(4);
     tokio::spawn(
         rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
     );
+    let metrics = BgpMetrics::new();
     let mgr = PeerManager::new_with_config(
         mpsc::channel(16).1,
         mpsc::channel(1).1,
@@ -64,7 +65,7 @@ fn lab(config: Config) -> Lab {
         Ipv4Addr::new(10, 0, 0, 1),
         None,
         None,
-        BgpMetrics::new(),
+        metrics.clone(),
         rib_tx,
         None,
         None,
@@ -81,6 +82,10 @@ fn lab(config: Config) -> Lab {
             let _ = applied_tx.send(command.desired.clone());
             if drop_next.swap(false, Ordering::SeqCst) {
                 continue;
+            }
+            // As the actor seeds a started session's gauge before it acks.
+            for params in command.desired.sessions.iter().filter(|p| p.enabled) {
+                metrics.record_bfd_state(&params.peer_label, false, false);
             }
             let acks = command
                 .desired
@@ -131,7 +136,7 @@ impl Lab {
     }
 
     /// The published sessions: (peer, label, enabled).
-    fn published(&self) -> Vec<(IpAddr, String, bool)> {
+    pub(super) fn published(&self) -> Vec<(IpAddr, String, bool)> {
         let mut sessions: Vec<_> = self
             .desired
             .borrow()
@@ -143,7 +148,7 @@ impl Lab {
         sessions
     }
 
-    fn member(&self, peer: IpAddr) -> Option<&crate::bfd_runtime::BfdSessionParams> {
+    pub(super) fn member(&self, peer: IpAddr) -> Option<&crate::bfd_runtime::BfdSessionParams> {
         self.mgr.bfd_coupling.as_ref()?.configured.get(&peer)
     }
 

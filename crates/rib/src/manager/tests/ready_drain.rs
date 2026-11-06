@@ -10,7 +10,7 @@ fn timer_manager(rx: mpsc::Receiver<RibUpdate>, query_rx: mpsc::Receiver<RibUpda
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(1),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: source,
+                peer: source.into(),
                 // The timer exercises the shared drain, while IPv4 ingest
                 // remains selected and observable by count/page queries.
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
@@ -346,7 +346,7 @@ async fn assert_injected_unicast_readiness_during_deferral(leased: bool) {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_mins(2),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+                peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)).into(),
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             }],
         });

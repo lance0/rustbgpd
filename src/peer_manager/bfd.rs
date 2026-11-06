@@ -55,6 +55,10 @@ pub(super) struct BfdCoupling {
     /// The next socket preflight's result, instead of opening real sockets.
     #[cfg(test)]
     pub(super) socket_preflight: Option<Result<Option<PreparedRuntime>, String>>,
+    /// The next membership derivation's error, standing in for an interface
+    /// scope that vanishes after the neighbor resolved.
+    #[cfg(test)]
+    pub(super) derivation_failure: Option<String>,
     /// Inner compensation must read accepted strict settings without losing
     /// the candidate needed to fence an uncertain rollback.
     rollback_lookup: bool,
@@ -133,6 +137,8 @@ impl PeerManager {
             desired_publications: 0,
             #[cfg(test)]
             socket_preflight: None,
+            #[cfg(test)]
+            derivation_failure: None,
             rollback_lookup: false,
             retries: BTreeMap::new(),
             retry_at: None,
@@ -343,10 +349,19 @@ impl PeerManager {
         candidate: &crate::config::Config,
     ) -> super::DynamicBfdSocketOutcome {
         use super::DynamicBfdSocketOutcome;
-        let probes = match crate::bfd_runtime::dynamic_range_socket_probes(candidate) {
-            Ok(probes) => probes,
-            Err(error) => return DynamicBfdSocketOutcome::Rejected(error.to_string()),
-        };
+        match crate::bfd_runtime::dynamic_range_socket_probes(candidate) {
+            Ok(probes) => self.open_bfd_sockets(probes).await,
+            Err(error) => DynamicBfdSocketOutcome::Rejected(error.to_string()),
+        }
+    }
+
+    /// Open the socket families `probes` need through the acknowledged
+    /// commit, leaving the membership unchanged.
+    async fn open_bfd_sockets(
+        &mut self,
+        probes: Vec<BfdSessionParams>,
+    ) -> super::DynamicBfdSocketOutcome {
+        use super::DynamicBfdSocketOutcome;
         let Some(coupling) = self.bfd_coupling.as_mut() else {
             return if probes.is_empty() {
                 DynamicBfdSocketOutcome::Ready
@@ -382,6 +397,115 @@ impl PeerManager {
                 DynamicBfdSocketOutcome::Ambiguous(error)
             }
         }
+    }
+
+    /// Open the socket family of `peer`'s member before the peer is added,
+    /// when no session has needed it yet: a runtime-created neighbor can be
+    /// the first in its family. A generation preflights its own sockets. An
+    /// unacknowledged commit fences BFD, as an uncertain generation does.
+    pub(super) async fn open_bfd_member_family(
+        &mut self,
+        peer: IpAddr,
+    ) -> super::DynamicBfdSocketOutcome {
+        let Some(member) = self
+            .bfd_coupling
+            .as_ref()
+            .filter(|coupling| !coupling.reloading)
+            .and_then(|coupling| coupling.configured.get(&peer))
+            .cloned()
+        else {
+            return super::DynamicBfdSocketOutcome::Ready;
+        };
+        self.open_bfd_sockets(vec![member]).await
+    }
+
+    /// Follow a configuration snapshot change outside a generation (runtime
+    /// neighbor create and delete; config transactions that would change BFD
+    /// membership are rejected at plan time) with the static BFD
+    /// membership it implies; a generation stages its own. A neighbor that
+    /// now resolves BFD gets a session under a fresh revision, published
+    /// level-triggered as at startup: adding the peer withholds a strict one
+    /// until that revision reports Up. A neighbor that no longer resolves BFD
+    /// loses its session and any BFD hold. Unchanged members keep their
+    /// revision; runtime-registered members are not configuration's. A
+    /// membership that cannot be derived (an interface scope that no longer
+    /// resolves) is an error, and the membership is left unchanged.
+    pub(super) fn follow_bfd_membership(
+        &mut self,
+        previous: &crate::config::Config,
+    ) -> Result<(), String> {
+        if self
+            .bfd_coupling
+            .as_ref()
+            .is_none_or(|coupling| coupling.reloading)
+        {
+            return Ok(());
+        }
+        if !crate::config::bfd_member_attachments_changed(previous, &self.current_config) {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if let Some(error) = self
+            .bfd_coupling
+            .as_mut()
+            .and_then(|coupling| coupling.derivation_failure.take())
+        {
+            return Err(error);
+        }
+        let coupling = self.bfd_coupling.as_ref().expect("checked above");
+        let sessions = |config| {
+            BfdRuntimeConfig::from_reload(config, previous, &coupling.configured).map(|set| {
+                set.sessions
+                    .into_iter()
+                    .map(|params| (params.peer, params))
+                    .collect::<HashMap<_, _>>()
+            })
+        };
+        let (old, mut new) = match (sessions(previous), sessions(&self.current_config)) {
+            (Ok(old), Ok(new)) => (old, new),
+            (Err(error), _) | (_, Err(error)) => return Err(error.to_string()),
+        };
+        let changed: HashSet<IpAddr> = old
+            .keys()
+            .chain(new.keys())
+            .copied()
+            .filter(|peer| old.get(peer) != new.get(peer) && !coupling.bound.contains(peer))
+            .collect();
+        for peer in changed {
+            if let Some(params) = new.remove(&peer) {
+                self.set_config_bfd_member(params);
+                continue;
+            }
+            let coupling = self.bfd_coupling.as_mut().expect("checked above");
+            // Before the hold is released: a retried start keys on the member.
+            coupling.configured.remove(&peer);
+            coupling.disabled.remove(&peer);
+            coupling.initially_withheld.remove(&peer);
+            if let Err(error) = self.release_bgp_bfd_hold(peer) {
+                warn!(%peer, %error, "BFD removed: failed to (re)start session");
+            }
+        }
+        self.republish_bfd_desired();
+        Ok(())
+    }
+
+    fn set_config_bfd_member(&mut self, mut params: BfdSessionParams) {
+        let Some(coupling) = self.bfd_coupling.as_mut() else {
+            return;
+        };
+        if let Some(old) = coupling.configured.get_mut(&params.peer) {
+            // Strict is admission metadata, not BFD session identity.
+            let mut prior = old.clone();
+            prior.strict = params.strict;
+            prior.revision = params.revision;
+            if prior == params {
+                old.strict = params.strict;
+                return;
+            }
+        }
+        params.revision = coupling.next_revision;
+        coupling.next_revision = coupling.next_revision.saturating_add(1);
+        coupling.configured.insert(params.peer, params);
     }
 
     /// Remove a dynamic session's BFD session once no dynamic peer at `peer`
@@ -1292,13 +1416,19 @@ impl PeerManager {
             // here makes removal the last word. A merely disabled peer
             // still exists (`peer_keys_for_address` non-empty) and keeps
             // its series.
-            // A binding registers its session before its peer exists; the
-            // registration's own acknowledgement is not a deletion.
-            let awaiting_binding = self
+            // A binding registers its session before its peer exists, and a
+            // runtime create opens its neighbor's socket family before adding
+            // the peer: neither acknowledgement is a deletion.
+            let awaiting_peer = self
                 .bfd_coupling
                 .as_ref()
-                .is_some_and(|c| c.bound.contains(&peer));
-            if self.peer_keys_for_address(peer).is_empty() && !awaiting_binding {
+                .is_some_and(|c| c.bound.contains(&peer))
+                || self
+                    .current_config
+                    .neighbors
+                    .iter()
+                    .any(|neighbor| neighbor.address.parse::<IpAddr>().ok() == Some(peer));
+            if self.peer_keys_for_address(peer).is_empty() && !awaiting_peer {
                 // The session's own value: scoped for a link-local neighbor.
                 let label = self
                     .bfd_coupling

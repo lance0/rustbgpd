@@ -69,18 +69,24 @@ fn harness_with(
     extra: &str,
     gtsm: Option<LearnedGtsmUpdate>,
 ) -> Harness {
-    let (_tx, rx) = mpsc::channel(16);
-    let (rib_tx, rib_rx) = mpsc::channel(64);
-    let mut mgr = PeerManager::new(
-        rx,
-        65001,
-        Ipv4Addr::new(10, 0, 0, 1),
-        None,
-        None,
-        BgpMetrics::new(),
-        rib_tx,
-        None,
-    );
+    harness_at(interfaces, links, neighbor_extra, extra, gtsm, None)
+}
+
+/// [`harness`] started by a planned restart whose window ends at
+/// `restart_until`: the configured neighbors are its roster, as at startup.
+fn restarted_harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
+    let restart_until = std::time::Instant::now() + Duration::from_secs(60);
+    harness_at(interfaces, links, "", "", None, Some(restart_until))
+}
+
+fn harness_at(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    neighbor_extra: &str,
+    extra: &str,
+    gtsm: Option<LearnedGtsmUpdate>,
+    restart_until: Option<std::time::Instant>,
+) -> Harness {
     let neighbors = interfaces
         .iter()
         .map(|name| {
@@ -95,7 +101,40 @@ fn harness_with(
          [global.telemetry]\nlog_format = \"json\"\n{neighbors}{extra}"
     ))
     .unwrap();
-    mgr.current_config = config;
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let router_id = Ipv4Addr::new(10, 0, 0, 1);
+    let mgr = if let Some(restart_until) = restart_until {
+        // The daemon's construction: the startup configuration and the
+        // restart window together name the planned restart's roster.
+        let (_internal_tx, internal_rx) = mpsc::channel(1);
+        PeerManager::new_with_config(
+            rx,
+            internal_rx,
+            65001,
+            router_id,
+            None,
+            Some(restart_until),
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+            None,
+            config,
+        )
+    } else {
+        let mut mgr = PeerManager::new(
+            rx,
+            65001,
+            router_id,
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        mgr.current_config = config;
+        mgr
+    };
     let (links_tx, links_rx) = watch::channel(snapshot(true, links));
     let (discovery, commands) = RaDiscovery::recording();
     let (_events_tx, events_rx) = crate::ra_discovery::event_channel();
@@ -829,6 +868,62 @@ async fn an_all_peers_gshut_clear_reaches_an_unbound_neighbors_held_intent() {
     assert!(
         !h.mgr.peers[&key].advertise_graceful_shutdown,
         "the next peer must not restore a cleared intent"
+    );
+}
+
+/// An all-peers graceful-shutdown set also sets the intent an unbound
+/// neighbor holds for its next peer. Mutation-red: setting only the managed
+/// peers rebinds the neighbor without `GRACEFUL_SHUTDOWN`.
+#[tokio::test(start_paused = true)]
+async fn an_all_peers_gshut_set_reaches_an_unbound_neighbors_held_intent() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    assert!(!h.mgr.peers[&key].advertise_graceful_shutdown);
+    h.mgr
+        .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
+    h.bind("swp1", None).await;
+    h.mgr.note_unnumbered_session_idle(&key);
+    h.reconcile().await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [],
+        "unbound: only the held state remains"
+    );
+
+    let _ = h.mgr.set_graceful_shutdown(None, true).await;
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(
+        h.mgr.peers[&key].advertise_graceful_shutdown,
+        "the next peer must take the all-peers set"
+    );
+}
+
+/// An all-peers graceful-shutdown set also reaches a configured
+/// interface-only neighbor that has never bound, and an all-peers clear
+/// undoes it. Mutation-red: recording the set only in a retired endpoint's
+/// held state binds the neighbor's first peer without `GRACEFUL_SHUTDOWN`.
+#[tokio::test(start_paused = true)]
+async fn an_all_peers_gshut_set_reaches_a_never_bound_neighbor() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.answer_retention();
+    let _ = h.mgr.set_graceful_shutdown(None, true).await;
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(
+        h.mgr.peers[&swp1_key(2)].advertise_graceful_shutdown,
+        "the first peer must take the all-peers set"
+    );
+
+    let _ = h.mgr.set_graceful_shutdown(None, false).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = h.peers_at(ll(3));
+    assert_eq!(swp2.len(), 1, "swp2 bound");
+    assert!(
+        !h.mgr.peers[&swp2[0]].advertise_graceful_shutdown,
+        "the first peer must not take a cleared intent"
     );
 }
 
@@ -1663,8 +1758,7 @@ async fn an_up_to_up_index_change_retires_the_old_scoped_peer() {
 /// the routes they retained; after the window it does not.
 #[tokio::test]
 async fn a_rediscovered_peer_carries_the_restart_state_only_within_the_window() {
-    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
-    h.mgr.local_gr_restart_until = Some(std::time::Instant::now() + Duration::from_secs(60));
+    let mut h = restarted_harness(&["swp1"], &[("swp1", 7, true)]);
     h.bind("swp1", Some(endpoint(2, 7))).await;
     // Mutation-red: binding as not restart-eligible clears the deadline.
     assert!(
@@ -1684,6 +1778,54 @@ async fn a_rediscovered_peer_carries_the_restart_state_only_within_the_window() 
         h.mgr.peers[&swp1_key(3)].transport_config.gr_restart_until,
         None,
         "R=0 after the window"
+    );
+}
+
+const SWP1_NEIGHBOR: &str = "[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n";
+
+/// Like a static neighbor added at runtime, an interface-only neighbor that
+/// is not in the planned restart's roster binds with R=0 even inside the
+/// window: it is not a selection-deferral waiter.
+#[tokio::test]
+async fn a_neighbor_outside_the_restart_roster_binds_without_the_restart_state() {
+    let mut h = restarted_harness(&[], &[("swp1", 7, true)]);
+    h.reload(config_with(SWP1_NEIGHBOR)).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        h.mgr.peers[&swp1_key(2)].transport_config.gr_restart_until,
+        None,
+        "R=0 for a neighbor added after the restart"
+    );
+}
+
+/// A roster neighbor removed and re-added inside the window leaves the
+/// roster for good (the RIB ends its waiter), so it rebinds with R=0.
+#[tokio::test]
+async fn a_removed_and_readded_roster_neighbor_binds_without_the_restart_state() {
+    // A second neighbor keeps discovery running across the removal.
+    let mut h = restarted_harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(
+        h.mgr.peers[&swp1_key(2)]
+            .transport_config
+            .gr_restart_until
+            .is_some(),
+        "R=1 for the startup roster neighbor"
+    );
+    let original = h.mgr.current_config.clone();
+    let mut removed = original.clone();
+    removed.neighbors.set_interface_only("swp1", None);
+    h.reload(removed).await;
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(2)),
+        "the removed neighbor's peer is gone"
+    );
+    h.reload(original).await;
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(
+        h.mgr.peers[&swp1_key(3)].transport_config.gr_restart_until,
+        None,
+        "R=0 once the neighbor has left the roster"
     );
 }
 

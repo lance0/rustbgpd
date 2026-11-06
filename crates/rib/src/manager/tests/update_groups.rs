@@ -267,7 +267,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
         manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: std::time::Duration::from_secs(1),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: PeerId::from_addr("192.0.2.51".parse().unwrap()),
+                peer: PeerId::from_addr("192.0.2.51".parse().unwrap()).into(),
                 families: ipv4_sendable(),
             }],
         });
@@ -12216,7 +12216,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
     .with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: peer_v4(source),
+            peer: peer_v4(source).into(),
             families: vec![family],
         }],
     });

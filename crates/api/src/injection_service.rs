@@ -11,7 +11,7 @@ use tonic::{Request, Response, Status};
 use crate::actor_read::rib_manager_read;
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary, safe_summary_value, set_request_summary};
 use crate::proto;
-use crate::route_distinguisher::parse_rd;
+use crate::route_distinguisher::{format_rd, parse_originated_rd, parse_rd};
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::injection_lease::{
@@ -280,7 +280,7 @@ const DEFAULT_LEASED_KEYS_PAGE_SIZE: usize = 100;
 /// `t1:<incarnation>:<sequence, or w<watermark> without a live lease>:<key>`,
 /// where the key is
 /// `u:<addr>/<len>:<path_id>` or `f:<afi>:<hex NLRI>`, with `:r<hex RD>`
-/// appended for an IPv4 VPN `FlowSpec` key. Clients treat it as opaque.
+/// appended for a VPN `FlowSpec` key. Clients treat it as opaque.
 fn leased_keys_token(owner: &str, page: &LeasedKeysPage, cursor: &InjectedKeyCursor) -> String {
     let sequence = page.generation.map_or_else(
         || format!("w{}", page.watermark),
@@ -368,7 +368,11 @@ fn parse_leased_key_cursor(token: &str) -> Result<InjectedKeyCursor, Status> {
             let rd: [u8; 8] = parse_hex(rd)
                 .and_then(|bytes| bytes.try_into().ok())
                 .ok_or_else(invalid)?;
-            (hex, Some(rustbgpd_wire::RouteDistinguisher(rd)))
+            let rd = RouteDistinguisher(rd);
+            if rd.rd_type() > 2 {
+                return Err(invalid());
+            }
+            (hex, Some(rd))
         }
         None => (hex, None),
     };
@@ -380,14 +384,17 @@ fn parse_leased_key_cursor(token: &str) -> Result<InjectedKeyCursor, Status> {
     let nlri = parse_hex(hex).ok_or_else(invalid)?;
     // Only a cursor a listing could have produced: a FlowSpec AFI and exactly
     // one complete rule. Anything else would silently skip or repeat keys.
-    // VPN FlowSpec is IPv4 only (ADR-0146).
     let afi = match (afi.parse::<u16>().map_err(|_| invalid())?, rd) {
         (1, _) => Afi::Ipv4,
-        (2, None) => Afi::Ipv6,
+        (2, _) => Afi::Ipv6,
         _ => return Err(invalid()),
     };
     match rustbgpd_wire::flowspec::decode_flowspec_nlri(&nlri, afi) {
-        Ok(rules) if rules.len() == 1 => Ok(InjectedKeyCursor::FlowSpec(afi as u16, rd, nlri)),
+        Ok(rules) if rules.len() == 1 => {
+            validate_flowspec_rule_encoded_len(&rules[0], afi, rd.is_some())
+                .map_err(|_| invalid())?;
+            Ok(InjectedKeyCursor::FlowSpec(afi as u16, rd, nlri))
+        }
         _ => Err(invalid()),
     }
 }
@@ -413,12 +420,17 @@ fn leased_key_to_proto(row: &LeasedKeyRow) -> proto::LeasedKey {
             })
         }
         InjectedKey::FlowSpec(key) => proto::leased_key::Key::FlowSpec(proto::LeasedFlowSpecKey {
-            afi_safi: if key.afi == Afi::Ipv6 {
+            afi_safi: if key.rd.is_some() && key.afi == Afi::Ipv6 {
+                proto::AddressFamily::L3vpnIpv6Flowspec
+            } else if key.rd.is_some() {
+                proto::AddressFamily::L3vpnIpv4Flowspec
+            } else if key.afi == Afi::Ipv6 {
                 proto::AddressFamily::Ipv6Flowspec
             } else {
                 proto::AddressFamily::Ipv4Flowspec
             } as i32,
             components: crate::rib_service::flowspec_components_to_proto(&key.rule),
+            rd: key.rd.map_or_else(String::new, format_rd),
         }),
     };
     proto::LeasedKey {
@@ -986,13 +998,13 @@ fn build_injected_route(req: proto::AddPathRequest) -> Result<Route, Status> {
 
 /// Build the local rule an `AddFlowSpec` request describes.
 fn build_injected_flowspec(req: proto::AddFlowSpecRequest) -> Result<FlowSpecRoute, Status> {
-    let afi = parse_flowspec_afi(req.afi_safi)?;
-
-    let components = parse_flowspec_components(&req.components, afi)?;
-    let rule = FlowSpecRule { components };
-    rule.validate()
-        .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
-    validate_flowspec_rule_encoded_len(&rule, afi)?;
+    let rustbgpd_rib::FlowSpecKey { afi, rd, rule } =
+        parse_flowspec_key(req.afi_safi, &req.rd, &req.components)?;
+    if rd.is_none() && !req.route_targets.is_empty() {
+        return Err(Status::invalid_argument(
+            "route_targets require a VPN FlowSpec family",
+        ));
+    }
 
     let mut attributes: Vec<PathAttribute> = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -1056,6 +1068,9 @@ fn build_injected_flowspec(req: proto::AddFlowSpecRequest) -> Result<FlowSpecRou
             ecs.push(ec);
         }
     }
+    if rd.is_some() {
+        merge_flowspec_scope_targets(&mut ecs, &req.route_targets)?;
+    }
     if !ecs.is_empty() {
         attributes.push(PathAttribute::ExtendedCommunities(ecs));
     }
@@ -1069,7 +1084,7 @@ fn build_injected_flowspec(req: proto::AddFlowSpecRequest) -> Result<FlowSpecRou
     Ok(FlowSpecRoute {
         rule,
         afi,
-        rd: None,
+        rd,
         peer: PeerId::LOCAL,
         attributes,
         received_at: std::time::Instant::now(),
@@ -1217,22 +1232,12 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
         let req = request.into_inner();
         let (requested_owner, override_owner) = (req.owner.clone(), req.override_owner);
-        let afi = parse_flowspec_afi(req.afi_safi)?;
-
-        let components = parse_flowspec_components(&req.components, afi)?;
-        let rule = FlowSpecRule { components };
-        rule.validate()
-            .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
-        validate_flowspec_rule_encoded_len(&rule, afi)?;
+        let key = parse_flowspec_key(req.afi_safi, &req.rd, &req.components)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::WithdrawFlowSpec {
-                key: rustbgpd_rib::FlowSpecKey {
-                    afi,
-                    rd: None,
-                    rule,
-                },
+                key,
                 allow_missing: req.allow_missing,
                 owner: req.owner,
                 override_owner: req.override_owner,
@@ -1483,22 +1488,12 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         );
         let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
         let req = request.into_inner();
-        let afi = parse_flowspec_afi(req.afi_safi)?;
-        let rule = FlowSpecRule {
-            components: parse_flowspec_components(&req.components, afi)?,
-        };
-        rule.validate()
-            .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
-        validate_flowspec_rule_encoded_len(&rule, afi)?;
+        let key = parse_flowspec_key(req.afi_safi, &req.rd, &req.components)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::WithdrawGuardedFlowSpec {
-                key: rustbgpd_rib::FlowSpecKey {
-                    afi,
-                    rd: None,
-                    rule,
-                },
+                key,
                 owner: req.owner.clone(),
                 revision,
                 reply: reply_tx,
@@ -1665,25 +1660,19 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         request: Request<proto::ListFlowSpecExportDispositionsRequest>,
     ) -> Result<Response<proto::ListPathExportDispositionsResponse>, Status> {
         let req = request.into_inner();
-        let afi = parse_flowspec_afi(req.afi_safi)?;
-        let rule = FlowSpecRule {
-            components: parse_flowspec_components(&req.components, afi)?,
-        };
-        rule.validate()
-            .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
-        validate_flowspec_rule_encoded_len(&rule, afi)?;
-        let key = rustbgpd_rib::FlowSpecKey {
-            afi,
-            rd: None,
-            rule,
-        };
+        let key = parse_flowspec_key(req.afi_safi, &req.rd, &req.components)?;
         let binding = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             (&key, req.include_configured).hash(&mut hasher);
             hasher.finish()
         };
-        let rule_text = key.rule.to_string();
+        let rule_text = format!(
+            "family {:?}, RD {}, {}",
+            key.family(),
+            key.rd.map_or_else(|| "none".to_owned(), format_rd),
+            key.rule
+        );
         let (page, next_page_token) = self
             .export_walk_page_for(
                 FLOWSPEC_EXPORT_WALK,
@@ -1972,15 +1961,30 @@ impl proto::injection_service_server::InjectionService for InjectionService {
     }
 }
 
-/// Parse the `AddressFamily` field for `FlowSpec` requests.
-fn parse_flowspec_afi(value: i32) -> Result<Afi, Status> {
-    match value {
-        x if x == proto::AddressFamily::Ipv4Flowspec as i32 => Ok(Afi::Ipv4),
-        x if x == proto::AddressFamily::Ipv6Flowspec as i32 => Ok(Afi::Ipv6),
-        _ => Err(Status::invalid_argument(
-            "afi_safi must be IPV4_FLOWSPEC or IPV6_FLOWSPEC",
-        )),
-    }
+/// Validate the complete key before any mutation or lease admission.
+fn parse_flowspec_key(
+    family: i32,
+    rd: &str,
+    components: &[proto::FlowSpecComponent],
+) -> Result<rustbgpd_rib::FlowSpecKey, Status> {
+    let (afi, rd) = match proto::AddressFamily::try_from(family) {
+        Ok(proto::AddressFamily::Ipv4Flowspec) if rd.is_empty() => (Afi::Ipv4, None),
+        Ok(proto::AddressFamily::Ipv6Flowspec) if rd.is_empty() => (Afi::Ipv6, None),
+        Ok(proto::AddressFamily::L3vpnIpv4Flowspec) => (Afi::Ipv4, Some(parse_originated_rd(rd)?)),
+        Ok(proto::AddressFamily::L3vpnIpv6Flowspec) => (Afi::Ipv6, Some(parse_originated_rd(rd)?)),
+        _ => {
+            return Err(Status::invalid_argument(
+                "afi_safi must be a FlowSpec family; only VPN FlowSpec accepts an RD",
+            ));
+        }
+    };
+    let rule = FlowSpecRule {
+        components: parse_flowspec_components(components, afi)?,
+    };
+    rule.validate()
+        .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
+    validate_flowspec_rule_encoded_len(&rule, afi, rd.is_some())?;
+    Ok(rustbgpd_rib::FlowSpecKey { afi, rd, rule })
 }
 
 /// Convert proto `FlowSpecComponent` messages into wire types.
@@ -2021,7 +2025,18 @@ fn parse_flowspec_components(
             9 => FlowSpecComponent::TcpFlags(parse_bitmask_value(&c.value, "tcp_flags")?),
             10 => FlowSpecComponent::PacketLength(parse_numeric_value(&c.value, "packet_length")?),
             11 => FlowSpecComponent::Dscp(parse_numeric_value(&c.value, "dscp")?),
-            12 => FlowSpecComponent::Fragment(parse_bitmask_value(&c.value, "fragment")?),
+            12 => {
+                let values = parse_bitmask_value(&c.value, "fragment")?;
+                // Masking here would turn an IPv4-only bit into value 0, which matches
+                // every packet. RFC 8956 §3.6 masking is a receive-side rule only.
+                if afi == Afi::Ipv6 && values.iter().any(|v| v.value & !0x0e != 0) {
+                    return Err(Status::invalid_argument(
+                        "fragment: IPv6 FlowSpec accepts only IsF (0x02), FF (0x04) and \
+                         LF (0x08); 0x01 (DF) is IPv4-only",
+                    ));
+                }
+                FlowSpecComponent::Fragment(values)
+            }
             13 => {
                 if afi != Afi::Ipv6 {
                     return Err(Status::invalid_argument(
@@ -2041,9 +2056,22 @@ fn parse_flowspec_components(
     Ok(result)
 }
 
-fn validate_flowspec_rule_encoded_len(rule: &FlowSpecRule, afi: Afi) -> Result<(), Status> {
-    rule.validate_encoded_len(afi)
-        .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))
+fn validate_flowspec_rule_encoded_len(
+    rule: &FlowSpecRule,
+    afi: Afi,
+    vpn: bool,
+) -> Result<(), Status> {
+    let len = rule.encoded_len(afi) + if vpn { 8 } else { 0 };
+    if len > rustbgpd_wire::flowspec::MAX_FLOWSPEC_NLRI_RULE_LEN {
+        let error = rustbgpd_wire::EncodeError::ValueOutOfRange {
+            field: "FlowSpec NLRI rule length",
+            value: len.to_string(),
+        };
+        return Err(Status::invalid_argument(format!(
+            "invalid FlowSpec rule: {error}"
+        )));
+    }
+    Ok(())
 }
 
 /// Parse a prefix string (e.g., "10.0.0.0/24") into a `FlowSpecPrefix`.
@@ -2073,15 +2101,25 @@ fn parse_flowspec_prefix(
                     "{label}: offset is only valid for IPv6 FlowSpec"
                 )));
             }
+            if len > 32 {
+                return Err(Status::invalid_argument(format!(
+                    "{label}: IPv4 prefix length exceeds 32"
+                )));
+            }
             Ok(FlowSpecPrefix::V4(Ipv4Prefix::new(v4, len)))
         }
         (Afi::Ipv6, IpAddr::V6(v6)) => {
-            let offset_u8 = u8::try_from(offset).map_err(|_| {
-                Status::invalid_argument(format!("{label}: offset must be 0..=255"))
-            })?;
+            if len > 128 || !((len == 0 && offset == 0) || offset < u32::from(len)) {
+                return Err(Status::invalid_argument(format!(
+                    "{label}: IPv6 prefix requires 0/0 or offset < length <= 128"
+                )));
+            }
+            let offset = u8::try_from(offset).expect("offset is less than 128");
+            // Skipped bits are not part of the match or its scoped identity.
+            let pattern = u128::from(v6) & (u128::MAX >> offset);
             Ok(FlowSpecPrefix::V6(Ipv6PrefixOffset {
-                prefix: Ipv6Prefix::new(v6, len),
-                offset: offset_u8,
+                prefix: Ipv6Prefix::new(Ipv6Addr::from(pattern), len),
+                offset,
             }))
         }
         _ => Err(Status::invalid_argument(format!(
@@ -2267,30 +2305,72 @@ fn parse_redirect_ip(address: &str) -> Result<IpAddr, Status> {
 /// RFC 5396 asdot (`high.low:value`) selects the 4-octet-AS form for any ASN,
 /// which is how a listing renders one whose ASN fits in 16 bits.
 fn parse_redirect(s: &str) -> Result<Option<ExtendedCommunity>, Status> {
+    // RFC 7674 keeps the RT layout under types 0x80-0x82 and subtype 0x08.
+    let mut bytes = parse_flowspec_route_target(s)?.as_u64().to_be_bytes();
+    bytes[0] |= 0x80;
+    bytes[1] = 0x08;
+    Ok(Some(ExtendedCommunity::new(u64::from_be_bytes(bytes))))
+}
+
+fn parse_flowspec_route_target(s: &str) -> Result<ExtendedCommunity, Status> {
     if let Some((admin, value)) = s.split_once(':')
         && let Some((high, low)) = admin.split_once('.')
         && !low.contains('.')
     {
         let invalid = || {
             Status::invalid_argument(format!(
-                "redirect route_target {s:?}: asdot form is \"high.low:value\" with 16-bit parts"
+                "route_target {s:?}: asdot form is \"high.low:value\" with 16-bit parts"
             ))
         };
         let high: u16 = high.parse().map_err(|_| invalid())?;
         let low: u16 = low.parse().map_err(|_| invalid())?;
         let value: u16 = value.parse().map_err(|_| invalid())?;
         let asn = (u32::from(high) << 16) | u32::from(low);
-        return Ok(Some(ExtendedCommunity::from_flowspec_action(
-            &rustbgpd_wire::flowspec::FlowSpecAction::Redirect4Octet { asn, value },
-        )));
+        let a = asn.to_be_bytes();
+        let v = value.to_be_bytes();
+        return Ok(ExtendedCommunity::new(u64::from_be_bytes([
+            0x02, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+        ])));
     }
-    // RFC 7674 §1: each redirect keeps its Route Target's layout (types 0x00,
-    // 0x01 from RFC 4360, 0x02 from RFC 5668) under types 0x80, 0x81, 0x82,
-    // with sub-type 0x08 in place of the Route Target's 0x02.
-    let mut bytes = parse_route_target(s)?.as_u64().to_be_bytes();
-    bytes[0] |= 0x80;
-    bytes[1] = 0x08;
-    Ok(Some(ExtendedCommunity::new(u64::from_be_bytes(bytes))))
+    parse_route_target(s)
+}
+
+fn merge_flowspec_scope_targets(
+    ecs: &mut Vec<ExtendedCommunity>,
+    route_targets: &[String],
+) -> Result<(), Status> {
+    if !route_targets.is_empty() {
+        let mut seen: std::collections::HashSet<_> = ecs.iter().copied().collect();
+        for target in route_targets {
+            let target = parse_flowspec_route_target(target)?;
+            if !seen.insert(target) {
+                return Err(Status::invalid_argument(
+                    "duplicate typed or typed/raw route_target",
+                ));
+            }
+            ecs.push(target);
+        }
+    }
+    // Canonicalize only scope RTs so typed/raw reinjection has one payload.
+    let mut targets: Vec<_> = ecs
+        .iter()
+        .copied()
+        .filter(|target| is_flowspec_scope_rt(*target))
+        .collect();
+    if targets.is_empty() {
+        return Err(Status::invalid_argument(
+            "VPN FlowSpec requires a transitive route_target",
+        ));
+    }
+    targets.sort_unstable_by_key(|target| target.as_u64());
+    ecs.retain(|community| !is_flowspec_scope_rt(*community));
+    ecs.extend(targets);
+    Ok(())
+}
+
+pub(crate) fn is_flowspec_scope_rt(community: ExtendedCommunity) -> bool {
+    let bytes = community.as_u64().to_be_bytes();
+    matches!(bytes[0], 0x00..=0x02) && bytes[1] == 0x02
 }
 
 /// Parse a request MAC through the grammar shared with the configuration
@@ -3117,7 +3197,10 @@ mod tests {
 
     /// A managed-peer roster naming 10.0.0.1..=n, as the peer manager
     /// publishes it.
-    fn publish_managed(publisher: &mut crate::import_roster::ImportRosterPublisher, n: u8) {
+    pub(super) fn publish_managed(
+        publisher: &mut crate::import_roster::ImportRosterPublisher,
+        n: u8,
+    ) {
         let peers = (1..=n)
             .map(|octet| crate::import_roster::ImportRosterPeer {
                 key: crate::peer_types::PeerKey::new(
@@ -3133,7 +3216,7 @@ mod tests {
     }
 
     /// An exact export encoder that accepts every announcement.
-    struct AcceptAllEncoder;
+    pub(super) struct AcceptAllEncoder;
 
     impl rustbgpd_rib::update::ExactExportEncoder for AcceptAllEncoder {
         fn owner_id(&self) -> u64 {
@@ -3249,6 +3332,7 @@ mod tests {
                     page_size,
                     page_token: token.into(),
                     include_configured: true,
+                    ..Default::default()
                 },
             ))
         };
@@ -3621,6 +3705,7 @@ mod tests {
                 communities: vec![],
                 extended_communities: vec![],
                 ipv6_extended_communities: vec![],
+                ..Default::default()
             }))
             .await
             .unwrap_err();
@@ -3643,6 +3728,7 @@ mod tests {
                 allow_missing: false,
                 owner: String::new(),
                 override_owner: false,
+                ..Default::default()
             }))
             .await
             .unwrap_err();
@@ -3855,6 +3941,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 ipv6_extended_communities: vec![],
+                ..Default::default()
             }))
             .await
             .unwrap_err();
@@ -3867,6 +3954,7 @@ mod tests {
                 allow_missing: false,
                 owner: String::new(),
                 override_owner: false,
+                ..Default::default()
             }))
             .await
             .unwrap_err();
@@ -3975,8 +4063,8 @@ mod tests {
 
     #[test]
     fn validate_flowspec_rule_encoded_len_rejects_oversized_rule() {
-        let err =
-            validate_flowspec_rule_encoded_len(&oversized_flowspec_rule(), Afi::Ipv4).unwrap_err();
+        let err = validate_flowspec_rule_encoded_len(&oversized_flowspec_rule(), Afi::Ipv4, false)
+            .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("FlowSpec NLRI rule length"));
     }
@@ -4900,7 +4988,7 @@ mod tests {
         ));
     }
 
-    fn flowspec_rate(rate: f32) -> proto::FlowSpecAction {
+    pub(super) fn flowspec_rate(rate: f32) -> proto::FlowSpecAction {
         proto::FlowSpecAction {
             action: Some(proto::flow_spec_action::Action::TrafficRate(
                 proto::FlowSpecTrafficRate { rate },
@@ -4908,7 +4996,7 @@ mod tests {
         }
     }
 
-    fn flowspec_rule_components() -> Vec<proto::FlowSpecComponent> {
+    pub(super) fn flowspec_rule_components() -> Vec<proto::FlowSpecComponent> {
         vec![
             proto::FlowSpecComponent {
                 r#type: 1,
@@ -4928,6 +5016,8 @@ mod tests {
     async fn add_rate(svc: &InjectionService, rate: f32) -> proto::FlowSpecInjectOutcome {
         let response = svc
             .add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                rd: String::new(),
+                route_targets: Vec::new(),
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: flowspec_rule_components(),
                 actions: vec![flowspec_rate(rate)],
@@ -4946,6 +5036,7 @@ mod tests {
         allow_missing: bool,
     ) -> Result<proto::DeleteFlowSpecResponse, Status> {
         svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+            rd: String::new(),
             afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
             components: flowspec_rule_components(),
             allow_missing,
@@ -4966,7 +5057,7 @@ mod tests {
 
     /// A read service holding a one-peer managed roster, as the daemon's
     /// does. Keep the publisher alive: dropping it closes the roster.
-    fn rib_service_with_roster(
+    pub(super) fn rib_service_with_roster(
         rib_tx: mpsc::Sender<RibUpdate>,
     ) -> (
         crate::rib_service::RibService,
@@ -5171,6 +5262,8 @@ mod tests {
         );
         let destinationless = svc
             .add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                rd: String::new(),
+                route_targets: Vec::new(),
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: vec![proto::FlowSpecComponent {
                     r#type: 3,
@@ -5345,6 +5438,8 @@ mod tests {
             flowspec_redirect("0.65001:400"),
         ];
         svc.add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+            rd: String::new(),
+            route_targets: Vec::new(),
             afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
             components: flowspec_rule_components(),
             actions: actions.clone(),
@@ -5676,6 +5771,8 @@ mod tests {
             .generation;
         svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
             rule: Some(proto::AddFlowSpecRequest {
+                rd: String::new(),
+                route_targets: Vec::new(),
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: flowspec_rule_components(),
                 actions: vec![flowspec_rate(0.0)],
@@ -5812,6 +5909,8 @@ mod tests {
         for (octet, port) in [(1, "<>80"), (2, "<>=80")] {
             svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
                 rule: Some(proto::AddFlowSpecRequest {
+                    rd: String::new(),
+                    route_targets: Vec::new(),
                     afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                     components: vec![
                         proto::FlowSpecComponent {
@@ -6017,6 +6116,8 @@ mod tests {
             async move {
                 svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
                     rule: Some(proto::AddFlowSpecRequest {
+                        rd: String::new(),
+                        route_targets: Vec::new(),
                         afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                         components: flowspec_rule_components(),
                         actions: vec![flowspec_rate(0.0)],
@@ -6234,6 +6335,8 @@ mod tests {
         let audit = GrpcAuditHandle::default();
         let mut request = Request::new(proto::AddLeasedFlowSpecRequest {
             rule: Some(proto::AddFlowSpecRequest {
+                rd: String::new(),
+                route_targets: Vec::new(),
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: flowspec_rule_components(),
                 actions: vec![flowspec_rate(0.0)],
@@ -6316,6 +6419,8 @@ mod tests {
             .unwrap();
         svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
             rule: Some(proto::AddFlowSpecRequest {
+                rd: String::new(),
+                route_targets: Vec::new(),
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: flowspec_rule_components(),
                 actions: vec![flowspec_rate(0.0)],
@@ -6363,6 +6468,7 @@ mod tests {
 
         let audit = GrpcAuditHandle::default();
         let mut request = Request::new(proto::DeleteFlowSpecRequest {
+            rd: String::new(),
             afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
             components: flowspec_rule_components(),
             allow_missing: false,
@@ -6424,7 +6530,7 @@ mod tests {
     /// The `ErrorInfo` reason of a lease conflict, decoded from the status
     /// details exactly as a client reads the `grpc-status-details-bin`
     /// trailer.
-    fn lease_conflict_reason(status: &Status) -> String {
+    pub(super) fn lease_conflict_reason(status: &Status) -> String {
         error_info_reason(status, tonic::Code::FailedPrecondition)
     }
 
@@ -6586,6 +6692,8 @@ mod tests {
             let mut components = flowspec_rule_components();
             components[1].value = port.into();
             proto::AddFlowSpecRequest {
+                rd: String::new(),
+                route_targets: Vec::new(),
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components,
                 actions: vec![flowspec_rate(0.0)],
@@ -6603,6 +6711,7 @@ mod tests {
             override_owner: false,
         };
         let delete_rule = |port: &str, owner: &str| proto::DeleteFlowSpecRequest {
+            rd: String::new(),
             afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
             components: rule(port).components,
             allow_missing: false,
@@ -6829,6 +6938,8 @@ mod tests {
         let rule = svc
             .add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
                 rule: Some(proto::AddFlowSpecRequest {
+                    rd: String::new(),
+                    route_targets: Vec::new(),
                     afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                     components: flowspec_rule_components(),
                     actions: vec![flowspec_rate(0.0)],
@@ -6983,6 +7094,7 @@ mod tests {
         ) -> Result<proto::DeleteGuardedFlowSpecResponse, Status> {
             self.svc
                 .delete_guarded_flow_spec(Request::new(proto::DeleteGuardedFlowSpecRequest {
+                    rd: String::new(),
                     afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                     components: guarded_rule(port, 0.0).components,
                     owner: owner.into(),
@@ -7029,6 +7141,8 @@ mod tests {
         let mut components = flowspec_rule_components();
         components[1].value = port.into();
         proto::AddFlowSpecRequest {
+            rd: String::new(),
+            route_targets: Vec::new(),
             afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
             components,
             actions: vec![flowspec_rate(rate)],
@@ -7534,6 +7648,7 @@ mod tests {
         let delete = rig
             .svc
             .delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+                rd: String::new(),
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: guarded_rule("=80", 0.0).components,
                 allow_missing: false,
@@ -7696,6 +7811,7 @@ mod tests {
                     components: guarded_rule("=80", 0.0).components,
                     owner: "ctl".into(),
                     revision: 1,
+                    ..Default::default()
                 })
                 .await
                 .map(|_| ())
@@ -7735,3 +7851,9 @@ mod tests {
         rig.stop().await;
     }
 }
+
+#[cfg(test)]
+mod vpn_flowspec_validation_tests;
+
+#[cfg(test)]
+mod vpn_flowspec_tests;

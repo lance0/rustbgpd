@@ -2229,8 +2229,8 @@ esac
 ;;
 (flowspec)
 _arguments "${_arguments_options[@]}" : \
-'-a+[Address family (ipv4_flowspec, ipv6_flowspec)]:FAMILY:_default' \
-'--family=[Address family (ipv4_flowspec, ipv6_flowspec)]:FAMILY:_default' \
+'-a+[Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)]:FAMILY:_default' \
+'--family=[Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)]:FAMILY:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -2256,8 +2256,8 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (advertised)
 _arguments "${_arguments_options[@]}" : \
-'-a+[Address family (ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
-'--family=[Address family (ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'-a+[Global or VPN FlowSpec family; defaults to both global families]:FAMILY:_default' \
+'--family=[Global or VPN FlowSpec family; defaults to both global families]:FAMILY:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -2276,8 +2276,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (received)
 _arguments "${_arguments_options[@]}" : \
-'-a+[Address family (ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
-'--family=[Address family (ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'-a+[Global or VPN FlowSpec family; defaults to both global families]:FAMILY:_default' \
+'--family=[Global or VPN FlowSpec family; defaults to both global families]:FAMILY:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -2296,8 +2296,10 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (add)
 _arguments "${_arguments_options[@]}" : \
-'-a+[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
-'--family=[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'-a+[Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)]:FAMILY:_default' \
+'--family=[Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)]:FAMILY:_default' \
+'--rd=[Route distinguisher (required for VPN families), e.g. 65000\:100]:RD:_default' \
+'*--route-target=[VPN scope route target; repeat for multiple targets]:ROUTE_TARGETS:_default' \
 '*--match=[Match components (e.g., dest=10.0.0.0/24 port==80)]:COMPONENTS:_default' \
 '*--action=[Actions (e.g., drop, rate=1000, redirect=65001\:100)]:ACTION:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2317,8 +2319,9 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (delete)
 _arguments "${_arguments_options[@]}" : \
-'-a+[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
-'--family=[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'-a+[Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)]:FAMILY:_default' \
+'--family=[Address family (ipv4_flowspec, ipv6_flowspec, l3vpn_ipv4_flowspec, l3vpn_ipv6_flowspec)]:FAMILY:_default' \
+'--rd=[Route distinguisher identifying the VPN rule]:RD:_default' \
 '*--match=[Match components identifying the rule]:COMPONENTS:_default' \
 '(--override-owner)--owner=[Lease owner the injected rule belongs to; without it only an unowned rule is deleted]:NAME:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \

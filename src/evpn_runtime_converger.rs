@@ -216,6 +216,12 @@ pub(crate) trait DaemonEvpnRuntimeConverger: Send + Sync {
     fn restore_link_drain(&self, prior: Arc<crate::evpn_es_drain::EsDrainReasonMap>) {
         let _ = prior;
     }
+
+    /// ADR-0084 drain GC against the committed `segments`, outside a
+    /// converge (see `EvpnRuntimeReloadApply::gc_drains_against_committed`).
+    fn retain_drained_esis(&self, segments: &[rustbgpd_evpn::EthernetSegment]) {
+        let _ = segments;
+    }
 }
 
 fn apply_task_join_error(context: &str, error: &JoinError) -> GrpcEvpnRuntimeApplyError {
@@ -410,8 +416,30 @@ impl EvpnRuntimeReloadApply {
             Ok(mut guard) => *guard = config.clone(),
             Err(poisoned) => *poisoned.into_inner() = config.clone(),
         }
+        // A bond the config no longer names leaves the readiness table,
+        // which ends the drain retention of its ESI.
+        self.auto_lacp_esis
+            .retain_bonds(&config.auto_lacp_interfaces());
+        self.gc_drains_against_committed();
         self.publish_es_link_bindings(config);
         self.start_auto_esi_probe_if_needed(config);
+    }
+
+    /// ADR-0084 drain GC against the committed segments, after every
+    /// successful config commit and readiness re-converge. The converge
+    /// GCs cover only the ES add/delete/redefine and teardown routes, and
+    /// keep every ESI the readiness table names; this pass also covers
+    /// no-op plans (removing a not-ready `auto-lacp` segment, or a derived
+    /// ESI suppressed by a collision) and multi-row additive build-ups.
+    fn gc_drains_against_committed(&self) {
+        let segments = self
+            .coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model()
+            .ethernet_segments()
+            .to_vec();
+        self.converger.retain_drained_esis(&segments);
     }
 
     /// Re-resolve and republish the ADR-0085 interface bindings for a
@@ -551,6 +579,7 @@ impl EvpnRuntimeReloadApply {
             // old ESI's routes may still be live, so its binding (and the
             // link drain it drives) stays until a retry succeeds.
             if result.is_ok() {
+                this.gc_drains_against_committed();
                 this.publish_es_link_bindings(&config);
             }
             AutoLacpRoundOutcome {
@@ -2793,6 +2822,16 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
         self.es_drain.restore(prior);
         if let Some(segment) = &self.segment {
             let _ = segment.replace_drained_esis(self.es_drain.snapshot());
+        }
+    }
+
+    fn retain_drained_esis(&self, segments: &[rustbgpd_evpn::EthernetSegment]) {
+        // Best-effort push, as after a converge GC: a closed control is
+        // daemon teardown.
+        if let Some(gc_drained) = self.gc_drained_esis(segments)
+            && let Some(segment) = &self.segment
+        {
+            let _ = segment.replace_drained_esis(gc_drained);
         }
     }
 

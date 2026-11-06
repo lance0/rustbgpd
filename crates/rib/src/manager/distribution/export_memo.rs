@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, RouteModifications};
 
+use crate::PeerId;
 use crate::attr_set::AttrSet;
 use crate::fast_hash::ShardedMap;
 use crate::route::Route;
@@ -164,7 +165,7 @@ const ADMISSION_SLOTS: usize = 4096;
 /// slot; promotion always requires full attribute equality.
 #[derive(Default)]
 pub(in crate::manager) struct ExportAdmission {
-    slots: Vec<Option<(u64, std::net::IpAddr, std::sync::Weak<AttrSet>)>>,
+    slots: Vec<Option<(u64, PeerId, std::sync::Weak<AttrSet>)>>,
 }
 
 impl ExportAdmission {
@@ -173,7 +174,7 @@ impl ExportAdmission {
     pub(in crate::manager) fn observe(
         &mut self,
         attrs: &Arc<AttrSet>,
-        receiver: std::net::IpAddr,
+        receiver: PeerId,
     ) -> Option<Arc<AttrSet>> {
         use std::hash::BuildHasher;
         let fingerprint = crate::fast_hash::FastState::default().hash_one(&**attrs);
@@ -184,7 +185,7 @@ impl ExportAdmission {
         &mut self,
         fingerprint: u64,
         attrs: &Arc<AttrSet>,
-        receiver: std::net::IpAddr,
+        receiver: PeerId,
     ) -> Option<Arc<AttrSet>> {
         if self.slots.is_empty() {
             self.slots.resize(ADMISSION_SLOTS, None);
@@ -411,8 +412,8 @@ mod tests {
         assert_eq!(&*memo.aspath_str(&no_aspath), "");
     }
 
-    fn receiver(host: u8) -> IpAddr {
-        IpAddr::V4(Ipv4Addr::new(10, 0, 0, host))
+    fn receiver(host: u8) -> PeerId {
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)))
     }
 
     #[test]

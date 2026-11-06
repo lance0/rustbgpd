@@ -1164,7 +1164,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
 | `AdjRibIn` | 1544 bytes |
-| `LocRib` | 1112 bytes |
+| `LocRib` | 1120 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
 doc: new attribute variants (RFC 6514 `PmsiTunnel`, RFC 9234
@@ -1191,7 +1191,8 @@ rows aren't in the allocator-tracked harness JSON.
 second family in each mixed-AFI table (IPv6 unicast, FlowSpec, VPN and
 labeled unicast, plus BGP-LS VPN), so the per-family `bgp_rib_loc_prefixes`
 series are published without walking a table. A sixth counter, for IPv4 VPN
-FlowSpec rules in the FlowSpec table, took it to 1112 bytes.
+FlowSpec rules in the FlowSpec table, took it to 1112 bytes. The matching
+IPv6 VPN FlowSpec counter adds eight more bytes, bringing it to 1120 bytes.
 
 Of the 1384 bytes, 48 are two inline, allocation-free
 `RpkiValidationCounts` values, one for each unicast family. They keep the

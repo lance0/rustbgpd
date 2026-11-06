@@ -41,6 +41,9 @@
 #       (slice 3b CVE-2025-39851 guard negative path only)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
 #       (ADR-0061 Slice 4 general unicast FIB runtime validation)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh blackhole_discard
+#       (RFC 7999 BLACKHOLE discard withdrawn beside foreign rows at
+#        other metrics, which stay untouched)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime
 #       (ADR-0067 BFD actor netns validation)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime_ipv4
@@ -158,6 +161,7 @@ case "${1:-all}" in
     fdb_nhg_roundtrip)  TEST_BIN="netns_fdb_nhg"; FILTER="round_trip_install_and_remove_fdb_nhg" ;;
     fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
     fib_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="fib_runtime::tests::netns_general_unicast_fib_" ;;
+    blackhole_discard)  FILTER=""; RUSTBGPD_TEST_FILTER="blackhole::tests::netns_blackhole_discard_" ;;
     bfd_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::" ;;
     bfd_runtime_ipv4)   FILTER="bfd_runtime::tests::netns::session_reaches_up_and_detects_down"; RUSTBGPD_TEST_FILTER="$FILTER" ;;
     bgp_unnumbered)     TEST_BIN="netns_bgp_unnumbered"; FILTER="" ;;
@@ -195,7 +199,7 @@ case "${1:-all}" in
     l3_single_path_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_installs_and_withdraws_l3_triple" ;;
     l3_foreign_route_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_foreign_route_survives_l3_cycle" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, ra_discovery, interface_only_neighbors, bond_lacp, auto_lacp_daemon, core_isolation, core_isolation_daemon, fast_external_failover, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_l2_dst, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, peer_sync_local_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, flood_list, svd_flood_list, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, blackhole_discard, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, ra_discovery, interface_only_neighbors, bond_lacp, auto_lacp_daemon, core_isolation, core_isolation_daemon, fast_external_failover, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_l2_dst, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, peer_sync_local_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, flood_list, svd_flood_list, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
         exit 2
         ;;
 esac

@@ -116,6 +116,8 @@ async fn flowspec_json_covers_proto_fields() {
                 lease_remaining_ms: None,
                 ipv6_extended_communities: raw_ipv6.clone(),
                 admission_revision: None,
+                rd: String::new(),
+                route_targets: vec![],
             },
             proto::FlowSpecRouteEntry::default(),
         ],
@@ -197,6 +199,233 @@ async fn flowspec_json_covers_proto_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vpn_flowspec_rows_preserve_scope_in_json_and_text() {
+    let server = test_support::spawn_mock_server(None).await;
+    let rd = "0x00020000fde80028";
+    let route_targets = ["0.65000:777", "192.0.2.1:9"];
+    let raw = vec![0x0202_0000_fde8_0309, 0x0102_c000_0201_0009];
+    for (family, label) in [
+        (
+            proto::AddressFamily::L3vpnIpv4Flowspec,
+            "l3vpn_ipv4_flowspec",
+        ),
+        (
+            proto::AddressFamily::L3vpnIpv6Flowspec,
+            "l3vpn_ipv6_flowspec",
+        ),
+    ] {
+        *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {
+            routes: vec![proto::FlowSpecRouteEntry {
+                afi_safi: family as i32,
+                peer_address: "0.0.0.0".into(),
+                rd: rd.into(),
+                route_targets: route_targets.iter().map(ToString::to_string).collect(),
+                extended_communities: raw.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let run = |json: bool| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_rbgp"));
+            command.args(["--addr", &server.addr]);
+            if json {
+                command.arg("--json");
+            }
+            command
+                .args(["flowspec", "--family", label])
+                .env("NO_COLOR", "1")
+                .output()
+                .expect("run rbgp")
+        };
+        let output = run(true);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            serde_json::json!([{
+                "components": [], "component_details": [], "actions": [],
+                "peer_address": "0.0.0.0", "afi_safi": label,
+                "as_path": [], "communities": [], "extended_communities": raw,
+                "rd": rd, "route_targets": route_targets,
+            }])
+        );
+        let output = run(false);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!(
+                "  match [] action [] from 0.0.0.0 ({label}) rd {rd} rt [0.65000:777, 192.0.2.1:9]\n"
+            )
+        );
+        assert_eq!(
+            *server.state.last_list_flowspec.lock().await,
+            Some(proto::ListFlowSpecRequest {
+                afi_safi: family as i32,
+                ..Default::default()
+            })
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flowspec_mutations_preserve_family_scope_and_global_defaults() {
+    let server = test_support::spawn_mock_server(None).await;
+    for (label, family, prefix, rd) in [
+        (
+            "ipv4_flowspec",
+            proto::AddressFamily::Ipv4Flowspec,
+            "192.0.2.0/24",
+            "",
+        ),
+        (
+            "ipv6_flowspec",
+            proto::AddressFamily::Ipv6Flowspec,
+            "2001:db8::/48",
+            "",
+        ),
+        (
+            "l3vpn_ipv4_flowspec",
+            proto::AddressFamily::L3vpnIpv4Flowspec,
+            "192.0.2.0/24",
+            "44407:40",
+        ),
+        (
+            "l3vpn-ipv6-flowspec",
+            proto::AddressFamily::L3vpnIpv6Flowspec,
+            "2001:db8::/48",
+            "44407:40",
+        ),
+    ] {
+        let component = format!("dest={prefix}");
+        let mut args = vec![
+            "flowspec", "add", "--family", label, "--match", &component, "--action", "drop",
+        ];
+        let targets = if rd.is_empty() {
+            vec![]
+        } else {
+            args.extend([
+                "--rd",
+                rd,
+                "--route-target",
+                "44407:777",
+                "--route-target",
+                "0.65000:9",
+            ]);
+            vec!["44407:777".to_string(), "0.65000:9".to_string()]
+        };
+        let run = |args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_rbgp"))
+                .args(["--addr", &server.addr])
+                .args(args)
+                .env("NO_COLOR", "1")
+                .output()
+                .expect("run rbgp")
+        };
+        let output = run(&args);
+        assert!(output.status.success(), "{label}: {output:?}");
+        let components = vec![proto::FlowSpecComponent {
+            r#type: 1,
+            prefix: prefix.into(),
+            ..Default::default()
+        }];
+        assert_eq!(
+            *server.state.last_add_flowspec.lock().await,
+            Some(proto::AddFlowSpecRequest {
+                afi_safi: family as i32,
+                rd: rd.into(),
+                route_targets: targets,
+                components: components.clone(),
+                actions: vec![proto::FlowSpecAction {
+                    action: Some(proto::flow_spec_action::Action::TrafficRate(
+                        proto::FlowSpecTrafficRate { rate: 0.0 },
+                    )),
+                }],
+                ..Default::default()
+            })
+        );
+        let mut args = vec![
+            "flowspec",
+            "delete",
+            "--family",
+            label,
+            "--match",
+            &component,
+            "--allow-missing",
+            "--owner",
+            "controller",
+        ];
+        if !rd.is_empty() {
+            args.extend(["--rd", rd]);
+        }
+        let output = run(&args);
+        assert!(output.status.success(), "{label}: {output:?}");
+        assert_eq!(
+            *server.state.last_delete_flowspec.lock().await,
+            Some(proto::DeleteFlowSpecRequest {
+                afi_safi: family as i32,
+                components,
+                rd: rd.into(),
+                allow_missing: true,
+                owner: "controller".into(),
+                override_owner: false,
+            })
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flowspec_add_rejects_vpn_scope_on_non_vpn_families_before_rpc() {
+    let server = test_support::spawn_mock_server(None).await;
+    for family in ["ipv4_flowspec", "ipv6-flowspec", "ipv4_unicast"] {
+        for scope in [
+            vec!["--rd", "44407:40"],
+            vec!["--route-target", "44407:777"],
+            vec!["--rd", "44407:40", "--route-target", "44407:777"],
+        ] {
+            let mut args = vec!["flowspec", "add", "--match", "port==80", "--action", "drop"];
+            args.extend(["--family", family]);
+            args.extend(scope);
+            let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+                .args(["--addr", &server.addr])
+                .args(&args)
+                .env("NO_COLOR", "1")
+                .output()
+                .expect("run rbgp");
+            assert!(
+                server.state.last_add_flowspec.lock().await.is_none(),
+                "invalid scope reached AddFlowSpec: {args:?}"
+            );
+            assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("require l3vpn_ipv4_flowspec")
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flowspec_delete_rejects_vpn_scope_on_non_vpn_families_before_rpc() {
+    let server = test_support::spawn_mock_server(None).await;
+    for family in ["ipv4_flowspec", "ipv6-flowspec", "ipv4_unicast"] {
+        let mut args = vec![
+            "flowspec", "delete", "--match", "port==80", "--rd", "44407:40",
+        ];
+        args.extend(["--family", family]);
+        let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+            .args(["--addr", &server.addr])
+            .args(&args)
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run rbgp");
+        assert!(
+            server.state.last_delete_flowspec.lock().await.is_none(),
+            "invalid scope reached DeleteFlowSpec: {args:?}"
+        );
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("require l3vpn_ipv4_flowspec"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn received_flowspec_json_projection_covers_proto_fields_and_pending_results() {
     let server = test_support::spawn_mock_server(None).await;
     let states = [
@@ -235,6 +464,8 @@ async fn received_flowspec_json_projection_covers_proto_fields_and_pending_resul
                     lease_remaining_ms: None,
                     ipv6_extended_communities: vec![],
                     admission_revision: None,
+                    rd: String::new(),
+                    route_targets: vec![],
                 }),
                 path_id: u32::MAX,
                 selected: *status == proto::FlowSpecValidationStatus::Feasible,

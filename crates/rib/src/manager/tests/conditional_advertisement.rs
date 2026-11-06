@@ -533,7 +533,7 @@ async fn selection_deferral_holds_pending_until_release() {
     let mut manager = manager().with_selection_deferral(SelectionDeferralConfig {
         timeout: Duration::from_secs(30),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: waiter,
+            peer: waiter.into(),
             families: vec![(Afi::Ipv4, Safi::Unicast)],
         }],
     });
@@ -840,7 +840,7 @@ async fn rollback_after_deferral_release_arms_the_restored_definition() {
     let mut manager = manager_with(&metrics).with_selection_deferral(SelectionDeferralConfig {
         timeout: Duration::from_secs(30),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: waiter,
+            peer: waiter.into(),
             families: vec![(Afi::Ipv4, Safi::Unicast)],
         }],
     });

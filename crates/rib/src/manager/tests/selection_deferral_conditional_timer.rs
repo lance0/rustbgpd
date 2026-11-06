@@ -27,7 +27,7 @@ fn manager(definitions: Vec<ConditionalAdvertisement>) -> RibManager {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         })

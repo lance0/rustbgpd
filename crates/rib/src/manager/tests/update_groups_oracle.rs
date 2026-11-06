@@ -3262,7 +3262,7 @@ async fn run_vpn_swap_case(
                         crate::SelectionDeferralConfig {
                             timeout: Duration::from_secs(30),
                             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                                peer: peer_v4(F),
+                                peer: peer_v4(F).into(),
                                 families: vec![(Afi::Ipv4, Safi::MplsVpn)],
                             }],
                         },

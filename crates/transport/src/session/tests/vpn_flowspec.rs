@@ -1,4 +1,4 @@
-//! ADR-0146: received VPN `FlowSpec` (AFI 1 / SAFI 134) is decoded, counted
+//! ADR-0146: received VPN `FlowSpec` (AFI 1/2 / SAFI 134) is decoded, counted
 //! and discarded, so it never reaches the RIB; locally originated VPN rules
 //! leave as SAFI 134 with their Route Distinguisher.
 
@@ -6,6 +6,7 @@ use super::*;
 use rustbgpd_wire::{
     Ipv4UnicastMode, MpReachNlri, MpUnreachNlri, ParsedUpdate, UpdateMessage, VpnFlowSpecRule,
 };
+use std::collections::HashSet;
 
 const DISCARDED: &str = "bgp_vpn_flowspec_nlri_discarded_total";
 
@@ -21,11 +22,14 @@ async fn read_message(server: &mut tokio::net::TcpStream) -> Message {
 fn rfc7606_diagnostics_list_vpn_flowspec_nlri() {
     let parsed = ParsedUpdate {
         withdrawn: Vec::new(),
-        attributes: vec![reach(vec![vpn_rule(40)]), unreach(vec![vpn_rule(41)])],
+        attributes: vec![
+            reach(Afi::Ipv4, vec![vpn_rule(Afi::Ipv4, 40)]),
+            unreach(Afi::Ipv4, vec![vpn_rule(Afi::Ipv4, 41)]),
+        ],
         announced: Vec::new(),
         bgpls_nlri_discarded: 0,
     };
-    let rule = vpn_rule(40).to_string();
+    let rule = vpn_rule(Afi::Ipv4, 40).to_string();
     assert_eq!(
         super::inbound::treat_as_withdraw_summary(&parsed),
         super::inbound::TreatAsWithdrawSummary {
@@ -38,7 +42,10 @@ fn rfc7606_diagnostics_list_vpn_flowspec_nlri() {
     );
     let involved = super::inbound::involved_nlri(&parsed);
     assert!(involved.contains(&rule), "{involved}");
-    assert!(involved.contains(&vpn_rule(41).to_string()), "{involved}");
+    assert!(
+        involved.contains(&vpn_rule(Afi::Ipv4, 41).to_string()),
+        "{involved}"
+    );
 }
 
 #[tokio::test]
@@ -54,7 +61,7 @@ async fn an_update_stopped_before_import_is_not_counted_as_discarded() {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002, 65001])],
             }),
-            reach(vec![vpn_rule(40)]),
+            reach(Afi::Ipv4, vec![vpn_rule(Afi::Ipv4, 40)]),
         ]))
         .await;
     // Missing mandatory ORIGIN: an RFC 7606 treat-as-withdraw.
@@ -63,7 +70,7 @@ async fn an_update_stopped_before_import_is_not_counted_as_discarded() {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
-            reach(vec![vpn_rule(41)]),
+            reach(Afi::Ipv4, vec![vpn_rule(Afi::Ipv4, 41)]),
         ]))
         .await;
     assert_eq!(discarded(&session), Vec::new());
@@ -75,20 +82,26 @@ async fn an_update_stopped_before_import_is_not_counted_as_discarded() {
     }
 }
 
-fn vpn_rule(assigned: u8) -> VpnFlowSpecRule {
+fn vpn_rule(afi: Afi, assigned: u8) -> VpnFlowSpecRule {
+    let prefix = if afi == Afi::Ipv6 {
+        FlowSpecPrefix::V6(Ipv6PrefixOffset {
+            prefix: Ipv6Prefix::new("2001:db8::10".parse().unwrap(), 128),
+            offset: 0,
+        })
+    } else {
+        FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 10), 32))
+    };
     VpnFlowSpecRule {
         rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, assigned]),
         rule: FlowSpecRule {
-            components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
-                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 10), 32),
-            ))],
+            components: vec![FlowSpecComponent::DestinationPrefix(prefix)],
         },
     }
 }
 
-fn reach(rules: Vec<VpnFlowSpecRule>) -> PathAttribute {
+fn reach(afi: Afi, rules: Vec<VpnFlowSpecRule>) -> PathAttribute {
     PathAttribute::MpReachNlri(Box::new(MpReachNlri {
-        afi: Afi::Ipv4,
+        afi,
         safi: Safi::FlowSpecVpn,
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         link_local_next_hop: None,
@@ -103,9 +116,9 @@ fn reach(rules: Vec<VpnFlowSpecRule>) -> PathAttribute {
     }))
 }
 
-fn unreach(rules: Vec<VpnFlowSpecRule>) -> PathAttribute {
+fn unreach(afi: Afi, rules: Vec<VpnFlowSpecRule>) -> PathAttribute {
     PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
-        afi: Afi::Ipv4,
+        afi,
         safi: Safi::FlowSpecVpn,
         withdrawn: vec![],
         flowspec_withdrawn: vec![],
@@ -122,13 +135,13 @@ fn update(attributes: &[PathAttribute]) -> UpdateMessage {
     UpdateMessage::build(&[], &[], attributes, true, false, Ipv4UnicastMode::Body)
 }
 
-fn announcement(rules: Vec<VpnFlowSpecRule>) -> UpdateMessage {
+fn announcement(afi: Afi, rules: Vec<VpnFlowSpecRule>) -> UpdateMessage {
     update(&[
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        reach(rules),
+        reach(afi, rules),
     ])
 }
 
@@ -148,56 +161,115 @@ fn discarded(session: &PeerSession) -> Vec<(HashMap<String, String>, f64)> {
 
 #[tokio::test]
 async fn received_vpn_flowspec_is_counted_and_never_reaches_the_rib() {
-    let (mut session, mut rib_rx) = session_with(vec![
-        (Afi::Ipv4, Safi::Unicast),
-        (Afi::Ipv4, Safi::FlowSpecVpn),
-    ]);
+    use crate::config::{MaxPrefixAction, PrefixLimitFamily};
 
-    session
-        .process_update(announcement(vec![vpn_rule(40), vpn_rule(41)]))
-        .await;
-    // A withdrawal carries NLRI, so it is counted and is not End-of-RIB.
-    session
-        .process_update(update(&[unreach(vec![vpn_rule(40)])]))
-        .await;
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let (mut session, mut rib_rx) = session_with(vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (afi, Safi::FlowSpec),
+            (afi, Safi::FlowSpecVpn),
+        ]);
+        session.config.max_prefixes = Some(1);
+        session.config.max_prefixes_family.0[PrefixLimitFamily::Ipv4Flowspec as usize] = Some(1);
+        session.config.max_prefixes_family.0[PrefixLimitFamily::Ipv6Flowspec as usize] = Some(1);
+        session.config.max_prefix_action = MaxPrefixAction::Block;
+        session.config.max_prefix_warning_percent = Some(100);
+        // A real global UPDATE proves that the same receive path stores and
+        // accounts rules; its sibling VPN withdrawal must never remove it.
+        let PathAttribute::MpReachNlri(mut global) = reach(afi, vec![]) else {
+            unreachable!()
+        };
+        global.safi = Safi::FlowSpec;
+        global.flowspec_announced = vec![vpn_rule(afi, 40).rule];
+        session
+            .process_update(update(&[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::MpReachNlri(global),
+            ]))
+            .await;
+        assert!(
+            matches!(rib_rx.try_recv(), Ok(RibUpdate::RoutesReceived { flowspec_announced, .. }) if flowspec_announced.len() == 1)
+        );
+        assert_eq!(session.known_prefix_count(), 1);
+        let known = session.known_flowspec.clone();
+        let counts = session.flowspec_counts;
+        assert_eq!(counts, if afi == Afi::Ipv4 { [1, 0] } else { [0, 1] });
+        let warned = session.max_prefix_warned;
+        let blocking = session.max_prefix_blocking;
 
-    assert_eq!(
-        discarded(&session),
-        vec![(
-            HashMap::from([("peer".to_string(), session.peer_label.clone())]),
-            3.0,
-        )]
-    );
-    assert!(
-        rib_rx.try_recv().is_err(),
-        "VPN FlowSpec must not reach the RIB"
-    );
-    assert!(session.received_eor_families.is_empty());
+        session
+            .process_update(announcement(
+                afi,
+                vec![vpn_rule(afi, 40), vpn_rule(afi, 41)],
+            ))
+            .await;
+        session
+            .process_update(update(&[unreach(afi, vec![vpn_rule(afi, 40)])]))
+            .await;
+        assert_eq!(
+            discarded(&session),
+            vec![(
+                HashMap::from([("peer".to_string(), session.peer_label.clone())]),
+                3.0,
+            )]
+        );
+        assert!(
+            rib_rx.try_recv().is_err(),
+            "VPN FlowSpec must not reach the RIB"
+        );
+        assert!(session.received_eor_families.is_empty());
+        assert_eq!(session.known_flowspec, known);
+        assert_eq!(session.flowspec_counts, counts);
+        assert_eq!(session.known_prefix_count(), 1);
+        assert_eq!(
+            session.family_prefix_usage(PrefixLimitFamily::Ipv4Flowspec),
+            counts[0]
+        );
+        assert_eq!(
+            session.family_prefix_usage(PrefixLimitFamily::Ipv6Flowspec),
+            counts[1]
+        );
+        assert_eq!(session.max_prefix_warned, warned);
+        assert_eq!(session.max_prefix_blocking, blocking);
+
+        let PathAttribute::MpUnreachNlri(mut global) = unreach(afi, vec![]) else {
+            unreachable!()
+        };
+        global.safi = Safi::FlowSpec;
+        global.flowspec_withdrawn = vec![vpn_rule(afi, 40).rule];
+        session
+            .process_update(update(&[PathAttribute::MpUnreachNlri(global)]))
+            .await;
+        assert!(
+            matches!(rib_rx.try_recv(), Ok(RibUpdate::RoutesReceived { flowspec_withdrawn, .. }) if flowspec_withdrawn.len() == 1)
+        );
+        assert_eq!(session.known_prefix_count(), 0);
+        assert!(session.known_flowspec.is_empty());
+        assert_eq!(session.flowspec_counts, [0, 0]);
+    }
 }
 
 #[tokio::test]
 async fn vpn_flowspec_end_of_rib_is_accepted_and_not_counted() {
-    let (mut session, mut rib_rx) = session_with(vec![
-        (Afi::Ipv4, Safi::Unicast),
-        (Afi::Ipv4, Safi::FlowSpecVpn),
-    ]);
-
-    session.process_update(update(&[unreach(vec![])])).await;
-
-    assert!(matches!(
-        rib_rx.try_recv(),
-        Ok(RibUpdate::EndOfRib {
-            afi: Afi::Ipv4,
-            safi: Safi::FlowSpecVpn,
-            ..
-        })
-    ));
-    assert!(
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let (mut session, mut rib_rx) =
+            session_with(vec![(Afi::Ipv4, Safi::Unicast), (afi, Safi::FlowSpecVpn)]);
         session
-            .received_eor_families
-            .contains(&(Afi::Ipv4, Safi::FlowSpecVpn))
-    );
-    assert_eq!(discarded(&session), Vec::new());
+            .process_update(update(&[unreach(afi, vec![])]))
+            .await;
+        assert!(
+            matches!(rib_rx.try_recv(), Ok(RibUpdate::EndOfRib { afi: received_afi, safi: Safi::FlowSpecVpn, .. }) if received_afi == afi)
+        );
+        assert!(
+            session
+                .received_eor_families
+                .contains(&(afi, Safi::FlowSpecVpn))
+        );
+        assert_eq!(discarded(&session), Vec::new());
+    }
 }
 
 #[tokio::test]
@@ -230,32 +302,31 @@ async fn an_update_without_vpn_flowspec_creates_no_discard_series() {
 
 #[tokio::test]
 async fn unnegotiated_vpn_flowspec_is_ignored_without_counting() {
-    let (mut session, mut rib_rx) = session_with(vec![(Afi::Ipv4, Safi::Unicast)]);
-
-    session
-        .process_update(announcement(vec![vpn_rule(40)]))
-        .await;
-
-    assert_eq!(discarded(&session), Vec::new());
-    assert!(rib_rx.try_recv().is_err());
+    for (afi, other) in [(Afi::Ipv4, Afi::Ipv6), (Afi::Ipv6, Afi::Ipv4)] {
+        let (mut session, mut rib_rx) = session_with(vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (afi, Safi::FlowSpec),
+            (other, Safi::FlowSpecVpn),
+        ]);
+        session
+            .process_update(announcement(afi, vec![vpn_rule(afi, 40)]))
+            .await;
+        assert_eq!(discarded(&session), Vec::new());
+        assert!(rib_rx.try_recv().is_err());
+        assert!(session.known_flowspec.is_empty());
+        assert_eq!(session.flowspec_counts, [0, 0]);
+    }
 }
 
 #[test]
 fn vpn_flowspec_route_refresh_is_never_requested() {
-    let (mut session, _rib_rx) = session_with(vec![
-        (Afi::Ipv4, Safi::FlowSpec),
-        (Afi::Ipv4, Safi::FlowSpecVpn),
-    ]);
-    // No writer is installed, so any real request fails to enqueue.
-    assert!(
-        session
-            .send_route_refresh(Afi::Ipv4, Safi::FlowSpec)
-            .is_err()
-    );
-    assert_eq!(
-        session.send_route_refresh(Afi::Ipv4, Safi::FlowSpecVpn),
-        Ok(())
-    );
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let (mut session, _rib_rx) =
+            session_with(vec![(afi, Safi::FlowSpec), (afi, Safi::FlowSpecVpn)]);
+        // No writer is installed, so any real request fails to enqueue.
+        assert!(session.send_route_refresh(afi, Safi::FlowSpec).is_err());
+        assert_eq!(session.send_route_refresh(afi, Safi::FlowSpecVpn), Ok(()));
+    }
 }
 
 fn refresh_capable_vpn_session() -> (PeerSession, tokio::sync::mpsc::Receiver<RibUpdate>) {
@@ -372,7 +443,7 @@ async fn soft_reset_of_vpn_flowspec_needs_no_route_refresh_capability() {
     ));
 }
 
-/// ADR-0146 slice 2: VPN rules leave as AFI 1 / SAFI 134 with their RD, and
+/// ADR-0146 slice 2: VPN rules leave as AFI 1/2 / SAFI 134 with their RD, and
 /// global rules with the same components as SAFI 133. Interleaved in one
 /// outbound batch with the same attributes, the families are partitioned
 /// into their own UPDATEs and no rule is lost. Withdrawals follow the same
@@ -388,7 +459,7 @@ async fn vpn_and_global_flowspec_leave_in_separate_updates() {
     ]);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-    let vpn = vpn_rule(40);
+    let vpn = vpn_rule(Afi::Ipv4, 40);
     let other = FlowSpecRule {
         components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
             Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 11), 32),
@@ -485,8 +556,8 @@ async fn a_vpn_flowspec_batch_sends_every_section() {
     let (mut session, _rib_rx) = session_with(vec![(Afi::Ipv4, Safi::FlowSpecVpn)]);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-    let withdrawn = vpn_rule(40);
-    let announced = vpn_rule(41);
+    let withdrawn = vpn_rule(Afi::Ipv4, 40);
+    let announced = vpn_rule(Afi::Ipv4, 41);
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
         flowspec_withdraw: vec![rustbgpd_rib::FlowSpecKey {
@@ -536,4 +607,105 @@ async fn a_vpn_flowspec_batch_sends_every_section() {
         }
     }
     assert_eq!(seen, ["withdrawal", "announcement", "end-of-rib"]);
+}
+
+#[tokio::test]
+async fn dual_stack_vpn_and_global_flowspec_batches_keep_each_family_separate() {
+    let families = vec![
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::Ipv6, Safi::FlowSpec),
+        (Afi::Ipv4, Safi::FlowSpecVpn),
+        (Afi::Ipv6, Safi::FlowSpecVpn),
+    ];
+    let (mut session, _rib_rx) = session_with(families.clone());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let routes: Vec<_> = families
+        .iter()
+        .rev()
+        .map(|&(afi, safi)| {
+            let vpn = vpn_rule(afi, 40);
+            FlowSpecRoute {
+                rule: vpn.rule,
+                afi,
+                rd: (safi == Safi::FlowSpecVpn).then_some(vpn.rd),
+                peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
+                attributes: vec![
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::AsPath(AsPath { segments: vec![] }),
+                ],
+                received_at: Instant::now(),
+                origin_type: rustbgpd_rib::RouteOrigin::Local,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+            }
+        })
+        .collect();
+    let withdrawals = routes.iter().map(FlowSpecRoute::selection_key).collect();
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        flowspec_announce: routes,
+        ..OutboundRouteUpdate::default()
+    });
+    let mut seen = HashSet::new();
+    for _ in &families {
+        let Message::Update(update) = read_message(&mut server).await else {
+            panic!("expected UPDATE")
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let reaches: Vec<_> = parsed
+            .attributes
+            .into_iter()
+            .filter_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reaches.len(), 1);
+        let mp = &reaches[0];
+        assert!(seen.insert((mp.afi, mp.safi)));
+        let vpn = vpn_rule(mp.afi, 40);
+        if mp.safi == Safi::FlowSpecVpn {
+            assert_eq!(mp.vpn_flowspec_announced, [vpn]);
+            assert_eq!(mp.flowspec_announced.len(), 0);
+        } else {
+            assert_eq!(mp.flowspec_announced, [vpn.rule]);
+            assert_eq!(mp.vpn_flowspec_announced.len(), 0);
+        }
+    }
+    assert_eq!(seen, families.iter().copied().collect());
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        flowspec_withdraw: withdrawals,
+        ..OutboundRouteUpdate::default()
+    });
+    let mut seen = HashSet::new();
+    for _ in &families {
+        let Message::Update(update) = read_message(&mut server).await else {
+            panic!("expected UPDATE")
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let unreaches: Vec<_> = parsed
+            .attributes
+            .into_iter()
+            .filter_map(|attr| match attr {
+                PathAttribute::MpUnreachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unreaches.len(), 1);
+        let mp = &unreaches[0];
+        assert!(seen.insert((mp.afi, mp.safi)));
+        let vpn = vpn_rule(mp.afi, 40);
+        if mp.safi == Safi::FlowSpecVpn {
+            assert_eq!(mp.vpn_flowspec_withdrawn, [vpn]);
+            assert_eq!(mp.flowspec_withdrawn.len(), 0);
+        } else {
+            assert_eq!(mp.flowspec_withdrawn, [vpn.rule]);
+            assert_eq!(mp.vpn_flowspec_withdrawn.len(), 0);
+        }
+    }
+    assert_eq!(seen, families.iter().copied().collect());
 }

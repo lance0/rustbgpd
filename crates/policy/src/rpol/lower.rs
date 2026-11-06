@@ -2469,6 +2469,8 @@ pub(super) fn family_value(name: &str) -> crate::engine::RouteFamily {
         "vpnv6" => RouteFamily::Vpnv6,
         "ipv4-flowspec" => RouteFamily::Ipv4Flowspec,
         "ipv6-flowspec" => RouteFamily::Ipv6Flowspec,
+        "vpnv4-flowspec" => RouteFamily::Vpnv4Flowspec,
+        "vpnv6-flowspec" => RouteFamily::Vpnv6Flowspec,
         "evpn" => RouteFamily::Evpn,
         "rtc" => RouteFamily::RtConstrain,
         "bgp-ls" => RouteFamily::BgpLs,

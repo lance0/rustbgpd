@@ -66,8 +66,12 @@ The exact API boundary is:
 | `RibService.ListFlowSpecRoutes`, `received_peer_address = "0.0.0.0"`, advertised selector empty | Return all retained local intent in `received_routes`, including outselected rules, with `received_view = true` even when empty. The stable row projection is `route` and `selected`. |
 | `RibService.ListFlowSpecRoutes`, `advertised_peer_address` names a destination peer, received selector empty | Return committed post-export-policy entries in `routes`, with `advertised_view = true` even when empty. Each row retains its source `peer_address`, not the destination. |
 
-Injection accepts `IPV4_FLOWSPEC` and `IPV6_FLOWSPEC`. Listing accepts those
-families or `UNSPECIFIED` for both. Both peer selectors together return
+The inventoried injection modes accept `IPV4_FLOWSPEC` and `IPV6_FLOWSPEC`.
+`UNSPECIFIED` listing selects only those two global SAFI-133 families in
+every view; explicit global-family selectors also exclude VPN rules.
+A FlowSpec-key request whose family requires an RD is refused without one.
+This also protects an older client that echoes a VPN lease key while dropping
+the unknown RD field: it cannot delete a global sibling. Both peer selectors together return
 `INVALID_ARGUMENT`; the advertised mode retains the documented unknown-peer
 and initial-roster errors. The
 [API reference](api.md#flowspec-injection-contract) specifies component
@@ -93,6 +97,18 @@ action.
 
 The following shared surfaces remain **outside v1**:
 
+- VPN FlowSpec families `ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC` (13) and
+  `ADDRESS_FAMILY_L3VPN_IPV6_FLOWSPEC` (14), and the RD/RT fields on the
+  existing add, delete, leased-key, export-disposition
+  and route-row messages. They use exact inventory exclusions and do not
+  change the existing stable message-graph digests. The
+  [VPN API contract](api.md#vpn-flowspec-controller-api) defines their
+  scoped identity, single owner lease across RDs, guarded payload changes,
+  typed-or-raw RT reinjection and read-only capability probe. Its release
+  floor is unassigned; these additions do not promote VPN behavior to v1.
+  The config and metric family labels `l3vpn_ipv4_flowspec` and
+  `l3vpn_ipv6_flowspec`, policy values `vpnv4-flowspec` and
+  `vpnv6-flowspec`, and their CLI surfaces also remain outside v1.
 - `ListFlowSpecRequest.received_peer_address` selecting any source other than
   the local `0.0.0.0` sentinel: remote received-candidate inspection and
   receive-side feasibility semantics remain alpha.
@@ -139,7 +155,8 @@ absent. After restarting the daemon, re-inject desired rules and verify local
 intent separately from committed advertisements and remote observations.
 
 A planned restart (SIGTERM with a Graceful Restart marker in
-`runtime_state_dir`) retains the static GR peer/family roster. Each family's
+`runtime_state_dir`) retains the GR peer/family roster of the configured
+static and interface-only neighbors. Each family's
 selection-deferral roster starts dormant and applies no hold until a roster
 peer re-establishes a session for it. Only eligible re-established peers wait
 for End-of-RIB; a configured neighbor that stays down or never returns does

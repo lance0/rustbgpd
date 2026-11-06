@@ -2116,7 +2116,7 @@ async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_hours(1),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: waiter,
+                peer: waiter.into(),
                 families: vec![evpn],
             }],
         });
@@ -2677,7 +2677,7 @@ async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_hours(1),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: peer_v4(target),
+                peer: peer_v4(target).into(),
                 families: vec![rtc],
             }],
         });

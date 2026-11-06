@@ -313,6 +313,7 @@ pub(crate) struct MockState {
     // the daemon's FAILED_PRECONDITION.
     pub(crate) injected_entry_owner: Mutex<String>,
     pub(crate) last_delete_path: Mutex<Option<server_proto::DeletePathRequest>>,
+    pub(crate) last_add_flowspec: Mutex<Option<server_proto::AddFlowSpecRequest>>,
     pub(crate) last_delete_flowspec: Mutex<Option<server_proto::DeleteFlowSpecRequest>>,
     pub(crate) last_list_flowspec: Mutex<Option<server_proto::ListFlowSpecRequest>>,
     pub(crate) last_list_evpn: Mutex<Option<server_proto::ListEvpnRequest>>,
@@ -1609,8 +1610,9 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
 
     async fn add_flow_spec(
         &self,
-        _request: Request<server_proto::AddFlowSpecRequest>,
+        request: Request<server_proto::AddFlowSpecRequest>,
     ) -> Result<Response<server_proto::AddFlowSpecResponse>, Status> {
+        *self.state.last_add_flowspec.lock().await = Some(request.into_inner());
         Ok(Response::new(
             *self.state.add_flowspec_response.lock().await,
         ))

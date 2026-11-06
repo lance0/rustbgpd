@@ -130,7 +130,7 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
             .with_selection_deferral(SelectionDeferralConfig {
                 timeout: Duration::from_secs(60),
                 waiters: vec![SelectionDeferralWaiterConfig {
-                    peer: peer_v4(WAITER),
+                    peer: peer_v4(WAITER).into(),
                     families: vec![FAMILY],
                 }],
             });
