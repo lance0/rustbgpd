@@ -346,6 +346,7 @@ impl PeerManager {
                             ))
                 }) {
                     // Operator explicitly disabled — don't remove, just let it stay idle.
+                    self.mark_unadmitted_disabled_dynamic(&peer_key);
                 } else if self.peers.get(&peer_key).is_some_and(|m| m.is_dynamic) {
                     // Snapshot any unfired hot-apply / Route Refresh
                     // intent before we drop the ManagedPeer. A

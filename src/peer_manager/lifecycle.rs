@@ -2944,6 +2944,7 @@ impl PeerManager {
         );
         // ADR-0067 step 4: drain this peer's BFD session (published disabled).
         self.set_bfd_peer_disabled(address, true);
+        self.mark_unadmitted_disabled_dynamic(&peer);
         info!(peer = %address, "peer disabled");
         Ok(())
     }

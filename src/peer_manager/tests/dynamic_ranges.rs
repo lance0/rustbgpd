@@ -917,6 +917,22 @@ async fn dynamic_peer_open_received_updates_remote_asn_and_metric_without_state_
 /// refused delete, and `enable` restarted it outside every range.
 #[tokio::test]
 async fn removing_a_range_releases_its_disabled_member() {
+    assert_disabled_member_released(false).await;
+}
+
+/// A member still enabled when its range goes, then disabled, is released
+/// too: the range change's own pass ran while it was enabled.
+/// Mutation-red: without marking the disabled member for the idle-member
+/// pass, it stays listed, holds its slot, and enable refuses it.
+#[tokio::test]
+async fn disabling_a_member_after_its_range_left_releases_it() {
+    assert_disabled_member_released(true).await;
+}
+
+/// Accept one dynamic member in 127.0.0.0/8 through the real manager loop,
+/// disable it and remove its range (in that order, or the reverse with
+/// `remove_first`), then require it released.
+async fn assert_disabled_member_released(remove_first: bool) {
     let (tx, rx) = mpsc::channel(16);
     let (_internal_tx, internal_rx) = mpsc::channel(1);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
@@ -976,15 +992,24 @@ async fn removing_a_range_releases_its_disabled_member() {
         Some(1.0)
     );
 
-    request!(DisablePeer {
-        peer: peer.clone(),
-        reason: None
-    })
-    .unwrap();
-    request!(DeleteDynamicRange {
-        prefix: "127.0.0.0/8".to_string()
-    })
-    .unwrap();
+    if !remove_first {
+        request!(DisablePeer {
+            peer: peer.clone(),
+            reason: None
+        })
+        .unwrap();
+    }
+    let prefix = "127.0.0.0/8".to_string();
+    request!(DeleteDynamicRange { prefix: prefix }).unwrap();
+    if remove_first {
+        // An enabled member keeps running until its session ends.
+        assert_eq!(request!(ListPeers {}).len(), 1);
+        request!(DisablePeer {
+            peer: peer.clone(),
+            reason: None
+        })
+        .unwrap();
+    }
 
     // Mutation-red: without the release the disabled member stays listed,
     // holds its slot, refuses delete and enable restarts it.

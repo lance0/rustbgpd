@@ -498,6 +498,19 @@ impl PeerManager {
         result
     }
 
+    /// A dynamic member disabled after its range left is idle like one
+    /// disabled before: let the next idle-member pass release it. The range
+    /// change's own pass ran while it was still enabled.
+    pub(super) fn mark_unadmitted_disabled_dynamic(&mut self, peer: &PeerKey) {
+        if self.peers.get(peer).is_some_and(|managed| {
+            managed.is_dynamic
+                && !managed.enabled
+                && !self.dynamic_peer_still_allowed_by_current_ranges(managed)
+        }) {
+            self.retention.admission_dirty = true;
+        }
+    }
+
     /// After a range change, release the idle members no range admits any
     /// more: retained neighbors and admin-disabled peers. An enabled member
     /// keeps its session and goes when that session next falls to Idle; a
