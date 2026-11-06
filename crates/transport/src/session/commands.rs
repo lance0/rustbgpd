@@ -1385,10 +1385,14 @@ impl PeerSession {
         }
         match cmd {
             PeerCommand::Start => {
-                self.stop_requested = false;
-                self.reconnect_timer = None;
-                self.notification_idle_failures = 0;
-                self.drive_fsm(Event::ManualStart).await;
+                // RFC 4271 §8.2.2 ignores a start event outside Idle: a
+                // running session keeps its NOTIFICATION backoff streak.
+                if self.fsm.state() == SessionState::Idle {
+                    self.stop_requested = false;
+                    self.reconnect_timer = None;
+                    self.notification_idle_failures = 0;
+                    self.drive_fsm(Event::ManualStart).await;
+                }
                 ControlFlow::Continue(())
             }
             PeerCommand::StartInbound {

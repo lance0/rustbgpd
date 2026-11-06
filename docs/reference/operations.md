@@ -3727,9 +3727,12 @@ rbgp neighbor 10.0.0.2 enable
 rbgp neighbor 10.0.0.2 disable --reason "maintenance"
 ```
 
-`enable` also clears the NOTIFICATION reconnect backoff, so the next
-attempt starts immediately and any later failure streak restarts from
-`connect_retry_secs`.
+On an idle peer, `enable` also clears the NOTIFICATION reconnect backoff,
+so the next attempt starts immediately and any later failure streak
+restarts from `connect_retry_secs`. On a peer whose session is already
+connecting or up, `enable` changes nothing. It sends no NOTIFICATION and
+keeps the backoff streak, because RFC 4271 §8.2.2 ignores a start event
+outside Idle.
 
 ### Reset a peer session
 
