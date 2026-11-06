@@ -18,9 +18,10 @@ use crate::eval::{MAX_EVAL_COST, MAX_LOOP_ITERATIONS, clamp};
 use crate::ir::{ArithOp, ValueField};
 
 use super::ast::{
-    ActionStmt, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, DatasetDecl,
-    DatasetEntryAst, Expr, FieldPath, FieldRoot, FnDef, ForSource, ForStmt, IfStmt, NextHopArg,
-    ParamType, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg, ValueExprAst,
+    ActionStmt, CallArg, CallStmt, CmpOp, CommunityArg, CommunityKind, CommunitySetDef,
+    DatasetDecl, DatasetEntryAst, Expr, FieldPath, FieldRoot, FnDef, ForSource, ForStmt, IfStmt,
+    NextHopArg, ParamType, PolicyDef, PrependAsArg, Rhs, RouteField, SourceFile, Stmt, U32Arg,
+    ValueExprAst,
 };
 use super::diag::{Diagnostic, DiagnosticCode, Span, Spanned, closest};
 
@@ -386,8 +387,29 @@ pub fn typecheck(file: &SourceFile) -> Vec<Diagnostic> {
 const MAX_TYPECHECK_DIAGNOSTICS: usize = 256;
 
 fn typecheck_inner(file: &SourceFile) -> Vec<Diagnostic> {
+    let mut sets = HashMap::new();
+    let named = file
+        .prefix_sets
+        .iter()
+        .map(|s| ("prefix-set", &s.name, None))
+        .chain(
+            file.community_sets
+                .iter()
+                .map(|s| ("community-set", &s.name, Some(s))),
+        )
+        .chain(file.asn_sets.iter().map(|s| ("asn-set", &s.name, None)));
+    for (kind, name, community) in named {
+        // First definition wins, as the linear lookups did; a name defined
+        // twice is already a diagnostic.
+        sets.entry(name.node.as_str()).or_insert(SetEntry {
+            kind,
+            span: name.span,
+            community,
+        });
+    }
     let mut checker = Checker {
         file,
+        sets,
         diags: Vec::new(),
     };
     checker.check_declarations();
@@ -413,8 +435,18 @@ fn typecheck_inner(file: &SourceFile) -> Vec<Diagnostic> {
     checker.diags
 }
 
+/// One named set in [`Checker::sets`].
+struct SetEntry<'a> {
+    kind: &'static str,
+    span: Span,
+    community: Option<&'a CommunitySetDef>,
+}
+
 struct Checker<'a> {
     file: &'a SourceFile,
+    /// Every named set by name, so a reference resolves in constant time
+    /// rather than by a scan of every set.
+    sets: HashMap<&'a str, SetEntry<'a>>,
     /// At most [`MAX_TYPECHECK_DIAGNOSTICS`]; see [`Checker::push_diag`].
     diags: Vec<Diagnostic>,
 }
@@ -598,6 +630,17 @@ fn call_prepend_bound(
 impl<'a> Checker<'a> {
     /// Collect a diagnostic unless [`MAX_TYPECHECK_DIAGNOSTICS`] are
     /// already held; the compile fails either way.
+    /// Whether the diagnostic cap is reached: the compile fails anyway, so
+    /// optional diagnostic work can stop.
+    fn full(&self) -> bool {
+        self.diags.len() >= MAX_TYPECHECK_DIAGNOSTICS
+    }
+
+    /// The named community-set, if `name` is one.
+    fn community_set(&self, name: &str) -> Option<&'a CommunitySetDef> {
+        self.sets.get(name).and_then(|entry| entry.community)
+    }
+
     fn push_diag(&mut self, diag: Diagnostic) {
         if self.diags.len() < MAX_TYPECHECK_DIAGNOSTICS {
             self.diags.push(diag);
@@ -795,20 +838,7 @@ impl<'a> Checker<'a> {
 
     /// The kind and definition span of a source-defined set by name.
     fn set_def_of(&self, name: &str) -> Option<(&'static str, Span)> {
-        if let Some(def) = self.file.prefix_sets.iter().find(|s| s.name.node == name) {
-            Some(("prefix-set", def.name.span))
-        } else if let Some(def) = self
-            .file
-            .community_sets
-            .iter()
-            .find(|s| s.name.node == name)
-        {
-            Some(("community-set", def.name.span))
-        } else if let Some(def) = self.file.asn_sets.iter().find(|s| s.name.node == name) {
-            Some(("asn-set", def.name.span))
-        } else {
-            None
-        }
+        self.sets.get(name).map(|entry| (entry.kind, entry.span))
     }
 
     /// The kind and definition span of any user-defined symbol by name
@@ -2809,7 +2839,7 @@ impl<'a> Checker<'a> {
         }
         let eq_only = |checker: &mut Self| {
             if matches!(op, CmpOp::Ge | CmpOp::Le) {
-                checker.diags.push(Diagnostic::coded(
+                checker.push_diag(Diagnostic::coded(
                     DiagnosticCode::Typecheck,
                     field.span.to(rhs.span()),
                     format!("`{}` supports only `==` and `!=`", field.render()),
@@ -2869,8 +2899,7 @@ impl<'a> Checker<'a> {
             Field::PeerGroup => {
                 eq_only(self);
                 if !matches!(rhs, Rhs::Str(_)) {
-                    self.diags
-                        .push(type_mismatch(field, "a quoted group name", rhs));
+                    self.push_diag(type_mismatch(field, "a quoted group name", rhs));
                 }
             }
             Field::Prefix => {
@@ -2928,8 +2957,7 @@ impl<'a> Checker<'a> {
             }
             Rhs::Int(..) => {}
             other => {
-                self.diags
-                    .push(type_mismatch(field, "an integer EVPN route type", other));
+                self.push_diag(type_mismatch(field, "an integer EVPN route type", other));
             }
         }
     }
@@ -2972,9 +3000,7 @@ impl<'a> Checker<'a> {
             Rhs::Ident(name) => {
                 self.check_u32_arg(&U32Arg::Param(name.clone()), scope);
             }
-            other => self
-                .diags
-                .push(type_mismatch(field, "a u32 value or parameter", other)),
+            other => self.push_diag(type_mismatch(field, "a u32 value or parameter", other)),
         }
     }
 
@@ -3024,15 +3050,7 @@ impl<'a> Checker<'a> {
     /// and a description of what mistakenly-referenced kind a name
     /// actually is (for the wrong-kind note).
     fn set_kind_of(&self, name: &str) -> Option<&'static str> {
-        if self.file.prefix_sets.iter().any(|s| s.name.node == name) {
-            Some("prefix-set")
-        } else if self.file.community_sets.iter().any(|s| s.name.node == name) {
-            Some("community-set")
-        } else if self.file.asn_sets.iter().any(|s| s.name.node == name) {
-            Some("asn-set")
-        } else {
-            None
-        }
+        self.sets.get(name).map(|entry| entry.kind)
     }
 
     /// `remove <kind> in SET` / `not in SET`: removal-only, against a
@@ -3082,21 +3100,14 @@ impl<'a> Checker<'a> {
             self.check_set_param(set, ty, &[ParamType::CommunitySet]);
             return;
         }
-        if let Some(def) = self
-            .file
-            .community_sets
-            .iter()
-            .find(|s| s.name.node == set.node)
-        {
+        if let Some(def) = self.community_set(&set.node) {
             match removal_set_problem(def, kind, negate) {
                 None => {}
                 Some(RemovalSetProblem::OtherKind { member, span }) => {
-                    self.diags
-                        .push(other_kind_removal(set, member, span, kind, form));
+                    self.push_diag(other_kind_removal(set, member, span, kind, form));
                 }
                 Some(RemovalSetProblem::NoRouteTargetOrOrigin) => {
-                    self.diags
-                        .push(ext_not_in_without_rt_ro(set, def.name.span));
+                    self.push_diag(ext_not_in_without_rt_ro(set, def.name.span));
                 }
                 Some(RemovalSetProblem::NoMembers { effect }) => {
                     let mut diag = Diagnostic::coded(
@@ -3153,7 +3164,9 @@ impl<'a> Checker<'a> {
     }
 
     /// Diagnose an `in <set>` reference that must resolve to a set of
-    /// `kind`, with wrong-kind and did-you-mean notes.
+    /// `kind`, with wrong-kind and did-you-mean notes. `names` (the
+    /// suggestion candidates) is read only for an unknown reference while
+    /// diagnostics are still being collected.
     fn check_set_reference<'n>(
         &mut self,
         set: &Spanned<String>,
@@ -3161,11 +3174,11 @@ impl<'a> Checker<'a> {
         need: &str,
         names: impl Iterator<Item = &'n Spanned<String>>,
     ) {
-        let candidates: Vec<(&str, Option<Span>)> =
-            names.map(|n| (n.node.as_str(), Some(n.span))).collect();
-        if candidates.iter().any(|&(name, _)| name == set.node) {
+        if self.set_kind_of(&set.node) == Some(kind) || self.full() {
             return;
         }
+        let candidates: Vec<(&str, Option<Span>)> =
+            names.map(|n| (n.node.as_str(), Some(n.span))).collect();
         let mut diag = Diagnostic::coded(
             DiagnosticCode::Typecheck,
             set.span,
@@ -3200,12 +3213,7 @@ impl<'a> Checker<'a> {
         form: &str,
         instead: &str,
     ) -> bool {
-        let Some(def) = self
-            .file
-            .community_sets
-            .iter()
-            .find(|s| s.name.node == set.node)
-        else {
+        let Some(def) = self.community_set(&set.node) else {
             return false;
         };
         let Some(member) = def

@@ -484,6 +484,56 @@ mod tests {
         eprintln!("compiled {index} unknown references in {elapsed:?}");
     }
 
+    /// Every typecheck diagnostic goes through the cap, including the
+    /// ordering-comparison check on an unordered field.
+    #[test]
+    fn ordering_comparison_diagnostics_respect_the_cap() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..300 {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.rpki >= valid {{ reject }} }} }}"
+            );
+        }
+        let diagnostics = crate::rpol::RpolFile::parse(&source)
+            .map(|_| ())
+            .expect_err("`>=` on route.rpki is an error");
+        assert_eq!(diagnostics.len(), 256);
+    }
+
+    /// 50k sets and 50k unknown references: past the diagnostic cap an
+    /// unknown reference costs one index lookup, not a scan of every set.
+    /// Release takes a fraction of a second; the debug bound is generous.
+    #[test]
+    fn many_sets_and_many_unknown_references_compile_in_bounded_time() {
+        use std::fmt::Write as _;
+
+        let mut source = String::new();
+        for index in 0..50_000 {
+            let _ = writeln!(source, "prefix-set s{index} {{ 10.0.0.0/8 }}");
+        }
+        for index in 0..50_000 {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.prefix in missing{index} {{ reject }} }} }}"
+            );
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::rpol::RpolFile::parse(&source).map(|_| ());
+            let _ = tx.send((result, started.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("50k sets x 50k unknown references compile within 60 s");
+        let diagnostics = result.expect_err("every reference is unknown");
+        assert!(diagnostics.len() <= 256, "{}", diagnostics.len());
+        eprintln!("compiled 50k x 50k in {elapsed:?}");
+    }
+
     /// One oversized report still stops at the byte cap.
     #[test]
     fn render_stops_at_the_byte_cap() {
