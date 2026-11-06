@@ -570,6 +570,7 @@ async fn denied_replacement_is_removed_before_eorr_and_cannot_survive_gr() {
         forwarding_preserved: false,
     }];
     install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
     session.config.peer.graceful_restart = true;
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
