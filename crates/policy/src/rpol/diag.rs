@@ -320,18 +320,65 @@ pub(crate) fn closest<'a>(
     closest_matches(name, candidates, 1).into_iter().next()
 }
 
+/// Names longer than this get no did-you-mean suggestion: the edit
+/// distance is quadratic in name length.
+const MAX_SUGGESTION_NAME_CHARS: usize = 64;
+
+/// Candidate sets larger than this get no did-you-mean suggestion.
+const MAX_SUGGESTION_CANDIDATES: usize = 1024;
+
+thread_local! {
+    /// Did-you-mean searches left on this thread; see
+    /// [`with_suggestion_budget`]. Unlimited outside one.
+    static SUGGESTIONS_LEFT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// Run `work` with at most `budget` did-you-mean searches on this thread.
+/// A compile with many unknown names would otherwise pay one search per
+/// name against every candidate.
+pub(crate) fn with_suggestion_budget<T>(budget: usize, work: impl FnOnce() -> T) -> T {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SUGGESTIONS_LEFT.set(self.0);
+        }
+    }
+    let _restore = Restore(SUGGESTIONS_LEFT.replace(budget));
+    work()
+}
+
 /// Up to `max` candidates to `name` within a small edit distance, closest
 /// first, for "did you mean" suggestions. Candidates further than 1/3 of
 /// the name's length (minimum 2) away are not suggested. Shared by the
 /// `.rpol` frontend and the TOML config diagnostics.
+///
+/// Bounded: a name over 64 characters, a candidate set over 1024 names or
+/// an exhausted [`with_suggestion_budget`] gets no suggestion, and
+/// candidates whose length alone puts them out of range are skipped before
+/// the edit distance runs.
 pub fn closest_matches<'a>(
     name: &str,
     candidates: impl IntoIterator<Item = &'a str>,
     max: usize,
 ) -> Vec<&'a str> {
+    let name_chars = name.chars().count();
+    let left = SUGGESTIONS_LEFT.get();
+    if name_chars > MAX_SUGGESTION_NAME_CHARS || left == 0 {
+        return Vec::new();
+    }
+    SUGGESTIONS_LEFT.set(left - 1);
+    let candidates: Vec<&str> = candidates
+        .into_iter()
+        .take(MAX_SUGGESTION_CANDIDATES + 1)
+        .collect();
+    if candidates.len() > MAX_SUGGESTION_CANDIDATES {
+        return Vec::new();
+    }
     let budget = (name.len() / 3).max(2);
     let mut ranked: Vec<(usize, &str)> = candidates
         .into_iter()
+        // The edit distance is at least the difference in length.
+        .filter(|candidate| candidate.chars().count().abs_diff(name_chars) <= budget)
         .map(|candidate| (edit_distance(name, candidate), candidate))
         .filter(|&(distance, _)| distance <= budget)
         .collect();
@@ -362,18 +409,23 @@ mod tests {
     fn render_is_bounded_for_many_diagnostics() {
         use std::fmt::Write as _;
 
+        // Built directly: typecheck itself stops collecting at 256, and this
+        // pins the renderer for any producer.
         let mut source = String::new();
+        let mut diagnostics = Diagnostics::default();
         for index in 0..4000 {
+            let start = source.len();
             let _ = writeln!(
                 source,
                 "policy p{index} {{ term t {{ if route.nosuch == 1 {{ reject }} }} }}"
             );
+            diagnostics.0.push(Diagnostic::new(
+                Span::new(start..source.len() - 1),
+                format!("unknown field in p{index}"),
+                "here",
+            ));
         }
-        let Err(diagnostics) = crate::rpol::RpolFile::parse(&source) else {
-            panic!("unknown route fields fail to compile");
-        };
         let count = diagnostics.len();
-        assert!(count >= 4000, "{count}");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(diagnostics.render("candidate.rpol", &source, false));
@@ -394,6 +446,43 @@ mod tests {
             "{}",
             &rendered[rendered.len().saturating_sub(300)..]
         );
+    }
+
+    /// A source at the 4 MiB request cap, dense with unknown references to
+    /// long set names, compiles in bounded time: typecheck stops collecting
+    /// diagnostics at its cap, and the did-you-mean searches stop with it
+    /// (a search per unknown name against every set made this quadratic).
+    /// Release takes well under a second; the debug bound is generous.
+    #[test]
+    fn a_source_dense_with_unknown_references_compiles_in_bounded_time() {
+        use std::fmt::Write as _;
+
+        let name = |prefix: char, index: usize| format!("{prefix}{index:0>255}");
+        let mut source = String::new();
+        for index in 0..1000 {
+            let _ = writeln!(source, "prefix-set {} {{ 10.0.0.0/8 }}", name('s', index));
+        }
+        let mut index = 0;
+        while source.len() < 4 * 1024 * 1024 - 400 {
+            let _ = writeln!(
+                source,
+                "policy p{index} {{ term t {{ if route.prefix in {} {{ reject }} }} }}",
+                name('u', index)
+            );
+            index += 1;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = crate::rpol::RpolFile::parse(&source).map(|_| ());
+            let _ = tx.send((result, started.elapsed()));
+        });
+        let (result, elapsed) = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("a 4 MiB unknown-reference source compiles within 60 s");
+        let diagnostics = result.expect_err("every reference is unknown");
+        assert!(diagnostics.len() <= 256, "{}", diagnostics.len());
+        eprintln!("compiled {index} unknown references in {elapsed:?}");
     }
 
     /// One oversized report still stops at the byte cap.
