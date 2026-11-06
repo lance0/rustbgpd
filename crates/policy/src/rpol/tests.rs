@@ -9826,10 +9826,6 @@ test chained {
                 "unknown community-set `s`",
             ),
             (
-                "dataset community-set tags policy p { term t { remove community in tags } }",
-                "takes a community-set; `tags` is a dataset",
-            ),
-            (
                 "community-set s { 64496:* } policy p { term t { remove large-community in s } }",
                 "has a standard-community member, but `remove large-community in` reads only large-community values",
             ),
@@ -11275,19 +11271,24 @@ mod typed_parameter_round_two {
                 .contains("parameter `s` is a prefix-set, but this probe needs `community-set`"),
             "{rendered}"
         );
-        // A dataset cannot be the set of a removal, through an argument or
-        // passed on through `apply`.
-        for expect in ["strip(live)", "outer(live)"] {
-            let (_, rendered) = diagnostics_of(&format!(
+        // A dataset can be the set of a removal, through an argument or
+        // passed on through `apply`; its members are known only at runtime.
+        for expect in [
+            "strip(live) == accept with removes community 65000:1, not removed community 64496:1",
+            "outer(live) == accept",
+        ] {
+            let source = format!(
                 "dataset community-set live
                  policy strip(s: community-set) {{ term t {{ remove community in s; accept }} }}
                  policy outer(z: community-set) {{ term t {{ if apply(strip(z)) {{ accept }} }} }}
-                 test x {{ route {{ prefix 192.0.2.0/24 }} expect {expect} == accept }}"
-            ));
-            assert!(
-                rendered.contains("`live` is a dataset, but parameter"),
-                "{expect}: {rendered}"
+                 test x {{
+                     dataset live {{ 65000:1 }}
+                     route {{ prefix 192.0.2.0/24; communities [65000:1, 64496:1] }}
+                     expect {expect}
+                 }}"
             );
+            let report = run_rpol_tests(&source).expect("compiles");
+            assert!(report.all_passed(), "{expect}: {:#?}", report.failures);
         }
         let (_, rendered) =
             diagnostics_of("policy p { term t { remove community in NO_EXPORT; accept } }");
@@ -13793,6 +13794,341 @@ test exceeds {
              policy b { term t { prepend as 65001 55; accept } }",
         );
         assert_eq!(fits.evaluate(&ctx).modifications.prepend_len(), 255);
+    }
+}
+
+/// `remove <kind> in|not in D` over a community dataset: the scan reads
+/// the walk's pinned snapshot, filtered by kind at runtime, so an empty or
+/// other-kind snapshot under `not in` removes every value of the kind.
+mod remove_in_dataset {
+    use std::sync::Arc;
+
+    use rustbgpd_wire::RpkiValidation;
+
+    use super::super::{RpolFile, run_rpol_tests};
+    use super::{route_ctx, v4};
+    use crate::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use crate::engine::{CommunityMatch, PolicyAction};
+    use crate::sets::{CommunitySet, SetStore};
+
+    fn assert_passes(source: &str, tests: usize) {
+        let report = run_rpol_tests(source).expect("compiles");
+        assert_eq!(report.total, tests);
+        assert!(report.all_passed(), "{:#?}", report.failures);
+    }
+
+    const POLICIES: &str = r"
+dataset community-set scrub
+dataset community-set allow
+policy scrub-in { term t { remove community in scrub; accept } }
+policy allow-only { term t { remove community not in allow; accept } }
+policy large-allow { term t { remove large-community not in allow; accept } }
+policy ext-allow { term t { remove ext-community not in allow; accept } }
+policy any-scrub { term t { remove any-community in scrub; accept } }
+asn-set once { 1 }
+policy loop-scrub { term t { for x in once { remove community in scrub } accept } }
+";
+
+    #[test]
+    fn in_and_not_in_follow_the_snapshot_with_the_exemptions() {
+        let source = format!(
+            "{POLICIES}
+test in-removes-members-and-named-well-known {{
+    dataset scrub {{ 64496:*, 65000:1, NO_EXPORT }}
+    route {{ prefix 192.0.2.0/24; communities [64496:5, 65000:1, 65000:2, NO_EXPORT, NO_ADVERTISE] }}
+    expect scrub-in == accept with only removes community 64496:5,
+        removes community 65000:1, removes community NO_EXPORT,
+        not removed community 65000:2, not removed community NO_ADVERTISE
+}}
+test not-in-removes-the-rest-but-never-well-known {{
+    dataset allow {{ 65000:*, NO_EXPORT }}
+    route {{ prefix 192.0.2.0/24; communities [65000:7, 64496:5, NO_EXPORT, NO_ADVERTISE] }}
+    expect allow-only == accept with only removes community 64496:5,
+        not removed community 65000:7, not removed community NO_EXPORT,
+        not removed community NO_ADVERTISE
+}}
+test large-not-in {{
+    dataset allow {{ 65000:*:* }}
+    route {{ prefix 192.0.2.0/24; large-communities [65000:1:1, 64496:1:1] }}
+    expect large-allow == accept with only removes large-community 64496:1:1,
+        not removed large-community 65000:1:1
+}}
+test ext-not-in-touches-only-route-targets-and-origins {{
+    dataset allow {{ RT:65000:* }}
+    route {{ prefix 192.0.2.0/24; ext-communities [RT:65000:1, RT:65001:1, RO:65001:2, OV_INVALID] }}
+    expect ext-allow == accept with only removes ext-community RT:65001:1,
+        removes ext-community RO:65001:2, not removed ext-community RT:65000:1,
+        not removed ext-community OV_INVALID
+}}
+test any-community-in-scans-every-kind {{
+    dataset scrub {{ 65000:1, 65000:1:1, RT:65000:1 }}
+    route {{
+        prefix 192.0.2.0/24; communities [65000:1, 65000:2]
+        large-communities [65000:1:1]; ext-communities [RT:65000:1, RT:65000:2]
+    }}
+    expect any-scrub == accept with only removes community 65000:1,
+        removes large-community 65000:1:1, removes ext-community RT:65000:1,
+        not removed community 65000:2, not removed ext-community RT:65000:2
+}}
+test scan-in-a-loop-body {{
+    dataset scrub {{ 65000:1 }}
+    route {{ prefix 192.0.2.0/24; communities [65000:1, 65000:2] }}
+    expect loop-scrub == accept with only removes community 65000:1,
+        not removed community 65000:2
+}}
+"
+        );
+        assert_passes(&source, 6);
+    }
+
+    /// An empty snapshot, or one with no member of the action's kind, has
+    /// no compile-time guard: `in` removes nothing and `not in` removes
+    /// every value of the kind, apart from the well-known standard values
+    /// and the extended communities that are not route targets or origins.
+    #[test]
+    fn empty_and_other_kind_snapshots_follow_the_literal_rule() {
+        let source = format!(
+            "{POLICIES}
+test empty-in-removes-nothing {{
+    dataset scrub {{ }}
+    route {{ prefix 192.0.2.0/24; communities [65000:1] }}
+    expect scrub-in == accept with only not removed community 65000:1
+}}
+test empty-not-in-removes-every-value {{
+    dataset allow {{ }}
+    route {{ prefix 192.0.2.0/24; communities [65000:7, 64496:5, NO_EXPORT] }}
+    expect allow-only == accept with only removes community 65000:7,
+        removes community 64496:5, not removed community NO_EXPORT
+}}
+test other-kind-not-in-removes-every-value {{
+    dataset allow {{ 65000:1:1 }}
+    route {{ prefix 192.0.2.0/24; communities [65000:7] }}
+    expect allow-only == accept with only removes community 65000:7
+}}
+test ext-not-in-without-route-targets-keeps-other-types {{
+    dataset allow {{ 65000:1 }}
+    route {{ prefix 192.0.2.0/24; ext-communities [RT:65000:1, RO:65001:2, OV_INVALID] }}
+    expect ext-allow == accept with only removes ext-community RT:65000:1,
+        removes ext-community RO:65001:2, not removed ext-community OV_INVALID
+}}
+"
+        );
+        assert_passes(&source, 4);
+    }
+
+    fn tags_handle(values: &[u32]) -> Arc<DatasetHandle> {
+        Arc::new(DatasetHandle::new(
+            "tags",
+            DatasetKind::Community,
+            community_data(values),
+        ))
+    }
+
+    fn community_data(values: &[u32]) -> DatasetData {
+        DatasetData::Community(CommunitySet::new(
+            values
+                .iter()
+                .map(|&value| CommunityMatch::Standard { value }),
+        ))
+    }
+
+    const BOUND: &str = r"
+dataset community-set tags
+prefix-set docs { 192.0.2.0/24 }
+policy scrub { term t { remove community in tags; accept } }
+policy keep { term t { remove community not in tags; accept } }
+asn-set once { 1 }
+policy looped { term t { for x in once { remove community in tags } accept } }
+policy guarded { term t { if route.prefix in docs { remove community in tags } } term rest { accept } }
+";
+
+    fn compile(name: &str, tags: &Arc<DatasetHandle>) -> crate::ir::CompiledChain {
+        let mut bindings = DatasetBindings::new();
+        bindings.insert(Arc::clone(tags));
+        RpolFile::parse(BOUND)
+            .expect("clean")
+            .compile_policy_bound(name, &[], &mut SetStore::new(), &bindings)
+            .expect("policy exists")
+            .expect("bindings complete")
+    }
+
+    /// An action-only reference pins the dataset, makes the chain reference
+    /// it, and keeps a swap from being scoped to route keys; a content swap
+    /// reaches the installed chain without recompiling it.
+    #[test]
+    fn action_only_reference_pins_and_follows_a_content_swap() {
+        let tags = tags_handle(&[(65_000 << 16) | 1]);
+        let chain = compile("scrub", &tags);
+        assert!(chain.references_dataset("tags"));
+        assert!(
+            RpolFile::parse(BOUND)
+                .expect("clean")
+                .lints()
+                .iter()
+                .all(|lint| !lint.message.contains("dataset tags")),
+            "an action-only dataset is referenced"
+        );
+        assert!(
+            !chain.dataset_probed_by_route_keys_only(&tags),
+            "a removal reads the route's communities, not its prefix or origin"
+        );
+        let before = chain.clone();
+        let communities = [(65_000 << 16) | 1, (65_000 << 16) | 2];
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &communities, RpkiValidation::NotFound);
+        assert_eq!(
+            chain.evaluate(&ctx).modifications.communities_remove,
+            [(65_000 << 16) | 1]
+        );
+
+        tags.refresh(community_data(&[(65_000 << 16) | 2]))
+            .expect("content changed");
+        assert_eq!(
+            chain.evaluate(&ctx).modifications.communities_remove,
+            [(65_000 << 16) | 2]
+        );
+        assert_eq!(chain, before, "content is data, not program");
+
+        // `not in` against a snapshot emptied by a refresh strips every value.
+        let keep = compile("keep", &tags);
+        tags.refresh(community_data(&[])).expect("content changed");
+        assert_eq!(
+            keep.evaluate(&ctx).modifications.communities_remove,
+            communities
+        );
+
+        // A guard-only route-key probe of another set leaves the action's
+        // dataset unscoped too.
+        assert!(!compile("guarded", &tags).dataset_probed_by_route_keys_only(&tags));
+    }
+
+    /// A removal whose dataset slot is not pinned fails closed on the
+    /// evaluation-error rail in the live, coverage, loop-body and explain
+    /// walks.
+    #[test]
+    fn unpinned_dataset_removal_fails_closed_in_every_walk() {
+        use crate::engine::{PolicyChain, explain::explain_chain_statements};
+        use crate::eval::{EvalErrorKind, PolicyHitCounters};
+
+        let tags = tags_handle(&[(65_000 << 16) | 1]);
+        let communities = [(64_496 << 16) | 9, (65_000 << 16) | 1];
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &communities, RpkiValidation::NotFound);
+        for name in ["scrub", "looped"] {
+            let mut chain = compile(name, &tags);
+            assert_eq!(chain.evaluate(&ctx).action, PolicyAction::Permit, "{name}");
+            chain.datasets.clear();
+
+            let counters = PolicyHitCounters::for_chain(&chain);
+            assert_eq!(
+                chain.evaluate_counting(&ctx, &counters),
+                crate::PolicyResult::deny(),
+                "{name}: live"
+            );
+            assert_eq!(
+                counters.last_error().map(|error| error.kind),
+                Some(EvalErrorKind::DatasetUnpinned),
+                "{name}"
+            );
+            let mut hits = chain.zero_term_hits();
+            assert_eq!(
+                chain.evaluate_recording_hits(&ctx, &mut hits),
+                crate::PolicyResult::deny(),
+                "{name}: coverage"
+            );
+            let named = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+                name.into(),
+                Arc::new(chain),
+            )]);
+            let trace = explain_chain_statements(Some(&named), &ctx);
+            assert_eq!(trace.action, PolicyAction::Deny, "{name}: explain");
+        }
+    }
+
+    /// Only a community dataset can be the set of a removal.
+    #[test]
+    fn a_dataset_of_another_kind_is_rejected() {
+        let (_, rendered) = super::diagnostics_of(
+            "dataset asn-set origins policy p { term t { remove community in origins; accept } }",
+        );
+        assert!(
+            rendered.contains(
+                "takes a community-set or community dataset; `origins` is an asn-set dataset"
+            ),
+            "{rendered}"
+        );
+    }
+
+    /// The chain's per-evaluation dataset bound counts a dataset that only
+    /// a removal reads: 16 probed by one member plus one removed by another
+    /// is 17, one more than an evaluation pins.
+    #[test]
+    fn chain_dataset_bound_counts_an_action_only_dataset() {
+        use std::fmt::Write as _;
+
+        use crate::compile::ChainNodeBudget;
+        use crate::datasets::MAX_UNIT_DATASETS;
+
+        let names: Vec<String> = (0..=MAX_UNIT_DATASETS).map(|i| format!("d{i}")).collect();
+        let mut bindings = DatasetBindings::new();
+        for name in &names {
+            bindings.insert(Arc::new(DatasetHandle::new(
+                name.as_str(),
+                DatasetKind::Community,
+                community_data(&[1]),
+            )));
+        }
+        let (probed, removed) = names.split_at(MAX_UNIT_DATASETS);
+        let mut probing = String::new();
+        for name in probed {
+            let _ = writeln!(probing, "dataset community-set {name}");
+        }
+        let guard = probed
+            .iter()
+            .map(|name| format!("route.communities in {name}"))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let _ = writeln!(
+            probing,
+            "policy a {{ term t {{ if {guard} {{ reject }} }} }}"
+        );
+        let removing = format!(
+            "dataset community-set {0}\npolicy b {{ term t {{ remove community in {0}; accept }} }}",
+            removed[0]
+        );
+        let member = |source: &str, name: &str| {
+            let chain = RpolFile::parse(source)
+                .expect("clean")
+                .compile_policy_bound(name, &[], &mut SetStore::new(), &bindings)
+                .expect("policy exists")
+                .expect("bindings complete");
+            crate::NamedPolicy::from_rpol(name.into(), Arc::new(chain))
+        };
+        let (a, b) = (member(&probing, "a"), member(&removing, "b"));
+        let mut budget = ChainNodeBudget::default();
+        budget.add_named(&a, &mut SetStore::new()).expect("16 fit");
+        let error = budget
+            .add_named(&b, &mut SetStore::new())
+            .expect_err("the 17th dataset is read by an action");
+        assert!(error.contains("references 17 datasets"), "{error}");
+    }
+
+    /// Splicing a named policy into a chain keeps the slot of a dataset
+    /// that only an action reads.
+    #[test]
+    fn splicing_keeps_an_action_only_dataset() {
+        use crate::engine::PolicyChain;
+
+        let tags = tags_handle(&[(65_000 << 16) | 1]);
+        let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+            "scrub".into(),
+            Arc::new(compile("scrub", &tags)),
+        )]);
+        let compiled = chain.compiled();
+        assert!(compiled.references_dataset("tags"));
+        let communities = [(65_000 << 16) | 1];
+        let ctx = route_ctx(v4(192, 0, 2, 0, 24), &communities, RpkiValidation::NotFound);
+        let result = compiled.evaluate(&ctx);
+        assert_eq!(result.action, PolicyAction::Permit);
+        assert_eq!(result.modifications.communities_remove, communities);
     }
 }
 

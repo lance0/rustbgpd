@@ -62,9 +62,9 @@ use crate::engine::{
 };
 use crate::eval::{arith, clamp};
 use crate::ir::{
-    Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetProbe, DatasetSlot, ForEachNode,
-    LoopSource, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction, ValueCmpNode,
-    ValueCmpOp, ValueExpr,
+    Cmp, CommunitySetRef, CompiledChain, CompiledPolicy, DatasetId, DatasetProbe, DatasetSlot,
+    ForEachNode, LoopSource, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction,
+    ValueCmpNode, ValueCmpOp, ValueExpr,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
@@ -1950,7 +1950,7 @@ fn flush_pending(out: &mut Lowered, pending: &mut RouteModifications) {
 /// mark/reset — body bindings are not visible outside the body.
 impl Lowerer<'_> {
     fn lower_body(
-        &self,
+        &mut self,
         body: &[Stmt],
         env: &HashMap<&str, u32>,
         lets: &mut LetEnv,
@@ -2220,25 +2220,39 @@ fn push_ext(add: bool, value: ExtendedCommunity, step: &mut RouteModifications) 
 
 impl<'a> Lowerer<'a> {
     /// `remove <kind> in SET` / `not in SET` as its scan action; the
-    /// typechecker has resolved `set` to a community-set.
-    /// `remove any-community in SET` is one scan per kind the set has
-    /// members of (LAN-2794).
+    /// typechecker has resolved `set` to a community-set or a community
+    /// dataset. `remove any-community in SET` is one scan per kind the set
+    /// has members of (LAN-2794), and one per kind for a dataset, whose
+    /// members are known only at runtime (LAN-2785).
     fn remove_in_set(
-        &self,
+        &mut self,
         kind: super::ast::CommunityKind,
         set: &Spanned<String>,
         negate: bool,
     ) -> Vec<TermAction> {
-        let id = self.community_set_ids[&self.bound_set(set).node];
+        let name = self.bound_set(set).node;
+        let set = if self.file.datasets.iter().any(|d| d.name.node == name) {
+            match self.dataset_ref(&name) {
+                Some(id) => CommunitySetRef::Dataset(id),
+                // Missing binding: the caller discards this chain
+                // (take_missing_datasets), so the scan is never run.
+                None => return Vec::new(),
+            }
+        } else {
+            CommunitySetRef::Set(self.community_set_ids[&name])
+        };
         community_attributes(kind)
             .iter()
-            .filter(|&&attribute| {
-                kind != super::ast::CommunityKind::Any
-                    || self.community_sets[id.0 as usize].has_kind(attribute)
+            .filter(|&&attribute| match set {
+                CommunitySetRef::Set(id) => {
+                    kind != super::ast::CommunityKind::Any
+                        || self.community_sets[id.0 as usize].has_kind(attribute)
+                }
+                CommunitySetRef::Dataset(_) => true,
             })
             .map(|&attribute| TermAction::RemoveCommunitiesInSet {
                 attribute,
-                set: id,
+                set,
                 negate,
             })
             .collect()

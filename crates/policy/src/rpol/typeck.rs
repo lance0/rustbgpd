@@ -3103,23 +3103,27 @@ impl<'a> Checker<'a> {
                     self.diags.push(diag);
                 }
             }
-        } else if self.dataset_of(&set.node).is_some() {
-            self.diags.push(
-                Diagnostic::coded(
-                    DiagnosticCode::Typecheck,
-                    set.span,
-                    format!(
-                        "`remove {keyword} {form}` takes a community-set; `{}` is a dataset",
-                        set.node
-                    ),
-                    "datasets are not supported here",
-                )
-                .with_note(format!(
-                    "probe the dataset in a guard (`route.communities in {}`), or define \
-                     the members as a community-set",
-                    set.node
-                )),
-            );
+        } else if let Some(decl) = self.dataset_of(&set.node) {
+            // LAN-2785: a community dataset's members are known only at
+            // runtime and are filtered by kind there, so it gets none of the
+            // member checks above.
+            if decl.kind != DatasetKind::Community {
+                self.diags.push(
+                    Diagnostic::coded(
+                        DiagnosticCode::Typecheck,
+                        set.span,
+                        format!(
+                            "`remove {keyword} {form}` takes a community-set or community \
+                             dataset; `{}` is {} {} dataset",
+                            set.node,
+                            article(&decl.kind.to_string()),
+                            decl.kind
+                        ),
+                        "not a community dataset",
+                    )
+                    .with_label(decl.kind_span, "declared here"),
+                );
+            }
         } else {
             self.check_set_reference(
                 set,
@@ -4112,11 +4116,9 @@ pub(super) fn check_call_arg(
             let community_set = file.community_sets.iter().find(|s| s.name.node == *name);
             if declared {
                 for &(_, kind, negate) in removals {
+                    // A community dataset is checked at runtime (LAN-2785).
                     let Some(def) = community_set else {
-                        return Err(format!(
-                            "`{name}` is a dataset, but parameter `{param}` is the set of a \
-                             `remove ... in` action, which takes a community-set"
-                        ));
+                        continue;
                     };
                     let form = if negate { "not in" } else { "in" };
                     let action = format!("`remove {} {form} {param}`", kind_keyword(kind));

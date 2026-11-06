@@ -751,14 +751,16 @@ fn trace_rpol_policy(
                 set,
                 negate,
             } => {
-                let scanned = crate::eval::exec_remove_communities_in_set(
-                    attribute,
-                    &tables.community_sets[set.0 as usize],
-                    negate,
-                    ctx,
-                    &mut continued,
-                    fuel,
-                );
+                let scanned = tables.removal_set(set, pinned).and_then(|set| {
+                    crate::eval::exec_remove_communities_in_set(
+                        attribute,
+                        set,
+                        negate,
+                        ctx,
+                        &mut continued,
+                        fuel,
+                    )
+                });
                 if scanned != Ok(true) {
                     term_traces.push(scan_failure_trace(
                         term,
@@ -1548,15 +1550,20 @@ fn community_field(
 /// `remove large-community not in scrub` — the `.rpol` spelling.
 fn render_remove_in_set(
     attribute: crate::ir::CommunityAttribute,
-    set: crate::ir::SetId,
+    set: crate::ir::CommunitySetRef,
     negate: bool,
     tables: &CompiledChain,
 ) -> String {
+    let set = match set {
+        crate::ir::CommunitySetRef::Set(id) => {
+            set_label(&tables.community_set_names, id.0, "community-set")
+        }
+        crate::ir::CommunitySetRef::Dataset(id) => dataset_label(tables, id),
+    };
     format!(
-        "remove {} {}in {}",
+        "remove {} {}in {set}",
         attribute.keyword(),
         if negate { "not " } else { "" },
-        set_label(&tables.community_set_names, set.0, "community-set")
     )
 }
 

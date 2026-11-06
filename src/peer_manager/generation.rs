@@ -118,6 +118,10 @@ impl AppliedEffects {
 /// its complete source/catalog. Compiling mixed/TOML chains can discard source
 /// distinctions. Local/loop guards and collapsed set aliases also keep their
 /// existing structural comparison.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exhaustive comparison over every action and guard kind; splitting it would hide a missed variant"
+)]
 fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Option<PolicyChain>) {
     let (Some(installed), Some(next)) = (installed, candidate.as_ref()) else {
         return;
@@ -147,8 +151,9 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
                             | TermAction::CommunityVar { .. }
                             | TermAction::RemoveLargeCommunityAdmin { .. }
                             | TermAction::RemoveAllCommunities { .. } => true,
-                            // The action names its set, like a set guard.
-                            TermAction::RemoveCommunitiesInSet { set, .. } => community_named(*set),
+                            TermAction::RemoveCommunitiesInSet { set, .. } => {
+                                set.source_set().is_none_or(community_named)
+                            }
                         };
                         action_comparable
                             && !term.guard.any_node(&|guard| match guard {

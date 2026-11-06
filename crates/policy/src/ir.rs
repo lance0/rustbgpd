@@ -41,6 +41,29 @@ pub struct SetId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatasetId(pub u32);
 
+/// The community set a [`TermAction::RemoveCommunitiesInSet`] scan reads:
+/// a source set, or a community dataset read from the walk's pinned
+/// snapshot (LAN-2785).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommunitySetRef {
+    /// Indexes [`CompiledChain::community_sets`].
+    Set(SetId),
+    /// Indexes [`CompiledChain::datasets`]; members are filtered by kind
+    /// at runtime, like a dataset probe.
+    Dataset(DatasetId),
+}
+
+impl CommunitySetRef {
+    /// The source set, or `None` for a dataset.
+    #[must_use]
+    pub fn source_set(self) -> Option<SetId> {
+        match self {
+            Self::Set(id) => Some(id),
+            Self::Dataset(_) => None,
+        }
+    }
+}
+
 /// What a [`MatchExpr::InDataset`] guard probes against the pinned
 /// dataset snapshot — the dataset mirror of the per-kind `*InSet`
 /// nodes (LAN-305). Kind agreement (an ASN probe against an asn-set
@@ -884,7 +907,9 @@ pub enum TermAction {
     },
     /// Scan the arrived route's communities of one attribute once and stage
     /// a concrete removal for every value that is a member of the set (or,
-    /// with `negate`, is not). A well-known standard community
+    /// with `negate`, is not). A dataset is read from the walk's pinned
+    /// snapshot, so an empty or other-kind snapshot under `negate` removes
+    /// every value of the kind the rules below allow. A well-known standard community
     /// (RFC 1997, `0xFFFF0000`–`0xFFFFFFFF`) is removed only when the set names it
     /// as an exact member — a pattern never names one, and `not in` never
     /// removes one. Over extended communities `not in` considers only route
@@ -894,8 +919,8 @@ pub enum TermAction {
     RemoveCommunitiesInSet {
         /// The community attribute scanned.
         attribute: CommunityAttribute,
-        /// The set (indexes [`CompiledChain::community_sets`]).
-        set: SetId,
+        /// The source set or dataset.
+        set: CommunitySetRef,
         /// True for `not in`.
         negate: bool,
     },
@@ -1039,7 +1064,7 @@ pub(crate) enum TermActionView<'a> {
     },
     RemoveCommunitiesInSet {
         attribute: CommunityAttribute,
-        set: SetId,
+        set: CommunitySetRef,
         negate: bool,
     },
 }
@@ -1277,16 +1302,48 @@ impl CompiledChain {
     /// [`DatasetData::route_key_verdict_differs`]: crate::datasets::DatasetData::route_key_verdict_differs
     #[must_use]
     pub fn dataset_probed_by_route_keys_only(&self, handle: &Arc<DatasetHandle>) -> bool {
-        !self.any_guard_node(&|expr| match expr {
-            MatchExpr::InDataset { probe, id } => {
-                !matches!(probe, DatasetProbe::Prefix | DatasetProbe::OriginAs)
-                    && self
-                        .datasets
-                        .get(id.0 as usize)
-                        .is_none_or(|slot| Arc::ptr_eq(&slot.handle, handle))
-            }
-            _ => false,
+        let reads_handle = |id: &DatasetId| {
+            self.datasets
+                .get(id.0 as usize)
+                .is_none_or(|slot| Arc::ptr_eq(&slot.handle, handle))
+        };
+        // A removal by dataset membership reads the route's communities.
+        !self.any_term_node(&|term| {
+            term.guard.any_node(&|expr| match expr {
+                MatchExpr::InDataset { probe, id } => {
+                    !matches!(probe, DatasetProbe::Prefix | DatasetProbe::OriginAs)
+                        && reads_handle(id)
+                }
+                _ => false,
+            }) || matches!(
+                &term.action,
+                TermAction::RemoveCommunitiesInSet {
+                    set: CommunitySetRef::Dataset(id),
+                    ..
+                } if reads_handle(id)
+            )
         })
+    }
+
+    /// The community set a removal scan reads, from `pinned` for a dataset.
+    /// An unpinned slot or a snapshot of another kind is the fail-closed
+    /// [`EvalErrorKind::DatasetUnpinned`](crate::eval::EvalErrorKind) rail.
+    pub(crate) fn removal_set<'a>(
+        &'a self,
+        set: CommunitySetRef,
+        pinned: &'a crate::eval::PinnedDatasets,
+    ) -> Result<&'a CommunitySet, crate::eval::EvalErrorKind> {
+        match set {
+            CommunitySetRef::Set(id) => Ok(&self.community_sets[id.0 as usize]),
+            CommunitySetRef::Dataset(id) => match pinned
+                .get(id.0 as usize)
+                .and_then(Option::as_ref)
+                .map(|snapshot| &snapshot.data)
+            {
+                Some(crate::datasets::DatasetData::Community(set)) => Ok(set),
+                _ => Err(crate::eval::EvalErrorKind::DatasetUnpinned),
+            },
+        }
     }
 
     /// Whether evaluating this chain needs the rendered `AS_PATH`
