@@ -57,6 +57,8 @@ pub struct RevisedParsedUpdate {
     /// Malformed attributes recovered without aborting the parse, each with
     /// its RFC 7606 disposition. Empty means the UPDATE decoded cleanly.
     pub malformed: Vec<crate::attribute::MalformedAttribute>,
+    /// See [`crate::attribute::RevisedAttributeDecode::coalesced_duplicates`].
+    pub coalesced_duplicates: u32,
 }
 impl UpdateMessage {
     /// Decode an UPDATE message body from a buffer.
@@ -274,6 +276,7 @@ impl UpdateMessage {
                     bgpls_nlri_discarded: decoded.bgpls_nlri_discarded,
                 },
                 malformed: decoded.malformed,
+                coalesced_duplicates: decoded.coalesced_duplicates,
             },
             evpn_discarded,
         ))

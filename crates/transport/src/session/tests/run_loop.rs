@@ -1459,7 +1459,8 @@ async fn shutdown_with_a_draining_peer_resolves_without_waiting_on_a_timer() {
 async fn full_rib_channel_parks_session_and_never_drops_routes() {
     let (mut session, mut rib_rx, metrics) = backpressure_test_session(1);
     let negotiated = negotiated_session(65002, false);
-    session.negotiated = Some(Arc::new(negotiated));
+    install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
     // Fill the capacity-1 channel so the delivery must wait.
     session
         .rib_tx

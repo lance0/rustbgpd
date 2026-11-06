@@ -412,11 +412,14 @@ impl ConfigPersister {
             return;
         };
         let path = dir.join(LAST_PERSIST_FILE);
-        // A plain write is enough: a torn or missing marker only degrades the
-        // freshness check to comparing against process start, which is what it
-        // did before the marker existed.
-        if let Err(error) =
-            std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&path, format!("{mtime}\n")))
+        // A torn or missing marker only degrades the freshness check to
+        // comparing against process start. The state writer still matters: it
+        // replaces a planted symlink rather than writing through it.
+        if let Err(error) = std::fs::create_dir_all(dir)
+            .map_err(crate::confirm_journal::AtomicPublishError::NotPublished)
+            .and_then(|()| {
+                crate::confirm_journal::write_state_atomic(&path, format!("{mtime}\n").as_bytes())
+            })
         {
             warn!(
                 path = %path.display(),
@@ -838,6 +841,46 @@ log_format = "json"
             recorded, mtime,
             "the marker must hold the mtime of the file the daemon just wrote, \
              or doctor reads the daemon's own write as an external edit"
+        );
+    }
+
+    /// Load-bearing: writing the marker through a symlink planted in the state
+    /// directory truncates the link's target.
+    #[tokio::test]
+    async fn last_persist_marker_replaces_a_planted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let state_dir = dir.path().join("state");
+        let victim = outside.path().join("victim");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::write(&victim, b"untouched\n").unwrap();
+        std::os::unix::fs::symlink(&victim, state_dir.join(LAST_PERSIST_FILE)).unwrap();
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), config, Some(state_dir.clone()));
+        let handle = tokio::spawn(persister.run());
+        let mut replacement = minimal_config();
+        replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        persist_replacement(
+            &tx,
+            AcceptedConfigSnapshot::from_config_for_test(replacement),
+        )
+        .await;
+        drop(tx);
+        handle.await.unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched\n");
+        let marker = state_dir.join(LAST_PERSIST_FILE);
+        assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
+        assert!(
+            std::fs::read_to_string(&marker)
+                .unwrap()
+                .trim()
+                .parse::<u64>()
+                .is_ok()
         );
     }
 

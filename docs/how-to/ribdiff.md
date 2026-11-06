@@ -389,6 +389,17 @@ octets trailing the next hop refuse the dump (exit 2). RFC 8050 Add-Path
 entries carry their path identifier through as `path_id`. Extended and
 large communities are emitted from the raw attribute bytes.
 
+The dump is read once, one record at a time, and the snapshot is rendered
+into a private unlinked temporary file that is copied to stdout only after
+the whole dump converted. Memory stays near one record whatever the file
+size; temporary disk use is the size of the snapshot. A record longer than
+16 MiB or a snapshot longer than 4 GiB refuses the dump (exit 2, nothing
+emitted), and so do a read error and a dump that ends mid-record. stdout
+holds exactly what was validated, but the adapter cannot tell that the
+source was stable: a file cut on a record boundary, or rewritten with other
+valid records while it is read, still converts. Convert a finished capture,
+not one still being written. The input may be a pipe.
+
 <a id="rbgp-diff-snapshot-from-bmp--rfc-8671-post-policy-bmp-captures"></a>
 ### BMP post-policy snapshots
 
@@ -451,8 +462,11 @@ artifact. Use `diff snapshots` to compare these values on both sides. A live
 comparison requires `--ignore-attribute unknown` if accepting that gRPC
 cannot verify them.
 Hard limits (not flags) bound input bytes (1 GiB), per-message length
-(1 MiB), peers (4096), routes (4M), and paths per NLRI (64); exceeding
-any refuses the conversion.
+(1 MiB), peers (4096), routes (4M), paths per NLRI (64), and snapshot
+output (4 GiB); exceeding any refuses the conversion. The capture is read
+one message at a time, and the routes of one UPDATE share one copy of its
+attributes, so memory follows the retained routes rather than the rendered
+output; the snapshot is measured before it is written.
 
 ### Golden fixtures
 

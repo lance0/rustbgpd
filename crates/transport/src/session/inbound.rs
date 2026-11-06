@@ -821,6 +821,58 @@ impl PeerSession {
         );
     }
 
+    /// One WARN per malformed UPDATE, and only at power-of-two UPDATE counts
+    /// per TCP connection; DEBUG keeps every record. One UPDATE can carry
+    /// hundreds of malformed records, and a peer can repeat it at will, so
+    /// neither may set the WARN volume. `bgp_update_malformed_total` counts
+    /// every UPDATE.
+    ///
+    /// Called once the UPDATE's final action is known: `applied` is that
+    /// action, which validation, ASPA, or the RFC 7606 §5.2 escalation may
+    /// have made stronger than the decoder's own `decoder_disposition`.
+    fn log_malformed_attributes(
+        &mut self,
+        malformed: &[rustbgpd_wire::MalformedAttribute],
+        coalesced_duplicates: u32,
+        applied: &'static str,
+    ) {
+        let Some(decoder_disposition) = malformed.iter().map(|m| m.disposition).max() else {
+            return;
+        };
+        // Name the decoder cause behind the strongest decoder disposition,
+        // e.g. the AS_SET behind a treat-as-withdraw rather than an earlier
+        // discard.
+        let Some(cause) = malformed
+            .iter()
+            .find(|m| m.disposition == decoder_disposition)
+        else {
+            return;
+        };
+        self.malformed_attribute_updates = self.malformed_attribute_updates.saturating_add(1);
+        if self.malformed_attribute_updates.is_power_of_two() {
+            warn!(
+                peer = %self.peer_label,
+                malformed_updates = self.malformed_attribute_updates,
+                malformed_attributes = malformed.len(),
+                coalesced_duplicates,
+                disposition = applied,
+                decoder_disposition = decoder_disposition.as_str(),
+                attr_type = cause.type_code,
+                error = %cause.error,
+                "malformed path attributes (RFC 7606 revised error handling); disposition is the action applied to the UPDATE, the cause shown is the decoder's strongest, all causes at DEBUG"
+            );
+        }
+        for m in malformed {
+            debug!(
+                peer = %self.peer_label,
+                attr_type = m.type_code,
+                disposition = m.disposition.as_str(),
+                error = %m.error,
+                "malformed path attribute (RFC 7606 revised error handling)"
+            );
+        }
+    }
+
     /// Preserve the established OTC ingress diagnostic surfaces for a
     /// decision that rejects one or more unicast announcements.
     fn observe_otc_ingress_block(&mut self, parsed: &ParsedUpdate, reason: OtcBlockReason) {
@@ -1543,7 +1595,8 @@ impl PeerSession {
             self.forget_known_path(prefix, path_id);
             self.forget_rejected_path(prefix, path_id);
         }
-        let mut path_admission = self.path_receive_admission();
+        let mut path_admission =
+            self.path_receive_admission(rejected_unicast.iter().map(|&(prefix, _)| prefix));
         if let Some(admission) = path_admission.as_mut() {
             rejected_unicast.retain(|&(prefix, path_id)| {
                 admission.permits(self, prefix, path_id, self.tracks_received(prefix))
@@ -1811,6 +1864,7 @@ impl PeerSession {
         let revised = rustbgpd_wire::RevisedParsedUpdate {
             update: parsed,
             malformed: Vec::new(),
+            coalesced_duplicates: 0,
         };
         Box::pin(self.process_decoded_update(None, revised, Vec::new(), false)).await;
     }
@@ -1922,15 +1976,7 @@ impl PeerSession {
         for (route_type, discarded) in evpn_discarded {
             self.record_evpn_discard(route_type, discarded);
         }
-        for m in &malformed {
-            warn!(
-                peer = %self.peer_label,
-                attr_type = m.type_code,
-                disposition = m.disposition.as_str(),
-                error = %m.error,
-                "malformed path attribute (RFC 7606 revised error handling)"
-            );
-        }
+        let coalesced_duplicates = revised.coalesced_duplicates;
         if !malformed.is_empty()
             && let Some(update) = update
         {
@@ -2049,23 +2095,26 @@ impl PeerSession {
             // A decoder-removed mandatory attribute already has its primary
             // cause. Do not label the resulting absence as a second independent
             // failure; retain the validator's protocol disposition below.
+            // The summary WARN already names a decoder cause that removed
+            // this attribute; do not report the same cause twice.
             if reason != MalformedUpdateReason::MissingWellKnown
                 || !malformed.iter().any(|m| m.type_code == type_code)
             {
                 causes.push((Some(type_code), reason));
+                warn!(
+                    peer = %self.peer_label,
+                    attr_type = type_code,
+                    subcode = update_err.subcode,
+                    disposition = update_err.disposition.as_str(),
+                    max_as_path_length = self.config.max_as_path_length,
+                    "UPDATE validation error"
+                );
             }
-            warn!(
-                peer = %self.peer_label,
-                attr_type = type_code,
-                subcode = update_err.subcode,
-                disposition = update_err.disposition.as_str(),
-                max_as_path_length = self.config.max_as_path_length,
-                "UPDATE validation error"
-            );
             if let Some(update) = update {
                 self.debug_dump_malformed_update(update, &parsed);
             }
             if update_err.disposition == ErrorDisposition::SessionReset {
+                self.log_malformed_attributes(&malformed, coalesced_duplicates, "session-reset");
                 record_malformed_update(
                     &self.metrics,
                     &self.peer_label,
@@ -2100,6 +2149,7 @@ impl PeerSession {
                     peer = %self.peer_label,
                     "treat-as-withdraw with no reachable NLRI — session reset (RFC 7606 §5.2)"
                 );
+                self.log_malformed_attributes(&malformed, coalesced_duplicates, "session-reset");
                 record_malformed_update(
                     &self.metrics,
                     &self.peer_label,
@@ -2135,6 +2185,7 @@ impl PeerSession {
                 prefixes = ?summary.prefixes,
                 "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
             );
+            self.log_malformed_attributes(&malformed, coalesced_duplicates, "treat-as-withdraw");
             record_malformed_update(
                 &self.metrics,
                 &self.peer_label,
@@ -2177,6 +2228,7 @@ impl PeerSession {
                 neighbor_asn,
                 "ASPA first-AS precondition failed; treating UPDATE as withdraw"
             );
+            self.log_malformed_attributes(&malformed, coalesced_duplicates, "treat-as-withdraw");
             causes.push((
                 Some(rustbgpd_wire::constants::attr_type::AS_PATH),
                 MalformedUpdateReason::AspaFirstAsMismatch,
@@ -2200,6 +2252,7 @@ impl PeerSession {
         // disposition is attribute-discard — the offending attributes were
         // dropped and the UPDATE proceeds without them.
         if let Some(applied) = disposition {
+            self.log_malformed_attributes(&malformed, coalesced_duplicates, applied.as_str());
             record_malformed_update(
                 &self.metrics,
                 &self.peer_label,
@@ -3556,7 +3609,14 @@ impl PeerSession {
             self.forget_known_path(prefix, path_id);
             self.forget_rejected_path(prefix, path_id);
         }
-        let mut path_admission = self.path_receive_admission();
+        let mut path_admission = self.path_receive_admission(
+            otc_rejected_unicast
+                .iter()
+                .chain(&ownership_rejected_unicast)
+                .chain(&denied_unicast)
+                .map(|&(prefix, _)| prefix)
+                .chain(announced.iter().map(|route| route.prefix)),
+        );
         if let Some(admission) = path_admission.as_mut() {
             otc_rejected_unicast.retain(|&(prefix, path_id)| {
                 admission.permits(self, prefix, path_id, self.tracks_received(prefix))

@@ -6,7 +6,6 @@ use super::{
     oneshot, project_evpn_routes, warn,
 };
 use crate::evpn_originator::duplicate_mac::{
-    apply_actions_with_duplicate_policy, outstanding_route_keys_for_mac,
     remote_route_processing_suppressed, suppress_local_originations_for_mac,
 };
 use rustbgpd_evpn::is_same_segment_peer;
@@ -85,6 +84,43 @@ pub(super) fn drain_ready_evpn_events(
     drain
 }
 
+/// Apply originator actions caused by a remote route change.
+///
+/// RFC 7432 §15.1 counts MAC moves that a PE "detects ... via local
+/// learning". A remote announcement or withdrawal on its own makes us
+/// withdraw or re-advertise, but it is not a locally detected move, so it
+/// never feeds the duplicate-MAC detector. Otherwise a peer could announce
+/// and withdraw a MAC we own until the detector quarantined it, which
+/// withdraws our route and filters remote FDB programming for the
+/// recovery period.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "RIB writes need the originator state and every actor output"
+)]
+async fn apply_remote_driven_actions(
+    actions: Vec<rustbgpd_evpn::OriginationAction>,
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    state: &mut OriginatorState,
+    inst: &rustbgpd_evpn::EvpnInstance,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) {
+    let actions = state.prepare_peer_sync_actions(vni, mac, actions);
+    super::rib_write::apply_actions(
+        &mut state.pending_rib_ops,
+        actions,
+        inst,
+        rib_tx,
+        metrics,
+        originated_local_mac_counts,
+        vni_to_esi,
+    )
+    .await;
+}
+
 /// Re-poll the RIB, build fresh contender views (both MAC-only and
 /// MAC+IP), diff against the cached state, and fire
 /// `on_remote_changed` / `on_remote_ip_changed` for any tracked
@@ -147,22 +183,18 @@ pub(super) async fn repoll_rib(
             suppressed_remote_diffs.insert((vni, mac));
             continue;
         }
-        let view_present = new_mac_view.contains_key(&(vni, mac));
-        let preexisting_keys = outstanding_route_keys_for_mac(state, vni, mac);
         let actions = {
             let view = new_mac_view.get(&(vni, mac));
             let Some(orig) = state.mac_originators.get_mut(&vni) else {
                 continue;
             };
-            orig.on_remote_changed(mac, view)
+            orig.on_remote_changed(mac, view, inst.local_vtep_ip)
         };
         if actions.is_empty() {
             continue;
         }
-        apply_actions_with_duplicate_policy(
+        apply_remote_driven_actions(
             actions,
-            view_present,
-            preexisting_keys,
             vni,
             mac,
             state,
@@ -195,22 +227,18 @@ pub(super) async fn repoll_rib(
             suppressed_remote_diffs.insert((vni, mac));
             continue;
         }
-        let view_present = new_mac_ip_view.contains_key(&(vni, mac, ip));
-        let preexisting_keys = outstanding_route_keys_for_mac(state, vni, mac);
         let actions = {
             let view = new_mac_ip_view.get(&(vni, mac, ip));
             let Some(orig) = state.mac_ip_originators.get_mut(&vni) else {
                 continue;
             };
-            orig.on_remote_ip_changed(mac, ip, view)
+            orig.on_remote_ip_changed(mac, ip, view, inst.local_vtep_ip)
         };
         if actions.is_empty() {
             continue;
         }
-        apply_actions_with_duplicate_policy(
+        apply_remote_driven_actions(
             actions,
-            view_present,
-            preexisting_keys,
             vni,
             mac,
             state,

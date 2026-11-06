@@ -327,6 +327,8 @@ fn write_config(
 ) -> PathBuf {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("make runtime dir private");
     let config_path = dir.join("rustbgpd.toml");
     let config = format!(
         r#"

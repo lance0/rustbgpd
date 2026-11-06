@@ -245,6 +245,7 @@ async fn add_path_partial_replay_sweeps_only_omitted_identity_and_keeps_prefix_c
         .add_path_families
         .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
     install_test_negotiated_session(&mut session, negotiated);
+    enter_test_fsm_established(&mut session);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     session.remember_known_path(Prefix::V4(prefix), 0);
     session.remember_known_path(Prefix::V4(prefix), 2);
@@ -435,6 +436,7 @@ async fn quiet_run_loop_expires_refresh_accounting() {
 async fn refresh_timeout_precedes_next_buffered_update_after_rib_backpressure() {
     let (mut session, _cmd_tx, mut rib_rx) = make_test_session_with_channels(65001, 65002, 1);
     install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    enter_test_fsm_established(&mut session);
     let stale = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let first = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let second = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -1043,6 +1045,7 @@ fn refresh_boundary_kind(update: &RibUpdate) -> &'static str {
 async fn held_refresh_timeout_corrects_count_before_next_update() {
     let (mut session, _cmd_tx, mut rib_rx) = make_test_session_with_channels(65001, 65002, 1);
     install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    enter_test_fsm_established(&mut session);
     session.config.max_prefixes = Some(2);
     let stale = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let first = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);

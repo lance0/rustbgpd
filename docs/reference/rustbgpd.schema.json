@@ -220,7 +220,7 @@
           "default": false
         },
         "receive_max": {
-          "description": "Experimental Paths-Limit preference per received Add-Path family.\nZero or absent disables Paths-Limit advertisement.",
+          "description": "Experimental Paths-Limit preference per received Add-Path family,\nalso enforced locally per IPv4/IPv6-unicast prefix. Zero or absent\ndisables Paths-Limit advertisement and applies the default local cap\nof 1024 paths per prefix, withholding the excess.",
           "type": [
             "integer",
             "null"
@@ -3851,6 +3851,24 @@
         "local_revalidation": {
           "description": "RFC 9324 local re-evaluation. When `true`, a session whose import\npolicy matches RPKI or ASPA state keeps its pre-policy IPv4/IPv6\nunicast input (accepted routes plus rejects that validation decided),\nand a VRP or ASPA change is re-evaluated locally instead of requesting\ninbound Route Refresh. A session whose retained rejects exceed the\nper-session bound falls back to Route Refresh. Default `false`;\nrestart-required like the rest of `[rpki]`.",
           "type": "boolean"
+        },
+        "max_records_per_cache": {
+          "description": "Most RPKI records one cache may hold, counting each VRP and each\nASPA provider ASN. A cache transfer that would exceed it is refused\nwhile it is received; the cache keeps its last accepted data and\nresynchronizes with a full table. Unset: 4000000. Must be >= 1 and\n<= `max_records_total`. Restart-required like the rest of `[rpki]`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_records_total": {
+          "description": "Most RPKI records held across all caches, counted as for\n`max_records_per_cache`. A full resynchronization counts the cache's\nold and new data together until it completes. Unset: 10000000. Must\nbe >= 1. Restart-required like the rest of `[rpki]`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false

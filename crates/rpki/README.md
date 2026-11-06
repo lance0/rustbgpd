@@ -70,6 +70,15 @@ a configured `retry_interval` at 7200 seconds.
   interval is limited only by the §6 bounds below, and cache-advertised values
   only by the protocol ceiling. The crate exports the
   RFC 8210 two-day ceiling as `RTR_EXPIRE_MAX_SECS` (`172800` seconds).
+  Starting with `0.10.0`, each client charges the records it holds (VRPs plus
+  ASPA provider ASNs) against a per-cache cap and a `RecordBudget` shared
+  through `RtrClient::with_record_limits`. The defaults are
+  `DEFAULT_MAX_CACHE_RECORDS` (4000000) and `DEFAULT_MAX_TOTAL_RECORDS`
+  (10000000). A transaction that would exceed a cap is refused while it is
+  decoded, with `RtrError::RecordLimit`. The cache's last accepted data is
+  kept, and the next query is a Reset Query. With the cache inventory
+  attached, data queued for or held by `VrpManager` stays charged until the
+  manager replaces or removes it.
   Starting with `0.3.1`, `RtrClient::new` bounds the configured timers to RFC
   8210 §6 and logs a warning when it changes one: a zero `refresh_interval` or
   `retry_interval` becomes 1 second, a zero `expire_interval` or
@@ -157,7 +166,7 @@ runs inside the task the application supplies.
 | RFC 9582 (obsoletes RFC 6482) | Validated ROA Payload prefix, maximum-length, and origin-AS semantics. |
 | RFC 6811 | `Valid`, `Invalid`, and `NotFound` origin validation over every covering VRP. |
 | RFC 8210 | RTR version 1 client and PDU codec, including serial/reset synchronization and expiry. |
-| `draft-ietf-sidrops-8210bis` | Scoped RTR version 2 support for ASPA records, with v1 fallback. Router Key PDUs are not implemented. |
+| `draft-ietf-sidrops-8210bis` | Scoped RTR version 2 support for ASPA records, with v1 fallback. Router Key PDUs are decoded, framing-checked and ignored; BGPsec path validation is not implemented. |
 | `draft-ietf-sidrops-aspa-verification-28` | Role-aware upstream/downstream ASPA path verification for IPv4 and IPv6 unicast. |
 
 RTR cache connections use plain TCP by default; an embedding daemon can open them
