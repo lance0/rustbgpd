@@ -1888,6 +1888,18 @@ impl RibManager {
             self.recompute_best(&prefixes);
             // A joining peer may not have received an unchanged frozen best.
             self.distribute_changes(&prefixes, &prefixes);
+            // A frozen row kept its exact rejections live; retire those whose
+            // row the release removed, after distribution suppressed the
+            // rejected members' withdrawals.
+            if !self.peer_unexportable.is_empty() {
+                let gone: Vec<_> = prefixes
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|prefix| self.loc_rib.get(prefix).is_none())
+                    .map(|prefix| crate::update::ExactExportKey::Unicast(*prefix, 0))
+                    .collect();
+                self.retire_exact_export_rejections(gone);
+            }
             super::retire_hash_set(&mut prefixes, &mut checkpoint);
         }
 
@@ -2017,6 +2029,15 @@ impl RibManager {
         let mut vpn = vpn.into_set(&mut checkpoint);
         if !vpn.is_empty() {
             self.recompute_vpn_keys(&vpn);
+            if !self.peer_unexportable.is_empty() {
+                let gone: Vec<_> = vpn
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|key| self.loc_rib.get_vpn(&key.nlri_key).is_none())
+                    .map(|key| crate::update::ExactExportKey::Vpn(key.clone()))
+                    .collect();
+                self.retire_exact_export_rejections(gone);
+            }
             super::retire_hash_set(&mut vpn, &mut checkpoint);
         }
 
