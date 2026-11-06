@@ -147,7 +147,7 @@ impl DatasetData {
     pub fn records(&self) -> usize {
         match self {
             DatasetData::Prefix(set) => set.entries().len(),
-            DatasetData::Asn(set) => set.asns().len(),
+            DatasetData::Asn(set) => set.asns().len() + set.ranges().len(),
             DatasetData::Community(set) => set.criteria().len() + set.patterns().len(),
         }
     }

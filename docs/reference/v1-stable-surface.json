@@ -583,6 +583,8 @@
       {"construct": "ast.set.pattern.route-origin", "classification": "v1", "reason": "`RO:` pattern"},
       {"construct": "ast.set.pattern-field.range", "classification": "v1", "reason": "pattern field `*` or `a..b`"},
       {"construct": "ast.set.pattern-field.private-as", "classification": "v1", "reason": "pattern field `PRIVATE_AS`"},
+      {"construct": "ast.set.asn.range", "classification": "v1", "reason": "asn-set or ASN dataset member `a..b`"},
+      {"construct": "ast.set.asn.private-as", "classification": "v1", "reason": "asn-set or ASN dataset member `PRIVATE_AS`"},
       {"construct": "ast.test.dataset-override", "classification": "v1", "reason": "`dataset NAME { ... }` content in a test"},
       {"construct": "ast.test.route.prefix", "classification": "v1", "reason": "`route { prefix ... }` test fixture field"},
       {"construct": "ast.test.route.communities", "classification": "v1", "reason": "`route { communities ... }` test fixture field"},

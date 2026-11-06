@@ -213,4 +213,4 @@ tests/interop/configs/rustbgpd-m80-policy-lp150.rpol 463 7f23c783ec34ca2a
 tests/interop/configs/rustbgpd-m80-policy.rpol 463 7f23c783ec34ca2a
 tools/rs-config-render/tests/golden/client-as197000-1.rpol 86 84e056708e0617fb
 tools/rs-config-render/tests/golden/client-as4242-1.rpol 86 f28ecac9937e803a
-tools/rs-config-render/tests/golden/rs-hygiene.rpol 368 53dd8c417db016ac
+tools/rs-config-render/tests/golden/rs-hygiene.rpol 396 614b153cbefa4cb2

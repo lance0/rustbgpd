@@ -58,7 +58,7 @@ use crate::engine::{
 use crate::ir::{
     ArithOp, CommunityAttribute, CompiledChain, LoopSource, MatchExpr, Term, TermAction, ValueExpr,
 };
-use crate::sets::{CommunityField, CommunityMember, CommunityPattern, SetStore};
+use crate::sets::{AsnMember, CommunityField, CommunityMember, CommunityPattern, SetStore};
 
 /// The curated programs that give every construct a case.
 const CURATED: &str = "crates/policy/tests/decision_corpus/";
@@ -909,6 +909,8 @@ const CONSTRUCTS: &[&str] = &[
     "ast.set.pattern.route-origin",
     "ast.set.pattern-field.range",
     "ast.set.pattern-field.private-as",
+    "ast.set.asn.range",
+    "ast.set.asn.private-as",
     "ast.test.dataset-override",
     "ast.test.route.prefix",
     "ast.test.route.communities",
@@ -1412,12 +1414,11 @@ fn declared_constructs(file: &RpolFile) -> Seen {
             community_member(&member.node, &mut seen);
         }
     }
-    for AsnSetDef {
-        name: _,
-        entries: _,
-    } in asn_sets
-    {
+    for AsnSetDef { name: _, entries } in asn_sets {
         seen.insert("ast.decl.asn-set");
+        for member in entries {
+            asn_member(member.node, &mut seen);
+        }
     }
     for DatasetDecl {
         name: _,
@@ -1465,8 +1466,9 @@ fn test_constructs(test: &TestDef, seen: &mut Seen) {
         for entry in entries {
             match &entry.node {
                 DatasetEntryAst::Community(member) => community_member(member, seen),
-                // Prefix and ASN members are the set forms already named.
-                DatasetEntryAst::Prefix(_) | DatasetEntryAst::Asn(_) => {}
+                DatasetEntryAst::Asn(member) => asn_member(*member, seen),
+                // Prefix members are the set forms already named.
+                DatasetEntryAst::Prefix(_) => {}
             }
         }
     }
@@ -1539,6 +1541,16 @@ fn test_constructs(test: &TestDef, seen: &mut Seen) {
             });
         }
     }
+}
+
+/// An asn-set or ASN dataset member's form; an exact ASN is the set itself.
+fn asn_member(member: AsnMember, seen: &mut Seen) {
+    let name = match member {
+        AsnMember::Exact(_) => return,
+        AsnMember::Range { .. } => "ast.set.asn.range",
+        AsnMember::PrivateAs => "ast.set.asn.private-as",
+    };
+    seen.insert(name);
 }
 
 /// A community-set or community-dataset member: its exact kind, or its

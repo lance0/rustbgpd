@@ -112,8 +112,8 @@ pub struct DatasetDecl {
 pub enum DatasetEntryAst {
     /// A prefix entry with optional `ge`/`le`.
     Prefix(PrefixEntryAst),
-    /// A bare u32 ASN.
-    Asn(u32),
+    /// An ASN, an ASN range, or `PRIVATE_AS`.
+    Asn(crate::sets::AsnMember),
     /// A community literal or pattern of any kind.
     Community(crate::sets::CommunityMember),
 }
@@ -136,8 +136,9 @@ pub struct TestDatasetDef {
 pub struct AsnSetDef {
     /// Set name.
     pub name: Spanned<String>,
-    /// Member ASNs (u32 literals; range-checked at parse).
-    pub entries: Vec<Spanned<u32>>,
+    /// Members: ASNs (u32 literals, range-checked at parse), inclusive
+    /// ranges and `PRIVATE_AS`.
+    pub entries: Vec<Spanned<crate::sets::AsnMember>>,
 }
 
 /// `community-set NAME { literals }`.

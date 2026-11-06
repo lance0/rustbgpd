@@ -7,6 +7,7 @@
 # AS_CONFED_SET as withdrawn when it decodes it (RFC 9774), so no such
 # route reaches import policy.
 
+asn-set rs-invalid-asns { 0, 23456, 64496..65551, 4200000000..4294967295 }
 asn-set rs-transit-free-asns { 174, 3356 }
 prefix-set rs-bogon-prefixes {
     10.0.0.0/8 le 32,  # RFC 1918
@@ -35,8 +36,14 @@ policy rs-hygiene {
     # arouteserver custom_communities are attached by the route server only; members cannot send them.
     term scrub-custom-communities { remove community 65530:100 }
     # 0, AS_TRANS, 16-bit doc/private/reserved (64496-65551), and the
-    # 32-bit private+reserved range (any 10-digit "42..." ASN in u32).
-    term reject-invalid-asn { if route.as-path matches "_(0|23456|6449[6-9]|64[5-9][0-9][0-9]|65[0-4][0-9][0-9]|655[0-4][0-9]|6555[01]|42[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])_" { reject } }
+    # 32-bit private+reserved range (4200000000-4294967295). Longer
+    # paths are left to reject-long-as-path.
+    term reject-invalid-asn {
+        for asn in route.as-path {
+            if route.as-path.len >= 33 { break }
+            if asn in rs-invalid-asns { reject }
+        }
+    }
     # A transit-free network in the path of a route learned from anyone
     # but that network itself means someone is leaking transit through it.
     term reject-transit-free-in-path {

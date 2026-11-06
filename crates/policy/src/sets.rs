@@ -985,48 +985,125 @@ impl PartialEq for CommunitySet {
 
 impl Eq for CommunitySet {}
 
-/// An indexed ASN set (`asn-set` in `.rpol`): membership is one hash
-/// probe regardless of member count. Probed by `route.origin-as in`
-/// and `peer.asn in` guards.
+/// The RFC 6996 private-use ASN ranges `PRIVATE_AS` stands for, the
+/// same values as [`rustbgpd_wire::is_private_asn`]. The RFC 7300 last
+/// ASNs (65535, 4294967295) are reserved, not private-use.
+pub const PRIVATE_AS_RANGES: [(u32, u32); 2] = [(64_512, 65_534), (4_200_000_000, 4_294_967_294)];
+
+/// One `asn-set` or ASN dataset member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AsnMember {
+    /// One ASN.
+    Exact(u32),
+    /// Every ASN from `lo` through `hi`, inclusive (`a..b`).
+    Range {
+        /// Lowest member.
+        lo: u32,
+        /// Highest member.
+        hi: u32,
+    },
+    /// The [`PRIVATE_AS_RANGES`].
+    PrivateAs,
+}
+
+/// An indexed ASN set (`asn-set` in `.rpol`). Exact members are one hash
+/// probe regardless of member count; ranges are a binary search over
+/// merged, disjoint ranges. Probed by `route.origin-as in` and
+/// `peer.asn in` guards.
 #[derive(Debug, Clone, Default)]
 pub struct AsnSet {
-    /// Canonically sorted, deduplicated members — the set's identity.
+    /// Sorted, deduplicated exact members no range covers.
     asns: Vec<u32>,
+    /// Sorted, disjoint, non-adjacent inclusive ranges of two or more
+    /// ASNs. Together with `asns`, the set's identity.
+    ranges: Vec<(u32, u32)>,
     set: FxHashSet<u32>,
 }
 
 impl AsnSet {
-    /// Build an indexed set from members. Members are canonicalized
+    /// Build an indexed set from exact members. Members are canonicalized
     /// (sorted, deduplicated), so construction order and duplicates do
     /// not affect identity or behavior.
     #[must_use]
     pub fn new(asns: impl IntoIterator<Item = u32>) -> Self {
-        let mut asns: Vec<u32> = asns.into_iter().collect();
-        asns.sort_unstable();
-        asns.dedup();
-        let set = asns.iter().copied().collect();
-        Self { asns, set }
+        Self::with_members(asns.into_iter().map(AsnMember::Exact))
     }
 
-    /// Whether `asn` is a member — one hash probe, no allocation.
+    /// Build an indexed set from exact members and ranges. A range absorbs
+    /// every member and range it overlaps or touches, and a one-value range
+    /// is an exact member, so equal spellings of the same membership intern
+    /// to one set. Exact members never merge into a range by themselves:
+    /// a set of exact ASNs stays one, and stays iterable.
+    #[must_use]
+    pub fn with_members(members: impl IntoIterator<Item = AsnMember>) -> Self {
+        // `(lo, hi, from a range)`, merged into blocks of touching values.
+        let mut items: Vec<(u32, u32, bool)> = Vec::new();
+        for member in members {
+            match member {
+                AsnMember::Exact(asn) => items.push((asn, asn, false)),
+                AsnMember::Range { lo, hi } => items.push((lo, hi, lo != hi)),
+                AsnMember::PrivateAs => {
+                    items.extend(PRIVATE_AS_RANGES.map(|(lo, hi)| (lo, hi, true)));
+                }
+            }
+        }
+        items.sort_unstable();
+        let mut blocks: Vec<(u32, u32, bool)> = Vec::with_capacity(items.len());
+        for (lo, hi, range) in items {
+            match blocks.last_mut() {
+                Some(block) if lo <= block.1.saturating_add(1) => {
+                    block.1 = block.1.max(hi);
+                    block.2 |= range;
+                }
+                _ => blocks.push((lo, hi, range)),
+            }
+        }
+        let mut asns = Vec::new();
+        let mut ranges = Vec::new();
+        for (lo, hi, range) in blocks {
+            if range {
+                ranges.push((lo, hi));
+            } else {
+                // A block of exact members only: every value in it is one.
+                asns.extend(lo..=hi);
+            }
+        }
+        let set = asns.iter().copied().collect();
+        Self { asns, ranges, set }
+    }
+
+    /// Whether `asn` is a member: one hash probe, then a binary search of
+    /// the ranges when the set has any. No allocation.
     #[must_use]
     #[inline]
     pub fn contains(&self, asn: u32) -> bool {
-        self.set.contains(&asn)
+        self.set.contains(&asn) || (!self.ranges.is_empty() && in_ranges(&self.ranges, asn))
     }
 
-    /// The canonical (sorted, deduplicated) member list.
+    /// The canonical (sorted, deduplicated) exact members no range covers.
     #[must_use]
     pub fn asns(&self) -> &[u32] {
         &self.asns
     }
+
+    /// The canonical (sorted, merged) inclusive ranges.
+    #[must_use]
+    pub fn ranges(&self) -> &[(u32, u32)] {
+        &self.ranges
+    }
+}
+
+/// Whether `asn` falls in one of the sorted, disjoint `ranges`.
+fn in_ranges(ranges: &[(u32, u32)], asn: u32) -> bool {
+    let after = ranges.partition_point(|&(lo, _)| lo <= asn);
+    after > 0 && asn <= ranges[after - 1].1
 }
 
 impl PartialEq for AsnSet {
     fn eq(&self, other: &Self) -> bool {
         // The hash set is derived from the canonical member list, so
-        // members alone are the identity.
-        self.asns == other.asns
+        // members and ranges alone are the identity.
+        self.asns == other.asns && self.ranges == other.ranges
     }
 }
 
@@ -1051,6 +1128,9 @@ fn community_key(cm: CommunityMatch) -> CommunityKey {
     }
 }
 
+/// Canonical interning key for an ASN set: exact members, then ranges.
+type AsnSetKey = (Vec<u32>, Vec<(u32, u32)>);
+
 /// Content-hash interner for match sets and AS-path regexes.
 ///
 /// Two policies — or two chains compiled through the same store —
@@ -1061,7 +1141,7 @@ fn community_key(cm: CommunityMatch) -> CommunityKey {
 pub struct SetStore {
     prefix_sets: FxHashMap<Vec<PrefixEntryKey>, Arc<PrefixSet>>,
     community_sets: FxHashMap<(Vec<CommunityKey>, Vec<CommunityPattern>), Arc<CommunitySet>>,
-    asn_sets: FxHashMap<Vec<u32>, Arc<AsnSet>>,
+    asn_sets: FxHashMap<AsnSetKey, Arc<AsnSet>>,
     as_path_regexes: FxHashMap<String, Arc<AsPathRegex>>,
 }
 
@@ -1119,13 +1199,20 @@ impl SetStore {
     /// Intern an ASN set built from `asns`.
     #[must_use]
     pub fn asn_set(&mut self, asns: &[u32]) -> Arc<AsnSet> {
-        let mut key: Vec<u32> = asns.to_vec();
-        key.sort_unstable();
-        key.dedup();
+        self.intern_asn_set(AsnSet::new(asns.iter().copied()))
+    }
+
+    /// Intern an ASN set built from exact members and ranges.
+    #[must_use]
+    pub fn asn_set_members(&mut self, members: &[AsnMember]) -> Arc<AsnSet> {
+        self.intern_asn_set(AsnSet::with_members(members.iter().copied()))
+    }
+
+    fn intern_asn_set(&mut self, set: AsnSet) -> Arc<AsnSet> {
         Arc::clone(
             self.asn_sets
-                .entry(key)
-                .or_insert_with(|| Arc::new(AsnSet::new(asns.iter().copied()))),
+                .entry((set.asns.clone(), set.ranges.clone()))
+                .or_insert_with(|| Arc::new(set)),
         )
     }
 
@@ -1292,6 +1379,94 @@ mod tests {
         let wide = AsnSet::new([4_200_000_001, 64_500]);
         assert!(wide.contains(4_200_000_001));
         assert!(!wide.contains(1));
+    }
+
+    /// `PRIVATE_AS` is the wire crate's private-use predicate, value for
+    /// value at every boundary.
+    #[test]
+    fn private_as_ranges_agree_with_the_wire_predicate() {
+        let set = AsnSet::with_members([AsnMember::PrivateAs]);
+        for asn in [
+            0,
+            64_511,
+            64_512,
+            65_534,
+            65_535,
+            4_199_999_999,
+            4_200_000_000,
+            4_294_967_294,
+            u32::MAX,
+        ] {
+            assert_eq!(
+                set.contains(asn),
+                rustbgpd_wire::is_private_asn(asn),
+                "{asn}"
+            );
+        }
+    }
+
+    /// Range membership is a binary search over merged, disjoint ranges:
+    /// every gap between many ranges misses, every end hits.
+    #[test]
+    fn asn_ranges_merge_and_probe_at_every_edge() {
+        let ranges = (0..10_000u32).map(|i| AsnMember::Range {
+            lo: i * 10,
+            hi: i * 10 + 4,
+        });
+        let set = AsnSet::with_members(ranges.chain([AsnMember::Exact(5), AsnMember::Exact(7)]));
+        assert_eq!(set.ranges().len(), 10_000);
+        // 5 touches 0..4 and joins it; 7 touches nothing.
+        assert_eq!(set.ranges()[0], (0, 5));
+        assert_eq!(set.asns(), &[7]);
+        for i in [0u32, 1, 4_999, 9_999] {
+            assert!(set.contains(i * 10));
+            assert!(set.contains(i * 10 + 4));
+            assert!(!set.contains(i * 10 + 6));
+            assert!(!set.contains(i * 10 + 9));
+        }
+        assert!(set.contains(5));
+        assert!(set.contains(7));
+        assert!(!set.contains(100_000));
+        // Exact members alone never form a range.
+        let exact = AsnSet::with_members((1..=3).map(AsnMember::Exact));
+        assert_eq!((exact.asns(), exact.ranges()), (&[1, 2, 3][..], &[][..]));
+
+        // Overlapping and adjacent ranges merge; u32::MAX does not wrap.
+        let merged = AsnSet::with_members([
+            AsnMember::Range { lo: 10, hi: 20 },
+            AsnMember::Range { lo: 21, hi: 30 },
+            AsnMember::Range { lo: 15, hi: 25 },
+            AsnMember::Range {
+                lo: u32::MAX - 1,
+                hi: u32::MAX,
+            },
+            AsnMember::Range {
+                lo: u32::MAX - 5,
+                hi: u32::MAX - 2,
+            },
+            AsnMember::Exact(12),
+        ]);
+        assert_eq!(merged.ranges(), &[(10, 30), (u32::MAX - 5, u32::MAX)]);
+        assert_eq!(merged.asns(), &[] as &[u32]);
+        assert!(merged.contains(u32::MAX));
+        assert!(!merged.contains(u32::MAX - 6));
+        assert!(!merged.contains(9));
+        assert!(!merged.contains(31));
+
+        let mut store = SetStore::new();
+        assert!(Arc::ptr_eq(
+            &store.asn_set_members(&[AsnMember::Range { lo: 1, hi: 3 }]),
+            &store.asn_set_members(&[
+                AsnMember::Range { lo: 2, hi: 3 },
+                AsnMember::Exact(1),
+                AsnMember::Range { lo: 1, hi: 2 },
+            ])
+        ));
+        // A set without ranges interns as before.
+        assert!(Arc::ptr_eq(
+            &store.asn_set(&[7, 8]),
+            &store.asn_set_members(&[AsnMember::Exact(8), AsnMember::Exact(7)])
+        ));
     }
 
     #[test]

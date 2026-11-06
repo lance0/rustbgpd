@@ -342,8 +342,8 @@ impl SetTables {
             .asn_sets
             .iter()
             .map(|def| {
-                let asns: Vec<u32> = def.entries.iter().map(|asn| asn.node).collect();
-                store.asn_set(&asns)
+                let members: Vec<_> = def.entries.iter().map(|member| member.node).collect();
+                store.asn_set_members(&members)
             })
             .collect();
         Self {

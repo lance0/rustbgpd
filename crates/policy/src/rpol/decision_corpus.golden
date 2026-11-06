@@ -1,19 +1,19 @@
-# rpol decision corpus: 271 programs, 1919 cases. Regenerate with
+# rpol decision corpus: 272 programs, 1929 cases. Regenerate with
 # RPOL_DECISION_GOLDEN_BLESS=1 cargo test -p rustbgpd-policy --lib corpus_decisions_are_pinned
 
 ## constructs (cases exercising each)
 ast.policy.default-action 57
 ast.policy.parameters 35
-ast.stmt.if 620
+ast.stmt.if 632
 ast.stmt.else-if 31
 ast.stmt.else 76
 ast.stmt.nested-if 13
-ast.stmt.for 75
+ast.stmt.for 102
 ast.stmt.call 48
-ast.for.field 64
+ast.for.field 91
 ast.for.set 11
-ast.action.accept 1333
-ast.action.reject 473
+ast.action.accept 1336
+ast.action.reject 485
 ast.action.set-local-pref 128
 ast.action.set-med 274
 ast.action.set-next-hop-self 3
@@ -40,18 +40,18 @@ ast.literal.route-origin-ipv4 2
 ast.literal.well-known-ext 35
 ast.action.prepend 56
 ast.action.let 63
-ast.action.break 33
+ast.action.break 50
 ast.action.continue 22
 ast.expr.or 11
 ast.expr.and 38
 ast.expr.not 5
-ast.expr.cmp 313
+ast.expr.cmp 328
 ast.expr.in 119
-ast.expr.ident-in 42
+ast.expr.ident-in 69
 ast.expr.has 9
 ast.expr.has-parameter 1
 ast.expr.exists 4
-ast.expr.matches 37
+ast.expr.matches 28
 ast.expr.contains 6
 ast.contains.literal 5
 ast.contains.parameter 1
@@ -74,9 +74,9 @@ ast.arith.div 11
 ast.arith.rem 11
 ast.cmp.eq 218
 ast.cmp.ne 40
-ast.cmp.ge 206
+ast.cmp.ge 222
 ast.cmp.le 4
-ast.rhs.integer 143
+ast.rhs.integer 159
 ast.rhs.identifier 92
 ast.rhs.ip 9
 ast.rhs.prefix 57
@@ -87,8 +87,8 @@ ast.field.route.communities 66
 ast.field.route.large-communities 1
 ast.field.route.ext-communities 9
 ast.field.route.any-community 5
-ast.field.route.as-path 74
-ast.field.route.as-path.len 52
+ast.field.route.as-path 92
+ast.field.route.as-path.len 68
 ast.field.route.communities.len 4
 ast.field.route.large-communities.len 3
 ast.field.route.ext-communities.len 2
@@ -136,7 +136,7 @@ ast.decl.import 20
 ast.decl.prefix-set 610
 ast.decl.prefix-set.ge-le 337
 ast.decl.community-set 625
-ast.decl.asn-set 326
+ast.decl.asn-set 336
 ast.decl.dataset.prefix-set 4
 ast.decl.dataset.asn-set 5
 ast.decl.dataset.community-set 120
@@ -154,6 +154,8 @@ ast.set.pattern.route-target 180
 ast.set.pattern.route-origin 120
 ast.set.pattern-field.range 191
 ast.set.pattern-field.private-as 120
+ast.set.asn.range 27
+ast.set.asn.private-as 10
 ast.test.dataset-override 125
 ast.test.route.prefix 1149
 ast.test.route.communities 843
@@ -192,15 +194,15 @@ ast.test.with.without.local-pref 232
 ast.test.with.without.med 120
 ast.test.with.without.next-hop 120
 ast.test.with.without.prepend 120
-ir.guard.true 1382
+ir.guard.true 1392
 ir.guard.prefix-in-set 222
 ir.guard.prefix-eq 286
 ir.guard.prefix-ne 12
 ir.guard.community-contains 52
 ir.guard.community-in-set 25
 ir.guard.community-kind-in-set 63
-ir.guard.as-path-matches 150
-ir.guard.as-path-len 89
+ir.guard.as-path-matches 141
+ir.guard.as-path-len 98
 ir.guard.origin-as-eq 21
 ir.guard.origin-as-ne 9
 ir.guard.origin-as-in-set 53
@@ -223,7 +225,7 @@ ir.guard.rpki-is 52
 ir.guard.aspa-is 76
 ir.guard.value-cmp 204
 ir.guard.exists 12
-ir.guard.local-in-asn-set 22
+ir.guard.local-in-asn-set 39
 ir.guard.local-in-community-set 15
 ir.guard.in-dataset 10
 ir.guard.and 217
@@ -237,12 +239,12 @@ ir.value.binary 137
 ir.value.min 40
 ir.value.max 11
 ir.value.clamp 11
-ir.action.permit 1291
-ir.action.deny 417
+ir.action.permit 1294
+ir.action.deny 429
 ir.action.continue 272
 ir.action.bind 132
-ir.action.for-each 75
-ir.action.break 33
+ir.action.for-each 102
+ir.action.break 50
 ir.action.continue-loop 22
 ir.action.community-var 43
 ir.action.remove-large-community-admin 22
@@ -283,7 +285,7 @@ crates/policy/tests/decision_corpus/surface.rpol: policy feed-scrub probes a dat
 docs/adr/0096-policy-language.md#3a31b83af85b070c: does not compile (a deliberate error, or datasets bound by config)
 docs/cookbook/policy-quickstart.md#a3fd935127a98e08: policy customer-in takes parameters (in-language tests only)
 docs/reference/rpol-language.md#9ea347e0d0bb861e: policy customer-in takes parameters (in-language tests only)
-docs/reference/rpol-language.md#985d439acbd4360b: does not compile (a deliberate error, or datasets bound by config)
+docs/reference/rpol-language.md#9578cbf621840eff: does not compile (a deliberate error, or datasets bound by config)
 docs/reference/rpol-language.md#5385c4f5957c146c: policy origin-guard probes a dataset (in-language tests only)
 docs/reference/rpol-language.md#26d7d85f21d694a7: does not compile (a deliberate error, or datasets bound by config)
 docs/reference/rpol-language.md#4bda8464c1fc633c: policy customer-in takes parameters (in-language tests only)
@@ -853,6 +855,8 @@ docs/reference/rpol-language.md#abe95d01360e284b | bogon-guard-regex | row bogon
 docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | row block-64500 blocked => #2 reject
 docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | row block-64500 no-origin => #1 reject
 docs/reference/rpol-language.md#acbc24b01a712bbc | block-64500 | row block-64500 rest => #3 accept
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | row no-invalid-asn-in-path invalid => #1 for asn in route.as-path { reject }
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | row no-invalid-asn-in-path rest => #2 accept
 docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | row customer-in common.1/customer-common(200):#enter => #1 let #return = 0
 docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | row customer-in common.2/customer-common(200):bad => #2 reject
 docs/reference/rpol-language.md#bf2317ce88f600e9 | customer-in | row customer-in common.3/customer-common(200):tag.1 => #3 remove community in scrub-tags
@@ -942,7 +946,7 @@ tools/rs-config-render/tests/golden/client-as4242-1.rpol | client-as4242-1 | row
 tools/rs-config-render/tests/golden/client-as4242-1.rpol | client-as4242-1 | row client-as4242-1 rest => #2 reject
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-black-list-prefix => #10 reject
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-bogon-prefix => #9 reject
-tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-invalid-asn => #5 reject
+tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-invalid-asn => #5 for asn in route.as-path { break | reject }
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-long-as-path => #8 reject
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-never-via-rs => #7 reject
 tools/rs-config-render/tests/golden/rs-hygiene.rpol | rs-hygiene | row rs-hygiene reject-rpki-invalid => #13 reject
@@ -2126,6 +2130,16 @@ docs/reference/rpol-language.md#9ea347e0d0bb861e | bogon-filter | m07-default =>
 docs/reference/rpol-language.md#9ea347e0d0bb861e | bogon-filter | m08-host-routes => deny
 docs/reference/rpol-language.md#9ea347e0d0bb861e | bogon-filter | m09-evpn => deny
 docs/reference/rpol-language.md#9ea347e0d0bb861e | bogon-filter | m10-v6-bogon => deny
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m01-v4-transit => deny
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m02-v4-invalid-long => deny
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m03-v6-tagged => deny
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m04-bare => permit
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m05-internal => permit
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m06-local-as-set => deny
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m07-default => deny
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m08-host-routes => deny
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m09-evpn => permit
+docs/reference/rpol-language.md#b0fe94130099f5a7 | no-invalid-asn-in-path | m10-v6-bogon => deny
 docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins-old | m01-v4-transit => permit
 docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins-old | m02-v4-invalid-long => deny
 docs/reference/rpol-language.md#a08ba49d62ea7f6f | customer-origins-old | m03-v6-tagged => deny

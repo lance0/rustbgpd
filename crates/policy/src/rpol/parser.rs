@@ -16,7 +16,7 @@ use crate::ir::ArithOp;
 
 use crate::datasets::{DatasetData, DatasetKind, MAX_DATASET_RECORDS};
 use crate::sets::{
-    AsnSet, CommunityField, CommunityMember, CommunityPattern, CommunitySet, PrefixSet,
+    AsnMember, AsnSet, CommunityField, CommunityMember, CommunityPattern, CommunitySet, PrefixSet,
     PrefixSetEntry, check_length_bounds, split_community_members,
 };
 
@@ -191,6 +191,53 @@ impl Parser<'_> {
         let token = self.expect(Tok::Int, what)?;
         let text = self.text(token).to_string();
         Ok((self.parse_u32_text(&text, token.span)?, token.span))
+    }
+
+    /// One asn-set or ASN dataset member: an ASN, an inclusive range
+    /// `a..b`, or `PRIVATE_AS`. A one-value range is the exact member.
+    fn asn_member(&mut self) -> PResult<Spanned<AsnMember>> {
+        const WHAT: &str = "an ASN (a u32 integer), an ASN range `a..b`, or `PRIVATE_AS`";
+        let Some(token) = self.peek() else {
+            return Err(self.error_expected(WHAT));
+        };
+        match token.kind {
+            Tok::Int => {
+                let (asn, span) = self.expect_u32(WHAT)?;
+                Ok(Spanned::new(AsnMember::Exact(asn), span))
+            }
+            Tok::AsnRange => {
+                self.bump();
+                let text = self.text(token).to_string();
+                let (lo, hi) = text.split_once("..").expect("the token holds `..`");
+                let (lo, hi) = (
+                    self.parse_u32_text(lo, token.span)?,
+                    self.parse_u32_text(hi, token.span)?,
+                );
+                if lo > hi {
+                    self.diags.push(Diagnostic::coded(
+                        DiagnosticCode::Parse,
+                        token.span,
+                        format!(
+                            "invalid ASN range `{text}`: it is empty, because its low end \
+                             exceeds its high end"
+                        ),
+                        "empty range",
+                    ));
+                    return Err(Fail);
+                }
+                let member = if lo == hi {
+                    AsnMember::Exact(lo)
+                } else {
+                    AsnMember::Range { lo, hi }
+                };
+                Ok(Spanned::new(member, token.span))
+            }
+            Tok::Ident if self.text(token) == "PRIVATE_AS" => {
+                self.bump();
+                Ok(Spanned::new(AsnMember::PrivateAs, token.span))
+            }
+            _ => Err(self.error_expected(WHAT)),
+        }
     }
 
     /// `u32` argument position: integer literal or parameter name.
@@ -787,9 +834,14 @@ impl Parser<'_> {
                 let entry = self.prefix_entry()?;
                 Ok(Spanned::new(DatasetEntryAst::Prefix(entry), start))
             }
-            Tok::Int => {
-                let (asn, span) = self.expect_u32("an ASN (a u32 integer)")?;
-                Ok(Spanned::new(DatasetEntryAst::Asn(asn), span))
+            Tok::Int | Tok::AsnRange => {
+                let member = self.asn_member()?;
+                Ok(Spanned::new(DatasetEntryAst::Asn(member.node), member.span))
+            }
+            // Not a community name: the private-use ASN ranges.
+            Tok::Ident if self.text(token) == "PRIVATE_AS" => {
+                let member = self.asn_member()?;
+                Ok(Spanned::new(DatasetEntryAst::Asn(member.node), member.span))
             }
             Tok::StdCommunityLit
             | Tok::LargeCommunityLit
@@ -869,11 +921,9 @@ impl Parser<'_> {
         self.expect(Tok::LBrace, "`{`")?;
         let mut entries = Vec::new();
         while !self.at(Tok::RBrace) {
-            // `expect_u32` rejects out-of-range literals with an
-            // "does not fit in u32" diagnostic — ASNs are u32, never
-            // 16-bit-truncated.
-            let (asn, span) = self.expect_u32("an ASN (a u32 integer)")?;
-            entries.push(Spanned::new(asn, span));
+            // Out-of-range literals get a "does not fit in u32"
+            // diagnostic — ASNs are u32, never 16-bit-truncated.
+            entries.push(self.asn_member()?);
             if self.eat(Tok::Comma).is_none() {
                 break;
             }
@@ -2611,7 +2661,7 @@ pub(crate) fn parse_call_arg_text(text: &str) -> Result<CallArg, String> {
 /// The first parse failure, prefixed with its 1-based line number.
 pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<DatasetData, String> {
     let mut prefixes: Vec<PrefixSetEntry> = Vec::new();
-    let mut asns: Vec<u32> = Vec::new();
+    let mut asns: Vec<AsnMember> = Vec::new();
     // Exact members and patterns go straight to their own lists, so a
     // million-record exact file peaks as it did before patterns.
     let mut communities: Vec<CommunityMatch> = Vec::new();
@@ -2648,9 +2698,7 @@ pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<Datase
                     le: entry.le,
                 });
             }),
-            DatasetKind::Asn => parser
-                .expect_u32("an ASN (a u32 integer)")
-                .map(|(asn, _)| asns.push(asn)),
+            DatasetKind::Asn => parser.asn_member().map(|member| asns.push(member.node)),
             DatasetKind::Community => parser.community_member().map(|member| match member.node {
                 CommunityMember::Exact(cm) => communities.push(cm),
                 CommunityMember::Pattern(pattern) => patterns.push(*pattern),
@@ -2672,7 +2720,7 @@ pub(crate) fn parse_dataset_text(text: &str, kind: DatasetKind) -> Result<Datase
     }
     Ok(match kind {
         DatasetKind::Prefix => DatasetData::Prefix(PrefixSet::new(prefixes)),
-        DatasetKind::Asn => DatasetData::Asn(AsnSet::new(asns)),
+        DatasetKind::Asn => DatasetData::Asn(AsnSet::with_members(asns)),
         DatasetKind::Community => {
             let set = CommunitySet::with_patterns(communities, patterns);
             set.check_pattern_scan()?;

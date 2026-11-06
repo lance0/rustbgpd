@@ -1888,6 +1888,19 @@ impl RibManager {
             self.recompute_best(&prefixes);
             // A joining peer may not have received an unchanged frozen best.
             self.distribute_changes(&prefixes, &prefixes);
+            // A frozen row kept its exact rejections live; retire those whose
+            // row the release removed. Retiring after the release's
+            // distribution is the conservative order: that pass still sees
+            // every rejection that was live while the row was held.
+            if !self.peer_unexportable.is_empty() {
+                let gone: Vec<_> = prefixes
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|prefix| self.loc_rib.get(prefix).is_none())
+                    .map(|prefix| crate::update::ExactExportKey::Unicast(*prefix, 0))
+                    .collect();
+                self.retire_exact_export_rejections(gone);
+            }
             super::retire_hash_set(&mut prefixes, &mut checkpoint);
         }
 
@@ -1978,6 +1991,16 @@ impl RibManager {
                     checkpoint();
                     self.distribute_evpn_keys_to_peer(peer, &evpn, &mut checkpoint);
                 }
+                // As for unicast: retire rejections whose held row is gone.
+                if !self.peer_unexportable.is_empty() {
+                    let gone: Vec<_> = evpn
+                        .iter()
+                        .inspect(|_| checkpoint())
+                        .filter(|key| self.loc_rib.get_evpn(key).is_none())
+                        .map(|key| crate::update::ExactExportKey::Evpn(*key))
+                        .collect();
+                    self.retire_exact_export_rejections(gone);
+                }
                 super::retire_hash_set(&mut evpn, &mut checkpoint);
             }
             self.complete_selection_evpn_feeds();
@@ -2017,6 +2040,15 @@ impl RibManager {
         let mut vpn = vpn.into_set(&mut checkpoint);
         if !vpn.is_empty() {
             self.recompute_vpn_keys(&vpn);
+            if !self.peer_unexportable.is_empty() {
+                let gone: Vec<_> = vpn
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|key| self.loc_rib.get_vpn(&key.nlri_key).is_none())
+                    .map(|key| crate::update::ExactExportKey::Vpn(key.clone()))
+                    .collect();
+                self.retire_exact_export_rejections(gone);
+            }
             super::retire_hash_set(&mut vpn, &mut checkpoint);
         }
 
@@ -2054,6 +2086,15 @@ impl RibManager {
         let mut labeled = labeled.into_set(&mut checkpoint);
         if !labeled.is_empty() {
             self.recompute_labeled_keys(&labeled);
+            if !self.peer_unexportable.is_empty() {
+                let gone: Vec<_> = labeled
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|key| self.loc_rib.get_labeled(&key.prefix).is_none())
+                    .map(|key| crate::update::ExactExportKey::Labeled(*key))
+                    .collect();
+                self.retire_exact_export_rejections(gone);
+            }
             super::retire_hash_set(&mut labeled, &mut checkpoint);
         }
 
