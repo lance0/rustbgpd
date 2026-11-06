@@ -805,6 +805,16 @@ impl Config {
                 validate_grpc_pem_file(key, "grpc_tcp.tls_key_file", PemKind::PrivateKey)?;
                 validate_grpc_pem_file(ca, "grpc_tcp.tls_client_ca_file", PemKind::Certificate)?;
             }
+            if let Some(crl) = cfg.tls_client_crl_file.as_deref() {
+                if tls_count != 3 {
+                    return Err(ConfigError::InvalidGrpcConfig {
+                        reason: "grpc_tcp.tls_client_crl_file requires tls_cert_file, \
+                                 tls_key_file, and tls_client_ca_file"
+                            .to_string(),
+                    });
+                }
+                validate_grpc_pem_file(crl, "grpc_tcp.tls_client_crl_file", PemKind::Crl)?;
+            }
             validate_grpc_principal(cfg.principal.as_deref(), "grpc_tcp.principal")?;
             if cfg.principal.is_some() && tls_count == 3 {
                 return Err(ConfigError::InvalidGrpcConfig {
@@ -3900,6 +3910,8 @@ enum PemKind {
     Certificate,
     /// A `PRIVATE KEY`, `RSA PRIVATE KEY`, or `EC PRIVATE KEY` block.
     PrivateKey,
+    /// An `X509 CRL` block.
+    Crl,
 }
 
 /// Validate a PEM-encoded TLS file at config-load / `--check` time.
@@ -3914,7 +3926,9 @@ fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result
         });
     }
     let credential_kind = match kind {
-        PemKind::Certificate => rustbgpd_api::credential_file::CredentialKind::Public,
+        PemKind::Certificate | PemKind::Crl => {
+            rustbgpd_api::credential_file::CredentialKind::Public
+        }
         PemKind::PrivateKey => rustbgpd_api::credential_file::CredentialKind::Secret,
     };
     let bytes = read_grpc_credential_file(path, field_name, credential_kind)?;
@@ -3955,6 +3969,7 @@ fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result
     let acceptable: &[&str] = match kind {
         PemKind::Certificate => &["CERTIFICATE"],
         PemKind::PrivateKey => &["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"],
+        PemKind::Crl => &["X509 CRL"],
     };
     let any_match = begin_lines.iter().any(|line| {
         let trimmed = line.trim_end();

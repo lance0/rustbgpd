@@ -728,6 +728,7 @@ container/network exposure.
 | `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
 | `tls_key_file`  | string | no   | --      | PEM-encoded server private key |
 | `tls_client_ca_file` | string | no | --   | PEM-encoded CA bundle that must sign every client certificate |
+| `tls_client_crl_file` | string | no | --  | PEM-encoded certificate revocation lists (`X509 CRL` blocks) checked against every client certificate chain; requires the three TLS fields. See [client certificate revocation](#grpc-client-certificate-revocation) |
 | `tls_expiry_warning_seconds` | integer (`u32`) | no | `0` | Opt-in certificate expiry warning window in seconds, including past dates; `0` disables warnings only. Restart-required. |
 
 **Native gRPC mTLS.** Setting any of `tls_cert_file` / `tls_key_file` /
@@ -744,6 +745,24 @@ server identity and client CA for every listener, then atomically publishes one
 process-wide credential generation. A malformed or partial rotation leaves the
 last-known-good generation active. Changing a path or TLS/auth mode remains
 **restart-required** and stays visible as drift until restart.
+
+<a id="grpc-client-certificate-revocation"></a>
+**Client certificate revocation.** `tls_client_crl_file` names a PEM file of
+one or more CRLs. When it is set, a client whose certificate chain includes a
+revoked certificate is refused at the TLS handshake. Without it, revocation is
+not checked, as before. Once configured, the daemon fails closed:
+
+- a missing, empty, or unparsable CRL file fails startup and `--check`, and
+  rejects a SIGHUP credential reload, which keeps the last good generation;
+- a CRL past its `nextUpdate` refuses every client until a fresh CRL is
+  installed and reloaded;
+- every certificate in a client chain must be covered by a CRL from its
+  issuer, so a deployment with intermediate CAs needs a CRL from each.
+
+SIGHUP re-reads the CRL with the other credential files; replace the file
+before its `nextUpdate` and reload. Changing the path, or adding or removing
+the field, is restart-required. The file is public material and is checked
+only as a regular file.
 
 Expiry metrics and successful-client metadata logs are available independently
 of `tls_expiry_warning_seconds`. A positive window adds warnings at startup,

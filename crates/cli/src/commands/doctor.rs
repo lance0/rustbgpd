@@ -3069,6 +3069,7 @@ fn credential_file_checks(document: &toml::Value, process: Option<LocalProcess>)
                 ("tls_cert_file", "certificate", CredentialKind::Public),
                 ("tls_key_file", "private key", CredentialKind::Secret),
                 ("tls_client_ca_file", "client CA", CredentialKind::Public),
+                ("tls_client_crl_file", "client CRL", CredentialKind::Public),
             ][..],
         ),
         (

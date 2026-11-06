@@ -1568,6 +1568,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                     cert_file: paths.cert_file.clone(),
                     key_file: paths.key_file.clone(),
                     client_ca_file: paths.client_ca_file.clone(),
+                    client_crl_file: paths.client_crl_file.clone(),
                 }),
             },
             GrpcListener::Uds { token_file, .. } => CredentialSource {

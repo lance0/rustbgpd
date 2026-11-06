@@ -1640,6 +1640,13 @@
             "null"
           ]
         },
+        "tls_client_crl_file": {
+          "description": "Optional certificate revocation lists (PEM file path, one or more\n`X509 CRL` blocks) checked against every client certificate chain.\nRequires the three TLS fields. Re-read on every credential reload;\nonce configured, a missing, unparsable, or expired CRL fails closed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tls_expiry_warning_seconds": {
           "description": "Warn when a TLS certificate notAfter is within this many seconds,\nincluding past dates. Default 0 disables warnings only; expiry metrics\nand successful client handshake metadata remain available. Restart-required.",
           "type": "integer",

@@ -81,7 +81,10 @@ Preferred posture:
   the server certificate, requires every client to present a
   certificate signed by `tls_client_ca_file`, and rejects unverified
   clients at the TLS layer before any gRPC handler runs. There is
-  no "TLS-without-mTLS" half-mode by design. Config loading checks file
+  no "TLS-without-mTLS" half-mode by design. Set `tls_client_crl_file` to
+  refuse revoked client certificates; once set, a missing, unparsable, or
+  expired CRL fails closed (see
+  [client certificate revocation](configuration.md#grpc-client-certificate-revocation)). Config loading checks file
   readability and PEM framing. After staging replacement files at the
   configured paths, run `rustbgpd --check --strict /etc/rustbgpd/config.toml`
   before SIGHUP or restart: both `--check`
