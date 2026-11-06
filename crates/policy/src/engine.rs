@@ -1868,6 +1868,12 @@ impl PolicyChain {
         for (index, set) in compiled.asn_sets.iter().enumerate() {
             writeln!(canonical, "asn-set[{index}]={:?}", set.asns())
                 .expect("writing canonical policy identity to String cannot fail");
+            // Only sets with ranges add a line, so an exact-only set keeps
+            // the identity it had before ranges existed.
+            if !set.ranges().is_empty() {
+                writeln!(canonical, "asn-set[{index}].ranges={:?}", set.ranges())
+                    .expect("writing canonical policy identity to String cannot fail");
+            }
         }
         for (index, regex) in compiled.as_path_regexes.iter().enumerate() {
             writeln!(canonical, "as-path-regex[{index}]={:?}", regex.pattern())

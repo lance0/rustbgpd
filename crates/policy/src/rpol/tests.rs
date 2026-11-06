@@ -14056,4 +14056,45 @@ test miss {
         let source = "asn-set s { 64496..64511, PRIVATE_AS, 7 }\n";
         assert_eq!(format_rpol(source).unwrap(), source);
     }
+
+    /// Ranges are part of the warm-checkpoint identity: two sets that differ
+    /// only in their ranges answer differently, so they must not share an
+    /// identity. An exact-only set keeps the bytes it had before ranges.
+    #[test]
+    fn ranges_take_part_in_the_checkpoint_identity() {
+        use sha2::{Digest, Sha256};
+
+        let identity = |members: &str| {
+            crate::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+                "p".into(),
+                std::sync::Arc::new(compile_ok(&format!(
+                    "asn-set s {{ {members} }} \
+                     policy p {{ term t {{ if route.origin-as in s {{ reject }} }} }}"
+                ))),
+            )])
+            .warm_checkpoint_identity_v1()
+            .unwrap()
+        };
+        // Pinned from the encoding before ranges existed.
+        let exact = identity("64500, 64501");
+        assert_eq!(
+            Sha256::digest(&exact)
+                .iter()
+                .fold(String::new(), |mut hex, byte| {
+                    let _ = write!(hex, "{byte:02x}");
+                    hex
+                }),
+            "7d0bddd3507d0001244532c2e2a4415fd0bc3da02d4b606cb0ed042a769dfb4f",
+            "{}",
+            String::from_utf8_lossy(&exact)
+        );
+        assert_ne!(identity("100..200"), identity("300..400"));
+        assert_ne!(identity("7, 100..200"), identity("7, 100..201"));
+        assert_ne!(identity("PRIVATE_AS"), identity("64512..65534"));
+        assert_eq!(
+            identity("PRIVATE_AS"),
+            identity("64512..65534, 4200000000..4294967294"),
+            "PRIVATE_AS is its canonical ranges"
+        );
+    }
 }
