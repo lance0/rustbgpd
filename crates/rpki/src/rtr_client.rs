@@ -4142,16 +4142,30 @@ mod tests {
                 flags: 1,
                 prefix_len: 24,
                 max_len: 24,
-                prefix: Ipv4Addr::new(203, 0, 113, i),
+                // Distinct /24s with no host bits: the budget, not a
+                // corrupt Prefix PDU, must end the transaction.
+                prefix: Ipv4Addr::new(203, 0, 113 + i, 0),
                 asn: 65001,
             });
         }
+        // A complete transaction, so an unenforced budget would publish it.
+        pdus.push(RtrPdu::EndOfData {
+            session_id: 7,
+            serial: 1,
+            refresh: 60,
+            retry: 5,
+            expire: 120,
+        });
         write_pdus(&mut stream, &pdus).await;
 
         // Budget exceeded: the client drops the connection (bounded
         // error, no wedge/OOM) and publishes nothing.
         let (mut stream2, _) = listener.accept().await.unwrap();
-        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+        assert_eq!(
+            read_pdu_with_version(&mut stream2).await,
+            (crate::rtr_codec::RTR_VERSION_2, RtrPdu::ResetQuery),
+            "a record-budget failure is not a version refusal"
+        );
         assert!(vrp_rx.try_recv().is_err());
 
         client_handle.abort();
