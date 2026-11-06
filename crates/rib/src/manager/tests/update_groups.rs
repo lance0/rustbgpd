@@ -8083,6 +8083,160 @@ fn forced_peer_outside_dirty_tick_slice_waits_for_capacity() {
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, peer_count);
 }
 
+/// How the session holding a pending forced resync ends.
+#[derive(Clone, Copy, Debug)]
+enum ForcedSessionEnd {
+    GracefulRestart,
+    ReplacementPeerUp,
+    CollisionFailback,
+}
+
+/// A forced resync still pending against a full channel belongs to the
+/// session that owned the channel. When that outbound registration ends,
+/// the next registration's initial table already carries every route; a
+/// leftover force bit made the first distribution pass after it replay the
+/// whole table a second time.
+fn forced_resync_does_not_outlive_registration(end: ForcedSessionEnd, ungrouped: bool) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = ungrouped;
+    let stuck = peer_v4(Ipv4Addr::new(10, 44, 0, 1));
+    let live = peer_v4(Ipv4Addr::new(10, 44, 0, 2));
+    let peer_up = |peer, session_id, outbound_tx| RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    };
+    let (live_tx, mut live_rx) = mpsc::channel(64);
+    manager.handle_update(peer_up(live, 0, live_tx));
+    let (first_tx, mut first_rx) = mpsc::channel(64);
+    manager.handle_update(peer_up(stuck, 0, first_tx));
+    // A collision failback needs a second session that took over the
+    // registration while the first stays live as the survivor.
+    let (mut active_session, mut second_rx) = (0, None);
+    if matches!(end, ForcedSessionEnd::CollisionFailback) {
+        let (second_tx, rx) = mpsc::channel(64);
+        manager.handle_update(peer_up(stuck, 1, second_tx));
+        active_session = 1;
+        second_rx = Some(rx);
+    }
+    full_channel_pass(&mut manager, &[0, 1, 2], &[]);
+    let drain = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        let mut announced = Vec::new();
+        while let Ok(update) = rx.try_recv().map(delivered) {
+            announced.extend(update.announce.iter().map(|route| route.prefix));
+        }
+        announced
+    };
+    drain(&mut live_rx);
+    drain(&mut first_rx);
+    if let Some(rx) = second_rx.as_mut() {
+        drain(rx);
+    }
+    assert_eq!(manager.grouped_member_of(stuck).is_none(), ungrouped);
+
+    // The forced resync cannot run while the active channel is full.
+    let mut permits = Vec::new();
+    while let Ok(permit) = manager.outbound_peers[&stuck].clone().try_reserve_owned() {
+        permits.push(permit);
+    }
+    let (reply, _response) = oneshot::channel();
+    manager.handle_refresh_peer_outbound(stuck, reply);
+    assert!(manager.force_outbound_peers.contains(&stuck));
+
+    let mut next_rx = match end {
+        ForcedSessionEnd::GracefulRestart => {
+            manager.handle_update(RibUpdate::PeerGracefulRestart {
+                peer: stuck,
+                session_id: active_session,
+                restart_time: 120,
+                stale_routes_time: 360,
+                gr_families: ipv4_sendable(),
+                peer_llgr_capable: false,
+                peer_llgr_families: vec![],
+                llgr_stale_time: 0,
+            });
+            let (next_tx, next_rx) = mpsc::channel(64);
+            manager.handle_update(peer_up(stuck, 2, next_tx));
+            next_rx
+        }
+        ForcedSessionEnd::ReplacementPeerUp => {
+            let (next_tx, next_rx) = mpsc::channel(64);
+            manager.handle_update(peer_up(stuck, 2, next_tx));
+            next_rx
+        }
+        ForcedSessionEnd::CollisionFailback => {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer: stuck,
+                session_id: active_session,
+            });
+            first_rx
+        }
+    };
+    drop(permits);
+
+    let mut initial = drain(&mut next_rx);
+    initial.sort_unstable();
+    assert_eq!(
+        initial,
+        [0, 1, 2].map(full_channel_prefix),
+        "{end:?}: the new registration's initial table sends each route once"
+    );
+
+    // An ordinary distribution pass and resync tick after the initial table.
+    full_channel_pass(&mut manager, &[30], &[]);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(
+        drain(&mut next_rx),
+        [full_channel_prefix(30)],
+        "{end:?}: a force bit left from the ended registration replayed the table"
+    );
+    assert!(!manager.force_outbound_peers.contains(&stuck));
+}
+
+#[test]
+fn grouped_forced_resync_cleared_by_graceful_restart() {
+    forced_resync_does_not_outlive_registration(ForcedSessionEnd::GracefulRestart, false);
+}
+
+#[test]
+fn ungrouped_forced_resync_cleared_by_graceful_restart() {
+    forced_resync_does_not_outlive_registration(ForcedSessionEnd::GracefulRestart, true);
+}
+
+#[test]
+fn grouped_forced_resync_cleared_by_replacement_peer_up() {
+    forced_resync_does_not_outlive_registration(ForcedSessionEnd::ReplacementPeerUp, false);
+}
+
+#[test]
+fn ungrouped_forced_resync_cleared_by_replacement_peer_up() {
+    forced_resync_does_not_outlive_registration(ForcedSessionEnd::ReplacementPeerUp, true);
+}
+
+#[test]
+fn grouped_forced_resync_cleared_by_collision_failback() {
+    forced_resync_does_not_outlive_registration(ForcedSessionEnd::CollisionFailback, false);
+}
+
+#[test]
+fn ungrouped_forced_resync_cleared_by_collision_failback() {
+    forced_resync_does_not_outlive_registration(ForcedSessionEnd::CollisionFailback, true);
+}
+
 fn family_distribution_cases() -> [(Afi, Safi, bool); 7] {
     [
         (Afi::Ipv4, Safi::MplsVpn, false),

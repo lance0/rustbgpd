@@ -607,7 +607,6 @@ impl RibManager {
         self.set_peer_group(peer, None);
         self.peer_bgp_id.remove(&peer);
         self.peer_is_rr_client.remove(&peer);
-        self.force_outbound_peers.remove(&peer);
     }
 
     /// Remove every Adj-RIB-In route learned from `peer` and redistribute
@@ -1759,6 +1758,9 @@ impl RibManager {
         self.rtc_eor_hold_ready.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.dirty_since.remove(&peer);
+        // A forced resync is owed to the session whose channel it could not
+        // reach; the next registration's initial table already sends it all.
+        self.force_outbound_peers.remove(&peer);
         self.pending_eor.remove(&peer);
         self.selection_deferred_refresh.remove(&peer);
         // Purge the peer's queued route batches. This upholds the
