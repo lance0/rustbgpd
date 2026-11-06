@@ -1340,8 +1340,10 @@ impl PeerManager {
             }
         }
         // Only cleanup ownership survives deletion, not the old neighbor's
-        // operator state, safety latch or lifetime counters.
+        // operator state, safety latch, lifetime counters or planned-restart
+        // membership.
         self.port_mut(name).held = None;
+        self.planned_restart_interfaces.remove(name);
         let label = rustbgpd_telemetry::interface_peer_label(name);
         // BGP teardown is settled; a pending BFD cleanup must not let a
         // deleted and re-added neighbor inherit the old startup window. Like
@@ -2207,12 +2209,14 @@ impl PeerManager {
             .current_config
             .resolve_bound_interface_neighbor(&neighbor, endpoint.address, endpoint.ifindex)
             .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
-        // Restart-eligible like configured neighbors: during a planned
-        // restart's window the OPEN carries R=1, so helpers keep the routes
-        // they retained; after the window it carries R=0.
+        // Restart-eligible like startup static neighbors: during a planned
+        // restart's window a neighbor of that restart's roster sends R=1, so
+        // helpers keep the routes they retained; after the window, or for a
+        // neighbor added at runtime, it sends R=0.
+        let restart_eligible = self.planned_restart_interfaces.contains(name);
         Ok((
             neighbor,
-            Self::peer_manager_config_from_resolved(resolved, true),
+            Self::peer_manager_config_from_resolved(resolved, restart_eligible),
         ))
     }
 

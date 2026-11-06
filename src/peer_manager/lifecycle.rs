@@ -2593,6 +2593,14 @@ impl PeerManager {
         }
     }
 
+    /// Name the interface-only neighbors that take part in the planned
+    /// restart, so their bindings inside the window carry Restart State.
+    #[must_use]
+    pub(crate) fn with_planned_restart_interfaces(mut self, interfaces: Vec<String>) -> Self {
+        self.planned_restart_interfaces = interfaces.into_iter().collect();
+        self
+    }
+
     /// Seed the RIB identities the daemon allocated for its startup
     /// neighbors, so the RIB's startup waiters and the sessions agree.
     #[must_use]

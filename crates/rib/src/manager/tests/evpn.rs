@@ -3781,7 +3781,7 @@ async fn evpn_sessions_synced_waits_for_selection_deferral_release() {
             waiters: [a, b]
                 .into_iter()
                 .map(|peer| crate::SelectionDeferralWaiterConfig {
-                    peer: peer_v4(peer),
+                    peer: peer_v4(peer).into(),
                     families: evpn_sendable(),
                 })
                 .collect(),

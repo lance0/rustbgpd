@@ -4599,6 +4599,9 @@ impl RibManager {
                 keep_series,
             } => self.handle_peer_deleted(peer, label, keep_series),
             RibUpdate::RetireEorGraceInterface { interface } => {
+                if let Some(selection) = self.selection_deferral.as_mut() {
+                    selection.retire_interface(&interface);
+                }
                 self.retire_eor_grace_interface(interface);
             }
             RibUpdate::ReleasePeer { peer } => self.handle_release_peer(peer),

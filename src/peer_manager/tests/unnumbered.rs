@@ -1665,6 +1665,7 @@ async fn an_up_to_up_index_change_retires_the_old_scoped_peer() {
 async fn a_rediscovered_peer_carries_the_restart_state_only_within_the_window() {
     let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
     h.mgr.local_gr_restart_until = Some(std::time::Instant::now() + Duration::from_secs(60));
+    h.mgr.planned_restart_interfaces.insert("swp1".into());
     h.bind("swp1", Some(endpoint(2, 7))).await;
     // Mutation-red: binding as not restart-eligible clears the deadline.
     assert!(
@@ -1684,6 +1685,21 @@ async fn a_rediscovered_peer_carries_the_restart_state_only_within_the_window() 
         h.mgr.peers[&swp1_key(3)].transport_config.gr_restart_until,
         None,
         "R=0 after the window"
+    );
+}
+
+/// Like a static neighbor added at runtime, an interface-only neighbor that
+/// is not in the planned restart's roster binds with R=0 even inside the
+/// window: it is not a selection-deferral waiter.
+#[tokio::test]
+async fn a_neighbor_outside_the_restart_roster_binds_without_the_restart_state() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.mgr.local_gr_restart_until = Some(std::time::Instant::now() + Duration::from_secs(60));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        h.mgr.peers[&swp1_key(2)].transport_config.gr_restart_until,
+        None,
+        "R=0 for a neighbor the restart does not wait for"
     );
 }
 

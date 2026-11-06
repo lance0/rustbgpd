@@ -10,6 +10,7 @@ use crate::fast_hash::ShardedMap;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::mem::size_of;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_telemetry::BgpMetrics;
@@ -320,8 +321,11 @@ use super::helpers::{afi_safi_label, gauge_val};
 /// One peer in the startup-frozen RFC 4724 waiter roster.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectionDeferralWaiterConfig {
-    /// Static peer address.
-    pub peer: PeerId,
+    /// Configured neighbor: an addressed neighbor's startup handle, or an
+    /// interface-only neighbor's interface, which binds to the first
+    /// session learned on it (that neighbor keeps its handle across
+    /// endpoints until configuration deletes it).
+    pub peer: super::EorGraceTarget,
     /// Configured families for which this peer may become an `EoR` waiter.
     pub families: Vec<(Afi, Safi)>,
 }
@@ -429,6 +433,10 @@ pub(super) struct SelectionDeferral {
     /// Keep such peers blocked until the timer rather than let one `EoR` satisfy
     /// both configured sessions.
     ambiguous_peers: HashSet<PeerId>,
+    /// Interface-only roster entries whose neighbor has not yet had a
+    /// session, with their families. Like any dormant entry they hold
+    /// nothing until a session binds them.
+    unbound_interfaces: HashMap<Arc<str>, Vec<(Afi, Safi)>>,
 }
 
 impl SelectionDeferral {
@@ -466,20 +474,32 @@ impl SelectionDeferral {
         let mut active: HashMap<(Afi, Safi), FamilyGate> = HashMap::new();
         let mut seen = HashSet::new();
         let mut ambiguous_peers = HashSet::new();
+        let mut unbound_interfaces: HashMap<Arc<str>, Vec<(Afi, Safi)>> = HashMap::new();
         for waiter in config.waiters {
-            if !seen.insert(waiter.peer) {
-                ambiguous_peers.insert(waiter.peer);
-            }
+            let peer = match waiter.peer {
+                super::EorGraceTarget::Peer(peer) => {
+                    if !seen.insert(peer) {
+                        ambiguous_peers.insert(peer);
+                    }
+                    Some(peer)
+                }
+                super::EorGraceTarget::Interface(interface) => {
+                    unbound_interfaces
+                        .entry(interface)
+                        .or_default()
+                        .extend(waiter.families.iter().copied());
+                    None
+                }
+            };
             for family in waiter.families {
-                active
-                    .entry(family)
-                    .or_insert_with(|| FamilyGate {
-                        waiters: HashMap::new(),
-                        selection_staged: false,
-                        armed: false,
-                    })
-                    .waiters
-                    .insert(waiter.peer, WaiterState::AwaitingSession);
+                let gate = active.entry(family).or_insert_with(|| FamilyGate {
+                    waiters: HashMap::new(),
+                    selection_staged: false,
+                    armed: false,
+                });
+                if let Some(peer) = peer {
+                    gate.waiters.insert(peer, WaiterState::AwaitingSession);
+                }
             }
         }
         for peer in &ambiguous_peers {
@@ -499,7 +519,36 @@ impl SelectionDeferral {
             active,
             released: HashMap::new(),
             ambiguous_peers,
+            unbound_interfaces,
         })
+    }
+
+    /// Bind an interface-only roster entry to the first session learned on
+    /// its interface. No other neighbor can be scoped to that interface
+    /// (ADR-0142), and the neighbor keeps this handle for its lifetime.
+    fn bind_interface(&mut self, peer: PeerId) {
+        if self.unbound_interfaces.is_empty() {
+            return;
+        }
+        let Some(families) = peer
+            .interface()
+            .and_then(|interface| self.unbound_interfaces.remove(&interface))
+        else {
+            return;
+        };
+        for family in families {
+            if let Some(gate) = self.active.get_mut(&family) {
+                gate.waiters
+                    .entry(peer)
+                    .or_insert(WaiterState::AwaitingSession);
+            }
+        }
+    }
+
+    /// Configuration removed an interface-only neighbor before any session
+    /// bound its roster entry.
+    pub(super) fn retire_interface(&mut self, interface: &str) {
+        self.unbound_interfaces.remove(interface);
     }
 
     pub(super) fn is_gated(&self, family: (Afi, Safi)) -> bool {
@@ -653,6 +702,7 @@ impl SelectionDeferral {
         peer_gr_families: &HashSet<(Afi, Safi)>,
         metrics: &BgpMetrics,
     ) -> Vec<SelectionDeferralTransition> {
+        self.bind_interface(peer);
         if session_id == 0 || self.ambiguous_peers.contains(&peer) {
             self.unclassified_session(peer, session_id, metrics);
             return Vec::new();
@@ -697,6 +747,7 @@ impl SelectionDeferral {
         session_id: u64,
         metrics: &BgpMetrics,
     ) {
+        self.bind_interface(peer);
         for (&family, gate) in &mut self.active {
             if let Some(state) = gate.waiters.get_mut(&peer) {
                 gate.armed = true;
@@ -749,6 +800,7 @@ impl SelectionDeferral {
         peer_enhanced_refresh: bool,
         metrics: &BgpMetrics,
     ) -> Option<Vec<SelectionDeferralTransition>> {
+        self.bind_interface(peer);
         if session_id == 0 || self.ambiguous_peers.contains(&peer) {
             self.unclassified_session(peer, session_id, metrics);
             return None;
@@ -826,9 +878,13 @@ impl SelectionDeferral {
     /// done completes here instead of blocking until the timer. An
     /// ambiguous roster address stays fail-closed: address-only identity
     /// cannot tell which of the duplicate configured peers was deleted.
+    /// A retired interface-only binding (`keep_series`) is not a deletion:
+    /// the neighbor keeps its handle and roster entry, and only its departed
+    /// session stops blocking.
     pub(super) fn peer_deleted(
         &mut self,
         peer: PeerId,
+        keep_series: bool,
         metrics: &BgpMetrics,
     ) -> Vec<SelectionDeferralTransition> {
         if self.ambiguous_peers.contains(&peer) {
@@ -844,7 +900,15 @@ impl SelectionDeferral {
             let Some(gate) = self.active.get_mut(&family) else {
                 continue;
             };
-            if gate.waiters.remove(&peer).is_none() {
+            let present = if keep_series {
+                gate.waiters
+                    .get_mut(&peer)
+                    .map(|state| *state = WaiterState::AwaitingSession)
+                    .is_some()
+            } else {
+                gate.waiters.remove(&peer).is_some()
+            };
+            if !present {
                 continue;
             }
             metrics.set_selection_deferral_waiters(

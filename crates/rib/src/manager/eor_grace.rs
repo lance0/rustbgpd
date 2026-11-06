@@ -32,7 +32,8 @@ use super::RibManager;
 use crate::injection_lease::LeaseConflict;
 use crate::update::RibCommandError;
 
-/// A configured neighbor whose grace window starts before its session exists.
+/// A configured neighbor whose planned-restart state (grace window or
+/// selection-deferral roster entry) starts before its session exists.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EorGraceTarget {
     /// An addressed neighbor whose handle is allocated at startup.

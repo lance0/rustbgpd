@@ -416,7 +416,7 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
         manager = manager.with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: source,
+                peer: source.into(),
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             }],
         });

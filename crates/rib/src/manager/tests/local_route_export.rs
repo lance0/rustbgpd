@@ -1575,7 +1575,7 @@ fn injected_flowspec_is_exported_during_selection_deferral() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: std::time::Duration::from_mins(2),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+                peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)).into(),
                 families: vec![FLOWSPEC, UNICAST],
             }],
         });
@@ -1786,7 +1786,7 @@ fn restart_unicast_manager(armed: bool) -> RibManager {
     .with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_mins(2),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)).into(),
             families: deferred_unicast_families(),
         }],
     })
@@ -2514,7 +2514,7 @@ fn dormant_selection_arming_replays_frozen_routes_to_late_joiners() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_mins(2),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: waiter,
+                peer: waiter.into(),
                 families: deferred_unicast_families(),
             }],
         });

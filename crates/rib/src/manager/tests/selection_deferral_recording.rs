@@ -247,7 +247,7 @@ fn recording_manager(families: Vec<(Afi, Safi)>) -> RibManager {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_mins(1),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(SOURCE),
+                peer: peer_v4(SOURCE).into(),
                 families,
             }],
         });

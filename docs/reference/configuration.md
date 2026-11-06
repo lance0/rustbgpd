@@ -2382,8 +2382,12 @@ daemon may advertise `R=1` after a planned restart, but configured kernel
 installers still advertise `forwarding_preserved = false`. The daemon never
 restores route state from the optional shutdown checkpoint. During that
 marker-backed startup it
-captures the effective static GR peer/family roster, but waits for EoR only
-from sessions that have re-established since the restart. Each family's
+captures the effective GR peer/family roster of the configured neighbors,
+static and interface-only, but waits for EoR only from sessions that have
+re-established since the restart. An interface-only neighbor joins the
+roster by interface, and its first session after the restart binds it; an
+interface-only neighbor added at runtime is not in the roster and, like a
+static neighbor added at runtime, advertises `R=0`. Each family's
 selection-deferral roster starts dormant and applies no hold until a roster
 peer re-establishes a session for it. A configured neighbor that stays down or never returns does
 not hold selection. New current sessions can join an active family wait;
@@ -2394,7 +2398,9 @@ the remaining marker window expires. See the
 [startup selection amendment](../adr/0141-injection-owner-lease.md#amendment-wait-for-re-established-gr-peers-2026-10-27).
 `gr_restart_time` therefore bounds both the advertised restart window and,
 via the maximum effective value
-across static peers, the process-start selection deferral. API-injected
+across configured GR neighbors, the process-start selection deferral. The
+shutdown marker takes that maximum from the committed runtime configuration,
+so neighbors added and `gr_restart_time` changes made at runtime count. API-injected
 RTBH unicast routes (`/32`, `/128` or standard BLACKHOLE `65535:666`) and
 FlowSpec rules are exceptions: only those local candidates compete while
 selection is deferred, subject to the existing export policy and admission

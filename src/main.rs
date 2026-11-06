@@ -1055,10 +1055,93 @@ fn raw_max_gr_restart_time_secs(config: &Config) -> Option<u64> {
         .max()
 }
 
-/// Planned-restart End-of-RIB grace windows for static GR neighbors that set
-/// `gr_eor_grace_time`. One absolute deadline per peer, counted from daemon
-/// start (so startup work cannot stretch it) and never past the
-/// restart-marker window.
+/// The neighbors that take part in a planned restart: every Graceful Restart
+/// neighbor, addressed or interface-only. The selection-deferral roster, the
+/// End-of-RIB grace windows, the interface-only Restart State eligibility and
+/// the restart-marker window are all derived from this one filter.
+fn planned_restart_neighbors<'a>(
+    neighbors: impl IntoIterator<Item = &'a config::ResolvedNeighbor>,
+) -> impl Iterator<Item = &'a rustbgpd_transport::TransportConfig> {
+    neighbors
+        .into_iter()
+        .map(|neighbor| &neighbor.transport_config)
+        .filter(|transport| transport.peer.graceful_restart)
+}
+
+/// The RIB's startup name for a planned-restart neighbor: an addressed
+/// neighbor's preallocated handle, or an interface-only neighbor's interface
+/// (its handle is allocated at its first binding).
+fn planned_restart_target(
+    transport: &rustbgpd_transport::TransportConfig,
+) -> rustbgpd_rib::EorGraceTarget {
+    if transport.interface_only {
+        rustbgpd_rib::EorGraceTarget::Interface(
+            transport
+                .peer_interface
+                .as_deref()
+                .map(std::sync::Arc::from)
+                .expect("interface-only neighbor has an interface"),
+        )
+    } else {
+        transport
+            .rib_peer
+            .current(transport.remote_addr.ip())
+            .into()
+    }
+}
+
+/// The families a planned restart covers toward a neighbor: the Graceful
+/// Restart families this daemon advertises to it.
+fn planned_restart_families(transport: &rustbgpd_transport::TransportConfig) -> Vec<(Afi, Safi)> {
+    transport
+        .peer
+        .effective_families()
+        .into_iter()
+        .filter(|family| rustbgpd_fsm::graceful_restart_preserves_family(*family))
+        .collect()
+}
+
+/// What a marker-backed planned restart derives from its roster, the
+/// startup static and interface-only neighbors.
+struct PlannedRestart {
+    /// RFC 4724 restarting-speaker selection deferral.
+    deferral: rustbgpd_rib::SelectionDeferralConfig,
+    /// End-of-RIB grace windows.
+    eor_grace: rustbgpd_rib::EorGraceConfig,
+    /// Interface-only neighbors whose bindings inside the window carry
+    /// Restart State (startup static peers carry it by construction).
+    interfaces: Vec<String>,
+}
+
+fn planned_restart(
+    static_neighbors: &[config::ResolvedNeighbor],
+    interface_neighbors: &[config::ResolvedNeighbor],
+    start_time: tokio::time::Instant,
+    restart_deadline: StdInstant,
+    replay_owners: &[String],
+) -> PlannedRestart {
+    let roster = || static_neighbors.iter().chain(interface_neighbors);
+    PlannedRestart {
+        deferral: rustbgpd_rib::SelectionDeferralConfig {
+            timeout: restart_deadline.saturating_duration_since(StdInstant::now()),
+            waiters: planned_restart_neighbors(roster())
+                .map(|transport| rustbgpd_rib::SelectionDeferralWaiterConfig {
+                    peer: planned_restart_target(transport),
+                    families: planned_restart_families(transport),
+                })
+                .collect(),
+        },
+        eor_grace: eor_grace_config(roster(), start_time, restart_deadline, replay_owners),
+        interfaces: planned_restart_neighbors(interface_neighbors)
+            .filter_map(|transport| transport.peer_interface.clone())
+            .collect(),
+    }
+}
+
+/// Planned-restart End-of-RIB grace windows for the planned-restart
+/// neighbors that set `gr_eor_grace_time`. One absolute deadline per peer,
+/// counted from daemon start (so startup work cannot stretch it) and never
+/// past the restart-marker window.
 fn eor_grace_config<'a>(
     peer_configs: impl IntoIterator<Item = &'a config::ResolvedNeighbor>,
     start_time: tokio::time::Instant,
@@ -1068,33 +1151,13 @@ fn eor_grace_config<'a>(
     let restart_deadline = tokio::time::Instant::from_std(restart_deadline);
     rustbgpd_rib::EorGraceConfig {
         replay_owners: replay_owners.to_vec(),
-        peers: peer_configs
-            .into_iter()
-            .map(|neighbor| &neighbor.transport_config)
-            .filter(|transport| transport.peer.graceful_restart && transport.gr_eor_grace_time > 0)
+        peers: planned_restart_neighbors(peer_configs)
+            .filter(|transport| transport.gr_eor_grace_time > 0)
             .map(|transport| rustbgpd_rib::EorGracePeerConfig {
-                peer: if transport.interface_only {
-                    rustbgpd_rib::EorGraceTarget::Interface(
-                        transport
-                            .peer_interface
-                            .as_deref()
-                            .map(std::sync::Arc::from)
-                            .expect("interface-only neighbor has an interface"),
-                    )
-                } else {
-                    transport
-                        .rib_peer
-                        .current(transport.remote_addr.ip())
-                        .into()
-                },
+                peer: planned_restart_target(transport),
                 deadline: (start_time + Duration::from_secs(transport.gr_eor_grace_time.into()))
                     .min(restart_deadline),
-                families: transport
-                    .peer
-                    .effective_families()
-                    .into_iter()
-                    .filter(|family| rustbgpd_fsm::graceful_restart_preserves_family(*family))
-                    .collect(),
+                families: planned_restart_families(transport),
             })
             .collect(),
     }
@@ -1105,10 +1168,8 @@ fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
         neighbors.extend(config.interface_only_resolved_for_comparison()?);
         Ok(neighbors)
     }) {
-        Ok(neighbors) => neighbors
-            .iter()
-            .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
-            .map(|neighbor| u64::from(neighbor.transport_config.peer.gr_restart_time))
+        Ok(neighbors) => planned_restart_neighbors(&neighbors)
+            .map(|transport| u64::from(transport.peer.gr_restart_time))
             .filter(|seconds| *seconds > 0)
             .max(),
         Err(error) => {
@@ -4943,40 +5004,27 @@ async fn run<T>(
     {
         rib_manager = rib_manager.with_eager_dataplane_prefix_index();
     }
+    // Interface-only neighbors that bind inside the window advertise the
+    // Restart State bit only when they belong to the planned restart.
+    let mut planned_restart_interfaces = Vec::new();
     if let Some(deadline) = local_gr_restart_until {
-        let waiters = peer_configs
-            .iter()
-            .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
-            .map(|neighbor| rustbgpd_rib::SelectionDeferralWaiterConfig {
-                peer: neighbor
-                    .transport_config
-                    .rib_peer
-                    .current(neighbor.transport_config.remote_addr.ip()),
-                families: neighbor
-                    .transport_config
-                    .peer
-                    .effective_families()
-                    .into_iter()
-                    .filter(|family| rustbgpd_fsm::graceful_restart_preserves_family(*family))
-                    .collect(),
-            })
-            .collect();
-        rib_manager = rib_manager.with_selection_deferral(rustbgpd_rib::SelectionDeferralConfig {
-            timeout: deadline.saturating_duration_since(StdInstant::now()),
-            waiters,
-        });
         let interface_configs = config
             .interface_only_resolved_for_comparison()
             .unwrap_or_else(|e| {
                 error!(error = %e, "invalid interface-only Graceful Restart configuration");
                 process::exit(1);
             });
-        rib_manager = rib_manager.with_eor_grace(eor_grace_config(
-            peer_configs.iter().chain(&interface_configs),
+        let restart = planned_restart(
+            &peer_configs,
+            &interface_configs,
             start_time,
             deadline,
             &config.global.gr_eor_replay_owners,
-        ));
+        );
+        rib_manager = rib_manager
+            .with_selection_deferral(restart.deferral)
+            .with_eor_grace(restart.eor_grace);
+        planned_restart_interfaces = restart.interfaces;
     } else {
         // A cold boot holds nothing, but knowing the listed controllers lets
         // a replay-complete signal answer NOT_HOLDING rather than
@@ -5307,6 +5355,7 @@ async fn run<T>(
     .with_local_forwarding_state(local_forwarding_state.clone())
     .with_readiness_queries(peer_mgr_readiness_rx)
     .with_operator_queries(peer_mgr_operator_rx)
+    .with_planned_restart_interfaces(planned_restart_interfaces)
     .with_rib_peers(peer_configs.iter().map(|neighbor| {
         let transport = &neighbor.transport_config;
         (
@@ -7287,7 +7336,13 @@ async fn run<T>(
     drop(profiler);
 
     let runtime_config_deadline = tokio::time::Instant::now() + WARM_CHECKPOINT_DEADLINE;
-    let mut restart_time_secs = max_gr_restart_time_secs(&config);
+    // The committed runtime configuration: runtime neighbor CRUD and config
+    // transactions publish to the accepted authority, never to this boot
+    // copy, which only SIGHUP reassigns.
+    let mut restart_time_secs = accepted_rx.as_ref().map_or_else(
+        || max_gr_restart_time_secs(&config),
+        |accepted| max_gr_restart_time_secs(accepted.borrow().config_ref()),
+    );
     let mut checkpoint_generation = None;
     // The drained coordinator is the warm-checkpoint fence.
     let mut checkpoint_failure = runtime_config_drain
@@ -7315,9 +7370,9 @@ async fn run<T>(
                 {
                     Ok(Ok(capture)) => {
                         // Marker expiry and bundle identity come from this same
-                        // actor-consistent capture. Main's Config can lag
-                        // accepted runtime CRUD and is only the generationless
-                        // compatibility fallback when capture itself fails.
+                        // actor-consistent capture. The accepted window above
+                        // is only the generationless compatibility fallback
+                        // when capture itself fails.
                         restart_time_secs = capture.restart_time_secs;
                         if restart_time_secs.is_some() {
                             match tokio::time::timeout_at(
@@ -12003,6 +12058,61 @@ gr_eor_grace_time = 0
             tokio::time::Instant::from_std(deadline)
         );
         assert_eq!(grace.peers[0].families, [(Afi::Ipv6, Safi::Unicast)]);
+    }
+
+    /// A planned restart whose only Graceful Restart neighbors are
+    /// interface-only still defers selection (RFC 4724 §4.1): each is a
+    /// waiter by interface, and the grace windows and the Restart State
+    /// bindings come from that same roster.
+    #[test]
+    fn interface_only_planned_restart_derives_every_list_from_one_roster() {
+        let config: Config = toml::from_str(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[[neighbors]]
+interface = "rbgp-absent0"
+remote_asn = "external"
+families = ["ipv6_unicast"]
+gr_eor_grace_time = 60
+[[neighbors]]
+interface = "rbgp-absent1"
+remote_asn = "external"
+graceful_restart = false
+"#,
+        )
+        .unwrap();
+        assert!(config.resolved_neighbors().unwrap().is_empty());
+        let interfaces = config.interface_only_resolved_for_comparison().unwrap();
+        let now = StdInstant::now();
+        let restart = planned_restart(
+            &[],
+            &interfaces,
+            tokio::time::Instant::from_std(now),
+            now + Duration::from_secs(120),
+            &[],
+        );
+        let target = rustbgpd_rib::EorGraceTarget::Interface("rbgp-absent0".into());
+        assert_eq!(
+            restart.deferral.waiters,
+            [rustbgpd_rib::SelectionDeferralWaiterConfig {
+                peer: target.clone(),
+                families: vec![(Afi::Ipv6, Safi::Unicast)],
+            }],
+            "an interface-only GR neighbor is a selection-deferral waiter"
+        );
+        let grace: Vec<_> = restart
+            .eor_grace
+            .peers
+            .iter()
+            .map(|peer| &peer.peer)
+            .collect();
+        assert_eq!(grace, [&target]);
+        assert_eq!(restart.interfaces, ["rbgp-absent0"]);
     }
 
     /// When only an IPv4 neighbor has `tcp_mss = 536`, the IPv4 listener gets

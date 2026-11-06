@@ -5,7 +5,8 @@
 //! restart the daemon instead of treating it as a clean stop. Live proofs cover
 //! startup binds, the RIB manager, RPKI subsystem, both inbound-admission tasks,
 //! and the peer manager; the Shutdown RPC proof pins the intentional exit-0 path
-//! beside them.
+//! beside them. A SIGTERM also publishes the Graceful Restart marker window
+//! from the committed runtime configuration, runtime changes included.
 
 #[path = "support/cargo.rs"]
 mod cargo;
@@ -1677,5 +1678,132 @@ fn sigterm_exits_zero() {
     assert!(
         !logs.contains(hidden),
         "unknown environment value leaked: {logs}"
+    );
+}
+
+/// The owner-only gRPC socket, once the daemon answers on it.
+fn wait_for_owner_socket(daemon: &mut Daemon, dir: &Path) -> String {
+    let grpc_addr = format!("unix://{}", dir.join("runtime/grpc.sock").display());
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let output = rbgp(&grpc_addr, &["neighbor"]);
+        if output.status.success() {
+            return grpc_addr;
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited before serving gRPC: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rustbgpd never served gRPC\nstderr:\n{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn rbgp_ok(daemon: &Daemon, grpc_addr: &str, args: &[&str]) {
+    let output = rbgp(grpc_addr, args);
+    assert!(
+        output.status.success(),
+        "rbgp {args:?} failed\nstdout:\n{}\nstderr:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        daemon.logs()
+    );
+}
+
+/// SIGTERM the daemon (warm checkpoint off, the default) and return the
+/// restart-marker window its coordinated shutdown published, if any.
+fn sigterm_restart_marker_window(daemon: &mut Daemon, dir: &Path) -> Option<u64> {
+    let sigterm = Command::new("kill")
+        .args(["-TERM", &daemon.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
+    let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
+    assert_eq!(status.code(), Some(0), "SIGTERM must exit 0\n{logs}");
+    let window = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| {
+            event["fields"]["message"]
+                == "finished GR restart marker publication for coordinated shutdown"
+        })
+        .map(|event| {
+            event["fields"]["restart_time_secs"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("marker publication names its window\n{logs}"))
+        });
+    assert_eq!(
+        dir.join("runtime/gr-restart.toml").exists(),
+        window.is_some(),
+        "the marker file agrees with the publication log\n{logs}"
+    );
+    window
+}
+
+/// A Graceful Restart neighbor added through gRPC after boot is covered by
+/// the restart marker: without it the next start is cold and the neighbor's
+/// helper flushes the routes it kept for us.
+#[test]
+fn sigterm_marker_window_covers_a_gr_neighbor_added_at_runtime() {
+    let temp = private_tempdir();
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let mut daemon = spawn_daemon(temp.path(), &config_path);
+    let grpc_addr = wait_for_owner_socket(&mut daemon, temp.path());
+    rbgp_ok(
+        &daemon,
+        &grpc_addr,
+        &["neighbor", "127.0.0.2", "add", "--remote-asn", "65002"],
+    );
+    assert_eq!(
+        sigterm_restart_marker_window(&mut daemon, temp.path()),
+        Some(120),
+        "the default gr_restart_time of the added neighbor"
+    );
+}
+
+/// Raising `gr_restart_time` at runtime widens the marker window to match.
+#[test]
+fn sigterm_marker_window_follows_a_gr_restart_time_raised_at_runtime() {
+    let temp = private_tempdir();
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let mut config = std::fs::read_to_string(&config_path).expect("read test config");
+    config.push_str(
+        r#"
+[peer_groups.gr]
+gr_restart_time = 30
+
+[[neighbors]]
+address = "127.0.0.2"
+remote_asn = 65002
+peer_group = "gr"
+"#,
+    );
+    std::fs::write(&config_path, config).expect("write test config");
+    let group = temp.path().join("peer-group-gr.json");
+    std::fs::write(&group, r#"{"gr_restart_time": 300}"#).expect("write peer group");
+    let mut daemon = spawn_daemon(temp.path(), &config_path);
+    let grpc_addr = wait_for_owner_socket(&mut daemon, temp.path());
+    rbgp_ok(
+        &daemon,
+        &grpc_addr,
+        &[
+            "peer-group",
+            "set",
+            "gr",
+            "--from-file",
+            group.to_str().expect("utf-8 temp path"),
+        ],
+    );
+    assert_eq!(
+        sigterm_restart_marker_window(&mut daemon, temp.path()),
+        Some(300)
     );
 }

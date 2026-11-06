@@ -78,7 +78,7 @@ fn deferral(peers: &[PeerId]) -> SelectionDeferralConfig {
         waiters: peers
             .iter()
             .map(|&peer| SelectionDeferralWaiterConfig {
-                peer,
+                peer: peer.into(),
                 families: vec![V4, V6],
             })
             .collect(),
