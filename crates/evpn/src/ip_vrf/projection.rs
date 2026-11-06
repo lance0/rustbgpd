@@ -39,7 +39,9 @@
 //! ## Wire L3VNI vs configured L3VNI
 //!
 //! Each candidate IP-VRF must additionally satisfy
-//! `route.l3vni == vrf.id.as_u32()`. A mismatch means the
+//! `route.l3vni == vrf.id.as_u32()`, except that an overlay-index route
+//! (non-zero ESI or GW IP) may carry label 0 per RFC 9136 §3.1 and then
+//! resolves recursively under the IP-VRF's L3VNI. A mismatch means the
 //! originator's VNI for that RT disagrees with our local config —
 //! installing the route anyway would program a kernel FIB entry
 //! whose VXLAN encap uses the wrong VNI. Drop with
@@ -720,7 +722,8 @@ pub enum DropReason {
     /// the originator, or the operator's RT list overlaps two
     /// distinct tenants on this PE. Importing the route would
     /// produce a kernel FIB entry whose VXLAN encap uses the wrong
-    /// VNI; drop instead so the misconfig is observable.
+    /// VNI; drop instead so the misconfig is observable. An
+    /// overlay-index route with label 0 (RFC 9136 §3.1) is exempt.
     L3VniMismatch {
         prefix: EvpnIpPrefixValue,
         next_hop: IpAddr,
@@ -913,6 +916,13 @@ where
         }
 
         let overlay_gateway = !route.gateway.is_unspecified();
+        // RFC 9136 §3.1: a sender SHOULD zero the label of an overlay-index
+        // route, and a receiver MUST then resolve it recursively. The ESI or
+        // GW IP is the overlay index whatever the label (Table 1), so a zero
+        // label takes its L3VNI from the IP-VRF. A zero label without either
+        // still fails the check below.
+        let zero_label_overlay =
+            route.l3vni == 0 && (overlay_gateway || route.esi != EthernetSegmentIdentifier::ZERO);
 
         // A non-zero Ethernet Tag is never imported, so its RT, L3VNI and tag
         // verdict below takes precedence over a resolution-shape error.
@@ -939,7 +949,7 @@ where
                 continue;
             }
             matched_any_rt = true;
-            if route.l3vni != vrf.id.as_u32() {
+            if route.l3vni != vrf.id.as_u32() && !zero_label_overlay {
                 table.drops.push(DropReason::L3VniMismatch {
                     prefix: route.prefix,
                     next_hop: route.next_hop,
@@ -2204,6 +2214,99 @@ mod tests {
             "must record L3VniMismatch drop reason: {:?}",
             table.drops()
         );
+    }
+
+    // RFC 9136 §3.1: "When sending, the label value SHOULD be zero if a
+    // recursive resolution based on an Overlay Index is used. If the
+    // received MPLS label value is zero, the route MUST contain an Overlay
+    // Index, and the ingress NVE/PE MUST perform a recursive resolution to
+    // find the egress NVE/PE." The IP-VRF then supplies the L3VNI.
+    #[test]
+    fn label_zero_gateway_overlay_resolves_with_vrf_l3vni() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        r.router_mac = None;
+        r.l3vni = 0;
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![r],
+            vec![overlay(100, "192.0.2.10", 0xaa, "10.0.0.2")],
+        );
+
+        assert_eq!(table.drops().len(), 0, "{:?}", table.drops());
+        let entries: Vec<_> = table.for_vrf(IpVrfId::new(5000).unwrap()).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.l3vni, 5000);
+        assert_eq!(entries[0].1.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(entries[0].1.router_mac, mac_with_tail(0xaa));
+    }
+
+    // RFC 9136 §3.1, ESI overlay index (§4.3): label 0 resolves through the
+    // EAD-per-EVI route and the IP-VRF supplies the L3VNI.
+    #[test]
+    fn label_zero_esi_overlay_resolves_with_vrf_l3vni() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let esi = esi([0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        r.esi = esi;
+        r.router_mac = Some(mac_with_tail(0xee));
+        r.l3vni = 0;
+
+        let table = project_ip_prefix_routes_with_overlay_and_esi_index(
+            &vrfs,
+            vec![r],
+            Vec::new(),
+            vec![esi_ead(100, esi, 0, "10.0.0.2", true)],
+        );
+
+        assert_eq!(table.drops().len(), 0, "{:?}", table.drops());
+        let entries: Vec<_> = table.for_vrf(IpVrfId::new(5000).unwrap()).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.l3vni, 5000);
+        assert_eq!(entries[0].1.next_hop, "10.0.0.2".parse::<IpAddr>().unwrap());
+    }
+
+    // RFC 9136 §3.1: label 0 with neither an ESI nor a GW IP overlay index
+    // is still dropped. With only a Router's MAC it is a MAC overlay index
+    // (Table 1), an OPTIONAL model this projection does not resolve; with
+    // no Router's MAC either it is treat-as-withdraw at the wire layer. A
+    // nonzero label that disagrees with the IP-VRF stays a mismatch even on
+    // an overlay-index route.
+    #[test]
+    fn label_zero_without_overlay_and_nonzero_mismatch_still_drop() {
+        let mut vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        vrfs.mark_referenced_by_l2vni("blue".to_string(), l2vni(100));
+        let mut no_overlay = route(v4([10, 1, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        no_overlay.l3vni = 0;
+        let mut wrong_label = route(v4([10, 2, 0, 0], 24), "10.0.0.9", &["65000:5000"]);
+        wrong_label.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        wrong_label.router_mac = None;
+        wrong_label.l3vni = 9999;
+
+        let table = project_ip_prefix_routes_with_overlay_index(
+            &vrfs,
+            vec![no_overlay, wrong_label],
+            vec![overlay(100, "192.0.2.10", 0xaa, "10.0.0.2")],
+        );
+
+        assert!(table.is_empty(), "{:?}", table.drops());
+        let observed: Vec<u32> = table
+            .drops()
+            .iter()
+            .filter_map(|d| match d {
+                DropReason::L3VniMismatch {
+                    observed_vni,
+                    configured_vni: 5000,
+                    ..
+                } => Some(*observed_vni),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(observed, vec![0, 9999], "{:?}", table.drops());
     }
 
     #[test]
