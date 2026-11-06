@@ -763,13 +763,22 @@ impl PeerSession {
             if matches!(event, Event::AdministrativeReset { .. }) {
                 self.notification_idle_failures = 0;
             }
-            self.batch_notification_teardown = matches!(
-                down_reason,
-                Some(SessionDownReason::RemoteNotification | SessionDownReason::LocalNotification)
-            ) && !matches!(
-                event,
-                Event::AdministrativeReset { .. } | Event::ManualStop { .. }
-            );
+            // A local Cease/8 ends its connection through the transport
+            // failure batch; that teardown was a sent NOTIFICATION too.
+            let local_notification =
+                down_reason.is_some() && std::mem::take(&mut self.local_notification_teardown);
+            self.batch_notification_teardown = (local_notification
+                || matches!(
+                    down_reason,
+                    Some(
+                        SessionDownReason::RemoteNotification
+                            | SessionDownReason::LocalNotification
+                    )
+                ))
+                && !matches!(
+                    event,
+                    Event::AdministrativeReset { .. } | Event::ManualStop { .. }
+                );
             let follow_up = self.execute_actions(actions).await;
             pending.extend(follow_up);
         }

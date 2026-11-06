@@ -586,6 +586,7 @@ impl PeerSession {
             return;
         }
         self.pending_outbound_teardown_cause = Some(cause);
+        self.local_notification_teardown = true;
         // The session now ends after a NOTIFICATION we sent: without the N
         // bit the peer's routes are purged (RFC 4724 §4); with it they are
         // retained unless it is a Hard Reset (RFC 8538 §4). The teardown

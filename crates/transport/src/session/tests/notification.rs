@@ -1330,6 +1330,213 @@ async fn administrative_reset_clears_notification_idle_backoff() {
     assert_eq!(notification_cycle(&mut session).await, 30);
 }
 
+/// An outbound envelope without its exact export snapshot: admitting it
+/// raises a local Cease/8.
+fn update_without_export_snapshot() -> OutboundRouteUpdate {
+    OutboundRouteUpdate {
+        announce: vec![make_route(100)].into(),
+        next_hop_override: vec![None].into(),
+        ..OutboundRouteUpdate::default()
+    }
+}
+
+/// Finish a local Cease/8 teardown as the run loop's writer-exit arm does.
+async fn finish_writer_teardown(session: &mut PeerSession) {
+    let join = session.writer_join.take().expect("writer join");
+    let exit = tokio::time::timeout(Duration::from_secs(30), join)
+        .await
+        .expect("the torn-down writer exits");
+    session.handle_writer_exit(exit).await;
+}
+
+/// A local Cease/8 sent from Established (the outbound admission class)
+/// escalates the Idle backoff as any sent NOTIFICATION does.
+/// Mutation-red: without the local-NOTIFICATION latch the transport-failure
+/// batch keeps the base wait and the streak.
+#[tokio::test(start_paused = true)]
+async fn local_outbound_cease8_escalates_notification_idle_backoff() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session
+        .handle_outbound_route_update(update_without_export_snapshot())
+        .await;
+    assert_eq!(
+        session.pending_outbound_teardown_cause,
+        Some(crate::handle::SessionFailureCause::ExportSnapshotMissing)
+    );
+    finish_writer_teardown(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(
+        (
+            pending_reconnect_secs(&session),
+            session.notification_idle_failures
+        ),
+        (120, 3)
+    );
+    // A later plain TCP loss is not a NOTIFICATION teardown.
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session.handle_tcp_read_result(Ok(0)).await;
+    assert_eq!(
+        (
+            pending_reconnect_secs(&session),
+            session.notification_idle_failures
+        ),
+        (30, 3)
+    );
+}
+
+/// A local Cease/8 before Established (an OPEN exchange that ends in one)
+/// escalates the backoff too.
+#[tokio::test(start_paused = true)]
+async fn local_open_confirm_cease8_escalates_notification_idle_backoff() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session.drive_fsm(peer_open(65002)).await;
+    assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+    session.trigger_outbound_out_of_resources_teardown(
+        crate::handle::SessionFailureCause::OutboundSaturation,
+    );
+    finish_writer_teardown(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(
+        (
+            pending_reconnect_secs(&session),
+            session.notification_idle_failures
+        ),
+        (120, 3)
+    );
+}
+
+/// An administrative reset whose close drain raises a Cease/8 is still the
+/// operator's reset: it clears the streak and keeps the base wait.
+/// Mutation-red: without the reset arm's clear the drained Cease/8 escalates.
+#[tokio::test(start_paused = true)]
+async fn administrative_reset_drain_cease8_clears_notification_idle_backoff() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session
+        .outbound_tx
+        .send(update_without_export_snapshot())
+        .await
+        .unwrap();
+    let reset = session.handle_command(PeerCommand::AdministrativeReset { reason: None });
+    let _ = tokio::time::timeout(Duration::from_secs(30), reset)
+        .await
+        .expect("the reset settles");
+    assert_eq!(
+        session.config.neighbor_counters.notifications_sent(),
+        1,
+        "the drain's Cease/8 is the only NOTIFICATION"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(
+        (
+            pending_reconnect_secs(&session),
+            session.notification_idle_failures
+        ),
+        (30, 0)
+    );
+    assert_eq!(notification_cycle(&mut session).await, 30);
+}
+
+/// A reset handled after a local Cease/8 but before its writer exit is
+/// observed is still the operator's reset: the exclusion wins over the
+/// latch the reset batch takes.
+/// Mutation-red: counting the taken latch ahead of the exclusion leaves
+/// `(30, 1)`.
+#[tokio::test(start_paused = true)]
+async fn reset_before_cease8_writer_exit_clears_notification_idle_backoff() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session
+        .handle_outbound_route_update(update_without_export_snapshot())
+        .await;
+    assert!(session.local_notification_teardown);
+    let _ = session
+        .handle_command(PeerCommand::AdministrativeReset { reason: None })
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(
+        !session.local_notification_teardown,
+        "reset batch took the latch"
+    );
+    assert_eq!(
+        (
+            pending_reconnect_secs(&session),
+            session.notification_idle_failures
+        ),
+        (30, 0)
+    );
+    finish_writer_teardown(&mut session).await;
+    assert_eq!(
+        (
+            pending_reconnect_secs(&session),
+            session.notification_idle_failures
+        ),
+        (30, 0)
+    );
+}
+
+/// A Stop handled after a local Cease/8 but before its writer exit leaves no
+/// latch behind for a later Start's session.
+#[tokio::test(start_paused = true)]
+async fn stop_then_start_after_cease8_does_not_leak_the_latch() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session
+        .handle_outbound_route_update(update_without_export_snapshot())
+        .await;
+    let _ = session
+        .handle_command(PeerCommand::Stop { reason: None })
+        .await;
+    assert!(!session.local_notification_teardown);
+    finish_writer_teardown(&mut session).await;
+    assert!(!session.local_notification_teardown);
+    let _ = session.handle_command(PeerCommand::Start).await;
+    if let Some(task) = session.connect_task.take() {
+        task.abort();
+    }
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::TcpConnectionConfirmed).await;
+    session.drive_fsm(peer_open(65002)).await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    session.handle_tcp_read_result(Ok(0)).await;
+    assert_eq!(
+        (
+            pending_reconnect_secs(&session),
+            session.notification_idle_failures
+        ),
+        (30, 0)
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn administrative_reset_in_idle_clears_notification_backoff_and_reconnects() {
     let mut session = make_test_session(65001, 65002);
