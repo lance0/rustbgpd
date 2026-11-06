@@ -24,6 +24,18 @@ const TCP_BEGIN: &str = "# use-case-remote-tcp:begin";
 const TCP_END: &str = "# use-case-remote-tcp:end";
 const TOKEN_PLACEHOLDER: &str = "/etc/rustbgpd/grpc-token";
 
+/// A private copy of the token fixture in `dir`. A checkout leaves the
+/// fixture group- or world-readable, which `--check --strict` rightly
+/// refuses; a deployed token is mode 0600 and owned by the daemon user,
+/// here the test user.
+fn private_token_copy(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let token = dir.join("operator.token");
+    fs::copy(repo_root().join(TOKEN_FIXTURE), &token).expect("copy token fixture");
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("chmod token copy");
+    token
+}
+
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
@@ -170,6 +182,8 @@ fn unreadable_token_file(source: &str) -> Option<String> {
 fn every_example_config_passes_check_strict() {
     let configs = example_configs();
     assert!(!configs.is_empty(), "enumerated no example configs");
+    let token_dir = tempfile::tempdir().expect("tempdir");
+    let host_token = private_token_copy(token_dir.path());
 
     for config in &configs {
         let source = fs::read_to_string(config).expect("read example config");
@@ -181,7 +195,6 @@ fn every_example_config_passes_check_strict() {
                 .suffix(".config-check")
                 .tempfile_in(config.parent().expect("config has a parent directory"))
                 .expect("stage config beside its relative resources");
-            let host_token = repo_root().join(TOKEN_FIXTURE);
             file.write_all(
                 source
                     .replace(&token, &host_token.display().to_string())
@@ -234,8 +247,7 @@ fn use_case_config_fences_pass_base_and_authenticated_tcp_check_strict() {
         ("route-collector", "looking-glass", "observer"),
     ];
     let dir = tempfile::tempdir().expect("tempdir");
-    let token = dir.path().join("use-case.token");
-    fs::copy(repo_root().join(TOKEN_FIXTURE), &token).expect("copy token fixture");
+    let token = private_token_copy(dir.path());
     let token_literal = toml::Value::String(token.display().to_string()).to_string();
     let mut checks = 0;
     for (name, tcp_principal, tcp_role) in cases {
