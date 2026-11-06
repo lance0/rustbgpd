@@ -1559,8 +1559,8 @@ fn post_stamp_verdict(
 /// a stamp that is already on this link. The kernel returns the same
 /// errno when another link already holds that altname, and then this
 /// link stays unstamped. An unstamped link reads as foreign and is
-/// never reaped, so roll the create back and fail until the conflicting
-/// altname is removed.
+/// never reaped, so roll the create back. The failure is transient, so
+/// the create resumes on backoff once the conflicting altname is freed.
 ///
 /// Only the link we stamped (`stamped_ifindex`) is ever deleted. If the
 /// post-stamp lookup by name finds a different link, ours was replaced,
@@ -1582,9 +1582,12 @@ async fn ensure_stamp_landed_or_roll_back(
         ))),
         PostStamp::StampHeldElsewhere => {
             rollback_unstamped_create(handle, stamped_ifindex, name, context).await;
-            Err(DataplaneError::InvalidArgument(format!(
+            // Transient, not permanent: a permanent failure stays
+            // suppressed while the name is desired, so freeing the
+            // altname would never let the create resume.
+            Err(DataplaneError::Other(format!(
                 "{context} {name}: ownership stamp {ownership_stamp} is held by another link; \
-                 the unstamped create was rolled back"
+                 the unstamped create was rolled back and retries on backoff"
             )))
         }
     }

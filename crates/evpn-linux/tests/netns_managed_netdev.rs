@@ -1061,4 +1061,35 @@ async fn managed_bridge_create_adopt_and_reap_round_trip_inner() {
         !after.link_name_exists("brstolen"),
         "unstamped just-created bridge must be rolled back"
     );
+    // The conflict is retryable: once the other link gives the altname
+    // up, the same create succeeds and stamps the new bridge.
+    assert_eq!(err.class(), FailureClass::Transient, "{err}");
+    run(
+        "ip",
+        &[
+            "link",
+            "property",
+            "del",
+            "dev",
+            "stampthief",
+            "altname",
+            "rustbgpd:bridge:leaf-1:brstolen",
+        ],
+    );
+    restarted
+        .apply(&DataplaneOp::CreateManagedBridge {
+            name: "brstolen".to_string(),
+            vlan_filtering: true,
+            ownership_stamp: "rustbgpd:bridge:leaf-1:brstolen".to_string(),
+        })
+        .await
+        .expect("create resumes once the altname is free");
+    let resumed = restarted.dump_snapshot().await.expect("dump after resume");
+    assert_eq!(
+        resumed
+            .links
+            .get("brstolen")
+            .map(|link| link.altnames.clone()),
+        Some(vec!["rustbgpd:bridge:leaf-1:brstolen".to_string()])
+    );
 }

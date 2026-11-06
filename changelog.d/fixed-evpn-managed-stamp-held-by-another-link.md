@@ -5,5 +5,5 @@
   rejects the stamp with `EEXIST`, which rustbgpd treated as
   already-stamped. The new link then stayed unstamped, was reported as
   `foreign-present` and was never reaped. rustbgpd now rolls the create
-  back and reports the conflict until the other link's altname is
-  removed.
+  back and retries it on backoff. The create succeeds once the other
+  link's altname is removed.
