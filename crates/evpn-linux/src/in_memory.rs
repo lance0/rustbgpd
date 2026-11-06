@@ -579,7 +579,10 @@ impl InMemoryDataplane {
                 ownership_stamp,
             } => match state.kernel.links.get_mut(name) {
                 Some(link)
-                    if managed_bridge_exact(link, name, *vlan_filtering, ownership_stamp) => {}
+                    if managed_bridge_exact(link, name, *vlan_filtering, ownership_stamp) =>
+                {
+                    link.up = true;
+                }
                 Some(_) => {
                     return Err(crate::error::DataplaneError::InvalidArgument(format!(
                         "managed bridge {name} changed during apply"
@@ -601,6 +604,7 @@ impl InMemoryDataplane {
                         .saturating_add(1);
                     state.kernel.insert_link(KernelLinkInfo {
                         ifindex: next_ifindex,
+                        up: true,
                         bridge_name: name.clone(),
                         vlan_filtering: *vlan_filtering,
                         altnames: vec![ownership_stamp.clone()],
@@ -627,7 +631,9 @@ impl InMemoryDataplane {
                 spec,
                 ownership_stamp,
             } => match state.kernel.vxlans.get_mut(name) {
-                Some(link) if managed_vxlan_exact(link, name, spec, ownership_stamp) => {}
+                Some(link) if managed_vxlan_exact(link, name, spec, ownership_stamp) => {
+                    link.up = true;
+                }
                 Some(_) => {
                     return Err(crate::error::DataplaneError::InvalidArgument(format!(
                         "managed VXLAN {name} changed during apply"

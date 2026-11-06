@@ -102,13 +102,13 @@ instance `Ready` only when all hold (otherwise `NotReady{reason}`):
 
 | # | Predicate | Satisfied by |
 |---|-----------|--------------|
-| 1 | `bridge` exists in the kernel | `ip link add … type bridge` |
+| 1 | `bridge` exists in the kernel and is administratively up | `ip link add … type bridge`; `ip link set ${BRIDGE} up` |
 | 2a | without `bridge_vlan`: bridge is **not** VLAN-aware (`vlan_filtering=0`) and has exactly one VXLAN port | `type bridge vlan_filtering 0`; one `set master ${BRIDGE}` |
 | 2b | with `bridge_vlan` (fixed-VNI): bridge is VLAN-aware (`vlan_filtering=1`), exactly one fixed-VNI member has the instance VNI, and the configured VLAN is present on both bridge and member | `type bridge vlan_filtering 1`; `bridge vlan add dev ${BRIDGE} vid ${VID} self`; `bridge vlan add dev ${VXLAN} vid ${VID}` |
 | 2c | with `bridge_vlan` (SVD / collect-metadata): bridge is VLAN-aware, the configured VLAN is present on both bridge and SVD member, and exactly one member maps the configured bridge VLAN to the instance VNI | `[[managed_netdevs.svd_vxlans]]`; bridge VLAN/tunnel mapping |
 | 3 | fixed-VNI target: VXLAN `IFLA_VXLAN_ID` == instance `vni`; SVD target: the row 2c VLAN/tunnel mapping supplies the VNI | `id ${VNI}` or the exact VLAN/tunnel mapping |
 | 4 | fixed-VNI `local` == instance `local_vtep_ip`; SVD `local` is optional; when reported, it equals `local_vtep_ip` | `local ${LOCAL_IP}`, or omit it for SVD |
-| 5 | selected VXLAN has `nolearning` (learning disabled); SVD also has `vnifilter` | `nolearning`; SVD `vnifilter` |
+| 5 | selected VXLAN is administratively up and has `nolearning` (learning disabled); SVD also has `vnifilter` | `ip link set ${VXLAN} up`; `nolearning`; SVD `vnifilter` |
 
 For `bridge_vlan`, the probe requires exactly one matching VXLAN target. If any
 fixed-VNI member has the instance VNI while an SVD member's VLAN/tunnel mapping

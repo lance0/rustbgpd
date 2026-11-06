@@ -715,10 +715,12 @@ pub(super) mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 99,
+                up: true,
                 mac: None,
                 vlan_filtering: false,
                 vxlan: Some(KernelVxlanInfo {
                     ifindex: vxlan_ifindex,
+                    up: true,
                     vni,
                     local_ip: "10.0.0.1".parse().unwrap(),
                     learning_disabled: Some(true),
@@ -1874,6 +1876,7 @@ pub(super) mod tests {
             "docker0".to_string(),
             BridgeLink {
                 ifindex: 50,
+                up: true,
                 vxlan_attach_count: 0,
                 ..BridgeLink::default()
             },

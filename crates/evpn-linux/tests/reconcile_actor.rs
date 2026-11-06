@@ -225,6 +225,7 @@ fn managed_link(
 ) -> KernelLinkInfo {
     KernelLinkInfo {
         ifindex,
+        up: true,
         bridge_name: name.to_string(),
         vlan_filtering,
         altnames: altnames.into_iter().map(str::to_string).collect(),
@@ -782,6 +783,7 @@ async fn reconcile_report_includes_observable_bum_enforcement_plan() {
             vlan_filtering: false,
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 200,
+                up: true,
                 vni: 100,
                 local_ip: ipa("10.0.0.1"),
                 learning_disabled: Some(true),
@@ -848,6 +850,7 @@ async fn reconcile_emits_set_bum_port_flags_when_apply_enabled() {
             vlan_filtering: false,
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 200,
+                up: true,
                 vni: 100,
                 local_ip: ipa("10.0.0.1"),
                 learning_disabled: Some(true),
@@ -907,6 +910,7 @@ async fn shutdown_restores_bum_flags_even_without_owned_fdb_entries() {
             vlan_filtering: false,
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 200,
+                up: true,
                 vni: 100,
                 local_ip: ipa("10.0.0.1"),
                 learning_disabled: Some(true),
@@ -971,6 +975,7 @@ async fn failed_bum_op_is_re_emitted_on_next_pass() {
             vlan_filtering: false,
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 200,
+                up: true,
                 vni: 100,
                 local_ip: ipa("10.0.0.1"),
                 learning_disabled: Some(true),

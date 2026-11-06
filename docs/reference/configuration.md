@@ -5841,7 +5841,13 @@ fixed-VNI VXLAN, SVD VXLAN, VRF, L3VXLAN, and VLAN
 upper rows are active lifecycle intent: the dataplane actor creates missing
 links, stamps them with the derived altname, treats exact stamped links as
 crash-restart adoption, and reaps exact same-owner orphans when the config
-keeps the owner token but removes the row. Reap order is dependency-aware:
+keeps the owner token but removes the row. Created links are brought
+administratively up, and any desired link that is administratively down reports
+`owned-unsafe`. A down bridge, fixed-VNI VXLAN, or VLAN upper that carries
+exactly its stamp and matching protected attributes is raised on the next
+reconcile pass; admin state is not a protected attribute. A down VRF, L3VXLAN,
+or SVD VXLAN stays reported until it is raised out of band.
+Reap order is dependency-aware:
 VLAN upper rows are removed before their bridge, L3VXLAN rows are removed
 before their VRF, and a stamped VRF is never removed while slave links remain
 attached.
