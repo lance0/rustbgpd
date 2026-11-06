@@ -943,8 +943,8 @@ impl EvpnRuntimeActorConverger {
             .originate_instance(instance, &self.rib_tx)
             .await;
         if !imet_originate_acknowledged(&imet_outcome) {
-            // A dropped reply leaves the key tracked; withdraw it so a retry
-            // re-injects instead of short-circuiting on `AlreadyOriginated`.
+            // An unacknowledged inject (dropped reply or ack timeout) leaves
+            // the key tracked and the route possibly installed; withdraw it.
             let restored = self.rollback_imet(added_vni).await;
             return Err(runtime_step_failure(
                 restored && imet_originate_had_no_effect(&imet_outcome),
@@ -1455,8 +1455,8 @@ impl EvpnRuntimeActorConverger {
                 .await
                 .originate_instance(instance.clone(), &self.rib_tx)
                 .await;
-            // Recorded before the check so the rollback also withdraws a
-            // dropped-reply key, which the controller tracks.
+            // Recorded before the check so the rollback also withdraws an
+            // unacknowledged key, which the controller tracks.
             originated_instances.push(instance.clone());
             if !imet_originate_acknowledged(&outcome) {
                 let restored = self
@@ -1636,8 +1636,8 @@ impl EvpnRuntimeActorConverger {
                 .await
                 .originate_instance(instance.clone(), &self.rib_tx)
                 .await;
-            // Recorded before the check so the rollback also withdraws a
-            // dropped-reply key, which the controller tracks.
+            // Recorded before the check so the rollback also withdraws an
+            // unacknowledged key, which the controller tracks.
             originated_added.push(instance.clone());
             if !imet_originate_acknowledged(&outcome) {
                 let restored = self

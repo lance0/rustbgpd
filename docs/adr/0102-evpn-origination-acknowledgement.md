@@ -163,4 +163,7 @@ the RIB, tracking emitted-but-unacknowledged operations explicitly.
   await, so an unbounded wait on a wedged RIB would lock every later
   EVPN runtime converge out — but keeps its own outcome mapping (an
   ack timeout reports `RibUnavailable`) rather than adopting the
-  pending-op tracker.
+  pending-op tracker. A timed-out IMET inject keeps its key tracked as
+  unacknowledged, because the RIB may still apply it: rollback and the
+  shutdown sweep withdraw it, and a withdraw answered `NotFound`
+  counts as done.
