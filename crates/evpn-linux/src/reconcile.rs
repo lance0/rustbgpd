@@ -4905,6 +4905,75 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             std::collections::BTreeMap::new();
 
         let drain_fut = async {
+            // A port may have been replaced after the last pass, with its
+            // ifindex taken by an unrelated link. Revalidate each restore
+            // against a fresh snapshot, under the drain timeout: the AC gate
+            // by its bound interface name, BUM by the bridge-port name the
+            // ifindex had when it entered the plan. A restore whose identity
+            // cannot be confirmed, including every restore when the dump
+            // fails, is skipped rather than aimed at an unknown device.
+            let port_snapshot = if bum_restore_ops.is_empty() && ac_gate_restore_ops.is_empty() {
+                None
+            } else {
+                match self.dataplane.dump_snapshot().await {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "kernel dump failed during drain; skipping AC-gate and BUM \
+                             restores whose port identity cannot be confirmed"
+                        );
+                        None
+                    }
+                }
+            };
+            let port_names: BTreeMap<u32, String> = port_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .bridge_ports
+                        .iter()
+                        .map(|(name, port)| (port.ifindex, name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let bum_restore_ops = if port_snapshot.is_some() {
+                bum_restore_ops
+                    .into_iter()
+                    .filter(|op| {
+                        let DataplaneOp::SetBumPortFlags { ifindex, .. } = op else {
+                            return false;
+                        };
+                        self.state
+                            .last_bum_port_names
+                            .get(ifindex)
+                            .is_none_or(|name| name.as_ref() == port_names.get(ifindex))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let ac_gate_restore_ops = if let Some(snapshot) = port_snapshot.as_ref() {
+                ac_gate_restore_ops
+                    .into_iter()
+                    .filter(|op| {
+                        let DataplaneOp::SetAcPortState { ifindex, .. } = op else {
+                            return false;
+                        };
+                        self.state
+                            .last_ac_gate_managed
+                            .get(ifindex)
+                            .is_some_and(|port| {
+                                snapshot
+                                    .bridge_ports
+                                    .get(&port.interface)
+                                    .is_some_and(|observed| observed.ifindex == *ifindex)
+                            })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for op in bum_restore_ops {
                 let DataplaneOp::SetBumPortFlags { ifindex, .. } = op else {
                     unreachable!("BUM restore ops are always SetBumPortFlags")

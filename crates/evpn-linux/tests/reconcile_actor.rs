@@ -6073,6 +6073,90 @@ async fn bum_restore_skips_an_ifindex_recycled_between_passes() {
     );
 }
 
+// LAN-2909 L-E2 review: the gated port is replaced after the last pass and
+// the daemon shuts down before another pass runs. The shutdown drain must
+// not set the unrelated port on the recycled ifindex forwarding, nor
+// rewrite its flood flags.
+#[tokio::test]
+async fn shutdown_drain_skips_an_ifindex_recycled_after_the_last_pass() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut links = BTreeMap::new();
+    links.insert(
+        "br100".to_string(),
+        KernelLinkInfo {
+            bridge_name: "br100".to_string(),
+            vlan_filtering: false,
+            vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
+                up: true,
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                learning_disabled: Some(true),
+            }),
+            ce_port_ifindexes: vec![11],
+            ..KernelLinkInfo::default()
+        },
+    );
+    h.handle.set_links(links);
+    h.handle.set_bridge_port(
+        "eth2",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_FORWARDING),
+    );
+    h.handle.set_bridge_port("ce0", 11, None);
+
+    let esi = EthernetSegmentIdentifier::new([7; 10]);
+    let mut table = ac_gate_table(esi, rustbgpd_evpn::AcGateState::Blocked);
+    table.insert(
+        EthernetSegmentIdentifier::new([1; 10]),
+        vni(100),
+        DfRole::NonDf,
+        "br100".to_string(),
+    );
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            one_instance_table(instance(100, Some("br100"), "10.0.0.1")),
+            RemoteMacTable::new(),
+            table,
+        ))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    let suppress = rustbgpd_evpn_linux::BumPortFlags::suppress_all();
+    assert_eq!(h.handle.ac_port_states().get(&10), Some(&true));
+    assert_eq!(h.handle.bum_port_flags().get(&11), Some(&suppress));
+
+    // Replace both ports with no reconcile pass in between, then shut down.
+    h.handle.remove_bridge_port("eth2");
+    h.handle.remove_bridge_port("ce0");
+    h.handle.set_bridge_port(
+        "other",
+        10,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_DISABLED),
+    );
+    h.handle.set_bridge_port("other-ce", 11, None);
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert_eq!(
+        handle.kernel_snapshot().bridge_ports["other"].state,
+        Some(rustbgpd_evpn_linux::ac_gate::BR_STATE_DISABLED),
+        "shutdown drain re-enabled an unrelated port on the recycled ifindex"
+    );
+    assert_eq!(
+        handle.bum_port_flags().get(&11),
+        Some(&suppress),
+        "shutdown drain rewrote the flood flags of an unrelated port"
+    );
+}
+
 // The kernel rewrites bridge-port state on carrier transitions
 // (`br_port_carrier_check` re-enables a DISABLED port when carrier
 // returns). Because the gate diffs desired against *observed* state,
