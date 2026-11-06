@@ -23,13 +23,14 @@ impl InstallLimits {
         }
     }
 
+    /// Order candidates by prefix, starting after the last attempted one.
+    /// This applies even without a configured cap or rate: the receipt's
+    /// prefix limit can also bound a pass, and a candidate that keeps
+    /// failing must not hold the only slot forever.
     pub(super) fn order<T, F>(&self, values: &mut [T], prefix: F)
     where
         F: Fn(&T) -> Prefix,
     {
-        if self.max_active.is_none() && self.bucket.is_none() {
-            return;
-        }
         values.sort_by_key(&prefix);
         let Some(cursor) = self.cursor else { return };
         let split = values.partition_point(|value| prefix(value) <= cursor);
@@ -202,13 +203,18 @@ mod tests {
         assert_eq!(bucket.take(Instant::now()), Ok(()));
     }
 
+    /// Without a cap or rate the receipt limit can still bound a pass, so
+    /// ordering stays canonical and moves past the last attempted prefix.
     #[test]
-    fn disabled_limits_preserve_input_order() {
-        let limits = InstallLimits::new(None, None, None);
-        let mut values = vec![v4([192, 0, 2, 2]), v4([192, 0, 2, 1])];
-        let original = values.clone();
+    fn disabled_limits_still_rotate_past_the_cursor() {
+        let mut limits = InstallLimits::new(None, None, None);
+        let (first, second, third) = (v4([192, 0, 2, 1]), v4([192, 0, 2, 2]), v4([192, 0, 2, 3]));
+        let mut values = vec![third, first, second];
         limits.order(&mut values, |prefix| *prefix);
-        assert_eq!(values, original);
+        assert_eq!(values, vec![first, second, third]);
+        limits.attempted(first);
+        limits.order(&mut values, |prefix| *prefix);
+        assert_eq!(values, vec![second, third, first]);
     }
 
     #[test]

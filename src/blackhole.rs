@@ -824,7 +824,13 @@ async fn reconcile_once<F>(
             .prefixes
             .iter()
             .copied()
-            .filter(|prefix| presences.get(prefix) == Some(&KernelRoutePresence::Marker))
+            // A row claimed while an earlier sweep could not publish stays
+            // receipted even if it has since vanished: drift or withdrawal
+            // handling releases it like any other owned row.
+            .filter(|prefix| {
+                presences.get(prefix) == Some(&KernelRoutePresence::Marker)
+                    || state.owned.contains_key(prefix)
+            })
             .collect();
         state.ownership.prefixes.clone_from(&retained);
         if state.ownership.flush() {
@@ -4656,6 +4662,46 @@ pub(super) mod tests {
         assert!(receipt_on_disk(&mut state).is_empty());
     }
 
+    /// A row claimed while a failed sweep is still pending can vanish
+    /// before the retry. The retried sweep keeps its prefix, so drift
+    /// handling releases and reinstalls it instead of finding an owned row
+    /// the receipt no longer names and disabling ownership.
+    #[tokio::test]
+    async fn claimed_row_that_vanishes_before_sweep_retry_stays_owned() {
+        let (live, orphan) = (v4_host(1), v4_host(2));
+        let (_dir, pinned, _) = durable_ownership(owned_state::FaultPoint::None);
+        let (store, empty) = owned_state::OwnedStateStore::load(Arc::clone(&pinned)).unwrap();
+        store
+            .replace(&empty, &BTreeSet::from([live, orphan]))
+            .unwrap();
+        let mut ownership = OwnershipState::load(Some(pinned));
+        ownership.store.as_mut().unwrap().fault = owned_state::FaultPoint::Write;
+        let mut state = ReconcilerState::new(enabled(), reapable_adoption().reap_after, ownership);
+        let mut fib = FakeFib::default();
+        fib.installed.insert(live);
+
+        pass(&mut state, &mut fib, blackholed(&[live])).await;
+        assert!(!state.adoption.swept && state.owned.contains_key(&live));
+        fib.installed.remove(&live);
+        receipt_store(&mut state).fault = owned_state::FaultPoint::None;
+
+        let statuses = pass(&mut state, &mut fib, blackholed(&[live])).await;
+        assert!(
+            state.ownership.available,
+            "ownership disabled on the vanished row"
+        );
+        assert_eq!(
+            fib.install_calls,
+            vec![live],
+            "the vanished row was not repaired"
+        );
+        assert_eq!(
+            reason_of(&statuses, live),
+            (BlackholeState::Installed, "installed")
+        );
+        assert_eq!(receipt_on_disk(&mut state), [live].into());
+    }
+
     async fn pass_with(
         config: BlackholeConfig,
         state: &mut ReconcilerState,
@@ -4707,7 +4753,8 @@ pub(super) mod tests {
     }
 
     /// Without an active cap, the write-ahead stops at the receipt's
-    /// prefix limit instead of failing every pass.
+    /// prefix limit instead of failing every pass. A candidate that keeps
+    /// failing does not hold the last slot: the next pass moves past it.
     #[tokio::test]
     async fn write_ahead_is_bounded_by_receipt_limit() {
         let held = (0..owned_state::MAX_PREFIXES - 1).map(|i| {
@@ -4722,15 +4769,29 @@ pub(super) mod tests {
         );
         state.adoption.swept = true;
         let mut fib = FakeFib::default();
+        fib.fail_install.insert(rows[0], "denied".to_string());
+
         let statuses = pass(&mut state, &mut fib, blackholed(&rows)).await;
-        assert_eq!(fib.installed, [rows[0]].into());
-        assert_eq!(state.ownership.prefixes.len(), owned_state::MAX_PREFIXES);
+        assert!(fib.installed.is_empty());
+        assert_eq!(fib.install_calls, vec![rows[0]]);
+        assert_eq!(
+            state.ownership.prefixes.len(),
+            owned_state::MAX_PREFIXES - 1
+        );
         for row in &rows[1..] {
             assert_eq!(
                 reason_of(&statuses, *row),
                 (BlackholeState::Rejected, "active_limit_exceeded")
             );
         }
+
+        pass(&mut state, &mut fib, blackholed(&rows)).await;
+        assert_eq!(
+            fib.installed,
+            [rows[1]].into(),
+            "the failing candidate kept the last receipt slot"
+        );
+        assert_eq!(state.ownership.prefixes.len(), owned_state::MAX_PREFIXES);
     }
 
     /// While the receipt cannot be written ahead, new installs are refused
