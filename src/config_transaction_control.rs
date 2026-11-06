@@ -1476,6 +1476,12 @@ impl ConfigTransactionController {
             pending.deadline = deadline;
             pending.deadline_unix_seconds = deadline_unix_seconds;
             pending.auto_revert_overdue_warnings = 0;
+            // The reset re-arms the automatic retry, so status reports the
+            // armed deadline rather than a failed rollback awaiting manual
+            // action; a failing retry sets the flag again. The journal's
+            // persisted `rollback_failed` bit stays: it only feeds the boot
+            // revert banner, where the earlier failure is still true.
+            pending.rollback_failed = None;
         }
         self.spawn_confirm_timeout(confirm_id).await;
         Ok(())

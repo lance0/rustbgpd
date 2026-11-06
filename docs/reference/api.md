@@ -978,7 +978,10 @@ Status reports pending/terminal state.
 A failed abort/auto-revert rollback is not terminal: the transaction stays
 pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED` status and the mutation
 fence stays closed until the abort is retried successfully, the candidate is
-confirmed, or a restart boot-reverts from the retained journal.
+confirmed, or a restart boot-reverts from the retained journal. A gNMI
+`CommitSetRollbackDuration` re-arms the automatic rollback: status returns to
+`PENDING` at the new deadline, and a retry that fails again reports the failed
+status again.
 
 Abort and timer rollback do not depend on the runtime snapshot token. The
 token is a Plan→Apply change detector for callers: it covers the runtime config

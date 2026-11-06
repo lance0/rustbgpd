@@ -5869,7 +5869,11 @@ remote_asn = 65010
 }
 
 #[tokio::test]
-async fn auto_revert_failure_records_lifecycle_metric() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the test proves the failed auto-revert, duration reset, and restart lifecycle"
+)]
+async fn auto_revert_failure_records_lifecycle_metric_and_reset_rearms_retry() {
     let previous_toml = base_toml("");
     let candidate_toml = base_toml(
         r#"
@@ -5881,7 +5885,7 @@ peer_group = "ix-members"
 remote_asn = 65010
 "#,
     );
-    let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
     let peers = Arc::new(Mutex::new(Vec::new()));
     let control = TypedTransactionFakeControl {
         stage_results: Arc::new(Mutex::new(VecDeque::from([
@@ -5902,10 +5906,15 @@ remote_asn = 65010
     ));
     let (config_tx, config_rx) = mpsc::channel(8);
     let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+    let journal_dir = tempfile::tempdir().unwrap();
     let controller = with_test_preloaded_plan_controlled(
-        ConfigTransactionController::new(
-            deps_value(None, peer_tx, Some(config_tx), Vec::new()),
-            BgpMetrics::new(),
+        with_v3_test_authority(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_dir.path().join("commit-confirm-journal.json")),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            journal_dir.path(),
+            &previous_toml,
         ),
         plan(
             RuntimeConfigTransactionStatus::Committable,
@@ -5955,6 +5964,63 @@ remote_asn = 65010
         .reject_if_pending("test mutation")
         .await
         .expect_err("failed auto-revert must keep the mutation fence closed");
+    let metadata_path = journal_dir
+        .path()
+        .join(crate::confirm_journal::v3::METADATA_FILE_NAME);
+    let persisted_rollback_failed = || {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        value["rollback_failed"].as_bool().unwrap()
+    };
+    assert!(persisted_rollback_failed());
+
+    // Resetting the rollback duration re-arms the automatic retry, so status
+    // reports a pending transaction at the new deadline, not a failed
+    // rollback that needs manual action.
+    let before_reset = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    controller
+        .clone()
+        .apply_gnmi_set(gnmi_set_rollback_duration("deploy-1", 120))
+        .await
+        .expect("rollback-duration reset after a failed auto-revert must succeed");
+    let status = controller.status().await.expect("status must succeed");
+    let confirmation = status.confirmation.unwrap();
+    assert_eq!(
+        confirmation.status,
+        proto::ConfigTransactionConfirmationStatus::Pending as i32
+    );
+    assert_eq!(confirmation.timeout_seconds, 120);
+    assert!(confirmation.deadline_unix_seconds >= before_reset + 120);
+    assert!(
+        !status.human_text.contains("rollback failed"),
+        "{}",
+        status.human_text
+    );
+    controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect_err("the re-armed transaction must keep the mutation fence closed");
+
+    // The journal keeps the earlier failure for the boot-revert banner: a
+    // restart before the retry still reverts and still reports that a live
+    // rollback failed, because nothing has repaired that state since.
+    assert!(persisted_rollback_failed());
+    let config_path = journal_dir.path().join("rustbgpd.toml");
+    std::fs::write(&config_path, &candidate_toml).unwrap();
+    let revert = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path)
+        .unwrap()
+        .boot_revert_check()
+        .expect("boot revert must apply")
+        .expect("the retained journal must trigger a boot revert");
+    assert_eq!(revert.notice.confirm_id, "deploy-1");
+    assert!(revert.notice.rollback_failed);
+    assert_snapshot_matches_config(
+        &std::fs::read_to_string(&config_path).unwrap(),
+        &previous_toml,
+    );
     ack_task.abort();
 }
 
