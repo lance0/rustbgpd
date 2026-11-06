@@ -17,8 +17,8 @@ pub const SLOW_TX_INTERVAL_US: u32 = 1_000_000;
 /// without one a single unauthenticated packet could push detection to the
 /// `u32` microsecond limit (about 71.6 minutes). Five minutes still covers the
 /// largest multiplier (255) at the §6.8.3 one-second slow rate. A peer that
-/// really transmits more slowly tolerates fewer missed packets before its
-/// session is declared down.
+/// really transmits more slowly tolerates fewer missed packets, and times out
+/// even without loss once its transmit interval exceeds the window.
 const MAX_REMOTE_DETECT_TIME_US: u32 = 300_000_000;
 
 /// Error constructing a [`Session`].
