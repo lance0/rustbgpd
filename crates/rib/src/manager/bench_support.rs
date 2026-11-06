@@ -2190,6 +2190,73 @@ impl RibManager {
         rx
     }
 
+    /// Register one synthetic iBGP outbound peer for IPv4 unicast. With
+    /// `orf`, the peer negotiates receive-side prefix ORF and installs those
+    /// entries through the production `PeerOrfUpdate` path with When-to-refresh
+    /// IMMEDIATE, which lifts the RFC 5291 §6 gate and floods the filtered
+    /// table. Without it the peer is an ordinary non-ORF peer. The initial
+    /// envelopes are drained before returning.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` exceeds `u32::MAX` or the ORF install is refused.
+    pub fn bench_register_orf_peer(
+        &mut self,
+        index: usize,
+        channel_capacity: usize,
+        orf: Option<Vec<rustbgpd_wire::AddressPrefixOrf>>,
+        exact_export_encoder: Arc<dyn ExactExportEncoder>,
+    ) -> mpsc::Receiver<OutboundRouteUpdate> {
+        let peer = Self::bench_peer_address(index);
+        let session_id = u64::from(u32::try_from(index).expect("bench peer index fits u32")) + 1;
+        let family = (Afi::Ipv4, Safi::Unicast);
+        let (tx, mut rx) = mpsc::channel(channel_capacity);
+        self.pending_peer_export_encoders
+            .insert((peer, session_id), exact_export_encoder);
+        self.handle_peer_up(
+            peer,
+            PeerUpRegistration {
+                session_id,
+                peer_asn: 64_512,
+                peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                outbound_tx: tx,
+                export_policy: None,
+                sendable_families: vec![family],
+                is_ebgp: false,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: Vec::new(),
+                add_path_send_max: 0,
+                negotiated_orf_recv: if orf.is_some() {
+                    vec![family]
+                } else {
+                    Vec::new()
+                },
+                negotiated_llgr_families: Vec::new(),
+            },
+        );
+        if let Some(entries) = orf {
+            let (reply, mut response) = oneshot::channel();
+            self.handle_update(crate::update::RibUpdate::PeerOrfUpdate {
+                peer,
+                session_id,
+                afi: family.0,
+                safi: family.1,
+                when: rustbgpd_wire::WhenToRefresh::Immediate,
+                entries,
+                reply,
+            });
+            response
+                .try_recv()
+                .expect("synchronous ORF reply")
+                .expect("benchmark ORF entries install");
+        }
+        while rx.try_recv().is_ok() {}
+        rx
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the bench seam keeps each production PeerUp grouping dimension explicit"
