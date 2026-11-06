@@ -162,6 +162,24 @@ dropped with the reaped peer; the remote retries and is accepted fresh).
   ordering (persist failure ⇒ zero resets), and the mixed static+dynamic
   commit.
 
+## Amendment: range removal releases disabled members (2026-11-06)
+
+`BackToIdle` still keeps an admin-disabled dynamic peer, as decision 3
+says, but only while a range admits it. A dynamic peer exists only because
+a range admitted it, and an operator's disable does not change that. Before,
+removing the range left a disabled member holding its slot: delete refused
+it, inbound connections were dropped, and `enable` restarted it outside
+every range.
+
+- Once a range change commits, every admin-disabled member that no
+  configured range admits is released the same way as a peer reaped after a
+  rollback. Its sessions stop, its slot, metric series, BFD session,
+  max-prefix latch and RIB handle go, and the RIB drops what it retained
+  from it. An enabled member still goes when its session next falls to Idle.
+  A peer held as a dampening capacity recovery target stays with that owner.
+- As a backstop, `enable` on a dynamic peer that no configured range admits
+  fails with `FAILED_PRECONDITION` and changes nothing.
+
 ## References
 
 - ADR-0076 (config transaction model), ADR-0081 (atomic peer-group

@@ -911,3 +911,199 @@ async fn dynamic_peer_open_received_updates_remote_asn_and_metric_without_state_
     assert_eq!(mgr.peers[&peer].remote_asn, 65099);
     assert_eq!(peer_info_remote_asn(&mgr).as_deref(), Some("65099"));
 }
+
+/// ADR-0086 amendment (2026-11-06): removing a range releases its
+/// admin-disabled members as well. Before, a disabled member kept its slot,
+/// refused delete, and `enable` restarted it outside every range.
+#[tokio::test]
+async fn removing_a_range_releases_its_disabled_member() {
+    assert_disabled_member_released(false).await;
+}
+
+/// A member still enabled when its range goes, then disabled, is released
+/// too: the range change's own pass ran while it was enabled.
+/// Mutation-red: without marking the disabled member for the idle-member
+/// pass, it stays listed, holds its slot, and enable refuses it.
+#[tokio::test]
+async fn disabling_a_member_after_its_range_left_releases_it() {
+    assert_disabled_member_released(true).await;
+}
+
+/// Accept one dynamic member in 127.0.0.0/8 through the real manager loop,
+/// disable it and remove its range (in that order, or the reverse with
+/// `remove_first`), then require it released.
+async fn assert_disabled_member_released(remove_first: bool) {
+    let (tx, rx) = mpsc::channel(16);
+    let (_internal_tx, internal_rx) = mpsc::channel(1);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        make_dynamic_manager_config(),
+    );
+    let handle = tokio::spawn(manager.run());
+    acknowledge_initial_dampening_owners(&mut rib_rx).await;
+    // Unanswered RIB requests fail at once instead of waiting.
+    let rib = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+    let bounded = Duration::from_secs(10);
+    macro_rules! request {
+        ($variant:ident { $($field:ident: $value:expr),* }) => {{
+            let (reply, response) = oneshot::channel();
+            tx.send(PeerManagerCommand::$variant { $($field: $value,)* reply })
+                .await
+                .unwrap();
+            tokio::time::timeout(bounded, response)
+                .await
+                .expect("the manager answers")
+                .unwrap()
+        }};
+    }
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let (client, accepted) = tokio::join!(
+        TcpStream::connect(listener.local_addr().unwrap()),
+        listener.accept()
+    );
+    let _client = client.unwrap();
+    let (server, remote_addr) = accepted.unwrap();
+    tx.send(PeerManagerCommand::AcceptInbound {
+        stream: server,
+        peer_addr: remote_addr,
+        tcp_ao_info: None,
+        tcp_ao_generation: None,
+    })
+    .await
+    .unwrap();
+    let peers = request!(ListPeers {});
+    assert_eq!(peers.len(), 1);
+    assert!(peers[0].is_dynamic);
+    let peer = PeerKey::new(remote_addr.ip(), None);
+    assert_eq!(
+        process_global_metric(&metrics, "bgp_dynamic_neighbor_slots_used"),
+        Some(1.0)
+    );
+
+    if !remove_first {
+        request!(DisablePeer {
+            peer: peer.clone(),
+            reason: None
+        })
+        .unwrap();
+    }
+    let prefix = "127.0.0.0/8".to_string();
+    request!(DeleteDynamicRange { prefix: prefix }).unwrap();
+    if remove_first {
+        // An enabled member keeps running until its session ends.
+        assert_eq!(request!(ListPeers {}).len(), 1);
+        request!(DisablePeer {
+            peer: peer.clone(),
+            reason: None
+        })
+        .unwrap();
+    }
+
+    // Mutation-red: without the release the disabled member stays listed,
+    // holds its slot, refuses delete and enable restarts it.
+    assert!(
+        request!(ListPeers {}).is_empty(),
+        "the disabled member is released"
+    );
+    assert_eq!(
+        process_global_metric(&metrics, "bgp_dynamic_neighbor_slots_used"),
+        Some(0.0)
+    );
+    assert!(matches!(
+        request!(DeletePeer {
+            peer: peer.clone(),
+            sync_config_snapshot: false
+        }),
+        Err(rustbgpd_api::peer_types::PeerLifecycleError::NotFound(_))
+    ));
+    assert!(matches!(
+        request!(EnablePeer { peer: peer.clone() }),
+        Err(rustbgpd_api::peer_types::PeerLifecycleError::NotFound(_))
+    ));
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    tokio::time::timeout(bounded, handle)
+        .await
+        .expect("the manager stops")
+        .unwrap();
+    rib.abort();
+}
+
+/// Backstop: while a disabled member no range admits is still present (the
+/// range change not yet committed), `enable` refuses without effect. The
+/// release then tears the member down with its RIB handle.
+#[tokio::test]
+async fn enable_refuses_a_dynamic_peer_no_range_admits() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::channel(1).1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        make_dynamic_manager_config(),
+    );
+    let address: IpAddr = "10.99.0.5".parse().unwrap();
+    let (commands, mut receiver) = mpsc::channel(1);
+    let task = tokio::spawn(async move {
+        while let Some(command) = receiver.recv().await {
+            if matches!(command, rustbgpd_transport::PeerCommand::Shutdown) {
+                break;
+            }
+        }
+        Ok(())
+    });
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        address,
+        1,
+        PeerHandle::from_parts(commands, task),
+        false,
+        "10.99.0.0".parse().unwrap(),
+        24,
+        "ix-members",
+    );
+    // Mutation-red: without the coverage check enable starts the peer.
+    let error = mgr.enable_peer(key(address)).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            rustbgpd_api::peer_types::PeerLifecycleError::Precondition(_)
+        ),
+        "{error:?}"
+    );
+    assert!(!mgr.peers[&key(address)].enabled, "no mutation");
+
+    let released = tokio::time::timeout(
+        Duration::from_secs(10),
+        mgr.release_unadmitted_idle_dynamic(),
+    )
+    .await
+    .expect("the release settles");
+    assert_eq!(released, 1);
+    assert!(mgr.peers.is_empty());
+    while let Ok(update) = rib_rx.try_recv() {
+        if matches!(update, RibUpdate::PeerDeleted { .. }) {
+            return;
+        }
+    }
+    panic!("the released member's RIB state is deleted");
+}

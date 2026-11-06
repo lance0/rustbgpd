@@ -535,6 +535,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
     );
     mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
     mgr.dynamic_peer_count = 1;
+    admit_test_dynamic_peer(&mut mgr, &key(addr));
 
     mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {
         session_id: 1,
@@ -1074,6 +1075,7 @@ async fn dynamic_back_to_idle_retains_recovery_target_for_late_terminal_breach()
     );
     mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
     mgr.dynamic_peer_count = 1;
+    admit_test_dynamic_peer(&mut mgr, &key(addr));
     mgr.refresh_dynamic_neighbor_capacity_metrics();
     assert_dynamic_neighbor_capacity(&mgr.metrics, 1.0, 100.0, 99.0, 0.0);
     mgr.session_notify_tx
