@@ -2982,3 +2982,456 @@ fn grouped_operator_replay_withdraws_a_newly_rejected_route() {
     }
     assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
 }
+
+/// Register `peer` for `family` on session 7 with an exact-export encoder;
+/// a GR `waiter` arms the configured selection hold.
+fn sync_peer_up(
+    manager: &mut RibManager,
+    peer: PeerId,
+    family: (Afi, Safi),
+    encoder: Option<Arc<dyn ExactExportEncoder>>,
+    waiter: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    if let Some(encoder) = encoder {
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 7,
+            encoder,
+        });
+    }
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer,
+        session_id: 7,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: if waiter { vec![family] } else { vec![] },
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (outbound_tx, outbound_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 7,
+        peer,
+        peer_asn: 65_100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![family],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: Vec::new(),
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    outbound_rx
+}
+
+/// `peer`'s BMP Adj-RIB-Out (post-policy) count for `family`.
+fn bmp_advertised(manager: &mut RibManager, peer: PeerId, family: (Afi, Safi)) -> u64 {
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryBmpPeerStats { reply });
+    let counts = result.try_recv().unwrap().adj_rib_out_post;
+    counts.get(&peer).map_or(0, |families| {
+        families
+            .iter()
+            .find(|(counted, _)| *counted == family)
+            .map_or(0, |(_, count)| *count)
+    })
+}
+
+const DEFERRED_UNICAST: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+const DEFERRED_VPN: (Afi, Safi) = (Afi::Ipv4, Safi::MplsVpn);
+const DEFERRED_EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+
+/// Rows of `family` announced and withdrawn in `updates`.
+fn family_rows(updates: &[OutboundRouteUpdate], family: (Afi, Safi)) -> (usize, usize) {
+    updates
+        .iter()
+        .fold((0, 0), |(announced, withdrawn), update| match family {
+            DEFERRED_VPN => (
+                announced + update.vpn_announce.len(),
+                withdrawn + update.vpn_withdraw.len(),
+            ),
+            DEFERRED_EVPN => (
+                announced + update.evpn_announce.len(),
+                withdrawn + update.evpn_withdraw.len(),
+            ),
+            _ => (
+                announced + update.announce.len(),
+                withdrawn + update.unicast_withdrawals().count(),
+            ),
+        })
+}
+
+/// RFC 4724 selection deferral freezes a Loc-RIB best whose only source
+/// withdraws. A group member's exact-export rejection of that frozen row
+/// must outlive the source. Otherwise, after an identical re-announcement
+/// leaves the best unchanged at release, the grouped view counts a route the
+/// member was never sent. The per-peer path is the reference. Without a
+/// re-announcement the release withdraws the row from the accepting peer
+/// only, and the rejection retires with it in the same pass. A non-waiter's
+/// End-of-RIB inside the hold runs the full rejection prune, which must keep
+/// the frozen row's rejection too. The hold releases on its timer or on the
+/// waiter's End-of-RIB.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one hold lifecycle checks every advertised surface of both paths"
+)]
+fn assert_deferred_frozen_rejection_stays_exact(
+    family: (Afi, Safi),
+    force_ungrouped: bool,
+    reannounce: bool,
+    release_by_eor: bool,
+) {
+    let case = format!(
+        "{family:?} force_ungrouped={force_ungrouped} reannounce={reannounce} \
+         release_by_eor={release_by_eor}"
+    );
+    let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 83));
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: waiter.into(),
+                families: vec![family],
+            }],
+        });
+    manager.test_force_ungrouped = force_ungrouped;
+    let classic = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
+    let extended = peer_v4(Ipv4Addr::new(192, 0, 2, 11));
+    let source = Ipv4Addr::new(198, 51, 100, 10);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let route = make_route_with_lp(prefix, source, 100);
+    let vpn_route = make_vpn_rib_route(source, 30, 1030, 100);
+    let evpn_route = make_evpn_imet(source, 30);
+    let key = match family {
+        DEFERRED_VPN => ExactExportKey::Vpn(vpn_route.key()),
+        DEFERRED_EVPN => ExactExportKey::Evpn(evpn_route.key()),
+        _ => ExactExportKey::Unicast(route.prefix, route.path_id),
+    };
+    let rejecting = MockExactExportEncoder::accepting(31);
+    rejecting.set_profile(31, [key]);
+    let mut classic_rx = sync_peer_up(&mut manager, classic, family, Some(rejecting), false);
+    let accepting = MockExactExportEncoder::accepting(32);
+    let mut extended_rx = sync_peer_up(&mut manager, extended, family, Some(accepting), false);
+    if family == DEFERRED_EVPN {
+        assert!(manager.evpn_grouped_member_of(classic).is_none(), "{case}");
+    } else {
+        assert_eq!(
+            manager.grouped_member_of(classic).is_some(),
+            !force_ungrouped,
+            "{case}"
+        );
+    }
+    let source_update = |manager: &mut RibManager, announce: bool| {
+        manager.handle_update(if family == DEFERRED_VPN {
+            RibUpdate::VpnRoutesReceived {
+                session_id: 0,
+                peer: peer_v4(source),
+                announced: if announce {
+                    vec![vpn_route.clone()]
+                } else {
+                    vec![]
+                },
+                withdrawn: if announce {
+                    vec![]
+                } else {
+                    vec![vpn_route.key()]
+                },
+            }
+        } else {
+            let evpn = family == DEFERRED_EVPN;
+            RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: peer_v4(source),
+                announced: if announce && !evpn {
+                    vec![route.clone()]
+                } else {
+                    vec![]
+                },
+                withdrawn: if announce || evpn {
+                    vec![]
+                } else {
+                    vec![(Prefix::V4(prefix), 0)]
+                },
+                flowspec_announced: Vec::new(),
+                flowspec_withdrawn: Vec::new(),
+                evpn_announced: if announce && evpn {
+                    vec![evpn_route.clone()]
+                } else {
+                    vec![]
+                },
+                evpn_withdrawn: if !announce && evpn {
+                    vec![evpn_route.key()]
+                } else {
+                    vec![]
+                },
+                validated_with: None,
+            }
+        });
+        drain_route_chunks(manager);
+    };
+    let frozen = |manager: &RibManager| match family {
+        DEFERRED_VPN => manager.loc_rib.get_vpn(&vpn_route.nlri.key()).is_some(),
+        DEFERRED_EVPN => manager.loc_rib.get_evpn(&evpn_route.key()).is_some(),
+        _ => manager.loc_rib.get(&Prefix::V4(prefix)).is_some(),
+    };
+    source_update(&mut manager, true);
+    assert_eq!(bmp_advertised(&mut manager, classic, family), 0, "{case}");
+    assert_eq!(bmp_advertised(&mut manager, extended, family), 1, "{case}");
+    assert!(manager.peer_unexportable.contains_key(&classic), "{case}");
+
+    let _waiter = sync_peer_up(&mut manager, waiter, family, None, true);
+    assert!(manager.selection_deferred(family), "{case}");
+    source_update(&mut manager, false);
+    assert!(
+        frozen(&manager),
+        "{case}: the hold freezes the withdrawn best"
+    );
+    assert_eq!(bmp_advertised(&mut manager, classic, family), 0, "{case}");
+    let end_of_rib = |peer| RibUpdate::EndOfRib {
+        peer,
+        session_id: 7,
+        afi: family.0,
+        safi: family.1,
+    };
+    let prunes = manager.test_exact_export_full_prune_calls;
+    manager.handle_update(end_of_rib(extended));
+    assert!(
+        manager.test_exact_export_full_prune_calls > prunes,
+        "{case}: the non-waiter's End-of-RIB ran the full prune"
+    );
+    assert!(manager.selection_deferred(family), "{case}: still held");
+    assert!(
+        manager.peer_unexportable.contains_key(&classic),
+        "{case}: the prune keeps the frozen row's rejection"
+    );
+    if reannounce {
+        source_update(&mut manager, true);
+    }
+    if release_by_eor {
+        manager.handle_update(end_of_rib(waiter));
+        drain_route_chunks(&mut manager);
+    } else {
+        manager.expire_selection_deferral();
+    }
+    assert!(!manager.selection_deferred(family), "{case}");
+    assert_eq!(frozen(&manager), reannounce, "{case}");
+
+    assert_eq!(
+        bmp_advertised(&mut manager, classic, family),
+        0,
+        "{case}: the classic peer was never sent the route"
+    );
+    assert_eq!(
+        bmp_advertised(&mut manager, extended, family),
+        u64::from(reannounce),
+        "{case}"
+    );
+    if family == DEFERRED_UNICAST {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryAdvertisedCount {
+            peer: classic,
+            reply,
+        });
+        assert_eq!(result.try_recv().unwrap(), 0, "{case}");
+    }
+    let classic_sent: Vec<_> = std::iter::from_fn(|| classic_rx.try_recv().ok()).collect();
+    assert_eq!(
+        family_rows(&classic_sent, family),
+        (0, 0),
+        "{case}: the classic peer is neither sent nor withdrawn the route"
+    );
+    let extended_sent: Vec<_> = std::iter::from_fn(|| extended_rx.try_recv().ok()).collect();
+    assert_eq!(
+        family_rows(&extended_sent, family),
+        (1, usize::from(!reannounce)),
+        "{case}"
+    );
+    assert_eq!(
+        manager.peer_unexportable.contains_key(&classic),
+        reannounce,
+        "{case}: the rejection lives exactly as long as the route"
+    );
+}
+
+#[test]
+fn deferred_frozen_unicast_rejection_keeps_the_grouped_view_exact() {
+    for force_ungrouped in [false, true] {
+        for reannounce in [true, false] {
+            for release_by_eor in [false, true] {
+                assert_deferred_frozen_rejection_stays_exact(
+                    DEFERRED_UNICAST,
+                    force_ungrouped,
+                    reannounce,
+                    release_by_eor,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn deferred_frozen_vpn_rejection_keeps_the_grouped_view_exact() {
+    for force_ungrouped in [false, true] {
+        for reannounce in [true, false] {
+            for release_by_eor in [false, true] {
+                assert_deferred_frozen_rejection_stays_exact(
+                    DEFERRED_VPN,
+                    force_ungrouped,
+                    reannounce,
+                    release_by_eor,
+                );
+            }
+        }
+    }
+}
+
+/// Private EVPN, the production path: a release that drops the frozen row
+/// retires its rejection in the same pass.
+#[test]
+fn deferred_frozen_private_evpn_rejection_retires_at_release() {
+    for reannounce in [true, false] {
+        for release_by_eor in [false, true] {
+            assert_deferred_frozen_rejection_stays_exact(
+                DEFERRED_EVPN,
+                false,
+                reannounce,
+                release_by_eor,
+            );
+        }
+    }
+}
+
+/// Labeled unicast is per-peer, so its wire and counts never include a
+/// rejected route, but the advertised-route explain reads the rejection
+/// overlay. A labeled Loc-RIB row frozen by a selection hold keeps its
+/// rejection through the source's withdrawal and an in-hold End-of-RIB
+/// prune, so explain still reports `exact_export_rejected` after an
+/// identical re-announcement; without one, the release retires it.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one hold lifecycle checks the overlay and explain for both release outcomes"
+)]
+fn deferred_frozen_labeled_rejection_keeps_the_explain_exact() {
+    let family = (Afi::Ipv4, Safi::LabeledUnicast);
+    for reannounce in [true, false] {
+        let case = format!("reannounce={reannounce}");
+        let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 83));
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_selection_deferral(SelectionDeferralConfig {
+                timeout: Duration::from_secs(60),
+                waiters: vec![SelectionDeferralWaiterConfig {
+                    peer: waiter.into(),
+                    families: vec![family],
+                }],
+            });
+        let classic = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
+        let source = Ipv4Addr::new(198, 51, 100, 10);
+        let route = make_labeled_rib_route(source, 30, 1030, 100);
+        let prefix = route.nlri.prefix;
+        let key = ExactExportKey::Labeled(route.key());
+        let rejecting = MockExactExportEncoder::accepting(31);
+        rejecting.set_profile(31, [key.clone()]);
+        let mut classic_rx = sync_peer_up(&mut manager, classic, family, Some(rejecting), false);
+        let send = |manager: &mut RibManager, announce: bool| {
+            manager.handle_update(RibUpdate::LabeledRoutesReceived {
+                peer: peer_v4(source),
+                session_id: 0,
+                announced: if announce {
+                    vec![route.clone()]
+                } else {
+                    vec![]
+                },
+                withdrawn: if announce { vec![] } else { vec![route.key()] },
+            });
+        };
+        let rejected = |manager: &RibManager| {
+            manager
+                .peer_unexportable
+                .get(&classic)
+                .is_some_and(|keys| keys.contains(&key))
+        };
+        let explain = |manager: &mut RibManager| {
+            let (reply, mut result) = oneshot::channel();
+            manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+                peer: classic,
+                prefix,
+                rd: None,
+                labeled: true,
+                source: None,
+                reply,
+            });
+            result.try_recv().unwrap().unwrap()
+        };
+        send(&mut manager, true);
+        assert!(rejected(&manager), "{case}: the encoder rejected the route");
+
+        let _waiter = sync_peer_up(&mut manager, waiter, family, None, true);
+        assert!(manager.selection_deferred(family), "{case}");
+        send(&mut manager, false);
+        assert!(
+            manager.loc_rib.get_labeled(&prefix).is_some(),
+            "{case}: the hold freezes the withdrawn best"
+        );
+        let prunes = manager.test_exact_export_full_prune_calls;
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: classic,
+            session_id: 7,
+            afi: family.0,
+            safi: family.1,
+        });
+        assert!(
+            manager.test_exact_export_full_prune_calls > prunes,
+            "{case}: the End-of-RIB ran the full prune"
+        );
+        assert!(manager.selection_deferred(family), "{case}: still held");
+        assert!(
+            rejected(&manager),
+            "{case}: the frozen row keeps its rejection"
+        );
+        if reannounce {
+            send(&mut manager, true);
+        }
+        manager.expire_selection_deferral();
+        assert!(!manager.selection_deferred(family), "{case}");
+        assert_eq!(
+            manager.loc_rib.get_labeled(&prefix).is_some(),
+            reannounce,
+            "{case}"
+        );
+        assert_eq!(
+            rejected(&manager),
+            reannounce,
+            "{case}: the rejection lives exactly as long as the route"
+        );
+        if reannounce {
+            let explanation = explain(&mut manager);
+            assert_eq!(
+                explanation.decision,
+                crate::update::ExplainDecision::Deny,
+                "{case}"
+            );
+            assert_eq!(
+                explanation.gates.last().map(|gate| gate.code),
+                Some("exact_export_rejected"),
+                "{case}"
+            );
+        }
+        let announced: usize = std::iter::from_fn(|| classic_rx.try_recv().ok())
+            .map(|update| update.labeled_announce.len())
+            .sum();
+        assert_eq!(
+            announced, 0,
+            "{case}: the classic peer is never sent the route"
+        );
+    }
+}
