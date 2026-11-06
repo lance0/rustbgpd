@@ -21,6 +21,7 @@ class ReceiptTest(unittest.TestCase):
             (
                 "fdb_nhg",
                 "fib_runtime",
+                "blackhole_discard",
                 "bfd_runtime",
                 "dataplane_vlan_fdb",
                 "peer_sync_local_fdb",

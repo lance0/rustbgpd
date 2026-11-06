@@ -131,7 +131,7 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   the CE's kernel LACP state.
 - M123: RFC 9785 Don't-Preempt recovery against Nokia SR Linux 25.10.1.
 - Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
-  `bfd_runtime`, `dataplane_vlan_fdb`, `peer_sync_local_fdb`,
+  `blackhole_discard`, `bfd_runtime`, `dataplane_vlan_fdb`, `peer_sync_local_fdb`,
   `dataplane_remote_mac`, `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,
   `flood_list`, `svd_flood_list`, `managed_bridge`, `managed_vxlan`, `managed_svd_vxlan`,
   `managed_vlan_upper`, `managed_ready`, `link_carrier`, `bond_lacp`,
@@ -143,15 +143,15 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   kernel module, and skip otherwise: `l3_multipath`,
   `managed_ip_vrf_ready`, `l3_all_active_writer`, `foreign_state_l3`, and
   `l3_route_event`, `l3_single_path_cycle`, and `l3_foreign_route_cycle`.
-  Between `fib_runtime` and `bfd_runtime`, the job also runs a supplementary
+  Between `blackhole_discard` and `bfd_runtime`, the job also runs a supplementary
   `bfd_runtime_ipv4` step with `AF_INET6` denied by a seccomp profile, proving
   the IPv4 BFD path does not depend on that family. It is deliberately outside
   the canonical selector receipt and the counts below.
 
 The job always publishes a stable `netns-selector-receipt` JSON artifact and a
 concise job summary. A selector is recorded only after its harness invocation
-succeeds. The finalizer requires all 36 selectors when VRF is available; when
-VRF is unavailable it requires the 29 unconditional selectors and records the
+succeeds. The finalizer requires all 37 selectors when VRF is available; when
+VRF is unavailable it requires the 30 unconditional selectors and records the
 seven L3 omissions with reason `vrf_unavailable`. Missing, duplicate, or
 unexpected required selectors fail the job.
 
