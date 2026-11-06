@@ -32,13 +32,15 @@ const RTPROT_BGP: u8 = 186;
 
 /// Bridge / VXLAN link inventory entry.
 ///
-/// Phase 2 holds only the fields the diff loop and per-instance probe
-/// need today; Phase 4 (the real netlink impl) extends with admin/oper
-/// state and bridge aging time as those become relevant.
+/// Holds the fields the diff loop, per-instance probe and managed-netdev
+/// classifier need.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelLinkInfo {
     /// Kernel ifindex of the bridge device.
     pub ifindex: u32,
+    /// Administrative link-up state (`IFF_UP`). A down bridge forwards
+    /// nothing, so readiness and managed-netdev status fail on `false`.
+    pub up: bool,
     /// Bridge name (e.g., `"br100"`).
     pub bridge_name: String,
     /// `true` if the bridge has `vlan_filtering=1`. Legacy L2VNIs still
@@ -249,6 +251,9 @@ pub struct KernelVxlanInfo {
     /// bridge owns the entry — `bridge fdb add MAC dev vxlanX master
     /// dst REMOTE` shape.
     pub ifindex: u32,
+    /// Administrative link-up state (`IFF_UP`). The probe reports the
+    /// instance `NotReady` when the VXLAN port is down.
+    pub up: bool,
     /// Configured VNI on the VXLAN port. The probe checks this matches
     /// the instance VNI.
     pub vni: u32,
@@ -361,6 +366,8 @@ pub struct KernelVlanUpperLinkInfo {
 pub struct KernelSvdVxlanInfo {
     /// Kernel ifindex of the VXLAN port itself.
     pub ifindex: u32,
+    /// Administrative link-up state (`IFF_UP`).
+    pub up: bool,
     /// `VXLAN_F_VNIFILTER` / `ip link ... vnifilter` state.
     pub vnifilter: bool,
     /// Local source IP when the kernel reports one. Normal external /
@@ -1116,6 +1123,7 @@ mod tests {
         };
         let mut bridge = KernelLinkInfo {
             ifindex: 10,
+            up: true,
             bridge_name: "br100".into(),
             vlan_filtering: false,
             altnames: Vec::new(),
@@ -1342,6 +1350,7 @@ mod tests {
             "br100".to_string(),
             KernelLinkInfo {
                 ifindex: 10,
+                up: true,
                 bridge_name: "br100".to_string(),
                 vlan_filtering: true,
                 altnames: Vec::new(),

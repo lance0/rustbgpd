@@ -7,7 +7,7 @@
 //! Per ADR-0054 §4 and ADR-0089 the probe verifies topology before it
 //! reports `Ready`:
 //!
-//! 1. The named bridge exists.
+//! 1. The named bridge exists and is administratively up.
 //! 2. Legacy instances (`bridge_vlan = None`) use the historical
 //!    one-bridge-one-VXLAN shape and require `vlan_filtering=0`.
 //! 3. ADR-0089 instances (`bridge_vlan = Some(VID)`) require
@@ -18,7 +18,8 @@
 //!      The bridge and selected VXLAN member must both carry `VID`.
 //! 4. A fixed-VNI member's `local` source IP must match `local_vtep_ip`.
 //!    An SVD member may omit `local`, but any reported address must match.
-//! 5. Both shapes require kernel learning to be disabled; SVD also requires
+//! 5. The selected VXLAN member must be administratively up.
+//! 6. Both shapes require kernel learning to be disabled; SVD also requires
 //!    `vnifilter`. A fixed-VNI member with the instance VNI and an SVD member
 //!    with the matching VLAN/tunnel mapping are ambiguous before selection.
 //!
@@ -62,6 +63,11 @@ fn probe_one(inst: &EvpnInstance, cache: &LinkCache) -> InstanceProbe {
             reason: format!("bridge {bridge_name} not found"),
         };
     };
+    if !bridge.up {
+        return InstanceProbe::NotReady {
+            reason: format!("bridge {bridge_name} is administratively down"),
+        };
+    }
     if bridge.vlan_filtering {
         if let Some(bridge_vlan) = inst.bridge_vlan {
             return probe_vlan_aware_bridge(inst, bridge_name, bridge, bridge_vlan.as_u16());
@@ -185,6 +191,14 @@ fn probe_vxlan_attrs(
     vxlan: &KernelVxlanInfo,
 ) -> InstanceProbe {
     let want_vni = inst.id.as_u32();
+    if !vxlan.up {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "VXLAN port ifindex {} on bridge {bridge_name} is administratively down",
+                vxlan.ifindex
+            ),
+        };
+    }
     if vxlan.vni != want_vni {
         return InstanceProbe::NotReady {
             reason: format!(
@@ -232,6 +246,15 @@ fn probe_svd_vxlan_attrs(
     svd: &KernelSvdVxlanInfo,
 ) -> InstanceProbe {
     let want_vni = inst.id.as_u32();
+    if !svd.up {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "collect-metadata VXLAN ifindex {} on bridge {bridge_name} is \
+                 administratively down",
+                svd.ifindex
+            ),
+        };
+    }
     if !svd.vnifilter {
         return InstanceProbe::NotReady {
             reason: format!(
@@ -360,12 +383,14 @@ mod tests {
     fn ready_link(vni: u32, local: &str) -> BridgeLink {
         let vxlan = KernelVxlanInfo {
             ifindex: 200,
+            up: true,
             vni,
             local_ip: ipa(local),
             learning_disabled: Some(true),
         };
         BridgeLink {
             ifindex: 100,
+            up: true,
             mac: None,
             vlan_filtering: false,
             vxlan_attach_count: 1,
@@ -386,12 +411,14 @@ mod tests {
     fn vlan_aware_link(vni: u32, bridge_vlan: u16, local: &str) -> BridgeLink {
         let vxlan_port = KernelVxlanInfo {
             ifindex: 200,
+            up: true,
             vni,
             local_ip: ipa(local),
             learning_disabled: Some(true),
         };
         BridgeLink {
             ifindex: 100,
+            up: true,
             mac: None,
             vlan_filtering: true,
             vxlan: None,
@@ -413,12 +440,14 @@ mod tests {
     fn svd_vlan_aware_link(vni: u32, bridge_vlan: u16, vnifilter: bool) -> BridgeLink {
         let svd = KernelSvdVxlanInfo {
             ifindex: 300,
+            up: true,
             vnifilter,
             local_ip: None,
             learning_disabled: Some(true),
         };
         BridgeLink {
             ifindex: 100,
+            up: true,
             mac: None,
             vlan_filtering: true,
             vxlan: None,
@@ -463,6 +492,37 @@ mod tests {
         let inst = instance(100, Some("br100"), "10.0.0.1");
         let cache = cache_with("br100", ready_link(100, "10.0.0.1"));
         assert_eq!(probe_one(&inst, &cache), InstanceProbe::Ready);
+    }
+
+    // LAN-2894: an admin-down bridge or VXLAN member forwards nothing, so
+    // every remote FDB row would black-hole while the instance read Ready.
+    #[test]
+    fn not_ready_when_bridge_or_vxlan_member_is_admin_down() {
+        let reason_of = |inst: &EvpnInstance, link: BridgeLink| match probe_one(
+            inst,
+            &cache_with("br100", link),
+        ) {
+            InstanceProbe::NotReady { reason } => reason,
+            other => panic!("expected NotReady, got {other:?}"),
+        };
+        let legacy = instance(100, Some("br100"), "10.0.0.1");
+
+        let mut link = ready_link(100, "10.0.0.1");
+        link.up = false;
+        assert!(reason_of(&legacy, link).contains("bridge br100 is administratively down"));
+
+        let mut link = ready_link(100, "10.0.0.1");
+        link.vxlan.as_mut().unwrap().up = false;
+        assert!(reason_of(&legacy, link).contains("VXLAN port ifindex 200"));
+
+        let vlan_aware = instance_with_vlan(100, "br100", "10.0.0.1", 10);
+        let mut link = vlan_aware_link(100, 10, "10.0.0.1");
+        link.vxlan_ports[0].up = false;
+        assert!(reason_of(&vlan_aware, link).contains("administratively down"));
+
+        let mut link = svd_vlan_aware_link(100, 10, true);
+        link.svd_vxlan_ports[0].up = false;
+        assert!(reason_of(&vlan_aware, link).contains("administratively down"));
     }
 
     #[test]
@@ -630,6 +690,7 @@ mod tests {
         let mut link = svd_vlan_aware_link(100, 10, true);
         link.vxlan_ports.push(KernelVxlanInfo {
             ifindex: 200,
+            up: true,
             vni: 100,
             local_ip: ipa("10.0.0.1"),
             learning_disabled: Some(true),

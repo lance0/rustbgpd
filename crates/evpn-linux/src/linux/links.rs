@@ -38,6 +38,8 @@ pub(crate) struct BridgeLink {
     /// reconcile-wake classifier (`notify::classify_link_event`) to
     /// recognize changes on — or enslavements to — a managed bridge.
     pub ifindex: u32,
+    /// Administrative link-up state (`IFF_UP`).
+    pub up: bool,
     /// Bridge link-layer (MAC) address, when the kernel reports one.
     /// Captured for SVI-MAC origination (RFC 9135 §6.1) — the daemon
     /// surfaces this on `InstanceDataplaneStatus.bridge_mac` so the
@@ -715,6 +717,7 @@ fn record_bridge_link(
         name.clone(),
         BridgeLink {
             ifindex,
+            up: msg.header.flags.contains(LinkFlags::Up),
             mac: extract_link_mac(msg),
             altnames: extract_altnames(msg),
             vlan_filtering: bridge_vlan_filtering(msg),
@@ -1184,6 +1187,7 @@ fn parsed_vxlan_to_port(parsed: &ParsedVxlanLink) -> Option<VxlanPort> {
             master: parsed.master,
             info: KernelSvdVxlanInfo {
                 ifindex: link.ifindex,
+                up: link.up,
                 vnifilter: link.vnifilter,
                 local_ip: link.local_ip,
                 learning_disabled: link.learning_disabled,
@@ -1195,6 +1199,7 @@ fn parsed_vxlan_to_port(parsed: &ParsedVxlanLink) -> Option<VxlanPort> {
         master: parsed.master,
         info: KernelVxlanInfo {
             ifindex: link.ifindex,
+            up: link.up,
             vni: link.vni?,
             local_ip: link.local_ip?,
             learning_disabled: link.learning_disabled,
@@ -1508,6 +1513,41 @@ mod tests {
         assert_eq!(port.info.vni, 100);
         assert_eq!(port.info.local_ip, "10.0.0.1".parse::<IpAddr>().unwrap());
         assert_eq!(port.info.learning_disabled, Some(true));
+        assert!(port.info.up);
+
+        // LAN-2894: the probe's view of the port carries admin-down too.
+        msg.header.flags.remove(LinkFlags::Up);
+        let Some(VxlanPort::Fixed(port)) = parse_vxlan_port(&msg) else {
+            panic!("expected fixed VXLAN port");
+        };
+        assert!(!port.info.up);
+    }
+
+    #[test]
+    fn record_bridge_link_captures_admin_state() {
+        let mut msg = LinkMessage::default();
+        msg.header.index = 10;
+        let mut bridges = HashMap::new();
+        let mut by_ifindex = HashMap::new();
+        record_bridge_link(
+            &msg,
+            "br-down".to_string(),
+            Vec::new(),
+            Vec::new(),
+            &mut bridges,
+            &mut by_ifindex,
+        );
+        msg.header.flags.insert(LinkFlags::Up);
+        record_bridge_link(
+            &msg,
+            "br-up".to_string(),
+            Vec::new(),
+            Vec::new(),
+            &mut bridges,
+            &mut by_ifindex,
+        );
+        assert!(!bridges["br-down"].up);
+        assert!(bridges["br-up"].up);
     }
 
     #[test]
@@ -1563,6 +1603,7 @@ mod tests {
         assert!(port.info.vnifilter);
         assert_eq!(port.info.local_ip, None);
         assert_eq!(port.info.learning_disabled, Some(true));
+        assert!(!port.info.up, "no IFF_UP in the message");
     }
 
     #[test]
@@ -1632,6 +1673,7 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 ..BridgeLink::default()
             },
         );
@@ -1640,6 +1682,7 @@ mod tests {
 
         let svd_info = |ifindex| KernelSvdVxlanInfo {
             ifindex,
+            up: true,
             vnifilter: true,
             local_ip: None,
             learning_disabled: Some(true),
@@ -1677,9 +1720,11 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vxlan_attach_count: 1,
                 vxlan: Some(KernelVxlanInfo {
                     ifindex: 20,
+                    up: true,
                     vni: 100,
                     local_ip: "10.0.0.1".parse().unwrap(),
                     learning_disabled: Some(true),
@@ -1757,16 +1802,19 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 vxlan_ports: vec![
                     KernelVxlanInfo {
                         ifindex: 20,
+                        up: true,
                         vni: 100,
                         local_ip: "10.0.0.1".parse().unwrap(),
                         learning_disabled: Some(true),
                     },
                     KernelVxlanInfo {
                         ifindex: 21,
+                        up: true,
                         vni: 200,
                         local_ip: "10.0.0.1".parse().unwrap(),
                         learning_disabled: Some(true),
@@ -1831,16 +1879,19 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 vxlan_ports: vec![
                     KernelVxlanInfo {
                         ifindex: 20,
+                        up: true,
                         vni: 100,
                         local_ip: "10.0.0.1".parse().unwrap(),
                         learning_disabled: Some(true),
                     },
                     KernelVxlanInfo {
                         ifindex: 21,
+                        up: true,
                         vni: 200,
                         local_ip: "10.0.0.1".parse().unwrap(),
                         learning_disabled: Some(true),
@@ -1888,9 +1939,11 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 vxlan_ports: vec![KernelVxlanInfo {
                     ifindex: 20,
+                    up: true,
                     vni: 100,
                     local_ip: "10.0.0.1".parse().unwrap(),
                     learning_disabled: Some(true),
@@ -1937,9 +1990,11 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 vxlan_ports: vec![KernelVxlanInfo {
                     ifindex: 20,
+                    up: true,
                     vni: 100,
                     local_ip: "10.0.0.1".parse().unwrap(),
                     learning_disabled: Some(true),
@@ -1972,9 +2027,11 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 svd_vxlan_ports: vec![KernelSvdVxlanInfo {
                     ifindex: 40,
+                    up: true,
                     vnifilter: true,
                     local_ip: None,
                     learning_disabled: Some(true),
@@ -2025,15 +2082,18 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 vxlan_ports: vec![KernelVxlanInfo {
                     ifindex: 20,
+                    up: true,
                     vni: 100,
                     local_ip: "10.0.0.1".parse().unwrap(),
                     learning_disabled: Some(true),
                 }],
                 svd_vxlan_ports: vec![KernelSvdVxlanInfo {
                     ifindex: 40,
+                    up: true,
                     vnifilter: true,
                     local_ip: None,
                     learning_disabled: Some(true),

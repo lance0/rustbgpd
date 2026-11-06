@@ -236,10 +236,12 @@ mod tests {
         let mut cache = LinkCache::default();
         let bridge = BridgeLink {
             ifindex: 10,
+            up: true,
             mac: None,
             vlan_filtering: false,
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 11,
+                up: true,
                 vni,
                 local_ip: "10.0.0.1".parse().unwrap(),
                 learning_disabled,
@@ -270,9 +272,11 @@ mod tests {
             "br-svd".into(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 svd_vxlan_ports: vec![KernelSvdVxlanInfo {
                     ifindex: 44,
+                    up: true,
                     vnifilter: true,
                     local_ip: None,
                     learning_disabled: Some(true),
@@ -312,17 +316,20 @@ mod tests {
             "br-tenant".into(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 vxlan: None,
                 vxlan_ports: vec![
                     KernelVxlanInfo {
                         ifindex: 11,
+                        up: true,
                         vni: 100,
                         local_ip: "10.0.0.1".parse().unwrap(),
                         learning_disabled: Some(true),
                     },
                     KernelVxlanInfo {
                         ifindex: 22,
+                        up: true,
                         vni: 200,
                         local_ip: "10.0.0.1".parse().unwrap(),
                         learning_disabled: Some(true),
@@ -371,17 +378,20 @@ mod tests {
             "br-tenant".into(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 vxlan: None,
                 vxlan_ports: vec![
                     KernelVxlanInfo {
                         ifindex: 11,
+                        up: true,
                         vni: 100,
                         local_ip: "10.0.0.1".parse().unwrap(),
                         learning_disabled: Some(true),
                     },
                     KernelVxlanInfo {
                         ifindex: 22,
+                        up: true,
                         vni: 100,
                         local_ip: "10.0.0.1".parse().unwrap(),
                         learning_disabled: Some(true),

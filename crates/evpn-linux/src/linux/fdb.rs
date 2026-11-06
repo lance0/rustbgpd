@@ -944,9 +944,11 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 10,
+                up: true,
                 vlan_filtering: true,
                 svd_vxlan_ports: vec![KernelSvdVxlanInfo {
                     ifindex: 11,
+                    up: true,
                     vnifilter: true,
                     local_ip: None,
                     learning_disabled: Some(true),
@@ -1330,17 +1332,20 @@ mod tests {
             "br-tenant".to_string(),
             BridgeLink {
                 ifindex: 7,
+                up: true,
                 vlan_filtering: true,
                 vxlan: None,
                 vxlan_ports: vec![
                     KernelVxlanInfo {
                         ifindex: 11,
+                        up: true,
                         vni: 100,
                         local_ip: ipa("10.0.0.1"),
                         learning_disabled: Some(true),
                     },
                     KernelVxlanInfo {
                         ifindex: 22,
+                        up: true,
                         vni: 200,
                         local_ip: ipa("10.0.0.1"),
                         learning_disabled: Some(true),
@@ -1368,17 +1373,20 @@ mod tests {
             "br-tenant".to_string(),
             BridgeLink {
                 ifindex: 7,
+                up: true,
                 vlan_filtering: true,
                 vxlan: None,
                 vxlan_ports: vec![
                     KernelVxlanInfo {
                         ifindex: 11,
+                        up: true,
                         vni: 100,
                         local_ip: ipa("10.0.0.1"),
                         learning_disabled: Some(true),
                     },
                     KernelVxlanInfo {
                         ifindex: 22,
+                        up: true,
                         vni: 100,
                         local_ip: ipa("10.0.0.1"),
                         learning_disabled: Some(true),
