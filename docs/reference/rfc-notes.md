@@ -782,8 +782,16 @@ Interpretation decisions:
 - An UPDATE whose only attributes were discarded as malformed is not
   mistaken for an End-of-RIB marker (RFC 4724 §2 detection requires a clean
   decode).
-- Malformed attributes are logged at `warn` with peer, attribute type, and
-  disposition. The §6 debugging facility is a DEBUG-level dump emitted on
+- Recovered attribute malformations produce one summary `warn` per UPDATE,
+  logged once the final action is known: peer, record count, coalesced
+  duplicate count, `disposition` (the action applied, after validation, ASPA,
+  and the §5.2 escalation), `decoder_disposition`, and the attribute type and
+  error of the strongest decoder cause. It is emitted for the 1st, 2nd, 4th,
+  8th, … such UPDATE per TCP connection; each cause is logged at DEBUG. A
+  validation finding that only restates a decoder-removed attribute is not
+  logged separately. A
+  type repeated many times in one UPDATE yields one record per cause. The
+  §6 debugging facility is a DEBUG-level dump emitted on
   every malformed event: the entire UPDATE message as hex (untruncated —
   message size is protocol-bounded at 4096 bytes, or 65535 with Extended
   Messages) plus an explicit enumeration of the NLRI involved (prefixes and
