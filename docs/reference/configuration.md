@@ -5423,8 +5423,11 @@ When the derived ESI changes, the daemon re-applies the committed config
 through the same live EVPN runtime path SIGHUP uses, with no restart. The ESI
 changes when the bond becomes Ready, goes NotReady, or learns a new partner.
 On Ready, the segment is added and its routes originated. On NotReady, the
-segment is removed and its routes withdrawn. When the CE is replaced, the old
-segment's routes are withdrawn and the new ESI's routes are originated. The
+segment is removed and its routes withdrawn. A segment that returns under the
+ESI it left with is a recovering attachment circuit: it originates only after
+`recovery_delay_seconds`, as after a carrier return. When the CE is replaced,
+the old segment's routes are withdrawn and the new ESI's routes are
+originated without that wait. The
 config text keeps `esi = "auto-lacp"`, so persistence, SIGHUP, and config
 transactions always carry the spec, never derived bytes. `rustbgpd --diff` and
 `DiffRuntimeConfig` cannot see the bond, so they classify an `auto-lacp` edit as

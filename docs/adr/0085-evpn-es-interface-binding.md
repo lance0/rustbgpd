@@ -354,3 +354,30 @@ build-up.
 The returning segment is still a new binding to the link coordinator, so
 Decision 1's direct first probe applies to it rather than the Decision 3
 hold-off.
+
+## Amendment (2026-11-06): a returning `auto-lacp` segment waits for the hold-off
+
+The amendment above left one gap: a segment whose bond regained the same
+LACP partner was a new binding to the link coordinator, so it originated at
+the first probe. A segment without an operator drain then re-originated as
+soon as LACP returned, and an operator who undrained just after the return
+skipped the hold-off as well. A partner loss is an attachment-circuit
+failure, so its return now counts as a recovery under Decision 3.
+
+- Bindings now record whether they belong to an `auto-lacp` segment. When
+  one leaves, the link coordinator remembers the ESI it left under, keyed by
+  bond name. At the bond's next binding the entry is consumed. Under the
+  same ESI, the binding resumes as down, so carrier up arms the
+  `recovery_delay_seconds` hold-off. Under another ESI it is a new segment
+  identity and gets the direct first probe, as a re-added ESI does under
+  ADR-0084 and as the drain amendment above treats a new partner.
+- History is kept per bond, not per ESI. It costs one entry per bond, and a
+  bond that never returns keeps that one entry until the coordinator stops.
+  Its ESI must match before it applies, so it cannot delay a different
+  partner.
+- The returning segment originates nothing in between. The apply that brings
+  it back already seeds the `Link` reason for every newly added bound
+  segment, so the segment re-enters the runtime link-drained, and the
+  hold-off releases that reason.
+- An explicit-ESI binding that is removed and re-added is still a new
+  binding (Decision 1).

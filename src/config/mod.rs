@@ -1462,6 +1462,7 @@ impl Config {
                         cfg.recovery_delay_seconds
                             .unwrap_or(DEFAULT_ES_RECOVERY_DELAY_SECS),
                     ),
+                    auto_lacp: cfg.esi == AUTO_LACP_ESI,
                 },
             );
         }
@@ -7303,6 +7304,9 @@ pub struct EsLinkBinding {
     pub interface: String,
     /// Hold-off between carrier return and link-drain release.
     pub recovery_delay: std::time::Duration,
+    /// `esi = "auto-lacp"`: the binding leaves while the bond has no
+    /// usable LACP partner and returns under the same ESI with it.
+    pub auto_lacp: bool,
 }
 
 /// ADR-0140 core-isolation input published to the hold controller on

@@ -22,6 +22,10 @@
 //!   immediately (decision 1).
 //! - **Binding removed → the `Link` reason is dropped**: unbound
 //!   segments have no link reason, ever.
+//! - **An `auto-lacp` binding returning under the same ESI is a recovery,
+//!   not a new binding.** Its bond lost its LACP partner and the segment
+//!   left the runtime; the apply that brings it back seeds the `Link`
+//!   reason, and the carrier-up it finds arms the hold-off (decision 3).
 //!
 //! ## Shape
 //!
@@ -369,6 +373,10 @@ struct EsLinkDrainPlanner {
     tracked: BTreeMap<EthernetSegmentIdentifier, bool>,
     /// Armed recovery hold-offs (decision 3).
     pending: BTreeMap<EthernetSegmentIdentifier, Instant>,
+    /// The ESI each `auto-lacp` bond last left under, by bond name. Taken
+    /// at the bond's next binding: under the same ESI it is a return.
+    /// One entry per bond, so a bond that never returns keeps one.
+    departed: BTreeMap<String, EthernetSegmentIdentifier>,
 }
 
 impl EsLinkDrainPlanner {
@@ -377,6 +385,7 @@ impl EsLinkDrainPlanner {
             bindings: Arc::new(BTreeMap::new()),
             tracked: BTreeMap::new(),
             pending: BTreeMap::new(),
+            departed: BTreeMap::new(),
         }
     }
 
@@ -387,7 +396,9 @@ impl EsLinkDrainPlanner {
     /// Replace the binding set. Removed bindings drop their `Link`
     /// reason (unbound segments never hold one); added or changed
     /// bindings are re-evaluated against `carrier` immediately —
-    /// direct application, no hold-off (decision 1).
+    /// direct application, no hold-off (decision 1). The exception is an
+    /// `auto-lacp` bond returning under the ESI it left with: it resumes
+    /// as down, so carrier up arms the hold-off.
     fn replace_bindings(
         &mut self,
         next: EsLinkBindings,
@@ -400,6 +411,9 @@ impl EsLinkDrainPlanner {
                 None => {
                     self.tracked.remove(esi);
                     self.pending.remove(esi);
+                    if old.auto_lacp {
+                        self.departed.insert(old.interface.clone(), *esi);
+                    }
                     actions.push(LinkDrainAction::Undrain(*esi));
                 }
                 Some(new) if *new != *old => {
@@ -410,6 +424,14 @@ impl EsLinkDrainPlanner {
                     self.pending.remove(esi);
                 }
                 Some(_) => {}
+            }
+        }
+        for (esi, binding) in next.iter() {
+            if binding.auto_lacp
+                && !self.bindings.contains_key(esi)
+                && self.departed.remove(&binding.interface) == Some(*esi)
+            {
+                self.tracked.insert(*esi, false);
             }
         }
         self.bindings = next;
@@ -513,6 +535,7 @@ mod tests {
         EsLinkBinding {
             interface: interface.to_string(),
             recovery_delay: Duration::from_secs(delay_secs),
+            auto_lacp: false,
         }
     }
 
@@ -678,6 +701,68 @@ mod tests {
             now,
         );
         assert_eq!(actions, vec![LinkDrainAction::Undrain(esi(1))]);
+        assert!(planner.next_deadline().is_none());
+    }
+
+    fn auto_lacp(entries: &[(u8, &str, u64)]) -> EsLinkBindings {
+        Arc::new(
+            entries
+                .iter()
+                .map(|(seed, interface, delay)| {
+                    let mut binding = binding(interface, *delay);
+                    binding.auto_lacp = true;
+                    (esi(*seed), binding)
+                })
+                .collect(),
+        )
+    }
+
+    /// History is kept per bond and matched by ESI: an `auto-lacp` bond
+    /// returning under the ESI it left with recovers through the hold-off;
+    /// under another partner's ESI it is a new segment, probed directly;
+    /// an explicit-ESI binding re-added is a new binding (decision 1).
+    #[tokio::test(start_paused = true)]
+    async fn auto_lacp_return_under_the_same_esi_arms_the_holdoff() {
+        let now = Instant::now();
+        let up = carrier(&[("bond0", true), ("es0", true)]);
+        let mut planner = EsLinkDrainPlanner::new();
+        let _ = planner.replace_bindings(auto_lacp(&[(1, "bond0", 30)]), &up, now);
+
+        // Partner loss: the binding leaves (the segment left the runtime).
+        let actions = planner.replace_bindings(bindings(&[]), &up, now);
+        assert_eq!(actions, vec![LinkDrainAction::Undrain(esi(1))]);
+        // Same partner back: no direct undrain, the hold-off arms.
+        let back = now + Duration::from_secs(5);
+        let actions = planner.replace_bindings(auto_lacp(&[(1, "bond0", 30)]), &up, back);
+        assert!(actions.is_empty(), "{actions:?}");
+        assert_eq!(
+            planner.next_deadline(),
+            Some(back + Duration::from_secs(30))
+        );
+        assert_eq!(
+            planner.fire_due(back + Duration::from_secs(30)),
+            vec![LinkDrainAction::Undrain(esi(1))]
+        );
+
+        // A different partner is a new segment identity: direct probe.
+        let _ = planner.replace_bindings(bindings(&[]), &up, back);
+        let actions = planner.replace_bindings(auto_lacp(&[(2, "bond0", 30)]), &up, back);
+        assert_eq!(actions, vec![LinkDrainAction::Undrain(esi(2))]);
+        assert!(planner.next_deadline().is_none());
+        // ...and it consumed the old partner's history.
+        let _ = planner.replace_bindings(bindings(&[]), &up, back);
+        assert_eq!(
+            planner.replace_bindings(auto_lacp(&[(2, "bond0", 30)]), &up, back),
+            Vec::new(),
+            "the new partner's own return arms the hold-off"
+        );
+
+        // An explicit-ESI binding re-added is a new binding.
+        let mut planner = EsLinkDrainPlanner::new();
+        let _ = planner.replace_bindings(bindings(&[(3, "es0", 30)]), &up, now);
+        let _ = planner.replace_bindings(bindings(&[]), &up, now);
+        let actions = planner.replace_bindings(bindings(&[(3, "es0", 30)]), &up, now);
+        assert_eq!(actions, vec![LinkDrainAction::Undrain(esi(3))]);
         assert!(planner.next_deadline().is_none());
     }
 
