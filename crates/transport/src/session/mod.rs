@@ -383,6 +383,9 @@ pub(crate) struct PeerSession {
     /// The FSM batch being executed tore the session down with a
     /// NOTIFICATION. Read when that batch falls to Idle to pick the wait.
     batch_notification_teardown: bool,
+    /// A local Cease/8 went out outside the FSM, so the teardown batch that
+    /// follows it counts as a sent NOTIFICATION. Taken by that batch.
+    local_notification_teardown: bool,
     /// RFC 4271 §6.8 gate for an unpromoted inbound collision candidate: its
     /// KEEPALIVE and further input wait in `OpenConfirm` for `PeerManager`'s
     /// verdict, so a collision loser never reaches Established.
@@ -2332,6 +2335,7 @@ impl PeerSession {
             reconnect_timer: None,
             notification_idle_failures: 0,
             batch_notification_teardown: false,
+            local_notification_teardown: false,
             collision_hold: if session_identity.role == SessionRole::InboundCandidate {
                 fsm::CollisionHold::Armed
             } else {

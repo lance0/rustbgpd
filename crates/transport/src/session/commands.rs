@@ -1523,6 +1523,10 @@ impl PeerSession {
                 // ordinary reconnect timer on the Idle transition because
                 // `stop_requested` is deliberately left alone.
                 if self.drain_outbound_before_close().await {
+                    // The drain raised a Cease/8, but this is still the
+                    // operator's reset: it clears the backoff streak.
+                    self.local_notification_teardown = false;
+                    self.notification_idle_failures = 0;
                     self.finish_drain_teardown().await;
                 } else {
                     self.administrative_reset(reason).await;

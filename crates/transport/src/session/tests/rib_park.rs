@@ -291,6 +291,39 @@ async fn rib_park_exhausted_stall_budget_sends_cease_then_peer_down() {
     ));
 }
 
+/// The stall's Cease/8 is a sent NOTIFICATION: its fall to Idle escalates
+/// the reconnect backoff like any other.
+/// Mutation-red: without the local-NOTIFICATION latch the streak stays at 2.
+#[tokio::test(start_paused = true)]
+async fn rib_park_stall_cease_escalates_notification_idle_backoff() {
+    let RibPark {
+        mut session,
+        commands: _commands,
+        rib_rx: _rib_rx,
+        mut server,
+        outbound: _outbound,
+        ..
+    } = rib_park().await;
+    session.notification_idle_failures = 2;
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    let established = tokio::time::Instant::now();
+    {
+        let run = session.run();
+        let steps = async {
+            server.write_all(&encoded_announce(held())).await.unwrap();
+            until_parked(&metrics, &peer).await;
+            tokio::time::sleep_until(established + Duration::from_secs(182)).await;
+        };
+        tokio::select! {
+            result = run => panic!("run() ended while parked: {result:?}"),
+            () = steps => {}
+        }
+    }
+    assert_eq!(cease_out_of_resources(&metrics, &peer), 1.0);
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(session.notification_idle_failures, 3);
+}
+
 /// A parked session (`held`, with `behind` buffered) whose hold expiries a
 /// test drives directly.
 async fn parked(behind: &[u8]) -> RibPark {
