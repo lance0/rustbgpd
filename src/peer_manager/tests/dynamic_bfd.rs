@@ -45,7 +45,7 @@ pub(super) struct Lab {
     /// Every set the fake actor took through the acknowledged path.
     pub(super) applied: mpsc::UnboundedReceiver<BfdRuntimeConfig>,
     /// The fake actor takes the next acknowledged change but drops its reply.
-    drop_next_reply: Arc<AtomicBool>,
+    pub(super) drop_next_reply: Arc<AtomicBool>,
     clients: Vec<TcpStream>,
 }
 

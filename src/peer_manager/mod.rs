@@ -2297,27 +2297,7 @@ impl PeerManager {
                 // Static delete and both dynamic operations validate
                 // before effect; static add reports cleanup explicitly.
                 let outcome = match mutation {
-                    OwnedNeighborMutation::Add(spec) => {
-                        let mut effect = lifecycle::RuntimeCreatePeerFailureEffect::NoEffect;
-                        match self
-                            .runtime_create_peer_classified(spec, Some(&mut effect))
-                            .await
-                        {
-                            Ok(()) => OwnedNeighborMutationOutcome::Success,
-                            Err(error) => match effect {
-                                lifecycle::RuntimeCreatePeerFailureEffect::NoEffect => {
-                                    OwnedNeighborMutationOutcome::RejectedNoEffect(
-                                        OwnedNeighborMutationError::Peer(error),
-                                    )
-                                }
-                                lifecycle::RuntimeCreatePeerFailureEffect::FullyCompensated => {
-                                    OwnedNeighborMutationOutcome::FullyCompensated(
-                                        OwnedNeighborMutationError::Peer(error),
-                                    )
-                                }
-                            },
-                        }
-                    }
+                    OwnedNeighborMutation::Add(spec) => self.owned_runtime_create_peer(spec).await,
                     OwnedNeighborMutation::Delete(peer) => {
                         match self.delete_peer_runtime(peer, true).await {
                             Ok(_) => OwnedNeighborMutationOutcome::Success,

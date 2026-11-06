@@ -394,13 +394,13 @@ impl PeerManager {
     }
 
     /// Open the socket family of `peer`'s member before the peer is added,
-    /// when no session has needed it yet: a runtime-added neighbor can be the
-    /// first in its family. A generation preflights its own sockets.
+    /// when no session has needed it yet: a runtime-created neighbor can be
+    /// the first in its family. A generation preflights its own sockets. An
+    /// unacknowledged commit fences BFD, as an uncertain generation does.
     pub(super) async fn open_bfd_member_family(
         &mut self,
         peer: IpAddr,
-    ) -> Result<(), rustbgpd_api::peer_types::PeerLifecycleError> {
-        use super::DynamicBfdSocketOutcome;
+    ) -> super::DynamicBfdSocketOutcome {
         let Some(member) = self
             .bfd_coupling
             .as_ref()
@@ -408,17 +408,9 @@ impl PeerManager {
             .and_then(|coupling| coupling.configured.get(&peer))
             .cloned()
         else {
-            return Ok(());
+            return super::DynamicBfdSocketOutcome::Ready;
         };
-        match self.open_bfd_sockets(vec![member]).await {
-            DynamicBfdSocketOutcome::Ready => Ok(()),
-            DynamicBfdSocketOutcome::Rejected(error) => Err(
-                rustbgpd_api::peer_types::PeerLifecycleError::Precondition(error),
-            ),
-            DynamicBfdSocketOutcome::Ambiguous(error) => Err(
-                rustbgpd_api::peer_types::PeerLifecycleError::Internal(error),
-            ),
-        }
+        self.open_bfd_sockets(vec![member]).await
     }
 
     /// Follow a configuration snapshot change outside a generation (runtime

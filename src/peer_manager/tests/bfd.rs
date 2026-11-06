@@ -2310,6 +2310,44 @@ async fn a_runtime_neighbor_in_a_strict_bfd_group_runs_bfd_and_is_withheld() {
     assert!(!lab.mgr.bfd_withholding(&RUNTIME_PEER), "BFD Up admits BGP");
 }
 
+/// When the BFD actor does not acknowledge the socket family a runtime-created
+/// neighbor needs, BFD is fenced and the restored snapshot cannot settle its
+/// membership: the owned create settles as ambiguous, so the API fences later
+/// mutations, never as a clean compensation.
+#[tokio::test]
+async fn a_lost_bfd_socket_acknowledgement_makes_a_runtime_create_ambiguous() {
+    let mut lab = super::dynamic_bfd::lab(strict_bfd_group_config());
+    lab.mgr.bfd_coupling.as_mut().unwrap().socket_preflight =
+        Some(Ok(Some(crate::bfd_runtime::PreparedRuntime::default())));
+    lab.drop_next_reply.store(true, Ordering::SeqCst);
+
+    let outcome = lab
+        .mgr
+        .owned_runtime_create_peer(runtime_neighbor(Some("strict-bfd"), 65009))
+        .await;
+
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::CompensationAmbiguous(_)
+        ),
+        "a lost BFD acknowledgement is not a clean compensation"
+    );
+    assert!(
+        lab.applied.try_recv().is_ok(),
+        "the commit reached the actor"
+    );
+    assert!(
+        lab.mgr.bfd_coupling.as_ref().unwrap().reloading,
+        "BFD is fenced"
+    );
+    assert!(!lab.mgr.peers.contains_key(&key(RUNTIME_PEER)), "not added");
+    assert!(
+        lab.mgr.current_config.neighbors.is_empty(),
+        "snapshot restored"
+    );
+}
+
 /// Deleting a strict-BFD neighbor and re-adding it without BFD (how the CLI
 /// changes a neighbor's ASN) removes its BFD session: the re-added neighbor
 /// is not held behind a session nothing configures.

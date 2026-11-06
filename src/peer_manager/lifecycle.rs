@@ -24,6 +24,9 @@ use super::{
 pub(super) enum RuntimeCreatePeerFailureEffect {
     NoEffect,
     FullyCompensated,
+    /// The BFD actor did not acknowledge the socket family the neighbor
+    /// needed; BFD is fenced and its final state is unknown.
+    CompensationAmbiguous,
 }
 
 pub(super) enum ReconfigurePeerFailureEffect {
@@ -814,6 +817,33 @@ impl PeerManager {
         self.runtime_create_peer_classified(spec, None).await
     }
 
+    /// The settlement outcome of an owned runtime create.
+    pub(super) async fn owned_runtime_create_peer(
+        &mut self,
+        spec: Box<PresenceAwareNeighborCreate>,
+    ) -> rustbgpd_api::peer_types::OwnedNeighborMutationOutcome {
+        use rustbgpd_api::peer_types::{OwnedNeighborMutationError, OwnedNeighborMutationOutcome};
+        let mut effect = RuntimeCreatePeerFailureEffect::NoEffect;
+        let Err(error) = self
+            .runtime_create_peer_classified(spec, Some(&mut effect))
+            .await
+        else {
+            return OwnedNeighborMutationOutcome::Success;
+        };
+        let error = OwnedNeighborMutationError::Peer(error);
+        match effect {
+            RuntimeCreatePeerFailureEffect::NoEffect => {
+                OwnedNeighborMutationOutcome::RejectedNoEffect(error)
+            }
+            RuntimeCreatePeerFailureEffect::FullyCompensated => {
+                OwnedNeighborMutationOutcome::FullyCompensated(error)
+            }
+            RuntimeCreatePeerFailureEffect::CompensationAmbiguous => {
+                OwnedNeighborMutationOutcome::CompensationAmbiguous(error)
+            }
+        }
+    }
+
     pub(super) async fn runtime_create_peer_classified(
         &mut self,
         spec: Box<PresenceAwareNeighborCreate>,
@@ -873,6 +903,27 @@ impl PeerManager {
         })?;
 
         let previous_config = self.replace_current_config(next_config);
+        // The neighbor's BFD session can be the first in its socket family.
+        let failure = match self.open_bfd_member_family(address).await {
+            super::DynamicBfdSocketOutcome::Ready => None,
+            super::DynamicBfdSocketOutcome::Rejected(error) => Some((
+                PeerLifecycleError::Precondition(error),
+                RuntimeCreatePeerFailureEffect::FullyCompensated,
+            )),
+            super::DynamicBfdSocketOutcome::Ambiguous(error) => Some((
+                PeerLifecycleError::Internal(format!("BFD socket family for {peer}: {error}")),
+                RuntimeCreatePeerFailureEffect::CompensationAmbiguous,
+            )),
+        };
+        if let Some((error, effect)) = failure {
+            // A fenced coupling keeps the member: restoring the snapshot
+            // cannot settle BFD membership, so the outcome stays ambiguous.
+            self.replace_current_config(previous_config);
+            if let Some(slot) = &mut failure_effect {
+                **slot = effect;
+            }
+            return Err(error);
+        }
         match self.add_peer(config, false).await {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -1025,7 +1076,6 @@ impl PeerManager {
         ) {
             return Err(PeerLifecycleError::Invalid(reason));
         }
-        self.open_bfd_member_family(config.address).await?;
 
         // A static neighbor at a retained dynamic neighbor's address is a new
         // neighbor: none of the retained identity carries over, and the
