@@ -842,28 +842,7 @@ async fn reconcile_once<F>(
         }
     }
 
-    for (prefix, installed) in state.owned.clone() {
-        if desired.contains(&prefix) {
-            continue;
-        }
-        match release_then_remove(fib, metrics, &mut state.ownership, prefix).await {
-            Removal::Removed => {
-                state.owned.remove(&prefix);
-                metrics.record_blackhole_discard_withdrawn();
-                info!(%prefix, "removed BLACKHOLE discard route");
-            }
-            Removal::KernelFailed => {
-                statuses.push(BlackholeStatus {
-                    prefix,
-                    peer: installed.peer,
-                    peer_interface: installed.peer_interface.clone(),
-                    state: BlackholeState::Failed,
-                    reason: "remove_failed".to_string(),
-                });
-            }
-            Removal::OwnershipUnavailable => {}
-        }
-    }
+    withdraw_undesired(fib, metrics, state, &desired, &mut statuses).await;
 
     for candidate in derived {
         if !candidate.installable {
@@ -1141,6 +1120,46 @@ fn mark_unreceipted(ownership: &OwnershipState, statuses: &mut [BlackholeStatus]
     }
 }
 
+/// Remove owned rows no longer desired, reporting failed removals.
+async fn withdraw_undesired<F>(
+    fib: &mut F,
+    metrics: &BgpMetrics,
+    state: &mut ReconcilerState,
+    desired: &HashSet<Prefix>,
+    statuses: &mut Vec<BlackholeStatus>,
+) where
+    F: BlackholeFib,
+{
+    let undesired = state
+        .owned
+        .keys()
+        .copied()
+        .filter(|prefix| !desired.contains(prefix))
+        .collect();
+    for (prefix, removal) in
+        release_then_remove(fib, metrics, &mut state.ownership, undesired).await
+    {
+        match removal {
+            Removal::Removed => {
+                state.owned.remove(&prefix);
+                metrics.record_blackhole_discard_withdrawn();
+                info!(%prefix, "removed BLACKHOLE discard route");
+            }
+            Removal::KernelFailed => {
+                let installed = &state.owned[&prefix];
+                statuses.push(BlackholeStatus {
+                    prefix,
+                    peer: installed.peer,
+                    peer_interface: installed.peer_interface.clone(),
+                    state: BlackholeState::Failed,
+                    reason: "remove_failed".to_string(),
+                });
+            }
+            Removal::OwnershipUnavailable => {}
+        }
+    }
+}
+
 fn ownership_unavailable_status(candidate: &Candidate) -> BlackholeStatus {
     BlackholeStatus {
         prefix: candidate.prefix,
@@ -1157,39 +1176,62 @@ enum Removal {
     OwnershipUnavailable,
 }
 
-/// Release `prefix` from the receipt, then delete its kernel row. A
-/// failed receipt write does not stop the delete: the row is known to be
-/// ours, and keeping it would strand a discard no later pass could reach.
+/// Release `prefixes` from the receipt in one publication, then delete
+/// their kernel rows. A failed delete restores the prefix in memory for
+/// the caller's closing `flush`. A failed receipt write does not stop the
+/// deletes: the rows are known to be ours, and keeping them would strand
+/// discards that no later pass could reach.
 async fn release_then_remove<F>(
     fib: &mut F,
     metrics: &BgpMetrics,
     ownership: &mut OwnershipState,
-    prefix: Prefix,
-) -> Removal
+    prefixes: Vec<Prefix>,
+) -> Vec<(Prefix, Removal)>
 where
     F: BlackholeFib,
 {
-    if !ownership.available {
-        return Removal::OwnershipUnavailable;
+    let unavailable = |prefixes: Vec<Prefix>| {
+        prefixes
+            .into_iter()
+            .map(|prefix| (prefix, Removal::OwnershipUnavailable))
+            .collect()
+    };
+    if prefixes.is_empty() {
+        return Vec::new();
     }
-    if !ownership.prefixes.contains(&prefix) {
+    if !ownership.available {
+        return unavailable(prefixes);
+    }
+    if let Some(prefix) = prefixes
+        .iter()
+        .find(|prefix| !ownership.prefixes.contains(prefix))
+    {
         warn!(%prefix, reason = "receipt lacks owned prefix", "BLACKHOLE ownership disabled");
         ownership.available = false;
-        return Removal::OwnershipUnavailable;
+        return unavailable(prefixes);
     }
-    if !ownership.remove(prefix) {
-        ownership.prefixes.insert(prefix);
-        return Removal::OwnershipUnavailable;
+    for prefix in &prefixes {
+        ownership.remove(*prefix);
     }
-    match fib.remove(prefix).await {
-        Ok(()) => Removal::Removed,
-        Err(error) => {
-            metrics.record_blackhole_discard_kernel_failure("remove");
-            warn!(%prefix, %error, "failed to remove BLACKHOLE discard route; restoring ownership receipt");
-            ownership.add(prefix);
-            Removal::KernelFailed
-        }
+    ownership.flush();
+    if !ownership.available {
+        ownership.prefixes.extend(prefixes.iter().copied());
+        return unavailable(prefixes);
     }
+    let mut removals = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        let removal = match fib.remove(prefix).await {
+            Ok(()) => Removal::Removed,
+            Err(error) => {
+                metrics.record_blackhole_discard_kernel_failure("remove");
+                warn!(%prefix, %error, "failed to remove BLACKHOLE discard route; restoring ownership receipt");
+                ownership.add(prefix);
+                Removal::KernelFailed
+            }
+        };
+        removals.push((prefix, removal));
+    }
+    removals
 }
 
 /// Reap adopted-but-unclaimed rows after the deferral, or surface them
@@ -1215,6 +1257,7 @@ async fn reap_or_report_adopted<F>(
         return;
     }
     let reapable = tokio::time::Instant::now() >= adoption.reap_after;
+    let mut reap = Vec::new();
     for prefix in adoption.pending.clone() {
         if desired.contains(&prefix) || owned.contains_key(&prefix) {
             // Claimed (or about to be) — never reap a desired prefix.
@@ -1250,7 +1293,10 @@ async fn reap_or_report_adopted<F>(
             );
             continue;
         }
-        match release_then_remove(fib, metrics, ownership, prefix).await {
+        reap.push(prefix);
+    }
+    for (prefix, removal) in release_then_remove(fib, metrics, ownership, reap).await {
+        match removal {
             Removal::Removed => {
                 adoption.pending.remove(&prefix);
                 metrics.record_blackhole_discard_reaped();
@@ -1271,7 +1317,7 @@ async fn reap_or_report_adopted<F>(
                     },
                 );
             }
-            Removal::OwnershipUnavailable => return,
+            Removal::OwnershipUnavailable => {}
         }
     }
 }
@@ -1316,28 +1362,8 @@ async fn degraded_pass_without_dump<F>(
     let mut statuses = Vec::with_capacity(derived.len() + state.owned.len());
     let mut current_rejected = HashSet::new();
 
-    for (prefix, installed) in state.owned.clone() {
-        if desired.contains(&prefix) {
-            continue;
-        }
-        match release_then_remove(fib, metrics, &mut state.ownership, prefix).await {
-            Removal::Removed => {
-                state.owned.remove(&prefix);
-                metrics.record_blackhole_discard_withdrawn();
-                info!(%prefix, "removed BLACKHOLE discard route");
-            }
-            Removal::KernelFailed => {
-                statuses.push(BlackholeStatus {
-                    prefix,
-                    peer: installed.peer,
-                    peer_interface: installed.peer_interface.clone(),
-                    state: BlackholeState::Failed,
-                    reason: "remove_failed".to_string(),
-                });
-            }
-            Removal::OwnershipUnavailable => {}
-        }
-    }
+    withdraw_undesired(fib, metrics, state, &desired, &mut statuses).await;
+    state.ownership.flush();
 
     for candidate in derived {
         if candidate.installable {
@@ -1382,16 +1408,14 @@ async fn drain_owned<F>(fib: &mut F, metrics: &BgpMetrics, state: &mut Reconcile
 where
     F: BlackholeFib,
 {
-    for prefix in state.owned.keys().copied().collect::<Vec<_>>() {
-        match release_then_remove(fib, metrics, &mut state.ownership, prefix).await {
-            Removal::Removed => {
-                state.owned.remove(&prefix);
-                metrics.record_blackhole_discard_withdrawn();
-            }
-            Removal::KernelFailed => {}
-            Removal::OwnershipUnavailable => return,
+    let owned = state.owned.keys().copied().collect();
+    for (prefix, removal) in release_then_remove(fib, metrics, &mut state.ownership, owned).await {
+        if matches!(removal, Removal::Removed) {
+            state.owned.remove(&prefix);
+            metrics.record_blackhole_discard_withdrawn();
         }
     }
+    state.ownership.flush();
     metrics.set_blackhole_discard_active(state.active_count());
 }
 
@@ -1773,7 +1797,6 @@ pub(super) mod tests {
                 log.lock().unwrap().push(prefix);
             }
             Box::pin(async move {
-                assert!(!receipt_has(self.receipt_path.as_deref(), prefix));
                 if let Some(error) = self.fail_install.get(&prefix) {
                     return Err(error.clone());
                 }
@@ -4221,8 +4244,8 @@ pub(super) mod tests {
         assert!(fib.install_calls.is_empty() && fib.remove_calls.is_empty());
         assert_eq!(statuses[0].reason, "ownership_state_unavailable");
         let mut missing = OwnershipState::ephemeral([]);
-        let _ = release_then_remove(&mut fib, &metrics, &mut missing, old).await;
-        let _ = release_then_remove(&mut fib, &metrics, &mut missing, old).await;
+        let _ = release_then_remove(&mut fib, &metrics, &mut missing, vec![old]).await;
+        let _ = release_then_remove(&mut fib, &metrics, &mut missing, vec![old]).await;
         let src = include_str!("blackhole.rs");
         let boundary = src.find(concat!("if !ownership.", "available")).unwrap();
         let warning = src.find(concat!("receipt lacks owned ", "prefix")).unwrap();
@@ -4363,6 +4386,10 @@ pub(super) mod tests {
 
     fn receipt_store(state: &mut ReconcilerState) -> &mut owned_state::OwnedStateStore {
         state.ownership.store.as_mut().unwrap()
+    }
+
+    fn receipt_writes(state: &mut ReconcilerState) -> u64 {
+        receipt_store(state).writes.load(Ordering::Relaxed)
     }
 
     fn receipt_on_disk(state: &mut ReconcilerState) -> BTreeSet<Prefix> {
@@ -4513,6 +4540,74 @@ pub(super) mod tests {
                 "{fault:?}"
             );
         }
+    }
+
+    /// One receipt publication per pass, not one per prefix.
+    #[tokio::test]
+    async fn receipt_is_published_once_per_pass() {
+        let prefixes: Vec<Prefix> = (1..=64).map(v4_host).collect();
+        let (_dir, _pinned, ownership) = durable_ownership(owned_state::FaultPoint::None);
+        let mut state = ReconcilerState::new(enabled(), deferred_adoption().reap_after, ownership);
+        let mut fib = FakeFib::default();
+        let mut writes = Vec::new();
+        pass(&mut state, &mut fib, blackholed(&prefixes)).await;
+        writes.push(receipt_writes(&mut state));
+        assert_eq!(fib.installed.len(), prefixes.len());
+        assert_eq!(receipt_on_disk(&mut state).len(), prefixes.len());
+        pass(&mut state, &mut fib, blackholed(&prefixes)).await;
+        writes.push(receipt_writes(&mut state));
+        pass(&mut state, &mut fib, Vec::new()).await;
+        writes.push(receipt_writes(&mut state));
+        assert!(fib.installed.is_empty() && receipt_on_disk(&mut state).is_empty());
+        pass(&mut state, &mut fib, blackholed(&prefixes)).await;
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        drain_owned(&mut fib, &metrics, &mut state).await;
+        writes.push(receipt_writes(&mut state));
+        assert!(fib.installed.is_empty() && receipt_on_disk(&mut state).is_empty());
+        // install pass, unchanged pass, withdraw pass, install pass + drain
+        assert_eq!(writes, vec![1, 1, 2, 4]);
+    }
+
+    /// Ordering: install, then publish the pass's receipt, then report.
+    /// A crash after the installs but before the publication leaves that
+    /// pass's rows unreceipted: restart adopts and reaps only receipted
+    /// rows and treats the rest as foreign, never deleting them.
+    #[tokio::test]
+    async fn crash_before_pass_receipt_adopts_only_receipted_rows() {
+        let (earlier, claimed, unclaimed) = (v4_host(1), v4_host(2), v4_host(3));
+        let (_dir, pinned, ownership) = durable_ownership(owned_state::FaultPoint::None);
+        let mut state = ReconcilerState::new(enabled(), deferred_adoption().reap_after, ownership);
+        let mut fib = FakeFib::default();
+        pass(&mut state, &mut fib, blackholed(&[earlier])).await;
+        // The stand-in for a crash: the pass's publication never lands and
+        // the process ends without a drain.
+        receipt_store(&mut state).fault = owned_state::FaultPoint::Write;
+        pass(
+            &mut state,
+            &mut fib,
+            blackholed(&[earlier, claimed, unclaimed]),
+        )
+        .await;
+        assert_eq!(fib.installed, [earlier, claimed, unclaimed].into());
+        assert_eq!(receipt_on_disk(&mut state), [earlier].into());
+        drop(state);
+
+        let mut restarted = ReconcilerState::new(
+            enabled(),
+            reapable_adoption().reap_after,
+            OwnershipState::load(Some(pinned)),
+        );
+        let statuses = pass(&mut restarted, &mut fib, blackholed(&[claimed])).await;
+        assert_eq!(
+            fib.installed,
+            [claimed, unclaimed].into(),
+            "only the receipted row is reaped"
+        );
+        assert_eq!(
+            reason_of(&statuses, claimed),
+            (BlackholeState::Failed, "foreign_route_exists")
+        );
+        assert!(restarted.ownership.available && restarted.ownership.prefixes.is_empty());
     }
 
     #[cfg(target_os = "linux")]

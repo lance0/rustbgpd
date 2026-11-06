@@ -447,11 +447,14 @@ repairs. Withdrawals/removals run first and bypass both limits. Limited routes
 remain retryable as `rejected/active_limit_exceeded` or
 `rejected/install_rate_limited`.
 
-Each successful install records its canonical prefix in private
-`<runtime_state_dir>/blackhole-owned.json`. Restart adopts only receipt∩marker;
-unreceipted marker-identical rows remain foreign. Unclaimed receipt rows stay
+Successful installs record their canonical prefixes in private
+`<runtime_state_dir>/blackhole-owned.json`, written once per reconcile pass after
+the pass's installs. Restart adopts only receipt∩marker; unreceipted
+marker-identical rows remain foreign, including rows a crash left between an
+install and that pass's receipt write. Unclaimed receipt rows stay
 `adopted_pending_reap` until the 500 s deferral expires. Receipt release is
-published before deletion; a failed delete attempts restoration.
+published before deletion, once per batch of removals; a failed delete attempts
+restoration.
 
 A failed receipt write (for example a full disk) keeps the affected rows owned
 in memory and retries on every pass. Until a write succeeds, rows the receipt

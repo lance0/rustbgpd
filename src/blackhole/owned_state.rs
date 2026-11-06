@@ -38,12 +38,20 @@ struct Receipt {
 pub(super) struct OwnedStateStore {
     directory: Arc<PinnedRuntimeStateDirectory>,
     pub(super) fault: FaultPoint,
+    /// Publication attempts, so tests can count receipt writes per pass.
+    #[cfg(test)]
+    pub(super) writes: AtomicU64,
 }
 
 /// The actor's BLACKHOLE ownership. `prefixes` is the in-memory
-/// authority: the rows the actor holds in the kernel. `flush` publishes
-/// it to the receipt; a failed publication keeps ownership in memory, so
-/// withdrawal and shutdown can still remove the rows.
+/// authority: the rows the actor holds in the kernel. `add` and `remove`
+/// change only memory; `flush` publishes the set as one receipt write, so
+/// a reconcile pass costs O(1) writes however many prefixes it touches.
+///
+/// Ordering: rows are installed, then the pass publishes the receipt,
+/// then statuses report them. A receipt drop is published before the
+/// kernel delete. A crash between an install and its publication leaves
+/// that row unreceipted, and restart treats it as foreign.
 #[derive(Default)]
 pub(super) struct OwnershipState {
     pub(super) store: Option<OwnedStateStore>,
@@ -98,18 +106,16 @@ impl OwnershipState {
 
     pub(super) fn add(&mut self, prefix: Prefix) {
         self.prefixes.insert(prefix);
-        self.flush();
     }
 
-    /// Release `prefix`. False when ownership is unavailable: the prefix
-    /// was not owned, or the receipt was changed outside the actor.
+    /// Drop `prefix` in memory. False, and ownership disabled, when it
+    /// was not owned.
     pub(super) fn remove(&mut self, prefix: Prefix) -> bool {
         if !self.prefixes.remove(&prefix) {
             self.available = false;
             return false;
         }
-        self.flush();
-        self.available
+        true
     }
 
     /// Publish `prefixes` if the receipt does not already hold it. An I/O
@@ -165,6 +171,8 @@ impl OwnedStateStore {
         let store = Self {
             directory,
             fault: FaultPoint::None,
+            #[cfg(test)]
+            writes: AtomicU64::new(0),
         };
         let prefixes = store.read()?.unwrap_or_default();
         Ok((store, prefixes))
@@ -199,6 +207,8 @@ impl OwnedStateStore {
         fault: FaultPoint,
         temp_name: &str,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        self.writes.fetch_add(1, Ordering::Relaxed);
         let on_disk = self.read()?;
         if on_disk.as_ref().is_none_or(BTreeSet::is_empty) && current.is_empty() {
             // Missing is empty authority only before anything has been owned.
