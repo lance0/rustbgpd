@@ -44,6 +44,15 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   of tuples, or an ORF structural error, still yields `Capability::Unknown`.
   `orf::decode_capability_value` returns the modeled blocks instead of `None`
   for an unrecognized AFI/SAFI.
+- `BgpHeader::decode` and `peek_message_length` enforce the RFC 4271 §6.1
+  per-type lengths: OPEN at least 29, UPDATE 23, NOTIFICATION 21,
+  ROUTE-REFRESH 23 (new `MIN_ROUTE_REFRESH_LEN`), and KEEPALIVE exactly 19.
+  A violation is `DecodeError::InvalidLength`, which maps to Bad Message
+  Length (1/2) carrying the Length field. Earlier releases passed a short
+  OPEN or NOTIFICATION to the body decoder, which reported OPEN Message
+  Error 2/0 with empty data, and a short UPDATE reported 3/1.
+  `DecodeError::InvalidKeepaliveLength` now also carries the length in its
+  NOTIFICATION data.
 - Pair this wire line with FSM 0.15 and RPKI 0.10 when sharing public wire
   types. These crate versions are not published by this change.
 

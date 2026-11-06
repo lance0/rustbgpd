@@ -323,6 +323,57 @@ mod tests {
         assert_eq!(data.as_ref(), &4097_u16.to_be_bytes());
     }
 
+    /// One message of `message_type` whose header claims `length`, with
+    /// `body` followed by zero padding.
+    fn framed(message_type: MessageType, length: u16, body: &[u8]) -> Bytes {
+        let mut encoded = BytesMut::new();
+        BgpHeader {
+            length,
+            message_type,
+        }
+        .encode(&mut encoded);
+        encoded.extend_from_slice(body);
+        encoded.resize(usize::from(length).max(HEADER_LEN), 0);
+        encoded.freeze()
+    }
+
+    /// RFC 4271 §6.1: a message shorter than its type's minimum, or a
+    /// KEEPALIVE that is not exactly 19 octets, is Bad Message Length (1/2)
+    /// with the erroneous Length field as Data. The minimum itself decodes.
+    #[test]
+    fn per_type_length_bounds_are_bad_message_length() {
+        let open = [4, 0xfd, 0xe9, 0, 90, 10, 0, 0, 1, 0];
+        let cases: [(MessageType, u16, &[u8], u16); 5] = [
+            (MessageType::Open, 29, &open, MAX_MESSAGE_LEN),
+            (MessageType::Update, 23, &[0, 0, 0, 0], MAX_MESSAGE_LEN),
+            (MessageType::Notification, 21, &[6, 2], MAX_MESSAGE_LEN),
+            (MessageType::Keepalive, 19, &[], 19),
+            (
+                MessageType::RouteRefresh,
+                23,
+                &[0, 1, 0, 1],
+                MAX_MESSAGE_LEN,
+            ),
+        ];
+        for (message_type, min, body, max) in cases {
+            decode_message(&mut framed(message_type, min, body), MAX_MESSAGE_LEN)
+                .unwrap_or_else(|err| panic!("{message_type:?} at its minimum {min}: {err}"));
+            for length in [min - 1, max + 1] {
+                let err = decode_message(&mut framed(message_type, length, body), MAX_MESSAGE_LEN)
+                    .unwrap_err();
+                assert_eq!(
+                    err.to_notification(),
+                    (
+                        NotificationCode::MessageHeader,
+                        2,
+                        Bytes::copy_from_slice(&length.to_be_bytes())
+                    ),
+                    "{message_type:?} length {length}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn roundtrip_open_minimal() {
         let msg = Message::Open(OpenMessage {
