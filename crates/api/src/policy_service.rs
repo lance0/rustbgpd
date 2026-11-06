@@ -393,6 +393,37 @@ pub struct PolicyService {
     /// `TestPolicy` / `ComparePolicy` candidate compiles in flight on the
     /// blocking pool ([`POLICY_COMPILE_SLOTS`]).
     compile_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Test-only hold on the blocking compile, to order observations
+    /// against it.
+    #[cfg(test)]
+    compile_gate: Option<std::sync::Arc<CompileGate>>,
+}
+
+/// Holds a candidate compile on its blocking thread until released, after
+/// announcing that it started. The hold ends after 10 s whatever happens,
+/// so a compile that runs on an async worker cannot hang a failing test.
+#[cfg(test)]
+struct CompileGate {
+    started: tokio::sync::Notify,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    /// Whether the hold ran out instead of being released.
+    timed_out: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl CompileGate {
+    fn hold(&self) {
+        self.started.notify_one();
+        let released = self
+            .release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10));
+        if released.is_err() {
+            self.timed_out
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 /// Candidate compiles one service runs at once. A request past this is
@@ -448,6 +479,8 @@ impl PolicyService {
             owned_actor_timeout: OWNED_POLICY_ACTOR_TIMEOUT,
             local_asn: None,
             compile_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(POLICY_COMPILE_SLOTS)),
+            #[cfg(test)]
+            compile_gate: None,
         }
     }
 
@@ -465,8 +498,14 @@ impl PolicyService {
                     "{POLICY_COMPILE_SLOTS} policy candidate compiles are already running; retry"
                 ))
             })?;
+        #[cfg(test)]
+        let gate = self.compile_gate.clone();
         let compile = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.hold();
+            }
             compile()
         });
         match tokio::time::timeout(POLICY_COMPILE_DEADLINE, compile).await {
@@ -4686,9 +4725,10 @@ policy customer-in(peer_lp: u32) {
         source
     }
 
-    /// An error-dense `TestPolicy` candidate compiles and renders off the async
-    /// workers: on this single-threaded runtime, `GetHealth` answers while the
-    /// candidate is still compiling.
+    /// A `TestPolicy` compile runs off the async workers: on this
+    /// single-threaded runtime, `GetHealth` answers while the compile is
+    /// held in flight on its blocking thread. The gate orders the
+    /// observation; nothing depends on how long the compile takes.
     #[tokio::test]
     async fn health_answers_while_a_large_test_policy_compiles() {
         use crate::proto::control_service_server::ControlService as _;
@@ -4720,8 +4760,14 @@ policy customer-in(peer_lp: u32) {
             }
         });
 
-        let svc = test_policy_service(Vec::new());
-        let started = std::time::Instant::now();
+        let (release, held) = std::sync::mpsc::channel();
+        let gate = std::sync::Arc::new(CompileGate {
+            started: tokio::sync::Notify::new(),
+            release: std::sync::Mutex::new(held),
+            timed_out: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mut svc = test_policy_service(Vec::new());
+        svc.compile_gate = Some(std::sync::Arc::clone(&gate));
         let dry_run = tokio::spawn(async move {
             PolicyServiceRpc::test_policy(
                 &svc,
@@ -4734,19 +4780,22 @@ policy customer-in(peer_lp: u32) {
             )
             .await
         });
-        // Let the dry run start before asking for health.
-        tokio::task::yield_now().await;
-        let health = health
-            .get_health(Request::new(proto::HealthRequest {}))
+        tokio::time::timeout(Duration::from_secs(20), gate.started.notified())
             .await
-            .expect("health answers");
-        let health_latency = started.elapsed();
+            .expect("the compile starts");
+        let health = tokio::time::timeout(
+            Duration::from_secs(5),
+            health.get_health(Request::new(proto::HealthRequest {})),
+        )
+        .await
+        .expect("health answers while the compile is held")
+        .expect("health answers");
         assert!(health.into_inner().healthy);
         assert!(
-            !dry_run.is_finished(),
-            "the candidate must still be compiling when health answers (it answered after \
-             {health_latency:?})"
+            !gate.timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            "health must answer before the held compile is released"
         );
+        release.send(()).unwrap();
         let response = tokio::time::timeout(Duration::from_secs(60), dry_run)
             .await
             .expect("the dry run finishes")
