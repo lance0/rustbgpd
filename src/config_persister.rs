@@ -101,7 +101,7 @@ impl ConfigPersister {
         // The v2 writer owns the one-time legacy-directory permission
         // tightening. Do it synchronously so read-only services can never
         // observe the directory before that ownership boundary is established.
-        persister.record_current_history();
+        persister.record_current_history(persister.current.read_mtime_unix());
         persister
     }
 
@@ -180,7 +180,10 @@ impl ConfigPersister {
                                 "adopting SIGHUP config snapshot without rewriting the operator file"
                             );
                             p.current = snapshot;
-                            p.record_current_history();
+                            // The mtime of the bytes the reload read, not the
+                            // file's mtime now: a save that landed during the
+                            // reload is still pending.
+                            p.record_current_history(p.current.read_mtime_unix());
                         })
                         .await;
                     let _ = adopted.send(());
@@ -290,7 +293,7 @@ impl ConfigPersister {
         match staged.commit() {
             Ok(()) => {
                 self.current = config;
-                self.record_current_history();
+                self.record_current_history(None);
                 ConfigPersistCommitOutcome::PublishedDurable
             }
             Err(crate::confirm_journal::AtomicPublishError::NotPublished(error)) => {
@@ -335,7 +338,7 @@ impl ConfigPersister {
             self.current.normalized_toml().as_bytes(),
         ) {
             Ok(()) => {
-                self.record_current_history();
+                self.record_current_history(None);
                 ConfigPersistCommitOutcome::PublishedDurable
             }
             Err(crate::confirm_journal::AtomicPublishError::NotPublished(error)) => {
@@ -359,8 +362,8 @@ impl ConfigPersister {
     /// current — boot, every durable write, and a SIGHUP snapshot refresh —
     /// already funnels here, which is why the marker is recorded here too
     /// rather than at each call site.
-    fn record_history(&self) {
-        self.record_last_persist();
+    fn record_history(&self, read_mtime_unix: Option<u64>) {
+        self.record_last_persist(read_mtime_unix);
         if let Some(dir) = self.history_dir() {
             match crate::config_history::record_accepted(&dir, &self.current) {
                 Ok(
@@ -391,16 +394,21 @@ impl ConfigPersister {
     /// compares byte-for-byte against the mtime `rbgp doctor` reads from the
     /// same file — no clock skew or rounding in between. A later external edit
     /// necessarily carries a higher mtime and still warns.
-    fn record_last_persist(&self) {
+    ///
+    /// `read_mtime_unix` is the mtime captured when an adopted snapshot was
+    /// read from the file (boot, SIGHUP). After the daemon's own write it is
+    /// `None`, and the file is stated now.
+    fn record_last_persist(&self, read_mtime_unix: Option<u64>) {
         let Some(dir) = &self.state_dir else {
             return;
         };
-        let Some(mtime) = std::fs::metadata(&self.config_path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|since| since.as_secs())
-        else {
+        let Some(mtime) = read_mtime_unix.or_else(|| {
+            std::fs::metadata(&self.config_path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_secs())
+        }) else {
             return;
         };
         let path = dir.join(LAST_PERSIST_FILE);
@@ -418,8 +426,8 @@ impl ConfigPersister {
         }
     }
 
-    fn record_current_history(&self) {
-        self.record_history();
+    fn record_current_history(&self, read_mtime_unix: Option<u64>) {
+        self.record_history(read_mtime_unix);
     }
 }
 
@@ -830,6 +838,78 @@ log_format = "json"
             recorded, mtime,
             "the marker must hold the mtime of the file the daemon just wrote, \
              or doctor reads the daemon's own write as an external edit"
+        );
+    }
+
+    /// A SIGHUP reload adopts the bytes it read, which may be minutes older
+    /// than the file by the time the reload lands. If the operator saves again
+    /// in that window, the marker must keep the mtime of the bytes the reload
+    /// read, so `rbgp doctor` (which warns when the file's mtime is newer than
+    /// the marker) still reports the second save as pending.
+    #[tokio::test]
+    async fn reload_adoption_records_the_mtime_read_at_load_not_at_adoption() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let state_dir = dir.path().join("state");
+        std::fs::write(
+            &path,
+            crate::test_support::tier_authorized_uds_test_config(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n\
+                 [global.telemetry]\nprometheus_addr = \"0.0.0.0:9179\"\nlog_format = \"json\"\n",
+            ),
+        )
+        .unwrap();
+        let set_mtime = |secs: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
+        let read_at: u64 = 1_700_000_000;
+        set_mtime(read_at);
+        let loaded = Arc::new(AcceptedConfigSnapshot::load(&path, None).unwrap());
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister =
+            ConfigPersister::new(rx, path.clone(), minimal_config(), Some(state_dir.clone()));
+        let handle = tokio::spawn(persister.run());
+
+        // The operator saves again while the reload is still applying.
+        let saved_again = read_at + 60;
+        set_mtime(saved_again);
+
+        let (adopted, adopted_rx) = oneshot::channel();
+        tx.send(ConfigMutation::AdoptReloadSnapshot {
+            snapshot: loaded,
+            adopted,
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), adopted_rx)
+            .await
+            .expect("adoption acknowledged in time")
+            .expect("persister adoption acknowledgement");
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("persister exits in time")
+            .unwrap();
+
+        let recorded: u64 = std::fs::read_to_string(state_dir.join(LAST_PERSIST_FILE))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            recorded, read_at,
+            "the marker must hold the mtime of the bytes the reload read, not the \
+             mtime of a save that landed during the reload"
+        );
+        assert!(
+            saved_again > recorded,
+            "doctor must still see the second save as newer than the marker"
         );
     }
 
