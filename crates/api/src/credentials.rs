@@ -1,6 +1,6 @@
 //! Atomic management-plane credential generations.
 
-use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +16,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
 use crate::authz_runtime::BearerAuthSecret;
+use crate::credential_file::{CredentialKind, DaemonIdentity, open_credential};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CredentialSource {
@@ -144,6 +145,8 @@ impl std::fmt::Debug for ListenerCredentials {
 pub struct CredentialGeneration {
     sequence: u64,
     listeners: Arc<[ListenerCredentials]>,
+    /// Permission warnings for the files this generation was staged from.
+    file_warnings: Arc<[String]>,
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +179,14 @@ impl CredentialGeneration {
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    /// Credential files this generation accepted that are readable beyond the
+    /// daemon (see [`crate::credential_file`]). Report them once per load or
+    /// reload.
+    #[must_use]
+    pub fn file_warnings(&self) -> &[String] {
+        &self.file_warnings
     }
 
     pub(crate) fn listener(&self, index: usize) -> &ListenerCredentials {
@@ -268,30 +279,73 @@ fn stage_generation(
     sources: &[CredentialSource],
     sequence: u64,
 ) -> Result<CredentialGeneration, String> {
+    let daemon = DaemonIdentity::current();
+    let mut warnings = Vec::new();
     let listeners = sources
         .iter()
         .enumerate()
-        .map(|(index, source)| stage_listener(index, source))
+        .map(|(index, source)| {
+            let mut files = Files {
+                index,
+                daemon,
+                warnings: &mut warnings,
+            };
+            stage_listener(&mut files, source)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(CredentialGeneration {
         sequence,
         listeners: listeners.into(),
+        file_warnings: warnings.into(),
     })
 }
 
-fn stage_listener(index: usize, source: &CredentialSource) -> Result<ListenerCredentials, String> {
+/// Opens one listener's credential files under the shared admission rules,
+/// collecting the warnings for the generation.
+struct Files<'a> {
+    index: usize,
+    daemon: DaemonIdentity,
+    warnings: &'a mut Vec<String>,
+}
+
+impl Files<'_> {
+    fn open(
+        &mut self,
+        label: &str,
+        kind: CredentialKind,
+        path: &Path,
+    ) -> Result<std::fs::File, String> {
+        let (file, warning) = open_credential(path, label, kind, self.daemon)
+            .map_err(|e| format!("listener {}: {e}", self.index))?;
+        if let Some(warning) = warning {
+            self.warnings
+                .push(format!("listener {}: {warning}", self.index));
+        }
+        Ok(file)
+    }
+}
+
+fn stage_listener(
+    files: &mut Files<'_>,
+    source: &CredentialSource,
+) -> Result<ListenerCredentials, String> {
+    let index = files.index;
     let bearer = source
         .token_file
         .as_ref()
         .map(|path| {
             // Zeroizing scrubs this transient read when it drops; the
             // retained copy inside `BearerAuthSecret` scrubs on its own drop.
-            let raw = Zeroizing::new(fs::read_to_string(path).map_err(|e| {
-                format!(
-                    "listener {index}: failed to read token file {}: {e}",
-                    path.display()
-                )
-            })?);
+            let mut raw = Zeroizing::new(String::new());
+            files
+                .open("token", CredentialKind::Secret, path)?
+                .read_to_string(&mut raw)
+                .map_err(|e| {
+                    format!(
+                        "listener {index}: failed to read token file {}: {e}",
+                        path.display()
+                    )
+                })?;
             let token = raw.trim_end();
             if token.is_empty() {
                 return Err(format!(
@@ -305,7 +359,7 @@ fn stage_listener(index: usize, source: &CredentialSource) -> Result<ListenerCre
     let tls = source
         .tls
         .as_ref()
-        .map(|source| build_tls(index, source))
+        .map(|source| build_tls(files, source))
         .transpose()?;
     let (tls, tls_expiry) = match tls {
         Some((config, expiry)) => (Some(config), Some(expiry)),
@@ -320,13 +374,23 @@ fn stage_listener(index: usize, source: &CredentialSource) -> Result<ListenerCre
 
 /// Read a credential file into a buffer that is scrubbed on drop (the TLS
 /// private key in particular must not linger in freed heap after parsing).
-fn read_file(index: usize, label: &str, path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
-    let bytes = Zeroizing::new(fs::read(path).map_err(|e| {
-        format!(
-            "listener {index}: failed to read {label} file {}: {e}",
-            path.display()
-        )
-    })?);
+fn read_file(
+    files: &mut Files<'_>,
+    label: &str,
+    kind: CredentialKind,
+    path: &Path,
+) -> Result<Zeroizing<Vec<u8>>, String> {
+    let index = files.index;
+    let mut bytes = Zeroizing::new(Vec::new());
+    files
+        .open(label, kind, path)?
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            format!(
+                "listener {index}: failed to read {label} file {}: {e}",
+                path.display()
+            )
+        })?;
     if bytes.is_empty() {
         return Err(format!(
             "listener {index}: {label} file {} is empty",
@@ -336,10 +400,29 @@ fn read_file(index: usize, label: &str, path: &Path) -> Result<Zeroizing<Vec<u8>
     Ok(bytes)
 }
 
-fn build_tls(index: usize, source: &TlsSource) -> Result<(Arc<ServerConfig>, TlsExpiry), String> {
-    let cert_bytes = read_file(index, "certificate", &source.cert_file)?;
-    let key_bytes = read_file(index, "private key", &source.key_file)?;
-    let ca_bytes = read_file(index, "client CA", &source.client_ca_file)?;
+fn build_tls(
+    files: &mut Files<'_>,
+    source: &TlsSource,
+) -> Result<(Arc<ServerConfig>, TlsExpiry), String> {
+    let index = files.index;
+    let cert_bytes = read_file(
+        files,
+        "certificate",
+        CredentialKind::Public,
+        &source.cert_file,
+    )?;
+    let key_bytes = read_file(
+        files,
+        "private key",
+        CredentialKind::Secret,
+        &source.key_file,
+    )?;
+    let ca_bytes = read_file(
+        files,
+        "client CA",
+        CredentialKind::Public,
+        &source.client_ca_file,
+    )?;
     let certs = CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<Vec<CertificateDer<'static>>, _>>()
         .map_err(|e| format!("listener {index}: invalid certificate PEM: {e}"))?;
@@ -648,6 +731,53 @@ mod tests {
             expiry_metrics(&registry)["server_leaf"],
             new_expiry.server_leaf.unwrap()
         );
+    }
+
+    /// Load-bearing: load and reload apply the shared file rules. A shared
+    /// token is accepted with one warning per generation, a world-writable
+    /// one is refused and leaves the last good generation active, and a
+    /// directory is refused outright.
+    #[test]
+    fn token_file_permissions_are_judged_on_load_and_reload() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let token = token_file("secret\n");
+        let chmod = |mode| {
+            std::fs::set_permissions(token.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        chmod(0o644);
+        let store = CredentialStore::stage(vec![CredentialSource {
+            token_file: Some(token.path().to_path_buf()),
+            tls: None,
+        }])
+        .unwrap();
+        let warnings = store.load().file_warnings().to_vec();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("listener 0: token file"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("mode 0644"), "{warnings:?}");
+
+        chmod(0o600);
+        assert_eq!(store.reload().unwrap(), 2);
+        assert_eq!(store.load().file_warnings(), [] as [String; 0]);
+
+        chmod(0o666);
+        let error = store.reload().unwrap_err();
+        assert!(error.contains("world-writable"), "{error}");
+        assert_eq!(
+            store.load().sequence(),
+            2,
+            "last good generation stays active"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let error = CredentialStore::stage(vec![CredentialSource {
+            token_file: Some(dir.path().to_path_buf()),
+            tls: None,
+        }])
+        .unwrap_err();
+        assert!(error.contains("not a regular file"), "{error}");
     }
 
     #[test]
