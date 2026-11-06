@@ -1236,6 +1236,11 @@ Each RTR client reconnects independently after a fixed `retry_interval`
 arrives, both capped by `max_expire_interval` when set), cached VRPs for that
 server are discarded. Routes are re-validated against the remaining VRP table.
 
+A cache that sends more records than `max_records_per_cache` allows, or
+that would take all caches past `max_records_total`, is refused the same way:
+its last accepted data stays, and it reconnects to ask for a full table. See
+[record limits](configuration.md#record-limits).
+
 When all caches are down, the VRP table is empty and all routes have
 validation state `NotFound`. If your policy denies `NotFound` routes, this
 will cause route drops. The recommended policy is to deny `Invalid` and

@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use rustbgpd_fsm::{PeerConfig, SessionState};
+use rustbgpd_policy::{
+    NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+    RouteType,
+};
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
@@ -1082,4 +1086,248 @@ async fn query_state_returns_router_id_at_open_confirm() {
 
     // Clean shutdown
     handle.shutdown().await.unwrap().unwrap();
+}
+
+/// The session state a peer message is injected in.
+#[derive(Clone, Copy)]
+enum PreEstablished {
+    /// Our OPEN is sent; the peer has not sent its OPEN.
+    OpenSent,
+    /// Both OPENs are exchanged and our KEEPALIVE is read; the peer has not
+    /// sent its KEEPALIVE.
+    OpenConfirm,
+}
+
+/// A classic IPv4 UPDATE: ORIGIN IGP, AS_PATH [65002] (two-octet), NEXT_HOP
+/// 10.0.0.2, NLRI 192.0.2.0/24.
+const PRE_ESTABLISHED_UPDATE: [u8; 45] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x00, 45, 2, // header
+    0x00, 0x00, // withdrawn routes length
+    0x00, 18, // path attribute length
+    0x40, 0x01, 0x01, 0x00, // ORIGIN IGP
+    0x40, 0x02, 0x04, 0x02, 0x01, 0xfd, 0xea, // AS_PATH AS_SEQUENCE [65002]
+    0x40, 0x03, 0x04, 10, 0, 0, 2, // NEXT_HOP 10.0.0.2
+    24, 192, 0, 2, // NLRI 192.0.2.0/24
+];
+
+/// IPv4 unicast End-of-RIB: an UPDATE with no withdrawals, attributes or NLRI.
+const PRE_ESTABLISHED_EOR: [u8; 23] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x00, 23, 2, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// ROUTE-REFRESH for IPv4 unicast.
+const PRE_ESTABLISHED_ROUTE_REFRESH: [u8; 23] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x00, 23, 5, 0x00, 0x01, 0x00, 0x01,
+];
+
+/// Name the RIB messages that carry peer input or end it.
+fn peer_input_kind(update: &RibUpdate) -> Option<&'static str> {
+    match update {
+        RibUpdate::RoutesReceived { .. } => Some("RoutesReceived"),
+        RibUpdate::WireRoutesReceived(_) => Some("WireRoutesReceived"),
+        RibUpdate::EndOfRib { .. } => Some("EndOfRib"),
+        RibUpdate::RouteRefreshRequest { .. } => Some("RouteRefreshRequest"),
+        RibUpdate::BeginRouteRefresh { .. } => Some("BeginRouteRefresh"),
+        RibUpdate::EndRouteRefresh { .. } => Some("EndRouteRefresh"),
+        RibUpdate::PeerDown { .. } => Some("PeerDown"),
+        _ => None,
+    }
+}
+
+/// Drive an active session to `stage`, send `pdu` as the peer, and return the
+/// NOTIFICATION the session answers with plus the peer-input RIB messages it
+/// queued.
+///
+/// The session hands a PDU's RIB messages to the channel before it drives the
+/// FSM for that PDU, so once the NOTIFICATION is on the wire the channel
+/// already holds everything the PDU produced.
+async fn inject_before_established(
+    stage: PreEstablished,
+    pdu: &[u8],
+    import_policy: Option<PolicyChain>,
+) -> (NotificationMessage, Vec<&'static str>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let handle = PeerHandle::spawn(
+        transport_config(addr),
+        BgpMetrics::new(),
+        rib_tx,
+        import_policy,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    handle.start().await.unwrap();
+
+    let (mut peer_stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("session connects")
+        .unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_bgp_message(&mut peer_stream, &mut buf),
+    )
+    .await
+    .expect("session sends OPEN");
+    assert!(matches!(msg, Message::Open(_)));
+
+    if matches!(stage, PreEstablished::OpenConfirm) {
+        let mut open = mock_open();
+        open.capabilities.push(Capability::RouteRefresh);
+        send_bgp_message(&mut peer_stream, &Message::Open(open)).await;
+        let msg = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_bgp_message(&mut peer_stream, &mut buf),
+        )
+        .await
+        .expect("session answers OPEN with KEEPALIVE");
+        assert!(matches!(msg, Message::Keepalive));
+    }
+
+    peer_stream.write_all(pdu).await.unwrap();
+    peer_stream.flush().await.unwrap();
+
+    let notification = loop {
+        let msg = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_bgp_message(&mut peer_stream, &mut buf),
+        )
+        .await
+        .expect("session answers a pre-Established message with a NOTIFICATION");
+        match msg {
+            Message::Notification(notification) => break notification,
+            Message::Keepalive => {}
+            other => panic!("unexpected message before NOTIFICATION: {other:?}"),
+        }
+    };
+    wait_for_fsm_state(&handle, SessionState::Idle).await;
+
+    let mut seen = Vec::new();
+    while let Ok(update) = rib_rx.try_recv() {
+        seen.extend(peer_input_kind(&update));
+    }
+    handle.shutdown().await.unwrap().unwrap();
+    (notification, seen)
+}
+
+/// RFC 4271 §8.2.2: UPDATE and ROUTE-REFRESH in OpenSent or OpenConfirm are
+/// FSM errors. RFC 6608 subcodes are not modeled, so the subcode is 0.
+fn assert_fsm_error(notification: &NotificationMessage) {
+    assert_eq!(notification.code, NotificationCode::FsmError);
+    assert_eq!(notification.subcode, 0);
+}
+
+#[tokio::test]
+async fn update_in_open_sent_is_an_fsm_error_and_reaches_no_rib() {
+    let (notification, seen) =
+        inject_before_established(PreEstablished::OpenSent, &PRE_ESTABLISHED_UPDATE, None).await;
+    assert!(
+        seen.is_empty(),
+        "pre-Established UPDATE reached the RIB: {seen:?}"
+    );
+    assert_fsm_error(&notification);
+}
+
+#[tokio::test]
+async fn update_in_open_confirm_is_an_fsm_error_and_reaches_no_rib() {
+    let (notification, seen) =
+        inject_before_established(PreEstablished::OpenConfirm, &PRE_ESTABLISHED_UPDATE, None).await;
+    assert!(
+        seen.is_empty(),
+        "pre-Established UPDATE reached the RIB: {seen:?}"
+    );
+    assert_fsm_error(&notification);
+}
+
+#[tokio::test]
+async fn end_of_rib_in_open_confirm_is_an_fsm_error_and_reaches_no_rib() {
+    let (notification, seen) =
+        inject_before_established(PreEstablished::OpenConfirm, &PRE_ESTABLISHED_EOR, None).await;
+    assert!(
+        seen.is_empty(),
+        "pre-Established End-of-RIB reached the RIB: {seen:?}"
+    );
+    assert_fsm_error(&notification);
+}
+
+#[tokio::test]
+async fn route_refresh_in_open_confirm_is_an_fsm_error_and_reaches_no_rib() {
+    let (notification, seen) = inject_before_established(
+        PreEstablished::OpenConfirm,
+        &PRE_ESTABLISHED_ROUTE_REFRESH,
+        None,
+    )
+    .await;
+    assert!(
+        seen.is_empty(),
+        "pre-Established ROUTE-REFRESH reached the RIB: {seen:?}"
+    );
+    assert_fsm_error(&notification);
+}
+
+/// One import deny statement for an eBGP neighbor, with default permit.
+fn deny_statement(
+    match_neighbor_set: Option<NeighborSetMatch>,
+    match_route_type: Option<RouteType>,
+) -> PolicyStatement {
+    PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: PolicyAction::Deny,
+        match_community: vec![],
+        match_as_path: None,
+        match_neighbor_set,
+        match_route_type,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    }
+}
+
+/// Before Established the session has no negotiated peer ASN, so a
+/// pre-Established UPDATE was evaluated as internal with no remote ASN and
+/// slipped past an eBGP deny-by-remote-ASN import policy into the RIB.
+#[tokio::test]
+async fn update_in_open_confirm_bypassing_ebgp_import_deny_reaches_no_rib() {
+    let import_policy = PolicyChain::new(vec![Policy {
+        entries: vec![
+            deny_statement(
+                Some(NeighborSetMatch {
+                    addresses: vec![],
+                    remote_asns: vec![REMOTE_ASN],
+                    peer_groups: vec![],
+                }),
+                None,
+            ),
+            deny_statement(None, Some(RouteType::External)),
+        ],
+        default_action: PolicyAction::Permit,
+    }]);
+    let (notification, seen) = inject_before_established(
+        PreEstablished::OpenConfirm,
+        &PRE_ESTABLISHED_UPDATE,
+        Some(import_policy),
+    )
+    .await;
+    assert!(
+        seen.is_empty(),
+        "pre-Established UPDATE bypassed the eBGP import deny: {seen:?}"
+    );
+    assert_fsm_error(&notification);
 }

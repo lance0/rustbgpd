@@ -397,7 +397,7 @@ def check_container_deployment_docs(
         "Use exactly one of these deployment paths:",
         "`--network=host` with `--user=root`",
         "--cap-drop=ALL",
-        "runtime-state marker/checkpoint storage unavailable",
+        "runtime-state owner guard treats that mismatch as unsafe and refuses to start",
         "must be non-empty",
         "Runtime mutation",
         "status does not terminate the attached process",

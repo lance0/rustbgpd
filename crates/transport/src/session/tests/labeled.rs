@@ -349,6 +349,7 @@ async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity()
         negotiated.peer_route_refresh = true;
         negotiated.peer_enhanced_route_refresh = true;
         install_test_negotiated_session(&mut session, negotiated);
+        enter_test_fsm_established(&mut session);
 
         let prefix = match afi {
             Afi::Ipv4 => Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 44, 3, 0), 24)),
