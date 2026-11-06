@@ -103,7 +103,7 @@ fn setup(
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: source,
+                peer: source.into(),
                 families: vec![V4],
             }],
         });
@@ -503,7 +503,7 @@ fn setup_withheld_v6() -> (
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: source,
+                peer: source.into(),
                 families: vec![V6],
             }],
         });

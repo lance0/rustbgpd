@@ -989,7 +989,7 @@ fn orr_topology_pages_keep_one_source_across_vantage_changes() {
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: std::time::Duration::from_secs(30),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: waiter,
+            peer: waiter.into(),
             families: vec![(Afi::BgpLs, Safi::BgpLsVpn)],
         }],
     });

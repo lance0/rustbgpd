@@ -392,7 +392,7 @@ fn selection_config(peers: usize, families: &[(Afi, Safi)]) -> SelectionDeferral
         timeout: Duration::from_secs(60),
         waiters: (0..peers)
             .map(|index| SelectionDeferralWaiterConfig {
-                peer: RibManager::bench_peer_address(index),
+                peer: RibManager::bench_peer_address(index).into(),
                 families: families.to_vec(),
             })
             .collect(),

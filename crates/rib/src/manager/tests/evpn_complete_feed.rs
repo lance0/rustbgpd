@@ -2110,12 +2110,12 @@ fn assert_review2_selection_release(nonempty: bool, staged: bool) {
     let route = received(100);
     let survivor = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 99).into());
     let mut waiters = vec![crate::SelectionDeferralWaiterConfig {
-        peer: route.peer,
+        peer: route.peer.into(),
         families: vec![EVPN],
     }];
     if staged {
         waiters.push(crate::SelectionDeferralWaiterConfig {
-            peer: survivor,
+            peer: survivor.into(),
             families: vec![EVPN],
         });
     }
@@ -2462,7 +2462,7 @@ fn assert_review2_selection_resync_terminal(private: bool) {
     manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: source,
+            peer: source.into(),
             families: vec![EVPN],
         }],
     });

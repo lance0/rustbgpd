@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::ControlFlow;
@@ -894,6 +894,10 @@ pub struct PeerManager {
     /// Process-wide local restarting-speaker GR deadline. Static peers
     /// restored during this window advertise `restart_state = true`.
     local_gr_restart_until: Option<Instant>,
+    /// Interface-only neighbors of the planned restart (the startup roster):
+    /// only their bindings advertise `restart_state = true` in the window,
+    /// as only startup static peers do.
+    planned_restart_interfaces: HashSet<String>,
     metrics: BgpMetrics,
     rib_tx: mpsc::Sender<RibUpdate>,
     /// Optional BMP event sender (None when BMP not configured).
@@ -1774,6 +1778,20 @@ impl PeerManager {
             0,
             Config::effective_dynamic_neighbor_limit(&current_config),
         );
+        // The startup configuration is the planned restart's roster; the
+        // daemon has already refused to start on an unresolvable one.
+        let planned_restart_interfaces = if local_gr_restart_until.is_some() {
+            current_config
+                .interface_only_resolved_for_comparison()
+                .map(|neighbors| {
+                    crate::planned_restart_neighbors(&neighbors)
+                        .filter_map(|transport| transport.peer_interface.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
         Self {
             peers: PeerTable::new(&current_config),
             configured_owners: configured_owners::ConfiguredOwners::new(&current_config),
@@ -1800,6 +1818,7 @@ impl PeerManager {
             router_id,
             cluster_id,
             local_gr_restart_until,
+            planned_restart_interfaces,
             metrics,
             rib_tx,
             bmp_tx,

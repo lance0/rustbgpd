@@ -681,7 +681,7 @@ impl PeerManager {
         let effective_config_toml = self.current_config.effective_redacted_toml()?;
         let local_asn = self.local_asn;
         let local_router_id = self.router_id;
-        let restart_time_secs = self
+        let neighbors = self
             .current_config
             .resolved_neighbors_for_comparison()
             .and_then(|mut neighbors| {
@@ -693,10 +693,9 @@ impl PeerManager {
             })
             .map_err(|error| {
                 format!("failed to resolve current neighbors for warm checkpoint: {error}")
-            })?
-            .iter()
-            .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
-            .map(|neighbor| u64::from(neighbor.transport_config.peer.gr_restart_time))
+            })?;
+        let restart_time_secs = crate::planned_restart_neighbors(&neighbors)
+            .map(|transport| u64::from(transport.peer.gr_restart_time))
             .filter(|seconds| *seconds > 0)
             .max();
         let mut address_counts = HashMap::<IpAddr, usize>::new();

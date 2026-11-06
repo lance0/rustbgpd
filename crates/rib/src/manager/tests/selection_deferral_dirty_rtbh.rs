@@ -99,7 +99,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         });
@@ -395,7 +395,7 @@ pub(super) fn manager_with_dormant_waiter() -> RibManager {
         SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         },
@@ -840,7 +840,7 @@ fn ipv6_selection_hold_does_not_keep_ipv4_only_recovery_or_initial_eor_pending()
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![v6],
             }],
         });
@@ -974,7 +974,7 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY, vpn_family],
             }],
         });
@@ -1193,7 +1193,7 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY, v6],
             }],
         });
@@ -1428,7 +1428,7 @@ fn private_vpn_only_handoff_refuses_unproved_unicast_admission() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![vpn],
             }],
         });
@@ -1555,7 +1555,7 @@ fn refused_private_handoff_withdraws_removed_old_unicast_and_vpn_at_release() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY, vpn],
             }],
         });
@@ -1774,7 +1774,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![family],
             }],
         });
@@ -2125,7 +2125,7 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
         manager_with_dormant_waiter().with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![family],
             }],
         });
@@ -2427,7 +2427,7 @@ async fn late_waiter_private_capture_services_readiness_before_completion() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![family],
             }],
         });
@@ -2569,7 +2569,7 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         manager_with_dormant_waiter().with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![family],
             }],
         });
@@ -3212,7 +3212,7 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         });

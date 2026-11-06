@@ -139,7 +139,8 @@ absent. After restarting the daemon, re-inject desired rules and verify local
 intent separately from committed advertisements and remote observations.
 
 A planned restart (SIGTERM with a Graceful Restart marker in
-`runtime_state_dir`) retains the static GR peer/family roster. Each family's
+`runtime_state_dir`) retains the GR peer/family roster of the configured
+static and interface-only neighbors. Each family's
 selection-deferral roster starts dormant and applies no hold until a roster
 peer re-establishes a session for it. Only eligible re-established peers wait
 for End-of-RIB; a configured neighbor that stays down or never returns does

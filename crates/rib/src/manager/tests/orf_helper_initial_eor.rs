@@ -54,7 +54,7 @@ fn held_manager() -> (
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(600),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         });

@@ -75,7 +75,7 @@ async fn stale_ingress_case(restarting: bool) {
         manager = manager.with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer,
+                peer: peer.into(),
                 families: vec![FAMILY],
             }],
         });

@@ -396,7 +396,7 @@ mod tests {
             .with_selection_deferral(SelectionDeferralConfig {
                 timeout: std::time::Duration::from_secs(30),
                 waiters: vec![SelectionDeferralWaiterConfig {
-                    peer: waiter,
+                    peer: waiter.into(),
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
                 }],
             });

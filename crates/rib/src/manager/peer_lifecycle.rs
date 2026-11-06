@@ -898,7 +898,7 @@ impl RibManager {
             .selection_deferral
             .as_mut()
             .map_or_else(Vec::new, |selection| {
-                selection.peer_deleted(peer, &self.metrics)
+                selection.peer_deleted(peer, keep_series && !peer.is_superseded(), &self.metrics)
             });
         self.apply_selection_deferral_transitions(transitions, "peer deleted from configuration");
         // Only the families the RIB writes: the peer manager reaped the rest

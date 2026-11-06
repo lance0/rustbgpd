@@ -2807,7 +2807,8 @@ pub enum RibUpdate {
         keep_series: bool,
     },
     /// Configuration removed an interface-only neighbor, including one that
-    /// never bound and therefore has no peer handle to delete.
+    /// never bound and therefore has no peer handle to delete: its startup
+    /// End-of-RIB grace window and selection-deferral roster entry end.
     RetireEorGraceInterface {
         /// Configured interface name.
         interface: Arc<str>,

@@ -535,7 +535,7 @@ fn config(timeout: Duration, peers: &[PeerId]) -> SelectionDeferralConfig {
             .iter()
             .copied()
             .map(|peer| SelectionDeferralWaiterConfig {
-                peer,
+                peer: peer.into(),
                 families: vec![FAMILY],
             })
             .collect(),
@@ -551,7 +551,7 @@ fn selection_deferral_construction_materializes_failure_counter_children() {
     let selection_config = SelectionDeferralConfig {
         timeout: Duration::from_mins(1),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: peer(1),
+            peer: peer(1).into(),
             families: vec![FAMILY, READY_FAMILY],
         }],
     };
@@ -2716,7 +2716,7 @@ fn zero_byte_limit_overflows_all_real_recorders_once_per_family() {
     let selection_config = SelectionDeferralConfig {
         timeout: Duration::from_mins(1),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: peer(1),
+            peer: peer(1).into(),
             families: families.clone(),
         }],
     };
@@ -3123,7 +3123,7 @@ async fn failback_excludes_a_family_transport_never_refreshes() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_mins(1),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: survivor,
+                peer: survivor.into(),
                 families: vec![VPN_FLOWSPEC],
             }],
         });

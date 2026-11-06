@@ -662,7 +662,7 @@ fn two_family_orf_flap(delete_v4: bool) -> TwoFamilyFlap {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY, V6],
             }],
         });
@@ -1397,7 +1397,7 @@ fn grace_flap(
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(600),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         })
@@ -1634,7 +1634,7 @@ fn pre_hold_flap_into_deferred_registration(grouped: bool, deleted: PreHoldDelet
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(60),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         });
@@ -1948,11 +1948,11 @@ fn grace_held_family_withdraws_while_its_gate_is_dormant() {
             timeout: Duration::from_secs(60),
             waiters: vec![
                 SelectionDeferralWaiterConfig {
-                    peer: peer_v4(WAITER),
+                    peer: peer_v4(WAITER).into(),
                     families: vec![FAMILY],
                 },
                 SelectionDeferralWaiterConfig {
-                    peer: peer_v4(V6_WAITER),
+                    peer: peer_v4(V6_WAITER).into(),
                     families: vec![V6],
                 },
             ],
@@ -2044,11 +2044,11 @@ fn dormant_family_keys_retire_once_its_end_of_rib_is_sent() {
             timeout: Duration::from_secs(60),
             waiters: vec![
                 SelectionDeferralWaiterConfig {
-                    peer: peer_v4(WAITER),
+                    peer: peer_v4(WAITER).into(),
                     families: vec![FAMILY],
                 },
                 SelectionDeferralWaiterConfig {
-                    peer: peer_v4(V6_WAITER),
+                    peer: peer_v4(V6_WAITER).into(),
                     families: vec![V6],
                 },
             ],
@@ -2246,7 +2246,7 @@ fn settled_carry_retires_its_family_once_its_end_of_rib_goes_out() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(600),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(V6_WAITER),
+                peer: peer_v4(V6_WAITER).into(),
                 families: vec![V6],
             }],
         })
@@ -2537,7 +2537,7 @@ fn grace_end_under_a_selection_gate_defers_retirement_to_its_release() {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(600),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         })
@@ -2794,7 +2794,7 @@ fn hold_and_grace_manager() -> RibManager {
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_secs(600),
             waiters: vec![SelectionDeferralWaiterConfig {
-                peer: peer_v4(WAITER),
+                peer: peer_v4(WAITER).into(),
                 families: vec![FAMILY],
             }],
         })
