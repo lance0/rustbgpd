@@ -2026,12 +2026,14 @@ fn parse_flowspec_components(
             10 => FlowSpecComponent::PacketLength(parse_numeric_value(&c.value, "packet_length")?),
             11 => FlowSpecComponent::Dscp(parse_numeric_value(&c.value, "dscp")?),
             12 => {
-                let mut values = parse_bitmask_value(&c.value, "fragment")?;
-                if afi == Afi::Ipv6 {
-                    // Reserved bits do not distinguish IPv6 fragment matches on the wire.
-                    for value in &mut values {
-                        value.value &= 0x0e;
-                    }
+                let values = parse_bitmask_value(&c.value, "fragment")?;
+                // Masking here would turn an IPv4-only bit into value 0, which matches
+                // every packet. RFC 8956 §3.6 masking is a receive-side rule only.
+                if afi == Afi::Ipv6 && values.iter().any(|v| v.value & !0x0e != 0) {
+                    return Err(Status::invalid_argument(
+                        "fragment: IPv6 FlowSpec accepts only IsF (0x02), FF (0x04) and \
+                         LF (0x08); 0x01 (DF) is IPv4-only",
+                    ));
                 }
                 FlowSpecComponent::Fragment(values)
             }

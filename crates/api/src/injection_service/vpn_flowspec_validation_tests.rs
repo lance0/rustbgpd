@@ -621,33 +621,61 @@ async fn vpn_communicated_actions_round_trip_on_real_local_rules() {
     task.await.unwrap();
 }
 
-#[test]
-fn vpn_ipv6_fragment_reserved_bits_do_not_create_distinct_keys() {
-    let components = |value: &str| {
-        vec![proto::FlowSpecComponent {
+fn fragment_request(family: proto::AddressFamily, value: &str) -> proto::AddFlowSpecRequest {
+    let vpn = matches!(
+        family,
+        proto::AddressFamily::L3vpnIpv4Flowspec | proto::AddressFamily::L3vpnIpv6Flowspec
+    );
+    proto::AddFlowSpecRequest {
+        rd: if vpn { "65000:1".into() } else { String::new() },
+        route_targets: if vpn {
+            vec!["65000:100".into()]
+        } else {
+            Vec::new()
+        },
+        components: vec![proto::FlowSpecComponent {
             r#type: 12,
             value: value.into(),
             ..Default::default()
-        }]
-    };
+        }],
+        ..vpn_request(family)
+    }
+}
+
+#[tokio::test]
+async fn ipv6_fragment_refuses_ipv4_only_and_reserved_bits() {
+    let (tx, mut rx) = mpsc::channel(64);
+    let leases = Arc::new(InjectionLeases::new());
+    let service = InjectionService::new(tx, AccessMode::ReadWrite, Arc::clone(&leases));
     for family in [
         proto::AddressFamily::Ipv6Flowspec,
         proto::AddressFamily::L3vpnIpv6Flowspec,
     ] {
-        let rd = if family == proto::AddressFamily::Ipv6Flowspec {
-            ""
-        } else {
-            "65000:1"
-        };
-        assert_eq!(
-            parse_flowspec_key(family as i32, rd, &components("0xff")).unwrap(),
-            parse_flowspec_key(family as i32, rd, &components("0x0e")).unwrap()
-        );
+        // 0x01 (DF) used to be masked to value 0, which matches every packet.
+        for value in ["0x01", "!0x01", "0x02 & 0x01", "0x10", "0xff"] {
+            let request = fragment_request(family, value);
+            let err = build_injected_flowspec(request.clone()).unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{value}");
+            assert!(err.message().contains("IPv4-only"), "{}", err.message());
+            reject_key_modes(&service, &request).await;
+        }
+        for value in ["0x02", "0x04", "0x08", "0x0e"] {
+            build_injected_flowspec(fragment_request(family, value))
+                .unwrap_or_else(|e| panic!("{family:?} {value}: {e}"));
+        }
     }
-    assert_ne!(
-        parse_flowspec_key(3, "", &components("0xff")).unwrap(),
-        parse_flowspec_key(3, "", &components("0x0e")).unwrap()
-    );
+    for family in [
+        proto::AddressFamily::Ipv4Flowspec,
+        proto::AddressFamily::L3vpnIpv4Flowspec,
+    ] {
+        build_injected_flowspec(fragment_request(family, "0x01"))
+            .unwrap_or_else(|e| panic!("{family:?} DF: {e}"));
+    }
+    assert_eq!(leases.list(None).len(), 0);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[test]

@@ -4329,7 +4329,9 @@ including source-prefix matches. Family 13 rejects IPv6 prefixes, nonzero
 prefix offsets and the IPv6 Flow Label component (type 13). Family 14
 accepts IPv6 prefixes, valid prefix offsets and Flow Label, with the IPv6
 upper-layer protocol and fragment semantics of RFC 8956; it rejects IPv4
-prefixes. The rule plus its eight-octet RD must fit in 4,095 bytes, leaving
+prefixes. In families 4 and 14, a fragment (type 12) value may set only IsF
+(`0x02`), FF (`0x04`) and LF (`0x08`); DF (`0x01`) is IPv4-only, and it or
+any reserved bit is rejected. The rule plus its eight-octet RD must fit in 4,095 bytes, leaving
 at most 4,087 bytes for components. Invalid scope or payload is rejected
 with `INVALID_ARGUMENT` before mutation.
 
