@@ -166,7 +166,7 @@ runs inside the task the application supplies.
 | RFC 9582 (obsoletes RFC 6482) | Validated ROA Payload prefix, maximum-length, and origin-AS semantics. |
 | RFC 6811 | `Valid`, `Invalid`, and `NotFound` origin validation over every covering VRP. |
 | RFC 8210 | RTR version 1 client and PDU codec, including serial/reset synchronization and expiry. |
-| `draft-ietf-sidrops-8210bis` | Scoped RTR version 2 support for ASPA records, with v1 fallback. Router Key PDUs are not implemented. |
+| `draft-ietf-sidrops-8210bis` | Scoped RTR version 2 support for ASPA records, with v1 fallback. Router Key PDUs are decoded, framing-checked and ignored; BGPsec path validation is not implemented. |
 | `draft-ietf-sidrops-aspa-verification-28` | Role-aware upstream/downstream ASPA path verification for IPv4 and IPv6 unicast. |
 
 RTR cache connections use plain TCP by default; an embedding daemon can open them
