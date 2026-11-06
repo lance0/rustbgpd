@@ -736,20 +736,17 @@ impl RibManager {
 
             let whole_pass = self.owing_whole_pass(
                 peer,
-                &[
-                    (Afi::Ipv4, Safi::FlowSpec),
-                    (Afi::Ipv6, Safi::FlowSpec),
-                    (Afi::Ipv4, Safi::FlowSpecVpn),
-                ]
-                .into_iter()
-                .filter(|family| {
-                    changed_keys.iter().any(|key| key.family() == *family)
-                        && sendable
-                            .as_ref()
-                            .is_some_and(|families| families.contains(family))
-                })
-                .filter_map(crate::manager::outbound_owing::OwedFamily::of)
-                .collect::<Vec<_>>(),
+                &crate::manager::outbound_owing::OwedFamily::ALL
+                    .into_iter()
+                    .filter(|owed| {
+                        let family = owed.afi_safis()[0];
+                        owed.is_flowspec()
+                            && changed_keys.iter().any(|key| key.family() == family)
+                            && sendable
+                                .as_ref()
+                                .is_some_and(|families| families.contains(&family))
+                    })
+                    .collect::<Vec<_>>(),
             );
             match whole_pass {
                 crate::manager::outbound_owing::WholePass::Preflight => {

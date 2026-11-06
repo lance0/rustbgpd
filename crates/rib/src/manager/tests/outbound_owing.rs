@@ -1060,6 +1060,89 @@ fn vpn_flowspec_refresh_absorbs_only_its_own_owed_withdrawals() {
     }
 }
 
+/// A lease expiry withdraws an owner's global IPv4 and IPv6 VPN `FlowSpec`
+/// rules in one pass while the receiver's credit is spent. Both families
+/// are owed whole, and both withdrawals reach the wire once credit returns.
+/// Red when IPv6 VPN `FlowSpec` has no owed family: the pass owes only the
+/// global family and skips the VPN withdrawal without marking the peer.
+#[tokio::test(start_paused = true)]
+async fn lease_expiry_owes_ipv6_vpn_flowspec_beside_global_flowspec() {
+    const GLOBAL: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpec);
+    const VPN6: (Afi, Safi) = (Afi::Ipv6, Safi::FlowSpecVpn);
+    let mut manager = manager(8);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 12, 3));
+    let mut rx = up(&mut manager, peer, vec![GLOBAL, VPN6]);
+    send_all(&mut rx);
+    let mut keys = HashSet::new();
+    for (afi, rd) in [
+        (Afi::Ipv4, None),
+        (
+            Afi::Ipv6,
+            Some(RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40])),
+        ),
+    ] {
+        let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
+        rule.peer = crate::PeerId::LOCAL;
+        rule.origin_type = crate::route::RouteOrigin::Local;
+        rule.afi = afi;
+        rule.rd = rd;
+        rule.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPort(vec![
+            rustbgpd_wire::NumericMatch {
+                end_of_list: true,
+                and_bit: false,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: 80,
+            },
+        ])];
+        keys.insert(rule.selection_key());
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectLeasedFlowSpec {
+            route: rule,
+            owner: "ctl".to_string(),
+            lease_seconds: 30,
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+    }
+    let announced: HashSet<_> = send_all(&mut rx)
+        .iter()
+        .flat_map(|update| {
+            update
+                .flowspec_announce
+                .iter()
+                .map(FlowSpecRoute::selection_key)
+        })
+        .collect();
+    assert_eq!(announced, keys, "both rules reach the peer");
+
+    let held = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 8);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let (expired, _) = manager.injection_leases().take_expired();
+    assert_eq!(expired.len(), 1);
+    manager.handle_expire_injection_leases(&expired);
+    assert!(send_all(&mut rx).is_empty(), "spent credit stages nothing");
+    assert!(manager.owes(peer, GLOBAL));
+    assert!(manager.owes(peer, VPN6), "the VPN withdrawal is owed");
+    drop(held);
+    let mut withdrawn = HashSet::new();
+    for _ in 0..64 {
+        manager.resync_dirty_peers_bounded();
+        let sent = send_all(&mut rx);
+        withdrawn.extend(
+            sent.iter()
+                .flat_map(|update| update.flowspec_withdraw.iter().cloned()),
+        );
+        if sent.is_empty() && manager.owing(peer).is_none() && !manager.dirty_peers.contains(&peer)
+        {
+            break;
+        }
+    }
+    assert_eq!(withdrawn, keys, "both withdrawals reach the wire");
+    assert!(manager.owing(peer).is_none());
+}
+
 /// An operator replay refused at its acceptance point (another whole-table
 /// update is live) sends nothing and leaves the owed keys exactly as they
 /// were; accepted later, the owed keys go ahead of the families and the
@@ -2330,6 +2413,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
         (Afi::Ipv4, Safi::FlowSpec),
         (Afi::Ipv6, Safi::FlowSpec),
         (Afi::Ipv4, Safi::FlowSpecVpn),
+        (Afi::Ipv6, Safi::FlowSpecVpn),
     ] {
         let afi = flowspec.0;
         let owed_family = OwedFamily::of(flowspec).unwrap();

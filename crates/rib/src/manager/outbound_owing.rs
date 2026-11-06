@@ -152,10 +152,11 @@ impl OwedFamily {
     pub(super) const RTC: Self = Self(10);
     pub(super) const VPNV4_FLOWSPEC: Self = Self(11);
     pub(super) const BGP_LS_VPN: Self = Self(12);
-    const COUNT: u8 = 13;
+    pub(super) const VPNV6_FLOWSPEC: Self = Self(13);
+    const COUNT: u8 = 14;
 
     /// Every owed family, in drain rotation order.
-    pub(super) const ALL: [Self; 13] = [
+    pub(super) const ALL: [Self; 14] = [
         Self::IPV4_UNICAST,
         Self::IPV6_UNICAST,
         Self::IPV4_LABELED,
@@ -169,6 +170,7 @@ impl OwedFamily {
         Self::RTC,
         Self::VPNV4_FLOWSPEC,
         Self::BGP_LS_VPN,
+        Self::VPNV6_FLOWSPEC,
     ];
 
     /// The owed family of a negotiated `(AFI, SAFI)`.
@@ -184,6 +186,7 @@ impl OwedFamily {
             (Afi::Ipv4, Safi::FlowSpec) => Self::IPV4_FLOWSPEC,
             (Afi::Ipv6, Safi::FlowSpec) => Self::IPV6_FLOWSPEC,
             (Afi::Ipv4, Safi::FlowSpecVpn) => Self::VPNV4_FLOWSPEC,
+            (Afi::Ipv6, Safi::FlowSpecVpn) => Self::VPNV6_FLOWSPEC,
             (Afi::BgpLs, Safi::BgpLs) => Self::BGP_LS,
             (Afi::BgpLs, Safi::BgpLsVpn) => Self::BGP_LS_VPN,
             (Afi::Ipv4, Safi::RtConstrain) => Self::RTC,
@@ -204,6 +207,7 @@ impl OwedFamily {
             Self::IPV4_FLOWSPEC => &[(Afi::Ipv4, Safi::FlowSpec)],
             Self::IPV6_FLOWSPEC => &[(Afi::Ipv6, Safi::FlowSpec)],
             Self::VPNV4_FLOWSPEC => &[(Afi::Ipv4, Safi::FlowSpecVpn)],
+            Self::VPNV6_FLOWSPEC => &[(Afi::Ipv6, Safi::FlowSpecVpn)],
             Self::BGP_LS => &[(Afi::BgpLs, Safi::BgpLs)],
             Self::BGP_LS_VPN => &[(Afi::BgpLs, Safi::BgpLsVpn)],
             _ => &[(Afi::Ipv4, Safi::RtConstrain)],
@@ -216,6 +220,14 @@ impl OwedFamily {
 
     pub(super) fn is_unicast(self) -> bool {
         self == Self::IPV4_UNICAST || self == Self::IPV6_UNICAST
+    }
+
+    /// A `FlowSpec` family, global (SAFI 133) or VPN (SAFI 134).
+    pub(super) fn is_flowspec(self) -> bool {
+        matches!(
+            self,
+            Self::IPV4_FLOWSPEC | Self::IPV6_FLOWSPEC | Self::VPNV4_FLOWSPEC | Self::VPNV6_FLOWSPEC
+        )
     }
 
     /// The owed unicast family of `prefix`.
@@ -794,10 +806,7 @@ impl RibManager {
             if owing.is_whole(family) {
                 // A new local change must re-arm the exempt pass even
                 // while the rest of this whole family stays held.
-                let held_exempt = (family.is_unicast()
-                    || family == OwedFamily::IPV4_FLOWSPEC
-                    || family == OwedFamily::IPV6_FLOWSPEC
-                    || family == OwedFamily::VPNV4_FLOWSPEC)
+                let held_exempt = (family.is_unicast() || family.is_flowspec())
                     && family
                         .afi_safis()
                         .iter()
@@ -1144,10 +1153,7 @@ impl RibManager {
         if family.is_unicast() && owing.exempt_len(family) != 0 {
             return Some(DrainScope::Exempt);
         }
-        let exempt_whole = family.is_unicast()
-            || family == OwedFamily::IPV4_FLOWSPEC
-            || family == OwedFamily::IPV6_FLOWSPEC
-            || family == OwedFamily::VPNV4_FLOWSPEC;
+        let exempt_whole = family.is_unicast() || family.is_flowspec();
         (exempt_whole && owing.is_whole(family) && !owing.whole_drained_in_hold(family))
             .then_some(DrainScope::Exempt)
     }
@@ -2106,5 +2112,53 @@ mod fifo_tests {
         owing.insert(key(1), false);
         assert_eq!(owing.exempt_len(family), 0);
         assert_eq!(owing.keyed_len(family), 1);
+    }
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+
+    /// Every `FlowSpec` family a rule can carry has its own owed family, and
+    /// the table is a consistent index. A new AFI fails the known-set check
+    /// until someone decides whether its `FlowSpec` families are owed.
+    #[test]
+    fn every_flowspec_family_has_an_owed_family() {
+        let afis: Vec<Afi> = (0..=u16::MAX).filter_map(Afi::from_u16).collect();
+        assert_eq!(
+            afis,
+            [Afi::Ipv4, Afi::Ipv6, Afi::L2Vpn, Afi::BgpLs],
+            "a new AFI: decide whether its FlowSpec families are owed"
+        );
+        let rd = rustbgpd_wire::RouteDistinguisher([0, 0, 0, 0, 0, 0, 0, 1]);
+        let mut flowspec = HashSet::new();
+        for afi in [Afi::Ipv4, Afi::Ipv6] {
+            for rd in [None, Some(&rd)] {
+                let family = crate::route::flowspec_family(afi, rd);
+                let owed = OwedFamily::of(family)
+                    .unwrap_or_else(|| panic!("{family:?} has no owed family"));
+                assert!(owed.is_flowspec(), "{family:?}");
+                assert_eq!(owed.afi_safis(), [family]);
+                flowspec.insert(owed);
+            }
+        }
+        assert_eq!(
+            flowspec,
+            OwedFamily::ALL
+                .into_iter()
+                .filter(|family| family.is_flowspec())
+                .collect()
+        );
+        assert_eq!(OwedFamily::ALL.len(), usize::from(OwedFamily::COUNT));
+        assert!(
+            u32::from(OwedFamily::COUNT) <= u16::BITS,
+            "`whole` is a u16"
+        );
+        for (index, family) in OwedFamily::ALL.into_iter().enumerate() {
+            assert_eq!(usize::from(family.0), index);
+            for &afi_safi in family.afi_safis() {
+                assert_eq!(OwedFamily::of(afi_safi), Some(family), "{afi_safi:?}");
+            }
+        }
     }
 }
