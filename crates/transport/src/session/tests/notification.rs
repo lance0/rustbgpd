@@ -94,13 +94,22 @@ fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
         || writer_failure_log_metadata(metadata)
         || malformed_attribute_warn_metadata(metadata)
         || validation_warn_metadata(metadata)
+        || downstream_malformed_warn_metadata(metadata)
         || (*metadata.level() == tracing::Level::WARN
             && ["peer", "family", "route_type", "discarded"]
                 .into_iter()
                 .all(|field| metadata.fields().field(field).is_some()))
 }
 
-/// The ungated `UPDATE validation error` WARN.
+/// The treat-as-withdraw action WARN and the ASPA first-AS WARN.
+fn downstream_malformed_warn_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    *metadata.level() == tracing::Level::WARN
+        && ["announced", "received_first_as"]
+            .into_iter()
+            .any(|field| metadata.fields().field(field).is_some())
+}
+
+/// The `UPDATE validation error` WARN.
 fn validation_warn_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     *metadata.level() == tracing::Level::WARN
         && metadata.fields().field("max_as_path_length").is_some()
@@ -2010,7 +2019,8 @@ fn malformed_attribute_warning_names_the_cause_of_the_applied_disposition() {
     attributes.extend([0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA]); // AS_PATH again, AS_SET
     update.path_attributes = Bytes::from(attributes);
 
-    let events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    let mut events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    events.retain(|event| !event.contains_key("announced")); // the action, not a cause
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["disposition"], "treat-as-withdraw");
     assert_eq!(events[0]["attr_type"], "2", "{events:?}");
@@ -2108,10 +2118,66 @@ fn decoder_removed_attribute_is_not_reported_again_by_validation() {
     attributes[3] = 9; // ORIGIN value out of range
     update.path_attributes = Bytes::from(attributes);
 
-    let events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    let mut events = capture_session_logs(|| runtime.block_on(session.process_update(update)));
+    events.retain(|event| !event.contains_key("announced")); // the action, not a cause
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["attr_type"], "1");
     assert!(events[0].contains_key("decoder_disposition"), "{events:?}");
+}
+
+/// Load-bearing log-volume proof: the treat-as-withdraw, validation and ASPA
+/// WARNs share the summary's per-connection gate, so a repeated malformed
+/// UPDATE warns at counts 1, 2, 4 and 8. Any of them logging once per
+/// UPDATE fails here; metrics still count every UPDATE.
+#[test]
+fn downstream_malformed_update_warnings_share_the_connection_gate() {
+    const UPDATES: usize = 8;
+    const GATED: usize = 4; // counts 1, 2, 4, 8
+    let count = |events: &[SessionLogFields], key: &str| {
+        events.iter().filter(|e| e.contains_key(key)).count()
+    };
+    let stream = |edit: &dyn Fn(&mut UpdateMessage)| {
+        let (runtime, mut session, server, mut update) = malformed_update_fixture();
+        edit(&mut update);
+        let mut events = Vec::new();
+        for _ in 0..UPDATES {
+            events.extend(capture_session_logs(|| {
+                runtime.block_on(session.process_update(update.clone()));
+            }));
+        }
+        session.close_tcp();
+        let rearmed =
+            capture_session_logs(|| runtime.block_on(session.process_update(update.clone())));
+        (session, server, events, rearmed)
+    };
+
+    // Decoder treat-as-withdraw: ORIGIN out of range.
+    let (session, _server, events, rearmed) = stream(&|update| {
+        let mut attributes = update.path_attributes.to_vec();
+        attributes[3] = 9;
+        update.path_attributes = Bytes::from(attributes);
+    });
+    assert_eq!(count(&events, "announced"), GATED, "{events:?}");
+    assert_eq!(count(&events, "decoder_disposition"), GATED);
+    assert_eq!(count(&rearmed, "announced"), 1, "a new connection re-arms");
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 9);
+
+    // Validation treat-as-withdraw: ORIGIN missing.
+    let (session, _server, events, _) = stream(&|update| {
+        update.path_attributes = update.path_attributes.slice(4..);
+    });
+    assert_eq!(count(&events, "max_as_path_length"), GATED, "{events:?}");
+    assert_eq!(count(&events, "announced"), GATED);
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 9);
+
+    // ASPA first-AS treat-as-withdraw.
+    let (session, _server, events, rearmed) = stream(&|update| {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        *update = aspa_first_as_update(prefix, 65003, true);
+    });
+    assert_eq!(count(&events, "received_first_as"), GATED, "{events:?}");
+    assert_eq!(count(&rearmed, "received_first_as"), 1);
+    assert_eq!(update_malformed_count(&session, "treat_as_withdraw"), 9);
 }
 
 #[test]

@@ -821,20 +821,31 @@ impl PeerSession {
         );
     }
 
-    /// One WARN per malformed UPDATE, and only at power-of-two UPDATE counts
-    /// per TCP connection; DEBUG keeps every record. One UPDATE can carry
-    /// hundreds of malformed records, and a peer can repeat it at will, so
-    /// neither may set the WARN volume. `bgp_update_malformed_total` counts
-    /// every UPDATE.
+    /// Whether this malformed UPDATE's WARNs are due: the first and then
+    /// power-of-two malformed UPDATE counts per TCP connection. `due` caches
+    /// the decision, so each UPDATE counts once however many of its WARN
+    /// sites ask. A peer can repeat a malformed UPDATE at will, so the
+    /// UPDATE count must not set the WARN volume; metrics count every one.
+    fn malformed_update_warn_due(&mut self, due: &mut Option<bool>) -> bool {
+        *due.get_or_insert_with(|| {
+            self.malformed_attribute_updates = self.malformed_attribute_updates.saturating_add(1);
+            self.malformed_attribute_updates.is_power_of_two()
+        })
+    }
+
+    /// One WARN per malformed UPDATE when `warn` is due; DEBUG keeps every
+    /// record. One UPDATE can carry hundreds of malformed records, so they
+    /// share that WARN. `bgp_update_malformed_total` counts every UPDATE.
     ///
     /// Called once the UPDATE's final action is known: `applied` is that
     /// action, which validation, ASPA, or the RFC 7606 §5.2 escalation may
     /// have made stronger than the decoder's own `decoder_disposition`.
     fn log_malformed_attributes(
-        &mut self,
+        &self,
         malformed: &[rustbgpd_wire::MalformedAttribute],
         coalesced_duplicates: u32,
         applied: &'static str,
+        warn: bool,
     ) {
         let Some(decoder_disposition) = malformed.iter().map(|m| m.disposition).max() else {
             return;
@@ -848,8 +859,7 @@ impl PeerSession {
         else {
             return;
         };
-        self.malformed_attribute_updates = self.malformed_attribute_updates.saturating_add(1);
-        if self.malformed_attribute_updates.is_power_of_two() {
+        if warn {
             warn!(
                 peer = %self.peer_label,
                 malformed_updates = self.malformed_attribute_updates,
@@ -2091,6 +2101,10 @@ impl PeerSession {
                     )
                 })
             });
+        // RFC 7606 §5.2: no reachable NLRI encoded turns any disposition
+        // stronger than attribute-discard into a session reset.
+        let no_reachable_nlri = parsed.announced.is_empty() && !mp_reach_carries_nlri;
+        let mut warn_due = None;
         if let Err((update_err, type_code, reason)) = validation {
             // A decoder-removed mandatory attribute already has its primary
             // cause. Do not label the resulting absence as a second independent
@@ -2101,20 +2115,36 @@ impl PeerSession {
                 || !malformed.iter().any(|m| m.type_code == type_code)
             {
                 causes.push((Some(type_code), reason));
-                warn!(
-                    peer = %self.peer_label,
-                    attr_type = type_code,
-                    subcode = update_err.subcode,
-                    disposition = update_err.disposition.as_str(),
-                    max_as_path_length = self.config.max_as_path_length,
-                    "UPDATE validation error"
-                );
+                // A session reset is bounded by the reconnect, so its cause
+                // always logs.
+                let resets = update_err.disposition == ErrorDisposition::SessionReset
+                    || (no_reachable_nlri
+                        && disposition.max(Some(update_err.disposition))
+                            >= Some(ErrorDisposition::TreatAsWithdraw));
+                if self.malformed_update_warn_due(&mut warn_due) || resets {
+                    warn!(
+                        peer = %self.peer_label,
+                        attr_type = type_code,
+                        subcode = update_err.subcode,
+                        disposition = update_err.disposition.as_str(),
+                        max_as_path_length = self.config.max_as_path_length,
+                        malformed_updates = self.malformed_attribute_updates,
+                        "UPDATE validation error"
+                    );
+                }
             }
             if let Some(update) = update {
                 self.debug_dump_malformed_update(update, &parsed);
             }
             if update_err.disposition == ErrorDisposition::SessionReset {
-                self.log_malformed_attributes(&malformed, coalesced_duplicates, "session-reset");
+                // Counted for `malformed_updates`; the reset cause always logs.
+                self.malformed_update_warn_due(&mut warn_due);
+                self.log_malformed_attributes(
+                    &malformed,
+                    coalesced_duplicates,
+                    "session-reset",
+                    true,
+                );
                 record_malformed_update(
                     &self.metrics,
                     &self.peer_label,
@@ -2144,12 +2174,19 @@ impl PeerSession {
             // session-reset approach MUST be used instead. "Encoded" means
             // actual NLRI content — an MP_REACH_NLRI attribute carrying zero
             // NLRI counts as no reachable NLRI.
-            if parsed.announced.is_empty() && !mp_reach_carries_nlri {
+            if no_reachable_nlri {
                 warn!(
                     peer = %self.peer_label,
                     "treat-as-withdraw with no reachable NLRI — session reset (RFC 7606 §5.2)"
                 );
-                self.log_malformed_attributes(&malformed, coalesced_duplicates, "session-reset");
+                // Counted for `malformed_updates`; the reset cause always logs.
+                self.malformed_update_warn_due(&mut warn_due);
+                self.log_malformed_attributes(
+                    &malformed,
+                    coalesced_duplicates,
+                    "session-reset",
+                    true,
+                );
                 record_malformed_update(
                     &self.metrics,
                     &self.peer_label,
@@ -2175,17 +2212,26 @@ impl PeerSession {
                 }
                 return;
             }
-            let summary = treat_as_withdraw_summary(&parsed);
-            warn!(
-                peer = %self.peer_label,
-                announced = summary.announced,
-                families = %summary.families,
-                next_hop = %summary.next_hop,
-                link_local_next_hop = ?summary.link_local_next_hop,
-                prefixes = ?summary.prefixes,
-                "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
+            let warn = self.malformed_update_warn_due(&mut warn_due);
+            if warn {
+                let summary = treat_as_withdraw_summary(&parsed);
+                warn!(
+                    peer = %self.peer_label,
+                    announced = summary.announced,
+                    families = %summary.families,
+                    next_hop = %summary.next_hop,
+                    link_local_next_hop = ?summary.link_local_next_hop,
+                    prefixes = ?summary.prefixes,
+                    malformed_updates = self.malformed_attribute_updates,
+                    "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
+                );
+            }
+            self.log_malformed_attributes(
+                &malformed,
+                coalesced_duplicates,
+                "treat-as-withdraw",
+                warn,
             );
-            self.log_malformed_attributes(&malformed, coalesced_duplicates, "treat-as-withdraw");
             record_malformed_update(
                 &self.metrics,
                 &self.peer_label,
@@ -2222,13 +2268,22 @@ impl PeerSession {
         if let Some((received_first_as, neighbor_asn)) =
             self.aspa_first_as_mismatch(is_ebgp, has_unicast_announcements, &parsed.attributes)
         {
-            warn!(
-                peer = %self.peer_label,
-                received_first_as = ?received_first_as,
-                neighbor_asn,
-                "ASPA first-AS precondition failed; treating UPDATE as withdraw"
+            let warn = self.malformed_update_warn_due(&mut warn_due);
+            if warn {
+                warn!(
+                    peer = %self.peer_label,
+                    received_first_as = ?received_first_as,
+                    neighbor_asn,
+                    malformed_updates = self.malformed_attribute_updates,
+                    "ASPA first-AS precondition failed; treating UPDATE as withdraw"
+                );
+            }
+            self.log_malformed_attributes(
+                &malformed,
+                coalesced_duplicates,
+                "treat-as-withdraw",
+                warn,
             );
-            self.log_malformed_attributes(&malformed, coalesced_duplicates, "treat-as-withdraw");
             causes.push((
                 Some(rustbgpd_wire::constants::attr_type::AS_PATH),
                 MalformedUpdateReason::AspaFirstAsMismatch,
@@ -2252,7 +2307,8 @@ impl PeerSession {
         // disposition is attribute-discard — the offending attributes were
         // dropped and the UPDATE proceeds without them.
         if let Some(applied) = disposition {
-            self.log_malformed_attributes(&malformed, coalesced_duplicates, applied.as_str());
+            let warn = self.malformed_update_warn_due(&mut warn_due);
+            self.log_malformed_attributes(&malformed, coalesced_duplicates, applied.as_str(), warn);
             record_malformed_update(
                 &self.metrics,
                 &self.peer_label,
