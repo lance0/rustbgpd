@@ -815,12 +815,18 @@ impl PeerSession {
                     break;
                 }
             };
+            // RFC 4271 §8.2.2: UPDATE and ROUTE-REFRESH are valid only in
+            // Established. Earlier, the decoded message only labels the FSM
+            // event, which answers it with an FSM Error NOTIFICATION; nothing
+            // from it reaches BMP, inbound processing or the RIB.
+            let established = self.fsm.state() == SessionState::Established;
             // RFC 7313 §5 applies only when the peer advertised ERR. Inspect
             // identifiable subtypes before the normal decoder interprets ORF.
-            if self
-                .negotiated
-                .as_ref()
-                .is_some_and(|n| n.peer_enhanced_route_refresh)
+            if established
+                && self
+                    .negotiated
+                    .as_ref()
+                    .is_some_and(|n| n.peer_enhanced_route_refresh)
                 && raw_pdu[18] == rustbgpd_wire::constants::message_type::ROUTE_REFRESH
                 && let Some(&subtype) = raw_pdu.get(21)
             {
@@ -961,6 +967,32 @@ impl PeerSession {
                                 self.received_hard_reset = true;
                             }
                             Event::NotificationReceived(notif)
+                        }
+                        Message::Update(_) if !established => {
+                            self.metrics
+                                .record_message_received(&self.peer_label, "update");
+                            warn!(
+                                peer = %self.peer_label,
+                                state = %self.fsm.state(),
+                                "UPDATE received before Established"
+                            );
+                            Event::UpdateReceived
+                        }
+                        Message::RouteRefresh(rr) if !established => {
+                            self.metrics
+                                .record_message_received(&self.peer_label, "route_refresh");
+                            warn!(
+                                peer = %self.peer_label,
+                                state = %self.fsm.state(),
+                                afi_raw = rr.afi_raw,
+                                safi_raw = rr.safi_raw,
+                                "ROUTE-REFRESH received before Established"
+                            );
+                            // Outside Established the FSM ignores the family.
+                            Event::RouteRefreshReceived {
+                                afi: rr.afi().unwrap_or(rustbgpd_wire::Afi::Ipv4),
+                                safi: rr.safi().unwrap_or(rustbgpd_wire::Safi::Unicast),
+                            }
                         }
                         Message::Update(update) => {
                             self.config.neighbor_counters.record_update_received();

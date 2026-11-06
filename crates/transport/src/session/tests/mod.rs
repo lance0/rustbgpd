@@ -533,6 +533,40 @@ fn install_test_negotiated_session(session: &mut PeerSession, negotiated: Negoti
     session.negotiated = Some(Arc::new(negotiated));
 }
 
+/// Bring only the FSM to Established, ignoring its actions, for tests that
+/// feed the read loop after installing negotiated state directly: it hands
+/// UPDATE and ROUTE-REFRESH to inbound processing only in Established.
+fn enter_test_fsm_established(session: &mut PeerSession) {
+    if session.fsm.state() == SessionState::Established {
+        return;
+    }
+    let peer = session.config.peer.clone();
+    let remote_asn = if peer.remote_asn == 0 {
+        65002
+    } else {
+        peer.remote_asn
+    };
+    let mut capabilities: Vec<_> = peer
+        .families
+        .iter()
+        .map(|&(afi, safi)| Capability::MultiProtocol { afi, safi })
+        .collect();
+    capabilities.push(Capability::FourOctetAs { asn: remote_asn });
+    let mut fsm = Session::new(peer);
+    fsm.handle_event(Event::ManualStart);
+    fsm.handle_event(Event::TcpConnectionConfirmed);
+    fsm.handle_event(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+        version: 4,
+        my_as: u16::try_from(remote_asn).unwrap_or(23_456),
+        hold_time: 90,
+        bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+        capabilities,
+    }));
+    fsm.handle_event(Event::KeepaliveReceived);
+    assert_eq!(fsm.state(), SessionState::Established);
+    session.fsm = fsm;
+}
+
 fn max_prefix_gauge(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -> Option<f64> {
     metrics
         .registry()
@@ -613,6 +647,7 @@ fn install_enhanced_refresh_session(
             });
     }
     install_test_negotiated_session(session, negotiated);
+    enter_test_fsm_established(session);
 }
 
 fn buffer_route_refresh(

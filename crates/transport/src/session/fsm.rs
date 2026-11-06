@@ -941,6 +941,15 @@ impl PeerSession {
                     self.close_tcp();
                 }
                 Action::StateChanged { old, new } => {
+                    // Only Established input reaches the per-session route
+                    // tables, and every FSM exit from Established emits
+                    // SessionDown first, which clears them and withdraws the
+                    // routes. A non-empty table here would leave routes in
+                    // the RIB with no PeerDown to remove them.
+                    debug_assert!(
+                        new != SessionState::Idle || self.known_prefix_count() == 0,
+                        "session reached Idle holding imported routes without SessionDown"
+                    );
                     self.session_telemetry_metric_lease.set_state(new);
                     if new != SessionState::OpenConfirm && self.collision_verdict_pending() {
                         self.collision_hold = CollisionHold::Armed;
