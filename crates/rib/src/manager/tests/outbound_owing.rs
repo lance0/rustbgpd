@@ -537,6 +537,19 @@ fn mixed_peer_owes_private_evpn_and_keeps_its_group() {
     drop(charge);
 }
 
+/// A policy denying `prefix` whose neighbor-set match keeps its member out
+/// of every update group.
+fn ungroupable_deny(prefix: Prefix) -> rustbgpd_policy::PolicyChain {
+    let mut policy = deny_prefixes_chain(&[prefix]);
+    policy.policies[0].policy.entries[0].match_neighbor_set =
+        Some(rustbgpd_policy::NeighborSetMatch {
+            addresses: vec![],
+            remote_asns: vec![65000],
+            peer_groups: vec![],
+        });
+    rustbgpd_policy::PolicyChain::from_named(policy.policies)
+}
+
 fn assert_mixed_regroup_withdraws_old_route(owe_evpn: bool, refuse_capture: bool) {
     use crate::manager::update_groups::RecoveryFallbackCause;
     use crate::manager::update_groups::admitted_recovery::AdmittedRecovery;
@@ -576,16 +589,8 @@ fn assert_mixed_regroup_withdraws_old_route(owe_evpn: bool, refuse_capture: bool
     // Pause admission so the regroup's proof can be observed before recovery consumes it.
     let sender = manager.outbound_peers[&peer].clone();
     let occupied: Vec<_> = std::iter::from_fn(|| sender.clone().try_reserve_owned().ok()).collect();
-    let mut policy = deny_prefixes_chain(&[old.0]);
-    policy.policies[0].policy.entries[0].match_neighbor_set =
-        Some(rustbgpd_policy::NeighborSetMatch {
-            addresses: vec![],
-            remote_asns: vec![65000],
-            peer_groups: vec![],
-        });
-    let policy = rustbgpd_policy::PolicyChain::from_named(policy.policies);
     manager
-        .replace_peer_export_policy_synchronously(peer, Some(policy))
+        .replace_peer_export_policy_synchronously(peer, Some(ungroupable_deny(old.0)))
         .unwrap();
     assert!(manager.grouped_member_of(peer).is_none());
     let captured_old = manager
@@ -643,6 +648,78 @@ fn mixed_regroup_without_debt_keeps_withdrawals() {
     for refuse_capture in [false, true] {
         assert_mixed_regroup_withdraws_old_route(false, refuse_capture);
     }
+}
+
+/// A drain refused for a missing encoder (`owing_fallback`) dirties a
+/// grouped member. It must capture the member's group-admitted routes, so a
+/// policy change that moves it to the private path before any resync still
+/// withdraws the route the new policy denies.
+#[test]
+fn owing_fallback_then_private_regroup_withdraws_the_denied_route() {
+    let mut manager = manager(8);
+    manager.test_force_ungrouped = false;
+    let both = vec![V4, EVPN];
+    let mut source = up(&mut manager, peer_v4(SOURCE), both.clone());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 8, 3));
+    let mut rx = up_session(&mut manager, peer, 0, both, 8);
+    send_all(&mut rx);
+    assert!(manager.grouped_member_of(peer).is_some());
+    assert!(manager.evpn_grouped_member_of(peer).is_none());
+    let mut wire = Wire::default();
+    received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
+    wire.apply(&send_all(&mut rx));
+    let old = (route_prefix(0), 0);
+    assert!(wire.unicast.contains_key(&old));
+
+    let credit = manager.outbound_credit_handle(peer);
+    let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8);
+    received(&mut manager, vec![], vec![], vec![evpn_route(1, 0)], vec![]);
+    send_all(&mut source);
+    wire.apply(&send_all(&mut rx));
+    assert_eq!(owed(&manager, peer, EVPN), 1);
+    drop(charge);
+
+    let encoder = manager.peer_export_encoders.remove(&peer).unwrap();
+    manager.drain_owing_bounded(std::time::Instant::now());
+    assert!(
+        manager.owing(peer).is_none(),
+        "the refused drain drops the debt"
+    );
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!((owing_fallbacks(&manager) - 1.0).abs() < f64::EPSILON);
+    manager.peer_export_encoders.insert(peer, encoder);
+
+    manager
+        .replace_peer_export_policy_synchronously(peer, Some(ungroupable_deny(old.0)))
+        .unwrap();
+    assert!(manager.grouped_member_of(peer).is_none());
+    let mut withdrawn = Vec::new();
+    for _ in 0..8 {
+        let sent = send_all(&mut rx);
+        withdrawn.extend(
+            sent.iter()
+                .flat_map(|update| update.unicast_withdrawals().copied()),
+        );
+        wire.apply(&sent);
+        manager.resync_dirty_peers_bounded();
+    }
+    let sent = send_all(&mut rx);
+    withdrawn.extend(
+        sent.iter()
+            .flat_map(|update| update.unicast_withdrawals().copied()),
+    );
+    wire.apply(&sent);
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(
+        wire.unicast.is_empty(),
+        "the route the new policy denies must be withdrawn: {:?}",
+        wire.unicast
+    );
+    assert_eq!(withdrawn, vec![old]);
+    assert_eq!(
+        wire.evpn.keys().collect::<Vec<_>>(),
+        vec![&format!("{:?}", evpn_route(1, 0).key())]
+    );
 }
 
 #[test]
@@ -1415,6 +1492,85 @@ fn a_drain_refused_by_a_full_channel_keeps_its_keys() {
         "the key is sent once the channel has room"
     );
     assert!(manager.owing(peer).is_none());
+}
+
+/// Labeled and VPN unicast are private families too: a fresh route toward
+/// a full channel is owed, not staged into a send that fails and dirties
+/// the peer.
+#[test]
+fn a_full_channel_defers_private_labeled_and_vpn_without_staging() {
+    for family in [
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::Ipv6, Safi::MplsVpn),
+    ] {
+        let mut manager = manager(8);
+        let mut source = up(&mut manager, peer_v4(SOURCE), vec![family]);
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 19, 2));
+        let mut rx = up_session(&mut manager, peer, 0, vec![family], 4);
+        send_all(&mut rx);
+        let sender = manager.outbound_peers[&peer].clone();
+        let occupied: Vec<_> =
+            std::iter::from_fn(|| sender.clone().try_reserve_owned().ok()).collect();
+        assert!(manager.outbound_channel_full(peer));
+        assert_eq!(manager.outbound_credit_rows(peer), 0);
+        let stagings = manager.outbound_stagings(peer);
+        typed_received(&mut manager, family, &[(1, 0)], &[], 0);
+        send_all(&mut source);
+        assert_eq!(
+            manager.outbound_stagings(peer),
+            stagings,
+            "{family:?}: a fresh route must not stage against a full channel"
+        );
+        assert_eq!(owed(&manager, peer, family), 1, "{family:?}");
+        assert!(!manager.dirty_peers.contains(&peer), "{family:?}");
+
+        drop(occupied);
+        manager.resync_dirty_peers_bounded();
+        let mut wire = TypedWire::new();
+        assert_eq!(apply_typed_wire(&mut wire, &send_all(&mut rx)), (1, 0));
+        assert!(wire.contains_key(&(typed_key(family, 1), 0)), "{family:?}");
+        assert!(manager.owing(peer).is_none());
+        assert!(!manager.dirty_peers.contains(&peer));
+    }
+}
+
+/// Debt that waits on a full channel cannot drain, so the tick stays the
+/// cheap scan with no executor handoff until the receiver reads.
+#[test]
+fn full_channel_debt_skips_the_executor_handoff_tick() {
+    let handoffs = |manager: &mut RibManager| {
+        let before = super::super::executor_handoffs().0;
+        manager.resync_dirty_peers_bounded();
+        super::super::executor_handoffs().0 - before
+    };
+    let mut manager = manager(8);
+    manager.test_force_ungrouped = false;
+    let both = vec![V4, EVPN];
+    let mut source = up(&mut manager, peer_v4(SOURCE), both.clone());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 8, 4));
+    let mut rx = up_session(&mut manager, peer, 0, both, 4);
+    send_all(&mut rx);
+    for key in 0..4 {
+        received(&mut manager, vec![route(key, 0)], vec![], vec![], vec![]);
+        send_all(&mut source);
+    }
+    assert!(manager.outbound_channel_full(peer));
+    received(&mut manager, vec![], vec![], vec![evpn_route(1, 0)], vec![]);
+    send_all(&mut source);
+    assert_eq!(owed(&manager, peer, EVPN), 1);
+    assert!(manager.outbound_credit_rows(peer) < manager.outbound_row_credit());
+
+    for _ in 0..5 {
+        assert_eq!(handoffs(&mut manager), 0, "no drain can progress");
+        assert_eq!(owed(&manager, peer, EVPN), 1);
+    }
+    assert_eq!(rows(&send_all(&mut rx)), 4);
+    assert!(
+        handoffs(&mut manager) > 0,
+        "room in the channel makes the tick due"
+    );
+    assert!(manager.owing(peer).is_none());
+    assert_eq!(rows(&send_all(&mut rx)), 1);
 }
 
 /// Each step takes the oldest complete keys that fit its remaining credit.

@@ -1225,17 +1225,19 @@ impl RibManager {
         })
     }
 
-    /// Whether some owing peer could make progress this tick: it has credit
-    /// and runnable work, or an End-of-RIB waits on an absorption with its
-    /// latch free. Read before taking the tick's executor handoff.
+    /// Whether some owing peer could make progress this tick: it has credit,
+    /// channel room and runnable work, or an End-of-RIB waits on an
+    /// absorption with its latch free. Read before taking the tick's
+    /// executor handoff.
     pub(super) fn owing_tick_due(&self) -> bool {
         let limit = self.outbound_row_credit();
         self.owing_peers.iter().any(|&peer| {
             self.owing_peer_runnable(peer)
-                && (self
+                && ((self
                     .outbound_credit
                     .get(&peer)
                     .is_some_and(|entry| entry.credit.rows() < limit)
+                    && !self.outbound_channel_full(peer))
                     || (!self.outbound_operation_live(peer) && self.owed_eor_ready(peer)))
         })
     }
@@ -1439,7 +1441,7 @@ impl RibManager {
         debug!(%peer, reason = failure.as_str(), "owed keys cannot drain — peer resyncs");
         self.drop_peer_owing(peer);
         self.metrics.record_rib_outbound_owing_fallback();
-        self.mark_outbound_dirty_inner(peer, false);
+        self.mark_outbound_dirty(peer);
     }
 
     /// Count a private ordinary batch refused for credit despite its gate
