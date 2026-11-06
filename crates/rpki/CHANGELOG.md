@@ -27,6 +27,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   (10000000) budget. Previously the only limit was the per-transaction record
   budget, which reset with every serial update.
 - The new API is additive, and `RtrError` was already `#[non_exhaustive]`.
+- `VrpManager` keys each cache's VRPs by the canonical prefix, with host bits
+  cleared, as validation already does. RTR v1 accepts Prefix PDUs with host
+  bits set. A withdrawal sent in canonical form could miss its host-bit
+  announcement and leave that VRP authorizing the prefix, and one VRP sent both
+  ways counted twice.
 - A cache that answers the v2 query at a lower version during §7 negotiation is
   no longer sent a fatal Error Report code 8. That code is for a version that
   differs from a negotiated one. The client now closes the connection and
