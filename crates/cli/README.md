@@ -330,6 +330,8 @@ VPN FlowSpec uses `--family l3vpn_ipv4_flowspec` or
 Deletes take the same family, RD and match components. RTs are attributes,
 so an RT-only add replaces the existing rule; a different RD creates a
 different rule that must be retired separately.
+The CLI rejects an RD or typed route targets with any non-VPN family before
+sending a mutation RPC, including when connected to an older daemon.
 
 ```bash
 rbgp flowspec add -a l3vpn_ipv4_flowspec --rd 44407:40 --route-target 44407:777 --match "dest=192.0.2.0/24 port==80" --action drop

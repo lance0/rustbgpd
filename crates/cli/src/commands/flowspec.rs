@@ -342,6 +342,22 @@ fn parse_action(s: &str) -> Result<FlowSpecAction, String> {
     Err(format!("unknown action: {s}"))
 }
 
+fn validate_vpn_scope(family: i32, rd: &str, route_targets: &[String]) -> Result<(), CliError> {
+    use crate::proto::AddressFamily::{L3vpnIpv4Flowspec, L3vpnIpv6Flowspec};
+
+    // Older daemons ignore scope fields on otherwise valid global requests.
+    if !matches!(
+        crate::proto::AddressFamily::try_from(family),
+        Ok(L3vpnIpv4Flowspec | L3vpnIpv6Flowspec)
+    ) && (!rd.is_empty() || !route_targets.is_empty())
+    {
+        return Err(CliError::Argument(
+            "--rd and --route-target require l3vpn_ipv4_flowspec or l3vpn_ipv6_flowspec".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn add(
     connection: Connection,
     family: i32,
@@ -351,6 +367,7 @@ pub async fn add(
     actions: &[String],
     json: bool,
 ) -> Result<(), CliError> {
+    validate_vpn_scope(family, &rd, &route_targets)?;
     let parsed_components: Vec<FlowSpecComponent> = components
         .iter()
         .map(|s| parse_component(s))
@@ -405,6 +422,7 @@ pub async fn delete(
     owner: super::InjectedOwner,
     json: bool,
 ) -> Result<(), CliError> {
+    validate_vpn_scope(family, &rd, &[])?;
     let parsed_components: Vec<FlowSpecComponent> = components
         .iter()
         .map(|s| parse_component(s))

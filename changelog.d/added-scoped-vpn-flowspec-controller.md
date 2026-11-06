@@ -5,6 +5,8 @@
   guarded mutations, list views, lease pagination and export dispositions
   preserve the scope; unspecified listings still select global FlowSpec only.
   `rbgp flowspec` accepts VPN families, `--rd` and typed `--route-target` values.
+  It rejects VPN scope on non-VPN mutations before sending an RPC, preventing
+  older daemons from silently treating those requests as global rules.
   The new API fields and families remain outside the v1 inventory.
 - Opt-in `l3vpn_ipv6_flowspec` negotiation, `vpnv6-flowspec` policy matching
   and per-family telemetry. Received VPN FlowSpec is decoded and discarded;

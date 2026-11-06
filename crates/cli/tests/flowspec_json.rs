@@ -373,6 +373,59 @@ async fn flowspec_mutations_preserve_family_scope_and_global_defaults() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flowspec_add_rejects_vpn_scope_on_non_vpn_families_before_rpc() {
+    let server = test_support::spawn_mock_server(None).await;
+    for family in ["ipv4_flowspec", "ipv6-flowspec", "ipv4_unicast"] {
+        for scope in [
+            vec!["--rd", "44407:40"],
+            vec!["--route-target", "44407:777"],
+            vec!["--rd", "44407:40", "--route-target", "44407:777"],
+        ] {
+            let mut args = vec!["flowspec", "add", "--match", "port==80", "--action", "drop"];
+            args.extend(["--family", family]);
+            args.extend(scope);
+            let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+                .args(["--addr", &server.addr])
+                .args(&args)
+                .env("NO_COLOR", "1")
+                .output()
+                .expect("run rbgp");
+            assert!(
+                server.state.last_add_flowspec.lock().await.is_none(),
+                "invalid scope reached AddFlowSpec: {args:?}"
+            );
+            assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("require l3vpn_ipv4_flowspec")
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flowspec_delete_rejects_vpn_scope_on_non_vpn_families_before_rpc() {
+    let server = test_support::spawn_mock_server(None).await;
+    for family in ["ipv4_flowspec", "ipv6-flowspec", "ipv4_unicast"] {
+        let mut args = vec![
+            "flowspec", "delete", "--match", "port==80", "--rd", "44407:40",
+        ];
+        args.extend(["--family", family]);
+        let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+            .args(["--addr", &server.addr])
+            .args(&args)
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run rbgp");
+        assert!(
+            server.state.last_delete_flowspec.lock().await.is_none(),
+            "invalid scope reached DeleteFlowSpec: {args:?}"
+        );
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("require l3vpn_ipv4_flowspec"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn received_flowspec_json_projection_covers_proto_fields_and_pending_results() {
     let server = test_support::spawn_mock_server(None).await;
     let states = [
