@@ -199,6 +199,11 @@ struct Port {
     refusal: Option<String>,
     /// Operator and safety state carried from a retired endpoint to the next.
     held: Option<HeldState>,
+    /// An operator's RFC 8326 graceful-shutdown advertisement for the next
+    /// peer while unbound, replayed on it as a static neighbor's reconfigure
+    /// does. Written by a retired endpoint or an all-peers toggle, so a
+    /// neighbor that never bound takes the toggle too; taken by the bind.
+    graceful_shutdown: bool,
     /// A BFD removal changed local membership but its actor acknowledgement
     /// is still uncertain. The port owns retries until the current set is confirmed.
     bfd_removal_unsettled: bool,
@@ -238,24 +243,17 @@ struct HeldState {
     /// keeps the operator's toggle only while this is unchanged, as
     /// `lifecycle::config_admin_enable` does for a static neighbor.
     config_admin_down: bool,
-    /// An operator's RFC 8326 graceful-shutdown advertisement, replayed on
-    /// the next peer as a static neighbor's reconfigure does.
-    graceful_shutdown: bool,
     max_prefix_restart_seconds: Option<u32>,
     latch: Option<super::MaxPrefixLatch>,
     counters: rustbgpd_transport::NeighborCounters,
 }
 
 impl Unnumbered {
-    /// Set the graceful-shutdown intent every unbound neighbor holds for
-    /// its next peer.
+    /// Set the graceful-shutdown intent every unbound neighbor, bound
+    /// before or not, holds for its next peer.
     pub(super) fn set_held_graceful_shutdown(&mut self, enabled: bool) {
-        for held in self
-            .ports
-            .values_mut()
-            .filter_map(|port| port.held.as_mut())
-        {
-            held.graceful_shutdown = enabled;
+        for port in self.ports.values_mut().filter(|port| port.bound.is_none()) {
+            port.graceful_shutdown = enabled;
         }
     }
 
@@ -1342,7 +1340,9 @@ impl PeerManager {
         // Only cleanup ownership survives deletion, not the old neighbor's
         // operator state, safety latch, lifetime counters or planned-restart
         // membership.
-        self.port_mut(name).held = None;
+        let port = self.port_mut(name);
+        port.held = None;
+        port.graceful_shutdown = false;
         self.planned_restart_interfaces.remove(name);
         let label = rustbgpd_telemetry::interface_peer_label(name);
         // BGP teardown is settled; a pending BFD cleanup must not let a
@@ -1820,16 +1820,16 @@ impl PeerManager {
         self.drain_ready_session_notifications(Some(&key)).await;
         // The neighbor's operator and safety state outlives the endpoint.
         let had_latch = self.max_prefix_latches.contains_key(&key);
+        let graceful_shutdown = self
+            .peers
+            .get(&key)
+            .is_some_and(|managed| managed.advertise_graceful_shutdown);
         let mut held = HeldState {
             enabled: self.peers.get(&key).is_none_or(|managed| managed.enabled),
             config_admin_down: self
                 .peers
                 .get(&key)
                 .is_some_and(|managed| managed.admin_down.is_some()),
-            graceful_shutdown: self
-                .peers
-                .get(&key)
-                .is_some_and(|managed| managed.advertise_graceful_shutdown),
             max_prefix_restart_seconds: self
                 .peers
                 .get(&key)
@@ -1896,6 +1896,7 @@ impl PeerManager {
         port.retire_unsettled = false;
         port.stopped_retained = false;
         port.held = Some(held);
+        port.graceful_shutdown = graceful_shutdown;
         let previous = port.last_address.map(|address| address.to_string());
         self.metrics.set_unnumbered_peer_address(
             &rustbgpd_telemetry::interface_peer_label(name),
@@ -2389,6 +2390,7 @@ impl PeerManager {
         // Carry the previous endpoint's state: a disable stays, and a latch
         // keeps the new peer down until its restart deadline or an enable.
         let held = self.port_mut(name).held.take();
+        let graceful_shutdown = std::mem::take(&mut self.port_mut(name).graceful_shutdown);
         // A changed configured admin state takes effect; an unchanged one
         // keeps the operator's toggle. The max-prefix latch is separate.
         let next_down = config.admin_down.is_some();
@@ -2424,7 +2426,9 @@ impl PeerManager {
             if rib_peer.is_some() {
                 self.rib_peers.remove(&key);
             }
-            self.port_mut(name).held = held;
+            let port = self.port_mut(name);
+            port.held = held;
+            port.graceful_shutdown = graceful_shutdown;
             // The gate installed above names an endpoint with no peer.
             self.conditional_reconcile_pending |= gated;
             if has_bfd {
@@ -2434,7 +2438,7 @@ impl PeerManager {
         }
         info!(interface = %name, peer = %key, enabled, "unnumbered: bound peer added");
         // Best-effort, like a static neighbor's reconfigure replay.
-        if held.as_ref().is_some_and(|held| held.graceful_shutdown)
+        if graceful_shutdown
             && let Err(error) = self.set_graceful_shutdown(Some(key.clone()), true).await
         {
             warn!(interface = %name, peer = %key, %error, "unnumbered: could not replay graceful shutdown on the new peer");

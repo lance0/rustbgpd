@@ -4408,8 +4408,9 @@ window action, not a steady state).
 so one that comes back during the maintenance window follows the latest
 all-peers toggle:
 
-- an unbound interface-only neighbor, through the state it keeps for its
-  next endpoint;
+- a configured interface-only neighbor with no bound endpoint, including one
+  that has never bound, through the intent it keeps for its next endpoint;
+  deleting the neighbor drops it;
 - a dynamic neighbor whose last session went down with an operator intent
   still pending (graceful shutdown, an unfired route refresh or export
   change), through its dead-letter entry. That table holds at most

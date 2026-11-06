@@ -3022,10 +3022,10 @@ impl PeerManager {
         if peer.is_none() {
             // A neighbor between sessions holds its intent for its next
             // peer: a dynamic neighbor's dead-letter entry and an unbound
-            // interface-only neighbor's held state. An all-peers toggle
-            // reaches them too. Otherwise a clear lets the neighbor
-            // reconnect advertising GRACEFUL_SHUTDOWN with no peer left to
-            // clear it by name, and a set lets it reconnect undrained
+            // interface-only neighbor's port, bound before or not. An
+            // all-peers toggle reaches them too. Otherwise a clear lets the
+            // neighbor reconnect advertising GRACEFUL_SHUTDOWN with no peer
+            // left to clear it by name, and a set lets it connect undrained
             // during the maintenance window. A dynamic neighbor with no
             // dead-letter entry has nothing held; its next accept starts
             // without the intent.
