@@ -9,4 +9,6 @@
   marker, warm checkpoint, and BLACKHOLE receipt. Before upgrading, check the
   directory (default `/var/lib/rustbgpd`) with `stat`, then `chown` it to the
   daemon user and `chmod 0700` it. Container deployments that override the
-  image user need a host bind mount owned by that user.
+  image user need a host bind mount owned by that user. Every directory above
+  it must also be owned by root or the daemon user and not writable by other
+  users unless sticky; the startup error names the first one that is not.

@@ -2,7 +2,8 @@
 
 - `runtime_state_dir` validation now fails closed. The daemon refuses to
   start unless the directory is a real directory (not a symlink) owned by the
-  daemon user and not group- or world-writable; previously it logged a warning
+  daemon user and not group- or world-writable, reached through directories
+  that only root or the daemon user can rewrite; previously it logged a warning
   and continued, and some state files were still written through the
   unvalidated path. The config last-persist marker, the general FIB
   ownership receipt and its `.stale` evidence copy, and panic reports are now
