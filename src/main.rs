@@ -393,6 +393,21 @@ impl PinnedRuntimeStateDirectory {
         use nix::sys::stat::Mode;
         use nix::unistd::geteuid;
 
+        // `dir/` and `dir/.` name the same entry as `dir`, but O_NOFOLLOW
+        // would judge their final `.` and follow a symlink at `dir`. Pin the
+        // spelling without them, so a symlinked directory is refused however
+        // it is written. A final `..` cannot be judged that way at all.
+        let normalized: PathBuf = path.components().collect();
+        if matches!(
+            normalized.components().next_back(),
+            None | Some(std::path::Component::ParentDir)
+        ) {
+            return Err(format!(
+                "runtime-state directory {} must name a directory, not end in `..`",
+                path.display()
+            ));
+        }
+        let path = normalized.as_path();
         match std::fs::symlink_metadata(path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -10906,6 +10921,35 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
         std::fs::set_permissions(unsafe_dir.path(), std::fs::Permissions::from_mode(0o777))
             .unwrap();
         assert!(PinnedRuntimeStateDirectory::prepare(unsafe_dir.path()).is_err());
+    }
+
+    /// Load-bearing: a trailing `/` or `/.` must not let a symlinked
+    /// runtime-state directory through `O_NOFOLLOW`, and a final `..` is
+    /// refused. The real directory still prepares under any spelling.
+    #[test]
+    fn runtime_state_directory_symlink_is_refused_under_every_spelling() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let spell =
+            |path: &Path, suffix: &str| PathBuf::from(format!("{}{suffix}", path.display()));
+        for suffix in ["", "/", "/.", "/./", "//", "/./."] {
+            let spelled = spell(&link, suffix);
+            let error = PinnedRuntimeStateDirectory::prepare(&spelled)
+                .err()
+                .unwrap_or_else(|| panic!("{} was accepted", spelled.display()));
+            assert!(error.contains("failed to pin"), "{suffix:?}: {error}");
+            let directory = PinnedRuntimeStateDirectory::prepare(&spell(&real, suffix))
+                .unwrap_or_else(|error| panic!("{suffix:?}: {error}"));
+            assert_eq!(directory.display_path, real);
+        }
+        let error = PinnedRuntimeStateDirectory::prepare(&spell(&link, "/.."))
+            .err()
+            .unwrap();
+        assert!(error.contains("not end in `..`"), "{error}");
     }
 
     #[test]
