@@ -546,7 +546,7 @@ fn build_transport_config_reflects_every_transport_field() {
 fn build_transport_config_sets_restart_window_for_eligible_static_peer() {
     let (_tx, rx) = mpsc::channel(1);
     let (rib_tx, _rib_rx) = mpsc::channel(1);
-    let mgr = PeerManager::new(
+    let mut mgr = PeerManager::new(
         rx,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
@@ -556,8 +556,10 @@ fn build_transport_config_sets_restart_window_for_eligible_static_peer() {
         rib_tx,
         None,
     );
-    let mut cfg = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
-    cfg.gr_restart_eligible = true;
+    // Static eligibility is roster membership, not the binding flag.
+    let cfg = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+    mgr.planned_restart_peers
+        .insert(PeerKey::new(cfg.address, cfg.interface.clone()));
 
     let transport = mgr.build_transport_config(&cfg);
     assert!(transport.gr_restart_until.is_some());

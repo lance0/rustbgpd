@@ -2287,8 +2287,9 @@ pub struct PeerManagerNeighborConfig {
     pub gr_stale_routes_time: u64,
     /// Long-lived stale routes time (RFC 9494, seconds). 0 = disabled.
     pub llgr_stale_time: u32,
-    /// Whether this peer should participate in the current local
-    /// restarting-speaker GR window (static startup peers only).
+    /// Whether this interface-only binding belongs to the current local
+    /// restarting-speaker GR window's roster. The peer manager derives a
+    /// static neighbor's membership from its startup roster instead.
     pub gr_restart_eligible: bool,
     /// Explicit IPv6 next-hop for eBGP (None = derive from socket).
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
