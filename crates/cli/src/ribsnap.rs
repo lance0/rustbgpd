@@ -11,11 +11,11 @@
 //! them against an Adj-RIB-Out would manufacture false divergence or,
 //! worse, false equality.
 //!
-//! Fail-closed emission: the dump is read twice, one record at a time. The
-//! first pass parses every record and measures the output; the second
-//! renders it. Any parse error, an oversized record, or an output past the
-//! limit exits 2 with nothing written to stdout, so the counted completion
-//! trailer is only ever present on a fully-converted snapshot.
+//! Fail-closed emission: the dump is read once, one record at a time, and
+//! rendered into a private temporary file that reaches stdout only after the
+//! whole dump converted. Any parse error, an oversized record, or an output
+//! past the limit exits 2 with nothing written to stdout, so the counted
+//! completion trailer is only ever present on a fully-converted snapshot.
 //!
 //! Wire notes (RFC 6396 §4.3.4): `AS_PATH` is always 4-octet. The
 //! `MP_REACH_NLRI` inside a RIB entry is decoded by
@@ -99,9 +99,8 @@ pub(crate) struct SnapRoute {
 /// adapter's input buffer whatever the file size.
 const MAX_RECORD_LEN: usize = 16 * 1024 * 1024;
 
-/// Largest snapshot either adapter writes. The output is measured before
-/// the first byte reaches stdout, so an input that would render past it is
-/// refused (exit 2) with nothing written.
+/// Largest snapshot either adapter writes. An input that would render past
+/// it is refused (exit 2) with nothing written to stdout.
 pub(crate) const MAX_OUTPUT_BYTES: u64 = 1 << 32;
 
 /// Run the adapter: print the snapshot to stdout on success, an error to
@@ -112,9 +111,11 @@ pub fn from_mrt(opts: &FromMrtOpts<'_>) -> i32 {
     from_mrt_to(opts, &mut stdout.lock())
 }
 
-/// [`from_mrt`] with the snapshot written to `writer`. The dump is read
-/// twice, one record at a time: the first pass validates every record and
-/// measures the output, the second renders it.
+/// [`from_mrt`] with the snapshot written to `writer`. The dump is read once,
+/// one record at a time, and rendered into an unlinked private temporary file
+/// that is copied to `writer` only after the whole dump converted. The input
+/// is never re-read, so a file rewritten or truncated during the conversion
+/// cannot produce partial output or slip past the output limit.
 #[must_use]
 pub fn from_mrt_to(opts: &FromMrtOpts<'_>, writer: &mut dyn std::io::Write) -> i32 {
     from_mrt_with_limit(opts, writer, MAX_OUTPUT_BYTES)
@@ -125,16 +126,28 @@ fn from_mrt_with_limit(
     writer: &mut dyn std::io::Write,
     max_output: u64,
 ) -> i32 {
-    let validated = check_opts(opts).and_then(|peer| {
+    let rendered = check_opts(opts).and_then(|peer| {
         let file = std::fs::File::open(opts.file)
             .map_err(|e| format!("cannot read {}: {e}", opts.file.display()))?;
-        let routes = measure(opts, peer, &mut std::io::BufReader::new(&file), max_output)?;
-        Ok((file, peer, routes))
+        let mut spool = tempfile::tempfile()
+            .map_err(|e| format!("cannot create a temporary file for the snapshot: {e}"))?;
+        let mut buffered = std::io::BufWriter::new(&mut spool);
+        render_dump(
+            opts,
+            peer,
+            &mut std::io::BufReader::new(file),
+            &mut buffered,
+            max_output,
+        )?;
+        std::io::Write::flush(&mut buffered)
+            .map_err(|e| format!("cannot write the snapshot temporary file: {e}"))?;
+        drop(buffered);
+        Ok(spool)
     });
-    match validated {
-        Ok((file, peer, routes)) => write_streamed(writer, "MRT snapshot output", |w| {
-            std::io::Seek::rewind(&mut &file)?;
-            render_stream(opts, peer, &mut std::io::BufReader::new(&file), routes, w)
+    match rendered {
+        Ok(mut spool) => write_streamed(writer, "MRT snapshot output", |w| {
+            std::io::Seek::rewind(&mut spool)?;
+            std::io::copy(&mut spool, w).map(drop)
         }),
         Err(e) => {
             eprintln!("Error: {e}");
@@ -226,9 +239,8 @@ fn convert_with_limit(
     data: &[u8],
     max_output: u64,
 ) -> Result<String, String> {
-    let routes = measure(opts, peer, &mut &data[..], max_output)?;
     let mut out = Vec::new();
-    render_stream(opts, peer, &mut &data[..], routes, &mut out).map_err(|e| e.to_string())?;
+    render_dump(opts, peer, &mut &data[..], &mut out, max_output)?;
     String::from_utf8(out).map_err(|e| e.to_string())
 }
 
@@ -257,76 +269,42 @@ pub(crate) fn trailer_line(routes: usize) -> String {
     )
 }
 
-/// Pass one: parse every record, measure the rendered snapshot, and return
-/// the route count. Nothing is retained between records.
-fn measure(
+/// Parse the whole dump one record at a time and render the snapshot into
+/// `out`, refusing a malformed dump or one that would render past
+/// `max_output` bytes. `out` is complete, with its counted trailer, only when
+/// this returns `Ok`.
+fn render_dump(
     opts: &FromMrtOpts<'_>,
     peer: IpAddr,
     reader: &mut dyn std::io::Read,
+    out: &mut dyn std::io::Write,
     max_output: u64,
-) -> Result<usize, String> {
+) -> Result<(), String> {
+    let over_limit =
+        || format!("the snapshot would exceed the {max_output}-byte output limit; refusing");
+    let write_failed = |e: std::io::Error| format!("cannot write the snapshot: {e}");
+    let header = header_line(opts);
+    let mut size = header.len() as u64;
+    out.write_all(header.as_bytes()).map_err(write_failed)?;
     let mut routes = 0_usize;
-    let mut size = header_line(opts).len() as u64;
     for_each_route(reader, &mut |addr, len, route| {
-        size += route_record_json(peer, opts.peer_asn, addr, len, &route).len() as u64 + 1;
+        let line = route_record_json(peer, opts.peer_asn, addr, len, &route);
+        size += line.len() as u64 + 1;
         if size > max_output {
-            return Err(format!(
-                "the snapshot would exceed the {max_output}-byte output limit; refusing"
-            ));
+            return Err(over_limit());
         }
+        out.write_all(line.as_bytes())
+            .and_then(|()| out.write_all(b"\n"))
+            .map_err(write_failed)?;
         routes += 1;
         Ok(())
     })
     .map_err(|e| format!("{}: {e}", opts.file.display()))?;
-    if size + trailer_line(routes).len() as u64 > max_output {
-        return Err(format!(
-            "{}: the snapshot would exceed the {max_output}-byte output limit; refusing",
-            opts.file.display()
-        ));
+    let trailer = trailer_line(routes);
+    if size + trailer.len() as u64 > max_output {
+        return Err(format!("{}: {}", opts.file.display(), over_limit()));
     }
-    Ok(routes)
-}
-
-/// Pass two: render the validated dump. A parse failure here means the
-/// input changed after validation; the output then lacks its trailer.
-fn render_stream(
-    opts: &FromMrtOpts<'_>,
-    peer: IpAddr,
-    reader: &mut dyn std::io::Read,
-    routes: usize,
-    out: &mut dyn std::io::Write,
-) -> std::io::Result<()> {
-    out.write_all(header_line(opts).as_bytes())?;
-    let mut written = 0_usize;
-    let mut failure = None;
-    let parsed = for_each_route(reader, &mut |addr, len, route| {
-        let line = route_record_json(peer, opts.peer_asn, addr, len, &route);
-        if let Err(error) = out
-            .write_all(line.as_bytes())
-            .and_then(|()| out.write_all(b"\n"))
-        {
-            failure = Some(error);
-            return Err(String::new());
-        }
-        written += 1;
-        Ok(())
-    });
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if let Err(e) = parsed {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("input changed after validation: {e}"),
-        ));
-    }
-    if written != routes {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("input changed after validation: {written} routes, expected {routes}"),
-        ));
-    }
-    out.write_all(trailer_line(routes).as_bytes())
+    out.write_all(trailer.as_bytes()).map_err(write_failed)
 }
 
 /// Render one `rbgp-ribsnap/1` route record (shared by the MRT and BMP
@@ -1123,6 +1101,47 @@ mod tests {
             from_mrt_with_limit(&opts, &mut output, limit - 1),
             EXIT_REFUSED
         );
+        assert_eq!(output, [] as [u8; 0]);
+    }
+
+    /// Load-bearing: the dump is read exactly once, so what reaches stdout is
+    /// what was validated. A pipe can be read only once; a design that
+    /// re-reads the input after validating it refuses this input (or, on a
+    /// file rewritten between reads, emits output nobody validated).
+    #[test]
+    fn dump_is_read_once_and_released_only_when_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("dump.fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let feed = |bytes: Vec<u8>| {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&fifo)
+                    .and_then(|mut pipe| pipe.write_all(&bytes));
+            })
+        };
+
+        let writer = feed(sample_dump());
+        let mut output = Vec::new();
+        let code = from_mrt_to(&opts(&fifo, "adj-rib-out-capture"), &mut output);
+        writer.join().unwrap();
+        assert_eq!(code, EXIT_OK);
+        let file = write_dump(&sample_dump());
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            run(&opts(file.path(), "adj-rib-out-capture")).unwrap()
+        );
+
+        // A dump cut mid-record after complete records writes nothing.
+        let mut truncated = sample_dump();
+        truncated.truncate(truncated.len() - 3);
+        let writer = feed(truncated);
+        let mut output = Vec::new();
+        let code = from_mrt_to(&opts(&fifo, "adj-rib-out-capture"), &mut output);
+        writer.join().unwrap();
+        assert_eq!(code, EXIT_REFUSED);
         assert_eq!(output, [] as [u8; 0]);
     }
 

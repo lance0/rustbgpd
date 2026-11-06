@@ -216,8 +216,45 @@ fn prepare(opts: &FromBmpOpts<'_>, limits: Limits) -> Result<BmpSnapshot, String
             limits.input_bytes
         ));
     }
-    let mut reader = std::io::Read::take(std::io::BufReader::new(file), limits.input_bytes);
+    let mut reader = InputBudget {
+        inner: std::io::BufReader::new(file),
+        remaining: limits.input_bytes,
+        limit: limits.input_bytes,
+    };
     convert_reader(opts, &peer_filter, &mut reader, limits)
+}
+
+/// Reads at most `limit` bytes, then fails if the input continues. A plain
+/// `take` would end the stream at the limit, so a capture that grew after the
+/// size check, or a pipe, could convert from a prefix that silently drops
+/// later withdrawals.
+struct InputBudget<R> {
+    inner: R,
+    remaining: u64,
+    limit: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for InputBudget<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            let mut probe = [0_u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "input continues past the input limit of {} bytes; refusing",
+                        self.limit
+                    ),
+                )),
+            };
+        }
+        let room = usize::try_from(self.remaining).unwrap_or(usize::MAX);
+        let take = buf.len().min(room);
+        let read = self.inner.read(&mut buf[..take])?;
+        self.remaining -= read as u64;
+        Ok(read)
+    }
 }
 
 /// Convert an in-memory capture into the snapshot text and notes under the
@@ -2341,6 +2378,51 @@ mod tests {
         };
         let err = run_with_limits(&opts(file.path(), &[]), short).unwrap_err();
         assert!(err.contains("output limit"), "{err}");
+    }
+
+    /// Load-bearing: input past the byte budget is refused even when the
+    /// budget ends on a clean message boundary and the size check could not
+    /// see it (a pipe). Truncating there would convert the prefix and drop
+    /// the withdrawal that follows.
+    #[test]
+    fn input_past_the_budget_is_refused_not_truncated() {
+        let (mut capture, info) = v4_peer_capture();
+        capture.extend(route_monitoring(&info, &simple_announce([10, 0, 0, 0], 24)));
+        capture.extend(route_monitoring(&info, &eor_v4()));
+        let budget = capture.len() as u64;
+        let mut withdrawal = Vec::new();
+        withdrawal.extend(route_monitoring(
+            &info,
+            &update_pdu(&v4_nlri([10, 0, 0, 0], 24, None), &[], &[]),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("capture.fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let writer = {
+            let fifo = fifo.clone();
+            let mut bytes = capture.clone();
+            bytes.extend(&withdrawal);
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let _ = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&fifo)
+                    .and_then(|mut pipe| pipe.write_all(&bytes));
+            })
+        };
+        let limits = Limits {
+            input_bytes: budget,
+            ..Limits::default()
+        };
+        let result = run_with_limits(&opts(&fifo, &[]), limits);
+        writer.join().unwrap();
+        let err = result.unwrap_err();
+        assert!(err.contains("input limit"), "{err}");
+
+        // The same budget passes an input that ends exactly at it.
+        let file = write_capture(&capture);
+        let (snapshot, _) = run_with_limits(&opts(file.path(), &[]), limits).unwrap();
+        assert!(snapshot.contains("10.0.0.0/24"), "{snapshot}");
     }
 
     #[test]

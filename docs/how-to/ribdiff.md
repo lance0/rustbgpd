@@ -389,10 +389,13 @@ octets trailing the next hop refuse the dump (exit 2). RFC 8050 Add-Path
 entries carry their path identifier through as `path_id`. Extended and
 large communities are emitted from the raw attribute bytes.
 
-The dump is read twice, one record at a time: the first pass validates
-every record and measures the snapshot, the second writes it. Memory stays
-near one record whatever the file size. A record longer than 16 MiB or a
-snapshot longer than 4 GiB refuses the dump (exit 2, nothing emitted).
+The dump is read once, one record at a time, and the snapshot is rendered
+into a private unlinked temporary file that is copied to stdout only after
+the whole dump converted. Memory stays near one record whatever the file
+size; temporary disk use is the size of the snapshot. A record longer than
+16 MiB or a snapshot longer than 4 GiB refuses the dump (exit 2, nothing
+emitted), and so does a file truncated or rewritten while it is read. The
+input may be a pipe.
 
 <a id="rbgp-diff-snapshot-from-bmp--rfc-8671-post-policy-bmp-captures"></a>
 ### BMP post-policy snapshots
