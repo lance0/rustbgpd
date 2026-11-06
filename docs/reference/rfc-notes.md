@@ -1796,6 +1796,21 @@ carries inactive (absent), unlimited (zero), or finite.
   parallel active-record index in the client. Duplicate announcements
   and withdrawals of unknown records are normalized silently instead of
   failing the session.
+- Deviation: when the router itself detects a fatal error in a cache's PDUs,
+  it drops the session but keeps that cache's last accepted data until a full
+  table replaces it or the §6 expire interval passes. This covers the Error
+  Codes 5 (Unsupported PDU Type), 8 (Unexpected Protocol Version) and 9 (ASPA
+  Provider List Error) that it sends, and a corrupt PDU other than a Prefix
+  PDU. 8210bis §12 says a fatal error MUST drop the session and the router
+  MUST flush all data learned from that cache. The offending transaction is
+  never applied, so the kept data is the last set the cache delivered intact.
+  Flushing on one malformed PDU would instead remove origin validation for
+  every route that cache alone covers, and for all routes when it is the only
+  cache, until the cache sends a clean table. Fatal evidence about the data
+  itself still flushes: an invalid Prefix PDU (code 0), and a fatal Error
+  Report the cache sends, Cache Shutdown (code 13) included. A received code
+  0 is handled as a Cache Reset, because StayRTR reports a restarted session
+  that way.
 - Best-path step 0.5: Valid > NotFound > Invalid (between stale demotion
   and LOCAL_PREF).
 - `match_rpki_validation` in policy.
