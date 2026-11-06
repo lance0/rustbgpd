@@ -447,21 +447,24 @@ repairs. Withdrawals/removals run first and bypass both limits. Limited routes
 remain retryable as `rejected/active_limit_exceeded` or
 `rejected/install_rate_limited`.
 
-Successful installs record their canonical prefixes in private
-`<runtime_state_dir>/blackhole-owned.json`, written once per reconcile pass after
-the pass's installs. Restart adopts only receipt∩marker; unreceipted
-marker-identical rows remain foreign, including rows a crash left between an
-install and that pass's receipt write. Unclaimed receipt rows stay
-`adopted_pending_reap` until the 500 s deferral expires. Receipt release is
-published before deletion, once per batch of removals; a failed delete attempts
-restoration.
+Private `<runtime_state_dir>/blackhole-owned.json` lists the canonical
+prefixes this daemon may have installed. It is a superset of the daemon's
+kernel discard rows at every instant: each reconcile pass writes its install
+candidates into the receipt before installing them, and deletes kernel rows
+before writing the receipt without them. The receipt is written at most once
+for the pass's installs, once for each batch of removals, and once to drop
+candidates that were not installed. A crash at any point therefore leaves every
+daemon row receipted. Restart adopts only receipt∩marker and forgets receipted
+prefixes that have no marker row; unreceipted marker-identical rows remain
+foreign. Unclaimed receipt rows stay `adopted_pending_reap` until the 500 s
+deferral expires.
 
-A failed receipt write (for example a full disk) keeps the affected rows owned
-in memory and retries on every pass. Until a write succeeds, rows the receipt
-does not name report `installed/receipt_write_failed`, new installs report
-`failed/receipt_write_failed`, and withdrawal and shutdown still remove owned
-rows. A receipt that is unreadable or changed outside the daemon fail-stops
-later mutations as `ownership_state_unavailable` until restart.
+A failed receipt write (for example a full disk) refuses that pass's new
+installs as `failed/receipt_write_failed` and retries on the next pass.
+Withdrawal and shutdown still remove owned rows, and the receipt keeps naming
+them until a write succeeds. A receipt that is unreadable or changed outside
+the daemon fail-stops later mutations as `ownership_state_unavailable` until
+restart.
 
 Live daemons require distinct runtime-state directories. Stopped receipt
 deletion and pre-receipt upgrade preserve surviving markers as foreign. Do not
@@ -470,8 +473,7 @@ replacement by an identical marker remains the value-identity limit.
 
 `rbgp rib blackholes` shows the current discard status for every
 BLACKHOLE-marked best route the daemon has observed: `installed`
-(`installed` / `owned` / `adopted` / `adopted_pending_reap` /
-`receipt_write_failed`), `rejected`
+(`installed` / `owned` / `adopted` / `adopted_pending_reap`), `rejected`
 (`broad_prefix` / `not_ebgp` / `active_limit_exceeded` / `install_rate_limited`), or `failed` (`foreign_route_exists`,
 `dump_failed`, `remove_failed`, `reap_failed`, `ownership_state_unavailable`,
 `receipt_write_failed`, or the kernel install error). The same surface is available as JSON with

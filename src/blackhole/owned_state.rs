@@ -43,21 +43,22 @@ pub(super) struct OwnedStateStore {
     pub(super) writes: AtomicU64,
 }
 
-/// The actor's BLACKHOLE ownership. `prefixes` is the in-memory
-/// authority: the rows the actor holds in the kernel. `add` and `remove`
-/// change only memory; `flush` publishes the set as one receipt write, so
-/// a reconcile pass costs O(1) writes however many prefixes it touches.
+/// The actor's BLACKHOLE ownership: the prefixes this daemon may have
+/// installed. `prefixes` changes in memory and `flush` publishes it as
+/// one receipt write, so a reconcile pass costs O(1) writes however many
+/// prefixes it touches.
 ///
-/// Ordering: rows are installed, then the pass publishes the receipt,
-/// then statuses report them. A receipt drop is published before the
-/// kernel delete. A crash between an install and its publication leaves
-/// that row unreceipted, and restart treats it as foreign.
+/// Invariant: the receipt is a superset of the kernel rows the actor owns.
+/// Installs are written ahead (receipt, then kernel); removals are written
+/// behind (kernel, then receipt). A crash at any point leaves every owned
+/// row receipted, and restart adopts receipted marker rows and forgets
+/// receipted prefixes with no marker row.
 #[derive(Default)]
 pub(super) struct OwnershipState {
     pub(super) store: Option<OwnedStateStore>,
     pub(super) prefixes: BTreeSet<Prefix>,
     /// The set the receipt holds, as last written or read back.
-    pub(super) persisted: BTreeSet<Prefix>,
+    persisted: BTreeSet<Prefix>,
     /// A failed publication of this set: the receipt holds either it or
     /// `persisted`, and the next `flush` retries.
     attempted: Option<BTreeSet<Prefix>>,
@@ -97,15 +98,6 @@ impl OwnershipState {
             attempted: None,
             available: true,
         }
-    }
-
-    /// The last publication failed and has not been retried successfully.
-    pub(super) fn write_failed(&self) -> bool {
-        self.attempted.is_some()
-    }
-
-    pub(super) fn add(&mut self, prefix: Prefix) {
-        self.prefixes.insert(prefix);
     }
 
     /// Drop `prefix` in memory. False, and ownership disabled, when it
@@ -509,7 +501,7 @@ fn strict_receipt_data_is_refused() {
         std::fs::write(&path, bytes).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut state = OwnershipState::load(Some(store.directory));
-        state.add(*expected.first().unwrap());
+        state.prefixes.insert(*expected.first().unwrap());
         assert!(!state.available && !state.flush());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
