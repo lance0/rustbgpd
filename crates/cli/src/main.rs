@@ -2,7 +2,7 @@
 
 mod commands;
 mod connection;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[path = "../../api/src/credential_file.rs"]
 #[allow(
     dead_code,
@@ -10,6 +10,7 @@ mod connection;
 )]
 mod credential_file;
 mod error;
+#[cfg(target_os = "linux")]
 #[path = "../../../src/host_ipv6.rs"]
 mod host_ipv6;
 mod output;
