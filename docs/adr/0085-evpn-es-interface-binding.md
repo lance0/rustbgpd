@@ -338,8 +338,18 @@ as *parked*. GC keeps the `Operator` reason of a parked ESI and drops its
 ends when the bond is ready again, or when the bond leaves the committed
 config. A bond that returns under the same partner is still operator-drained.
 A different partner is a new segment identity and starts undrained, as a
-re-added ESI does under ADR-0084. A bond removed from the config while parked
-drops the drain at that commit, though the removal plans as a runtime no-op.
+re-added ESI does under ADR-0084.
+
+The GC inside a converge also keeps every ESI a ready bond derives. One
+readiness round can return one bond and park another. That plan is an ES add
+plus an ES delete, so it converges in decomposed steps. The intermediate
+candidate holds neither segment, and its GC must not strip the returning
+segment's drain. Entries the table no longer names are collected by one more
+GC pass, run against the committed segments after every successful config
+commit and readiness re-converge. That pass covers the plans with no converge
+GC: removing a parked or collision-suppressed bond from the config, a derived
+ESI suppressed by a collision (a no-op plan), and a multi-segment additive
+build-up.
 
 The returning segment is still a new binding to the link coordinator, so
 Decision 1's direct first probe applies to it rather than the Decision 3

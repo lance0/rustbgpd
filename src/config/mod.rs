@@ -7430,25 +7430,28 @@ impl AutoLacpEsis {
         changed
     }
 
-    /// Forget bonds a newly committed config no longer names. Returns
-    /// whether a parked entry went, which ends its ESI's drain retention.
-    pub(crate) fn retain_bonds(&self, configured: &BTreeSet<String>) -> bool {
-        let mut parked_dropped = false;
-        self.table().retain(|bond, entry| {
-            let keep = configured.contains(bond);
-            parked_dropped |= !keep && matches!(entry, AutoLacpEsi::Parked(_));
-            keep
-        });
-        parked_dropped
+    /// Forget bonds a newly committed config no longer names.
+    pub(crate) fn retain_bonds(&self, configured: &BTreeSet<String>) {
+        self.table().retain(|bond, _| configured.contains(bond));
+    }
+
+    /// Current derived ESIs of ready bonds, collision-suppressed ones
+    /// included.
+    pub(crate) fn ready_esis(&self) -> BTreeSet<EthernetSegmentIdentifier> {
+        self.esis(true)
     }
 
     /// Last derived ESIs of configured bonds that are not ready.
     pub(crate) fn parked_esis(&self) -> BTreeSet<EthernetSegmentIdentifier> {
+        self.esis(false)
+    }
+
+    fn esis(&self, ready: bool) -> BTreeSet<EthernetSegmentIdentifier> {
         self.read()
             .values()
-            .filter_map(|entry| match entry {
-                AutoLacpEsi::Parked(esi) => Some(*esi),
-                AutoLacpEsi::Ready(_) => None,
+            .filter_map(|entry| match (entry, ready) {
+                (AutoLacpEsi::Ready(esi), true) | (AutoLacpEsi::Parked(esi), false) => Some(*esi),
+                _ => None,
             })
             .collect()
     }

@@ -31,7 +31,9 @@
 //! not ready (for example after carrier loss) is still configured: its
 //! last derived ESI is parked in the readiness table, and its
 //! `Operator` reason survives until the bond returns or leaves the
-//! committed config.
+//! committed config. Besides the converge GCs, the reload apply GCs
+//! against the committed segments after every successful commit and
+//! readiness re-converge, for plans that have no converge GC.
 //!
 //! Observability: every committed mutation syncs the
 //! `evpn_es_drained{esi, reason}` gauge when the state was built with
@@ -242,16 +244,22 @@ impl EvpnEsDrainState {
 
     /// GC on segment-set replace: drop drain entries — all reasons —
     /// for ESIs that are no longer configured (their gauge series are
-    /// removed too). A parked `auto-lacp` ESI (its bond is configured
-    /// but not ready) is still configured: it keeps its `Operator`
-    /// reason and loses only `Link`, which goes with its binding.
+    /// removed too). `auto-lacp` ESIs in the readiness table count as
+    /// configured: a ready one keeps every reason, because an
+    /// intermediate step of a decomposed apply can omit a segment the
+    /// final step re-adds; a parked one (its bond is configured but not
+    /// ready) keeps its `Operator` reason and loses only `Link`, which
+    /// goes with its binding. Entries the table stops naming are
+    /// collected by the post-commit GC
+    /// (`EvpnRuntimeReloadApply::gc_drains_against_committed`).
     /// Returns `Some(new_flat)` when entries changed, `None` otherwise.
     pub fn retain_configured(
         &self,
         segments: &[rustbgpd_evpn::EthernetSegment],
     ) -> Option<Arc<BTreeSet<EthernetSegmentIdentifier>>> {
-        let configured: BTreeSet<EthernetSegmentIdentifier> =
+        let mut configured: BTreeSet<EthernetSegmentIdentifier> =
             segments.iter().map(|seg| seg.esi).collect();
+        configured.extend(self.auto_lacp_esis.ready_esis());
         let parked = self.auto_lacp_esis.parked_esis();
         let operator = BTreeSet::from([EsDrainReason::Operator]);
         let mut guard = self.lock();
