@@ -169,6 +169,41 @@ pub(crate) fn remote_contender_wins(
     remote_seq > our_seq || (remote_seq == our_seq && remote_next_hop < local_vtep_ip)
 }
 
+/// The contender an entry withdrew to, kept so the contest can be decided
+/// again when our own sequence changes without a new contender view (for
+/// example a same-segment peer sequence adopted after the withdrawal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct YieldedTo {
+    remote_seq: Option<u32>,
+    remote_next_hop: IpAddr,
+    local_vtep_ip: IpAddr,
+}
+
+impl YieldedTo {
+    pub(crate) const fn new(
+        remote_seq: Option<u32>,
+        remote_next_hop: IpAddr,
+        local_vtep_ip: IpAddr,
+    ) -> Self {
+        Self {
+            remote_seq,
+            remote_next_hop,
+            local_vtep_ip,
+        }
+    }
+
+    /// Does this contender still win against `our_seq`?
+    pub(crate) fn still_wins(self, our_seq: u32, our_sticky: bool) -> bool {
+        remote_contender_wins(
+            our_seq,
+            our_sticky,
+            self.remote_seq,
+            self.remote_next_hop,
+            self.local_vtep_ip,
+        )
+    }
+}
+
 /// Action the daemon-side adapter must execute against the RIB.
 ///
 /// The state machine produces these as pure values — translation to
@@ -222,9 +257,9 @@ struct LocalMacOriginationState {
     /// Key of the route we currently have outstanding. `Some` ⇒ we are
     /// advertising; `None` ⇒ withdrawn (or never advertised).
     originated_key: Option<EvpnRouteKey>,
-    /// We withdrew because a contender won (RFC 7432 §15) while the MAC
-    /// stays local. Cleared by a local age or a re-advertisement.
-    yielded: bool,
+    /// The contender we withdrew to (RFC 7432 §15) while the MAC stays
+    /// local. Cleared by a local age, a drain or a re-advertisement.
+    yielded_to: Option<YieldedTo>,
 }
 
 impl LocalMacOriginationState {
@@ -321,12 +356,15 @@ impl LocalMacOriginator {
 
     /// Adopt a same-segment peer's sequence without treating it as a move.
     /// Unknown MACs remain unknown; withdrawn entries retain the floor without
-    /// re-advertising. The local sticky bit and remote contention history stay intact.
+    /// re-advertising, except an entry that yielded to a contender the
+    /// adopted sequence now beats (RFC 7432 §15). The local sticky bit and
+    /// remote contention history stay intact.
     pub fn adopt_peer_sequence(
         &mut self,
         mac: MacAddress,
         sequence: u32,
     ) -> Vec<OriginationAction> {
+        let fresh_key = self.key(mac);
         let Some(state) = self.by_mac.get_mut(&mac) else {
             return Vec::new();
         };
@@ -334,14 +372,21 @@ impl LocalMacOriginator {
             return Vec::new();
         }
         state.our_seq = sequence;
-        state.originated_key.map_or_else(Vec::new, |key| {
-            vec![OriginationAction::Inject {
-                mac,
-                mobility_seq: state.rendered_seq(),
-                sticky: state.sticky,
-                key,
-            }]
-        })
+        let key = match (state.originated_key, state.yielded_to) {
+            (Some(key), _) => key,
+            (None, Some(contender)) if !contender.still_wins(state.our_seq, state.sticky) => {
+                state.yielded_to = None;
+                state.originated_key = Some(fresh_key);
+                fresh_key
+            }
+            (None, _) => return Vec::new(),
+        };
+        vec![OriginationAction::Inject {
+            mac,
+            mobility_seq: state.rendered_seq(),
+            sticky: state.sticky,
+            key,
+        }]
     }
 
     /// Build the wire-shaped key for `mac`.
@@ -380,7 +425,7 @@ impl LocalMacOriginator {
     pub fn drain_to_withdraws(&mut self) -> Vec<OriginationAction> {
         let mut out = Vec::with_capacity(self.advertised_count());
         for (mac, state) in &mut self.by_mac {
-            state.yielded = false;
+            state.yielded_to = None;
             if let Some(key) = state.originated_key.take() {
                 out.push(OriginationAction::Withdraw { mac: *mac, key });
             }
@@ -430,7 +475,10 @@ impl LocalMacOriginator {
         // Yielded to a winning contender and nothing local changed: a
         // replay or same-port notification is not a newly detected move
         // (RFC 7432 §15), so stay withdrawn rather than outbid it.
-        if prior.as_ref().is_some_and(|s| s.yielded) && !port_changed && !sticky_changed {
+        if prior.as_ref().is_some_and(|s| s.yielded_to.is_some())
+            && !port_changed
+            && !sticky_changed
+        {
             if let Some(entry) = self.by_mac.get_mut(&mac) {
                 entry.last_seen_remote_seq = new_last_seen;
             }
@@ -485,7 +533,7 @@ impl LocalMacOriginator {
             last_seen_remote_seq: new_last_seen,
             sticky,
             originated_key: Some(key),
-            yielded: false,
+            yielded_to: None,
         };
         let mobility_seq = new_state.rendered_seq();
         self.by_mac.insert(mac, new_state);
@@ -505,7 +553,7 @@ impl LocalMacOriginator {
         };
         // The MAC left: a yielded entry must not come back when the
         // contender goes away.
-        entry.yielded = false;
+        entry.yielded_to = None;
         let Some(key) = entry.originated_key.take() else {
             return Vec::new();
         };
@@ -555,10 +603,18 @@ impl LocalMacOriginator {
             // Withdrawn. If we yielded and no contender beats us any more,
             // the MAC is still local: advertise it again at its retained
             // sequence.
-            if !entry.yielded || contender_wins {
+            if entry.yielded_to.is_none() {
                 return Vec::new();
             }
-            entry.yielded = false;
+            if let Some(v) = view.filter(|_| contender_wins) {
+                entry.yielded_to = Some(YieldedTo::new(
+                    v.mobility_sequence,
+                    v.next_hop,
+                    local_vtep_ip,
+                ));
+                return Vec::new();
+            }
+            entry.yielded_to = None;
             entry.originated_key = Some(fresh_key);
             return vec![OriginationAction::Inject {
                 mac,
@@ -568,11 +624,15 @@ impl LocalMacOriginator {
             }];
         };
 
-        if !contender_wins {
+        let Some(v) = view.filter(|_| contender_wins) else {
             return Vec::new();
-        }
+        };
         entry.originated_key = None;
-        entry.yielded = true;
+        entry.yielded_to = Some(YieldedTo::new(
+            v.mobility_sequence,
+            v.next_hop,
+            local_vtep_ip,
+        ));
         vec![OriginationAction::Withdraw { mac, key }]
     }
 }
@@ -818,6 +878,20 @@ mod tests {
         assert_eq!(o.drain_to_withdraws(), Vec::new());
         assert_eq!(o.on_remote_changed(mac(0xAA), None, local_ip()), Vec::new());
         assert_eq!(o.advertised_count(), 0);
+    }
+
+    // A same-segment sequence adopted after a yield is re-evaluated against
+    // the contender we yielded to, with no new contender view.
+    #[test]
+    fn adopted_sequence_that_beats_the_contender_re_advertises() {
+        let mut o = fresh();
+        let _ = o.on_local_learned(mac(0xAA), 10, false, None);
+        let _ = o.on_remote_changed(mac(0xAA), Some(&remote(Some(5))), local_ip());
+        assert_eq!(o.adopt_peer_sequence(mac(0xAA), 3), Vec::new());
+        let actions = o.adopt_peer_sequence(mac(0xAA), 10);
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(10), false);
+        assert_eq!(o.advertised_count(), 1);
     }
 
     // RFC 7432 §15.2: a static (sticky) MAC is not subject to MAC moves.
@@ -1075,7 +1149,7 @@ mod tests {
         let bb = o.by_mac.get(&mac(0xBB)).unwrap();
         assert_eq!(bb.our_seq, 8); // 7 + 1 on learn; the remote 9 wins
         assert_eq!(bb.last_seen_remote_seq, Some(9));
-        assert!(bb.yielded && bb.originated_key.is_none());
+        assert!(bb.yielded_to.is_some() && bb.originated_key.is_none());
 
         let cc = o.by_mac.get(&mac(0xCC)).unwrap();
         assert!(cc.originated_key.is_none());

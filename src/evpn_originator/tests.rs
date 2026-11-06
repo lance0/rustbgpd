@@ -5419,6 +5419,43 @@ async fn yielded_mac_stays_withdrawn_after_drain_when_contender_leaves() {
     }
 }
 
+/// RFC 7432 §15 with RFC 9721 §6.4/§6.5 peer sync: a same-segment peer's
+/// sequence adopted after we yielded can put us back ahead of the
+/// different-segment contender, with the contender view unchanged. The
+/// route must then be advertised at the adopted sequence, in one Inject and
+/// without a transient withdraw. Both route shapes.
+#[tokio::test]
+async fn peer_sync_sequence_that_beats_the_contender_keeps_the_route_advertised() {
+    for ip in [None, Some("192.0.2.10")] {
+        let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+        let contender = with_esi(
+            evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.3", Some(5), false),
+            segment_esi(2),
+        );
+        let mut h = PeerSyncHarness::new(segments, Vec::new());
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if ip.is_some() {
+            h.observe(ip_added_aa()).await;
+        }
+        let _ = h.take_log().await;
+
+        h.routes_tx
+            .send_replace(vec![contender, eligible_peer_sync_route(10, ip)]);
+        h.repoll().await;
+        let key = macip_key_with(100, 0xAA, ip);
+        let log = h.take_log().await;
+        assert_eq!(
+            log,
+            vec![RibActionWithSeq::Inject(key, Some(10))],
+            "{ip:?}: expected one Inject at the adopted sequence"
+        );
+        let advertised = h.advertised.lock().await;
+        let route = advertised.get(&key).expect("route advertised");
+        assert_eq!(extract_mac_mobility_full(&route.attributes).1, Some(10));
+    }
+}
+
 fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
     with_esi(
         evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false),

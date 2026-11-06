@@ -79,6 +79,7 @@ use rustbgpd_wire::{
 
 use crate::EvpnInstanceId;
 use crate::origination::OriginationAction;
+use crate::origination::YieldedTo;
 
 /// Composite key — `(MAC, IP)` — used as the per-instance map key.
 /// A small newtype so `BTreeMap` lookups in the daemon don't risk
@@ -153,9 +154,9 @@ struct LocalMacIpOriginationState {
     /// Key of the route we currently have outstanding. `Some` ⇒ we
     /// are advertising; `None` ⇒ withdrawn (or never advertised).
     originated_key: Option<EvpnRouteKey>,
-    /// We withdrew because a contender won (RFC 7432 §15) while the
-    /// binding stays local. Cleared by a local age or a re-advertisement.
-    yielded: bool,
+    /// The contender we withdrew to (RFC 7432 §15) while the binding stays
+    /// local. Cleared by a local age, a drain or a re-advertisement.
+    yielded_to: Option<YieldedTo>,
 }
 
 impl LocalMacIpOriginationState {
@@ -254,19 +255,35 @@ impl LocalMacIpOriginator {
         sequence: u32,
     ) -> Vec<OriginationAction> {
         let mut actions = Vec::new();
-        for (_, state) in self.by_key.range_mut(mac_ip_range(mac)) {
+        let (rd, ethernet_tag) = (self.rd, self.ethernet_tag);
+        for (k, state) in self.by_key.range_mut(mac_ip_range(mac)) {
             if state.our_seq >= sequence {
                 continue;
             }
             state.our_seq = sequence;
-            if let Some(key) = state.originated_key {
-                actions.push(OriginationAction::Inject {
-                    mac,
-                    mobility_seq: state.rendered_seq(),
-                    sticky: state.sticky,
-                    key,
-                });
-            }
+            let key = match (state.originated_key, state.yielded_to) {
+                (Some(key), _) => key,
+                // RFC 7432 §15: the adopted sequence now beats the
+                // contender this binding yielded to.
+                (None, Some(contender)) if !contender.still_wins(state.our_seq, state.sticky) => {
+                    let key = EvpnRouteKey::MacIp {
+                        rd,
+                        ethernet_tag,
+                        mac,
+                        ip: Some(k.ip),
+                    };
+                    state.yielded_to = None;
+                    state.originated_key = Some(key);
+                    key
+                }
+                (None, _) => continue,
+            };
+            actions.push(OriginationAction::Inject {
+                mac,
+                mobility_seq: state.rendered_seq(),
+                sticky: state.sticky,
+                key,
+            });
         }
         actions
     }
@@ -295,7 +312,7 @@ impl LocalMacIpOriginator {
     pub fn drain_to_withdraws(&mut self) -> Vec<OriginationAction> {
         let mut out = Vec::with_capacity(self.advertised_count());
         for (k, state) in &mut self.by_key {
-            state.yielded = false;
+            state.yielded_to = None;
             if let Some(key) = state.originated_key.take() {
                 out.push(OriginationAction::Withdraw { mac: k.mac, key });
             }
@@ -356,7 +373,7 @@ impl LocalMacIpOriginator {
         // Yielded to a winning contender: a replay or a repeated binding
         // notification is not a newly detected move (RFC 7432 §15). A
         // local port move re-advertises through `on_local_mac_moved`.
-        if prior.as_ref().is_some_and(|s| s.yielded) && !sticky_changed {
+        if prior.as_ref().is_some_and(|s| s.yielded_to.is_some()) && !sticky_changed {
             if let Some(entry) = self.by_key.get_mut(&composite) {
                 entry.last_seen_remote_seq = new_last_seen;
             }
@@ -407,7 +424,7 @@ impl LocalMacIpOriginator {
             last_seen_remote_seq: new_last_seen,
             sticky,
             originated_key: Some(key),
-            yielded: false,
+            yielded_to: None,
         };
         let mobility_seq = new_state.rendered_seq();
         self.by_key.insert(composite, new_state);
@@ -428,7 +445,7 @@ impl LocalMacIpOriginator {
         let Some(entry) = self.by_key.get_mut(&composite) else {
             return Vec::new();
         };
-        entry.yielded = false;
+        entry.yielded_to = None;
         let Some(key) = entry.originated_key.take() else {
             return Vec::new();
         };
@@ -451,7 +468,7 @@ impl LocalMacIpOriginator {
             if k.mac != mac {
                 continue;
             }
-            state.yielded = false;
+            state.yielded_to = None;
             if let Some(key) = state.originated_key.take() {
                 out.push(OriginationAction::Withdraw { mac, key });
             }
@@ -477,14 +494,14 @@ impl LocalMacIpOriginator {
             }
             let key = match state.originated_key {
                 Some(key) => key,
-                None if state.yielded => {
+                None if state.yielded_to.is_some() => {
                     let key = EvpnRouteKey::MacIp {
                         rd,
                         ethernet_tag,
                         mac,
                         ip: Some(k.ip),
                     };
-                    state.yielded = false;
+                    state.yielded_to = None;
                     state.originated_key = Some(key);
                     key
                 }
@@ -546,10 +563,18 @@ impl LocalMacIpOriginator {
         });
 
         let Some(key) = entry.originated_key else {
-            if !entry.yielded || contender_wins {
+            if entry.yielded_to.is_none() {
                 return Vec::new();
             }
-            entry.yielded = false;
+            if let Some(v) = view.filter(|_| contender_wins) {
+                entry.yielded_to = Some(YieldedTo::new(
+                    v.mobility_sequence,
+                    v.next_hop,
+                    local_vtep_ip,
+                ));
+                return Vec::new();
+            }
+            entry.yielded_to = None;
             entry.originated_key = Some(fresh_key);
             return vec![OriginationAction::Inject {
                 mac,
@@ -559,11 +584,15 @@ impl LocalMacIpOriginator {
             }];
         };
 
-        if !contender_wins {
+        let Some(v) = view.filter(|_| contender_wins) else {
             return Vec::new();
-        }
+        };
         entry.originated_key = None;
-        entry.yielded = true;
+        entry.yielded_to = Some(YieldedTo::new(
+            v.mobility_sequence,
+            v.next_hop,
+            local_vtep_ip,
+        ));
         vec![OriginationAction::Withdraw { mac, key }]
     }
 }
@@ -1019,6 +1048,19 @@ mod tests {
             Vec::new()
         );
         assert_eq!(o.advertised_count(), 0);
+    }
+
+    #[test]
+    fn adopted_sequence_that_beats_the_contender_re_advertises() {
+        let mut o = fresh();
+        let ip = ipa("192.0.2.10");
+        let _ = o.on_local_ip_learned(mac(0xAA), ip, false, None);
+        let _ = o.on_remote_ip_changed(mac(0xAA), ip, Some(&remote(Some(5))), local_ip());
+        assert_eq!(o.adopt_peer_sequence(mac(0xAA), 3), Vec::new());
+        let actions = o.adopt_peer_sequence(mac(0xAA), 10);
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(10), false);
+        assert_eq!(o.advertised_count(), 1);
     }
 
     #[test]
