@@ -626,10 +626,26 @@ impl RtrClient {
     }
 
     async fn dial(&self) -> std::io::Result<TcpStream> {
-        match &self.dialer {
-            Some(dial) => dial(self.config.server_addr).await,
-            None => TcpStream::connect(self.config.server_addr).await,
-        }
+        let connect = async {
+            match &self.dialer {
+                Some(dial) => dial(self.config.server_addr).await,
+                None => TcpStream::connect(self.config.server_addr).await,
+            }
+        };
+        // §6: held data MUST NOT be kept past its expire interval. A
+        // connection attempt that hangs past that instant ends there, and
+        // the failed-attempt path flushes the expired data.
+        let Some(expires_at) = self.data_expires_at else {
+            return connect.await;
+        };
+        tokio::time::timeout_at(expires_at, connect)
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "held RTR data expired while connecting",
+                ))
+            })
     }
 
     /// Main event loop — connects, keeps the RTR session open, and reconnects
@@ -1292,6 +1308,11 @@ impl RtrClient {
         mut query: QueryKind,
     ) -> Result<(), RtrError> {
         let deadline = TokioInstant::now() + self.transaction_deadline;
+        // §6: the held data expires on time even while a query is in
+        // flight; a transaction still running then ends and the data is
+        // flushed.
+        let expires_at = self.data_expires_at;
+        let read_deadline = expires_at.map_or(deadline, |at| at.min(deadline));
         let mut bytes: usize = 0;
         let mut restarts: u8 = 0;
 
@@ -1716,9 +1737,19 @@ impl RtrClient {
                     }
                 }
 
-                let n = tokio::time::timeout_at(deadline, stream.read(read_buf))
+                let expired = || expires_at.is_some_and(|at| TokioInstant::now() >= at);
+                if expired() {
+                    return Err(RtrError::Expired);
+                }
+                let n = tokio::time::timeout_at(read_deadline, stream.read(read_buf))
                     .await
-                    .map_err(|_| RtrError::TransactionTimeout)?
+                    .map_err(|_| {
+                        if expired() {
+                            RtrError::Expired
+                        } else {
+                            RtrError::TransactionTimeout
+                        }
+                    })?
                     .map_err(RtrError::Io)?;
                 if n == 0 {
                     return Err(RtrError::ConnectionClosed);
@@ -3761,6 +3792,83 @@ mod tests {
         );
         assert!(vrp_rx.try_recv().is_err(), "held data was flushed");
         drop(v1);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §6: held data expires on time while a refresh query is in flight. A
+    /// cache that accepts the query and never answers must not keep the
+    /// data published until the transaction deadline.
+    #[tokio::test(start_paused = true)]
+    async fn held_data_expires_during_a_stalled_query() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // Refresh 60 s, expire 120 s: the refresh query is still
+        // unanswered when the data expires.
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 120).await;
+        let accepted = TokioInstant::now();
+        assert!(matches!(
+            read_pdu(&mut stream).await,
+            RtrPdu::SerialQuery { .. }
+        ));
+
+        let update = timeout(Duration::from_secs(1000), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+        assert!(
+            accepted.elapsed() <= Duration::from_secs(120),
+            "flushed {:?} after End of Data, past the 120 s expire",
+            accepted.elapsed()
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// §6: held data expires on time while a reconnect hangs in connect.
+    #[tokio::test(start_paused = true)]
+    async fn held_data_expires_during_a_hung_connect() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&dials);
+        // The first connection succeeds; every later one never completes.
+        let client = zero_retry_client(addr, vrp_tx).with_dialer(move |_| {
+            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                if first {
+                    TcpStream::connect(addr).await
+                } else {
+                    std::future::pending().await
+                }
+            }
+        });
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 120).await;
+        let accepted = TokioInstant::now();
+        drop(stream);
+
+        let update = timeout(Duration::from_secs(1000), vrp_rx.recv())
+            .await
+            .expect("held data outlived its expire interval during a hung connect")
+            .unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+        assert!(accepted.elapsed() <= Duration::from_secs(120));
+        assert!(dials.load(Ordering::SeqCst) >= 2);
 
         client_handle.abort();
         let _ = client_handle.await;

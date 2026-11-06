@@ -1768,7 +1768,8 @@ carries inactive (absent), unlimited (zero), or finite.
   ID, RFC 1982 serial regression) force a Reset Query resync — never a
   splice. Validated data is retained through reconnect/Cache Reset until
   replaced or expired. Transactions are bounded by deadline and
-  record/byte budgets.
+  record/byte budgets. The expire interval (§6) is enforced at all times,
+  including during an in-flight query and a hung connect.
 - ASPA over RTR v2 uses 8210bis replacement semantics: announce replaces
   the customer's provider set; withdraw removes the customer ASN.
 - Strict acceptance limits (8210bis-27): per-PDU length is capped at
