@@ -579,6 +579,10 @@ impl VrpManager {
                     aspa_withdrawn,
                 })
                 .await;
+                // The delta's withdrawals are applied; only its
+                // announcements stay charged with the table.
+                let mut charge = charge;
+                charge.release_withdrawn();
                 if let Some(table) = self.server_tables.get_mut(&server) {
                     match &mut table.charge {
                         Some(held) => held.absorb(charge),
@@ -1558,7 +1562,7 @@ mod tests {
         let (attachment, _updates, _queries) = CacheInventoryAttachment::new([server1()]);
         let mut mgr = VrpManager::new(legacy_rx, rib_tx).with_cache_inventory(attachment);
         let full = |records| EnhancedVrpUpdate::Full {
-            charge: Reservation::charged(&budget, records),
+            charge: Reservation::charged(&budget, records, 0),
             server: server1(),
             entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
             aspa_records: vec![],
@@ -1579,20 +1583,26 @@ mod tests {
         mgr.handle_enhanced_update(replacement).await;
         assert_eq!(budget.used(), 2, "the replaced table released its charge");
 
-        mgr.handle_enhanced_update(EnhancedVrpUpdate::Incremental {
-            charge: Reservation::charged(&budget, 1),
+        // A delta with one announcement and two withdrawals: the withdrawals
+        // are charged while it waits, and released once it is applied.
+        let delta = EnhancedVrpUpdate::Incremental {
+            charge: Reservation::charged(&budget, 1, 2),
             server: server1(),
             announced: vec![entry(Ipv4Addr::new(192, 0, 2, 128), 25, 25, 64_496)],
-            withdrawn: vec![],
+            withdrawn: vec![
+                entry(Ipv4Addr::new(198, 51, 100, 0), 24, 24, 64_496),
+                entry(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 64_496),
+            ],
             aspa_announced: vec![],
             aspa_withdrawn: vec![],
             version: 2,
             session_id: 7,
             serial: 12,
             accepted_at: Instant::now(),
-        })
-        .await;
-        assert_eq!(budget.used(), 3);
+        };
+        assert_eq!(budget.used(), 5);
+        mgr.handle_enhanced_update(delta).await;
+        assert_eq!(budget.used(), 3, "applied withdrawals stayed charged");
 
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
             server: server1(),

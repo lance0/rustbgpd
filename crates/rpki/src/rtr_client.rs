@@ -142,25 +142,47 @@ impl RecordBudget {
 #[derive(Debug)]
 pub(crate) struct Reservation {
     budget: Arc<RecordBudget>,
+    /// All charged records, withdrawals included.
     records: usize,
+    /// The withdrawals among `records`. They are charged only while their
+    /// update is staged or queued, and released once it is applied.
+    withdrawn: usize,
 }
 
 impl Reservation {
     pub(crate) fn new(budget: Arc<RecordBudget>) -> Self {
-        Self { budget, records: 0 }
+        Self {
+            budget,
+            records: 0,
+            withdrawn: 0,
+        }
     }
 
     fn clear(&mut self) {
+        self.withdrawn = 0;
         self.budget.release(std::mem::take(&mut self.records));
+    }
+
+    /// Charged announcements, the part that becomes held data.
+    fn announced(&self) -> usize {
+        self.records - self.withdrawn
+    }
+
+    /// Release the withdrawals' share once nothing holds them any more.
+    pub(crate) fn release_withdrawn(&mut self) {
+        let withdrawn = std::mem::take(&mut self.withdrawn);
+        self.records -= withdrawn;
+        self.budget.release(withdrawn);
     }
 
     /// A charge of `records` already reserved on `budget`.
     #[cfg(test)]
-    pub(crate) fn charged(budget: &Arc<RecordBudget>, records: usize) -> Self {
-        assert!(budget.reserve(records));
+    pub(crate) fn charged(budget: &Arc<RecordBudget>, records: usize, withdrawn: usize) -> Self {
+        assert!(budget.reserve(records + withdrawn));
         Self {
             budget: Arc::clone(budget),
-            records,
+            records: records + withdrawn,
+            withdrawn,
         }
     }
 
@@ -168,6 +190,7 @@ impl Reservation {
     pub(crate) fn absorb(&mut self, mut other: Self) {
         debug_assert!(Arc::ptr_eq(&self.budget, &other.budget));
         self.records += std::mem::take(&mut other.records);
+        self.withdrawn += std::mem::take(&mut other.withdrawn);
     }
 }
 
@@ -509,7 +532,7 @@ impl RtrClient {
         // A full table replaces the held data; a delta adds to it.
         let base = if is_reset { 0 } else { self.held_records };
         if base
-            .saturating_add(reservation.records)
+            .saturating_add(reservation.announced())
             .saturating_add(records)
             > self.max_records
         {
@@ -523,6 +546,18 @@ impl RtrClient {
             return Err(RtrError::RecordLimit("total RPKI record limit reached"));
         }
         reservation.records += records;
+        Ok(())
+    }
+
+    /// Charge one staged withdrawal against the shared budget only: it adds
+    /// nothing to the cache's held data, but its update takes memory until
+    /// it is applied.
+    fn charge_withdrawal(&self, reservation: &mut Reservation) -> Result<(), RtrError> {
+        if !self.record_budget.reserve(1) {
+            return Err(RtrError::RecordLimit("total RPKI record limit reached"));
+        }
+        reservation.records += 1;
+        reservation.withdrawn += 1;
         Ok(())
     }
 
@@ -1257,6 +1292,15 @@ impl RtrClient {
                 while let Some(pdu) = self.next_pdu(parse_buf)? {
                     match pdu {
                         RtrPdu::CacheResponse { session_id } => {
+                            // One Cache Response opens one response. A second
+                            // one is a protocol violation, not a restart:
+                            // the transaction ends and nothing it staged is
+                            // kept.
+                            if pending_session.is_some() {
+                                return Err(RtrError::ProtocolViolation(
+                                    "duplicate Cache Response in one response",
+                                ));
+                            }
                             if expected_session.is_some_and(|expected| expected != session_id) {
                                 // The cache is answering from a different
                                 // session than the one our data belongs
@@ -1283,12 +1327,6 @@ impl RtrClient {
                                 });
                             }
                             pending_session = Some(session_id);
-                            records = 0;
-                            reservation.clear();
-                            announced.clear();
-                            withdrawn.clear();
-                            aspa_announced.clear();
-                            aspa_withdrawn.clear();
                         }
                         RtrPdu::Ipv4Prefix {
                             flags,
@@ -1307,6 +1345,7 @@ impl RtrClient {
                                 self.charge(&mut reservation, is_reset, 1)?;
                                 announced.push(entry);
                             } else {
+                                self.charge_withdrawal(&mut reservation)?;
                                 withdrawn.push(entry);
                             }
                             records += 1;
@@ -1331,6 +1370,7 @@ impl RtrClient {
                                 self.charge(&mut reservation, is_reset, 1)?;
                                 announced.push(entry);
                             } else {
+                                self.charge_withdrawal(&mut reservation)?;
                                 withdrawn.push(entry);
                             }
                             records += 1;
@@ -1396,6 +1436,7 @@ impl RtrClient {
                                 )?;
                                 aspa_announced.push(record);
                             } else {
+                                self.charge_withdrawal(&mut reservation)?;
                                 aspa_withdrawn.push(record);
                             }
                             records += 1;
@@ -1464,14 +1505,18 @@ impl RtrClient {
                             // adds to it. The charge leaves the transaction
                             // with the update below.
                             self.held_records = if is_reset {
-                                reservation.records
+                                reservation.announced()
                             } else {
-                                self.held_records + reservation.records
+                                self.held_records + reservation.announced()
                             };
-                            let charge = std::mem::replace(
+                            let mut charge = std::mem::replace(
                                 &mut reservation,
                                 Reservation::new(Arc::clone(&self.record_budget)),
                             );
+                            // A full table carries no withdrawals onward.
+                            if is_reset {
+                                charge.release_withdrawn();
+                            }
                             self.apply_eod_timers(refresh, retry, expire);
                             let now = TokioInstant::now();
                             self.last_end_of_data_at = Some(now);
@@ -1564,7 +1609,9 @@ impl RtrClient {
                                 let _ = handle.0.send(update).await;
                             } else {
                                 // The legacy channel cannot carry the
-                                // charge, so the client keeps it.
+                                // charge, so the client keeps it, and its
+                                // withdrawals are released here.
+                                charge.release_withdrawn();
                                 match &mut self.held_charge {
                                     Some(held) if !is_reset => held.absorb(charge),
                                     held => *held = Some(charge),
@@ -3795,6 +3842,118 @@ mod tests {
             0,
             "dropping the queued data releases its charge"
         );
+    }
+
+    /// A second Cache Response inside one response ends the transaction:
+    /// the client drops the connection and publishes nothing it staged.
+    #[tokio::test]
+    async fn duplicate_cache_response_ends_the_transaction() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = zero_retry_client(addr, vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, 1),
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, 2),
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 60,
+                    retry: 0,
+                    expire: 3600,
+                },
+            ],
+        )
+        .await;
+        let (mut again, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("a duplicate Cache Response did not end the transaction")
+            .unwrap();
+        assert_eq!(read_pdu(&mut again).await, RtrPdu::ResetQuery);
+        let published = vrp_rx.try_recv();
+        assert!(published.is_err(), "published {published:?}");
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    /// Withdrawals in a queued delta take memory until the manager applies
+    /// them, so they are charged against the total budget until then. With
+    /// the manager blocked, queued withdrawals cannot grow past the cap.
+    #[tokio::test]
+    async fn queued_withdrawals_stay_charged_until_the_manager_applies_them() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (attachment, handle, _queries) = CacheInventoryAttachment::new([addr]);
+        let (vrp_tx, _vrp_rx) = mpsc::channel(8);
+        let budget = RecordBudget::new(3);
+        let client = zero_retry_client(addr, vrp_tx)
+            .with_record_limits(10, Arc::clone(&budget))
+            .with_cache_inventory(handle);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        let end = |serial| RtrPdu::EndOfData {
+            session_id: 7,
+            serial,
+            refresh: 60,
+            retry: 0,
+            expire: 3600,
+        };
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(1, 1),
+                end(1),
+            ],
+        )
+        .await;
+        notify_and_expect_serial_query(&mut stream, 2, 1).await;
+        // Two withdrawals of records the cache never sent.
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(0, 8),
+                host_prefix(0, 9),
+                end(2),
+            ],
+        )
+        .await;
+        notify_and_expect_serial_query(&mut stream, 3, 2).await;
+        assert_eq!(budget.used(), 3, "queued withdrawals are not charged");
+
+        // One more queued withdrawal would exceed the total: refused.
+        write_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                host_prefix(0, 7),
+                end(3),
+            ],
+        )
+        .await;
+        let (mut again, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("a queued withdrawal past the total was not refused")
+            .unwrap();
+        assert_eq!(read_pdu(&mut again).await, RtrPdu::ResetQuery);
+        assert_eq!(budget.used(), 3);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+        drop(attachment);
+        assert_eq!(budget.used(), 0);
     }
 
     #[tokio::test(start_paused = true)]

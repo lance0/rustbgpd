@@ -16,7 +16,12 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   manager releases it when that cache's data is replaced or removed. Without
   the inventory attachment, the client keeps the charge for its last accepted
   data, so a consumer of the plain `VrpUpdate` channel that queues updates is
-  not covered.
+  not covered. Withdrawals are charged against the total budget while their
+  delta is staged or queued, and released once the manager applies it; they do
+  not count against the per-cache cap.
+- A second Cache Response inside one RTR response now ends the transaction as
+  a protocol violation. Previously it restarted collection, and nothing staged
+  before it was published.
 - **Behavior change:** without `with_record_limits`, a client uses
   `DEFAULT_MAX_CACHE_RECORDS` (4000000) and its own `DEFAULT_MAX_TOTAL_RECORDS`
   (10000000) budget. Previously the only limit was the per-transaction record
