@@ -1889,8 +1889,9 @@ impl RibManager {
             // A joining peer may not have received an unchanged frozen best.
             self.distribute_changes(&prefixes, &prefixes);
             // A frozen row kept its exact rejections live; retire those whose
-            // row the release removed, after distribution suppressed the
-            // rejected members' withdrawals.
+            // row the release removed. Retiring after the release's
+            // distribution is the conservative order: that pass still sees
+            // every rejection that was live while the row was held.
             if !self.peer_unexportable.is_empty() {
                 let gone: Vec<_> = prefixes
                     .iter()
