@@ -397,14 +397,13 @@ impl Capability {
                     return Ok(Capability::Unknown { code, data });
                 }
                 let entry_count = usize::from(length) / 6;
-                let raw_data = buf.copy_to_bytes(usize::from(length));
-                let mut cursor = raw_data.clone();
                 let mut families = Vec::with_capacity(entry_count);
-                let mut all_valid = true;
+                // RFC 5492 §4: a tuple naming a family we do not model is
+                // ignored on its own; the modeled tuples still negotiate.
                 for _ in 0..entry_count {
-                    let nlri_afi_raw = cursor.get_u16();
-                    let nlri_safi_field = cursor.get_u16();
-                    let next_hop_afi_raw = cursor.get_u16();
+                    let nlri_afi_raw = buf.get_u16();
+                    let nlri_safi_field = buf.get_u16();
+                    let next_hop_afi_raw = buf.get_u16();
                     let nlri_safi = u8::try_from(nlri_safi_field).ok().and_then(Safi::from_u8);
                     if let (Some(nlri_afi), Some(nlri_safi), Some(next_hop_afi)) = (
                         Afi::from_u16(nlri_afi_raw),
@@ -416,18 +415,9 @@ impl Capability {
                             nlri_safi,
                             next_hop_afi,
                         });
-                    } else {
-                        all_valid = false;
                     }
                 }
-                if all_valid {
-                    Ok(Capability::ExtendedNextHop(families))
-                } else {
-                    Ok(Capability::Unknown {
-                        code,
-                        data: raw_data,
-                    })
-                }
+                Ok(Capability::ExtendedNextHop(families))
             }
             capability_code::LINK_LOCAL_NEXT_HOP => {
                 if length != 0 {
@@ -484,17 +474,15 @@ impl Capability {
                     return Ok(Capability::Unknown { code, data });
                 }
                 let entry_count = usize::from(length) / 7;
-                let raw_data = buf.copy_to_bytes(usize::from(length));
-                let mut cursor = raw_data.clone();
                 let mut families = Vec::with_capacity(entry_count);
-                let mut all_valid = true;
+                // RFC 5492 §4: skip only the tuples for unmodeled families.
                 for _ in 0..entry_count {
-                    let afi_raw = cursor.get_u16();
-                    let safi_raw = cursor.get_u8();
-                    let flags = cursor.get_u8();
+                    let afi_raw = buf.get_u16();
+                    let safi_raw = buf.get_u8();
+                    let flags = buf.get_u8();
                     // stale_time is 24-bit (3 bytes, big-endian)
-                    let st_hi = cursor.get_u8();
-                    let st_lo = cursor.get_u16();
+                    let st_hi = buf.get_u8();
+                    let st_lo = buf.get_u16();
                     let stale_time = (u32::from(st_hi) << 16) | u32::from(st_lo);
                     if let (Some(afi), Some(safi)) =
                         (Afi::from_u16(afi_raw), Safi::from_u8(safi_raw))
@@ -505,18 +493,9 @@ impl Capability {
                             forwarding_preserved: (flags & 0x80) != 0,
                             stale_time,
                         });
-                    } else {
-                        all_valid = false;
                     }
                 }
-                if all_valid {
-                    Ok(Capability::LongLivedGracefulRestart(families))
-                } else {
-                    Ok(Capability::Unknown {
-                        code,
-                        data: raw_data,
-                    })
-                }
+                Ok(Capability::LongLivedGracefulRestart(families))
             }
             capability_code::ADD_PATH => {
                 // RFC 7911 §4: value is N entries of (AFI:2 + SAFI:1 + mode:1) = 4 bytes each
@@ -525,16 +504,15 @@ impl Capability {
                     return Ok(Capability::Unknown { code, data });
                 }
                 let entry_count = usize::from(length) / 4;
-                // Snapshot the raw bytes before parsing so we can fall back
-                // to Unknown if any entry would be discarded (lossless roundtrip).
-                let raw_data = buf.copy_to_bytes(usize::from(length));
-                let mut cursor = raw_data.clone();
                 let mut families = Vec::with_capacity(entry_count);
-                let mut all_valid = true;
+                // RFC 5492 §4 / RFC 7911: a tuple for a family we do not model,
+                // or with an undefined Send/Receive value, is ignored on its
+                // own. Demoting the whole capability would lose every family
+                // while the peer still sends path IDs for the modeled ones.
                 for _ in 0..entry_count {
-                    let afi_raw = cursor.get_u16();
-                    let safi_raw = cursor.get_u8();
-                    let mode_raw = cursor.get_u8();
+                    let afi_raw = buf.get_u16();
+                    let safi_raw = buf.get_u8();
+                    let mode_raw = buf.get_u8();
                     if let (Some(afi), Some(safi), Some(mode)) = (
                         Afi::from_u16(afi_raw),
                         Safi::from_u8(safi_raw),
@@ -545,20 +523,9 @@ impl Capability {
                             safi,
                             send_receive: mode,
                         });
-                    } else {
-                        all_valid = false;
                     }
                 }
-                // Preserve as Unknown if any entry was unrecognized, to avoid
-                // silently rewriting malformed capability data on re-encode.
-                if all_valid {
-                    Ok(Capability::AddPath(families))
-                } else {
-                    Ok(Capability::Unknown {
-                        code,
-                        data: raw_data,
-                    })
-                }
+                Ok(Capability::AddPath(families))
             }
             capability_code::PATHS_LIMIT => {
                 // draft-04: repeated AFI(2) + SAFI(1) + receive-limit(2) tuples.
@@ -566,14 +533,12 @@ impl Capability {
                     let data = buf.copy_to_bytes(usize::from(length));
                     return Ok(Capability::Unknown { code, data });
                 }
-                let raw_data = buf.copy_to_bytes(usize::from(length));
-                let mut cursor = raw_data.clone();
                 let mut families = Vec::with_capacity(usize::from(length) / 5);
-                let mut all_valid = true;
-                while cursor.has_remaining() {
-                    let afi_raw = cursor.get_u16();
-                    let safi_raw = cursor.get_u8();
-                    let receive_limit = cursor.get_u16();
+                // RFC 5492 §4: skip only the tuples for unmodeled families.
+                for _ in 0..usize::from(length) / 5 {
+                    let afi_raw = buf.get_u16();
+                    let safi_raw = buf.get_u8();
+                    let receive_limit = buf.get_u16();
                     if let (Some(afi), Some(safi)) =
                         (Afi::from_u16(afi_raw), Safi::from_u8(safi_raw))
                     {
@@ -589,23 +554,14 @@ impl Capability {
                                 receive_limit,
                             });
                         }
-                    } else {
-                        all_valid = false;
                     }
                 }
-                if all_valid {
-                    Ok(Capability::PathsLimit(families))
-                } else {
-                    Ok(Capability::Unknown {
-                        code,
-                        data: raw_data,
-                    })
-                }
+                Ok(Capability::PathsLimit(families))
             }
             capability_code::OUTBOUND_ROUTE_FILTERING => {
                 // RFC 5291 §5: per-family blocks. Preserve as Unknown on a
-                // structural error or unrecognized AFI/SAFI (lossless
-                // round-trip, mirroring Add-Path).
+                // structural error; a block for an unmodeled AFI/SAFI is
+                // skipped on its own (RFC 5492 §4).
                 let raw = buf.copy_to_bytes(usize::from(length));
                 match crate::orf::decode_capability_value(&raw) {
                     Some(entries) => Ok(Capability::OutboundRouteFilter(entries)),
@@ -1687,44 +1643,6 @@ mod tests {
     }
 
     #[test]
-    fn add_path_unknown_afi_preserved_as_unknown() {
-        // code=69, len=4, AFI=99(unknown), SAFI=1, mode=3
-        let data: &[u8] = &[69, 4, 0, 99, 1, 3];
-        let mut buf = Bytes::copy_from_slice(data);
-        let cap = Capability::decode(&mut buf).unwrap();
-        // Unrecognized entry → preserve as Unknown for lossless roundtrip
-        assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
-    }
-
-    #[test]
-    fn add_path_invalid_mode_preserved_as_unknown() {
-        // code=69, len=4, AFI=1, SAFI=1, mode=0 (invalid)
-        let data: &[u8] = &[69, 4, 0, 1, 1, 0];
-        let mut buf = Bytes::copy_from_slice(data);
-        let cap = Capability::decode(&mut buf).unwrap();
-        // Invalid mode → preserve as Unknown for lossless roundtrip
-        assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
-    }
-
-    #[test]
-    fn add_path_mixed_valid_and_invalid_preserved_as_unknown() {
-        // Two entries: valid IPv4/Unicast/Both + invalid AFI=99
-        let mut data = bytes::BytesMut::new();
-        data.put_u8(69); // code
-        data.put_u8(8); // len = 2 * 4
-        data.put_u16(1); // AFI IPv4
-        data.put_u8(1); // SAFI Unicast
-        data.put_u8(3); // Both (valid)
-        data.put_u16(99); // AFI unknown
-        data.put_u8(1); // SAFI Unicast
-        data.put_u8(3); // Both
-        let mut buf = data.freeze();
-        let cap = Capability::decode(&mut buf).unwrap();
-        // One invalid entry → entire capability preserved as Unknown
-        assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
-    }
-
-    #[test]
     fn llgr_capability_roundtrip() {
         let families = vec![
             LlgrFamily {
@@ -1934,15 +1852,6 @@ mod tests {
     }
 
     #[test]
-    fn outbound_route_filter_unknown_afi_preserved_as_unknown() {
-        // code=3, len=7, AFI=99(unknown), SAFI=1, count=1, type=64, sr=1
-        let data: &[u8] = &[3, 7, 0, 99, 0, 1, 1, 64, 1];
-        let mut buf = Bytes::copy_from_slice(data);
-        let cap = Capability::decode(&mut buf).unwrap();
-        assert!(matches!(cap, Capability::Unknown { code: 3, .. }));
-    }
-
-    #[test]
     fn paths_limit_roundtrip_and_first_duplicate_wins() {
         let cap = Capability::PathsLimit(vec![
             PathsLimitFamily {
@@ -1976,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn paths_limit_malformed_tuple_is_preserved() {
+    fn paths_limit_bad_length_is_preserved_and_unknown_tuple_skipped() {
         let mut empty = Bytes::from_static(&[76, 0]);
         assert_eq!(
             Capability::decode(&mut empty).unwrap(),
@@ -1989,10 +1898,100 @@ mod tests {
             Capability::Unknown { code: 76, .. }
         ));
 
-        let mut unknown_afi = Bytes::from_static(&[76, 5, 0, 99, 1, 0, 4]);
+        // IPv4 unicast limit 4, then AFI 99: the known tuple survives.
+        let mut mixed = Bytes::from_static(&[76, 10, 0, 1, 1, 0, 4, 0, 99, 1, 0, 4]);
+        assert_eq!(
+            Capability::decode(&mut mixed).unwrap(),
+            Capability::PathsLimit(vec![PathsLimitFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                receive_limit: 4,
+            }])
+        );
+    }
+
+    /// RFC 5492 §4 / RFC 7911: an Add-Path tuple for an unmodeled family or
+    /// with an undefined Send/Receive value is ignored on its own; the
+    /// modeled tuples keep negotiating.
+    #[test]
+    fn add_path_skips_only_unmodeled_tuples() {
+        // IPv4/unicast Both, AFI 99, SAFI 200, mode 0, IPv6/unicast Send.
+        let mut buf = Bytes::from_static(&[
+            69, 20, 0, 1, 1, 3, 0, 99, 1, 3, 0, 1, 200, 3, 0, 2, 1, 0, 0, 2, 1, 2,
+        ]);
+        assert_eq!(
+            Capability::decode(&mut buf).unwrap(),
+            Capability::AddPath(vec![
+                AddPathFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    send_receive: AddPathMode::Both,
+                },
+                AddPathFamily {
+                    afi: Afi::Ipv6,
+                    safi: Safi::Unicast,
+                    send_receive: AddPathMode::Send,
+                },
+            ])
+        );
+        assert!(buf.is_empty(), "the whole value is consumed");
+        // Only unmodeled tuples: an empty list, not Unknown.
+        let mut only_unknown = Bytes::from_static(&[69, 4, 0, 99, 1, 3]);
+        assert_eq!(
+            Capability::decode(&mut only_unknown).unwrap(),
+            Capability::AddPath(Vec::new())
+        );
+    }
+
+    #[test]
+    fn extended_next_hop_skips_only_unmodeled_tuples() {
+        // IPv4/unicast via IPv6, then AFI 1 / SAFI 200 via IPv6.
+        let mut buf = Bytes::from_static(&[5, 12, 0, 1, 0, 1, 0, 2, 0, 1, 0, 200, 0, 2]);
+        assert_eq!(
+            Capability::decode(&mut buf).unwrap(),
+            Capability::ExtendedNextHop(vec![ExtendedNextHopFamily {
+                nlri_afi: Afi::Ipv4,
+                nlri_safi: Safi::Unicast,
+                next_hop_afi: Afi::Ipv6,
+            }])
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn llgr_skips_only_unmodeled_tuples() {
+        // IPv4/unicast F-bit stale 60, then AFI 99 stale 60.
+        let mut buf = Bytes::from_static(&[71, 14, 0, 1, 1, 0x80, 0, 0, 60, 0, 99, 1, 0, 0, 0, 60]);
+        assert_eq!(
+            Capability::decode(&mut buf).unwrap(),
+            Capability::LongLivedGracefulRestart(vec![LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: true,
+                stale_time: 60,
+            }])
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn outbound_route_filter_skips_only_unmodeled_blocks() {
+        // AFI 99 block with one type, then IPv4/unicast Address-Prefix both.
+        let mut buf = Bytes::from_static(&[3, 14, 0, 99, 0, 1, 1, 64, 1, 0, 1, 0, 1, 1, 64, 3]);
+        let Capability::OutboundRouteFilter(entries) = Capability::decode(&mut buf).unwrap() else {
+            panic!("ORF capability with a modeled block must decode");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].afi, entries[0].safi),
+            (Afi::Ipv4, Safi::Unicast)
+        );
+        assert!(buf.is_empty());
+        // A structural error still keeps the raw value.
+        let mut truncated = Bytes::from_static(&[3, 4, 0, 1, 0, 1]);
         assert!(matches!(
-            Capability::decode(&mut unknown_afi).unwrap(),
-            Capability::Unknown { code: 76, .. }
+            Capability::decode(&mut truncated).unwrap(),
+            Capability::Unknown { code: 3, .. }
         ));
     }
 }

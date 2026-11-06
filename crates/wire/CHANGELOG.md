@@ -33,6 +33,17 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   RFC 8956 defines it. In an IPv4 rule, global (SAFI 133) or VPN (SAFI 134),
   it is an unknown component type and the NLRI is malformed (RFC 8955 §4.2);
   earlier releases accepted it.
+- The Add-Path, Extended Next Hop, Long-Lived Graceful Restart, Paths-Limit
+  and Outbound Route Filtering capability decoders now skip only the tuples
+  (or ORF blocks) for an unmodeled AFI/SAFI, or an undefined Add-Path
+  Send/Receive value, and keep the rest (RFC 5492 §4). Earlier releases
+  turned the whole capability into `Capability::Unknown`, so one such tuple
+  lost every family; for Add-Path the peer then still sent path IDs. A value
+  holding only unmodeled tuples decodes to an empty list. These capabilities
+  no longer re-encode the skipped tuples. A length that is not a whole number
+  of tuples, or an ORF structural error, still yields `Capability::Unknown`.
+  `orf::decode_capability_value` returns the modeled blocks instead of `None`
+  for an unrecognized AFI/SAFI.
 - Pair this wire line with FSM 0.15 and RPKI 0.10 when sharing public wire
   types. These crate versions are not published by this change.
 
