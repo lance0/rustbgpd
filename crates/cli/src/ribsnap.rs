@@ -114,8 +114,9 @@ pub fn from_mrt(opts: &FromMrtOpts<'_>) -> i32 {
 /// [`from_mrt`] with the snapshot written to `writer`. The dump is read once,
 /// one record at a time, and rendered into an unlinked private temporary file
 /// that is copied to `writer` only after the whole dump converted. The input
-/// is never re-read, so a file rewritten or truncated during the conversion
-/// cannot produce partial output or slip past the output limit.
+/// is never re-read, so output past the limit or partial output never reaches
+/// `writer`. A source changed during the conversion is not detected when it
+/// still ends on a complete record; callers convert a finished capture.
 #[must_use]
 pub fn from_mrt_to(opts: &FromMrtOpts<'_>, writer: &mut dyn std::io::Write) -> i32 {
     from_mrt_with_limit(opts, writer, MAX_OUTPUT_BYTES)
