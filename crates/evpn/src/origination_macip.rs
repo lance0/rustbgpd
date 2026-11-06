@@ -290,10 +290,12 @@ impl LocalMacIpOriginator {
     }
 
     /// Clear advertising state and return Withdraw actions for every
-    /// currently-advertised `(MAC, IP)`.
+    /// currently-advertised `(MAC, IP)`. Every entry also loses its yielded
+    /// mark; see [`crate::origination::LocalMacOriginator::drain_to_withdraws`].
     pub fn drain_to_withdraws(&mut self) -> Vec<OriginationAction> {
         let mut out = Vec::with_capacity(self.advertised_count());
         for (k, state) in &mut self.by_key {
+            state.yielded = false;
             if let Some(key) = state.originated_key.take() {
                 out.push(OriginationAction::Withdraw { mac: k.mac, key });
             }
@@ -1003,6 +1005,20 @@ mod tests {
         let actions = o.on_remote_ip_changed(mac(0xAA), ip, None, local_ip());
         assert_eq!(actions.len(), 1);
         assert_inject(&actions[0], Some(0), false);
+    }
+
+    #[test]
+    fn drain_clears_yield_so_contender_departure_does_not_re_advertise() {
+        let mut o = fresh();
+        let ip = ipa("192.0.2.10");
+        let _ = o.on_local_ip_learned(mac(0xAA), ip, false, None);
+        let _ = o.on_remote_ip_changed(mac(0xAA), ip, Some(&remote(Some(5))), local_ip());
+        assert_eq!(o.drain_to_withdraws(), Vec::new());
+        assert_eq!(
+            o.on_remote_ip_changed(mac(0xAA), ip, None, local_ip()),
+            Vec::new()
+        );
+        assert_eq!(o.advertised_count(), 0);
     }
 
     #[test]

@@ -372,10 +372,15 @@ impl LocalMacOriginator {
 
     /// Clear all state and return the Withdraw actions that drain the
     /// currently-advertised set. Used by the daemon's coordinated
-    /// shutdown drain.
+    /// shutdown drain and by ES drain, VNI removal and redefinition.
+    ///
+    /// Every entry also loses its yielded mark, including entries already
+    /// withdrawn: a drained MAC must come back only through the caller's
+    /// replay, not because a contender it yielded to went away.
     pub fn drain_to_withdraws(&mut self) -> Vec<OriginationAction> {
         let mut out = Vec::with_capacity(self.advertised_count());
         for (mac, state) in &mut self.by_mac {
+            state.yielded = false;
             if let Some(key) = state.originated_key.take() {
                 out.push(OriginationAction::Withdraw { mac: *mac, key });
             }
@@ -799,6 +804,18 @@ mod tests {
         // After a local age the yielded state is gone: no comeback.
         let _ = o.on_remote_changed(mac(0xAA), Some(&remote(Some(4))), local_ip());
         assert_eq!(o.on_local_aged(mac(0xAA)), Vec::new());
+        assert_eq!(o.on_remote_changed(mac(0xAA), None, local_ip()), Vec::new());
+        assert_eq!(o.advertised_count(), 0);
+    }
+
+    // A drain withdraws for an administrative reason; a MAC that had
+    // yielded must not come back on its own while drained.
+    #[test]
+    fn drain_clears_yield_so_contender_departure_does_not_re_advertise() {
+        let mut o = fresh();
+        let _ = o.on_local_learned(mac(0xAA), 10, false, None);
+        let _ = o.on_remote_changed(mac(0xAA), Some(&remote(Some(5))), local_ip());
+        assert_eq!(o.drain_to_withdraws(), Vec::new());
         assert_eq!(o.on_remote_changed(mac(0xAA), None, local_ip()), Vec::new());
         assert_eq!(o.advertised_count(), 0);
     }

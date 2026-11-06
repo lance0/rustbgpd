@@ -5377,6 +5377,48 @@ async fn same_segment_peer_mac_ip_is_not_a_mobility_contender() {
     assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
 }
 
+/// A MAC that yielded to a contender must not come back while its segment
+/// is drained: the drain withdrew it for an administrative reason, and only
+/// the undrain replay may advertise it again. Both route shapes.
+#[tokio::test]
+async fn yielded_mac_stays_withdrawn_after_drain_when_contender_leaves() {
+    for ip in [None, Some("192.0.2.10")] {
+        let contender = evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.3", Some(5), false);
+        let mut h = PeerSyncHarness::new(BTreeMap::new(), Vec::new());
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if ip.is_some() {
+            h.observe(ip_added_aa()).await;
+        }
+        h.routes_tx.send_replace(vec![contender]);
+        h.repoll().await;
+        let key = macip_key_with(100, 0xAA, ip);
+        assert!(
+            !h.advertised.lock().await.contains_key(&key),
+            "{ip:?}: the higher contender must win first"
+        );
+
+        rib_write::drain_vni_to_withdraws(
+            &mut h.state,
+            &h.instances,
+            vni(100),
+            &h.rib_tx,
+            &h.metrics,
+            &h.counts,
+            &h.segments,
+        )
+        .await;
+        let _ = h.take_log().await;
+        h.routes_tx.send_replace(Vec::new());
+        h.repoll().await;
+        assert_eq!(
+            h.take_log().await,
+            Vec::new(),
+            "{ip:?}: a drained MAC re-advertised when its contender left"
+        );
+    }
+}
+
 fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
     with_esi(
         evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false),
