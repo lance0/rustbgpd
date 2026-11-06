@@ -2211,7 +2211,7 @@ fn deferral_manager(families: Vec<(Afi, Safi)>, credit: usize) -> RibManager {
     .with_selection_deferral(SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![SelectionDeferralWaiterConfig {
-            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 83)),
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 83)).into(),
             families,
         }],
     })
