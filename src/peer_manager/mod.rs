@@ -1214,6 +1214,69 @@ impl PeerManager {
 
     /// Replace the live configuration, republishing its dataset bindings in
     /// the import roster. Every wholesale replacement goes through here.
+    /// Install an already planned transaction candidate, returning the
+    /// snapshot that [`Self::restore_transaction_config`] restores.
+    fn stage_transaction_config(
+        &mut self,
+        candidate: Box<Config>,
+        scope: TransactionConfigScope,
+    ) -> Result<TransactionConfigRollbackToken, String> {
+        self.staged_policy_routes_prior = None;
+        let policy_routes_prior = self.installed_policy_routes_reachability();
+        match scope {
+            // ADR-0142: discovery may have bound an endpoint since the plan.
+            // Recheck in this owner turn, before the candidate is installed;
+            // once it is staged, binding waits for the commit or rollback.
+            TransactionConfigScope::Full => self
+                .unnumbered_preflight(&candidate)
+                .and_then(|()| bfd::dynamic_range_bfd_unchanged(&self.current_config, &candidate))
+                .map(|()| *candidate),
+            TransactionConfigScope::FibTablesOnly => {
+                let mut staged = self.current_config.clone();
+                staged.fib_tables.clone_from(&candidate.fib_tables);
+                staged.config_epoch = candidate.config_epoch;
+                staged.global.ebgp_requires_policy = candidate.global.ebgp_requires_policy;
+                staged
+                    .validate()
+                    .map_err(|error| error.to_string())
+                    .map(|()| staged)
+            }
+        }
+        .map(|staged| {
+            let previous = self.replace_current_config(staged);
+            self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
+            self.retention.admission_dirty = true;
+            self.reconcile_stale_dynamic_max_prefix_restarts();
+            self.config_snapshot_staged = true;
+            self.staged_policy_routes_prior = Some(policy_routes_prior);
+            self.metrics.record_policy_generation_loaded();
+            TransactionConfigRollbackToken::capture(Box::new(previous), scope)
+        })
+    }
+
+    /// Restore the snapshot a failed transaction staged over. Its static
+    /// rollback has already re-added peers under the candidate's BFD
+    /// membership, so a peer whose restored member is newly strict is held
+    /// until that member's session is Up.
+    async fn restore_transaction_config(&mut self, rollback: TransactionConfigRollbackToken) {
+        let strict_before = self.strict_bfd_members();
+        self.replace_current_config(*rollback.previous);
+        self.hold_newly_strict_bfd_peers(&strict_before).await;
+        self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
+        self.retention.admission_dirty = true;
+        self.reconcile_stale_dynamic_max_prefix_restarts();
+        self.dynamic_neighbor_limit = self.current_config.effective_dynamic_neighbor_limit();
+        self.metrics
+            .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
+        self.config_snapshot_staged = false;
+        self.staged_policy_routes_prior = None;
+        self.metrics.record_policy_generation_loaded();
+        if rollback.scope == TransactionConfigScope::Full {
+            self.reap_dynamic_peers_not_allowed_by_current_ranges()
+                .await;
+        }
+    }
+
     fn replace_current_config(&mut self, config: Config) -> Config {
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
@@ -3511,70 +3574,13 @@ impl PeerManager {
                             scope,
                             reply,
                         }) => {
-                            self.staged_policy_routes_prior = None;
-                            let policy_routes_prior =
-                                self.installed_policy_routes_reachability();
-                            let result = match scope {
-                                // ADR-0142: discovery may have bound an endpoint since
-                                // the plan. Recheck in this owner turn, before the
-                                // candidate is installed; once it is staged, binding
-                                // waits for the commit or rollback.
-                                TransactionConfigScope::Full => self
-                                    .unnumbered_preflight(&candidate)
-                                    .and_then(|()| {
-                                        bfd::dynamic_range_bfd_unchanged(&self.current_config, &candidate)
-                                    })
-                                    .map(|()| *candidate),
-                                TransactionConfigScope::FibTablesOnly => {
-                                    let mut staged = self.current_config.clone();
-                                    staged.fib_tables.clone_from(&candidate.fib_tables);
-                                    staged.config_epoch = candidate.config_epoch;
-                                    staged.global.ebgp_requires_policy =
-                                        candidate.global.ebgp_requires_policy;
-                                    staged
-                                        .validate()
-                                        .map_err(|error| error.to_string())
-                                        .map(|()| staged)
-                                }
-                            }
-                            .map(|staged| {
-                                    let previous = self.replace_current_config(staged,
-                                    );
-                                    self.dynamic_ranges =
-                                        Self::parse_dynamic_ranges(&self.current_config);
-                                    self.retention.admission_dirty = true;
-                                    self.reconcile_stale_dynamic_max_prefix_restarts();
-                                    self.config_snapshot_staged = true;
-                                    self.staged_policy_routes_prior = Some(policy_routes_prior);
-                                    self.metrics.record_policy_generation_loaded();
-                                    TransactionConfigRollbackToken::capture(
-                                        Box::new(previous),
-                                        scope,
-                                    )
-                                });
-                            let _ = reply.send(result);
+                            let _ = reply.send(self.stage_transaction_config(candidate, scope));
                         }
                         Some(InternalCommand::RestoreTransactionConfig {
                             rollback,
                             reply,
                         }) => {
-                            self.replace_current_config(*rollback.previous);
-                            self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
-                            self.retention.admission_dirty = true;
-                            self.reconcile_stale_dynamic_max_prefix_restarts();
-                            self.dynamic_neighbor_limit =
-                                self.current_config.effective_dynamic_neighbor_limit();
-                            self.metrics.set_dynamic_neighbor_capacity(
-                                self.dynamic_peer_count,
-                                self.dynamic_neighbor_limit,
-                            );
-                            self.config_snapshot_staged = false;
-                            self.staged_policy_routes_prior = None;
-                            self.metrics.record_policy_generation_loaded();
-                            if rollback.scope == TransactionConfigScope::Full {
-                                self.reap_dynamic_peers_not_allowed_by_current_ranges()
-                                    .await;
-                            }
+                            self.restore_transaction_config(rollback).await;
                             let _ = reply.send(());
                         }
                         None => {}
