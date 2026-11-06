@@ -23,8 +23,8 @@ use std::sync::Arc;
 use crate::datasets::MAX_UNIT_DATASETS;
 use crate::engine::{AsPathRegex, NamedPolicy, PolicyAction, PolicyChain, PolicyStatement};
 use crate::ir::{
-    Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetSlot, ForEachNode, LoopSource, MatchExpr,
-    PolicySource, RegexId, SetId, Term, TermAction,
+    Cmp, CommunitySetRef, CompiledChain, CompiledPolicy, DatasetId, DatasetSlot, ForEachNode,
+    LoopSource, MatchExpr, PolicySource, RegexId, SetId, Term, TermAction,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, SetStore};
 
@@ -157,12 +157,23 @@ impl ChainNodeBudget {
             // `if` body); splicing keeps only slots a retained guard probes.
             let probed = vec![Cell::new(false); chain.datasets.len()];
             for term in chain.policies.iter().flat_map(|policy| &policy.terms) {
+                let mark = |id: &DatasetId| {
+                    if let Some(probed) = probed.get(id.0 as usize) {
+                        probed.set(true);
+                    }
+                };
                 term.any_term(&|term| {
+                    // A removal by dataset membership reads its slot too.
+                    if let TermAction::RemoveCommunitiesInSet {
+                        set: CommunitySetRef::Dataset(id),
+                        ..
+                    } = &term.action
+                    {
+                        mark(id);
+                    }
                     term.guard.any_node(&|expr| {
-                        if let MatchExpr::InDataset { id, .. } = expr
-                            && let Some(probed) = probed.get(id.0 as usize)
-                        {
-                            probed.set(true);
+                        if let MatchExpr::InDataset { id, .. } = expr {
+                            mark(id);
                         }
                         false
                     })
@@ -331,17 +342,22 @@ fn remap_terms(terms: &[Term], donor: &CompiledChain, sets: &mut ChainSets) -> V
                     attribute,
                     set,
                     negate,
-                } => {
-                    let index = set.0 as usize;
-                    TermAction::RemoveCommunitiesInSet {
-                        attribute: *attribute,
-                        set: sets.community_set_id(
-                            donor.community_sets[index].clone(),
-                            donor.community_set_names.get(index).cloned().flatten(),
+                } => TermAction::RemoveCommunitiesInSet {
+                    attribute: *attribute,
+                    set: match set {
+                        CommunitySetRef::Set(id) => {
+                            let index = id.0 as usize;
+                            CommunitySetRef::Set(sets.community_set_id(
+                                donor.community_sets[index].clone(),
+                                donor.community_set_names.get(index).cloned().flatten(),
+                            ))
+                        }
+                        CommunitySetRef::Dataset(id) => CommunitySetRef::Dataset(
+                            sets.dataset_id(&donor.datasets[id.0 as usize]),
                         ),
-                        negate: *negate,
-                    }
-                }
+                    },
+                    negate: *negate,
+                },
                 other => other.clone(),
             },
         })

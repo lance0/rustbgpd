@@ -314,3 +314,19 @@ test padded-times-parameter {
     route { prefix 192.0.2.0/24; next-hop 198.51.100.1; as-path "64500" }
     expect pad-times(2) == accept with prepend as 64500 2, without next-hop
 }
+
+# Removal by dataset membership: the scan reads the pinned snapshot.
+policy feed-scrub {
+    term scrub { remove community in feed; remove large-community not in feed; accept }
+}
+
+test feed-scrubbed {
+    dataset feed { 65000:666, 65000:1:* }
+    route {
+        prefix 192.0.2.0/24; communities [65000:666, 65000:1]
+        large-communities [65000:1:1, 64496:1:1]
+    }
+    expect feed-scrub == accept with only removes community 65000:666,
+        removes large-community 64496:1:1, not removed community 65000:1,
+        not removed large-community 65000:1:1
+}

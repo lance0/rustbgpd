@@ -325,7 +325,9 @@ The differences from a source-defined set:
   datasets per compilation unit.
 - **Probe-only in this slice.** `for x in <dataset>` is a compile
   error — content is a runtime snapshot, so iteration bounds are not
-  compile-time knowledge. Probe with `in` instead.
+  compile-time knowledge. Probe with `in` instead. A community dataset
+  can also be the set of `remove <kind> in` / `not in` (see
+  [Removing by set membership](#removing-by-set-membership)).
 - **Parameter probes stay runtime probes.** `<parameter> in <set>`
   folds to a constant for source sets; against a dataset it stays a
   live probe, because the answer changes with the content.
@@ -595,7 +597,7 @@ policy customer-in(lp: u32, pfx: prefix-set, tag: community, nh: ip) {
 |---|---|---|
 | `u32` | an integer | anywhere a u32 is expected: `set local-pref lp`, `route.local-pref >= lp`, `route.as-path contains asn`, a `prepend` operand or count |
 | `prefix-set` | a prefix-set or prefix dataset name | `route.prefix in pfx` |
-| `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists, and `route.any-community in tags`), `<binding> in tags`, and, for a community-set argument, `remove community in tags` / `not in tags` and `remove any-community in tags` (the argument gets the member checks a named set gets) |
+| `community-set` | a community-set or community dataset name | `route.communities in tags` (and the large/extended lists, and `route.any-community in tags`), `<binding> in tags`, and `remove community in tags` / `not in tags` and `remove any-community in tags` (a community-set argument gets the member checks a named set gets; a dataset argument is read at runtime, as in [Removing by set membership](#removing-by-set-membership)) |
 | `asn-set` | an asn-set or ASN dataset name | `route.origin-as in origins`, `peer.asn in origins`, `<binding> in origins` |
 | `community` | a standard community, `65000:100` or a well-known name such as `NO_EXPORT` | `route.communities has tag`, `add community tag`, `remove community tag`, `tag in tags`, and as a community value (`let t = tag`, `c == tag`) |
 | `ip` | an IPv4 or IPv6 address | `set next-hop nh`, `route.next-hop == nh`, `peer.address == nh` |
@@ -1601,8 +1603,24 @@ test scrubbed {
   mixes kinds and removes the members of every kind; it has no `not in` form,
   because an allow-list is per kind: split a mixed allow-list by kind and
   keep one `remove <kind> not in` per kind. For `ext-community not in` the
-  set needs a route-target or route-origin member. Datasets are not accepted
-  here yet; probe a dataset in a guard instead.
+  set needs a route-target or route-origin member.
+- **A community dataset** can be the set too: `remove community not in
+  allowed-tags` with `dataset community-set allowed-tags`. The scan reads the
+  snapshot pinned at walk start and, like a dataset probe, filters its
+  members by kind at runtime, so none of the member checks above apply. The
+  scan follows the current contents literally: an empty snapshot, or one with
+  no member of the action's kind, removes nothing under `in` and every value
+  of the kind under `not in`, except the well-known standard communities, and,
+  for `ext-community not in`, every extended community that is not a route
+  target or route origin. A snapshot with no route-target or route-origin
+  member therefore strips every route target and route origin. Refresh
+  validation is the guard: a dataset file that is missing, unreadable, too
+  large or does not parse rejects the reload and keeps the prior snapshot,
+  and an empty snapshot requires an explicitly empty file (see
+  [Refresh, failure, and observability](#refresh-failure-and-observability)).
+  A content swap reaches installed chains without recompiling them, and a
+  dataset a removal reads is refreshed for every route, not only those whose
+  prefix or origin AS the two snapshots answer differently.
 - **Removal only, in statement order.** `add <kind> in` is a compile error.
   The scan stages concrete, deduplicated removals of the arrived values it
   selects, and cancels the earlier staged additions it selects by the same

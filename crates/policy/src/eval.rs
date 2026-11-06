@@ -1753,14 +1753,16 @@ impl CompiledChain {
                             negate,
                         } => {
                             if !matches!(
-                                exec_remove_communities_in_set(
-                                    attribute,
-                                    &self.community_sets[set.0 as usize],
-                                    negate,
-                                    ctx,
-                                    &mut continued,
-                                    &mut fuel,
-                                ),
+                                self.removal_set(set, pinned).and_then(|set| {
+                                    exec_remove_communities_in_set(
+                                        attribute,
+                                        set,
+                                        negate,
+                                        ctx,
+                                        &mut continued,
+                                        &mut fuel,
+                                    )
+                                }),
                                 Ok(true)
                             ) {
                                 denied = true;
@@ -2010,14 +2012,16 @@ impl CompiledChain {
                         set,
                         negate,
                     } => {
-                        match exec_remove_communities_in_set(
-                            attribute,
-                            &self.community_sets[set.0 as usize],
-                            negate,
-                            ctx,
-                            &mut continued,
-                            fuel,
-                        ) {
+                        match self.removal_set(set, pinned).and_then(|set| {
+                            exec_remove_communities_in_set(
+                                attribute,
+                                set,
+                                negate,
+                                ctx,
+                                &mut continued,
+                                fuel,
+                            )
+                        }) {
                             Ok(true) => {}
                             Ok(false) => {
                                 return PolicyDecision::Deny {
@@ -2190,15 +2194,14 @@ impl CompiledChain {
                         set,
                         negate,
                     } => {
-                        if !exec_remove_communities_in_set(
-                            *attribute,
-                            &self.community_sets[set.0 as usize],
-                            *negate,
-                            ctx,
-                            continued,
-                            fuel,
-                        )
-                        .map_err(|kind| (kind, iterations - 1))?
+                        if !self
+                            .removal_set(*set, pinned)
+                            .and_then(|set| {
+                                exec_remove_communities_in_set(
+                                    *attribute, set, *negate, ctx, continued, fuel,
+                                )
+                            })
+                            .map_err(|kind| (kind, iterations - 1))?
                         {
                             return Ok(LoopOutcome {
                                 iterations,

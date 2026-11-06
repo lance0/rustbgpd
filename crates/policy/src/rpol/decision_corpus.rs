@@ -358,11 +358,17 @@ pub(super) fn row_contents(action: &TermAction, chain: &CompiledChain) -> String
             "remove {}{} in {}",
             attribute.keyword(),
             if *negate { " not" } else { "" },
-            chain
-                .community_set_names
-                .get(set.0 as usize)
-                .and_then(Option::as_deref)
-                .unwrap_or("?")
+            match set {
+                crate::ir::CommunitySetRef::Set(id) => chain
+                    .community_set_names
+                    .get(id.0 as usize)
+                    .and_then(Option::as_deref)
+                    .unwrap_or("?"),
+                crate::ir::CommunitySetRef::Dataset(id) => chain
+                    .datasets
+                    .get(id.0 as usize)
+                    .map_or("?", |slot| &*slot.name),
+            }
         ),
     }
 }
