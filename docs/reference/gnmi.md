@@ -233,7 +233,8 @@ controller used by `rbgp config apply --confirm-id`:
 - `CommitSetRollbackDuration` resets the rollback timer for the pending
   transaction. Its `id` must match the pending transaction, it must include a
   positive whole-second `rollback_duration`, and it overwrites the current timer
-  rather than appending time.
+  rather than appending time. After a failed automatic rollback it re-arms the
+  retry, and status reports the transaction as pending at the new deadline.
 
 Only one confirmed transaction may be pending at a time. While pending, normal
 Set mutations return `FAILED_PRECONDITION` until the transaction is confirmed,
