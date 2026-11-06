@@ -38,10 +38,10 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   (or ORF blocks) for an unmodeled AFI/SAFI, or an undefined Add-Path
   Send/Receive value, and keep the rest (RFC 5492 §4). Earlier releases
   turned the whole capability into `Capability::Unknown`, so one such tuple
-  lost every family; for Add-Path the peer then still sent path IDs. A value
-  holding only unmodeled tuples decodes to an empty list. These capabilities
-  no longer re-encode the skipped tuples. A length that is not a whole number
-  of tuples, or an ORF structural error, still yields `Capability::Unknown`.
+  lost every family; for Add-Path the peer then still sent path IDs. A
+  decoded capability no longer re-encodes the skipped tuples. A value with no
+  modeled tuple, a length that is not a whole number of tuples, or an ORF
+  structural error still yields `Capability::Unknown`.
   `orf::decode_capability_value` returns the modeled blocks instead of `None`
   for an unrecognized AFI/SAFI.
 - `BgpHeader::decode` and `peek_message_length` enforce the RFC 4271 §6.1

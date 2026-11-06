@@ -396,6 +396,11 @@ impl Capability {
                     let data = buf.copy_to_bytes(usize::from(length));
                     return Ok(Capability::Unknown { code, data });
                 }
+                // Parse a copy so a value with no modeled tuple can stay
+                // `Unknown` verbatim, as before; that keeps a decode,
+                // re-encode and decode stable.
+                let raw = buf.copy_to_bytes(usize::from(length));
+                let mut buf = raw.clone();
                 let entry_count = usize::from(length) / 6;
                 let mut families = Vec::with_capacity(entry_count);
                 // RFC 5492 §4: a tuple naming a family we do not model is
@@ -417,7 +422,11 @@ impl Capability {
                         });
                     }
                 }
-                Ok(Capability::ExtendedNextHop(families))
+                if families.is_empty() && !raw.is_empty() {
+                    Ok(Capability::Unknown { code, data: raw })
+                } else {
+                    Ok(Capability::ExtendedNextHop(families))
+                }
             }
             capability_code::LINK_LOCAL_NEXT_HOP => {
                 if length != 0 {
@@ -473,6 +482,11 @@ impl Capability {
                     let data = buf.copy_to_bytes(usize::from(length));
                     return Ok(Capability::Unknown { code, data });
                 }
+                // Parse a copy so a value with no modeled tuple can stay
+                // `Unknown` verbatim, as before; that keeps a decode,
+                // re-encode and decode stable.
+                let raw = buf.copy_to_bytes(usize::from(length));
+                let mut buf = raw.clone();
                 let entry_count = usize::from(length) / 7;
                 let mut families = Vec::with_capacity(entry_count);
                 // RFC 5492 §4: skip only the tuples for unmodeled families.
@@ -495,7 +509,11 @@ impl Capability {
                         });
                     }
                 }
-                Ok(Capability::LongLivedGracefulRestart(families))
+                if families.is_empty() && !raw.is_empty() {
+                    Ok(Capability::Unknown { code, data: raw })
+                } else {
+                    Ok(Capability::LongLivedGracefulRestart(families))
+                }
             }
             capability_code::ADD_PATH => {
                 // RFC 7911 §4: value is N entries of (AFI:2 + SAFI:1 + mode:1) = 4 bytes each
@@ -503,6 +521,11 @@ impl Capability {
                     let data = buf.copy_to_bytes(usize::from(length));
                     return Ok(Capability::Unknown { code, data });
                 }
+                // Parse a copy so a value with no modeled tuple can stay
+                // `Unknown` verbatim, as before; that keeps a decode,
+                // re-encode and decode stable.
+                let raw = buf.copy_to_bytes(usize::from(length));
+                let mut buf = raw.clone();
                 let entry_count = usize::from(length) / 4;
                 let mut families = Vec::with_capacity(entry_count);
                 // RFC 5492 §4 / RFC 7911: a tuple for a family we do not model,
@@ -525,7 +548,11 @@ impl Capability {
                         });
                     }
                 }
-                Ok(Capability::AddPath(families))
+                if families.is_empty() && !raw.is_empty() {
+                    Ok(Capability::Unknown { code, data: raw })
+                } else {
+                    Ok(Capability::AddPath(families))
+                }
             }
             capability_code::PATHS_LIMIT => {
                 // draft-04: repeated AFI(2) + SAFI(1) + receive-limit(2) tuples.
@@ -533,6 +560,11 @@ impl Capability {
                     let data = buf.copy_to_bytes(usize::from(length));
                     return Ok(Capability::Unknown { code, data });
                 }
+                // Parse a copy so a value with no modeled tuple can stay
+                // `Unknown` verbatim, as before; that keeps a decode,
+                // re-encode and decode stable.
+                let raw = buf.copy_to_bytes(usize::from(length));
+                let mut buf = raw.clone();
                 let mut families = Vec::with_capacity(usize::from(length) / 5);
                 // RFC 5492 §4: skip only the tuples for unmodeled families.
                 for _ in 0..usize::from(length) / 5 {
@@ -556,16 +588,22 @@ impl Capability {
                         }
                     }
                 }
-                Ok(Capability::PathsLimit(families))
+                if families.is_empty() && !raw.is_empty() {
+                    Ok(Capability::Unknown { code, data: raw })
+                } else {
+                    Ok(Capability::PathsLimit(families))
+                }
             }
             capability_code::OUTBOUND_ROUTE_FILTERING => {
                 // RFC 5291 §5: per-family blocks. Preserve as Unknown on a
-                // structural error; a block for an unmodeled AFI/SAFI is
-                // skipped on its own (RFC 5492 §4).
+                // structural error or when no block is modeled; a block for
+                // an unmodeled AFI/SAFI is skipped on its own (RFC 5492 §4).
                 let raw = buf.copy_to_bytes(usize::from(length));
                 match crate::orf::decode_capability_value(&raw) {
-                    Some(entries) => Ok(Capability::OutboundRouteFilter(entries)),
-                    None => Ok(Capability::Unknown { code, data: raw }),
+                    Some(entries) if !entries.is_empty() => {
+                        Ok(Capability::OutboundRouteFilter(entries))
+                    }
+                    _ => Ok(Capability::Unknown { code, data: raw }),
                 }
             }
             capability_code::FOUR_OCTET_AS => {
@@ -1935,12 +1973,20 @@ mod tests {
             ])
         );
         assert!(buf.is_empty(), "the whole value is consumed");
-        // Only unmodeled tuples: an empty list, not Unknown.
+        // Only unmodeled tuples: kept verbatim as Unknown, so a re-encode
+        // decodes to the same value.
         let mut only_unknown = Bytes::from_static(&[69, 4, 0, 99, 1, 3]);
+        let decoded = Capability::decode(&mut only_unknown).unwrap();
         assert_eq!(
-            Capability::decode(&mut only_unknown).unwrap(),
-            Capability::AddPath(Vec::new())
+            decoded,
+            Capability::Unknown {
+                code: 69,
+                data: Bytes::from_static(&[0, 99, 1, 3]),
+            }
         );
+        let mut encoded = bytes::BytesMut::new();
+        decoded.encode(&mut encoded).unwrap();
+        assert_eq!(Capability::decode(&mut encoded.freeze()).unwrap(), decoded);
     }
 
     #[test]
