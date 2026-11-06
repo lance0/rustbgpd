@@ -3033,7 +3033,10 @@ impl PeerManager {
                 held.graceful_shutdown = enabled;
             }
             if let Some(unnumbered) = self.unnumbered.as_mut() {
-                unnumbered.set_held_graceful_shutdown(enabled);
+                let neighbors = &self.current_config.neighbors;
+                unnumbered.set_held_graceful_shutdown(enabled, |name| {
+                    neighbors.interface_only_on(name).is_some()
+                });
             }
         }
         let targets: Vec<PeerKey> = match peer {

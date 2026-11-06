@@ -79,7 +79,7 @@ mod unnumbered {
             match self {}
         }
 
-        pub(super) fn set_held_graceful_shutdown(&mut self, _: bool) {
+        pub(super) fn set_held_graceful_shutdown(&mut self, _: bool, _: impl Fn(&str) -> bool) {
             match *self {}
         }
     }

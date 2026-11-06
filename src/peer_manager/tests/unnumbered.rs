@@ -7248,6 +7248,9 @@ async fn a_deleted_neighbor_drops_held_state_while_bfd_cleanup_is_pending() {
         h.mgr.unnumbered.is_some(),
         "cleanup ownership remains until acknowledgement"
     );
+    // An all-peers set while only cleanup owns the port: no neighbor is
+    // configured there to hold it.
+    h.mgr.set_graceful_shutdown(None, true).await.unwrap();
     h.links_changed(snapshot(true, &[("swp1", 7, true)]));
     h.reload(original).await;
     let managed = &h.mgr.peers[&key];
@@ -7259,7 +7262,10 @@ async fn a_deleted_neighbor_drops_held_state_while_bfd_cleanup_is_pending() {
         !h.mgr.max_prefix_latches.contains_key(&key),
         "new stanza does not inherit the old max-prefix latch"
     );
-    assert!(!managed.advertise_graceful_shutdown);
+    assert!(
+        !managed.advertise_graceful_shutdown,
+        "new stanza does not inherit the old intent or a set made while it was deleted"
+    );
     assert_eq!(
         managed.transport_config.neighbor_counters.flaps(),
         0,
